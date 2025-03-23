@@ -1,4 +1,4 @@
-use chumsky::{select, Error, Parser};
+use chumsky::{select, Parser};
 use chumsky::error::Simple;
 use chumsky::primitive::{end, just};
 use chumsky::recursive::recursive;
