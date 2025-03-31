@@ -1,9 +1,9 @@
 ![Ryo](./docs/assets/ryo.jpg)
 # Ryo Programming Language ⚡
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/ryolang/ryo/ci.yml?branch=main)](https://github.com/ryolang/ryo/actions)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Discord](https://img.shields.io/discord/your-discord-invite-code?label=discord&logo=discord)](https://discord.gg/your-discord-invite-code)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/ryolang/ryox/ci.yml?branch=main&style=for-the-badge)](https://github.com/ryolang/ryox/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
+[![Discord](https://img.shields.io/discord/your-discord-invite-code?label=discord&logo=discord&style=for-the-badge)](https://discord.gg/your-discord-invite-code)
 
 **Ryo /ˈraɪoʊ/: Productive, Safe, Fast.**
 
