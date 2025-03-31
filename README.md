@@ -1,4 +1,4 @@
-![Ryo](./docs/assets/ryo.svg)
+![Ryo](./docs/assets/ryo.jpg)
 # Ryo Programming Language ⚡
 
 [![Build Status](https://img.shields.io/github/actions/workflow/status/ryolang/ryo/ci.yml?branch=main)](https://github.com/ryolang/ryo/actions)
@@ -14,7 +14,7 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 **This project contains the source code for the Ryo compiler, standard library, and tooling.**
 
 
-> [!WARNING] Status
+> [!WARNING]
 > Ryo is currently in the **early stages of development** (pre-alpha). The language design is stabilizing, but the compiler is under active construction. It is **not yet ready for production use**. We welcome contributors!
 
 ## Why Ryo?
