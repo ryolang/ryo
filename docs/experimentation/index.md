@@ -418,7 +418,7 @@ ryo pkg build
 ryo pkg publish
 ```
 
-For more information about Ryo's package manager, including version constraints, lock files, and working with private repositories, see the [Package Manager Guide](pkg_manager.md).
+For more information about Ryo's package manager, including version constraints, lock files, and working with private repositories, see the [Package Manager Guide](../pkg_manager.md).
 
 ## 8. Common Error Messages
 
@@ -568,10 +568,10 @@ Congratulations on completing this Getting Started guide! You've learned the bas
 * **Explore more examples:** Look for more Ryo code examples to see different features in action.
 * **Practice writing Ryo code:** Start writing your own simple Ryo programs. Try to solve small problems using the features you've learned.
 * **Read the full Ryo documentation:** Dive deeper into Ryo with our comprehensive documentation:
-  * [Standard Library Reference](std.md) - Explore Ryo's built-in functions and modules
+  * [Standard Library Reference](../std.md) - Explore Ryo's built-in functions and modules
   * [Deep Dive Guide](deep_guide.md) - Advanced language features and concepts
   * [Language Specification Summary](spec_summary.md) - Technical details of Ryo's design
-  * [Package Manager Guide](pkg_manager.md) - Learn how to use Ryo's package ecosystem
+  * [Package Manager Guide](../pkg_manager.md) - Learn how to use Ryo's package ecosystem
   * [Memory Management](memory.md) - Understanding how Ryo handles memory
   * [Cheat Sheet](cheats.md) - Quick reference for Ryo syntax and common patterns
 * **Join the Ryo community:** Connect with other Ryo developers to ask questions, share your projects, and contribute to the language's development.

@@ -1,9 +1,9 @@
-![Ryo](./docs/assets/ryo.svg)
+![Ryo](./docs/assets/ryo.jpg)
 # Ryo Programming Language ⚡
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/ryolang/ryo/ci.yml?branch=main)](https://github.com/ryolang/ryo/actions)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Discord](https://img.shields.io/discord/your-discord-invite-code?label=discord&logo=discord)](https://discord.gg/your-discord-invite-code)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/ryolang/ryox/ci.yml?branch=main&style=for-the-badge)](https://github.com/ryolang/ryox/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
+[![Discord](https://img.shields.io/discord/your-discord-invite-code?label=discord&logo=discord&style=for-the-badge)](https://discord.gg/your-discord-invite-code)
 
 **Ryo /ˈraɪoʊ/: Productive, Safe, Fast.**
 
@@ -13,7 +13,9 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 
 **This project contains the source code for the Ryo compiler, standard library, and tooling.**
 
-**Status:** Ryo is currently in the **early stages of development** (pre-alpha). The language design is stabilizing, but the compiler is under active construction. It is **not yet ready for production use**. We welcome contributors!
+
+> [!WARNING]
+> Ryo is currently in the **early stages of development** (pre-alpha). The language design is stabilizing, but the compiler is under active construction. It is **not yet ready for production use**. We welcome contributors!
 
 ## Why Ryo?
 
@@ -55,7 +57,7 @@ struct User:
 #: Simple handler to return users as JSON
 fn handle_users(req: http.Request) -> http.Response {
     # In a real app, fetch from DB
-    let users = [
+    users = [
         User{ id: 1, name: "Alice" },
         User{ id: 2, name: "Bob" },
     ]

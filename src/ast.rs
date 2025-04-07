@@ -1,9 +1,11 @@
 
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum Expr {
     // Integer literal.
     Int(isize),
+    // Float literal
+    //Float(f64),
 
     // Unary minus.
     Neg(Box<Expr>),

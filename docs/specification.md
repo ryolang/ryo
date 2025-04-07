@@ -53,15 +53,16 @@
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
 *   **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
     *   *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for types (structs, enums, traits) and enum variants. *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
-*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `Result`, `Optional`, `Ok`, `Err`, `Some`, `true`, `false`, `comptime`, `spawn`, `chan`, `select`, `move`, `unsafe`. (Note: `as`, `default`, `package`, `None` are not keywords).
+*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `Result`, `Optional`, `Ok`, `Err`, `Some`, `true`, `false`, `comptime`, `spawn`, `chan`, `select`, `move`, `unsafe`. (Note: `as`, `default`, `package`, `None`, `let` are not keywords).
 *   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error propagation (`?`), channel ops (`<-`).
+    *   `_` (Underscore): The underscore `_` is treated as a special identifier. When used in patterns (`match`, `select`, destructuring assignment), it signifies a wildcard or an intentionally ignored value; it does not bind to a variable.
 *   **Literals:** Integers (decimal `123`, hex `0xFF`, octal `0o77`, binary `0b11`; underscores `1_000`), Floats (`123.45`, `1.23e-10`; underscores `1_000.0`), Strings (`"..."` basic escapes like `\n`, `\t`, `\\`, `\"`, `\xHH`, `\u{HHHH}`). `f"..."` (f-strings with `{expression}` interpolation), Booleans (`true`, `false`), List (`[...]`), Map (`{key: value, ...}`), Tuple (`(v1, v2, ...)`), Char (`'a'`, `'\u{1F600}'`).
 *   **Comments:**
     *   **Regular Comment:** Starts with `#` followed by a space or directly by the comment text. Continues to the end of the line. Ignored by the compiler.
         ```ryo
         # This is a comment
         #Another comment
-        let x = 1 # Comment after code
+        x = 1 # Comment after code
         ```
     *   **Documentation Comment:** Starts with the specific sequence `#:` (hash symbol immediately followed by a colon). Continues to the end of the line. Processed by documentation tooling (supports Markdown). Ignored otherwise by the compiler. Applies to the item immediately following it. Consecutive `#:` lines form a single documentation block.
         ```ryo
@@ -109,7 +110,7 @@
             do_something_else()
     ```
 *   **Closures:** `fn(args): expression`.
-*   **Tuple Destructuring:** `let (a, b) = my_tuple`.
+*   **Tuple Destructuring:** `(a, b) = my_tuple`.
 *   **Type Conversion Syntax:** Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
 **4. Types**
@@ -158,9 +159,9 @@
     ```
 *   **Instantiation:** Use `EnumName.VariantName`. Provide data for tuple/struct variants.
     ```ryo
-    let msg1 = Message.Quit
-    let msg2 = Message.Write("hello")
-    let msg3 = Message.Coords { x: 10, y: -5 }
+    msg1 = Message.Quit
+    msg2 = Message.Write("hello")
+    msg3 = Message.Coords { x: 10, y: -5 }
     ```
 *   **Pattern Matching (`match`):** The primary way to use enum values. `match` destructures variants and allows executing code based on the current variant.
     ```ryo
@@ -195,7 +196,9 @@
 **4.8 Standard Library Types (`Result`, `Optional`)**
 
 *   `Result[T, E]`: Built using `enum { Ok(T), Err(E) }`.
-*   `Optional[T]`: Built using `enum { Some(T), None }`. Replaces `null`. *(Rationale: Explicit handling of absence/errors via ADTs is safer than nullable types or exceptions).*
+*   `Optional[T]`: Built using `enum { Some(T), None }`. Replaces `null`.
+    *   Uses the variant None (accessed as `Optional.None`). Note that `None` itself is not a global keyword, but the specific identifier for this variant within the `Optional` enum, aligning with common practice in languages like Rust for null safety.
+    *   *(Rationale: Explicit handling of absence/errors via ADTs is safer than nullable types or exceptions).*
 
 **4.9 Concurrency Types (`chan`)**
 
@@ -215,16 +218,42 @@
 *   **No Garbage Collector.** Provides deterministic performance and resource management.
 *   **Core Principle:** Simplified Ownership & Borrowing, inspired by Rust but aiming for lower complexity.
     *   **Ownership:** Single owner responsible for deallocation.
-    *   **Move Semantics (Default):** Assignment (`new = old`), return, and passing arguments to functions (that don't declare borrows) *moves* ownership. The original variable (`old`) becomes invalid after the move (compile-time check). *(Rationale: Prevents accidental aliasing of owned mutable data. Provides clear resource responsibility transfer. This is the foundational rule).*
+    *   **Move Semantics (Default):** Assignment (`new = old`), return, and passing owned arguments to functions (that don't declare borrows) *moves* ownership. The original variable (`old`) becomes invalid after the move (compile-time check). *(Rationale: Prevents accidental aliasing of owned mutable data. Provides clear resource responsibility transfer. This is the foundational rule).*
     *   **Borrowing:** Grants temporary access without transferring ownership.
-        *   **Implicit Immutable Borrow (Default Function Params):** Function parameters are *implicitly* treated as immutable borrows (`&Type`) unless marked `mut`. *(Rationale: High ergonomic win for common read-only function calls, enhancing Pythonic feel. This is a specific rule for function parameters overriding the default move for convenience. Requires excellent documentation/errors to avoid confusion).*
+        *   **Implicit Immutable Borrow (Default Function Params):**
+            *   Function parameters are *implicitly* treated as immutable borrows (`&Type`) unless marked `mut` or `move`. *(Wording slightly adjusted for clarity)*
+            *   **Important Distinction:** This default implicit borrow for function arguments *contrasts* with the default *move* semantics for assignment and return values. This choice prioritizes ergonomics for the common case of read-only function access (enhancing Pythonic feel) over strict uniformity. Developers must be aware that `my_func(my_var)` typically borrows `my_var` immutably (leaving `my_var` valid), while `let new_var = my_var` moves `my_var` (invalidating `my_var`). The compiler must provide clear error messages when ownership rules are violated due to this distinction.
+            *   *(Example Added)*
+                ```ryo
+                fn process_data(data: &SomeType) { # Explicit borrow, same effect as implicit
+                    # ... read data ...
+                }
+                fn read_data(data: SomeType) { # Implicit immutable borrow
+                    # ... read data ...
+                }
+                fn consume_data(move data: SomeType) { # Explicit move (alternative to default borrow)
+                    # ... takes ownership ...
+                }
+                fn main():
+                    my_data = SomeType { ... }
+                    read_data(my_data) # Implicitly borrows my_data, my_data still valid here
+                    # process_data(&my_data) # Explicit borrow, my_data still valid
+
+                    moved_data = my_data # MOVES my_data, my_data is now INVALID
+                    # read_data(my_data) # Compile Error: Use of moved value 'my_data'
+
+                    another_data = SomeType { ... }
+                    consume_data(move another_data) # MOVES another_data, another_data is now INVALID
+                ```
         *   **Explicit Mutable Borrow (`mut` Keyword):** `mut param: Type` requires a mutable borrow (`&mut Type`). The variable passed *must* be declared `mut`. *(Rationale: Makes mutation intent explicit. Tying it to variable declaration simplifies reasoning compared to call-site mutability markers).*
+        *   **Explicit Move (`move` Keyword on Param):** `move param: Type` explicitly enforces move semantics for a function parameter, overriding the implicit borrow default. *(Added for completeness)*
         *   **Lifetime Inference:** Lifetimes are inferred by the compiler based primarily on **lexical scopes**. Borrows are valid only within the scope where they are created and cannot outlive the owner. **No manual lifetime annotations (`'a`)**. *(Rationale: Core simplification vs Rust, crucial for approachability).*
+            *   This simplification means some complex borrowing patterns possible in languages with manual lifetime annotations may not be directly expressible or may require different structuring (e.g., returning owned data instead of borrows, using reference counting). It prioritizes approachability over maximum flexibility.
         *   **Borrowing Rules (Compile-Time Enforced):**
             1.  At any point in time, a variable can have *either*: One or more **immutable borrows** OR Exactly **one mutable borrow**.
             2.  Borrows must not outlive the owner's scope.
             3.  A mutable borrow cannot exist simultaneously with any other borrow (mutable or immutable) to the same variable within the same or overlapping scopes.
-        *   **Collection Borrowing Rules:** Mutable borrow of collection prevents *any* other borrows to the collection *or its elements*. Reallocation may invalidate element borrows (compiler tracked). *(Rationale: Prioritizes safety and implementation simplicity over fine-grained element borrowing initially, preventing iterator invalidation and element dangling pointer issues).*
+        *   **Collection Borrowing Rules:** Mutable borrow of collection prevents *any* other borrows to the collection *or its elements*. Reallocation may invalidate element borrows (compiler tracked). *(Rationale: Prioritizes safety and implementation simplicity over fine-grained element borrowing initially, preventing iterator invalidation and element dangling pointer issues, This rule simplifies safety by preventing issues like iterator invalidation, potentially being refined in future versions if safe fine-grained borrowing patterns are identified without significantly increasing complexity).*
 *   **RAII (`Drop` Trait):**
     *   `impl Drop for Type: fn drop(mut self): ...`. Automatic cleanup on scope exit for owned values. Drop order is reverse declaration order within scope.
     *   Errors in `drop` cannot propagate; must not panic. Use explicit methods for fallible cleanup. *(Rationale: Ensures deterministic, non-failing scope exit critical for resource safety).*
@@ -240,7 +269,7 @@
 **7. Error Handling**
 
 *   **Recoverable:** `Result[T, E]` (`Ok`, `Err`). Mandatory handling (via `match`, `?`, methods like `.unwrap_or()`). *(Rationale: Explicit error handling prevents ignored errors).*
-*   **Propagation:** `?` operator unwraps `Ok` or returns `Err` early. *(Rationale: Highly ergonomic, standard pattern in Rust/Swift).* Error type compatibility TBD (likely needs `From` trait later).
+*   **Propagation:** `?` operator unwraps `Ok` or returns `Err` early. *(Rationale: Highly ergonomic, standard pattern in Rust/Swift).* Error type compatibility for `?` across different error types relies on a conversion mechanism (like a standard `From` trait or similar), which is planned for detailed specification.
 *   **Unrecoverable:** `panic("message")`. **Aborts** process by default. *(Rationale: Simplest, safest default. Avoids unwind complexity).*
 
 **8. Traits (Behavior)**
@@ -248,6 +277,7 @@
 *   **Definition:** `trait Name: fn method(...) ... { /* optional default impl */ }`. Default methods allowed. *(Rationale: Default methods reduce boilerplate).*
 *   **Implementation:** `impl Trait for Type: fn method(...) ...`. Can override defaults.
 *   **Dispatch:** **Static Dispatch** via monomorphization only (initially). *(Rationale: Prioritizes runtime performance and implementation simplicity).* No dynamic dispatch (`dyn Trait`).
+    *   This means polymorphism is primarily achieved through generics (compile-time polymorphism). Patterns requiring runtime dynamic dispatch (common in some OOP/dynamic languages) will need alternative approaches in Ryo, such as using enums with associated data to represent variants or passing function pointers/closures.
 *   **Associated Types:** Not supported initially. *(Rationale: Significant type system complexity).*
 
 **9. Concurrency Model: CSP (Go-inspired)**
@@ -262,7 +292,11 @@
 **10. Compile-Time Execution (`comptime`)**
 
 *   **Mechanism:** `comptime {}`, `comptime fn`, `const NAME = comptime expr`. Code runs at compile time.
-*   **Capabilities (Initial Scope):** Execute pure functions, read files relative to build root, initialize constants/globals, basic conditional compilation, basic type introspection (`mem.size_of[T]()`, `mem.align_of[T]()`). Cannot perform runtime I/O or interact with runtime `spawn` state. *(Rationale: Powerful metaprogramming without complex macros. Initial scope balances utility with implementation feasibility).*
+*   **Capabilities (Initial Scope):** Execute pure functions, read files relative to build root, initialize constants/globals, basic conditional compilation, basic type introspection (`mem.size_of[T]()`, `mem.align_of[T]()`).
+    *   Cannot perform runtime I/O or interact with runtime `spawn` state.
+    *   **Environment:** `comptime` execution occurs in a sandboxed environment isolated from the target runtime system.
+    *   **Error Handling:** Mechanisms for handling and reporting errors that occur *during* compile-time execution need to be defined (e.g., compile-time panics, returning `Result` from `comptime fn`).
+*   *(Rationale: Powerful metaprogramming without complex macros. Initial scope balances utility with implementation feasibility).*
 
 **11. Modules & Packages**
 
@@ -324,7 +358,7 @@
 *   **Default:** Panic (debug), Wrap (release). *(Rationale: Balance safety during dev with performance in release).*
 *   **Explicit Methods:** `checked_* -> Optional`, `wrapping_*`, `saturating_*` (on types or in `math`).
 *   **Division by Zero:** Always panics.
-*   **Numeric Conversions (`TargetType(value)`):** Safe, defined behavior (widening ok, float->int truncates, narrowing int wraps/truncates). Does *not* require `unsafe`.
+*   **Numeric Conversions (`TargetType(value)`):** Safe, explicitly defined behavior (widening ok, float->int truncates towards zero, narrowing int wraps/truncates). Does *not* require `unsafe`. This defined behavior ensures portability and avoids undefined behavior common in some other languages for certain conversions.
 
 **18. Missing Elements / Future Work**
 
@@ -340,5 +374,6 @@
 *   **Error Handling Details** (Standard `Error` trait? `From` trait for `?` conversions?).
 *   **Module System Edge Cases** (Detailed resolution rules, visibility across modules/packages).
 *   **Attributes:** Formal system for attributes like `#[test]`, `#[no_mangle]`, `#[repr(C)]`.
+*   **SIMD** (Single Instruction Multiple Data Operations)
 
 ---

@@ -1,27 +1,46 @@
+use std::fmt;
 use logos::Logos;
 
 #[derive(Logos, Debug, PartialEq, Eq, Hash, Clone)]
-#[logos(skip r"[ \t\n]+")]
-#[logos(error = String)]
-pub enum Token {
+pub enum Token<'a> {
+    Error,
+
+    #[regex(r"[0-9]+")]
+    Int(&'a str),
+    //#[regex(r"[+-]?([0-9]*[.])?[0-9]+")]
+    //Float(&'a str),
+
     #[token("+")]
-    Plus,
-
+    Add,
     #[token("-")]
-    Minus,
-
+    Sub,
     #[token("*")]
-    Multiply,
-
+    Mul,
     #[token("/")]
-    Divide,
+    Div,
 
     #[token("(")]
     LParen,
-
     #[token(")")]
     RParen,
 
-    #[regex("[0-9]+", |lex| lex.slice().parse::<isize>().unwrap())]
-    Integer(isize),
+    #[regex(r"[ \t\f\n]+", logos::skip)]
+    Whitespace,
+}
+
+impl fmt::Display for Token<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Int(s) => write!(f, "{}", s),
+            //Self::Float(s) => write!(f, "{}", s),
+            Self::Add => write!(f, "+"),
+            Self::Sub => write!(f, "-"),
+            Self::Mul => write!(f, "*"),
+            Self::Div => write!(f, "/"),
+            Self::LParen => write!(f, "("),
+            Self::RParen => write!(f, ")"),
+            Self::Whitespace => write!(f, "<whitespace>"),
+            Self::Error => write!(f, "<error>"),
+        }
+    }
 }

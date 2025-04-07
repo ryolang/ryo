@@ -71,17 +71,8 @@
         - `map.values[K, V](mp: map[K, V]) -> list[V]`: Returns a list of values from the map.
         - `map.get[K, V](mp: map[K, V], key: K) -> result[V, str]`: Retrieves the value associated with a key. Returns `Ok(value)` if key exists, `Err("Key not found")` otherwise.
         - `map.contains_key[K, V](mp: map[K, V], key: K) -> bool`: Checks if a map contains a specific key.
-  
-6. async Package (Asynchronous Utilities)
 
-    - Purpose: Provides utilities related to asynchronous programming (beyond the core `async`/`await` keywords).
-
-    - Essential Functions:
-
-        - `async.sleep(duration_ms: int) -> async func ()`: Creates an asynchronous function (a `Future`) that sleeps for the specified duration in milliseconds. Useful for introducing delays in async operations.
-        - `async.spawn(async_fn: async func () -> T) -> Future[T]`: Spawns a new asynchronous task (executes `async_fn` concurrently). Returns a `Future` representing the result of the spawned task. (If Ryo wants to support basic concurrency within async/await - otherwise, this might be omitted for a very minimal stdlib).
-  
-7. time Package (Time and Duration)
+6. time Package (Time and Duration)
 
     - Purpose: Provides basic time-related functionalities.
 
