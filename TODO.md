@@ -1,55 +1,19 @@
-![Ryo](./docs/assets/ryo.svg)
+# TODO
 
-A statically typed programming language with a focus on simplicity and ease of use.
+- [ ] review https://docs.modular.com/mojo/manual/values/ownership copy design
+- [ ] get the domain https://ryolang.org
+- [ ] Add https://scorecard.dev/
+- [ ] Set up clippy https://github.com/rust-lang/rust-clippy
+- [ ] set up https://codspeed.io/
+- [ ] review for more https://github.com/astral-sh/ruff/tree/main/.github/workflows
 
-[⚡ Ryo](https://ryolang.org)
-
-## Features
-
-Primary goal: Efficient and safe Python
-
-review https://docs.modular.com/mojo/manual/values/ownership copy design
-
-- Expressive, Minimal Syntax for readability similar to Python
-- Static Type System with strong compile-time checks
-- Type Inference to minimize explicit annotations
-- Memory Safety through compile-time guarantees
-- Immutable-by-Default variables for safer code
-- Efficient Compilation targeting native performance
-- Simple async calls avoiding coloring
-- Interactive REPL for rapid prototyping
-- Python interoperability
-
-## Target audiences
-
-- Backend Services and Microservices Developers
-- Finance/Fintech Application Developers
-- Scientific and Technical Computing
-- Data Scientists
-- Web Developers
-- General Purpose Scripting/Automation (Critical Infrastructure)
-
-## Quick Start
-
-Read the [Quick Start Guide](https://ryolang.org) from the documentation.
-
-## Building from Source
-
-Ensure you have [Rust](https://rust-lang.org) installed.
-
-```shell
-cargo build
-```
-
-## TODO
-
-- Move index to getting started
 ### Core language
 - Lexer: Lexical, Syntactic Grammar
   1. Arithmetic
   2. Basic types
   3. Operators
   4. Comments
+     1. Document Comments
   5. print
   6. Control Flow: if, for
   7. Functions
@@ -70,7 +34,7 @@ cargo build
 - Testing - go to: lexer next number
 ### Safety & Concurrency
 - Borrow & Ownership
-- async, await, fibers
+- SCP concurrency
 - STD
 - Testing
   
@@ -93,5 +57,5 @@ cargo build
 - https://github.com/rhaiscript/rhai
 
 ```shell
-cargo run "1+1"
+cargo run -- "1+1"
 ```
