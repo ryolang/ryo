@@ -92,23 +92,38 @@ fn main() -> Result<(), String> {
 [Linking]"
             );
             let exe_filename = "output_executable";
-            // Try clang first, then cc as fallback
-            let linker_status = Command::new("clang")
+            // Try zig cc first, then clang, then cc as fallbacks
+            let linker_status = Command::new("zig")
+                .arg("cc") // Use zig's C compiler frontend for linking
                 .arg(obj_filename)
                 .arg("-o")
                 .arg(exe_filename)
                 .status();
 
             let status = match linker_status {
-                Ok(status) => status,
+                Ok(status) => {
+                    println!("  Attempting link with 'zig cc'...");
+                    status
+                }
                 Err(_) => {
-                    println!("  'clang' not found, trying 'cc'.");
-                    Command::new("cc")
+                    println!("  'zig cc' not found or failed, trying 'clang'...");
+                    match Command::new("clang")
                         .arg(obj_filename)
                         .arg("-o")
                         .arg(exe_filename)
                         .status()
-                        .map_err(|e| format!("Failed to run linker 'cc': {}", e))?
+                    {
+                        Ok(status) => status,
+                        Err(_) => {
+                            println!("  'clang' not found, trying 'cc'...");
+                            Command::new("cc")
+                                .arg(obj_filename)
+                                .arg("-o")
+                                .arg(exe_filename)
+                                .status()
+                                .map_err(|e| format!("Failed to run linker 'cc': {}", e))?
+                        }
+                    }
                 }
             };
 
