@@ -60,6 +60,27 @@
 cargo run -- "1+1"
 ```
 
+```shell
+objdump -d output.o
+objdump -h output.o
+objdump -x output.o
+```
+
+```shell
+otool -tV output.o
+otool -h output.o
+otool -l output.o
+```
+
+```shell
+nm output.o
+```
+
+```shell
+xxd output.o | less
+hexdump -C output.o | less
+```
+
 ## experimental deps
 * melior = "0.19.0"
 * pest = "2.7.14"

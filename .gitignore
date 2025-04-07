@@ -24,3 +24,7 @@ site/
 
 # Mac
 .DS_Store
+
+# Output files
+output.o
+output_executable
