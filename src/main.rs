@@ -1,18 +1,17 @@
-use std::env;
+use crate::lexer::Token;
+use crate::parser::parser;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::{
     input::{Stream, ValueInput},
     prelude::*,
 };
 use logos::Logos;
-use crate::lexer::Token;
-use crate::parser::parser;
-
+use std::env;
 
 mod ast;
+mod evaluator;
 mod lexer;
 mod parser;
-mod evaluator;
 
 const SRC: &str = r"
     (-
@@ -52,25 +51,28 @@ fn main() {
             println!("[AST]\n{:#?}", expr);
             //evaluates the AST to get the result
             println!("\n[result]\n{}", expr.eval());
-        },
+        }
         // If parsing was unsuccessful, generate a nice user-friendly diagnostic with ariadne. You could also use
         // codespan, or whatever other diagnostic library you care about. You could even just display-print the errors
         // with Rust's built-in `Display` trait, but it's a little crude
         Err(errs) => {
+            let source_id = "cmdline";
             for err in errs {
-                Report::build(ReportKind::Error, (), err.span().start)
-                    .with_code(3)
-                    .with_message(err.to_string())
-                    .with_label(
-                        Label::new(err.span().into_range())
-                            .with_message(err.reason().to_string())
-                            .with_color(Color::Red),
-                    )
-                    .finish()
-                    .eprint(Source::from(input.clone()))
-                    .unwrap();
+                Report::build(
+                    ReportKind::Error,
+                    (source_id, err.span().start..err.span().end),
+                )
+                .with_code(3)
+                .with_message(err.to_string())
+                .with_label(
+                    Label::new((source_id, err.span().into_range()))
+                        .with_message(err.reason().to_string())
+                        .with_color(Color::Red),
+                )
+                .finish()
+                .eprint((source_id, Source::from(&input)))
+                .unwrap();
             }
         }
     }
-
 }

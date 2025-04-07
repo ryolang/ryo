@@ -59,3 +59,13 @@
 ```shell
 cargo run -- "1+1"
 ```
+
+## experimental deps
+* melior = "0.19.0"
+* pest = "2.7.14"
+* pest_derive = "2.7.14"
+* lalrpop = "0.22"
+* lalrpop-util = "0.22"
+* lazy_static = "1.5.0"
+
+* async to sync https://github.com/zesterer/pollster

@@ -4,18 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [build-dependencies]
-# lalrpop = "0.22"
 
 [dependencies]
 
-# lalrpop = "0.22"
-# lalrpop-util = "0.22"
-# lazy_static = "1.5.0"
-ariadne = "0.2"
+ariadne = "0.5.1"
 chumsky = "0.10"
+cranelift = "0.118.0"
+cranelift-jit = "0.118.0"
+cranelift-module = "0.118.0"
+cranelift-object = "0.118.0"
 logos = "0.15"
-# melior = "0.19.0"
-# pest = "2.7.14"
-# pest_derive = "2.7.14"
-
-# async to sync https://github.com/zesterer/pollster
