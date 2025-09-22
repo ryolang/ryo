@@ -7,11 +7,11 @@ edition = "2024"
 
 [dependencies]
 
-ariadne = "0.5.1"
-chumsky = "0.10"
-cranelift = "0.118.0"
-cranelift-jit = "0.118.0"
-cranelift-module = "0.118.0"
-cranelift-object = "0.118.0"
+ariadne = "0.5"
+chumsky = "0.11"
+cranelift = "0.124.0"
+cranelift-jit = "0.124.0"
+cranelift-module = "0.124.0"
+cranelift-object = "0.124.0"
 logos = "0.15"
-target-lexicon = "0.13.2"
+target-lexicon = "0.13"

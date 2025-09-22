@@ -4,7 +4,6 @@ use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
 use cranelift_module::{FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::collections::HashMap;
 use target_lexicon::Triple;
 
 /// The main code generation structure for creating object files.

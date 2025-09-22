@@ -1,5 +1,5 @@
 use chumsky::{
-    input::{Stream, ValueInput},
+    input::ValueInput,
     prelude::*,
 };
 

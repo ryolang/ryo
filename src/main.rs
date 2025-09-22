@@ -2,13 +2,12 @@ use crate::lexer::Token;
 use crate::parser::parser;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::{
-    input::{Stream, ValueInput},
+    input::Stream,
     prelude::*,
 };
 use logos::Logos;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 use target_lexicon::Triple;
 
