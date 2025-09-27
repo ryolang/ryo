@@ -4,13 +4,16 @@ Welcome to ⚡ Ryo **/ˈraɪoʊ/** (Rye-oh), a programming language designed for
 
 This guide will walk you through the basics of Ryo and help you write your first programs. Let's get started!
 
-## 1. Setting Up Ryo
+!!! info "Installation Required"
+    
+    Before following this guide, make sure you have Ryo installed on your system. See the [Installation Guide](installation.md) for detailed setup instructions.
+    
+    You can verify your installation by running:
+    ```bash
+    ryo --version
+    ```
 
-*(Placeholder - Installation Instructions will go here when Ryo is ready)*
-
-For now, let's assume you have Ryo installed and ready to run. We'll focus on writing Ryo code.
-
-## 2. Your First Ryo Program: Hello, World!
+## 1. Your First Ryo Program: Hello, World!
 
 Let's start with the classic "Hello, World!" program, Ryo style:
 
@@ -154,7 +157,7 @@ To run this program:
 ryo run temp_converter.ryo
 ```
 
-## 3. Basic Syntax Elements
+## 2. Basic Syntax Elements
 
 Let's explore some fundamental building blocks of Ryo syntax.
 
@@ -241,7 +244,7 @@ fn count_to(limit: int):
 
 * **`range(start, end)`**: This built-in function generates a sequence of numbers starting from `start` and going up to (but not including) `end`.
 
-## 4. Working with Imports
+## 3. Working with Imports
 
 In Ryo, you can import code from other files and packages using the `import` statement. This helps organize your code into reusable modules.
 
@@ -313,9 +316,7 @@ fn main():
     print(response.body)
 ```
 
-For more detailed information about imports and module organization, see the [Deep Dive Guide](deep_guide.md#imports).
-
-## 5. Simple Error Handling
+## 4. Simple Error Handling
 
 Ryo provides a basic way to handle errors with the `Result[T, E]` type:
 
@@ -339,7 +340,7 @@ fn main():
             print(f"Division failed: {error_message}")
 ```
 
-## 6. Command-Line Tools
+## 5. Command-Line Tools
 
 Here are the basic commands for using Ryo:
 
@@ -374,7 +375,7 @@ Hello from REPL!
 >> exit
 ```
 
-## 7. Package Management
+## 6. Package Management
 
 Ryo comes with a built-in package manager that makes it easy to use third-party libraries in your projects.
 
@@ -393,7 +394,7 @@ This command installs the `http` package and adds it to your project's dependenc
 Once a package is installed, you can import and use it in your Ryo code:
 
 ```ryo
-import pkg:http # Paquete externo instalado (no local)
+import pkg:http # External package (not local)
 
 fn main():
     response = http.get("https://api.example.com/data")
@@ -418,9 +419,7 @@ ryo pkg build
 ryo pkg publish
 ```
 
-For more information about Ryo's package manager, including version constraints, lock files, and working with private repositories, see the [Package Manager Guide](../pkg_manager.md).
-
-## 8. Common Error Messages
+## 7. Common Error Messages
 
 When you're getting started, you might encounter these common error messages:
 
@@ -439,9 +438,7 @@ Indentation error
 ```
 Ryo uses indentation to define code blocks, so make sure your code is properly indented.
 
-For a comprehensive list of error messages and how to fix them, see our [Troubleshooting Guide](deep_guide.md#troubleshooting).
-
-## 9. Memory Management Overview (TO BE REVIEWED)
+## 8. Memory Management Overview
 
 Ryo features a modern memory management system that combines the safety of garbage collection with the predictability of manual memory management.
 
@@ -480,12 +477,9 @@ fn main():
 
 In this example, `&mut int` denotes a mutable reference to an integer. The function can modify the original value, but doesn't own it.
 
-For more detailed information about Ryo's memory management model, including lifetimes, borrowing rules, and optimization techniques, see the [Memory Management Guide](memory.md).
-
-## 10. Language Comparison
+## 9. Language Comparison
 
 Understanding how Ryo compares to other languages helps clarify its design philosophy and advantages. Here's how Ryo relates to Python and Rust across several key dimensions:
-
 
 ### Philosophy and Design
 
@@ -557,24 +551,18 @@ match divide(10, 2) {
 
 * **Ryo is ideal for:** Web services, data processing, CLI tools, game development, and systems that need both safety and simplicity.
 
-For more detailed comparisons and migration tips, see our [Language Comparison Guide](documentation.md).
-
-## 11. Next Steps
+## 10. Next Steps
 
 Congratulations on completing this Getting Started guide! You've learned the basics of Ryo syntax.
 
 **Where to go from here:**
 
-* **Explore more examples:** Look for more Ryo code examples to see different features in action.
+* **Explore more examples:** Look in the [examples/](examples/) directory for more Ryo code samples
 * **Practice writing Ryo code:** Start writing your own simple Ryo programs. Try to solve small problems using the features you've learned.
 * **Read the full Ryo documentation:** Dive deeper into Ryo with our comprehensive documentation:
-  * [Standard Library Reference](../std.md) - Explore Ryo's built-in functions and modules
-  * [Deep Dive Guide](deep_guide.md) - Advanced language features and concepts
-  * [Language Specification Summary](spec_summary.md) - Technical details of Ryo's design
-  * [Package Manager Guide](../pkg_manager.md) - Learn how to use Ryo's package ecosystem
-  * [Memory Management](memory.md) - Understanding how Ryo handles memory
-  * [Cheat Sheet](cheats.md) - Quick reference for Ryo syntax and common patterns
+  * [Language Specification](specification.md) - Core language features and syntax
+  * [Standard Library](std.md) - Built-in functions and modules for building applications
+  * [Package Manager](pkg_manager.md) - Managing dependencies and publishing packages
+  * [Proposals](proposals.md) - Future language features and enhancements
+  * [Implementation Roadmap](implementation_roadmap.md) - Development milestones and progress
 * **Join the Ryo community:** Connect with other Ryo developers to ask questions, share your projects, and contribute to the language's development.
-  * Join our Discord server: [discord.gg/ryo](https://discord.gg/ryo-lang)
-  * Star us on GitHub: [github.com/ryolang/ryo](https://github.com/ryolang/ryo)
-  * Follow us on Twitter: [@RyoLang](https://twitter.com/ryo-lang) 

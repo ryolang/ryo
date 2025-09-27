@@ -1,0 +1,66 @@
+# error_handling.ryo
+# Error handling example demonstrating Result types and the ? operator
+
+fn divide(a: float, b: float) -> Result[float, str]:
+    if b == 0.0:
+        return Err("Division by zero")
+    return Ok(a / b)
+
+fn calculate_average(numbers: List[float]) -> Result[float, str]:
+    if numbers.is_empty():
+        return Err("Cannot calculate average of empty list")
+
+    sum = 0.0
+    for num in numbers:
+        sum += num
+
+    return Ok(sum / float(numbers.len()))
+
+fn safe_division_chain(a: float, b: float, c: float) -> Result[float, str]:
+    # Using ? operator for elegant error propagation
+    first_result = divide(a, b)?
+    second_result = divide(first_result, c)?
+    return Ok(second_result)
+
+fn main():
+    # Basic error handling with match
+    result = divide(10.0, 2.0)
+    match result:
+        Ok(value):
+            print(f"10.0 / 2.0 = {value}")
+        Err(error):
+            print(f"Error: {error}")
+
+    # Error case
+    error_result = divide(10.0, 0.0)
+    match error_result:
+        Ok(value):
+            print(f"This won't print: {value}")
+        Err(error):
+            print(f"Expected error: {error}")
+
+    # Using ? operator
+    chain_result = safe_division_chain(100.0, 5.0, 2.0)
+    match chain_result:
+        Ok(value):
+            print(f"Chain result: {value}")
+        Err(error):
+            print(f"Chain error: {error}")
+
+    # List average example
+    numbers = [1.0, 2.0, 3.0, 4.0, 5.0]
+    avg_result = calculate_average(numbers)
+    match avg_result:
+        Ok(avg):
+            print(f"Average: {avg}")
+        Err(error):
+            print(f"Error calculating average: {error}")
+
+    # Empty list case
+    empty_numbers = []
+    empty_avg = calculate_average(empty_numbers)
+    match empty_avg:
+        Ok(avg):
+            print(f"This won't print: {avg}")
+        Err(error):
+            print(f"Expected error: {error}")

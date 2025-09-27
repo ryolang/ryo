@@ -1,0 +1,81 @@
+# async_example.ryo
+# Async/await example demonstrating concurrent programming
+
+import std.time
+import std.http
+
+async fn fetch_data(url: str, delay: int) -> Result[str, str]:
+    # Simulate network delay
+    await time.sleep(delay)
+
+    # Simulate HTTP request (placeholder)
+    return Ok(f"Data from {url} (took {delay}ms)")
+
+async fn process_data(data: str) -> str:
+    # Simulate some processing time
+    await time.sleep(100)
+    return f"Processed: {data}"
+
+async fn fetch_and_process(url: str, delay: int) -> Result[str, str]:
+    # Chain async operations using ? operator
+    raw_data = await fetch_data(url, delay)?
+    processed = await process_data(raw_data)
+    return Ok(processed)
+
+async fn main():
+    print("Starting async operations...")
+
+    # Sequential execution
+    print("\n=== Sequential Execution ===")
+    start_time = time.now()
+
+    result1 = await fetch_and_process("api.example.com/users", 200)
+    match result1:
+        Ok(data):
+            print(data)
+        Err(error):
+            print(f"Error: {error}")
+
+    result2 = await fetch_and_process("api.example.com/posts", 300)
+    match result2:
+        Ok(data):
+            print(data)
+        Err(error):
+            print(f"Error: {error}")
+
+    sequential_time = time.now() - start_time
+    print(f"Sequential time: {sequential_time}ms")
+
+    # Concurrent execution
+    print("\n=== Concurrent Execution ===")
+    start_time = time.now()
+
+    # Start both operations concurrently
+    future1 = fetch_and_process("api.example.com/users", 200)
+    future2 = fetch_and_process("api.example.com/posts", 300)
+
+    # Wait for both to complete
+    results = await gather([future1, future2])
+
+    for result in results:
+        match result:
+            Ok(data):
+                print(data)
+            Err(error):
+                print(f"Error: {error}")
+
+    concurrent_time = time.now() - start_time
+    print(f"Concurrent time: {concurrent_time}ms")
+
+    # Demonstrate timeout
+    print("\n=== Timeout Example ===")
+    slow_operation = fetch_data("slow.api.com", 5000)
+
+    timeout_result = await time.timeout(slow_operation, 1000)
+    match timeout_result:
+        Ok(data):
+            print(f"Completed: {data}")
+        Err(error):
+            print(f"Timed out or failed: {error}")
+
+    print("Async example completed!")

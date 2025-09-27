@@ -1,0 +1,53 @@
+# temperature_converter.ryo
+# Temperature conversion example demonstrating enums, structs, and pattern matching
+
+enum TempScale:
+    Celsius
+    Fahrenheit
+    Kelvin
+
+struct Temperature:
+    value: float
+    scale: TempScale
+
+fn to_celsius(temp: Temperature) -> Temperature:
+    match temp.scale:
+        TempScale.Celsius:
+            return temp
+        TempScale.Fahrenheit:
+            return Temperature{
+                value: (temp.value - 32.0) * 5.0 / 9.0,
+                scale: TempScale.Celsius
+            }
+        TempScale.Kelvin:
+            return Temperature{
+                value: temp.value - 273.15,
+                scale: TempScale.Celsius
+            }
+
+fn to_fahrenheit(temp: Temperature) -> Temperature:
+    celsius = to_celsius(temp)
+    return Temperature{
+        value: celsius.value * 9.0 / 5.0 + 32.0,
+        scale: TempScale.Fahrenheit
+    }
+
+fn to_kelvin(temp: Temperature) -> Temperature:
+    celsius = to_celsius(temp)
+    return Temperature{
+        value: celsius.value + 273.15,
+        scale: TempScale.Kelvin
+    }
+
+fn main():
+    # Create a temperature in Fahrenheit
+    temp_f = Temperature{value: 98.6, scale: TempScale.Fahrenheit}
+
+    # Convert to all scales
+    temp_c = to_celsius(temp_f)
+    temp_k = to_kelvin(temp_f)
+
+    print(f"Body temperature:")
+    print(f"  Celsius: {temp_c.value:.1f}°C")
+    print(f"  Fahrenheit: {temp_f.value:.1f}°F")
+    print(f"  Kelvin: {temp_k.value:.1f}K")

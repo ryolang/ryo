@@ -3,19 +3,26 @@ site_url: https://ryolang.org
 site_description: A statically typed programming language with a focus on simplicity and ease of use.
 theme:
   name: material
-  logo: assets/ryo.svg
-  favicon: assets/ryo.svg
+  logo: assets/ryo-logo-dark.svg
+  favicon: assets/ryo_transparent.png
   features:
-    - navigation.instant
-    - navigation.instant.prefetch
-    - navigation.tracking
     - content.code.annotate
-    - toc.integrate
-    - toc.follow
-    - navigation.path
-    - navigation.top
     - content.code.copy
     - content.tabs.link
+    - navigation.expand
+    - navigation.footer
+    - navigation.indexes
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.path
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.suggest
+    - toc.follow
   palette:
     # Palette toggle for automatic mode
     - media: "(prefers-color-scheme)"
@@ -49,11 +56,59 @@ plugins:
   - search
 extra:
   homepage: https://ryolang.org
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ryolang/ryo
+      name: Ryo on GitHub
+    - icon: fontawesome/solid/globe
+      link: https://ryolang.org
+      name: Official Website
+  generator: false
+extra_css:
+  - extra/tweaks.css
+nav:
+  - index.md
+  - Getting Started:
+      - Installation: installation.md
+      - Tutorial: getting_started.md
+      - Examples: examples/README.md
+  - Documentation:
+      - Language Specification: specification.md
+      - Standard Library: std.md
+      - Language Comparison: language_comparison.md
+  - Development:
+      - Package Manager: pkg_manager.md
+      - Design Issues: design_issues.md
+      - Proposals: proposals.md
+      - Implementation Roadmap: implementation_roadmap.md
+      - Development Docs:
+          - Project Structure: dev/project_structure.md
+          - Token Implementation: dev/token.rs.md
+          - Parser Implementation: dev/parser.rs.md
 markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji
   - pymdownx.highlight:
       anchor_linenums: true
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
+  - pymdownx.mark
+  - pymdownx.smartsymbols
   - pymdownx.snippets
   - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde

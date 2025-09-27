@@ -1,41 +1,10 @@
-**Ryo Programming Language Specification (Draft v1.5)**
+# Ryo Programming Language Specification
 
-**Table of Contents**
-
-1.  Introduction & Vision
-2.  Lexical Structure
-3.  Syntax & Grammar
-4.  Types
-    *   4.1 Static Typing & Inference
-    *   4.2 Primitive Types
-    *   4.3 Tuple Type
-    *   4.4 Slice Types (Borrowed Views)
-    *   4.5 Struct Type (Product Type)
-    *   4.6 Enum Type (Sum Type / ADT)
-    *   4.7 Built-in Collections
-    *   4.8 Standard Library Types (`Result`, `Optional`)
-    *   4.9 FFI Types *(Planned - see proposals.md)*
-    *   4.10 Type Conversion Syntax
-5.  Memory Management: "Ownership Lite"
-6.  Functions & Closures
-7.  Error Handling
-8.  Traits (Behavior)
-9.  Concurrency Model: Async/Await
-10. Compile-Time Execution *(Planned - see proposals.md)*
-11. Modules & Packages
-12. Application Entry Point
-13. Package Manager (`ryopkg`) *(Implementation detail)*
-14. Standard Library
-15. Tooling
-16. FFI & `unsafe` *(Planned - see proposals.md)*
-17. Integer Overflow Behavior
-18. Missing Elements / Future Work
-
----
-
-**1. Introduction & Vision**
+## 1. Introduction & Vision
 
 *   **Vision:** Ryo is a statically-typed, compiled programming language designed to offer a pragmatic balance between performance, memory safety, and developer ergonomics. It aims to combine the compile-time memory safety guarantees inspired by Rust (simplified, without a garbage collector), the approachable syntax and developer experience reminiscent of Python, and familiar async/await concurrency patterns.
+
+*   **Target Domains:** Web Backend Development (API Servers, Microservices), CLI Tools, Network Services & Proxies, WebAssembly (Wasm) Applications & Libraries, Game Development (Tooling, Scripting, Core Logic), Data Processing & ETL Pipelines, and Higher-Level Embedded Systems.
 *   **Core Goals:**
     *   **Python-like Simplicity:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
     *   **Rust-like Safety (Simplified):** Memory safe by default via ownership and borrowing, without GC. Compile-time checks prevent dangling pointers, data races, use-after-free. Simplified borrowing model compared to Rust (no manual lifetimes).
@@ -47,7 +16,7 @@
 
 *   **Target Audience:** Developers familiar with languages like Python, Go, TypeScript, or C# seeking better performance and stronger safety guarantees without the steep learning curve of Rust or the runtime overhead of GC languages, especially for backend services, CLI tools, and scripting.
 
-**2. Lexical Structure**
+## 2. Lexical Structure
 
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
 *   **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
@@ -79,7 +48,7 @@
 *   **Indentation:** **Tabs** strictly denote code blocks. One tab per indentation level. Mixing tabs and spaces for indentation is a compile-time error. *(Rationale: Enforces a single, consistent style like Go, avoids common Python indentation issues).*
 *   **Statements:** Generally one per line; semicolons are not required or used.
 
-**3. Syntax & Grammar**
+## 3. Syntax & Grammar
 
 *   *(Note: A formal grammar (EBNF) is required for full implementation but omitted here).*
 *   **Function Definition:** `fn name(param: Type, ...) -> RetType: ...`
@@ -112,14 +81,14 @@
 *   **Tuple Destructuring:** `(a, b) = my_tuple`.
 *   **Type Conversion Syntax:** Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
-**4. Types**
+## 4. Types
 
-**4.1 Static Typing & Inference**
+### 4.1 Static Typing & Inference
 
 *   **Static Typing:** Checked at compile time. Enhances safety and enables performance optimizations.
 *   **Type Inference:** Limited to variable declarations (`var = val`). Explicit type annotations are required for function signatures, struct fields, enum variant data, and potentially complex literals to maintain clarity. *(Rationale: Balances Pythonic convenience for local variables with the clarity and safety benefits of explicit types in definitions and interfaces).*
 
-**4.2 Primitive Types**
+### 4.2 Primitive Types
 
 *   `int`: Defaults to `isize` (signed pointer-sized integer).
 *   `float`: Defaults to `float64` (64-bit IEEE 754 float).
@@ -128,11 +97,11 @@
 *   `char`: Unicode Scalar Value. Literal: `'a'`.
 *   Explicit Sizes: `i8`-`i64`, `u8`-`u64`, `usize`, `float32`. *(Rationale: Necessary for control over representation, performance, and FFI).*
 
-**4.3 Tuple Type**
+### 4.3 Tuple Type
 
 *   **Tuple Type:** `(T1, T2, ...)`. Literal `(v1, v2, ...)`. Access `.0`, `.1`, etc. Destructuring. *(Rationale: High Pythonic familiarity. Ergonomic for returning multiple values and simple ad-hoc grouping without needing named structs).*
 
-**4.4 Slice Types (Borrowed Views)**
+### 4.4 Slice Types (Borrowed Views)
 
 
 *   `&str`: Borrowed, immutable UTF-8 view (pointer + byte length). Created via `my_str[start_byte..end_byte]`, `my_str.as_slice()`, or from literals. Lifetime tied to borrowed data.
@@ -140,13 +109,13 @@
 *   `&mut [T]`: Borrowed, *mutable* slice of `T` elements. Created via `my_mut_list.as_mut_slice()`. Requires `mut` borrow of source.
 *   *(Rationale: `&` syntax leverages borrow concept. No `&mut str` initially simplifies UTF-8 safety. Slices provide efficient read-only/mutable views without copying).*
 
-**4.5 Struct Type (Product Type)**
+### 4.5 Struct Type (Product Type)
 
 *   User-defined data aggregation: `struct Name: field: Type ...`.
 *   Instances created via struct literals: `Name { field: value, ... }`.
 *   Access via dot notation: `instance.field`. Mutable if instance bound `mut`.
 
-**4.6 Enum Type (Sum Type / Algebraic Data Type - ADT)**
+### 4.6 Enum Type (Sum Type / Algebraic Data Type - ADT)
 
 *   **Concept:** Defines a type that can be exactly *one* of several named **variants**. Each variant can optionally hold associated data. Enums are fundamental for representing alternatives, states, and structured data safely.
 *   **Syntax:**
@@ -187,30 +156,30 @@
     ```
 *   *(Rationale: Enums provide type-safe ways to represent alternatives (like `Result`/`Optional`), states, and structured messages, crucial for robust software and eliminating `null` errors. Exhaustive matching is a key safety feature derived from functional programming and Rust).*
 
-**4.7 Built-in Collections**
+### 4.7 Built-in Collections
 
 *   `List[T]`: Dynamic array. Homogeneous. *(Built-in generic type)*
 *   `Map[K, V]`: Hash map. Homogeneous keys/values. `K` must be hashable/comparable. *(Built-in generic type)*
 
 *Note: User-defined generics are planned for future implementation. See [Language Proposals](proposals.md#advanced-generics) for detailed generic type system design.*
 
-**4.8 Standard Library Types (`Result`, `Optional`)**
+### 4.8 Standard Library Types (`Result`, `Optional`)
 
 *   `Result[T, E]`: Built using `enum { Ok(T), Err(E) }`.
 *   `Optional[T]`: Built using `enum { Some(T), None }`. Replaces `null`.
     *   Uses the variant None (accessed as `Optional.None`). Note that `None` itself is not a global keyword, but the specific identifier for this variant within the `Optional` enum, aligning with common practice in languages like Rust for null safety.
     *   *(Rationale: Explicit handling of absence/errors via ADTs is safer than nullable types or exceptions).*
 
-**4.9 FFI Types**
+### 4.9 FFI Types
 
 *   **Note:** FFI types are planned for future implementation. See [Language Proposals](proposals.md#foreign-function-interface-ffi--unsafe-code) for detailed design.
 
-**4.10 Type Conversion Syntax**
+### 4.10 Type Conversion Syntax
 
 *   Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
 
-**5. Memory Management: "Ownership Lite"**
+## 5. Memory Management: "Ownership Lite"
 
 *   **No Garbage Collector.** Provides deterministic performance and resource management.
 *   **Core Principle:** Simplified Ownership & Borrowing, inspired by Rust but aiming for lower complexity.
@@ -256,20 +225,20 @@
     *   Errors in `drop` cannot propagate; must not panic. Use explicit methods for fallible cleanup. *(Rationale: Ensures deterministic, non-failing scope exit critical for resource safety).*
 *   **Shared Ownership:** `Shared[T]` (ARC) / `Weak[T]` provided in stdlib (e.g., `sync` module) for opt-in shared ownership and cycle breaking. API uses dot notation (`Shared.new`, `ref.clone`, `ref.downgrade`, `weak_ref.upgrade`). *(Rationale: Provides necessary mechanism for shared state and cyclic data when single ownership is insufficient, while making the associated overhead (ARC) explicit).*
 
-**6. Functions & Closures**
+## 6. Functions & Closures
 
 *   **Functions/Methods:** Standard definition/call. Return single value (can be tuple). Methods use `&self` (immutable borrow), `&mut self` (mutable borrow), or `self` (take ownership).
 *   **Closures:** Anonymous functions `fn(args): expression`.
     *   **Capture:** Default immutable borrow. `move fn` captures by move. Mutable borrow inferred on mutation (requires original `mut`). Compiler checks rules. *(Rationale: Provides explicit control over captures, crucial for safety with `spawn` and non-escaping closures).*
     *   **Conceptual Types:** `Fn`, `FnMut`, `FnMove` describe capabilities, guiding type checking for functions accepting closures. *(Rationale: Defines closure behavior without full initial trait complexity).*
 
-**7. Error Handling**
+## 7. Error Handling
 
 *   **Recoverable:** `Result[T, E]` (`Ok`, `Err`). Mandatory handling (via `match`, `?`, methods like `.unwrap_or()`). *(Rationale: Explicit error handling prevents ignored errors).*
 *   **Propagation:** `?` operator unwraps `Ok` or returns `Err` early. *(Rationale: Highly ergonomic, standard pattern in Rust/Swift).* Error type compatibility for `?` across different error types relies on a conversion mechanism (like a standard `From` trait or similar), which is planned for detailed specification.
 *   **Unrecoverable:** `panic("message")`. **Aborts** process by default. *(Rationale: Simplest, safest default. Avoids unwind complexity).*
 
-**8. Traits (Behavior)**
+## 8. Traits (Behavior)
 
 *   **Definition:** `trait Name: fn method(...) ... { /* optional default impl */ }`. Default methods allowed. *(Rationale: Default methods reduce boilerplate).*
 *   **Implementation:** `impl Trait for Type: fn method(...) ...`. Can override defaults.
@@ -278,7 +247,7 @@
     *   **Future Extension:** Dynamic dispatch via trait objects (e.g., `&dyn Trait`) is planned for future versions to enable more flexible polymorphism patterns familiar to Python developers. See [Language Proposals](proposals.md#dynamic-dispatch-trait-objects) for details.
 *   **Associated Types:** Not supported initially. *(Rationale: Significant type system complexity).*
 
-**9. Concurrency Model: Async/Await**
+## 9. Concurrency Model: Async/Await
 
 *   **Model:** Cooperative concurrency using async/await with a high-performance runtime. Familiar to Python developers while maintaining memory safety.
 *   **Primitives:**
@@ -312,24 +281,24 @@
 *   *(Rationale: Async/await is familiar to Python developers, provides excellent ergonomics for I/O-bound applications, and integrates well with Ryo's ownership model. The cooperative nature prevents many concurrency bugs while maintaining high performance).*
 *   **Future Extensions:** CSP-style channels (`chan[T]`, `select`) planned as optional additions for specialized use cases. See [Language Proposals](proposals.md#concurrency-extensions-csp-communicating-sequential-processes) for detailed CSP design.
 
-**10. Compile-Time Execution (`comptime`)**
+## 10. Compile-Time Execution (`comptime`)
 
 *   **Note:** Compile-time execution is planned for future implementation. See [Language Proposals](proposals.md#compile-time-execution-comptime) for detailed design.
 
-**11. Modules & Packages**
+## 11. Modules & Packages
 
 *   **Implicit Packaging:** Directory structure under `src/` defines hierarchy. No `package` keyword. *(Rationale: Pythonic simplicity, reduces boilerplate).*
 *   **Imports:** `import path.to.module`, `import path.{item}`, `import pkg:dep_name`, `import path as alias`. Paths relative to `src/`.
 *   **Visibility:** Default private, `pub` for public.
 *   **Cycles:** Disallowed.
 
-**12. Application Entry Point**
+## 12. Application Entry Point
 
 *   **Convention:** Default entry point file is `src/main.ryo`.
 *   **`fn main()`:** Required in entry point (`fn main()` or `fn main() -> Result[(), ErrType]`).
 *   **Compiler Enforcement:** `fn main()` only allowed in the designated entry point file for executable compilation. *(Rationale: Clear convention without needing `package main` keyword).*
 
-**13. Package Manager (`ryopkg`)**
+## 13. Package Manager (`ryopkg`)
 
 *   **Manifest:** `ryo.toml`. Defines metadata, dependencies.
 *   **Registry:** `ryopkgs.io` (hypothetical).
@@ -337,7 +306,7 @@
 *   **Locking:** `ryo.lock` for reproducible builds.
 *   **CLI Tool:** Cargo-inspired commands (`new`, `add`, `install`, `build`, `run`, `test`, `publish`, `update`, `lock`). *(Rationale: Proven, robust model for ecosystem management).*
 
-**14. Standard Library**
+## 14. Standard Library
 
 *   **Philosophy:** Modular packages, practical, ergonomic, safe, reasonably "batteries-included" for web/scripting.
 *   **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
@@ -356,23 +325,23 @@
     *   `mem`: Basic memory utilities, `Drop` trait definition.
     *   `utf8`: Utilities for `str`/`&str` validation, char iteration.
 
-**15. Tooling**
+## 15. Tooling
 
 *   **Compiler Backend:** **Cranelift**. Supports AOT, JIT, WebAssembly. *(Rationale: Good balance of performance, compile speed, JIT/Wasm support).*
 *   **Tools:** `ryo` package manager integrated, `ryo` REPL (using JIT), Integrated Testing (`ryo test`). LSP future goal.
 
-**16. FFI & `unsafe`**
+## 16. FFI & `unsafe`
 
 *   **Note:** Foreign Function Interface and unsafe operations are planned for future implementation. See [Language Proposals](proposals.md#foreign-function-interface-ffi--unsafe-code) for detailed design.
 
-**17. Integer Overflow Behavior**
+## 17. Integer Overflow Behavior
 
 *   **Default:** Panic (debug), Wrap (release). *(Rationale: Balance safety during dev with performance in release).*
 *   **Explicit Methods:** `checked_* -> Optional`, `wrapping_*`, `saturating_*` (on types or in `math`).
 *   **Division by Zero:** Always panics.
 *   **Numeric Conversions (`TargetType(value)`):** Safe, explicitly defined behavior (widening ok, float->int truncates towards zero, narrowing int wraps/truncates). Does *not* require `unsafe`. This defined behavior ensures portability and avoids undefined behavior common in some other languages for certain conversions.
 
-**18. Missing Elements / Future Work**
+## 18. Missing Elements / Future Work
 
 For detailed future features and extensions, see the dedicated [Language Proposals](proposals.md) document.
 
@@ -401,5 +370,11 @@ For detailed future features and extensions, see the dedicated [Language Proposa
 *   **Advanced Compile-Time Reflection** (Type introspection and code generation)
 *   **SIMD Support** (Vector operations)
 *   **Module System Extensions** (Conditional compilation)
+
+## See Also
+
+- **[Code Examples](examples/)** - Practical examples demonstrating the features described in this specification
+- **[Getting Started Guide](getting_started.md)** - Step-by-step tutorial for learning Ryo
+- **[Standard Library](std.md)** - Built-in functions and modules available in Ryo programs
 
 ---
