@@ -180,7 +180,7 @@ Publish a package to `ryopkgs.io`.
 
 ### Task Runner
 
-#### `ryo run <task>`
+#### `ryo task <task>`
 
 Run custom tasks defined in `ryo.toml`.
 
@@ -198,9 +198,9 @@ dev = ["ryo build", "ryo run"]
 ```
 
 **Examples:**
-- `ryo run format` - Formats the source code
-- `ryo run dev` - Runs multiple commands in sequence
-- `ryo run clean` - Cleans build artifacts
+- `ryo task format` - Formats the source code
+- `ryo task dev` - Runs multiple commands in sequence
+- `ryo task clean` - Cleans build artifacts
 
 ## Implementation Notes
 

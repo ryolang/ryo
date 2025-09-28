@@ -37,7 +37,7 @@
 - SCP concurrency
 - STD
 - Testing
-  
+
 
 ## Resources
 
@@ -55,6 +55,7 @@
 - https://course.ccs.neu.edu/cs4410sp19/lec_type-inference_notes.html
 - https://rustc-dev-guide.rust-lang.org/type-inference.html
 - https://github.com/rhaiscript/rhai
+- https://github.com/davidlattimore/wild fast linker?
 
 ```shell
 cargo run -- "1+1"
