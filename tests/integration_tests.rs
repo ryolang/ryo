@@ -1,6 +1,6 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{env, fs};
 use tempfile::TempDir;
 
 // Helper to clean up generated files
@@ -50,11 +50,16 @@ fn create_test_file(dir: &Path, filename: &str, content: &str) -> std::path::Pat
 #[test]
 fn test_output_filename_generation() {
     let mut cleanup = TestCleanup::new();
-    cleanup.track("mytest.o");
-    cleanup.track("mytest");
+    let base_name = "mytest";
+    let source_filename = format!("{}.ryo", base_name);
+    let object_name = format!("{}.{}", base_name, if cfg!(windows) { "obj" } else { "o" });
+    let executable_name = format!("{}{}", base_name, env::consts::EXE_SUFFIX);
+
+    cleanup.track(&object_name);
+    cleanup.track(&executable_name);
 
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let test_file = create_test_file(temp_dir.path(), "mytest.ryo", "1 + 2");
+    let test_file = create_test_file(temp_dir.path(), &source_filename, "1 + 2");
 
     let output =
         run_ryo_command(&["run", "mytest.ryo"], &test_file).expect("Failed to run ryo command");
@@ -68,12 +73,14 @@ fn test_output_filename_generation() {
 
     // Verify output files were created with correct names in current directory
     assert!(
-        PathBuf::from("mytest.o").exists(),
-        "Object file 'mytest.o' was not created"
+        PathBuf::from(&object_name).exists(),
+        "Object file '{}' was not created",
+        object_name
     );
     assert!(
-        PathBuf::from("mytest").exists(),
-        "Executable 'mytest' was not created"
+        PathBuf::from(&executable_name).exists(),
+        "Executable '{}' was not created",
+        executable_name
     );
 
     // Verify the executable actually works

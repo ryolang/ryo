@@ -6,6 +6,7 @@
 - [ ] Set up clippy https://github.com/rust-lang/rust-clippy
 - [ ] set up https://codspeed.io/
 - [ ] review for more https://github.com/astral-sh/ruff/tree/main/.github/workflows
+- [ ] Hindley-Milner type inference
 
 ### Core language
 - Lexer: Lexical, Syntactic Grammar
@@ -54,19 +55,31 @@
 - https://github.com/zesterer/tao
 - https://course.ccs.neu.edu/cs4410sp19/lec_type-inference_notes.html
 - https://rustc-dev-guide.rust-lang.org/type-inference.html
-- https://github.com/rhaiscript/rhai
-- https://github.com/davidlattimore/wild fast linker?
+- https://github.com/rhaiscript/rhai - embedded scripting language and evaluation engine for Rust
+- https://github.com/davidlattimore/wild - fast linker
+- https://github.com/zesterer/pollster - minimal async executor
+- https://github.com/mlir-rs/melior - Melior is the MLIR bindings for Rust
+- https://github.com/compiler-explorer/compiler-explorer - interactive compiler exploration website
+- https://bitfieldconsulting.com/posts/crisp-code - Correct, Readable, Idiomatic, Simple, Performant
+- https://kristoff.it/blog/zig-new-async-io/ - Can we do functions colorblind??
+- https://github.com/smol-rs/smol - A small and fast async runtime.
+
+
+Improve AGENTS.md
+Add SOLID and CRISP, and IR inspect in AGENTS.md
 
 ```shell
 cargo run -- "1+1"
 ```
 
+## GNU Binutils for Linux
 ```shell
 objdump -d output.o
 objdump -h output.o
 objdump -x output.o
 ```
 
+## macOS
 ```shell
 otool -tV output.o
 otool -h output.o
@@ -83,11 +96,8 @@ hexdump -C output.o | less
 ```
 
 ## experimental deps
-* melior = "0.19.0"
 * pest = "2.7.14"
 * pest_derive = "2.7.14"
 * lalrpop = "0.22"
 * lalrpop-util = "0.22"
 * lazy_static = "1.5.0"
-
-* async to sync https://github.com/zesterer/pollster

@@ -4,6 +4,7 @@ use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::{Parser as ChumskyParser, input::Stream, prelude::*};
 use clap::{Parser, Subcommand};
 use logos::Logos;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,8 +21,8 @@ fn get_output_filenames(input_file: &Path) -> (String, String) {
         .and_then(|s| s.to_str())
         .unwrap_or("output");
 
-    let obj_filename = format!("{}.o", stem);
-    let exe_filename = stem.to_string();
+    let obj_filename = format!("{}.{}", stem, if cfg!(windows) { "obj" } else { "o" });
+    let exe_filename = format!("{}{}", stem, env::consts::EXE_SUFFIX);
 
     (obj_filename, exe_filename)
 }

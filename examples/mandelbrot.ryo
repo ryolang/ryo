@@ -1,0 +1,22 @@
+# For time benchmarks
+##    Determines the number of iterations for a point c to escape.
+##
+##    Args:
+##        c (complex): The complex number to test.
+##        max_iter (int): The maximum number of iterations to perform.
+##
+##    Returns:
+##        int: The number of iterations before z's magnitude exceeded 2.
+##             Returns max_iter if the point is likely in the Mandelbrot set.
+fn mandelbrot(c: complex, max_iter: int) -> int:
+    z: complex = 0
+    # Iterate from 0 up to max_iter - 1
+    for n in range(max_iter):
+        z = z*z + c
+        # Check if the point has escaped the boundary
+        if abs(z) > 2:
+            # Return the iteration count when it escaped
+            return n
+
+    # If the loop completes, the point has not escaped; it's in the set.
+    return max_iter

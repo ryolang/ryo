@@ -54,11 +54,11 @@ fn main() {
     # Type inference like Python
     message = greet("World")
     print(message)
-    
+
     # Safe collections
     numbers = [1, 2, 3, 4, 5]
     print(f"Numbers: {numbers}")
-    
+
     # Memory safe - no null pointer exceptions!
     user = Optional.Some("Alice")
     match user:
@@ -112,7 +112,7 @@ We welcome contributions! Ryo is an ambitious project, and we need help with:
 *   Language design discussions
 *   Writing examples and tutorials
 
-Please read our [Contributing Guide](CONTRIBUTING.md) and check out the [open issues](https://github.com/ryolang/ryo/issues). Join our [Discord Server](https://discord.gg/your-discord-invite-code) to chat with the developers!
+Please read our [Contributing Guide](CONTRIBUTING.md) and check out the [open issues](https://github.com/ryolang/ryo/issues).
 
 ## Documentation
 

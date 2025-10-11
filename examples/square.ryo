@@ -1,0 +1,3 @@
+# function
+fn square(int num) -> int:
+    return num * num

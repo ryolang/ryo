@@ -123,6 +123,10 @@ This roadmap outlines the planned development of the Ryo programming language co
 - Issue errors on use-after-move
 - Focus on simple variable assignments and function calls
 
+**References:**
+- https://www.modular.com/blog/mojo-vs-rust
+- https://docs.modular.com/mojo/manual/values/
+
 **Visible Progress:** Compiler prevents basic use-after-move errors
 
 ### Milestone 9: Immutable Borrows
@@ -248,7 +252,7 @@ Advanced features for specific use cases (see [proposals.md](proposals.md) for d
 The 14 milestones above represent the **minimum viable language** needed for Ryo v1.0. Upon completion, developers will have:
 
 ✅ **Memory Safety:** Ownership and borrowing prevent common memory errors
-✅ **Async Concurrency:** Native async/await for scalable applications  
+✅ **Async Concurrency:** Native async/await for scalable applications
 ✅ **Type Safety:** Static typing with inference catches errors at compile time
 ✅ **Error Handling:** Result types and `?` operator for robust error management
 ✅ **Performance:** Compiled native code with predictable memory usage
