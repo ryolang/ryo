@@ -41,6 +41,18 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 
 For full details, see the [Language Specification](docs/specification.md) (Link to spec file).
 
+## Language Inspirations
+
+Ryo draws inspiration from the best features of modern programming languages:
+
+*   **🐍 Python** - Clean syntax with colons and indentation, f-strings, type inference, async/await
+*   **🦀 Rust** - Ownership model for memory safety, algebraic data types (enums), pattern matching, trait system
+*   **🔥 Mojo** - Simplified ownership without lifetimes, value semantics, progressive complexity
+*   **🔷 Go** - Simplicity as a core value, fast compilation, pragmatic concurrency (CSP channels planned)
+*   **⚡ Zig** - Comptime execution for zero-cost abstractions, explicit error handling, no hidden control flow
+
+**The Result:** A language that's **easier than Rust** (no lifetimes), **safer than Python** (compile-time memory safety), **more expressive than Go** (generics, ADTs), and **more familiar than Zig** (Python-like syntax).
+
 ## Quick Example
 
 ```ryo

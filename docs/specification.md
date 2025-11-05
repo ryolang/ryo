@@ -16,6 +16,18 @@
 
 *   **Target Audience:** Developers familiar with languages like Python, Go, TypeScript, or C# seeking better performance and stronger safety guarantees without the steep learning curve of Rust or the runtime overhead of GC languages, especially for backend services, CLI tools, and scripting.
 
+### Language Inspirations
+
+Ryo synthesizes ideas from several modern programming languages:
+
+*   **Python** - Clean syntax with colons and indentation, f-strings, type inference, async/await, developer-friendly design
+*   **Rust** - Ownership model for memory safety, algebraic data types (enums with data), pattern matching, trait system, Result/Option types
+*   **Mojo** - Simplified ownership without manual lifetimes, value semantics, progressive complexity model
+*   **Go** - Simplicity as a core design principle, fast compilation, built-in concurrency primitives, minimal feature set
+*   **Zig** - Comptime execution for zero-cost abstractions, explicit error handling, no hidden control flow, minimal runtime
+
+**Key Differentiators**: Ryo aims to be easier than Rust (no lifetimes), safer than Python (compile-time memory safety), more expressive than Go (generics, algebraic types), and more familiar than Zig (Python-like syntax).
+
 ## 2. Lexical Structure
 
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).

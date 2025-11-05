@@ -9,13 +9,14 @@
 ## Table of Contents
 
 1. [Project Overview](#project-overview)
-2. [Current Implementation Status](#current-implementation-status)
-3. [Architecture & Code Organization](#architecture--code-organization)
-4. [Syntax Conventions](#syntax-conventions)
-5. [Development Workflow](#development-workflow)
-6. [Key Design Decisions](#key-design-decisions)
-7. [Common Tasks](#common-tasks)
-8. [Areas Needing Attention](#areas-needing-attention)
+2. [Language Inspirations](#language-inspirations)
+3. [Current Implementation Status](#current-implementation-status)
+4. [Architecture & Code Organization](#architecture--code-organization)
+5. [Syntax Conventions](#syntax-conventions)
+6. [Development Workflow](#development-workflow)
+7. [Key Design Decisions](#key-design-decisions)
+8. [Common Tasks](#common-tasks)
+9. [Areas Needing Attention](#areas-needing-attention)
 
 ---
 
@@ -38,6 +39,86 @@
 
 **Current Focus**: Build a proof-of-concept compiler demonstrating core language features
 **Long-Term Vision**: Production-ready language for web backends, CLI tools, and systems programming
+
+---
+
+## Language Inspirations
+
+Ryo draws inspiration from several modern programming languages, taking the best ideas from each:
+
+### 🐍 Python - Syntax & Developer Experience
+- **Clean, readable syntax** with colons and indentation
+- **Type inference** for reduced boilerplate
+- **F-strings** for intuitive string formatting
+- **Familiar async/await** syntax for asynchronous programming
+- **Tab-based indentation** (enforced at compile-time)
+
+**Rationale**: Python's syntax makes code accessible to developers of all skill levels. By adopting its readability, Ryo lowers the barrier to entry while maintaining compile-time safety.
+
+### 🦀 Rust - Ownership & Type Safety
+- **Ownership model** for memory safety without garbage collection
+- **Algebraic data types** (enums with associated data)
+- **Pattern matching** with exhaustive checks
+- **Trait system** for polymorphism
+- **Result/Option types** for explicit error handling
+
+**Rationale**: Rust's ownership system eliminates entire classes of bugs (use-after-free, data races) while maintaining performance. Ryo simplifies this concept with "Ownership Lite" - removing lifetime annotations while keeping the core safety guarantees.
+
+### 🔥 Mojo - Ownership Simplified
+- **Ownership without lifetimes** - simpler mental model
+- **Value semantics** with clear ownership transfer
+- **Progressive complexity** - start simple, add complexity when needed
+
+**Rationale**: Mojo demonstrates that ownership doesn't require Rust's complexity. Ryo follows this philosophy, making memory safety accessible to Python developers.
+
+### 🔷 Go - Simplicity & Concurrency
+- **Simplicity as a core value** - fewer language features, done well
+- **Fast compilation** times for rapid development
+- **Built-in concurrency primitives** (future: CSP-style channels)
+- **Single, standard toolchain** (no build configuration hell)
+- **Pragmatic approach** to language design
+
+**Rationale**: Go proves that simplicity and performance aren't mutually exclusive. Ryo adopts this pragmatic philosophy while adding modern type safety.
+
+### ⚡ Zig - Simplicity, Error Handling & Compile-Time
+- **No hidden control flow** - explicit is better than implicit
+- **Comptime execution** for zero-cost abstractions without macros
+- **Simple error handling** with explicit error sets
+- **No operator overloading** - predictable code behavior
+- **Minimal runtime** requirements
+
+**Rationale**: Zig's `comptime` provides powerful metaprogramming without complex macro systems. Ryo adopts this for configuration, code generation, and type introspection.
+
+### Synthesis: The Best of All Worlds
+
+Ryo isn't just a collection of features - it's a carefully designed synthesis:
+
+```ryo
+# Python-like syntax
+fn calculate_total(items: List[Item]) -> Result[float, Error]:
+    # Rust/Mojo-like ownership (simplified)
+    total = 0.0
+    for item in items:
+        # Zig-like explicit error handling
+        price = item.price()?
+        total += price
+
+    # Go-like simplicity, Python-like f-strings
+    print(f"Total: ${total:.2f}")
+    return Ok(total)
+
+# Comptime from Zig
+comptime fn generate_validators[T]():
+    # Type introspection at compile time
+    return build_validators_for[T]()
+```
+
+**Key Differentiators**:
+- **Easier than Rust**: No lifetime annotations, simpler borrow checker
+- **Safer than Python**: Compile-time memory safety, no null/undefined
+- **More expressive than Go**: Generics, algebraic types, pattern matching
+- **More familiar than Zig**: Python-like syntax instead of C-like
+- **Performance**: No GC, compiles to native code, predictable memory usage
 
 ---
 
