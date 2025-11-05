@@ -31,7 +31,7 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 *   **Memory Management:** Ownership & Borrowing (Simplified, "Ownership Lite"), No GC, RAII (`Drop`), Immutable-by-Default variables for safer code.
 *   **Concurrency:** Python-familiar async/await with high-performance async runtime
 *   **Syntax:** Python-inspired, tab-indented, expressions, statements
-*   **Types:** Static typing, type inference (for `var = val`), primitives (`int`, `float`, `bool`, `str`, `char`), tuples, `struct`, `enum` (ADTs), `trait` (static dispatch initially)
+*   **Types:** Static typing with Hindley-Milner type inference, primitives (`int`, `float`, `bool`, `str`, `char`), tuples, `struct`, `enum` (ADTs), `trait` (static dispatch initially). Variables are immutable by default (no `let` keyword), use `mut` for mutability
 *   **Error Handling:** `Result[T, E]` and `Optional[T]` enums, `?` operator, `panic` (aborts)
 *   **Compile-Time Execution:** `comptime` blocks and functions
 *   **Tooling:** `ryo` command (compiler, runner, REPL, package manager frontend), `ryopkg` logic integrated, Cranelift backend (AOT/JIT/Wasm)
@@ -62,9 +62,13 @@ fn greet(name: &str) -> str:
     return f"Hello, {name}! Welcome to Ryo."
 
 fn main():
-    # Type inference like Python
-    message = greet("World")
+    # Variables are immutable by default (no 'let' keyword)
+    message = greet("World")  # Type inferred: str
     print(message)
+
+    # Mutable variables use 'mut'
+    mut counter = 0  # Type inferred: int
+    counter += 1
 
     # Safe collections
     numbers = [1, 2, 3, 4, 5]

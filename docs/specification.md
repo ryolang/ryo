@@ -65,7 +65,21 @@ Ryo synthesizes ideas from several modern programming languages:
 
 *   *(Note: A formal grammar (EBNF) is required for full implementation but omitted here).*
 *   **Function Definition:** `fn name(param: Type, ...) -> RetType: ...`
-*   **Variable Declaration:** `var = val`, `mut var = val`, `var: Type = val`, `mut var: Type = val`. *(Rationale: Pythonic feel for common `var = val`, explicitness available, `mut` required for mutation).*
+*   **Variable Declaration:** Variables are **immutable by default** and do not require a keyword. Use `mut` for mutable variables.
+    *   Immutable: `name = value` (type inferred)
+    *   Immutable with explicit type: `name: Type = value`
+    *   Mutable: `mut name = value` (type inferred)
+    *   Mutable with explicit type: `mut name: Type = value`
+    *   Examples:
+        ```ryo
+        pi = 3.14                    # Immutable float (type inferred)
+        name = "Alice"               # Immutable string (type inferred)
+        count: int = 42              # Immutable int (explicit type)
+        mut counter = 0              # Mutable integer (type inferred)
+        mut temperature: float = 98.6 # Mutable float (explicit type)
+        ```
+    *   *(Rationale: Immutable-by-default promotes safer code. No `let` keyword provides Pythonic simplicity. Type inference reduces boilerplate while explicit types remain available for clarity. The `mut` keyword makes mutability explicit and visible).*
+    *   **Type Inference:** Ryo uses **Hindley-Milner type inference** to automatically deduce types from usage, reducing the need for explicit type annotations while maintaining full static type safety.
 *   **Struct Definition:** `struct Name: field: Type ...`
 *   **Enum Definition:** `enum Name: Variant1, Variant2(Type), Variant3 { field: Type } ...`
 *   **Trait Definition:** `trait Name: fn method(...) -> RetType ... { /* optional default */ }`

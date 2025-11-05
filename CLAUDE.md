@@ -188,7 +188,7 @@ pub enum Token<'a> {
 
 All features described in `README.md` and `docs/specification.md` are **design goals**:
 
-- ❌ Variables (`let`, `mut`)
+- ❌ Variables (immutable by default, `mut` for mutable)
 - ❌ Functions (beyond single `main`)
 - ❌ Type system (only integers exist)
 - ❌ Control flow (`if`, `for`, `match`)
@@ -311,6 +311,24 @@ impl From<std::io::Error> for CompilerError {
 **As of 2025-11-05**, all Ryo code examples **must** use Python-style colons and indentation, **NOT** curly braces.
 
 ### ✅ Correct Ryo Syntax
+
+#### Variables
+```ryo
+# Immutable by default (no 'let' keyword)
+pi = 3.14                    # Immutable float (type inferred)
+name = "Alice"               # Immutable string
+count: int = 42              # Immutable with explicit type
+
+# Mutable variables use 'mut'
+mut counter = 0              # Mutable integer (type inferred)
+mut temperature: float = 98.6 # Mutable with explicit type
+counter += 1                 # Can modify mutable variables
+
+# Type inference (Hindley-Milner)
+x = 5                        # Inferred as int
+y = x + 10                   # Inferred as int
+result = x * 2.5             # Type error: int * float
+```
 
 #### Functions
 ```ryo

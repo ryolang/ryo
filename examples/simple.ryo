@@ -5,8 +5,8 @@ fn sum(x:int, y:int) -> int:
     return x + y
 
 fn main():
-    let x = 1  # type inference int, x is not mutable
-    let y = 2
+    x = 1  # Immutable int (type inferred)
+    y = 2  # Immutable int (type inferred)
 
-    let z = sum(x,y)
+    z = sum(x,y)  # Immutable int (type inferred)
     print(f"z: {z}")
