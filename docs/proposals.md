@@ -46,36 +46,30 @@ CSP primitives will be designed to work alongside async/await:
 
 ```ryo
 # Channels that work with async code
-async fn async_producer(ch: chan[Data]) {
-    for i in range(10) {
+async fn async_producer(ch: chan[Data]):
+    for i in range(10):
         data = await expensive_computation(i)
         ch <- data  # Send computed data
-    }
     close(ch)
-}
 
 # Async iteration over channels
-async fn async_consumer(ch: chan[Data]) {
-    async for data in ch {  # Async iterator over channel
+async fn async_consumer(ch: chan[Data]):
+    async for data in ch:  # Async iterator over channel
         await process_data(data)
-    }
-}
 
 # Mixing paradigms
-async fn hybrid_example() {
+async fn hybrid_example():
     (tx, rx) = chan.unbounded[Task]()
-    
+
     # Spawn CSP-style workers
     spawn worker(rx)
-    
+
     # Use async for I/O
     tasks = await load_tasks_from_db()
-    
+
     # Send via channels
-    for task in tasks {
+    for task in tasks:
         tx <- task
-    }
-}
 ```
 
 ### **Use Cases for CSP Extensions**
@@ -89,22 +83,20 @@ async fn hybrid_example() {
 
 **Example: Data Processing Pipeline**
 ```ryo
-async fn data_pipeline() {
+async fn data_pipeline():
     # Create pipeline stages
     (raw_input, raw_output) = chan.unbounded[RawData]()
     (processed_input, processed_output) = chan.unbounded[ProcessedData]()
     (final_input, final_output) = chan.unbounded[FinalData]()
-    
+
     # Spawn processing stages
     spawn raw_processor(raw_output, processed_input)
-    spawn data_enricher(processed_output, final_input) 
+    spawn data_enricher(processed_output, final_input)
     spawn final_consumer(final_output)
-    
+
     # Feed data into pipeline (async source)
-    async for raw_data in data_source() {
+    async for raw_data in data_source():
         raw_input <- raw_data
-    }
-}
 ```
 
 ### **Implementation Timeline**
@@ -240,9 +232,9 @@ trait Iterator:
 impl Iterator for ListIterator[T]:
     type Item = T
     
-    fn next(&mut self) -> Optional[T] {
+    fn next(&mut self) -> Optional[T]:
         # Implementation
-    }
+        pass
 ```
 
 **Collection Traits**
@@ -260,10 +252,13 @@ trait Collection:
 impl[T] Collection for List[T]:
     type Item = T
     type Iter = ListIterator[T]
-    
-    fn len(&self) -> int { self.count }
-    fn is_empty(&self) -> bool { self.count == 0 }
-    fn iter(&self) -> ListIterator[T] { ListIterator.new(self) }
+
+    fn len(&self) -> int:
+        return self.count
+    fn is_empty(&self) -> bool:
+        return self.count == 0
+    fn iter(&self) -> ListIterator[T]:
+        return ListIterator.new(self)
 ```
 
 #### **Generic Implementation Blocks**
@@ -349,9 +344,8 @@ trait Iterator:
     
     fn fold[B](self, init: B, f: fn(B, Self.Item) -> B) -> B:
         accumulator = init
-        for item in self {
+        for item in self:
             accumulator = f(accumulator, item)
-        }
         return accumulator
 ```
 
@@ -363,11 +357,10 @@ impl Iterator for ListIterator[T]:
     type Item = T
     
     fn next(&mut self) -> Optional[T]:
-        if self.index < self.list.len() {
+        if self.index < self.list.len():
             item = self.list[self.index]
             self.index += 1
             return Optional.Some(item)
-        }
         return Optional.None
 
 # IntoIterator trait for collections
@@ -387,8 +380,8 @@ impl IntoIterator for List[T]:
 # Usage examples
 numbers = [1, 2, 3, 4, 5]
 doubled = numbers.iter()
-    .map(fn(x) { x * 2 })
-    .filter(fn(x) { x > 5 })
+    .map(fn(x): x * 2)
+    .filter(fn(x): x > 5)
     .collect[List[int]]()
 ```
 
@@ -458,12 +451,11 @@ impl From[ParseError] for AppError:
         return AppError.Parse(err)
 
 # Enhanced ? operator with automatic conversions
-fn process_file(path: str) -> Result[ProcessedData, AppError] {
+fn process_file(path: str) -> Result[ProcessedData, AppError]:
     content = files.read_text(path)?      # IoError -> AppError automatically
     config = parse_config(content)?       # ParseError -> AppError automatically
     data = fetch_remote_data(config)?     # NetworkError -> AppError automatically
     return Ok(process(data))
-}
 ```
 
 #### **Error Context and Chaining**
@@ -484,12 +476,11 @@ impl ErrorContext[T, E] for Result[T, E]:
             Err(err): return Err(ContextError { source: err, context })
 
 # Usage
-fn load_user_config(user_id: int) -> Result[UserConfig, ContextError[AppError]] {
+fn load_user_config(user_id: int) -> Result[UserConfig, ContextError[AppError]]:
     path = f"/users/{user_id}/config.toml"
     config = parse_config_file(path)
         .with_context(f"Failed to load config for user {user_id}")?
     return Ok(config)
-}
 ```
 
 ### **Attribute System**
@@ -506,9 +497,8 @@ Currently, attributes like `#[test]` are mentioned but not formally specified. A
 
 # Built-in attributes
 #[test]
-fn test_addition() {
+fn test_addition():
     assert_eq(2 + 2, 4)
-}
 
 #[repr(C)]
 struct Point:
@@ -516,9 +506,8 @@ struct Point:
     y: float
 
 #[no_mangle]
-pub extern "C" fn exported_function(x: int) -> int {
+pub extern "C" fn exported_function(x: int) -> int:
     return x * 2
-}
 ```
 
 #### **Conditional Compilation**
@@ -529,19 +518,18 @@ pub extern "C" fn exported_function(x: int) -> int {
 import async_runtime
 
 #[cfg(target_os = "linux")]
-fn platform_specific_function() {
+fn platform_specific_function():
     # Linux-specific implementation
-}
+    pass
 
 #[cfg(target_os = "windows")]
-fn platform_specific_function() {
+fn platform_specific_function():
     # Windows-specific implementation
-}
+    pass
 
 #[cfg(debug_assertions)]
-fn debug_only_function() {
+fn debug_only_function():
     print("This only runs in debug builds")
-}
 ```
 
 #### **Derive-like Attributes**
@@ -581,9 +569,8 @@ struct Point:
     y: float
 
 impl Display for Point:
-    fn fmt(&self, formatter: &mut Formatter) -> Result[(), FormatError> {
+    fn fmt(&self, formatter: &mut Formatter) -> Result[(), FormatError]:
         formatter.write(f"({self.x}, {self.y})")
-    }
 ```
 
 #### **Enhanced Format Strings**
@@ -619,9 +606,8 @@ struct Currency:
     symbol: str
 
 impl Display for Currency:
-    fn fmt(&self, formatter: &mut Formatter) -> Result[(), FormatError> {
+    fn fmt(&self, formatter: &mut Formatter) -> Result[(), FormatError]:
         formatter.write(f"{self.symbol}{self.amount:.2}")
-    }
 
 price = Currency { amount: 123.456, symbol: "$" }
 print(f"Price: {price}")  # Price: $123.46
@@ -660,13 +646,11 @@ comptime {
 
 const PI = comptime 3.14159265359
 
-comptime fn generate_lookup_table() -> [int; 256] {
+comptime fn generate_lookup_table() -> [int; 256]:
     table = [0; 256]
-    for i in range(256) {
+    for i in range(256):
         table[i] = expensive_calculation(i)
-    }
     return table
-}
 
 # Pre-computed at compile time
 LOOKUP = comptime generate_lookup_table()
@@ -697,23 +681,21 @@ Beyond basic `comptime`, more advanced reflection capabilities are under conside
 
 ```ryo
 # Future comptime reflection API
-comptime fn generate_serializer[T]() -> str {
+comptime fn generate_serializer[T]() -> str:
     type_info = comptime.type_info[T]()
-    
+
     match type_info.kind:
         TypeKind.Struct { fields }:
             # Generate struct serialization code
             serializer_code = "fn serialize(value: T) -> str {\n"
-            for field in fields {
+            for field in fields:
                 serializer_code += f"    {field.name}_json = serialize_field(value.{field.name})\n"
-            }
             serializer_code += "}\n"
             return serializer_code
-            
+
         TypeKind.Enum { variants }:
             # Generate enum serialization code
             return generate_enum_serializer(variants)
-}
 
 # Usage
 #[derive(Serialize)]  # Uses comptime reflection
@@ -745,10 +727,9 @@ struct FieldInfo:
     type_info: TypeInfo
     offset: int
 
-comptime fn analyze_type[T]() {
+comptime fn analyze_type[T]():
     info = comptime.type_info[T]()
     print(f"Type {info.name} has size {info.size} and alignment {info.alignment}")
-}
 ```
 
 #### **Runtime Reflection Considerations**
@@ -791,28 +772,22 @@ struct Rectangle:
     height: float
 
 impl Drawable for Circle:
-    fn draw(&self) {
+    fn draw(&self):
         print(f"Drawing circle with radius {self.radius}")
-    }
-    fn area(&self) -> float {
+    fn area(&self) -> float:
         return 3.14159 * self.radius * self.radius
-    }
 
 impl Drawable for Rectangle:
-    fn draw(&self) {
+    fn draw(&self):
         print(f"Drawing rectangle {self.width}x{self.height}")
-    }
-    fn area(&self) -> float {
+    fn area(&self) -> float:
         return self.width * self.height
-    }
 
 # Dynamic dispatch with trait objects
-fn process_shapes(shapes: List[&dyn Drawable]) {
-    for shape in shapes {
+fn process_shapes(shapes: List[&dyn Drawable]):
+    for shape in shapes:
         shape.draw()  # Dynamic dispatch - runtime polymorphism
         print(f"Area: {shape.area()}")
-    }
-}
 
 # Usage
 circle = Circle { radius: 5.0 }
@@ -854,12 +829,10 @@ struct Point:
     y: f64
 
 #[no_mangle]
-pub extern "C" fn process_point(p: *const Point) -> f64 {
-    unsafe {
+pub extern "C" fn process_point(p: *const Point) -> f64:
+    unsafe:
         point = &*p  # Dereference raw pointer
         return (point.x * point.x + point.y * point.y).sqrt()
-    }
-}
 ```
 
 #### **Type Mapping and Utilities**
@@ -872,16 +845,13 @@ pub extern "C" fn process_point(p: *const Point) -> f64 {
 **String Handling:**
 ```ryo
 # Future string FFI utilities
-fn ryo_str_to_c(s: &str) -> (*const c_char, usize) {
+fn ryo_str_to_c(s: &str) -> (*const c_char, usize):
     return (s.as_ptr(), s.len())
-}
 
-fn c_str_to_ryo(ptr: *const c_char) -> Result[str, ConversionError] {
-    unsafe {
+fn c_str_to_ryo(ptr: *const c_char) -> Result[str, ConversionError]:
+    unsafe:
         # Safe conversion with validation
         return ffi.cstr_to_string(ptr)
-    }
-}
 ```
 
 **Complex Types:**
@@ -894,17 +864,13 @@ fn c_str_to_ryo(ptr: *const c_char) -> Result[str, ConversionError] {
 **Unsafe Blocks and Functions:**
 ```ryo
 # Future unsafe functionality
-unsafe fn manipulate_raw_memory(ptr: *mut u8, len: usize) {
-    for i in range(len) {
+unsafe fn manipulate_raw_memory(ptr: *mut u8, len: usize):
+    for i in range(len):
         *ptr.offset(i) = 0  # Raw pointer arithmetic and dereference
-    }
-}
 
-fn safe_wrapper(data: &mut [u8]) {
-    unsafe {
+fn safe_wrapper(data: &mut [u8]):
+    unsafe:
         manipulate_raw_memory(data.as_mut_ptr(), data.len())
-    }
-}
 ```
 
 **Required for Unsafe:**
@@ -935,9 +901,8 @@ However, these features are advanced and should be used sparingly, with safety a
 # Future SIMD support
 import simd
 
-fn parallel_add(a: simd.f32x4, b: simd.f32x4) -> simd.f32x4 {
+fn parallel_add(a: simd.f32x4, b: simd.f32x4) -> simd.f32x4:
     return a + b  # Vectorized addition
-}
 ```
 
 ---

@@ -31,7 +31,7 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 *   **Memory Management:** Ownership & Borrowing (Simplified, "Ownership Lite"), No GC, RAII (`Drop`), Immutable-by-Default variables for safer code.
 *   **Concurrency:** Python-familiar async/await with high-performance async runtime
 *   **Syntax:** Python-inspired, tab-indented, expressions, statements
-*   **Types:** Static typing, type inference (for `var = val`), primitives (`int`, `float`, `bool`, `str`, `char`), tuples, `struct`, `enum` (ADTs), `trait` (static dispatch initially)
+*   **Types:** Static typing with bidirectional type inference (like Rust/TypeScript), primitives (`int`, `float`, `bool`, `str`, `char`), tuples, `struct`, `enum` (ADTs), `trait` (static dispatch initially). Function signatures require types, local variables inferred. Variables are immutable by default (no `let` keyword), use `mut` for mutability
 *   **Error Handling:** `Result[T, E]` and `Optional[T]` enums, `?` operator, `panic` (aborts)
 *   **Compile-Time Execution:** `comptime` blocks and functions
 *   **Tooling:** `ryo` command (compiler, runner, REPL, package manager frontend), `ryopkg` logic integrated, Cranelift backend (AOT/JIT/Wasm)
@@ -41,19 +41,34 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 
 For full details, see the [Language Specification](docs/specification.md) (Link to spec file).
 
+## Language Inspirations
+
+Ryo draws inspiration from the best features of modern programming languages:
+
+*   **🐍 Python** - Clean syntax with colons and indentation, f-strings, type inference, async/await
+*   **🦀 Rust** - Ownership model for memory safety, algebraic data types (enums), pattern matching, trait system
+*   **🔥 Mojo** - Simplified ownership without lifetimes, value semantics, progressive complexity
+*   **🔷 Go** - Simplicity as a core value, fast compilation, pragmatic concurrency (CSP channels planned)
+*   **⚡ Zig** - Comptime execution for zero-cost abstractions, explicit error handling, no hidden control flow
+
+**The Result:** A language that's **easier than Rust** (no lifetimes), **safer than Python** (compile-time memory safety), **more expressive than Go** (generics, ADTs), and **more familiar than Zig** (Python-like syntax).
+
 ## Quick Example
 
 ```ryo
 # src/main.ryo
 
-fn greet(name: &str) -> str {
+fn greet(name: &str) -> str:
     return f"Hello, {name}! Welcome to Ryo."
-}
 
-fn main() {
-    # Type inference like Python
-    message = greet("World")
+fn main():
+    # Variables are immutable by default (no 'let' keyword)
+    message = greet("World")  # Type inferred: str
     print(message)
+
+    # Mutable variables use 'mut'
+    mut counter = 0  # Type inferred: int
+    counter += 1
 
     # Safe collections
     numbers = [1, 2, 3, 4, 5]
@@ -64,7 +79,6 @@ fn main() {
     match user:
         Optional.Some(name): print(f"User: {name}")
         Optional.None: print("No user found")
-}
 ```
 
 Run with: `ryo run` (after building the `ryo` tool)

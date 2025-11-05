@@ -11,13 +11,15 @@ This document identifies critical design inconsistencies in the Ryo language spe
 **Examples**:
 ```ryo
 # Type annotation
-fn foo() -> (int, str) { ... }
+fn foo() -> (int, str):
+    ...
 
-# Value literal  
+# Value literal
 x = (42, "hello")
 
 # Function parameter grouping
-fn bar(param: (int, str)) { ... }
+fn bar(param: (int, str)):
+    ...
 bar((42, "hello"))  # One tuple arg or two separate args?
 
 # Expression grouping
@@ -25,11 +27,12 @@ result = (a + b) * c
 
 # Empty tuple vs unit
 empty = ()
-fn unit_func() -> () { ... }
+fn unit_func() -> ():
+    ...
 ```
 
-**Recommendation**: 
-- Use different syntax for unit type: `fn unit_func() -> unit { ... }`
+**Recommendation**:
+- Use different syntax for unit type: `fn unit_func() -> unit:`
 - Or use explicit tuple constructors: `tuple(42, "hello")`
 - Or require trailing comma for single-element tuples: `(42,)`
 
@@ -42,22 +45,25 @@ fn unit_func() -> () { ... }
 # Assignment: MOVES
 new_var = old_var  # old_var invalid
 
-# Function call: BORROWS  
-fn process(data: SomeType) { ... }
+# Function call: BORROWS
+fn process(data: SomeType):
+    ...
 process(my_data)  # my_data still valid
 
 # This creates confusion:
 data = create_data()
 process(data)      # Borrows - OK
-other = data       # Moves - data invalid!  
+other = data       # Moves - data invalid!
 process(data)      # ERROR: use of moved value
 ```
 
-**Recommendation**: 
+**Recommendation**:
 - **Option A**: Make everything explicit - remove implicit borrowing
   ```ryo
-  fn process(data: &SomeType) { ... }  # Explicit borrow
-  fn consume(data: SomeType) { ... }   # Explicit move
+  fn process(data: &SomeType):  # Explicit borrow
+      ...
+  fn consume(data: SomeType):   # Explicit move
+      ...
   ```
 - **Option B**: Make assignment borrowing more explicit
   ```ryo
@@ -75,7 +81,8 @@ process(data)      # ERROR: use of moved value
 struct MyResult: ...  # ERROR: 'Result' is keyword
 
 # But used as types everywhere
-fn parse() -> Result[int, Error] { ... }
+fn parse() -> Result[int, Error]:
+    ...
 ```
 
 **Recommendation**: 
@@ -113,7 +120,8 @@ enum Result[T, E]:
     Err(E)
 
 # With trait bounds (future)
-fn sort[T: Comparable](list: List[T]) { ... }
+fn sort[T: Comparable](list: List[T]):
+    ...
 ```
 
 ### 5. Method Self Parameter Confusion 🔴
@@ -179,16 +187,15 @@ impl From[IoError] for Error: ...
 **Recommendation**: Define async main semantics:
 ```ryo
 # Option A: Explicit runtime
-fn main() {
+fn main():
     async_runtime.run(async_main())
-}
 
-async fn async_main() -> Result[(), Error] { ... }
+async fn async_main() -> Result[(), Error]:
+    ...
 
 # Option B: Compiler magic
-async fn main() -> Result[(), Error> {  # Compiler starts runtime
+async fn main() -> Result[(), Error]:  # Compiler starts runtime
     # ...
-}
 ```
 
 ### 8. Channel Operators Listed as Current but in Future ⚠️
@@ -207,11 +214,9 @@ async fn main() -> Result[(), Error> {  # Compiler starts runtime
 trait Drawable:
     fn draw(self)
 
-fn process_shapes(shapes: List[&dyn Drawable]) {
-    for shape in shapes {
+fn process_shapes(shapes: List[&dyn Drawable]):
+    for shape in shapes:
         shape.draw()  # Dynamic dispatch
-    }
-}
 ```
 
 ### 10. Array vs Slice Type Ambiguity ⚠️

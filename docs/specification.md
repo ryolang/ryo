@@ -16,6 +16,18 @@
 
 *   **Target Audience:** Developers familiar with languages like Python, Go, TypeScript, or C# seeking better performance and stronger safety guarantees without the steep learning curve of Rust or the runtime overhead of GC languages, especially for backend services, CLI tools, and scripting.
 
+### Language Inspirations
+
+Ryo synthesizes ideas from several modern programming languages:
+
+*   **Python** - Clean syntax with colons and indentation, f-strings, type inference, async/await, developer-friendly design
+*   **Rust** - Ownership model for memory safety, algebraic data types (enums with data), pattern matching, trait system, Result/Option types
+*   **Mojo** - Simplified ownership without manual lifetimes, value semantics, progressive complexity model
+*   **Go** - Simplicity as a core design principle, fast compilation, built-in concurrency primitives, minimal feature set
+*   **Zig** - Comptime execution for zero-cost abstractions, explicit error handling, no hidden control flow, minimal runtime
+
+**Key Differentiators**: Ryo aims to be easier than Rust (no lifetimes), safer than Python (compile-time memory safety), more expressive than Go (generics, algebraic types), and more familiar than Zig (Python-like syntax).
+
 ## 2. Lexical Structure
 
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
@@ -41,7 +53,8 @@
             y: int # Regular comment for field
 
         #: Calculates the distance from the origin.
-        fn distance(p: &Point) -> float { ... }
+        fn distance(p: &Point) -> float:
+            ...
         ```
     *   *(Rationale: Uses `#` as the base. The `#:` marker provides an unambiguous distinction for documentation tooling, avoiding whitespace sensitivity and block comment syntax. Attributes `#[...]` remain separate).*
 *   **Attributes:** Metadata annotations use the `#[...]` syntax, placed before the documented item. *(Rationale: Distinct syntax using brackets clearly separates attributes from code and comments).*
@@ -52,7 +65,38 @@
 
 *   *(Note: A formal grammar (EBNF) is required for full implementation but omitted here).*
 *   **Function Definition:** `fn name(param: Type, ...) -> RetType: ...`
-*   **Variable Declaration:** `var = val`, `mut var = val`, `var: Type = val`, `mut var: Type = val`. *(Rationale: Pythonic feel for common `var = val`, explicitness available, `mut` required for mutation).*
+*   **Variable Declaration:** Variables are **immutable by default** and do not require a keyword. Use `mut` for mutable variables.
+    *   Immutable: `name = value` (type inferred)
+    *   Immutable with explicit type: `name: Type = value`
+    *   Mutable: `mut name = value` (type inferred)
+    *   Mutable with explicit type: `mut name: Type = value`
+    *   Examples:
+        ```ryo
+        pi = 3.14                    # Immutable float (type inferred)
+        name = "Alice"               # Immutable string (type inferred)
+        count: int = 42              # Immutable int (explicit type)
+        mut counter = 0              # Mutable integer (type inferred)
+        mut temperature: float = 98.6 # Mutable float (explicit type)
+        ```
+    *   *(Rationale: Immutable-by-default promotes safer code. No `let` keyword provides Pythonic simplicity. Type inference reduces boilerplate while explicit types remain available for clarity. The `mut` keyword makes mutability explicit and visible).*
+    *   **Type Inference:** Ryo uses **bidirectional type checking** (like Rust, TypeScript, and modern statically-typed languages) which provides:
+        *   **Function signatures require type annotations** - Good for documentation and API clarity
+        *   **Local variables inferred from initialization** - Ergonomic for local code
+        *   **Better, localized error messages** - More understandable than full Hindley-Milner
+        *   **Simpler implementation** - More practical than complete HM type inference
+        *   **Comptime with enhanced inference** - More aggressive type inference in compile-time contexts
+        *   Examples:
+            ```ryo
+            fn add(a: int, b: int) -> int:  # Parameters need types
+                result = a + b              # Local variable type inferred: int
+                return result               # Return type checked against signature
+
+            # Type errors are localized and clear
+            x = 5              # Inferred: int
+            y = 3.14           # Inferred: float
+            z = x + y          # Error: cannot add int and float (clear, localized)
+            ```
+        *   *(Rationale: Bidirectional type checking provides the right balance - function signatures serve as documentation and API contracts while local code remains concise. This matches developer expectations from Rust/TypeScript and provides better error messages than fully implicit systems like Hindley-Milner).*
 *   **Struct Definition:** `struct Name: field: Type ...`
 *   **Enum Definition:** `enum Name: Variant1, Variant2(Type), Variant3 { field: Type } ...`
 *   **Trait Definition:** `trait Name: fn method(...) -> RetType ... { /* optional default */ }`
@@ -69,13 +113,12 @@
 *   **Control Flow:** `if/elif/else`, `for item in iterable:`, `for i in range(start, end):`.
 *   **Pattern Matching:** `match expr: Pattern1: ... Pattern2(bind): ... Pattern3 { x, y }: ... _ : ...` (`_` for wildcard/default).
 
-*   **Async/Await:** `async fn name() -> RetType:`, `await expression`, 
+*   **Async/Await:** `async fn name() -> RetType:`, `await expression`,
     ```ryo
-    async fn fetch_data() -> Result[Data, Error] {
+    async fn fetch_data() -> Result[Data, Error]:
         response = await http.get("https://api.example.com/data")
         data = await response.json[Data]()
         return Ok(data)
-    }
     ```
 *   **Closures:** `fn(args): expression`.
 *   **Tuple Destructuring:** `(a, b) = my_tuple`.
@@ -148,11 +191,10 @@
 *   **Methods:** Methods can be defined on enums using `impl EnumName: ...`, often using `match self:` internally.
     ```ryo
     impl MyEnum:
-        fn process(self) {
+        fn process(self):
             match self:
                 MyEnum.Variant1: io.println("Processing V1")
                 # ... other variants ...
-        }
     ```
 *   *(Rationale: Enums provide type-safe ways to represent alternatives (like `Result`/`Optional`), states, and structured messages, crucial for robust software and eliminating `null` errors. Exhaustive matching is a key safety feature derived from functional programming and Rust).*
 
@@ -257,13 +299,12 @@
     *   **Ownership Integration:** Async functions work seamlessly with Ryo's ownership model - values can be moved into async contexts safely.
 *   **Examples:**
     ```ryo
-    async fn process_request(req: Request) -> Result[Response, Error> {
+    async fn process_request(req: Request) -> Result[Response, Error]:
         data = await database.query("SELECT * FROM users")?
         result = await external_api.call(data)?
         return Ok(Response.json(result))
-    }
 
-    async fn process_all_requests() {
+    async fn process_all_requests():
         tasks = [
             process_request(req1),
             process_request(req2),
@@ -271,12 +312,10 @@
         ]
         results = await async.gather(tasks)
         print(f"Processed {results.len()} requests")
-    }
 
-    fn main() {
+    fn main():
         # Start async runtime and run async code
         async_runtime.run(process_all_requests())
-    }
     ```
 *   *(Rationale: Async/await is familiar to Python developers, provides excellent ergonomics for I/O-bound applications, and integrates well with Ryo's ownership model. The cooperative nature prevents many concurrency bugs while maintaining high performance).*
 *   **Future Extensions:** CSP-style channels (`chan[T]`, `select`) planned as optional additions for specialized use cases. See [Language Proposals](proposals.md#concurrency-extensions-csp-communicating-sequential-processes) for detailed CSP design.

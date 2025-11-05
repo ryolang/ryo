@@ -18,7 +18,7 @@ fn take_text(owned text: String): # fast and secure, but if you want to use this
     # text is destroyed here
 
 fn my_function():
-    var message: String = "Hello" # In Mojo variables `var` are mutable by default, in rust in-mutable use `let` and `let mut` for mutable
+    mut message: String = "Hello" # In Ryo: immutable by default, `mut` for mutable (like Rust but no `let`)
     read_text(message) ## readonly, reference is pass but the owner is my_function
     mutate_text(message) ## mutable, reference is pass but the owner is my_function
     take_text(message) ## reference is moved to take_text

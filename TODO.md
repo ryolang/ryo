@@ -6,7 +6,7 @@
 - [ ] Set up clippy https://github.com/rust-lang/rust-clippy
 - [ ] set up https://codspeed.io/
 - [ ] review for more https://github.com/astral-sh/ruff/tree/main/.github/workflows
-- [ ] Hindley-Milner type inference
+- [ ] Bidirectional type inference (function signatures require types, local variables inferred)
 
 ### Core language
 - Lexer: Lexical, Syntactic Grammar
