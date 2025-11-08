@@ -33,10 +33,11 @@ Ryo synthesizes ideas from several modern programming languages:
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
 *   **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
     *   *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for types (structs, enums, traits) and enum variants. *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
-*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `true`, `false`, `async`, `await`, `move`. (Note: `Result`, `Optional`, `Ok`, `Err`, `Some` are built-in types resolved by the type checker, not keywords. `comptime`, `unsafe` are planned for future implementation. `as`, `default`, `package`, `None`, `let` are not keywords).
-*   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error propagation (`?`).
+*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `true`, `false`, `none`, `async`, `await`, `move`, `error`, `try`, `catch`, `orelse`. (Note: `comptime`, `unsafe` are planned for future implementation. `as`, `default`, `package`, `let` are not keywords).
+*   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error union prefix (`!`), optional chaining (`?.`).
+    *   **Important Note:** The `!` operator is used exclusively for error union type prefixes (`!T` = error or T, `ErrorType!T` = ErrorType or T). The `!` is NOT used for logical negation—use `not` instead (following Python convention). Similarly, `?` operator in type context (`?T`) denotes optional types, while `?.` is the optional chaining operator.
     *   `_` (Underscore): The underscore `_` is treated as a special identifier. When used in patterns (`match`, destructuring assignment), it signifies a wildcard or an intentionally ignored value; it does not bind to a variable.
-*   **Literals:** Integers (decimal `123`, hex `0xFF`, octal `0o77`, binary `0b11`; underscores `1_000`), Floats (`123.45`, `1.23e-10`; underscores `1_000.0`), Strings (`"..."` basic escapes like `\n`, `\t`, `\\`, `\"`, `\xHH`, `\u{HHHH}`). `f"..."` (f-strings with `{expression}` interpolation), Booleans (`true`, `false`), List (`[...]`), Map (`{key: value, ...}`), Tuple (`(v1, v2, ...)`), Char (`'a'`, `'\u{1F600}'`).
+*   **Literals:** Integers (decimal `123`, hex `0xFF`, octal `0o77`, binary `0b11`; underscores `1_000`), Floats (`123.45`, `1.23e-10`; underscores `1_000.0`), Strings (`"..."` basic escapes like `\n`, `\t`, `\\`, `\"`, `\xHH`, `\u{HHHH}`). `f"..."` (f-strings with `{expression}` interpolation), Booleans (`true`, `false`), Optional null value (`none`), List (`[...]`), Map (`{key: value, ...}`), Tuple (`(v1, v2, ...)`), Char (`'a'`, `'\u{1F600}'`).
 *   **Comments:**
     *   **Regular Comment:** Starts with `#` followed by a space or directly by the comment text. Continues to the end of the line. Ignored by the compiler.
         ```ryo
@@ -115,10 +116,14 @@ Ryo synthesizes ideas from several modern programming languages:
 
 *   **Async/Await:** `async fn name() -> RetType:`, `await expression`,
     ```ryo
-    async fn fetch_data() -> Result[Data, Error]:
-        response = await http.get("https://api.example.com/data")
-        data = await response.json[Data]()
-        return Ok(data)
+    error NetworkError:
+        ConnectionFailed
+        TimeoutError
+
+    async fn fetch_data() -> NetworkError!Data:
+        response = try await http.get("https://api.example.com/data")
+        data = try await response.json[Data]()
+        return data
     ```
 *   **Closures:** `fn(args): expression`.
 *   **Tuple Destructuring:** `(a, b) = my_tuple`.
@@ -205,18 +210,114 @@ Ryo synthesizes ideas from several modern programming languages:
 
 *Note: User-defined generics are planned for future implementation. See [Language Proposals](proposals.md#advanced-generics) for detailed generic type system design.*
 
-### 4.8 Standard Library Types (`Result`, `Optional`)
+### 4.8 Optional Types (`?T`)
 
-*   `Result[T, E]`: Built using `enum { Ok(T), Err(E) }`.
-*   `Optional[T]`: Built using `enum { Some(T), None }`. Replaces `null`.
-    *   Uses the variant None (accessed as `Optional.None`). Note that `None` itself is not a global keyword, but the specific identifier for this variant within the `Optional` enum, aligning with common practice in languages like Rust for null safety.
-    *   *(Rationale: Explicit handling of absence/errors via ADTs is safer than nullable types or exceptions).*
+*   **Syntax:** `?T` represents a value of type `T` that may be absent (represented by `none`). Eliminates null pointer errors through explicit, type-safe handling.
+*   **Null literal:** `none` (lowercase keyword, consistent with `true` and `false`). *(Rationale: Python-familiar, semantically clear—"none" means "no value")*
+*   **Declaration and Assignment:**
+    ```ryo
+    user: ?User = none
+    user: ?User = User{name: "Alice"}
 
-### 4.9 FFI Types
+    config: ?Config = load_config()  # If load_config returns ?Config
+    ```
+*   **Optional Chaining (`?.`):** Access nested optional fields without explicit unwrapping. Returns an optional type if any step is `none`:
+    ```ryo
+    city = user?.profile?.address?.city  # Returns ?str
+
+    # Equivalent to (conceptually):
+    city = if user != none and user.profile != none and user.profile.address != none:
+        user.profile.address.city
+    else:
+        none
+    ```
+*   **Default Values with `orelse`:** Provide defaults or early return:
+    ```ryo
+    name = user?.name orelse "Unknown"
+    port = config?.port orelse 8080
+
+    # Early return pattern (with smart casting)
+    user = optional_user orelse return error.NoUser
+    # 'user' is now User (not ?User)
+    ```
+*   **Smart Casting after Null Checks:** After a null check, the type is automatically narrowed:
+    ```ryo
+    if user != none:
+        print(user.name)  # user is User here, not ?User (smart cast)
+
+    if let user = optional_user:  # Future: if-let syntax
+        print(user.name)
+    ```
+*   **Pattern Matching:**
+    ```ryo
+    match optional_user:
+        none: print("No user")
+        else: print(f"User: {optional_user.name}")
+    ```
+*   *(Rationale: Zig-inspired `?T` syntax is concise and compositional. The `none` keyword aligns with Python's `None`. Optional chaining (`?.`) and `orelse` provide ergonomic handling. Smart casting reduces boilerplate after validation)*
+
+### 4.9 Error Types (`ErrorType!SuccessType`)
+
+*   **Purpose:** Error types are algebraic data types specifically designed for error handling. Use the `error` keyword to define error types with associated data.
+*   **Definition Syntax:**
+    ```ryo
+    error IoError:
+        FileNotFound(path: str)
+        PermissionDenied(path: str)
+        DiskFull
+
+    error ParseError:
+        InvalidSyntax(line: int, column: int)
+        UnexpectedToken(expected: str, got: str)
+        UnexpectedEof
+    ```
+*   **Variants with Associated Data:** Error variants can carry data (tuple or struct variants):
+    ```ryo
+    error DatabaseError:
+        ConnectionFailed(reason: str)
+        QueryTimeout(Duration)
+        InvalidQuery(sql: str, position: int)
+    ```
+*   **Error Union Type (`ErrorType!T`):** Represents a value that can be the error type or the success type:
+    ```ryo
+    fn read_file(path: str) -> IoError!str:
+        if not exists(path):
+            return IoError.FileNotFound(path)
+        return os.read(path)
+    ```
+*   **Generic Error Type (`!T`):** When error type is not specified, `!T` means "any error or T":
+    ```ryo
+    fn flexible_operation() -> !Data:
+        # Can return any error type
+        ...
+    ```
+*   **Combined Error and Optional (`!?T`):** For operations that can fail (error), return no value (`none`), or return a value:
+    ```ryo
+    fn find_user(db: Database, id: int) -> IoError!?User:
+        # Can return: IoError, none (not found), or User
+        rows = try db.query("SELECT * FROM users WHERE id = ?", id)
+        if rows.is_empty():
+            return none
+        return User.from_row(rows[0])
+    ```
+*   **Pattern Matching on Errors:** Use full ADT pattern matching to handle different error variants:
+    ```ryo
+    result = load_config() catch |e|:
+        match e:
+            ParseError.InvalidSyntax(line, col):
+                print(f"Syntax error at {line}:{col}")
+            ParseError.UnexpectedToken(exp, got):
+                print(f"Expected {exp}, got {got}")
+            ParseError.UnexpectedEof:
+                print("Unexpected end of file")
+    ```
+*   *(Rationale: `error` keyword signals error-handling intent. Associated data enables rich error information. Zig-style `E!T` syntax is concise. Full pattern matching provides type-safe error handling)*
+
+### 4.11 FFI Types
 
 *   **Note:** FFI types are planned for future implementation. See [Language Proposals](proposals.md#foreign-function-interface-ffi--unsafe-code) for detailed design.
 
-### 4.10 Type Conversion Syntax
+### 4.12 Type Conversion Syntax
 
 *   Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
@@ -276,9 +377,158 @@ Ryo synthesizes ideas from several modern programming languages:
 
 ## 7. Error Handling
 
-*   **Recoverable:** `Result[T, E]` (`Ok`, `Err`). Mandatory handling (via `match`, `?`, methods like `.unwrap_or()`). *(Rationale: Explicit error handling prevents ignored errors).*
-*   **Propagation:** `?` operator unwraps `Ok` or returns `Err` early. *(Rationale: Highly ergonomic, standard pattern in Rust/Swift).* Error type compatibility for `?` across different error types relies on a conversion mechanism (like a standard `From` trait or similar), which is planned for detailed specification.
-*   **Unrecoverable:** `panic("message")`. **Aborts** process by default. *(Rationale: Simplest, safest default. Avoids unwind complexity).*
+Error handling in Ryo uses algebraic error types (defined with the `error` keyword) combined with the `try` and `catch` operators for type-safe, explicit error management.
+
+### 7.1 Error Types and Definitions
+
+Error types are defined with the `error` keyword and support variants with associated data:
+
+```ryo
+error NetworkError:
+    ConnectionTimeout
+    DnsResolutionFailed(domain: str)
+    HttpError(status: int, message: str)
+
+error FileError:
+    NotFound(path: str)
+    PermissionDenied(path: str)
+    ReadFailed(reason: str)
+```
+
+*   *(Rationale: `error` keyword signals error-handling intent. Associated data enables rich error information.)*
+
+### 7.2 Error Union Types (`ErrorType!T`)
+
+Function return types specify both the error type and success type using the `ErrorType!SuccessType` syntax:
+
+```ryo
+fn read_file(path: str) -> FileError!str:
+    if not exists(path):
+        return FileError.NotFound(path)
+    return os.read(path)
+
+# Flexible error type - can return any error
+fn flexible_operation() -> !Data:
+    ...
+```
+
+*   *(Rationale: Zig-style `E!T` syntax is concise and reads naturally. Error type is explicitly documented in function signature.)*
+
+### 7.3 Error Propagation (`try`)
+
+The `try` keyword unwraps success or propagates the error early:
+
+```ryo
+fn load_and_parse(path: str) -> !Config:
+    # Both try expressions propagate errors
+    content = try read_file(path)      # FileError propagates
+    config = try parse_config(content) # ParseError propagates
+    return config
+```
+
+*   **Semantic:** `try expr` evaluates `expr`. If it succeeds, the value is returned. If it fails (error), the error is propagated to the caller.
+*   *(Rationale: `try` clearly signals error propagation. Familiar to async/await users.)*
+
+### 7.4 Error Handling (`catch`)
+
+The `catch` operator handles errors with pattern matching:
+
+```ryo
+config = load_and_parse("app.toml") catch |e|:
+    match e:
+        FileError.NotFound(path):
+            print(f"Creating default config at {path}")
+            return default_config()
+
+        ParseError.InvalidSyntax(line, col):
+            print(f"Syntax error at {line}:{col}")
+            exit(1)
+```
+
+*   **Syntax:** `expr catch |e|: handle_error(e)`
+*   **Pattern Matching:** Full ADT pattern matching enables type-safe error handling.
+*   *(Rationale: `catch` follows familiar error-handling conventions. Full pattern matching prevents missed error cases.)*
+
+### 7.5 Error Conversion (`From` Trait)
+
+The `From` trait enables automatic error conversion with the `try` operator:
+
+```ryo
+trait From[T]:
+    fn from(value: T) -> Self
+
+impl From[FileError] for AppError:
+    fn from(err: FileError) -> AppError:
+        return AppError.File(err)
+
+impl From[ParseError] for AppError:
+    fn from(err: ParseError) -> AppError:
+        return AppError.Parse(err)
+
+# With From trait implementations, try automatically converts errors
+fn high_level() -> AppError!Data:
+    content = try read_file("data.txt")
+    # FileError automatically converted to AppError via From trait
+
+    parsed = try parse_data(content)
+    # ParseError automatically converted to AppError via From trait
+
+    return process(parsed)
+```
+
+*   **Automatic Conversion:** When `try` encounters an error, it attempts to convert it using the `From` trait.
+*   *(Rationale: Eliminates boilerplate error conversion. Standard pattern from Rust.)*
+
+### 7.6 Combined Error + Optional (`!?T`)
+
+For operations that can fail (error), return no value (`none`), or succeed:
+
+```ryo
+fn find_user(db: Database, id: int) -> DatabaseError!?User:
+    # Can return: DatabaseError, none (not found), or User
+    rows = try db.query("SELECT * FROM users WHERE id = ?", id)
+    if rows.is_empty():
+        return none
+    return User.from_row(rows[0])
+
+# Sequential unwrapping pattern
+fn authenticate(db: Database, token: ?str) -> !User:
+    t = token orelse return error.MissingToken
+    # t is now str (smart cast from ?str)
+
+    user = try find_user(db, 42) orelse return error.UserNotFound
+    # First try: handle error (!?User -> ?User)
+    # Then orelse: handle optional (?User -> User)
+    # user is now User (fully unwrapped)
+
+    return user
+```
+
+*   **Sequential Unwrapping:** `try` handles errors, `orelse` handles optionals.
+*   **Smart Casting:** Values are automatically narrowed after unwrapping.
+*   *(Rationale: Handles real-world patterns where operations can both error and return optional data.)*
+
+### 7.7 Unrecoverable Errors (`panic`)
+
+For unrecoverable errors, use `panic("message")`:
+
+```ryo
+fn critical_operation():
+    if not initialized:
+        panic("System not initialized!")  # Aborts immediately
+```
+
+*   **Behavior:** Aborts the process. **Does not unwind** (simplifies implementation and predictability).
+*   *(Rationale: Simplest, safest default for truly unrecoverable situations.)*
+
+### 7.8 Error Handling Best Practices
+
+1. **Use `try` for propagating errors** in functions that return error unions
+2. **Use `catch` for handling errors** at boundaries (main functions, API handlers)
+3. **Define specific error types** that capture all failure modes
+4. **Implement `From` trait** for error composition across layers
+5. **Use `!?T` carefully** to distinguish between errors and legitimate absence
+6. **Pattern match exhaustively** to handle all error variants
 
 ## 8. Traits (Behavior)
 
@@ -299,10 +549,14 @@ Ryo synthesizes ideas from several modern programming languages:
     *   **Ownership Integration:** Async functions work seamlessly with Ryo's ownership model - values can be moved into async contexts safely.
 *   **Examples:**
     ```ryo
-    async fn process_request(req: Request) -> Result[Response, Error]:
-        data = await database.query("SELECT * FROM users")?
-        result = await external_api.call(data)?
-        return Ok(Response.json(result))
+    error NetworkError:
+        ConnectionFailed
+        RequestTimeout
+
+    async fn process_request(req: Request) -> NetworkError!Response:
+        data = try await database.query("SELECT * FROM users")
+        result = try await external_api.call(data)
+        return Response.json(result)
 
     async fn process_all_requests():
         tasks = [
@@ -334,7 +588,7 @@ Ryo synthesizes ideas from several modern programming languages:
 ## 12. Application Entry Point
 
 *   **Convention:** Default entry point file is `src/main.ryo`.
-*   **`fn main()`:** Required in entry point (`fn main()` or `fn main() -> Result[(), ErrType]`).
+*   **`fn main()`:** Required in entry point. Takes no parameters, returns nothing. Use `try/catch` for error handling within main.
 *   **Compiler Enforcement:** `fn main()` only allowed in the designated entry point file for executable compilation. *(Rationale: Clear convention without needing `package main` keyword).*
 
 ## 13. Package Manager (`ryopkg`)
@@ -350,7 +604,7 @@ Ryo synthesizes ideas from several modern programming languages:
 *   **Philosophy:** Modular packages, practical, ergonomic, safe, reasonably "batteries-included" for web/scripting.
 *   **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
 *   **Core Packages (Initial):**
-    *   `core`/`builtin` (Implicit): Fundamental types (`Result`, `Optional`), core traits (`Drop`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`).
+    *   `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`), error and optional type support.
     *   `io`: Console (`readln`), Files (`File`), Buffering (using `Result`, implements `Drop`).
     *   `string`: `&str` manipulation, parsing (`parse_* -> Result`).
     *   `collections`: `List[T]`, `Map[K, V]` types and methods.

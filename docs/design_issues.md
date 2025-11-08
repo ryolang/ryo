@@ -152,30 +152,34 @@ impl Counter:
     fn drop(self): ...           # Drop takes ownership
 ```
 
-### 6. Error Trait System Missing 🔴
+### 6. Error Trait System ✅ RESOLVED
 
-**Problem**: `?` operator won't work across different error types without conversion mechanism.
+**Previously**: `?` operator wouldn't work across different error types without conversion mechanism.
+
+**Solution Implemented**:
+- Replaced `?` operator with `try` keyword for explicit error propagation
+- Implemented `From` trait for automatic error conversion with `try` operator
+- Error types are now defined with the `error` keyword with full ADT support
 
 **Examples**:
 ```ryo
-fn fetch_and_save() -> Result[(), Error] {
-    data = await http.get("...")?  # HttpError -> Error?
-    await files.write(data)?       # IoError -> Error?
-    return Ok(())
+error AppError:
+    Http(HttpError)
+    Io(IoError)
+
+impl From[HttpError] for AppError:
+    fn from(err: HttpError) -> AppError:
+        return AppError.Http(err)
+
+impl From[IoError] for AppError:
+    fn from(err: IoError) -> AppError:
+        return AppError.Io(err)
+
+fn fetch_and_save() -> AppError!() {
+    data = try await http.get("...")      # HttpError -> AppError
+    try await files.write(data)          # IoError -> AppError
+    return
 }
-```
-
-**Recommendation**: Define error trait system:
-```ryo
-trait Error:
-    fn message(self) -> str
-
-trait From[T]:
-    fn from(value: T) -> Self
-
-# Enable automatic conversions for ?
-impl From[HttpError] for Error: ...
-impl From[IoError] for Error: ...
 ```
 
 ## Moderate Issues
@@ -233,17 +237,17 @@ fn process_shapes(shapes: List[&dyn Drawable]):
 ## Resolution Status
 
 **✅ Resolved:**
-3. ~~Remove type names from keywords~~ - Moved `Result`, `Ok`, `Err`, `Some` to built-in types
-4. ~~Define generic syntax completely~~ - Moved detailed syntax to proposals.md 
+3. ~~Remove type names from keywords~~ - Removed `Result`, `Optional`, `Ok`, `Err`, `Some` from keywords
+4. ~~Define generic syntax completely~~ - Moved detailed syntax to proposals.md
 5. ~~Clarify method self parameters~~ - Applied explicit `&self`, `&mut self`, `self` syntax
+6. ~~Design error trait system~~ - Implemented `error` keyword, `try`/`catch` operators, `From` trait
 7. ~~Define async main function~~ - Specified sync main only with explicit runtime calls
 8. ~~Resolve operator inconsistencies~~ - Removed channel operators from current spec
 9. ~~Consider dynamic dispatch options~~ - Added future trait objects plan
 
 **🔄 Deferred for Review:**
 1. Fix tuple syntax ambiguity - Keep in file for later review
-2. Resolve borrow/move inconsistency - Keep in file for later review  
-6. Design basic error trait system - Keep in file for later review
+2. Resolve borrow/move inconsistency - Keep in file for later review
 10. Clarify array/slice syntax - Keep in file for later review
 
 ## Next Steps (Remaining Issues)

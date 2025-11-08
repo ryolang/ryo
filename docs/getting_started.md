@@ -316,28 +316,89 @@ fn main():
     print(response.body)
 ```
 
-## 4. Simple Error Handling
+## 4. Error Handling
 
-Ryo provides a basic way to handle errors with the `Result[T, E]` type:
+Ryo provides type-safe error handling with **error types** and the `try`/`catch` operators.
+
+### Error Types
+
+Define errors with the `error` keyword:
 
 ```ryo
-fn divide(numerator: float, denominator: float) -> Result[float, Err]:
-    if denominator == 0.0:
-        return Err("Cannot divide by zero") # Return an error
-    else:
-        return Ok(numerator / denominator) # Return a successful result
+error MathError:
+    DivideByZero
+    InvalidInput(message: str)
 ```
 
-You can handle the result using a `match` expression:
+### Functions That Can Fail
+
+Use the `E!T` syntax to indicate a function can return an error or a value:
+
+```ryo
+fn divide(numerator: float, denominator: float) -> MathError!float:
+    if denominator == 0.0:
+        return MathError.DivideByZero  # Return an error
+    return numerator / denominator     # Return success
+```
+
+### Handling Errors with `catch`
+
+Use `catch` for error handling with pattern matching:
 
 ```ryo
 fn main():
-    result = divide(10.0, 2.0)
-    match result:
-        Ok(value):
-            print(f"Division successful: {value}")
-        Err(error_message):
-            print(f"Division failed: {error_message}")
+    result = divide(10.0, 2.0) catch |e|:
+        match e:
+            MathError.DivideByZero:
+                print("Cannot divide by zero!")
+            MathError.InvalidInput(msg):
+                print(f"Invalid input: {msg}")
+        return
+
+    print(f"Division result: {result}")
+```
+
+### Propagating Errors with `try`
+
+Use `try` to propagate errors up the call stack:
+
+```ryo
+fn calculate() -> MathError!float:
+    x = try divide(20.0, 4.0)      # If divide fails, propagate error
+    y = try divide(x, 2.0)         # If divide fails, propagate error
+    return y                        # Success!
+
+fn main():
+    result = calculate() catch |e|:
+        print("Calculation failed!")
+        return
+
+    print(f"Final result: {result}")
+```
+
+### Optional Values
+
+Ryo also provides optional types (`?T`) for when a value may or may not be present:
+
+```ryo
+fn find_user(users: List[User], id: int) -> ?User:
+    for user in users:
+        if user.id == id:
+            return user
+    return none  # No user found
+
+fn main():
+    users = [User{id: 1, name: "Alice"}, User{id: 2, name: "Bob"}]
+
+    # Safe optional chaining
+    name = find_user(users, 1)?.name orelse "Unknown"
+    print(f"User name: {name}")
+
+    # Null check with smart casting
+    if find_user(users, 3) != none:
+        print("User found!")
+    else:
+        print("User not found")
 ```
 
 ## 5. Command-Line Tools
@@ -498,17 +559,22 @@ See how Ryo compares when handling potential errors:
 
 **Ryo:**
 ```ryo
-fn divide(a: int, b: int) -> Result[int, Err]:
+error DivideError:
+    DivisionByZero
+
+fn divide(a: int, b: int) -> DivideError!int:
     if b == 0:
-        return Err("Division by zero")
-    return Ok(a / b)
+        return DivideError.DivisionByZero
+    return a / b
 
 # Usage
-match divide(10, 2):
-    Ok(result):
-        print(f"Result: {result}")
-    Err(msg):
-        print(f"Error: {msg}")
+result = divide(10, 2) catch |e|:
+    match e:
+        DivideError.DivisionByZero:
+            print("Error: Division by zero")
+    return
+
+print(f"Result: {result}")
 ```
 
 **Python:**
