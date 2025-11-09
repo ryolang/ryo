@@ -79,14 +79,42 @@ mod tests {
                     let leaked_str: &'static str = Box::leak(s.to_string().into_boxed_str());
                     Token::Int(leaked_str)
                 }
+                // Keywords
+                Token::Fn => Token::Fn,
+                Token::If => Token::If,
+                Token::Else => Token::Else,
+                Token::Return => Token::Return,
+                Token::Mut => Token::Mut,
+                Token::Struct => Token::Struct,
+                Token::Enum => Token::Enum,
+                Token::Match => Token::Match,
+
+                // Identifiers
+                Token::Ident(s) => {
+                    let leaked_str: &'static str = Box::leak(s.to_string().into_boxed_str());
+                    Token::Ident(leaked_str)
+                }
+
+                // Operators - Arithmetic
                 Token::Add => Token::Add,
                 Token::Sub => Token::Sub,
                 Token::Mul => Token::Mul,
                 Token::Div => Token::Div,
+
+                // Operators - Assignment and Type Annotation
+                Token::Assign => Token::Assign,
+                Token::Colon => Token::Colon,
+
+                // Punctuation
                 Token::LParen => Token::LParen,
                 Token::RParen => Token::RParen,
-                Token::Error => Token::Error,
+                Token::LBrace => Token::LBrace,
+                Token::RBrace => Token::RBrace,
+
+                // Comments and Whitespace
+                Token::Comment => Token::Comment,
                 Token::Whitespace => Token::Whitespace,
+                Token::Error => Token::Error,
             })
             .collect();
 
