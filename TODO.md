@@ -68,8 +68,9 @@
 Improve AGENTS.md
 Add SOLID and CRISP, and IR inspect in AGENTS.md
 
+example
 ```shell
-cargo run -- "1+1"
+cargo run -- run examples/calculator.ryo
 ```
 
 ## GNU Binutils for Linux

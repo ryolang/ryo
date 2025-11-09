@@ -258,10 +258,10 @@ ryox/
 ariadne = "0.5"          # Error reporting
 chumsky = "0.11"         # Parser combinators
 clap = "4.0"             # CLI argument parsing
-cranelift = "0.124.0"    # Code generation backend
-cranelift-jit = "0.124.0"
-cranelift-module = "0.124.0"
-cranelift-object = "0.124.0"
+cranelift = "0.125"      # Code generation backend
+cranelift-jit = "0.125"
+cranelift-module = "0.125"
+cranelift-object = "0.125"
 logos = "0.15"           # Lexical analysis
 target-lexicon = "0.13"  # Target platform info
 ```
