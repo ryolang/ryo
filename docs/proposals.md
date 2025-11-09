@@ -12,7 +12,7 @@ While Ryo's primary concurrency model is async/await, we plan to add optional CS
 
 **Planned Primitives:**
 *   `spawn`: Creates lightweight concurrent task.
-*   `chan[T]`: Typed channel. Sending moves ownership. Default **unbuffered**; `chan[T](size)` for buffered. `close(chan)` function. Receive on closed yields `Optional.None` after buffer empty. Send on closed panics.
+*   `chan[T]`: Typed channel. Sending moves ownership. Default **unbuffered**; `chan[T](size)` for buffered. `close(chan)` function. Receive on closed yields `none` after buffer empty. Send on closed panics.
 *   `select`: Waits on multiple channel operations. `_:` case for non-blocking default.
 
 ### **CSP Syntax Examples**
@@ -101,10 +101,12 @@ async fn data_pipeline():
 
 ### **Implementation Timeline**
 
+**Status:** CSP is a planned future extension. The design is detailed in this document, but implementation phases have not yet been scheduled. Async/await remains the primary concurrency model for near-term releases.
+
 - **Phase 1**: Core async/await implementation (current focus)
-- **Phase 2**: Basic channel types and operations
-- **Phase 3**: Select statement and advanced channel features  
-- **Phase 4**: Integration with async runtime and optimization
+- **Phase 2**: Basic channel types and operations (planned, not scheduled)
+- **Phase 3**: Select statement and advanced channel features (planned, not scheduled)
+- **Phase 4**: Integration with async runtime and optimization (planned, not scheduled)
 
 ### **Rationale**
 
@@ -125,7 +127,7 @@ However, async/await remains the primary model because:
 
 ### **Advanced Generics**
 
-Currently, Ryo uses generic types like `List[T]`, `Map[K,V]`, `Result[T,E]`, and `Optional[T]` but these are built-in types. User-defined generics are planned for future implementation.
+Currently, Ryo uses built-in generic types like `List[T]`, `Map[K,V]`, and collection types. Error types use the `error` keyword and optional types use `?T`. User-defined generics are planned for future implementation.
 
 #### **Generic Type Definitions**
 
@@ -162,17 +164,19 @@ swapped = swap(my_pair)  # Type inference
 **Generic Enums**
 ```ryo
 # Future syntax for generic enums
-enum Result[T, E]:
-    Ok(T)
-    Err(E)
-
-enum Optional[T]:
+enum Option[T]:
     Some(T)
     None
 
+# Error types use 'error' keyword (single-variant)
+module processing:
+    error InvalidInput(str)
+    error ParseFailed
+
 # Usage
-result = Result[int, str].Ok(42)
-maybe = Optional[str].Some("hello")
+maybe = Option[str].Some("hello")
+result = try some_operation() catch |e|:
+    handle_error(e)
 ```
 
 #### **Trait Bounds and Constraints**
@@ -194,10 +198,9 @@ where T: Serializable {
 **Multiple Bounds**
 ```ryo
 # Future syntax for multiple trait bounds
-fn process[T](data: T) -> Result[ProcessedData, Error]
-where T: Serializable + Clone + Send {
+fn process[T](data: T) -> ProcessingError!ProcessedData
+where T: Serializable + Clone + Send:
     # Implementation using multiple T capabilities
-}
 ```
 
 **Where Clauses**
@@ -219,9 +222,9 @@ where
 # Future trait with associated types
 trait Iterator:
     type Item
-    
-    fn next(&mut self) -> Optional[Self.Item]
-    
+
+    fn next(&mut self) -> ?Self.Item
+
     # Default implementations
     fn collect[C](self) -> C
     where C: FromIterator[Self.Item] {
@@ -231,8 +234,8 @@ trait Iterator:
 # Implementation
 impl Iterator for ListIterator[T]:
     type Item = T
-    
-    fn next(&mut self) -> Optional[T]:
+
+    fn next(&mut self) -> ?T:
         # Implementation
         pass
 ```
@@ -328,13 +331,13 @@ Currently, Ryo supports `for item in collection:` syntax but lacks a formal iter
 # Future iterator trait design
 trait Iterator:
     type Item
-    
-    fn next(&mut self) -> Optional[Self.Item]
-    
+
+    fn next(&mut self) -> ?Self.Item
+
     # Default implementations for common operations
     fn map[B](self, f: fn(Self.Item) -> B) -> MapIterator[Self, B]:
         return MapIterator.new(self, f)
-    
+
     fn filter(self, predicate: fn(&Self.Item) -> bool) -> FilterIterator[Self]:
         return FilterIterator.new(self, predicate)
     
@@ -355,13 +358,13 @@ trait Iterator:
 # Future iterator implementations for built-in collections
 impl Iterator for ListIterator[T]:
     type Item = T
-    
-    fn next(&mut self) -> Optional[T]:
+
+    fn next(&mut self) -> ?T:
         if self.index < self.list.len():
             item = self.list[self.index]
             self.index += 1
-            return Optional.Some(item)
-        return Optional.None
+            return item
+        return none
 
 # IntoIterator trait for collections
 trait IntoIterator:
@@ -397,91 +400,156 @@ result = data.iter()
     .collect[List[ProcessedItem]]()  # Evaluation happens here
 ```
 
-### **Standard Error Trait System**
+### **Error Handling System** ✅ IMPLEMENTED
 
-Currently, Ryo has `Result[T, E]` types but lacks a unified error handling system. A standard error trait is planned to improve error handling ergonomics.
+**Core Feature: Error Union Types**
 
-#### **Error Trait Design**
+Error handling is fully implemented in the core language with automatic error composition via error unions. This eliminates the "wrapper problem" where developers previously had to manually create wrapper types to compose functions with different error types.
 
+#### **Key Features (Implemented)**
+
+1. **Single-Variant Errors Only** - Simple, unified syntax:
 ```ryo
-# Future error trait system
-trait Error:
-    fn message(&self) -> str
-    fn source(&self) -> Optional[&dyn Error]:
-        return Optional.None
-
-# Conversion trait for automatic error type conversions
-trait From[T]:
-    fn from(value: T) -> Self
-
-# Standard error types
-struct IoError:
-    kind: IoErrorKind
-    message: str
-
-struct ParseError:
-    input: str
-    position: int
-    expected: str
-
-impl Error for IoError:
-    fn message(&self) -> str:
-        return f"IO Error ({self.kind}): {self.message}"
-
-impl Error for ParseError:
-    fn message(&self) -> str:
-        return f"Parse error at position {self.position}: expected {self.expected}, found '{self.input}'"
+error Timeout                          # Unit error
+error NotFound(str)                    # Message-only error
+error HttpError(status: int, message: str)  # Structured error
 ```
 
-#### **Error Conversion and Propagation**
-
+2. **Module-Based Error Grouping** - Organize related errors:
 ```ryo
-# Future error conversion system
-enum AppError:
-    Io(IoError)
-    Parse(ParseError)
-    Network(NetworkError)
+module io:
+    error NotFound(path: str)
+    error PermissionDenied(path: str)
+    error ReadFailed(reason: str)
 
-impl From[IoError] for AppError:
-    fn from(err: IoError) -> AppError:
-        return AppError.Io(err)
-
-impl From[ParseError] for AppError:
-    fn from(err: ParseError) -> AppError:
-        return AppError.Parse(err)
-
-# Enhanced ? operator with automatic conversions
-fn process_file(path: str) -> Result[ProcessedData, AppError]:
-    content = files.read_text(path)?      # IoError -> AppError automatically
-    config = parse_config(content)?       # ParseError -> AppError automatically
-    data = fetch_remote_data(config)?     # NetworkError -> AppError automatically
-    return Ok(process(data))
+module parse:
+    error InvalidSyntax(line: int, column: int)
+    error UnexpectedToken(expected: str, got: str)
 ```
 
-#### **Error Context and Chaining**
+3. **Automatic Error Composition** - Error unions inferred from `try` expressions:
+```ryo
+# Explicit union - manually specified
+fn process_file(path: str) -> (io.NotFound | io.PermissionDenied | parse.InvalidSyntax)!ProcessedData:
+    content = try files.read_text(path)
+    config = try parse_config(content)
+    return process(config)
+
+# Inferred union - compiler automatically determines the union
+fn process_file(path: str) -> !ProcessedData:
+    content = try files.read_text(path)    # io errors
+    config = try parse_config(content)     # parse errors
+    return process(config)
+# Compiler infers: (io.NotFound | io.PermissionDenied | parse.InvalidSyntax | ...)!ProcessedData
+```
+
+#### **Error Trait (Implemented)**
+
+All errors implement an automatic `Error` trait with `.message()` method:
+
+```ryo
+# Automatic message generation
+error HttpError(status: int, message: str)
+
+result = fetch_resource(url) catch |e|:
+    print(e.message())  # Returns: "400: Bad Request"
+    return
+
+# Custom message implementations
+impl Error for CustomError:
+    fn message(self) -> str:
+        match self:
+            CustomError.Timeout(duration):
+                return f"Operation timed out after {duration}ms"
+            CustomError.NotFound(resource):
+                return f"Resource not found: {resource}"
+```
+
+#### **Pattern Matching (Implemented)**
+
+- **Single error types**: Exhaustive matching required (all variants must be handled)
+- **Error unions**: Exhaustive matching required (all error types in union must be handled, or use catch-all)
+
+```ryo
+# Exhaustive matching for single error type
+result = divide(10.0, 0.0) catch |e|:
+    match e:
+        math.DivisionByZero:
+            print("Cannot divide by zero")
+    return
+
+# Exhaustive matching for error unions
+result = complex_operation() catch |e|:
+    match e:
+        network.Timeout(duration):
+            print(f"Timeout after {duration}ms")
+        network.ConnectionFailed(reason):
+            print(f"Connection failed: {reason}")
+        parse.InvalidJson(reason):
+            print(f"Parse error: {reason}")
+        validation.InvalidData(reason):
+            print(f"Validation error: {reason}")
+    return
+
+# Using catch-all for generic error handling
+result = complex_operation() catch |e|:
+    match e:
+        network.Timeout(duration):
+            print(f"Timeout after {duration}ms")
+        _:  # Explicit catch-all: handle all other errors generically
+            log_error(e.message())
+            print("Other error occurred")
+    return
+```
+
+#### **Error Composition (Implemented)**
+
+Automatic error composition from `try` expressions eliminates the need for wrapper types:
+
+```ryo
+# No wrapper types needed - errors automatically composed!
+fn legacy_interface() -> !ProcessedData:
+    content = try files.read_text(path)   # io.ReadFailed error
+    config = try parse_config(content)    # parse.InvalidFormat error
+    return process(config)
+# Compiler automatically infers: (io.ReadFailed | parse.InvalidFormat)!ProcessedData
+```
+
+#### **Future: Error Context and Chaining**
+
+Enhanced error context for more informative error chains:
 
 ```ryo
 # Future error context system
-trait ErrorContext[T, E]:
-    fn with_context(self, context: str) -> Result[T, ContextError[E]]
+trait ErrorContext[E]:
+    fn with_context(self, context: str) -> ContextError[E]
 
 struct ContextError[E]:
     source: E
     context: str
 
-impl ErrorContext[T, E] for Result[T, E]:
-    fn with_context(self, context: str) -> Result[T, ContextError[E]]:
-        match self:
-            Ok(value): return Ok(value)
-            Err(err): return Err(ContextError { source: err, context })
+impl[E] ErrorContext[E] for E:
+    fn with_context(self, context: str) -> ContextError[E]:
+        return ContextError { source: self, context }
 
 # Usage
-fn load_user_config(user_id: int) -> Result[UserConfig, ContextError[AppError]]:
+fn load_user_config(user_id: int) -> !(UserConfig):
     path = f"/users/{user_id}/config.toml"
-    config = parse_config_file(path)
-        .with_context(f"Failed to load config for user {user_id}")?
-    return Ok(config)
+    config = try parse_config_file(path)
+        .with_context(f"Failed to load config for user {user_id}")
+    return config
 ```
+
+#### **Benefits of Error Unions**
+
+- ✅ **Zero boilerplate**: No manual wrapper types required
+- ✅ **Automatic inference**: Compiler tracks error types from `try` expressions
+- ✅ **Type safety**: All errors are tracked and checked by the type system
+- ✅ **Ergonomic**: `try` keyword makes error propagation natural
+- ✅ **Safety First**: Exhaustive matching by default ensures all error cases are handled; explicit catch-all (`_`) for generic handling when needed
+- ✅ **Composable**: Functions naturally compose without explicit error mapping
+
+**See the [Language Specification](specification.md) Sections 4.9, 4.10, and 7.2-7.4 for complete error handling documentation.**
 
 ### **Attribute System**
 
@@ -557,10 +625,10 @@ Currently, Ryo has basic f-strings. Enhanced formatting capabilities are planned
 ```ryo
 # Future formatting trait system
 trait Display:
-    fn fmt(&self, formatter: &mut Formatter) -> Result[(), FormatError]
+    fn fmt(&self, formatter: &mut Formatter) -> FormatError!()
 
 trait Debug:
-    fn fmt(&self, formatter: &mut Formatter) -> Result[(), FormatError]
+    fn fmt(&self, formatter: &mut Formatter) -> FormatError!()
 
 # Automatic implementations possible with attributes
 #[derive(Debug)]
@@ -569,7 +637,7 @@ struct Point:
     y: float
 
 impl Display for Point:
-    fn fmt(&self, formatter: &mut Formatter) -> Result[(), FormatError]:
+    fn fmt(&self, formatter: &mut Formatter) -> FormatError!():
         formatter.write(f"({self.x}, {self.y})")
 ```
 
@@ -606,7 +674,7 @@ struct Currency:
     symbol: str
 
 impl Display for Currency:
-    fn fmt(&self, formatter: &mut Formatter) -> Result[(), FormatError]:
+    fn fmt(&self, formatter: &mut Formatter) -> FormatError!():
         formatter.write(f"{self.symbol}{self.amount:.2}")
 
 price = Currency { amount: 123.456, symbol: "$" }
@@ -848,10 +916,14 @@ pub extern "C" fn process_point(p: *const Point) -> f64:
 fn ryo_str_to_c(s: &str) -> (*const c_char, usize):
     return (s.as_ptr(), s.len())
 
-fn c_str_to_ryo(ptr: *const c_char) -> Result[str, ConversionError]:
+module conversion:
+    error InvalidUtf8
+    error NullPointer
+
+fn c_str_to_ryo(ptr: *const c_char) -> conversion.InvalidUtf8!str:
     unsafe:
         # Safe conversion with validation
-        return ffi.cstr_to_string(ptr)
+        return try ffi.cstr_to_string(ptr)
 ```
 
 **Complex Types:**
@@ -904,6 +976,97 @@ import simd
 fn parallel_add(a: simd.f32x4, b: simd.f32x4) -> simd.f32x4:
     return a + b  # Vectorized addition
 ```
+
+---
+
+### **Stack Trace and Debugging Enhancements**
+
+**Current Implementation (v1.0):**
+- Automatic stack trace capture for all panics and errors
+- Location information (file, line, column, function) automatically tracked
+- `.location()` and `.stack_trace()` methods on Error trait
+- DWARF debug symbols included by default
+- `RYOLANG_BACKTRACE` environment variable for controlling output
+
+**Future Enhancements (v1.5+):**
+
+1. **Verbose Stack Traces**
+   - `RYOLANG_BACKTRACE=full` displays local variable values
+   - Show argument values at each stack frame
+   - Display register state (optional, for low-level debugging)
+   - Example:
+   ```
+   Frame 0: main::divide (src/main.ryo:42:13)
+     a = 10.0
+     b = 0.0
+   ```
+
+2. **Async Stack Traces**
+   - Show await points in async call chains
+   - Distinguish between sync and async frames
+   - Display future state transitions
+   - Crucial for debugging complex async applications
+
+3. **Custom Panic Handlers**
+   ```ryo
+   # Allow registering custom panic handlers
+   fn custom_panic_handler(panic_info: PanicInfo):
+       # Custom logging, error reporting, cleanup
+       log_error_to_monitoring_service(panic_info)
+       cleanup_resources()
+
+   thread::set_panic_handler(custom_panic_handler)
+   ```
+
+4. **Source Code in Stack Traces**
+   - Display source code snippets for each frame
+   - Highlight the specific line that caused the panic
+   - Example:
+   ```
+   Frame 0: main::divide (src/main.ryo:42:13)
+     42: let result = a / b
+              ^^^^^^ panic: divide by zero
+   ```
+
+5. **Structured Error Output**
+   - JSON format for stack traces (for tool integration)
+   - Machine-readable error information
+   - Integration with monitoring/logging services
+   ```json
+   {
+     "panic": "divide by zero",
+     "location": {"file": "src/main.ryo", "line": 42, "column": 13},
+     "stack": [
+       {"function": "divide", "file": "src/main.ryo", "line": 42}
+     ]
+   }
+   ```
+
+6. **Debugger Integration**
+   - Integration with gdb/lldb for interactive debugging
+   - Breakpoint support
+   - Step through execution
+   - Watch variables
+
+7. **Core Dump Generation**
+   - Optional core dumps for post-mortem analysis
+   - Memory state preservation
+   - External analysis tools support
+
+8. **Performance Optimization**
+   - Lazy stack trace capture (only materialize on error/panic)
+   - Sampling profiler integration
+   - Zero-cost when no errors occur (theoretical goal)
+
+**Rationale:**
+
+The v1.0 implementation provides solid debugging foundation. Future enhancements address:
+- **Async debugging** (increasingly important for modern applications)
+- **Tool integration** (CI/CD, monitoring, crash reporting services)
+- **Performance optimization** (if stack trace overhead becomes a real bottleneck)
+- **Advanced debugging** (verbose output for complex issues)
+
+These are valuable but not essential for initial launch, allowing iterative improvement based on real-world usage patterns.
 
 ---
 
@@ -1075,15 +1238,19 @@ A high-performance web framework leveraging Ryo's async capabilities and memory 
 ```ryo
 import web
 
-#[route("/users/{id}")]
-async fn get_user(id: int) -> Result[JsonResponse[User], HttpError]:
-    user = await database.find_user(id)?
-    return Ok(JsonResponse.new(user))
+module http:
+    error NotFound
+    error DatabaseError(message: str)
 
-async fn main():
+#[route("/users/{id}")]
+async fn get_user(id: int) -> (http.NotFound | http.DatabaseError)!JsonResponse[User]:
+    user = try await database.find_user(id)
+    return JsonResponse.new(user)
+
+fn main():
     app = web.App.new()
     app.route_handler(get_user)
-    await app.serve("0.0.0.0:8080")
+    async_runtime.run(app.serve("0.0.0.0:8080"))
 ```
 
 ## Implementation Priority and Timeline
@@ -1095,7 +1262,7 @@ Based on analysis of missing features and their importance to Ryo's goals, here 
 **Phase 1: Foundation**
 1. **Advanced Generics** - User-defined generic types and functions with trait bounds
 2. **Iterator System** - Standard iterator traits and lazy evaluation 
-3. **Standard Error Trait** - Unified error handling with `From` trait for `?` operator
+3. **Standard Error Trait** - Unified error handling with `From` trait for `try` keyword
 
 *Rationale: These are fundamental features required for building reusable, robust code. Essential for any serious development work and library ecosystem.*
 
@@ -1132,7 +1299,7 @@ Based on analysis of missing features and their importance to Ryo's goals, here 
 - Current async/await concurrency model
 - Basic ownership and borrowing
 - Fundamental types and collections
-- Basic error handling with `Result[T, E]`
+- Basic error handling with error types and error unions (`ErrorType!SuccessType`)
 
 **Version 1.5 (Essential Extensions):**
 - Advanced generics system

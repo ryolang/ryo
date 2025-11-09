@@ -20,7 +20,7 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 ## Why Ryo?
 
 *   **🐍 Simple & Productive:** Write clear, readable code with a clean syntax inspired by Python (tabs, f-strings, tuples, built-in `print`). Reduce boilerplate and focus on your logic.
-*   **🛡️ Safe & Reliable:** Compile-time memory safety via "Ownership Lite" prevents dangling pointers, data races, and use-after-free errors without a GC. Explicit error handling with `Result` and `?` makes code robust. No `null` thanks to `Optional`.
+*   **🛡️ Safe & Reliable:** Compile-time memory safety via "Ownership Lite" prevents dangling pointers, data races, and use-after-free errors without a GC. Explicit error handling with `error` types, `try`, and `catch` makes code robust. No null thanks to optional types (`?T` and `none`).
 *   **🚀 Fast & Efficient:** Compiled to native code using **Cranelift** for excellent performance. No garbage collection pauses mean predictable speed. Familiar async/await concurrency for scalable applications with excellent Python developer ergonomics.
 *   **🧩 Modern Tooling:** Integrated package manager (`ryo`), fast compiler, interactive REPL (JIT), built-in testing framework.
 *   **✨ Compile-Time Power (`comptime`):** Run code at compile time for metaprogramming, configuration loading, and pre-computation without runtime cost or complex macros.
@@ -32,7 +32,14 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 *   **Concurrency:** Python-familiar async/await with high-performance async runtime
 *   **Syntax:** Python-inspired, tab-indented, expressions, statements
 *   **Types:** Static typing with bidirectional type inference (like Rust/TypeScript), primitives (`int`, `float`, `bool`, `str`, `char`), tuples, `struct`, `enum` (ADTs), `trait` (static dispatch initially). Function signatures require types, local variables inferred. Variables are immutable by default (no `let` keyword), use `mut` for mutability
-*   **Error Handling:** `Result[T, E]` and `Optional[T]` enums, `?` operator, `panic` (aborts)
+*   **Error Handling:** Type-safe, explicit error handling system:
+    - **Single-variant errors only**: `error Timeout`, `error NotFound(str)`, `error HttpError(status: int, message: str)` - unified syntax for all error definitions
+    - **Module-based error grouping**: Organize related errors in modules: `module math: error DivisionByZero`
+    - **Error unions** with automatic composition: `fn process() -> !Data` infers `(FileError | ParseError)!Data` from `try` expressions
+    - **Error trait** with automatic message generation: All errors implement `.message() -> str`
+    - **Try/catch operators** for ergonomic error propagation and handling
+    - **Optional types** (`?T` and `none`) for nullable values - no null pointer exceptions
+    - **Exhaustive pattern matching by default**: All error unions require handling all error types exhaustively (or explicit `_` catch-all)
 *   **Compile-Time Execution:** `comptime` blocks and functions
 *   **Tooling:** `ryo` command (compiler, runner, REPL, package manager frontend), `ryopkg` logic integrated, Cranelift backend (AOT/JIT/Wasm)
 *   **FFI:** C interoperability via `extern "C"` and `unsafe` blocks, `ffi` stdlib module. (Future Goal: Explore deeper integration with other language ecosystems like Python).
@@ -74,11 +81,22 @@ fn main():
     numbers = [1, 2, 3, 4, 5]
     print(f"Numbers: {numbers}")
 
-    # Memory safe - no null pointer exceptions!
-    user = Optional.Some("Alice")
-    match user:
-        Optional.Some(name): print(f"User: {name}")
-        Optional.None: print("No user found")
+    # Memory safe - optional types prevent null pointer exceptions!
+    user: ?str = "Alice"
+
+    # Safe optional chaining
+    message = user?.len() orelse 0
+    print(f"User message length: {message}")
+
+    # Safe error handling
+    print(process_user(user))
+
+module process:
+    error InvalidUser
+
+fn process_user(user: ?str) -> process.InvalidUser!str:
+    name = user orelse return process.InvalidUser
+    return f"Processing user: {name}"
 ```
 
 Run with: `ryo run` (after building the `ryo` tool)

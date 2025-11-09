@@ -95,17 +95,21 @@ Ryo isn't just a collection of features - it's a carefully designed synthesis:
 
 ```ryo
 # Python-like syntax
-fn calculate_total(items: List[Item]) -> Result[float, Error]:
+module price:
+    error OutOfStock
+    error InvalidPrice(reason: str)
+
+fn calculate_total(items: List[Item]) -> (price.OutOfStock | price.InvalidPrice)!float:
     # Rust/Mojo-like ownership (simplified)
     total = 0.0
     for item in items:
         # Zig-like explicit error handling
-        price = item.price()?
+        price = try item.price()
         total += price
 
     # Go-like simplicity, Python-like f-strings
     print(f"Total: ${total:.2f}")
-    return Ok(total)
+    return total
 
 # Comptime from Zig
 comptime fn generate_validators[T]():
@@ -360,36 +364,123 @@ while condition:
 
 # Match expressions
 match value:
-    Optional.Some(x): print(x)
-    Optional.None: print("none")
+    x: print(x)
+    _: print("no match")
 ```
 
 #### Async Functions
 ```ryo
-async fn fetch_data() -> Result[Data, Error]:
-    response = await http.get("https://api.example.com")
-    data = await response.json()
-    return Ok(data)
+module http:
+    error ConnectionFailed(reason: str)
+    error RequestTimeout
+
+async fn fetch_data() -> (http.ConnectionFailed | http.RequestTimeout)!Data:
+    response = try await http.get("https://api.example.com")
+    data = try await response.json()
+    return data
 
 async fn main():
-    result = await fetch_data()
+    result = fetch_data() catch |e|:
+        print(f"Error: {e}")
+        return
     print(result)
 ```
 
-#### Structs and Enums
+#### Structs, Enums, and Errors
 ```ryo
-# Definition uses colon
+# Struct definition
 struct Point:
     x: float
     y: float
 
-enum Result[T, E]:
-    Ok(T)
-    Err(E)
+# Enum for domain modeling
+enum Color:
+    Red
+    Green
+    Blue
 
-# Literals use braces (correct!)
+# Error types for error handling
+module file:
+    error NotFound(path: str)
+    error PermissionDenied(path: str)
+
+# Struct literal (uses braces)
 point = Point{x: 3.14, y: 2.71}
-result = Result.Ok(42)
+
+# Enum variant
+color = Color.Red
+
+# Error variant
+error = file.NotFound("config.toml")
+```
+
+#### Optional Types (`?T`)
+```ryo
+# Declare optional types
+user: ?User = none
+config: ?Config = load_config()
+
+# Optional chaining
+city = user?.profile?.address?.city  # Returns ?str
+
+# Providing defaults with orelse
+name = user?.name orelse "Unknown"
+
+# Early return pattern (smart casting)
+u = user orelse return error.NoUser
+# u is now User (not ?User)
+
+# Null checks with smart casting
+if user != none:
+    print(user.name)  # user is User here, not ?User
+
+# Pattern matching on optionals
+match config:
+    none: print("No config")
+    else: print(f"Config: {config}")
+```
+
+#### Error Handling (`error`, `try`, `catch`)
+```ryo
+# Define error types
+error DatabaseError:
+    ConnectionFailed(reason: str)
+    QueryTimeout(Duration)
+    InvalidQuery(sql: str)
+
+# Function that can error
+fn query(sql: str) -> DatabaseError!Data:
+    if not connected:
+        return DatabaseError.ConnectionFailed("no db")
+    return db.execute(sql)
+
+# Propagate errors with try
+fn load_config() -> !Config:
+    content = try read_file("config.toml")
+    config = try parse_config(content)
+    return config
+
+# Handle errors with catch
+config = load_config() catch |e|:
+    print(f"Error loading config: {e}")
+    return default_config()
+
+# Pattern matching on errors
+data = query("SELECT * FROM users") catch |e|:
+    match e:
+        DatabaseError.ConnectionFailed(reason):
+            print(f"Connection failed: {reason}")
+        DatabaseError.QueryTimeout(duration):
+            print(f"Query timed out after {duration}")
+        DatabaseError.InvalidQuery(sql):
+            print(f"Invalid query: {sql}")
+
+# Combined error + optional (!?T)
+fn find_user(db: Database, id: int) -> DatabaseError!?User:
+    rows = try db.query("SELECT * FROM users WHERE id = ?", id)
+    if rows.is_empty():
+        return none  # Not found (not an error)
+    return User.from_row(rows[0])
 ```
 
 #### Traits and Implementations

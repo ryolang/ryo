@@ -33,10 +33,11 @@ Ryo synthesizes ideas from several modern programming languages:
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
 *   **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
     *   *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for types (structs, enums, traits) and enum variants. *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
-*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `true`, `false`, `async`, `await`, `move`. (Note: `Result`, `Optional`, `Ok`, `Err`, `Some` are built-in types resolved by the type checker, not keywords. `comptime`, `unsafe` are planned for future implementation. `as`, `default`, `package`, `None`, `let` are not keywords).
-*   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error propagation (`?`).
+*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `true`, `false`, `none`, `void`, `async`, `await`, `move`, `error`, `try`, `catch`, `orelse`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `as`, `default`, `package`, `let` are not keywords).
+*   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error union prefix (`!`), optional chaining (`?.`).
+    *   **Important Note:** The `!` operator is used exclusively for error union type prefixes (`!T` = error or T, `ErrorType!T` = ErrorType or T). The `!` is NOT used for logical negation—use `not` instead (following Python convention). Similarly, `?` operator in type context (`?T`) denotes optional types, while `?.` is the optional chaining operator.
     *   `_` (Underscore): The underscore `_` is treated as a special identifier. When used in patterns (`match`, destructuring assignment), it signifies a wildcard or an intentionally ignored value; it does not bind to a variable.
-*   **Literals:** Integers (decimal `123`, hex `0xFF`, octal `0o77`, binary `0b11`; underscores `1_000`), Floats (`123.45`, `1.23e-10`; underscores `1_000.0`), Strings (`"..."` basic escapes like `\n`, `\t`, `\\`, `\"`, `\xHH`, `\u{HHHH}`). `f"..."` (f-strings with `{expression}` interpolation), Booleans (`true`, `false`), List (`[...]`), Map (`{key: value, ...}`), Tuple (`(v1, v2, ...)`), Char (`'a'`, `'\u{1F600}'`).
+*   **Literals:** Integers (decimal `123`, hex `0xFF`, octal `0o77`, binary `0b11`; underscores `1_000`), Floats (`123.45`, `1.23e-10`; underscores `1_000.0`), Strings (`"..."` basic escapes like `\n`, `\t`, `\\`, `\"`, `\xHH`, `\u{HHHH}`). `f"..."` (f-strings with `{expression}` interpolation), Booleans (`true`, `false`), Optional null value (`none`), List (`[...]`), Map (`{key: value, ...}`), Tuple (`(v1, v2, ...)`), Char (`'a'`, `'\u{1F600}'`).
 *   **Comments:**
     *   **Regular Comment:** Starts with `#` followed by a space or directly by the comment text. Continues to the end of the line. Ignored by the compiler.
         ```ryo
@@ -59,6 +60,7 @@ Ryo synthesizes ideas from several modern programming languages:
     *   *(Rationale: Uses `#` as the base. The `#:` marker provides an unambiguous distinction for documentation tooling, avoiding whitespace sensitivity and block comment syntax. Attributes `#[...]` remain separate).*
 *   **Attributes:** Metadata annotations use the `#[...]` syntax, placed before the documented item. *(Rationale: Distinct syntax using brackets clearly separates attributes from code and comments).*
 *   **Indentation:** **Tabs** strictly denote code blocks. One tab per indentation level. Mixing tabs and spaces for indentation is a compile-time error. *(Rationale: Enforces a single, consistent style like Go, avoids common Python indentation issues).*
+    - **Note:** Code examples in this documentation may display spaces for markdown rendering compatibility, but actual `.ryo` source files **MUST** use tabs. The compiler will enforce this requirement and reject files with mixed tabs and spaces.
 *   **Statements:** Generally one per line; semicolons are not required or used.
 
 ## 3. Syntax & Grammar
@@ -99,10 +101,10 @@ Ryo synthesizes ideas from several modern programming languages:
         *   *(Rationale: Bidirectional type checking provides the right balance - function signatures serve as documentation and API contracts while local code remains concise. This matches developer expectations from Rust/TypeScript and provides better error messages than fully implicit systems like Hindley-Milner).*
 *   **Struct Definition:** `struct Name: field: Type ...`
 *   **Enum Definition:** `enum Name: Variant1, Variant2(Type), Variant3 { field: Type } ...`
-*   **Trait Definition:** `trait Name: fn method(...) -> RetType ... { /* optional default */ }`
+*   **Trait Definition:** `trait Name: fn method(...) -> RetType ... (with optional default implementation)`
 *   **Implementation:** `impl Trait for Type: fn method(...) -> RetType: ...`
     ```ryo
-    struct Counter: 
+    struct Counter:
         count: int
     trait Resettable:
         fn reset(&mut self)
@@ -115,10 +117,11 @@ Ryo synthesizes ideas from several modern programming languages:
 
 *   **Async/Await:** `async fn name() -> RetType:`, `await expression`,
     ```ryo
-    async fn fetch_data() -> Result[Data, Error]:
-        response = await http.get("https://api.example.com/data")
-        data = await response.json[Data]()
-        return Ok(data)
+
+    async fn fetch_data() -> !Data:
+        response = try await http.get("https://api.example.com/data")
+        data = try await response.json[Data]()
+        return data
     ```
 *   **Closures:** `fn(args): expression`.
 *   **Tuple Destructuring:** `(a, b) = my_tuple`.
@@ -136,13 +139,14 @@ Ryo synthesizes ideas from several modern programming languages:
 *   `int`: Defaults to `isize` (signed pointer-sized integer).
 *   `float`: Defaults to `float64` (64-bit IEEE 754 float).
 *   `bool`: `true`, `false`.
-*   `str`: Owned, growable, heap-allocated, UTF-8 string. Mutable if bound `mut`. *(Rationale: Provides a primary, easy-to-use string type. Mutability controlled by binding aligns with general variable mutability).*
+*   `str`: Owned, heap-allocated, UTF-8 string. Can grow and shrink dynamically when bound to a `mut` variable. *(Rationale: Provides a primary, easy-to-use string type. Mutability controlled by binding aligns with general variable mutability).*
 *   `char`: Unicode Scalar Value. Literal: `'a'`.
-*   Explicit Sizes: `i8`-`i64`, `u8`-`u64`, `usize`, `float32`. *(Rationale: Necessary for control over representation, performance, and FFI).*
+*   `void`: Unit type. Represents a value with no data. Used for functions that return no meaningful value. Reserved keyword for future implementation. *(Rationale: Provides explicit way to represent "no return value" concept, common in many programming languages for side-effecting functions)*.
+*   Explicit Sizes: `i8`-`i64`, `u8`-`u64`, `usize`, `float32`. *(Rationale: Necessary for control over representation, performance, and FFI).**
 
 ### 4.3 Tuple Type
 
-*   **Tuple Type:** `(T1, T2, ...)`. Literal `(v1, v2, ...)`. Access `.0`, `.1`, etc. Destructuring. *(Rationale: High Pythonic familiarity. Ergonomic for returning multiple values and simple ad-hoc grouping without needing named structs).*
+*   **Tuple Type:** `(T1, T2, ...)`. Literal `(v1, v2, ...)`. Access `.0`, `.1`, etc. Destructuring. The empty tuple `()` represents the unit type value. *(Rationale: High Pythonic familiarity. Ergonomic for returning multiple values and simple ad-hoc grouping without needing named structs. The empty tuple provides a natural syntax for the unit type)*.*
 
 ### 4.4 Slice Types (Borrowed Views)
 
@@ -151,6 +155,18 @@ Ryo synthesizes ideas from several modern programming languages:
 *   `&[T]`: Borrowed, immutable slice of `T` elements (pointer + element length). Created via `my_list[start..end]`, `my_list.as_slice()`.
 *   `&mut [T]`: Borrowed, *mutable* slice of `T` elements. Created via `my_mut_list.as_mut_slice()`. Requires `mut` borrow of source.
 *   *(Rationale: `&` syntax leverages borrow concept. No `&mut str` initially simplifies UTF-8 safety. Slices provide efficient read-only/mutable views without copying).*
+
+**Function Parameter Note:** When using slice types like `&str` or `&[T]` as function parameters, the `&` is *required* because these are slice types, not owned types. Example:
+```ryo
+fn process_string(s: &str):      # Explicit & required for string slices
+    # ... read s ...
+
+fn process_list(items: &[int]):  # Explicit & required for list slices
+    # ... read items ...
+
+fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
+    # ... read data ...
+```
 
 ### 4.5 Struct Type (Product Type)
 
@@ -205,18 +221,339 @@ Ryo synthesizes ideas from several modern programming languages:
 
 *Note: User-defined generics are planned for future implementation. See [Language Proposals](proposals.md#advanced-generics) for detailed generic type system design.*
 
-### 4.8 Standard Library Types (`Result`, `Optional`)
+### 4.8 Optional Types (`?T`)
 
-*   `Result[T, E]`: Built using `enum { Ok(T), Err(E) }`.
-*   `Optional[T]`: Built using `enum { Some(T), None }`. Replaces `null`.
-    *   Uses the variant None (accessed as `Optional.None`). Note that `None` itself is not a global keyword, but the specific identifier for this variant within the `Optional` enum, aligning with common practice in languages like Rust for null safety.
-    *   *(Rationale: Explicit handling of absence/errors via ADTs is safer than nullable types or exceptions).*
+*   **Syntax:** `?T` represents a value of type `T` that may be absent (represented by `none`). Eliminates null pointer errors through explicit, type-safe handling.
+*   **Null literal:** `none` (lowercase keyword, consistent with `true` and `false`). *(Rationale: Python-familiar, semantically clear—"none" means "no value")*
+*   **Declaration and Assignment:**
+    ```ryo
+    user: ?User = none
+    user: ?User = User{name: "Alice"}
 
-### 4.9 FFI Types
+    config: ?Config = load_config()  # If load_config returns ?Config
+    ```
+*   **Optional Chaining (`?.`):** Access nested optional fields without explicit unwrapping. Returns an optional type if any step is `none`:
+    ```ryo
+    city = user?.profile?.address?.city  # Returns ?str
+
+    # Equivalent to (conceptually):
+    city = if user != none and user.profile != none and user.profile.address != none:
+        user.profile.address.city
+    else:
+        none
+    ```
+*   **Default Values with `orelse`:** Provide defaults or early return:
+    ```ryo
+    name = user?.name orelse "Unknown"
+    port = config?.port orelse 8080
+
+    # Early return pattern (with smart casting)
+    user = optional_user orelse return error.NoUser
+    # 'user' is now User (not ?User)
+    ```
+*   **Smart Casting after Null Checks:** After a null check, the type is automatically narrowed:
+    ```ryo
+    if user != none:
+        print(user.name)  # user is User here, not ?User (smart cast)
+
+    if let user = optional_user:  # Future: if-let syntax
+        print(user.name)
+    ```
+*   *(Rationale: Zig-inspired `?T` syntax is concise and compositional. The `none` keyword aligns with Python's `None`. Optional chaining (`?.`) and `orelse` provide ergonomic handling. Smart casting reduces boilerplate after validation)*
+
+### 4.9 Error Types (`ErrorType!SuccessType`)
+
+*   **Purpose:** Error types are algebraic data types specifically designed for error handling. Use the `error` keyword to define error types with associated data.
+
+#### **Single-Variant Errors** (Simple Case)
+
+*   **Unit Error (No Data):** A simple error marker:
+    ```ryo
+    error Timeout
+    error Unauthorized
+    ```
+    **Usage:**
+    ```ryo
+    fn operation() -> Timeout!Data:
+        if elapsed > limit:
+            return Timeout  # Direct return
+        return data
+    ```
+
+*   **Message-Only Error (Most Common):** Single unnamed string field becomes the message:
+    ```ryo
+    error NotFound(str)
+    error ValidationFailed(str)
+    ```
+    **Usage:**
+    ```ryo
+    fn find_user(id: int) -> NotFound!User:
+        if not exists(id):
+            return NotFound("User not found")
+        return user
+    ```
+    **Automatic message:** The string is accessible via `.message()` method on error trait.
+
+*   **Structured Single-Variant Error:** Multiple named fields:
+    ```ryo
+    error HttpError(status: int, message: str)
+    error ValidationError(field: str, constraint: str)
+    ```
+    **Usage:**
+    ```ryo
+    fn fetch(url: str) -> HttpError!Data:
+        response = await http.get(url)
+        if response.status != 200:
+            return HttpError(status: response.status, message: response.body)
+        return parse(response.body)
+    ```
+
+#### **Grouping Related Errors with Modules**
+
+For organizing related errors, use module namespacing instead of multi-variant syntax:
+
+```ryo
+# In module 'io'
+module io:
+    error FileNotFound(path: str)
+    error PermissionDenied(path: str)
+    error DiskFull
+
+# In module 'parse'
+module parse:
+    error InvalidSyntax(line: int, column: int)
+    error UnexpectedToken(expected: str, got: str)
+    error UnexpectedEof
+```
+
+Usage:
+```ryo
+fn read_file(path: str) -> io.FileNotFound!str:
+    if not exists(path):
+        return io.FileNotFound(path)
+    return os.read(path)
+
+fn parse_json(text: str) -> parse.InvalidSyntax!Data:
+    if invalid_json(text):
+        return parse.InvalidSyntax(line: 0, column: 0)
+    return Data{...}
+```
+
+#### **Error Union Types** (Composition)
+
+*   **Explicit Error Unions** - Compose multiple error types:
+    ```ryo
+    # Can return either FileError or ParseError
+    fn process(path: str) -> (FileError | ParseError)!Data:
+        file = try read_file(path)      # FileError
+        data = try parse_json(file)     # ParseError
+        return data
+    ```
+
+*   **Inferred Error Unions** - Compiler infers error set from `try` expressions:
+    ```ryo
+    # Just use ! and compiler infers: (FileError | ParseError)!Data
+    fn process(path: str) -> !Data:
+        file = try read_file(path)      # FileError
+        data = try parse_json(file)     # ParseError
+        return data
+
+    # Use --show-inferred-errors flag to see inferred type:
+    # process() -> (FileError | ParseError)!Data
+    ```
+    **Benefits:** No wrapper types needed, composition is automatic, refactoring-friendly.
+
+*   **Explicit Single Error Type** (`ErrorType!T`):
+    ```ryo
+    fn read_file(path: str) -> io.FileNotFound!str:
+        if not exists(path):
+            return io.FileNotFound(path)
+        return os.read(path)
+    ```
+
+*   **Generic Error Type** (`!T`): Accept any error:
+    ```ryo
+    fn flexible_operation() -> !Data:
+        # Can return any error type
+        ...
+    ```
+
+*   **Combined Error and Optional** (`!?T`):
+    ```ryo
+    fn find_user(db: Database, id: int) -> DatabaseError!?User:
+        # Can return: DatabaseError, none (not found), or User
+        rows = try db.query("SELECT * FROM users WHERE id = ?", id)
+        if rows.is_empty():
+            return none
+        return User.from_row(rows[0])
+    ```
+
+#### **Pattern Matching on Errors**
+
+*   **Single Error Type** (Exhaustive matching required):
+    ```ryo
+    result = read_file(path) catch |e|:
+        match e:
+            io.FileNotFound(p):
+                print(f"File not found: {p}")
+            io.PermissionDenied(p):
+                print(f"Permission denied: {p}")
+            io.DiskFull:
+                print("Disk full")
+            # MUST handle all variants - compiler error if missing
+    ```
+
+*   **Error Union** (Exhaustive matching required):
+    ```ryo
+    result = process(path) catch |e|:
+        match e:
+            io.FileNotFound(p):
+                return create_default(p)
+            io.PermissionDenied(p):
+                return request_permissions()
+            parse.InvalidSyntax(line, col):
+                log_error(f"Syntax error at {line}:{col}")
+                return default_config()
+            parse.UnexpectedToken(exp, got):
+                log_error(f"Expected {exp}, got {got}")
+                return default_config()
+            parse.UnexpectedEof:
+                log_error("Unexpected end of file")
+                return default_config()
+            # MUST handle all variants in union - compiler enforces this
+    ```
+
+    **Using catch-all when needed:**
+    ```ryo
+    result = process(path) catch |e|:
+        match e:
+            io.FileNotFound(p):
+                return create_default(p)
+            _:  # Explicit catch-all: "handle everything else the same way"
+                log_error(e.message())
+                return default_config()
+    ```
+
+*   *(Rationale: Single-variant errors provide simplicity (one syntax). Error unions enable automatic composition without wrapper types (Zig-inspired). Exhaustive matching by default ensures all error cases are explicitly handled. The `_` catch-all provides an escape hatch for truly generic handling.)*
+
+### 4.10 Error Trait and Message Handling
+
+*   **Error Trait:** All error types automatically implement the `Error` trait:
+    ```ryo
+    trait Error:
+        fn message(self) -> str           # Human-readable message
+        fn location(self) -> ?Location    # Where error was created
+        fn stack_trace(self) -> ?StackTrace  # Call stack when created
+
+    struct Location:
+        file: str          # File path (absolute or relative)
+        line: int          # Line number (1-indexed)
+        column: int        # Column number (1-indexed)
+        function: str      # Function name with module path
+
+    struct StackTrace:
+        frames: List[StackFrame]
+
+    struct StackFrame:
+        function: str      # Function name with module path
+        file: str          # File path
+        line: int          # Line number
+        column: int        # Column number
+    ```
+
+*   **Automatic Location Tracking:** All error values automatically capture the location where they are created:
+    *   **`.location()`** returns `Location` with file, line, column, and function name
+    *   **`.stack_trace()`** returns the full call stack (list of frames) at error creation
+    *   Useful for debugging: find exactly where an error originated
+    *   Works across error propagation with `try` - stack grows as error bubbles up
+
+    Example:
+    ```ryo
+    module file:
+        error NotFound(path: str)
+
+    fn find_config() -> file.NotFound!Config:
+        # Error created here captures: line 5, column 8, file "src/main.ryo"
+        return file.NotFound("/etc/config.toml")
+
+    fn main():
+        config = find_config() catch |e|:
+            # Access location information
+            loc = e.location()  # Returns Location{file: "src/main.ryo", line: 5, ...}
+            print(f"Error at {loc.file}:{loc.line}:{loc.column} in {loc.function}")
+
+            # Get full stack trace
+            trace = e.stack_trace()
+            for frame in trace.frames:
+                print(f"  {frame.function} at {frame.file}:{frame.line}")
+    ```
+
+*   **Automatic Message Generation:**
+    *   **Single string field:** The string is used as the message.
+        ```ryo
+        error NotFound(str)
+        # .message() returns the string directly
+        ```
+    *   **Named message field:** The `message` field is used.
+        ```ryo
+        error HttpError(status: int, message: str)
+        # .message() returns the message field
+        ```
+    *   **Unit variant:** Variant name is used.
+        ```ryo
+        error Timeout
+        # .message() returns "Timeout"
+        ```
+    *   **Multiple fields (no message field):** Generated from Debug representation.
+        ```ryo
+        error FileNotFound(path: str, permission_level: int)
+        # .message() returns "FileNotFound(path=/var/log, permission_level=0700)"
+        ```
+
+*   **Custom Message Implementation:** Override automatic message generation:
+    ```ryo
+    # Single-variant errors with custom messages
+    error TooShort(field: str, min_length: int)
+    error TooLong(field: str, max_length: int)
+
+    impl Error for TooShort:
+        fn message(self) -> str:
+            return f"{self.field} must be at least {self.min_length} characters"
+
+    impl Error for TooLong:
+        fn message(self) -> str:
+            return f"{self.field} cannot exceed {self.max_length} characters"
+    ```
+
+*   **Accessing Error Messages and Location:**
+    ```ryo
+    result = operation() catch |e|:
+        # Access message directly
+        print(e.message())
+
+        # Access location information for debugging
+        if loc = e.location():
+            print(f"Error at {loc.file}:{loc.line} in {loc.function}")
+
+        # Or use in catch handlers
+        match e:
+            NotFound(msg):
+                print(f"Not found: {msg}")
+            _:
+                print(f"Error: {e.message()}")
+                if trace = e.stack_trace():
+                    print("Stack trace:")
+                    for frame in trace.frames:
+                        print(f"  {frame.function} at {frame.file}:{frame.line}")
+    ```
+
+*   *(Rationale: Error messages are essential for debugging and user feedback. Automatic generation from data reduces boilerplate. Custom implementations enable domain-specific messages. Location tracking and stack traces enable efficient debugging without requiring external tools or logging.)*
+
+### 4.11 FFI Types
 
 *   **Note:** FFI types are planned for future implementation. See [Language Proposals](proposals.md#foreign-function-interface-ffi--unsafe-code) for detailed design.
 
-### 4.10 Type Conversion Syntax
+### 4.12 Type Conversion Syntax
 
 *   Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
@@ -233,15 +570,15 @@ Ryo synthesizes ideas from several modern programming languages:
             *   **Important Distinction:** This default implicit borrow for function arguments *contrasts* with the default *move* semantics for assignment and return values. This choice prioritizes ergonomics for the common case of read-only function access (enhancing Pythonic feel) over strict uniformity. Developers must be aware that `my_func(my_var)` typically borrows `my_var` immutably (leaving `my_var` valid), while `let new_var = my_var` moves `my_var` (invalidating `my_var`). The compiler must provide clear error messages when ownership rules are violated due to this distinction.
             *   *(Example Added)*
                 ```ryo
-                fn process_data(data: &SomeType) { # Explicit borrow, same effect as implicit
+                fn process_data(data: &SomeType): # Explicit borrow, same effect as implicit
                     # ... read data ...
-                }
-                fn read_data(data: SomeType) { # Implicit immutable borrow
+
+                fn read_data(data: SomeType): # Implicit immutable borrow
                     # ... read data ...
-                }
-                fn consume_data(move data: SomeType) { # Explicit move (alternative to default borrow)
+
+                fn consume_data(move data: SomeType): # Explicit move (alternative to default borrow)
                     # ... takes ownership ...
-                }
+
                 fn main():
                     my_data = SomeType { ... }
                     read_data(my_data) # Implicitly borrows my_data, my_data still valid here
@@ -276,13 +613,504 @@ Ryo synthesizes ideas from several modern programming languages:
 
 ## 7. Error Handling
 
-*   **Recoverable:** `Result[T, E]` (`Ok`, `Err`). Mandatory handling (via `match`, `?`, methods like `.unwrap_or()`). *(Rationale: Explicit error handling prevents ignored errors).*
-*   **Propagation:** `?` operator unwraps `Ok` or returns `Err` early. *(Rationale: Highly ergonomic, standard pattern in Rust/Swift).* Error type compatibility for `?` across different error types relies on a conversion mechanism (like a standard `From` trait or similar), which is planned for detailed specification.
-*   **Unrecoverable:** `panic("message")`. **Aborts** process by default. *(Rationale: Simplest, safest default. Avoids unwind complexity).*
+Error handling in Ryo uses algebraic error types (defined with the `error` keyword) combined with the `try` and `catch` operators for type-safe, explicit error management.
+
+### 7.1 Error Types and Definitions
+
+Error types are defined with the `error` keyword, using modules to organize related errors:
+
+```ryo
+module network:
+    error ConnectionTimeout
+    error DnsResolutionFailed(domain: str)
+    error HttpError(status: int, message: str)
+
+module io:
+    error NotFound(path: str)
+    error PermissionDenied(path: str)
+    error ReadFailed(reason: str)
+```
+
+*   *(Rationale: `error` keyword signals error-handling intent. Single-variant errors with module organization provide clear composition without wrapper types. Associated data enables rich error information.)*
+
+### 7.2 Error Union Types
+
+Function return types specify both the error type and success type. Ryo provides three ways to express error types, each with different use cases:
+
+#### **Choosing Your Error Union Syntax**
+
+| Syntax | Use Case | Example |
+|--------|----------|---------|
+| `ErrorType!T` | Single, specific error type | `fn read(path) -> FileNotFound!str` |
+| `(E1\|E2\|E3)!T` | Multiple known error types | `fn load() -> (FileNotFound\|ParseError)!Data` |
+| `!T` | Any/inferred error types | `fn process() -> !Result` (compiler infers all errors from `try`) |
+
+**Decision Guide:**
+- **Use `ErrorType!T`** when your function can only fail in one specific way
+- **Use `(E1|E2)!T`** when you know exactly which errors can occur and want to document them
+- **Use `!T`** when composing multiple functions with different errors - the compiler automatically infers the error union from `try` expressions
+
+#### **Single Error Type**
+
+The `ErrorType!SuccessType` syntax indicates a function can return one specific error or a value:
+
+```ryo
+fn read_file(path: str) -> FileError!str:
+    if not exists(path):
+        return FileError.NotFound(path)
+    return os.read(path)
+```
+
+#### **Multiple Error Types (Error Unions)**
+
+**Explicit error union** - List all possible error types:
+
+```ryo
+# Can return FileError OR ParseError OR Data
+fn process(path: str) -> (FileError | ParseError)!Data:
+    file = try read_file(path)      # FileError
+    data = try parse_json(file)     # ParseError
+    return data
+```
+
+**Inferred error union** - Compiler infers from `try` expressions:
+
+```ryo
+# Compiler infers: (FileError | ParseError)!Data
+fn process(path: str) -> !Data:
+    file = try read_file(path)      # FileError
+    data = try parse_json(file)     # ParseError
+    return data
+```
+
+**Generic error type** - Accept any error:
+
+```ryo
+fn flexible_operation() -> !Data:
+    # Can return any error type
+    ...
+```
+
+*   **Error Union Semantics:**
+    *   Error types are composed with `|` operator (unordered, not a sequence)
+    *   Inferred unions automatically track all possible errors from `try` expressions
+    *   Use `--show-inferred-errors` compiler flag to see inferred error set
+    *   Single error type is a special case of error union with one member
+
+*   *(Rationale: Zig-style `E!T` syntax is concise. Error unions eliminate wrapper types through automatic composition. Explicit unions document API contracts. Inferred unions reduce boilerplate.)*
+
+### 7.3 Error Propagation (`try`)
+
+The `try` keyword unwraps success or propagates the error early:
+
+```ryo
+fn load_and_parse(path: str) -> !Config:
+    # Both try expressions propagate errors
+    content = try read_file(path)      # FileError propagates
+    config = try parse_config(content) # ParseError propagates
+    return config
+```
+
+*   **Semantic:** `try expr` evaluates `expr`:
+    *   If success: returns the value
+    *   If error: propagates error to caller
+
+*   **Error Composition with `try`:**
+    *   In functions with inferred error unions, `try` automatically collects all error types
+    *   In explicit error unions, error must be in the union
+    *   In single error type, error must match exactly
+
+*   **Example - Inferred Union:**
+    ```ryo
+    fn process() -> !Data:
+        a = try func_a()  # FileError
+        b = try func_b()  # ParseError
+        c = try func_c()  # NetworkError
+    # Inferred as: (FileError | ParseError | NetworkError)!Data
+    ```
+
+*   **Example - Explicit Union with Conversion:**
+    ```ryo
+    # Example using separate error types with error unions
+    fn process() -> (FileError | ParseError)!Data:
+        a = try read_file(path)  # Can return FileError
+        b = try parse_json(a)    # Can return ParseError
+        return b
+    ```
+
+*   **Error Context Preservation:** When `try` propagates an error, the original error's location and stack trace are preserved intact. No context is lost as the error bubbles up through the call stack. Each level can inspect `.location()` and `.stack_trace()` to see where the error originated.
+
+    Example:
+    ```ryo
+    fn level3() -> db.QueryFailed!Result:
+        # Error created here with location information
+        return db.QueryFailed("Invalid query")
+
+    fn level2() -> db.QueryFailed!Result:
+        result = try level3()  # Error propagates, context preserved
+        return result
+
+    fn level1() -> !Result:
+        result = try level2()  # Error propagates, context preserved
+        return result
+
+    fn main():
+        data = level1() catch |e|:
+            # Can still access original location from level3
+            loc = e.location()
+            print(f"Original error at {loc.file}:{loc.line}")
+    ```
+
+*   *(Rationale: `try` clearly signals error propagation. Familiar to async/await users. Automatic composition via inferred unions eliminates wrapper types (Zig-inspired). Error context preservation ensures debugging information is never lost during propagation.)*
+
+### 7.4 Error Handling (`catch`)
+
+**IMPORTANT:** Error handling with `catch` requires **exhaustive pattern matching**. All error types and variants must be explicitly handled. If you don't want to handle specific error cases explicitly, use the `_` wildcard pattern to match remaining cases.
+
+The `catch` operator handles errors with pattern matching:
+
+```ryo
+config = load_and_parse("app.toml") catch |e|:
+    match e:
+        FileError.NotFound(path):
+            print(f"Creating default config at {path}")
+            return default_config()
+
+        ParseError.InvalidSyntax(line, col):
+            print(f"Syntax error at {line}:{col}")
+            exit(1)
+```
+
+*   **Syntax:** `expr catch |e|: handle_error(e)`
+*   **Pattern Matching:** Full ADT pattern matching enables type-safe error handling.
+
+*   **Pattern Matching Differences:**
+    *   **Single Error Type** (exhaustive): Must handle all variants
+        ```ryo
+        result = read_file(path) catch |e|:
+            match e:
+                FileError.NotFound(p):
+                    # ...
+                FileError.PermissionDenied(p):
+                    # ...
+                FileError.ReadError(r):
+                    # ...
+                # MUST handle all variants
+        ```
+    *   **Error Union** (Exhaustive matching required): Must handle all error types in union:
+        ```ryo
+        result = process(path) catch |e|:
+            match e:
+                io.FileNotFound(p):
+                    return create_default(p)
+                parse.InvalidFormat(reason):
+                    log_error(f"Parse error: {reason}")
+                    return default_config()
+                network.ConnectionFailed(reason):
+                    return retry_later()
+                # MUST handle all variants in union
+        ```
+    *   **With Catch-All**: When you want generic handling for some errors:
+        ```ryo
+        result = process(path) catch |e|:
+            match e:
+                io.FileNotFound(p):
+                    return create_default(p)
+                _:  # Explicit catch-all for all other error types
+                    log_error(e.message())
+                    return default_config()
+        ```
+
+*   *(Rationale: `catch` follows familiar error-handling conventions. Exhaustive matching for all error types (single or union) ensures all error cases are explicitly handled, improving code reliability and preventing silent failures.)*
+
+### 7.5 Combined Error + Optional (`!?T`)
+
+For operations that can fail (error), return no value (`none`), or succeed:
+
+```ryo
+fn find_user(db: Database, id: int) -> DatabaseError!?User:
+    # Can return: DatabaseError, none (not found), or User
+    rows = try db.query("SELECT * FROM users WHERE id = ?", id)
+    if rows.is_empty():
+        return none
+    return User.from_row(rows[0])
+
+# Sequential unwrapping pattern
+fn authenticate(db: Database, token: ?str) -> !User:
+    t = token orelse return error.MissingToken
+    # t is now str (smart cast from ?str)
+
+    user = try find_user(db, 42) orelse return error.UserNotFound
+    # First try: handle error (!?User -> ?User)
+    # Then orelse: handle optional (?User -> User)
+    # user is now User (fully unwrapped)
+
+    return user
+```
+
+*   **Sequential Unwrapping:** `try` handles errors, `orelse` handles optionals.
+*   **Smart Casting:** Values are automatically narrowed after unwrapping.
+*   *(Rationale: Handles real-world patterns where operations can both error and return optional data.)*
+
+### 7.6 Unrecoverable Errors (`panic`)
+
+For unrecoverable errors, use `panic("message")`. When a panic occurs, the program immediately terminates after printing diagnostic information.
+
+```ryo
+fn critical_operation():
+    if not initialized:
+        panic("System not initialized!")  # Aborts immediately
+```
+
+#### **Panic Behavior**
+
+*   **Aborts the process immediately** with exit code `101`
+*   **Does not unwind** - no cleanup code runs (simplifies implementation and predictability)
+*   **Captures and prints full stack trace** - shows complete call chain leading to panic
+*   **Includes location information** - file, line, column, and function name of panic call
+
+#### **Panic Output Format**
+
+When `panic("message")` executes, output appears on stderr:
+
+```
+thread 'main' panicked at src/database.ryo:42:13 in function 'connect':
+  Database connection failed: timeout after 30s
+
+Stack trace:
+  0: database::connect (src/database.ryo:42:13)
+  1: app::initialize (src/app.ryo:18:25)
+  2: main (src/main.ryo:10:5)
+
+note: Set RYOLANG_BACKTRACE=full for more verbose output
+```
+
+**Stack trace details:**
+- Each frame shows: frame number, function path, file:line:column location
+- Frame 0 is the panic call (most recent)
+- Frame N is the entry point (oldest)
+- Includes inlined functions and async boundaries
+
+#### **Debug Symbols and Stack Traces**
+
+*   **Debug symbols always included** by default (DWARF format via Cranelift)
+*   **Stack traces automatically captured** - no performance trade-off option in v1.0
+*   **Binary size impact** - approximately 20-30% larger with debug symbols
+*   **Environment variable `RYOLANG_BACKTRACE`** controls output verbosity:
+    - `RYOLANG_BACKTRACE=1` (default) - standard stack trace
+    - `RYOLANG_BACKTRACE=full` - verbose output with additional context
+    - `RYOLANG_BACKTRACE=0` - minimal output (not recommended, disables stack trace)
+
+#### **Performance Implications**
+
+*   **Stack trace capture adds overhead** (~5-10% estimated, varies by workload)
+*   **Memory overhead** for maintaining stack frame information
+*   **Trade-off philosophy**: Developer productivity and debugging capability prioritized over raw performance
+*   **Mitigation strategies**:
+    - For performance-critical inner loops, structure code to avoid panic in hot paths
+    - Use error types for recoverable errors instead of panics
+    - Consider `RYOLANG_BACKTRACE=0` only in extreme cases (not recommended)
+
+#### **When to Use `panic`**
+
+Use `panic()` **only** for:
+- Truly unrecoverable conditions that indicate a bug in your program
+- Invalid program state that cannot be recovered
+- Internal consistency violations
+
+Do **not** use `panic()` for:
+- User input errors (use error types instead)
+- Expected failure modes (use error types instead)
+- Control flow (use error types instead)
+
+#### **Example: Understanding a Panic**
+
+```ryo
+module database:
+    error ConnectionFailed(reason: str)
+
+fn connect(host: str, port: int) -> database.ConnectionFailed!Connection:
+    if port < 1 or port > 65535:
+        # BUG: Invalid port should never reach here if caller validates
+        panic(f"Invalid port {port}: must be 1-65535")
+
+    # ... actual connection code ...
+    Connection{...}
+
+fn main():
+    # If this panics with invalid port, stack trace shows:
+    # 1. panic location (in connect function)
+    # 2. call to connect (in main)
+    # 3. where to fix the bug
+```
+
+*   *(Rationale: Immediate abort without unwinding simplifies runtime and guarantees clean termination. Comprehensive stack traces provide essential debugging information for post-mortem analysis.)*
+
+### 7.7 Error Handling Best Practices
+
+1. **Use `try` for propagating errors** in functions that return error unions
+2. **Use `catch` for handling errors** at boundaries (main functions, API handlers)
+3. **Define specific error types** that capture all failure modes
+4. **Use modules to organize related errors** ensuring clear composition
+5. **Use `!?T` carefully** to distinguish between errors and legitimate absence
+6. **Pattern match exhaustively** to handle all error variants
+
+### 7.8 Forbidden: Direct Unwrap
+
+**Direct unwrap is NOT allowed.** Attempting to access error or optional values without using `try`, `catch`, or `orelse` is a **compile-time error**:
+
+```ryo
+# ❌ COMPILE ERROR: Cannot access error union value directly
+result: ParseError!int = parse_int("42")
+value = result  # ERROR: Cannot use value of type ParseError!int directly
+
+# ❌ COMPILE ERROR: Cannot access optional value directly
+maybe_user: ?User = get_user(id)
+name = maybe_user.name  # ERROR: Cannot access fields on optional type
+
+# ✅ CORRECT: Use try to unwrap errors
+result: ParseError!int = parse_int("42")
+value = try result catch |e|:
+    handle_error(e)
+    return
+
+# ✅ CORRECT: Use try to unwrap and propagate
+fn load_data() -> ParseError!int:
+    result = try parse_int("42")  # Propagates error on failure
+    return result
+
+# ✅ CORRECT: Use orelse for optionals
+maybe_user: ?User = get_user(id)
+name = maybe_user?.name orelse "Unknown"
+
+# ✅ CORRECT: Use smart casting after null check
+if maybe_user != none:
+    name = maybe_user.name  # Type narrowed to User
+```
+
+*   **Rationale:** Direct unwrap removes type safety. By requiring explicit `try`/`catch`/`orelse`, Ryo ensures all error and null cases are handled, preventing silent failures and unexpected panics. This design choice makes error handling visible and intentional.
+
+### 7.9 Stack Traces and Debugging
+
+Ryo provides comprehensive stack trace and debugging information to help diagnose runtime errors efficiently.
+
+#### **Automatic Stack Trace Capture**
+
+*   **Always captured** - Stack traces are automatically captured for all panics and errors
+*   **No performance trade-off option** - Debugging capability is prioritized over micro-optimization
+*   **Full call chain** - Shows complete function call path from entry point to error location
+*   **Accessible at runtime** - Use `.stack_trace()` method on errors to access frame information
+
+#### **Using Stack Traces for Debugging**
+
+**From Panics:**
+```ryo
+fn dangerous_operation() -> int:
+    panic("Something went very wrong!")
+
+fn main():
+    # When panic occurs, stderr shows:
+    # thread 'main' panicked at src/main.ryo:10:5 in function 'dangerous_operation':
+    # Something went very wrong!
+    #
+    # Stack trace:
+    #   0: main::dangerous_operation (src/main.ryo:10:5)
+    #   1: main (src/main.ryo:5:5)
+    dangerous_operation()
+```
+
+**From Errors:**
+```ryo
+module db:
+    error QueryFailed(sql: str)
+
+fn query_user(id: int) -> db.QueryFailed!User:
+    # Error automatically captures file/line/function at creation
+    return db.QueryFailed(f"SELECT * FROM users WHERE id = {id}")
+
+fn main():
+    user = query_user(42) catch |e|:
+        # Access location where error was created
+        if loc = e.location():
+            print(f"Error created at {loc.file}:{loc.line} in {loc.function}")
+
+        # Access full stack at time of error creation
+        if trace = e.stack_trace():
+            for frame in trace.frames:
+                print(f"  Frame: {frame.function} at {frame.file}:{frame.line}")
+        return
+```
+
+#### **Debug Symbols and Build Information**
+
+*   **Debug symbols always included by default** - DWARF format generated via Cranelift
+*   **Binary size impact** - Approximately 20-30% larger due to debug information
+*   **`--strip` compiler flag** - Remove debug symbols from production binaries if size is critical
+*   **Trade-off confirmed** - Size cost justified by debugging capability
+
+#### **Environment Variables**
+
+Control stack trace verbosity:
+
+*   **`RYOLANG_BACKTRACE=1`** (default) - Standard stack trace with file, line, column, function name
+*   **`RYOLANG_BACKTRACE=full`** (future) - Verbose output with additional context and local values
+*   **`RYOLANG_BACKTRACE=0`** (not recommended) - Minimal output, disables stack trace display
+
+Example:
+```bash
+# Show standard stack trace (default)
+./my_program
+
+# Show verbose stack trace
+RYOLANG_BACKTRACE=full ./my_program
+
+# Suppress stack trace (not recommended)
+RYOLANG_BACKTRACE=0 ./my_program
+```
+
+#### **Performance and Overhead**
+
+*   **Runtime overhead** - Stack trace capture adds approximately 5-10% overhead (varies by workload)
+*   **Memory overhead** - Maintaining stack frame information uses additional memory
+*   **Trade-off philosophy** - Debugging capability and developer productivity prioritized over raw performance
+*   **Mitigation strategies**:
+    - Structure performance-critical code to avoid panics in hot paths
+    - Use error types for recoverable errors instead of panics
+    - Profile real-world workloads to measure actual impact
+
+#### **Best Practices for Debugging**
+
+1. **Use error location for quick diagnosis:**
+   ```ryo
+   result = risky_operation() catch |e|:
+       loc = e.location()
+       print(f"Quick fix: Check {loc.file}:{loc.line}")
+   ```
+
+2. **Print full stack trace for complex error chains:**
+   ```ryo
+   result = risky_operation() catch |e|:
+       print(f"Error: {e.message()}")
+       if trace = e.stack_trace():
+           print("Debug stack trace:")
+           for frame in trace.frames:
+               print(f"  {frame.function}")
+   ```
+
+3. **Use messages with context:**
+   ```ryo
+   error DatabaseError(sql: str, reason: str)
+   # When error occurs, message includes both query and reason
+   ```
+
+4. **Avoid panics in production paths:**
+   - Use error types for expected failures
+   - Reserve `panic()` for bugs and internal inconsistencies
+   - Structured error handling is better for debugging than post-mortem panic analysis
 
 ## 8. Traits (Behavior)
 
-*   **Definition:** `trait Name: fn method(...) ... { /* optional default impl */ }`. Default methods allowed. *(Rationale: Default methods reduce boilerplate).*
+*   **Definition:** `trait Name: fn method(...) ...` (with optional default implementations). Default methods allowed. *(Rationale: Default methods reduce boilerplate).*
 *   **Implementation:** `impl Trait for Type: fn method(...) ...`. Can override defaults.
 *   **Dispatch:** **Static Dispatch** via monomorphization only (initially). *(Rationale: Prioritizes runtime performance and implementation simplicity).* No dynamic dispatch (`dyn Trait`).
     *   This means polymorphism is primarily achieved through generics (compile-time polymorphism). Patterns requiring runtime dynamic dispatch (common in some OOP/dynamic languages) will need alternative approaches in Ryo, such as using enums with associated data to represent variants or passing function pointers/closures.
@@ -299,10 +1127,10 @@ Ryo synthesizes ideas from several modern programming languages:
     *   **Ownership Integration:** Async functions work seamlessly with Ryo's ownership model - values can be moved into async contexts safely.
 *   **Examples:**
     ```ryo
-    async fn process_request(req: Request) -> Result[Response, Error]:
-        data = await database.query("SELECT * FROM users")?
-        result = await external_api.call(data)?
-        return Ok(Response.json(result))
+    async fn process_request(req: Request) -> !Response:
+        data = try await database.query("SELECT * FROM users")
+        result = try await external_api.call(data)
+        return Response.json(result)
 
     async fn process_all_requests():
         tasks = [
@@ -334,7 +1162,7 @@ Ryo synthesizes ideas from several modern programming languages:
 ## 12. Application Entry Point
 
 *   **Convention:** Default entry point file is `src/main.ryo`.
-*   **`fn main()`:** Required in entry point (`fn main()` or `fn main() -> Result[(), ErrType]`).
+*   **`fn main()`:** Required in entry point. Takes no parameters, returns the unit type (empty tuple `()`). Use `try/catch` for error handling within main.
 *   **Compiler Enforcement:** `fn main()` only allowed in the designated entry point file for executable compilation. *(Rationale: Clear convention without needing `package main` keyword).*
 
 ## 13. Package Manager (`ryopkg`)
@@ -350,15 +1178,15 @@ Ryo synthesizes ideas from several modern programming languages:
 *   **Philosophy:** Modular packages, practical, ergonomic, safe, reasonably "batteries-included" for web/scripting.
 *   **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
 *   **Core Packages (Initial):**
-    *   `core`/`builtin` (Implicit): Fundamental types (`Result`, `Optional`), core traits (`Drop`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`).
-    *   `io`: Console (`readln`), Files (`File`), Buffering (using `Result`, implements `Drop`).
-    *   `string`: `&str` manipulation, parsing (`parse_* -> Result`).
+    *   `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`), error and optional type support.
+    *   `io`: Console (`readln`), Files (`File`), Buffering (functions return `IoError!T`), implements `Drop`.
+    *   `string`: `&str` manipulation, parsing (functions return `ParseError!T`).
     *   `collections`: `List[T]`, `Map[K, V]` types and methods.
     *   `math`: Functions, constants, explicit overflow methods.
     *   `time`: `Instant`, `SystemTime`, `Duration`.
-    *   `encoding.json`: `encode -> Result[str]`, `decode -> Result[JsonValue]`, `decode_into[T] -> Result[T]`.
-    *   `net.http`: Async Client/Server primitives (`Request`, `Response`, async handlers).
-    *   `os`: Env, args, basic filesystem ops (using `Result`).
+    *   `encoding.json`: `encode -> JsonError!str`, `decode -> JsonError!JsonValue`, `decode_into[T] -> JsonError!T`.
+    *   `net.http`: Async Client/Server primitives (`Request`, `Response`, async handlers, functions return `HttpError!T`).
+    *   `os`: Env, args, basic filesystem ops (functions return `OsError!T`).
     *   `testing`: `#[test]` attribute, `assert()`, `assert_eq()`. *(Planned)*
     *   `sync`: `Shared[T]`/`Weak[T]` types for optional shared ownership.
     *   `mem`: Basic memory utilities, `Drop` trait definition.

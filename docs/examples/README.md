@@ -18,10 +18,11 @@ This directory contains practical code examples demonstrating various Ryo langua
 - Function organization and code structure
 
 ### [error_handling.ryo](error_handling.ryo)
-**Concepts:** Result types, error propagation, `?` operator
-- `Result[T, E]` type for error handling
-- Pattern matching for error cases
-- The `?` operator for error propagation
+**Concepts:** Error types, error propagation, error handling with `try`/`catch`
+- Error type definitions with the `error` keyword
+- Error unions (`ErrorType!SuccessType`)
+- The `try` keyword for error propagation
+- The `catch` operator with pattern matching
 - Handling empty collections and edge cases
 
 ### [ownership_borrowing.ryo](ownership_borrowing.ryo)
@@ -79,9 +80,10 @@ For beginners, we recommend following this order:
 - Clear rules about when data can be accessed and modified
 
 ### Error Handling
-- Explicit error handling with `Result` types
+- Explicit error handling with error types and error unions
 - No hidden exceptions or null pointer errors
-- Ergonomic error propagation with the `?` operator
+- Ergonomic error propagation with `try` and error handling with `catch`
+- Safe optional handling with `?T` types and the `orelse` operator
 
 ### Performance
 - Zero-cost abstractions - high-level code compiles to efficient machine code

@@ -23,7 +23,7 @@
   10. Enums
       1. match
   11. Errors
-      1. `?` for error propagation
+      1. `try` for error propagation, `catch` for error handling
   12. Structs
   13. Traits
 - Parser

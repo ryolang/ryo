@@ -81,7 +81,7 @@ process(data)      # ERROR: use of moved value
 struct MyResult: ...  # ERROR: 'Result' is keyword
 
 # But used as types everywhere
-fn parse() -> Result[int, Error]:
+fn parse() -> ParseError!int:
     ...
 ```
 
@@ -92,16 +92,16 @@ fn parse() -> Result[int, Error]:
 
 ### 4. Generic Syntax Undefined 🔴
 
-**Problem**: Generics used throughout spec (`List[T]`, `Result[T,E]`) but syntax never defined.
+**Problem**: Generics used throughout spec (`List[T]`, `Map[K,V]`) but syntax never defined.
 
 **Examples**:
 ```ryo
 # Used in spec but undefined:
-List[T], Map[K,V], Result[T,E]
+List[T], Map[K,V]
 
 # How to define?
 struct MyStruct[T]: ...?     # Unclear syntax
-fn generic_fn[T](...): ...?  # Unclear syntax  
+fn generic_fn[T](...): ...?  # Unclear syntax
 ```
 
 **Recommendation**: Define complete generic syntax:
@@ -110,14 +110,14 @@ fn generic_fn[T](...): ...?  # Unclear syntax
 struct Container[T]:
     value: T
 
-# Generic function  
+# Generic function
 fn identity[T](x: T) -> T:
     return x
 
 # Generic enum
-enum Result[T, E]:
-    Ok(T)
-    Err(E)
+error ApiResponse[T]:
+    Success(T)
+    Failure(str)
 
 # With trait bounds (future)
 fn sort[T: Comparable](list: List[T]):
@@ -131,9 +131,9 @@ fn sort[T: Comparable](list: List[T]):
 **Examples**:
 ```ryo
 impl Counter:
-    fn increment(mut self) {  # Borrow or move?
+    fn increment(mut self):  # Borrow or move?
         self.count += 1
-    }
+
     fn drop(mut self): ...   # Drop must take ownership
 
 # Usage unclear:
@@ -143,40 +143,141 @@ counter.increment()  # Does counter still exist?
 **Recommendation**: Use Rust-like explicit syntax:
 ```ryo
 impl Counter:
-    fn increment(&mut self) {     # Mutable borrow - clear
+    fn increment(&mut self):     # Mutable borrow - clear
         self.count += 1
-    }
-    fn consume(self) {            # Take ownership - clear  
+
+    fn consume(self):            # Take ownership - clear
         # ...
-    }
+
     fn drop(self): ...           # Drop takes ownership
 ```
 
-### 6. Error Trait System Missing 🔴
+### 6. Error Handling with Automatic Composition ✅ RESOLVED
 
-**Problem**: `?` operator won't work across different error types without conversion mechanism.
+**Previously**: Developers had to create wrapper error types when composing functions with different error types, creating boilerplate (the "wrapper problem").
 
-**Examples**:
+**Solution Implemented**: Comprehensive error union system inspired by Zig with improvements from Swift and Rust.
+
+#### Key Features:
+
+1. **Single-Variant Errors Only** (simplified design):
+   ```ryo
+   error Timeout                          # Unit error
+   error NotFound(str)                    # Message-only error
+   error HttpError(status: int, message: str)  # Structured error
+   ```
+
+2. **Module-Based Grouping** (organize related errors):
+   ```ryo
+   module math:
+       error DivisionByZero
+       error InvalidInput(message: str)
+       error OverflowError
+   ```
+
+3. **Error Union Types** (automatic composition from `try`):
+   ```ryo
+   # Explicit union - manually specified
+   fn process() -> (FileError | ParseError)!Data:
+       file = try read_file(path)
+       data = try parse(file)
+       return data
+
+   # Inferred union - compiler automatically infers from try expressions
+   fn process() -> !Data:
+       file = try read_file(path)      # FileError
+       data = try parse(file)          # ParseError
+       return data
+   # Compiler infers: (FileError | ParseError)!Data
+   ```
+
+4. **Error Trait** (automatic message generation):
+   ```ryo
+   # All errors implement Error trait with .message() method
+   result = fetch_resource(url) catch |e|:
+       print(e.message())  # Automatic or custom message
+       return
+   ```
+
+5. **Error Propagation** (no wrapper boilerplate):
+   ```ryo
+   # Before (wrapper boilerplate):
+   error AppError:
+       Http(HttpError)
+       Io(IoError)
+
+   # After (automatic composition):
+   fn fetch_and_save() -> !():
+       data = try http.get("...")     # Different errors
+       try files.write(data)           # Automatically composed
+       return
+   # Compiler infers: (HttpError | IoError)!()
+   ```
+
+6. **Pattern Matching (Exhaustive by Default)**:
+   - **Single error types**: Exhaustive matching required (all variants must be handled)
+   - **Error unions**: Exhaustive matching required (compiler enforces handling all types in union)
+   - **Catch-all pattern**: Use `_` when you want generic handling for unspecified errors
+
+#### Examples:
+
+**Single error type (exhaustive):**
 ```ryo
-fn fetch_and_save() -> Result[(), Error] {
-    data = await http.get("...")?  # HttpError -> Error?
-    await files.write(data)?       # IoError -> Error?
-    return Ok(())
-}
+result = divide(10.0, 0.0) catch |e|:
+    match e:
+        math.DivisionByZero:
+            print("Cannot divide by zero")
+    return
+# MUST handle the single error type
 ```
 
-**Recommendation**: Define error trait system:
+**Error union (exhaustive matching):**
 ```ryo
-trait Error:
-    fn message(self) -> str
-
-trait From[T]:
-    fn from(value: T) -> Self
-
-# Enable automatic conversions for ?
-impl From[HttpError] for Error: ...
-impl From[IoError] for Error: ...
+result = complex_operation() catch |e|:
+    match e:
+        math.DivisionByZero:
+            print("Cannot divide by zero")
+        math.InvalidInput(msg):
+            print(f"Invalid: {msg}")
+        io.FileNotFound(path):
+            print(f"File not found: {path}")
+        parse.InvalidJson(reason):
+            print(f"Parse error: {reason}")
+    return
+# MUST handle all error types in the union (unless using catch-all)
 ```
+
+**Using catch-all for generic handling:**
+```ryo
+result = complex_operation() catch |e|:
+    match e:
+        math.DivisionByZero:
+            print("Math error!")
+        _:  # Explicit catch-all: handle all other errors the same way
+            log_error(e.message())
+            print("Generic error occurred")
+    return
+```
+
+#### Benefits:
+- ✅ **Maximum simplicity**: Single-variant only (one syntax to learn)
+- ✅ **Zero boilerplate**: No wrapper types, no multi-variant boilerplate
+- ✅ **Type safety**: All errors explicitly tracked by type system
+- ✅ **Composability**: Functions naturally compose without explicit error mapping
+- ✅ **Safety**: Exhaustive matching by default ensures all error paths are handled
+- ✅ **Ergonomic**: `try` keyword for propagation, `catch` for handling
+- ✅ **Explicit handling**: `try`/`catch` makes all error paths visible in code
+- ✅ **Zig-inspired**: Simple error sets (like Zig) with payload support (unlike Zig)
+
+#### Key Safety Features:
+- **No direct unwrap**: Error values cannot be used without `try`/`catch` or propagation
+- **Exhaustive matching**: Compiler requires handling all error types in a union (or explicit catch-all)
+- **Automatic inference**: Compiler tracks error types and infers unions automatically
+- **Module namespacing**: Related errors organized in modules (not multi-variant syntax)
+- **Message support**: All errors automatically implement `.message()` method
+- **From trait**: Allows explicit cross-layer error conversion when needed
+
+This design achieves **maximum simplicity** (single-variant errors only with module grouping) while maintaining **strong safety guarantees** (exhaustive matching by default). It eliminates the "wrapper problem" without requiring multi-variant syntax, inspired by Zig's philosophy of simplicity.
 
 ## Moderate Issues
 
@@ -190,11 +291,11 @@ impl From[IoError] for Error: ...
 fn main():
     async_runtime.run(async_main())
 
-async fn async_main() -> Result[(), Error]:
+async fn async_main() -> AppError!():
     ...
 
 # Option B: Compiler magic
-async fn main() -> Result[(), Error]:  # Compiler starts runtime
+async fn main() -> AppError!():  # Compiler starts runtime
     # ...
 ```
 
@@ -233,18 +334,127 @@ fn process_shapes(shapes: List[&dyn Drawable]):
 ## Resolution Status
 
 **✅ Resolved:**
-3. ~~Remove type names from keywords~~ - Moved `Result`, `Ok`, `Err`, `Some` to built-in types
-4. ~~Define generic syntax completely~~ - Moved detailed syntax to proposals.md 
+3. ~~Remove type names from keywords~~ - Removed `Result`, `Optional`, `Ok`, `Err`, `Some` from keywords
+4. ~~Define generic syntax completely~~ - Moved detailed syntax to proposals.md
 5. ~~Clarify method self parameters~~ - Applied explicit `&self`, `&mut self`, `self` syntax
+6. ~~Design error trait system~~ - Implemented `error` keyword, `try`/`catch` operators, `From` trait
 7. ~~Define async main function~~ - Specified sync main only with explicit runtime calls
 8. ~~Resolve operator inconsistencies~~ - Removed channel operators from current spec
 9. ~~Consider dynamic dispatch options~~ - Added future trait objects plan
 
 **🔄 Deferred for Review:**
 1. Fix tuple syntax ambiguity - Keep in file for later review
-2. Resolve borrow/move inconsistency - Keep in file for later review  
-6. Design basic error trait system - Keep in file for later review
+2. Resolve borrow/move inconsistency - Keep in file for later review
 10. Clarify array/slice syntax - Keep in file for later review
+
+## Design Decision: Stack Traces vs Performance Trade-Off ✅ RESOLVED
+
+**Decision**: Ryo prioritizes **debugging capability over raw performance**. Stack traces are **always captured and included by default**.
+
+### The Trade-Off
+
+**Option A: Always Capture Stack Traces** ✅ **CHOSEN**
+- **Pros:**
+  - Best debugging experience - developers can always see where errors occurred
+  - Transparent - no configuration needed to get debugging info
+  - Consistent behavior across all deployments
+  - Python-like developer experience (always have traceback)
+  - Fault analysis is immediate without reproducing issues
+- **Cons:**
+  - ~5-10% runtime overhead (estimate, varies by workload)
+  - ~20-30% larger binary size (due to DWARF debug symbols)
+  - Memory overhead for maintaining stack frame information
+
+**Option B: Debug-Only Stack Traces**
+- **Pros:**
+  - Zero overhead in release builds
+  - Better performance in production
+  - Smaller release binaries (no debug symbols)
+- **Cons:**
+  - Different behavior between debug and release builds (confusing)
+  - Production crashes lack debugging info (must reproduce with debug build)
+  - More complex tooling (need separate debug and release artifacts)
+  - Common source of "works in debug, fails in production" issues
+
+**Option C: Opt-In Stack Traces**
+- **Pros:**
+  - Zero cost when disabled
+  - Developers choose trade-off per application
+- **Cons:**
+  - Easy to forget to enable for troubleshooting
+  - Inconsistent debugging across projects
+  - Defeats purpose if not enabled when needed
+  - Complexity - must manage feature flag
+
+**Option D: No Stack Traces**
+- **Pros:**
+  - Zero overhead, maximum performance
+  - Minimal complexity in runtime
+- **Cons:**
+  - Worst debugging experience
+  - Requires external tools (debuggers, logging)
+  - Poor for production incident response
+  - Contradicts Ryo's goal of being "easy to debug"
+
+### Rationale for Chosen Approach
+
+Ryo's design philosophy emphasizes **developer productivity and debugging** over micro-optimization. The reasoning:
+
+1. **Developer Time is Expensive**: The 5-10% performance cost is often worth 10x faster debugging
+2. **Production Incidents**: When systems fail in production, having stack traces is invaluable
+3. **Zero Configuration**: No environment variables or flags needed for normal debugging
+4. **Consistency**: Same behavior in all build modes - no surprises
+5. **Python Heritage**: Ryo targets developers from Python who expect always-available tracebacks
+6. **Real-World Data**: Profile before optimizing - most applications won't be bottlenecked by stack trace overhead
+
+### Implementation Details
+
+- **DWARF Format**: Debug symbols generated via Cranelift backend
+- **Always Included**: No compiler flag needed
+- **Strippable**: `--strip` flag can remove debug symbols for production if needed (not recommended)
+- **Controllable Output**: `RYOLANG_BACKTRACE` environment variable controls verbosity
+- **Accessible at Runtime**: `.location()` and `.stack_trace()` methods available on errors
+
+### When This Trade-Off Makes Sense
+
+This trade-off is appropriate for Ryo because:
+
+1. **Target Use Cases**: Web services, CLI tools, data processing - rarely performance-limited by stack traces
+2. **Development Speed**: Most projects prioritize fast debugging over 5% performance gain
+3. **Production Operations**: Stack traces from production errors are worth the cost
+4. **Ecosystem Compatibility**: Aligns with Python/JavaScript/Go patterns (always have stack traces)
+
+### When This Might NOT Make Sense
+
+For applications where this trade-off is problematic:
+- Extreme real-time systems (sub-millisecond latencies)
+- Embedded systems with very tight memory constraints
+- Performance-critical inner loops running billions of times
+
+**Mitigation**: Use `--strip` to remove debug symbols, or profile to verify stack traces aren't actually the bottleneck.
+
+### Comparison with Other Languages
+
+| Language | Stack Traces | Default | Trade-off |
+|----------|--------------|---------|-----------|
+| **Ryo** | ✅ Always | Always captured | Performance < Debugging |
+| Python | ✅ Always | Always captured | Performance < Debugging |
+| Go | ✅ Always | Always captured | Performance < Debugging |
+| Rust | ✅ With RUST_BACKTRACE | Opt-in | Performance > Debugging |
+| C/C++ | ❌ Manual setup | Manual logging | Performance > Debugging |
+| Java | ✅ Always | Always captured | Performance < Debugging |
+
+Ryo aligns with Python/Go (developer-friendly) rather than Rust (performance-optimized).
+
+### Future Flexibility
+
+While the v1.0 decision is firm, future versions can provide:
+- Lazy stack trace materialization (only capture on error)
+- Sampling profilers for production monitoring
+- Conditional compilation to disable in extremely hot code paths
+- Zero-cost abstractions for performance-critical sections
+
+The decision is not irrevocable, but the default remains: **debugging capability first**.
 
 ## Next Steps (Remaining Issues)
 

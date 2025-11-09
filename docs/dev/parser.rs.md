@@ -33,7 +33,7 @@ pub fn program_parser<'a>() -> impl Parser<'a, &'a [(Token, Span)], Program, ext
     let int_literal = select! { Token::LiteralInt(val) => Literal::Int(val) }.labelled("integer literal");
 
     // Parser for basic type expressions (just identifier for now)
-    // TODO: Expand for List[T], Map[K,V], Optional[T], Result[T,E], tuple types etc.
+    // TODO: Expand for List[T], Map[K,V], ?T (optional), ErrorType!T (error unions), tuple types etc.
     let type_expr = ident.map(|name| TypeExpr::Name(name)).labelled("type");
 
     // --- Expressions (Minimal) ---
@@ -156,7 +156,7 @@ use chumsky::{error::Rich, span::SimpleSpan}; // Import Rich error type
 5.  **Minimal Subset:** This code *only* parses `fn main(): return <integer>;`. Expanding it involves:
     *   **Expressions:** Adding parsers for binary operators (handling precedence with `left_assoc`, `right_assoc`), unary operators, function calls, tuple/list/map literals, variable access (`ident`).
     *   **Statements:** Adding parsers for variable declarations (`let`/`mut`), `if`/`elif`/`else`, `for`, `match`, expression statements (like a function call on its own).
-    *   **Types:** Expanding `type_expr` to handle `List[T]`, `Map[K,V]`, `(T1, T2)`, `Optional[T]`, `Result[T,E]`.
+    *   **Types:** Expanding `type_expr` to handle `List[T]`, `Map[K,V]`, `(T1, T2)`, `?T` (optional), `ErrorType!T` (error unions).
     *   **Function Definitions:** Parsing parameters `(name: Type, ...)` and return types `-> Type`. Allowing functions other than `main`.
     *   **Top Level:** Allowing multiple functions, `struct`, `enum`, `trait`, `impl`, `import` statements at the top level of a file within the `program` parser.
 6.  **Indentation:** This is the **biggest missing piece** here. You need a pre-processing step (lexer wrapper) to convert newline/tab sequences into `Indent`/`Dedent`/`Newline` tokens. The parser then uses these tokens to structure blocks instead of relying on `{}` or simple sequencing. Chumsky has examples/strategies for handling indentation-sensitive languages, but it adds significant complexity.

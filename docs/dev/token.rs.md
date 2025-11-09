@@ -50,8 +50,11 @@ pub enum Token {
     KwMatch,
     #[token("pub")]
     KwPub,
-    #[token("Result")] // Treat built-in type names like keywords initially
-    KwResult,         // Alternatively, handle via Ident and check later
+    // NOTE: Result, Optional, Ok, Err, Some should NOT be keywords (see design_issues.md)
+    // They are type names, not language keywords. Should be treated as identifiers.
+    // The following token definitions are temporary/placeholder:
+    #[token("Result")]
+    KwResult,
     #[token("Optional")]
     KwOptional,
     #[token("Ok")]
@@ -60,7 +63,7 @@ pub enum Token {
     KwErr,
     #[token("Some")]
     KwSome,
-    // Note: 'None' is Optional.None, not a keyword
+    // Note: 'none' is the null value keyword, not a type name
     #[token("true")]
     KwTrue,
     #[token("false")]

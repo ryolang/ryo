@@ -39,6 +39,15 @@ Ryo **/ˈraɪoʊ/** (Rye-oh) is a modern programming language designed for devel
 
 5. **Modern tooling** — Integrated package manager, fast compiler via Cranelift, and built-in testing. Everything you need in one tool.
 
+## Safety Guarantees
+
+Ryo's design prioritizes preventing entire classes of bugs at compile time:
+
+- **No null pointer exceptions** — Optional types (`?T`) are explicit and must be handled with `orelse`
+- **No silent errors** — Error types (`E!T`) must be handled with `try` or `catch`
+- **No direct unwrap allowed** — The compiler rejects any attempt to use an error or optional value without proper handling
+- **No use-after-free** — Ownership and borrowing rules prevent accessing freed memory
+
 ```ryo title="hello.ryo"
 import net.http
 
@@ -46,17 +55,24 @@ struct User:
     id: int
     name: str
 
-async fn fetch_user(id: int) -> Result[User, HttpError] {
-    response = await http.get(f"https://api.example.com/users/{id}")
-    user = await response.json[User]()
-    return Ok(user)
-}
+module http:
+    error NetworkFailure(reason: str)
+    error InvalidResponse
 
-fn main() -> Result[(), Error] {
-    user = async_runtime.run(fetch_user(1))?
+async fn fetch_user(id: int) -> (http.NetworkFailure | http.InvalidResponse)!User:
+    response = try await http.get(f"https://api.example.com/users/{id}")
+    user = try await response.json[User]()
+    return user
+
+fn main():
+    user = fetch_user(1) catch |e|:
+        match e:
+            http.NetworkFailure(reason):
+                print(f"Network error: {reason}")
+            http.InvalidResponse:
+                print("Invalid response")
+        return
     print(f"Hello, {user.name}!")
-    return Ok(())
-}
 ```
 
 ## Next Steps

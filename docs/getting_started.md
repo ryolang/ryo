@@ -5,9 +5,9 @@ Welcome to ⚡ Ryo **/ˈraɪoʊ/** (Rye-oh), a programming language designed for
 This guide will walk you through the basics of Ryo and help you write your first programs. Let's get started!
 
 !!! info "Installation Required"
-    
+
     Before following this guide, make sure you have Ryo installed on your system. See the [Installation Guide](installation.md) for detailed setup instructions.
-    
+
     You can verify your installation by running:
     ```bash
     ryo --version
@@ -115,10 +115,10 @@ fn main():
     # Get user input
     print("Enter a temperature value:")
     input_value = float(input())
-    
+
     print("Enter the scale (C for Celsius, F for Fahrenheit, K for Kelvin):")
     input_scale = input()
-    
+
     # Create Temperature struct based on input
     temp = match input_scale:
         "C" | "c":
@@ -130,12 +130,12 @@ fn main():
         _:
             print("Invalid scale! Defaulting to Celsius.")
             Temperature{value: input_value, scale: TempScale.Celsius}
-    
+
     # Convert to all scales and display
     celsius = to_celsius(temp)
     fahrenheit = to_fahrenheit(temp)
     kelvin = to_kelvin(temp)
-    
+
     print(f"Celsius: {celsius.value:.2f}°C")
     print(f"Fahrenheit: {fahrenheit.value:.2f}°F")
     print(f"Kelvin: {kelvin.value:.2f}K")
@@ -185,7 +185,7 @@ fn add(x: int, y: int) -> int: # Function to add two integers, returns an intege
 
 ### Variables
 
-Ryo uses **implicit variable declaration** within functions. You simply use a variable name, and the compiler infers its type based on the value assigned to it.
+Variables in Ryo **do not require a declaration keyword**. You simply use a variable name, and the compiler infers its type based on the value assigned to it. Variables are **immutable by default**; use the `mut` keyword for mutable variables.
 
 ```ryo
 fn example_variables():
@@ -316,29 +316,243 @@ fn main():
     print(response.body)
 ```
 
-## 4. Simple Error Handling
+## 4. Error Handling
 
-Ryo provides a basic way to handle errors with the `Result[T, E]` type:
+Ryo provides type-safe error handling with **error types** and the `try`/`catch` operators. The system is designed to prevent silent failures while remaining ergonomic and expressive.
+
+### Single-Variant Errors
+
+For simple error cases, Ryo provides syntactic sugar with single-variant errors:
 
 ```ryo
-fn divide(numerator: float, denominator: float) -> Result[float, Err]:
-    if denominator == 0.0:
-        return Err("Cannot divide by zero") # Return an error
-    else:
-        return Ok(numerator / denominator) # Return a successful result
+# Unit error (no data)
+error Timeout
+
+# Message-only error
+error NotFound(str)
+
+# Structured error with multiple fields
+error HttpError(status: int, message: str)
 ```
 
-You can handle the result using a `match` expression:
+Single-variant errors make simple error cases concise:
+
+```ryo
+fn fetch_resource(url: str) -> HttpError!str:
+    response = make_request(url)
+    if response.status != 200:
+        return HttpError{status: response.status, message: "Failed to fetch"}
+    return response.body
+
+fn find_user(id: int) -> NotFound!User:
+    for user in users:
+        if user.id == id:
+            return user
+    return NotFound("User not found")
+
+fn main():
+    # Handling single-variant error
+    user = find_user(42) catch |e|:
+        print(e.message())  # Prints: "User not found"
+        return
+    print(user.name)
+```
+
+### Grouping Related Errors with Modules
+
+For organizing related errors, use modules:
+
+```ryo
+# In math module
+module math:
+    error DivideByZero
+    error InvalidInput(str)
+    error OverflowError
+
+# In parse module
+module parse:
+    error InvalidFormat(str)
+    error InvalidEncoding
+```
+
+### Functions That Can Fail
+
+Use the `ErrorType!T` syntax to indicate a function can return an error or a value:
+
+```ryo
+fn divide(numerator: float, denominator: float) -> math.DivideByZero!float:
+    if denominator == 0.0:
+        return math.DivideByZero
+    return numerator / denominator
+
+fn parse_number(text: str) -> math.InvalidInput!float:
+    if text.is_empty():
+        return math.InvalidInput("Text cannot be empty")
+    # Actual parsing...
+    return float(text)
+```
+
+### Handling Errors with `catch`
+
+Use `catch` for error handling with pattern matching. Error unions require exhaustive matching:
 
 ```ryo
 fn main():
-    result = divide(10.0, 2.0)
-    match result:
-        Ok(value):
-            print(f"Division successful: {value}")
-        Err(error_message):
-            print(f"Division failed: {error_message}")
+    # Single error - must handle it
+    result = divide(10.0, 2.0) catch |e|:
+        match e:
+            math.DivideByZero:
+                print("Cannot divide by zero!")
+                return
+
+    print(f"Division result: {result}")
+
+    # Multiple errors - must handle all
+    result2 = complex_operation() catch |e|:
+        match e:
+            math.DivideByZero:
+                print("Cannot divide!")
+            math.InvalidInput(msg):
+                print(f"Invalid input: {msg}")
+            math.OverflowError:
+                print("Arithmetic overflow!")
+        return
+
+    print(f"Complex result: {result2}")
 ```
+
+### Propagating Errors with `try`
+
+Use `try` to propagate errors up the call stack. With `try`, errors are automatically composed when functions have different error types:
+
+```ryo
+# Simple case: same error type
+fn calculate() -> math.DivideByZero!float:
+    x = try divide(20.0, 4.0)
+    y = try divide(x, 2.0)
+    return y
+
+# Composing different error types - automatic!
+module io:
+    error NotFound
+    error PermissionDenied
+
+module parse:
+    error InvalidFormat(str)
+    error InvalidEncoding
+
+fn load_and_parse(path: str) -> !str:
+    content = try read_file(path)      # Returns io.NotFound or io.PermissionDenied
+    parsed = try parse_json(content)   # Returns parse.InvalidFormat or parse.InvalidEncoding
+    return parsed
+# Compiler infers: (io.NotFound | io.PermissionDenied | parse.InvalidFormat | parse.InvalidEncoding)!str
+
+fn main():
+    result = calculate() catch |e|:
+        match e:
+            math.DivideByZero:
+                print("Cannot divide!")
+        return
+
+    print(f"Final result: {result}")
+```
+
+### Error Union Types
+
+When composing functions with different error types, Ryo automatically creates error unions. You can also express them explicitly:
+
+```ryo
+# Explicit error union
+fn complex_operation(x: float, y: float) -> (math.DivideByZero | validation.NegativeValue)!float:
+    if x < 0.0:
+        return validation.NegativeValue
+    return try divide(x, y)
+
+# Inferred error union from try expressions
+fn process_data(file_path: str) -> !Data:
+    # io errors from try read_file()
+    content = try read_file(file_path)
+    # parse errors from try parse()
+    parsed = try parse(content)
+    # math errors from try calculate()
+    result = try calculate(parsed.values)
+    return result
+# Compiler automatically infers: (io.NotFound | io.PermissionDenied | parse.InvalidFormat | math.DivideByZero)!Data
+```
+
+### Error Messages
+
+All errors automatically implement a `.message()` method:
+
+```ryo
+error HttpError(status: int, message: str)
+
+result = fetch_resource(url) catch |e|:
+    # .message() returns the message field automatically
+    print(e.message())  # Prints the message from the error
+    return
+```
+
+For simple message-only errors, the message is automatically available:
+
+```ryo
+error Timeout(str)
+
+result = try_with_timeout() catch |e|:
+    print(e.message())  # Automatically returns the string value
+    return
+```
+
+### Optional Values
+
+Ryo also provides optional types (`?T`) for when a value may or may not be present:
+
+```ryo
+fn find_user(users: List[User], id: int) -> ?User:
+    for user in users:
+        if user.id == id:
+            return user
+    return none  # No user found
+
+fn main():
+    users = [User{id: 1, name: "Alice"}, User{id: 2, name: "Bob"}]
+
+    # Safe optional chaining
+    name = find_user(users, 1)?.name orelse "Unknown"
+    print(f"User name: {name}")
+
+    # Null check
+    if find_user(users, 3) != none:
+        print("User found!")
+    else:
+        print("User not found")
+```
+
+### Important: No Direct Unwrap
+
+**You cannot directly access error or optional values without using `try`, `catch`, or `orelse`.** The compiler will reject code that tries to do this:
+
+```ryo
+# ❌ COMPILE ERROR: Cannot use error value directly
+divide(10.0, 0.0)  # Returns MathError!float
+value = result     # ERROR: must handle the error type!
+
+# ❌ COMPILE ERROR: Cannot access fields on optional
+user = find_user(users, 1)
+name = user.name   # ERROR: user is ?User, can't access .name directly
+
+# ✅ CORRECT: Handle the error or optional value
+result = divide(10.0, 2.0) catch |e|:
+    handle_error(e)
+    return
+# Now result is definitely a float
+
+user = find_user(users, 1)
+name = user?.name orelse "Unknown"
+# Now name is definitely a string
+```
+
+This design ensures all error and optional cases are handled explicitly, preventing silent failures.
 
 ## 5. Command-Line Tools
 
@@ -450,13 +664,13 @@ Ryo uses an ownership model inspired by Rust but simplified for better learnabil
 fn create_and_use():
     # 'message' owns this string data
     message = "Hello, Ryo!"
-    
+
     # The 'print' function borrows 'message' temporarily
     print(message)
-    
+
     # 'message' is still valid here
     print(f"Length: {len(message)}")
-    
+
     # When 'message' goes out of scope, its memory is automatically freed
 ```
 
@@ -498,17 +712,21 @@ See how Ryo compares when handling potential errors:
 
 **Ryo:**
 ```ryo
-fn divide(a: int, b: int) -> Result[int, Err]:
+error DivisionByZero
+
+fn divide(a: int, b: int) -> DivisionByZero!int:
     if b == 0:
-        return Err("Division by zero")
-    return Ok(a / b)
+        return DivisionByZero
+    return a / b
 
 # Usage
-match divide(10, 2):
-    Ok(result):
-        print(f"Result: {result}")
-    Err(msg):
-        print(f"Error: {msg}")
+result = divide(10, 2) catch |e|:
+    match e:
+        DivisionByZero:
+            print("Error: Division by zero")
+    return
+
+print(f"Result: {result}")
 ```
 
 **Python:**
@@ -518,7 +736,7 @@ def divide(a, b):
         return a / b
     except ZeroDivisionError:
         return "Division by zero"
-        
+
 # Usage
 result = divide(10, 2)
 if isinstance(result, str):
@@ -551,7 +769,193 @@ match divide(10, 2) {
 
 * **Ryo is ideal for:** Web services, data processing, CLI tools, game development, and systems that need both safety and simplicity.
 
-## 10. Next Steps
+## 10. Debugging Your Ryo Programs
+
+When something goes wrong, Ryo provides helpful debugging information to quickly identify and fix the problem.
+
+### Understanding Error Messages
+
+When an error occurs in your Ryo program, you'll get a clear message with location information:
+
+```ryo
+module user:
+    error NotFound(id: int)
+
+fn get_user(id: int) -> user.NotFound!User:
+    if id < 0:
+        # This error will capture: file, line, column, function name
+        return user.NotFound(id)
+    # ... fetch user ...
+    User{...}
+
+fn main():
+    user = get_user(42) catch |e|:
+        # Access error message
+        print(f"Error: {e.message()}")
+
+        # Find where the error occurred
+        if loc = e.location():
+            print(f"Location: {loc.file}:{loc.line}:{loc.column} in {loc.function}")
+```
+
+### Reading Panic Messages
+
+When your program panics (hits an unrecoverable error), it prints diagnostic information before stopping:
+
+```
+thread 'main' panicked at src/main.ryo:42:13 in function 'critical_operation':
+  Database connection failed
+
+Stack trace:
+  0: main::critical_operation (src/main.ryo:42:13)
+  1: main::initialize (src/main.ryo:18:5)
+  2: main (src/main.ryo:10:5)
+
+note: Set RYOLANG_BACKTRACE=full for more verbose output
+```
+
+**Reading the output:**
+- **Thread and message**: Which function panicked and why
+- **File:line:column**: Exact location of the panic
+- **Stack trace**: Each frame shows a function call leading to the panic
+  - Frame 0 is the panic (most recent)
+  - Top frame in stack is the entry point (oldest)
+- **Frame format**: `function_path (file:line:column)`
+
+### Using Stack Traces for Debugging
+
+Stack traces show you the complete call chain. To understand a panic:
+
+1. **Read the panic message** - What went wrong?
+2. **Check frame 0** - Where did it panic?
+3. **Follow the stack** - How did we get there?
+
+Example:
+
+```ryo
+fn validate_age(age: int):
+    if age < 0 or age > 150:
+        panic(f"Invalid age: {age}")  # This is frame 0
+
+fn create_user(name: str, age: int) -> User:
+    validate_age(age)  # This is frame 1
+    User{name: name, age: age}
+
+fn main():
+    # This is frame 2
+    user = create_user("Alice", -5)
+    # Panic occurs here!
+```
+
+When this panics, the stack trace shows exactly where (-5 is invalid age) and how we got there (create_user called validate_age).
+
+### Accessing Error Location and Stack Trace
+
+Ryo errors automatically capture debugging information. You can access it at runtime:
+
+```ryo
+result = risky_operation() catch |e|:
+    # Get where the error was created
+    if location = e.location():
+        print(f"Error at {location.file}:{location.line}")
+        print(f"In function: {location.function}")
+
+    # Get the full call stack at time of error
+    if trace = e.stack_trace():
+        print("Stack frames:")
+        for frame in trace.frames:
+            print(f"  {frame.function} at {frame.file}:{frame.line}")
+```
+
+### Debugging Tips
+
+**1. Use descriptive error messages:**
+```ryo
+# ❌ Not helpful
+error Error(str)
+# Error when creating user? Error when validating? Unclear.
+
+# ✅ Better
+error ValidationFailed(field: str, reason: str)
+# Clear what failed and why
+```
+
+**2. Include context in errors:**
+```ryo
+module database:
+    error QueryFailed(sql: str, reason: str)
+
+fn query_users(age: int) -> database.QueryFailed!List[User]:
+    sql = f"SELECT * FROM users WHERE age > {age}"
+    result = try db.execute(sql)
+    # Error will show the SQL query, helping you debug
+
+```
+
+**3. Print location for quick diagnosis:**
+```ryo
+result = operation() catch |e|:
+    if loc = e.location():
+        # Go directly to the source code location
+        print(f"Fix it here: {loc.file}:{loc.line}")
+```
+
+**4. Avoid panics in production code:**
+```ryo
+# ❌ Bad - panics are unrecoverable
+fn divide(a: float, b: float) -> float:
+    if b == 0:
+        panic("Cannot divide by zero!")  # Crashes entire program
+    a / b
+
+# ✅ Better - use error types
+module math:
+    error DivisionByZero
+
+fn divide(a: float, b: float) -> math.DivisionByZero!float:
+    if b == 0:
+        return math.DivisionByZero  # Caller can handle it
+    a / b
+```
+
+**5. Use environment variables to control stack trace detail:**
+```bash
+# See standard stack trace (default)
+./my_program
+
+# See verbose stack trace with more detail
+RYOLANG_BACKTRACE=full ./my_program
+
+# Turn off stack trace (not recommended)
+RYOLANG_BACKTRACE=0 ./my_program
+```
+
+### Common Debugging Scenarios
+
+**Scenario 1: "Where did this error come from?"**
+```ryo
+result = complex_operation() catch |e|:
+    loc = e.location()  # Points directly to the source
+```
+
+**Scenario 2: "Why did my program panic?"**
+- Read the panic message and frame 0
+- Check the source code at that location
+- See what condition triggered the panic
+
+**Scenario 3: "How does the error propagate through my code?"**
+```ryo
+result = complex_operation() catch |e|:
+    if trace = e.stack_trace():
+        for (i, frame) in enumerate(trace.frames):
+            print(f"{i}: {frame.function}")  # Shows the call path
+```
+
+### Performance Note
+
+Ryo automatically captures stack traces when errors occur. This adds a small overhead (about 5-10%) but is enabled by default because debugging is more important than micro-optimizations. If your program is performance-critical, profile it first to see if stack trace capture is actually a bottleneck.
+
+## 11. Next Steps
 
 Congratulations on completing this Getting Started guide! You've learned the basics of Ryo syntax.
 

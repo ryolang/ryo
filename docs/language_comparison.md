@@ -52,16 +52,21 @@ else:
 
 **Ryo:**
 ```ryo
-fn divide(a: int, b: int) -> Result[int, str]:
-    if b == 0:
-        return Err("Division by zero")
-    return Ok(a / b)
+module math:
+    error DivisionByZero
 
-match divide(10, 2):
-    Ok(result):
-        print(f"Result: {result}")
-    Err(msg):
-        print(f"Division failed: {msg}")
+fn divide(a: int, b: int) -> math.DivisionByZero!int:
+    if b == 0:
+        return math.DivisionByZero
+    return a / b
+
+result = divide(10, 2) catch |e|:
+    match e:
+        math.DivisionByZero:
+            print("Division failed: division by zero")
+    return
+
+print(f"Result: {result}")
 ```
 
 **Migration Path:**
@@ -137,7 +142,7 @@ fn main():
 |---------|----|----|-----------|
 | **Memory Safety** | Manual memory management, GC | Ownership with compile-time checks | Ryo: Memory safety without GC overhead |
 | **Type System** | Simple but limited | Static with inference and generics | Ryo: More expressive while staying simple |
-| **Error Handling** | `if err != nil` pattern | Result types with `?` operator | Ryo: More ergonomic error handling |
+| **Error Handling** | `if err != nil` pattern | Error types with `try`/`catch` | Ryo: More ergonomic error handling |
 | **Generics** | Recently added, limited | Designed from the ground up | Ryo: More powerful generic system |
 | **Concurrency** | Goroutines and channels | Async/await with structured concurrency | Both: Excellent, different approaches |
 
@@ -219,7 +224,7 @@ async fn main():
 ### Choose Ryo over Go when:
 - **Memory safety is non-negotiable:** Systems programming, security-critical applications
 - **More expressive types needed:** Complex domain modeling, API design
-- **Better error handling desired:** Exhaustive error checking, `?` operator ergonomics
+- **Better error handling desired:** Exhaustive error checking, `try`/`catch` ergonomics
 - **No GC overhead acceptable:** Real-time systems, predictable performance
 
 ### Choose Ryo over TypeScript when:
@@ -246,7 +251,7 @@ async fn main():
 
 ### From Go
 1. **Adopt memory safety:** Learn ownership to prevent memory bugs
-2. **Enhance error handling:** Use Result types and `?` operator
+2. **Enhance error handling:** Use error types with `try`/`catch` and automatic error unions
 3. **Upgrade type system:** Leverage generics and inference
 4. **Similar simplicity:** Maintain minimalist philosophy
 5. **Better tooling:** Modern compiler and package manager
