@@ -1,0 +1,3 @@
+# Error example: missing assignment operator
+# This should fail because = is required
+x 42
