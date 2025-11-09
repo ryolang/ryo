@@ -160,19 +160,19 @@ impl Counter:
 
 #### Key Features:
 
-1. **Single-Variant Errors** (syntactic sugar for simple cases):
+1. **Single-Variant Errors Only** (simplified design):
    ```ryo
    error Timeout                          # Unit error
    error NotFound(str)                    # Message-only error
    error HttpError(status: int, message: str)  # Structured error
    ```
 
-2. **Multi-Variant Errors** (full ADT support):
+2. **Module-Based Grouping** (organize related errors):
    ```ryo
-   error MathError:
-       DivisionByZero
-       InvalidInput(message: str)
-       OverflowError
+   module math:
+       error DivisionByZero
+       error InvalidInput(message: str)
+       error OverflowError
    ```
 
 3. **Error Union Types** (automatic composition from `try`):
@@ -214,54 +214,70 @@ impl Counter:
    # Compiler infers: (HttpError | IoError)!()
    ```
 
-6. **Pattern Matching Flexibility**:
+6. **Pattern Matching (Exhaustive by Default)**:
    - **Single error types**: Exhaustive matching required (all variants must be handled)
-   - **Error unions**: Non-exhaustive matching allowed (can handle some, others propagate)
+   - **Error unions**: Exhaustive matching required (compiler enforces handling all types in union)
+   - **Catch-all pattern**: Use `_` when you want generic handling for unspecified errors
 
 #### Examples:
 
-**Exhaustive matching (single error type):**
+**Single error type (exhaustive):**
 ```ryo
 result = divide(10.0, 0.0) catch |e|:
     match e:
-        MathError.DivisionByZero:
+        math.DivisionByZero:
             print("Cannot divide by zero")
-        MathError.InvalidInput(msg):
-            print(f"Invalid: {msg}")
-        MathError.OverflowError:
-            print("Overflow!")
     return
-# All variants MUST be handled (unless there's a catch-all _ pattern)
+# MUST handle the single error type
 ```
 
-**Non-exhaustive matching (error unions):**
+**Error union (exhaustive matching):**
 ```ryo
 result = complex_operation() catch |e|:
     match e:
-        NetworkError.Timeout(duration):
-            print(f"Timeout after {duration}ms")
-        ParseError.InvalidJson(reason):
+        math.DivisionByZero:
+            print("Cannot divide by zero")
+        math.InvalidInput(msg):
+            print(f"Invalid: {msg}")
+        io.FileNotFound(path):
+            print(f"File not found: {path}")
+        parse.InvalidJson(reason):
             print(f"Parse error: {reason}")
-        # Other errors (FileError, ValidationError) can be unhandled
-        # They would propagate to the caller
+    return
+# MUST handle all error types in the union (unless using catch-all)
+```
+
+**Using catch-all for generic handling:**
+```ryo
+result = complex_operation() catch |e|:
+    match e:
+        math.DivisionByZero:
+            print("Math error!")
+        _:  # Explicit catch-all: handle all other errors the same way
+            log_error(e.message())
+            print("Generic error occurred")
     return
 ```
 
 #### Benefits:
-- ✅ **Zero boilerplate**: No wrapper types needed
+- ✅ **Maximum simplicity**: Single-variant only (one syntax to learn)
+- ✅ **Zero boilerplate**: No wrapper types, no multi-variant boilerplate
 - ✅ **Type safety**: All errors explicitly tracked by type system
 - ✅ **Composability**: Functions naturally compose without explicit error mapping
-- ✅ **Flexibility**: Can use exhaustive matching for single types, non-exhaustive for unions
-- ✅ **Ergonomic**: `try` keyword feels natural for error propagation
+- ✅ **Safety**: Exhaustive matching by default ensures all error paths are handled
+- ✅ **Ergonomic**: `try` keyword for propagation, `catch` for handling
 - ✅ **Explicit handling**: `try`/`catch` makes all error paths visible in code
+- ✅ **Zig-inspired**: Simple error sets (like Zig) with payload support (unlike Zig)
 
 #### Key Safety Features:
 - **No direct unwrap**: Error values cannot be used without `try`/`catch` or propagation
+- **Exhaustive matching**: Compiler requires handling all error types in a union (or explicit catch-all)
 - **Automatic inference**: Compiler tracks error types and infers unions automatically
+- **Module namespacing**: Related errors organized in modules (not multi-variant syntax)
+- **Message support**: All errors automatically implement `.message()` method
 - **From trait**: Allows explicit cross-layer error conversion when needed
-- **Message support**: All errors can provide human-readable messages via trait
 
-This design eliminates the "wrapper problem" while maintaining type safety and enabling better error composition patterns than traditional exception systems.
+This design achieves **maximum simplicity** (single-variant errors only with module grouping) while maintaining **strong safety guarantees** (exhaustive matching by default). It eliminates the "wrapper problem" without requiring multi-variant syntax, inspired by Zig's philosophy of simplicity.
 
 ## Moderate Issues
 

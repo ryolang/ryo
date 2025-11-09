@@ -358,15 +358,21 @@ fn main():
     print(user.name)
 ```
 
-### Multi-Variant Errors
+### Grouping Related Errors with Modules
 
-For cases with multiple distinct error conditions, define errors with multiple variants:
+For organizing related errors, use modules:
 
 ```ryo
-error MathError:
-    DivideByZero
-    InvalidInput(message: str)
-    OverflowError
+# In math module
+module math:
+    error DivideByZero
+    error InvalidInput(str)
+    error OverflowError
+
+# In parse module
+module parse:
+    error InvalidFormat(str)
+    error InvalidEncoding
 ```
 
 ### Functions That Can Fail
@@ -374,36 +380,45 @@ error MathError:
 Use the `ErrorType!T` syntax to indicate a function can return an error or a value:
 
 ```ryo
-fn divide(numerator: float, denominator: float) -> MathError!float:
+fn divide(numerator: float, denominator: float) -> math.DivideByZero!float:
     if denominator == 0.0:
-        return MathError.DivideByZero
+        return math.DivideByZero
     return numerator / denominator
 
-fn parse_number(text: str) -> MathError!float:
+fn parse_number(text: str) -> math.InvalidInput!float:
     if text.is_empty():
-        return MathError.InvalidInput("Text cannot be empty")
+        return math.InvalidInput("Text cannot be empty")
     # Actual parsing...
     return float(text)
 ```
 
 ### Handling Errors with `catch`
 
-Use `catch` for error handling with pattern matching:
+Use `catch` for error handling with pattern matching. Error unions require exhaustive matching:
 
 ```ryo
 fn main():
-    # Single-variant error handling
+    # Single error - must handle it
     result = divide(10.0, 2.0) catch |e|:
         match e:
-            MathError.DivideByZero:
+            math.DivideByZero:
                 print("Cannot divide by zero!")
-            MathError.InvalidInput(msg):
+                return
+
+    print(f"Division result: {result}")
+
+    # Multiple errors - must handle all
+    result2 = complex_operation() catch |e|:
+        match e:
+            math.DivideByZero:
+                print("Cannot divide!")
+            math.InvalidInput(msg):
                 print(f"Invalid input: {msg}")
-            MathError.OverflowError:
+            math.OverflowError:
                 print("Arithmetic overflow!")
         return
 
-    print(f"Division result: {result}")
+    print(f"Complex result: {result2}")
 ```
 
 ### Propagating Errors with `try`
@@ -412,29 +427,31 @@ Use `try` to propagate errors up the call stack. With `try`, errors are automati
 
 ```ryo
 # Simple case: same error type
-fn calculate() -> MathError!float:
+fn calculate() -> math.DivideByZero!float:
     x = try divide(20.0, 4.0)
     y = try divide(x, 2.0)
     return y
 
 # Composing different error types - automatic!
-error FileError:
-    NotFound
-    PermissionDenied
+module io:
+    error NotFound
+    error PermissionDenied
 
-error ParseError:
-    InvalidFormat
-    InvalidEncoding
+module parse:
+    error InvalidFormat(str)
+    error InvalidEncoding
 
 fn load_and_parse(path: str) -> !str:
-    content = try read_file(path)      # Returns FileError!str
-    parsed = try parse_json(content)   # Returns ParseError!str
+    content = try read_file(path)      # Returns io.NotFound or io.PermissionDenied
+    parsed = try parse_json(content)   # Returns parse.InvalidFormat or parse.InvalidEncoding
     return parsed
-# Compiler infers: (FileError | ParseError)!str
+# Compiler infers: (io.NotFound | io.PermissionDenied | parse.InvalidFormat | parse.InvalidEncoding)!str
 
 fn main():
     result = calculate() catch |e|:
-        print("Calculation failed!")
+        match e:
+            math.DivideByZero:
+                print("Cannot divide!")
         return
 
     print(f"Final result: {result}")
@@ -446,21 +463,21 @@ When composing functions with different error types, Ryo automatically creates e
 
 ```ryo
 # Explicit error union
-fn complex_operation(x: float, y: float) -> (MathError | ValidationError)!float:
+fn complex_operation(x: float, y: float) -> (math.DivideByZero | validation.NegativeValue)!float:
     if x < 0.0:
-        return ValidationError.NegativeValue
+        return validation.NegativeValue
     return try divide(x, y)
 
 # Inferred error union from try expressions
 fn process_data(file_path: str) -> !Data:
-    # FileError from try read_file()
+    # io errors from try read_file()
     content = try read_file(file_path)
-    # ParseError from try parse()
+    # parse errors from try parse()
     parsed = try parse(content)
-    # MathError from try calculate()
+    # math errors from try calculate()
     result = try calculate(parsed.values)
     return result
-# Compiler automatically infers: (FileError | ParseError | MathError)!Data
+# Compiler automatically infers: (io.NotFound | io.PermissionDenied | parse.InvalidFormat | math.DivideByZero)!Data
 ```
 
 ### Error Messages

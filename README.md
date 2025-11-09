@@ -33,13 +33,13 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 *   **Syntax:** Python-inspired, tab-indented, expressions, statements
 *   **Types:** Static typing with bidirectional type inference (like Rust/TypeScript), primitives (`int`, `float`, `bool`, `str`, `char`), tuples, `struct`, `enum` (ADTs), `trait` (static dispatch initially). Function signatures require types, local variables inferred. Variables are immutable by default (no `let` keyword), use `mut` for mutability
 *   **Error Handling:** Type-safe, explicit error handling system:
-    - **Single-variant errors** for simple cases: `error Timeout`, `error NotFound(str)`
-    - **Multi-variant errors** with full ADT support: `error MathError: DivisionByZero, InvalidInput(str)`
-    - **Error unions** with automatic composition: `fn process() -> !Data` infers `(FileError | ParseError | MathError)!Data`
+    - **Single-variant errors only**: `error Timeout`, `error NotFound(str)`, `error HttpError(status: int, message: str)` - unified syntax for all error definitions
+    - **Module-based error grouping**: Organize related errors in modules: `module math: error DivisionByZero`
+    - **Error unions** with automatic composition: `fn process() -> !Data` infers `(FileError | ParseError)!Data` from `try` expressions
     - **Error trait** with automatic message generation: All errors implement `.message() -> str`
     - **Try/catch operators** for ergonomic error propagation and handling
     - **Optional types** (`?T` and `none`) for nullable values - no null pointer exceptions
-    - **Exhaustive pattern matching** for single errors, flexible non-exhaustive matching for error unions
+    - **Exhaustive pattern matching by default**: All error unions require handling all error types exhaustively (or explicit `_` catch-all)
 *   **Compile-Time Execution:** `comptime` blocks and functions
 *   **Tooling:** `ryo` command (compiler, runner, REPL, package manager frontend), `ryopkg` logic integrated, Cranelift backend (AOT/JIT/Wasm)
 *   **FFI:** C interoperability via `extern "C"` and `unsafe` blocks, `ffi` stdlib module. (Future Goal: Explore deeper integration with other language ecosystems like Python).
@@ -91,11 +91,11 @@ fn main():
     # Safe error handling
     print(process_user(user))
 
-error ProcessError:
-    InvalidUser
+module process:
+    error InvalidUser
 
-fn process_user(user: ?str) -> ProcessError!str:
-    name = user orelse return ProcessError.InvalidUser
+fn process_user(user: ?str) -> process.InvalidUser!str:
+    name = user orelse return process.InvalidUser
     return f"Processing user: {name}"
 ```
 

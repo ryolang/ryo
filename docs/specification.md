@@ -303,28 +303,36 @@ Ryo synthesizes ideas from several modern programming languages:
         return parse(response.body)
     ```
 
-#### **Multi-Variant Errors** (Complex Case)
+#### **Grouping Related Errors with Modules**
 
-*   **Definition Syntax:**
-    ```ryo
-    error IoError:
-        FileNotFound(path: str)
-        PermissionDenied(path: str)
-        DiskFull
+For organizing related errors, use module namespacing instead of multi-variant syntax:
 
-    error ParseError:
-        InvalidSyntax(line: int, column: int)
-        UnexpectedToken(expected: str, got: str)
-        UnexpectedEof
-    ```
+```ryo
+# In module 'io'
+module io:
+    error FileNotFound(path: str)
+    error PermissionDenied(path: str)
+    error DiskFull
 
-*   **Variants with Associated Data:** Error variants can carry data (tuple or struct variants):
-    ```ryo
-    error DatabaseError:
-        ConnectionFailed(reason: str)
-        QueryTimeout(Duration)
-        InvalidQuery(sql: str, position: int)
-    ```
+# In module 'parse'
+module parse:
+    error InvalidSyntax(line: int, column: int)
+    error UnexpectedToken(expected: str, got: str)
+    error UnexpectedEof
+```
+
+Usage:
+```ryo
+fn read_file(path: str) -> io.FileNotFound!str:
+    if not exists(path):
+        return io.FileNotFound(path)
+    return os.read(path)
+
+fn parse_json(text: str) -> parse.InvalidSyntax!Data:
+    if invalid_json(text):
+        return parse.InvalidSyntax(line: 0, column: 0)
+    return Data{...}
+```
 
 #### **Error Union Types** (Composition)
 
@@ -377,41 +385,51 @@ Ryo synthesizes ideas from several modern programming languages:
 
 #### **Pattern Matching on Errors**
 
-*   **Single Error Type** (Exhaustive matching):
+*   **Single Error Type** (Exhaustive matching required):
     ```ryo
     result = read_file(path) catch |e|:
         match e:
-            FileError.FileNotFound(p):
+            io.FileNotFound(p):
                 print(f"File not found: {p}")
-            FileError.PermissionDenied(p):
+            io.PermissionDenied(p):
                 print(f"Permission denied: {p}")
-            FileError.DiskFull:
+            io.DiskFull:
                 print("Disk full")
-            # MUST handle all variants (exhaustive)
+            # MUST handle all variants - compiler error if missing
     ```
 
-*   **Error Union** (Non-exhaustive matching):
+*   **Error Union** (Exhaustive matching required):
     ```ryo
     result = process(path) catch |e|:
         match e:
-            FileError.FileNotFound(p):
+            io.FileNotFound(p):
                 return create_default(p)
-            ParseError.InvalidSyntax(line, col):
+            io.PermissionDenied(p):
+                return request_permissions()
+            parse.InvalidSyntax(line, col):
                 log_error(f"Syntax error at {line}:{col}")
                 return default_config()
-            # Don't need to handle all errors - non-exhaustive
+            parse.UnexpectedToken(exp, got):
+                log_error(f"Expected {exp}, got {got}")
+                return default_config()
+            parse.UnexpectedEof:
+                log_error("Unexpected end of file")
+                return default_config()
+            # MUST handle all variants in union - compiler enforces this
     ```
-    **With catch-all:**
+
+    **Using catch-all when needed:**
     ```ryo
     result = process(path) catch |e|:
         match e:
-            FileError.FileNotFound(p):
+            io.FileNotFound(p):
                 return create_default(p)
-            else:
-                panic(f"Unexpected error: {e.message()}")
+            _:  # Explicit catch-all: "handle everything else the same way"
+                log_error(e.message())
+                return default_config()
     ```
 
-*   *(Rationale: Single-variant errors optimize common case (just a message). Multi-variant errors provide rich type-safe variants. Error unions eliminate wrapper types through automatic composition (Zig-inspired). Non-exhaustive matching for unions allows partial error handling at boundaries.)*
+*   *(Rationale: Single-variant errors provide simplicity (one syntax). Error unions enable automatic composition without wrapper types (Zig-inspired). Exhaustive matching by default ensures all error cases are explicitly handled. The `_` catch-all provides an escape hatch for truly generic handling.)*
 
 ### 4.10 Error Trait and Message Handling
 
@@ -439,24 +457,23 @@ Ryo synthesizes ideas from several modern programming languages:
         ```
     *   **Multiple fields (no message field):** Generated from Debug representation.
         ```ryo
-        error FileError:
-            NotFound(path: str)
-        # .message() returns "File not found: /path/to/file"
+        error FileNotFound(path: str, permission_level: int)
+        # .message() returns "FileNotFound(path=/var/log, permission_level=0700)"
         ```
 
 *   **Custom Message Implementation:** Override automatic message generation:
     ```ryo
-    error ValidationError:
-        TooShort(field: str, min_length: int)
-        TooLong(field: str, max_length: int)
+    # Single-variant errors with custom messages
+    error TooShort(field: str, min_length: int)
+    error TooLong(field: str, max_length: int)
 
-    impl Error for ValidationError:
+    impl Error for TooShort:
         fn message(self) -> str:
-            match self:
-                ValidationError.TooShort(field, min):
-                    return f"{field} must be at least {min} characters"
-                ValidationError.TooLong(field, max):
-                    return f"{field} cannot exceed {max} characters"
+            return f"{self.field} must be at least {self.min_length} characters"
+
+    impl Error for TooLong:
+        fn message(self) -> str:
+            return f"{self.field} cannot exceed {self.max_length} characters"
     ```
 
 *   **Accessing Error Messages:**

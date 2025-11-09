@@ -52,17 +52,17 @@ else:
 
 **Ryo:**
 ```ryo
-error MathError:
-    DivisionByZero
+module math:
+    error DivisionByZero
 
-fn divide(a: int, b: int) -> MathError!int:
+fn divide(a: int, b: int) -> math.DivisionByZero!int:
     if b == 0:
-        return MathError.DivisionByZero
+        return math.DivisionByZero
     return a / b
 
 result = divide(10, 2) catch |e|:
     match e:
-        MathError.DivisionByZero:
+        math.DivisionByZero:
             print("Division failed: division by zero")
     return
 

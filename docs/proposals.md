@@ -406,39 +406,39 @@ Error handling is fully implemented in the core language with automatic error co
 
 #### **Key Features (Implemented)**
 
-1. **Single-Variant Errors** - Syntactic sugar for simple error cases:
+1. **Single-Variant Errors Only** - Simple, unified syntax:
 ```ryo
 error Timeout                          # Unit error
 error NotFound(str)                    # Message-only error
 error HttpError(status: int, message: str)  # Structured error
 ```
 
-2. **Multi-Variant Errors** - Full ADT support:
+2. **Module-Based Error Grouping** - Organize related errors:
 ```ryo
-error IoError:
-    NotFound(path: str)
-    PermissionDenied(path: str)
-    ReadFailed(reason: str)
+module io:
+    error NotFound(path: str)
+    error PermissionDenied(path: str)
+    error ReadFailed(reason: str)
 
-error ParseError:
-    InvalidSyntax(line: int, column: int)
-    UnexpectedToken(expected: str, got: str)
+module parse:
+    error InvalidSyntax(line: int, column: int)
+    error UnexpectedToken(expected: str, got: str)
 ```
 
 3. **Automatic Error Composition** - Error unions inferred from `try` expressions:
 ```ryo
 # Explicit union - manually specified
-fn process_file(path: str) -> (IoError | ParseError)!ProcessedData:
+fn process_file(path: str) -> (io.NotFound | io.PermissionDenied | parse.InvalidSyntax)!ProcessedData:
     content = try files.read_text(path)
     config = try parse_config(content)
     return process(config)
 
 # Inferred union - compiler automatically determines the union
 fn process_file(path: str) -> !ProcessedData:
-    content = try files.read_text(path)    # IoError
-    config = try parse_config(content)     # ParseError
+    content = try files.read_text(path)    # io errors
+    config = try parse_config(content)     # parse errors
     return process(config)
-# Compiler infers: (IoError | ParseError)!ProcessedData
+# Compiler infers: (io.NotFound | io.PermissionDenied | parse.InvalidSyntax | ...)!ProcessedData
 ```
 
 #### **Error Trait (Implemented)**
@@ -466,52 +466,57 @@ impl Error for CustomError:
 #### **Pattern Matching (Implemented)**
 
 - **Single error types**: Exhaustive matching required (all variants must be handled)
-- **Error unions**: Non-exhaustive matching allowed (can handle some errors, others propagate)
+- **Error unions**: Exhaustive matching required (all error types in union must be handled, or use catch-all)
 
 ```ryo
 # Exhaustive matching for single error type
 result = divide(10.0, 0.0) catch |e|:
     match e:
-        MathError.DivisionByZero:
+        math.DivisionByZero:
             print("Cannot divide by zero")
-        MathError.InvalidInput(msg):
-            print(f"Invalid: {msg}")
     return
 
-# Non-exhaustive matching for error unions
+# Exhaustive matching for error unions
 result = complex_operation() catch |e|:
     match e:
-        NetworkError.Timeout(duration):
+        network.Timeout(duration):
             print(f"Timeout after {duration}ms")
-        ParseError.InvalidJson(reason):
+        network.ConnectionFailed(reason):
+            print(f"Connection failed: {reason}")
+        parse.InvalidJson(reason):
             print(f"Parse error: {reason}")
-        # Other errors can be unhandled and propagate to caller
+        validation.InvalidData(reason):
+            print(f"Validation error: {reason}")
+    return
+
+# Using catch-all for generic error handling
+result = complex_operation() catch |e|:
+    match e:
+        network.Timeout(duration):
+            print(f"Timeout after {duration}ms")
+        _:  # Explicit catch-all: handle all other errors generically
+            log_error(e.message())
+            print("Other error occurred")
     return
 ```
 
-#### **Error Conversion (Implemented)**
+#### **Error Composition (Implemented)**
 
-Optional `From` trait for explicit error conversion when automatic composition is not sufficient:
+Automatic error composition from `try` expressions eliminates the need for wrapper types:
 
 ```ryo
-error AppError:
-    Io(IoError)
-    Parse(ParseError)
-    Network(NetworkError)
-
-impl From[IoError] for AppError:
-    fn from(err: IoError) -> AppError:
-        return AppError.Io(err)
-
-impl From[ParseError] for AppError:
-    fn from(err: ParseError) -> AppError:
-        return AppError.Parse(err)
-
-# Usage with explicit conversion
-fn legacy_interface() -> AppError!ProcessedData:
-    content = try files.read_text(path)   # IoError, no conversion needed
-    config = try parse_config(content)    # ParseError, no conversion needed
+# No wrapper types needed - errors automatically composed!
+fn legacy_interface() -> !ProcessedData:
+    content = try files.read_text(path)   # io.ReadFailed error
+    config = try parse_config(content)    # parse.InvalidFormat error
     return process(config)
+# Compiler automatically infers: (io.ReadFailed | parse.InvalidFormat)!ProcessedData
+
+# Optional: Use From trait for explicit conversion in special cases
+impl From[io.ReadFailed] for AppError:
+    fn from(err: io.ReadFailed) -> AppError:
+        # Custom conversion logic if needed
+        return AppError.IoError(err.reason)
 ```
 
 #### **Future: Error Context and Chaining**
