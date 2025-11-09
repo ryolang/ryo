@@ -63,12 +63,10 @@ fn main():
 
     # Map operations
     scores["David"] = 89
-    alice_score = scores.get("Alice")
-    match alice_score:
-        ?score:
-            print(f"Alice's score: {score}")
-        none:
-            print("Alice not found")
+    alice_score = scores.get("Alice") orelse:
+        print("Alice not found")
+        return
+    print(f"Alice's score: {alice_score}")
 
     # Working with custom structs
     point1 = Point{x: 0.0, y: 0.0}

@@ -248,12 +248,6 @@ Ryo synthesizes ideas from several modern programming languages:
     if let user = optional_user:  # Future: if-let syntax
         print(user.name)
     ```
-*   **Pattern Matching:**
-    ```ryo
-    match optional_user:
-        none: print("No user")
-        else: print(f"User: {optional_user.name}")
-    ```
 *   *(Rationale: Zig-inspired `?T` syntax is concise and compositional. The `none` keyword aligns with Python's `None`. Optional chaining (`?.`) and `orelse` provide ergonomic handling. Smart casting reduces boilerplate after validation)*
 
 ### 4.9 Error Types (`ErrorType!SuccessType`)
@@ -486,7 +480,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
         match e:
             NotFound(msg):
                 print(f"Not found: {msg}")
-            else:
+            _:
                 print(f"Error: {e.message()}")
     ```
 
