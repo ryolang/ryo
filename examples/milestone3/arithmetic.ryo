@@ -1,0 +1,4 @@
+# Milestone 3: Arithmetic expression example
+# Demonstrates compilation of arithmetic expressions with proper precedence
+# Result: 2 + 3 * 4 = 2 + 12 = 14
+result = 2 + 3 * 4

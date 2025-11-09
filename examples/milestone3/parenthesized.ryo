@@ -1,0 +1,4 @@
+# Milestone 3: Parenthesized expression example
+# Demonstrates precedence override with parentheses
+# Result: (10 + 5) * 2 = 15 * 2 = 30
+result = (10 + 5) * 2
