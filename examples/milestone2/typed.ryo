@@ -1,0 +1,3 @@
+# Variable declaration with explicit type annotation
+x: int = 42
+y: int = 100

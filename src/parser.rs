@@ -1,68 +1,161 @@
 use chumsky::{
     input::{Stream, ValueInput},
     prelude::*,
+    span::SimpleSpan,
 };
+use logos::Logos;
 
-use crate::ast::Expr;
+use crate::ast::*;
 use crate::lexer::Token;
 
-// This function signature looks complicated, but don't fear! We're just saying that this function is generic over
-// inputs that:
-//     - Can have tokens pulled out of them by-value, by cloning (`ValueInput`)
-//     - Gives us access to slices of the original input (`SliceInput`)
-//     - Produces tokens of type `Token`, the type we defined above (`Token = Token<'a>`)
-//     - Produces spans of type `SimpleSpan`, a built-in span type provided by chumsky (`Span = SimpleSpan`)
-// The function then returns a parser that:
-//     - Has an input type of type `I`, the one we declared as a type parameter
-//     - Produces an `Expr` as its output
-//     - Uses `Rich`, a built-in error type provided by chumsky, for error generation
-pub fn parser<'a, I>() -> impl Parser<'a, I, Expr, extra::Err<Rich<'a, Token<'a>>>>
+/// Parse a complete Ryo program with multiple statements
+pub fn program_parser<'a, I>() -> impl Parser<'a, I, Program, extra::Err<Rich<'a, Token<'a>>>> + 'a
 where
     I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
-    recursive(|p| {
-        let atom = {
-            let parenthesized = p.delimited_by(just(Token::LParen), just(Token::RParen));
-            let integer = select! {
-                Token::Int(n) => Expr::Int(n.parse().unwrap()),
+    statement_parser()
+        .repeated()
+        .collect::<Vec<_>>()
+        .map_with(|statements, _e| {
+            let span = if statements.is_empty() {
+                SimpleSpan::new((), 0..0)
+            } else {
+                let start = statements.first().unwrap().span.start;
+                let end = statements.last().unwrap().span.end;
+                SimpleSpan::new((), start..end)
             };
-            parenthesized.or(integer)
+            Program { statements, span }
+        })
+        .then_ignore(end())
+}
+
+/// Parse a single statement
+fn statement_parser<'a, I>() -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token<'a>>>> + 'a
+where
+    I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
+{
+    var_decl_parser().map_with(|kind, e| Statement {
+        span: e.span(),
+        kind: StmtKind::VarDecl(kind),
+    })
+}
+
+/// Parse a variable declaration: [mut] ident [: type] = expression
+/// Examples:
+///   x = 42
+///   x: int = 42
+///   mut x = 42
+///   mut counter: int = 0
+fn var_decl_parser<'a, I>() -> impl Parser<'a, I, VarDecl, extra::Err<Rich<'a, Token<'a>>>> + 'a
+where
+    I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
+{
+    // Optional 'mut' keyword
+    let mutable = just(Token::Mut).or_not().map(|m| m.is_some());
+
+    // Identifier (variable name)
+    let ident = select! {
+        Token::Ident(name) => name.to_string()
+    }
+    .map_with(|name, e| Ident::new(name, e.span()));
+
+    // Optional type annotation: `: type_name`
+    let type_annotation = just(Token::Colon)
+        .ignore_then(
+            select! {
+                Token::Ident(name) => name.to_string()
+            }
+            .map_with(|name, e| TypeExpr::new(name, e.span())),
+        )
+        .or_not();
+
+    // Build the parser
+    mutable
+        .then(ident)
+        .then(type_annotation)
+        .then_ignore(just(Token::Assign))
+        .then(expression_parser())
+        .map(|(((mutable, name), type_annotation), initializer)| VarDecl {
+            mutable,
+            name,
+            type_annotation,
+            initializer,
+        })
+}
+
+/// Parse an expression with precedence handling
+fn expression_parser<'a, I>() -> impl Parser<'a, I, Expression, extra::Err<Rich<'a, Token<'a>>>> + 'a
+where
+    I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
+{
+    recursive(|expr| {
+        // Atomic expressions: literals and parenthesized expressions
+        let atom = {
+            let literal = select! {
+                Token::Int(s) => {
+                    let n: isize = s.parse().unwrap();
+                    ExprKind::Literal(Literal::Int(n))
+                }
+            }
+            .map_with(|kind, e| Expression::new(kind, e.span()));
+
+            let parenthesized = expr
+                .delimited_by(just(Token::LParen), just(Token::RParen));
+
+            literal.or(parenthesized)
         };
 
-        // Unary operators (like negation) have the highest precedence
+        // Unary operators (negation has highest precedence)
         let unary = just(Token::Sub)
             .repeated()
             .collect::<Vec<_>>()
-            .or_not()
             .then(atom)
-            .map(|(maybe_ops, value)| match maybe_ops {
-                Some(ops) => ops
-                    .into_iter()
-                    .rfold(value, |acc, _op| Expr::Neg(Box::new(acc))),
-                None => value,
+            .map_with(|(negs, expr), e| {
+                let mut result = expr;
+                for _ in negs {
+                    result = Expression::new(
+                        ExprKind::UnaryOp(UnaryOperator::Neg, Box::new(result)),
+                        e.span(),
+                    );
+                }
+                result
             });
 
-        // Multiplication and division have higher precedence
-        let op1 = choice((
-            just(Token::Mul).to(Expr::Mul as fn(Box<Expr>, Box<Expr>) -> Expr),
-            just(Token::Div).to(Expr::Div as fn(Box<Expr>, Box<Expr>) -> Expr),
-        ));
-        let binary_1 = unary.clone().foldl(
-            op1.then(unary).repeated(), // Operator followed by operand, repeated
-            |lhs, (op_fn, rhs)| op_fn(Box::new(lhs), Box::new(rhs)), // Folding function
+        // Multiplication and division (higher precedence)
+        let term = unary.clone().foldl(
+            choice((
+                just(Token::Mul).to(BinaryOperator::Mul),
+                just(Token::Div).to(BinaryOperator::Div),
+            ))
+            .then(unary)
+            .repeated(),
+            |left, (op, right)| {
+                let start = left.span.start;
+                let end = right.span.end;
+                Expression::new(
+                    ExprKind::BinaryOp(Box::new(left.clone()), op, Box::new(right.clone())),
+                    SimpleSpan::new((), start..end),
+                )
+            },
         );
 
-        // Addition and subtraction have lower precedence
-        let op2 = choice((
-            just(Token::Add).to(Expr::Add as fn(Box<Expr>, Box<Expr>) -> Expr),
-            just(Token::Sub).to(Expr::Sub as fn(Box<Expr>, Box<Expr>) -> Expr),
-        ));
-        let binary_2 = binary_1.clone().foldl(
-            op2.then(binary_1).repeated(), // Operator followed by operand (binary_1), repeated
-            |lhs, (op_fn, rhs)| op_fn(Box::new(lhs), Box::new(rhs)), // Folding function
-        );
-
-        binary_2
+        // Addition and subtraction (lower precedence)
+        term.clone().foldl(
+            choice((
+                just(Token::Add).to(BinaryOperator::Add),
+                just(Token::Sub).to(BinaryOperator::Sub),
+            ))
+            .then(term)
+            .repeated(),
+            |left, (op, right)| {
+                let start = left.span.start;
+                let end = right.span.end;
+                Expression::new(
+                    ExprKind::BinaryOp(Box::new(left.clone()), op, Box::new(right.clone())),
+                    SimpleSpan::new((), start..end),
+                )
+            },
+        )
     })
 }
 
@@ -71,7 +164,13 @@ mod tests {
     use super::*;
     use chumsky::Parser;
 
-    fn parser_test_helper(tokens: Vec<Token>) -> Result<Expr, Vec<Rich<'static, Token<'static>>>> {
+    fn lex_and_parse(input: &str) -> Result<Program, Vec<Rich<'static, Token<'static>>>> {
+        use crate::lexer::Token;
+
+        let tokens: Vec<_> = Token::lexer(input)
+            .filter_map(|result| result.ok())
+            .collect();
+
         let static_tokens: Vec<Token<'static>> = tokens
             .into_iter()
             .map(|t| match t {
@@ -79,7 +178,10 @@ mod tests {
                     let leaked_str: &'static str = Box::leak(s.to_string().into_boxed_str());
                     Token::Int(leaked_str)
                 }
-                // Keywords
+                Token::Ident(s) => {
+                    let leaked_str: &'static str = Box::leak(s.to_string().into_boxed_str());
+                    Token::Ident(leaked_str)
+                }
                 Token::Fn => Token::Fn,
                 Token::If => Token::If,
                 Token::Else => Token::Else,
@@ -88,216 +190,214 @@ mod tests {
                 Token::Struct => Token::Struct,
                 Token::Enum => Token::Enum,
                 Token::Match => Token::Match,
-
-                // Identifiers
-                Token::Ident(s) => {
-                    let leaked_str: &'static str = Box::leak(s.to_string().into_boxed_str());
-                    Token::Ident(leaked_str)
-                }
-
-                // Operators - Arithmetic
                 Token::Add => Token::Add,
                 Token::Sub => Token::Sub,
                 Token::Mul => Token::Mul,
                 Token::Div => Token::Div,
-
-                // Operators - Assignment and Type Annotation
                 Token::Assign => Token::Assign,
                 Token::Colon => Token::Colon,
-
-                // Punctuation
                 Token::LParen => Token::LParen,
                 Token::RParen => Token::RParen,
                 Token::LBrace => Token::LBrace,
                 Token::RBrace => Token::RBrace,
-
-                // Comments and Whitespace
                 Token::Comment => Token::Comment,
                 Token::Whitespace => Token::Whitespace,
                 Token::Error => Token::Error,
             })
             .collect();
 
-        parser()
+        program_parser()
             .parse(Stream::from_iter(static_tokens))
             .into_result()
             .map_err(|e| e.into_iter().map(|rich| rich.into_owned()).collect())
     }
 
     #[test]
-    fn parse_positive_integer() {
-        let tokens = vec![Token::Int("42")];
-        assert_eq!(parser_test_helper(tokens), Ok(Expr::Int(42)));
+    fn parse_simple_variable_declaration() {
+        let result = lex_and_parse("x = 42");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 1);
+
+        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
+            assert!(!decl.mutable);
+            assert_eq!(decl.name.name, "x");
+            assert!(decl.type_annotation.is_none());
+            match &decl.initializer.kind {
+                ExprKind::Literal(Literal::Int(42)) => {}
+                _ => panic!("Expected Int(42)"),
+            }
+        } else {
+            panic!("Expected VarDecl");
+        }
     }
 
     #[test]
-    fn parse_unary_negation() {
-        let tokens = vec![Token::Sub, Token::Int("42")];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Neg(Box::new(Expr::Int(42))))
-        );
+    fn parse_variable_with_type_annotation() {
+        let result = lex_and_parse("x: int = 42");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 1);
+
+        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
+            assert!(!decl.mutable);
+            assert_eq!(decl.name.name, "x");
+            assert!(decl.type_annotation.is_some());
+            assert_eq!(decl.type_annotation.as_ref().unwrap().name, "int");
+        } else {
+            panic!("Expected VarDecl");
+        }
     }
 
     #[test]
-    fn parse_nested_negation() {
-        let tokens = vec![
-            Token::Sub,
-            Token::LParen,
-            Token::Sub,
-            Token::Int("42"),
-            Token::RParen,
-        ];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Neg(Box::new(Expr::Neg(Box::new(Expr::Int(42))))))
-        );
+    fn parse_mutable_variable() {
+        let result = lex_and_parse("mut x = 42");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 1);
+
+        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
+            assert!(decl.mutable);
+            assert_eq!(decl.name.name, "x");
+        } else {
+            panic!("Expected VarDecl");
+        }
     }
 
     #[test]
-    fn parse_multiple_negation() {
-        let tokens = vec![Token::Sub, Token::Sub, Token::Int("42")];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Neg(Box::new(Expr::Neg(Box::new(Expr::Int(42))))))
-        );
+    fn parse_mutable_with_type() {
+        let result = lex_and_parse("mut counter: int = 0");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 1);
+
+        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
+            assert!(decl.mutable);
+            assert_eq!(decl.name.name, "counter");
+            assert_eq!(decl.type_annotation.as_ref().unwrap().name, "int");
+            match &decl.initializer.kind {
+                ExprKind::Literal(Literal::Int(0)) => {}
+                _ => panic!("Expected Int(0)"),
+            }
+        } else {
+            panic!("Expected VarDecl");
+        }
     }
 
     #[test]
-    fn parse_addition() {
-        let tokens = vec![Token::Int("1"), Token::Add, Token::Int("2")];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Add(Box::new(Expr::Int(1)), Box::new(Expr::Int(2))))
-        );
+    fn parse_expression_addition() {
+        let result = lex_and_parse("x = 1 + 2");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+
+        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
+            match &decl.initializer.kind {
+                ExprKind::BinaryOp(left, BinaryOperator::Add, right) => {
+                    match &left.kind {
+                        ExprKind::Literal(Literal::Int(1)) => {}
+                        _ => panic!("Expected left = 1"),
+                    }
+                    match &right.kind {
+                        ExprKind::Literal(Literal::Int(2)) => {}
+                        _ => panic!("Expected right = 2"),
+                    }
+                }
+                _ => panic!("Expected BinaryOp(Add)"),
+            }
+        } else {
+            panic!("Expected VarDecl");
+        }
     }
 
     #[test]
-    fn parse_subtraction() {
-        let tokens = vec![Token::Int("1"), Token::Sub, Token::Int("2")];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Sub(Box::new(Expr::Int(1)), Box::new(Expr::Int(2))))
-        );
+    fn parse_expression_precedence() {
+        let result = lex_and_parse("x = 2 + 3 * 4");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+
+        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
+            // Should parse as: 2 + (3 * 4)
+            match &decl.initializer.kind {
+                ExprKind::BinaryOp(left, BinaryOperator::Add, right) => {
+                    // left = 2
+                    match &left.kind {
+                        ExprKind::Literal(Literal::Int(2)) => {}
+                        _ => panic!("Expected left = 2"),
+                    }
+                    // right = 3 * 4
+                    match &right.kind {
+                        ExprKind::BinaryOp(_, BinaryOperator::Mul, _) => {}
+                        _ => panic!("Expected right = BinaryOp(Mul)"),
+                    }
+                }
+                _ => panic!("Expected BinaryOp(Add)"),
+            }
+        } else {
+            panic!("Expected VarDecl");
+        }
     }
 
     #[test]
-    fn parse_multiplication() {
-        let tokens = vec![Token::Int("2"), Token::Mul, Token::Int("3")];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Mul(Box::new(Expr::Int(2)), Box::new(Expr::Int(3))))
-        );
+    fn parse_expression_negation() {
+        let result = lex_and_parse("x = -42");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+
+        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
+            match &decl.initializer.kind {
+                ExprKind::UnaryOp(UnaryOperator::Neg, expr) => {
+                    match &expr.kind {
+                        ExprKind::Literal(Literal::Int(42)) => {}
+                        _ => panic!("Expected Int(42)"),
+                    }
+                }
+                _ => panic!("Expected UnaryOp(Neg)"),
+            }
+        } else {
+            panic!("Expected VarDecl");
+        }
     }
 
     #[test]
-    fn parse_division() {
-        let tokens = vec![Token::Int("4"), Token::Div, Token::Int("2")];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Div(Box::new(Expr::Int(4)), Box::new(Expr::Int(2))))
-        );
+    fn parse_expression_parenthesized() {
+        let result = lex_and_parse("x = (2 + 3) * 4");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+
+        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
+            // Should parse as: (2 + 3) * 4
+            match &decl.initializer.kind {
+                ExprKind::BinaryOp(_left, BinaryOperator::Mul, _right) => {
+                    // Parenthesized expression forces precedence
+                }
+                _ => panic!("Expected BinaryOp(Mul)"),
+            }
+        } else {
+            panic!("Expected VarDecl");
+        }
     }
 
     #[test]
-    fn parse_precedence() {
-        let tokens = vec![
-            Token::Int("1"),
-            Token::Add,
-            Token::Int("2"),
-            Token::Mul,
-            Token::Int("3"),
-        ];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Add(
-                Box::new(Expr::Int(1)),
-                Box::new(Expr::Mul(Box::new(Expr::Int(2)), Box::new(Expr::Int(3))))
-            ))
-        );
+    fn parse_multiple_statements() {
+        let result = lex_and_parse("x = 42\ny = 10");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 2);
     }
 
     #[test]
-    fn parse_precedence_with_negation() {
-        let tokens = vec![
-            Token::Int("1"),
-            Token::Add,
-            Token::Sub,
-            Token::Int("2"),
-            Token::Mul,
-            Token::Int("3"),
-        ];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Add(
-                Box::new(Expr::Int(1)),
-                Box::new(Expr::Mul(
-                    Box::new(Expr::Neg(Box::new(Expr::Int(2)))),
-                    Box::new(Expr::Int(3))
-                ))
-            ))
-        );
+    fn parse_multiple_with_types() {
+        let result = lex_and_parse("x: int = 42\nmut y: float = 3\nz = 1 + 2");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 3);
     }
 
     #[test]
-    fn parse_negation_precedence() {
-        let tokens = vec![Token::Sub, Token::Int("1"), Token::Mul, Token::Int("2")];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Mul(
-                Box::new(Expr::Neg(Box::new(Expr::Int(1)))),
-                Box::new(Expr::Int(2))
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_parentheses() {
-        let tokens = vec![
-            Token::LParen,
-            Token::Int("1"),
-            Token::Add,
-            Token::Int("2"),
-            Token::RParen,
-            Token::Mul,
-            Token::Int("3"),
-        ];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Mul(
-                Box::new(Expr::Add(Box::new(Expr::Int(1)), Box::new(Expr::Int(2)))),
-                Box::new(Expr::Int(3))
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_complex_expression() {
-        let tokens = vec![
-            Token::Sub,
-            Token::LParen,
-            Token::Int("1"),
-            Token::Add,
-            Token::Int("2"),
-            Token::RParen,
-            Token::Mul,
-            Token::Int("3"),
-            Token::Div,
-            Token::Sub,
-            Token::Int("4"),
-        ];
-        assert_eq!(
-            parser_test_helper(tokens),
-            Ok(Expr::Div(
-                Box::new(Expr::Mul(
-                    Box::new(Expr::Neg(Box::new(Expr::Add(
-                        Box::new(Expr::Int(1)),
-                        Box::new(Expr::Int(2))
-                    )))),
-                    Box::new(Expr::Int(3))
-                )),
-                Box::new(Expr::Neg(Box::new(Expr::Int(4))))
-            ))
-        );
+    fn parse_empty_program() {
+        let result = lex_and_parse("");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 0);
     }
 }

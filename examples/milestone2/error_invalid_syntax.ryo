@@ -1,0 +1,3 @@
+# Error example: completely invalid syntax
+# Multiple assignment operators and invalid pattern
+= = = x y z

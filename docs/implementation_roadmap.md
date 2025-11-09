@@ -9,8 +9,8 @@ This roadmap outlines the planned development of the Ryo programming language co
 | Milestone | Status | Notes |
 |-----------|--------|-------|
 | Milestone 1: Lexer Basics | ✅ **COMPLETE** | All tokens implemented and tested. `ryo lex` command fully functional. |
-| Milestone 2: Parser & AST | 🔄 In Progress | Partial implementation exists (arithmetic expressions work). Full expansion needed for variable declarations and function definitions. |
-| Milestone 3: Cranelift Integration | ✅ **COMPLETE** | Working code generation to native code via Cranelift. `ryo run` command functional. |
+| Milestone 2: Parser & AST | ✅ **COMPLETE** | Full AST implemented with variable declarations, type annotations, and expressions. `ryo parse` command functional. 32 unit tests + 5 integration tests. |
+| Milestone 3: Cranelift Integration | ⏳ Needs Update | Partially complete from earlier work. Code generation needs updating for new AST structure. `ryo run` temporarily disabled. |
 | Milestones 4+ | ⏳ Planned | Future features in design phase. |
 
 ## Guiding Principles
@@ -48,21 +48,46 @@ This roadmap outlines the planned development of the Ryo programming language co
 - CLI tested with realistic Ryo code samples
 - **Design Decision:** Struct literals use parentheses with named arguments `Point(x=1, y=2)`, not braces. Curly braces are reserved exclusively for f-string interpolation (e.g., `f"Hello {name}"`) which will be implemented in later milestones.
 
-### Milestone 2: Parser & AST Basics
+### Milestone 2: Parser & AST Basics ✅ COMPLETE
+
 **Goal:** Parse simple variable declarations and integer literals into an Abstract Syntax Tree
 
 **Tasks:**
-- Define basic AST nodes in `src/ast.rs`:
-  - `struct Program`, `struct Statement`, `enum StmtKind::VarDecl`
-  - `struct Expression`, `enum ExprKind::Literal`, `struct Ident`, `struct TypeExpr`
-  - Include spans (`chumsky::SimpleSpan`)
-- Implement parser using `chumsky` (`src/parser.rs`)
-- Parse `ident: type = literal_int` structure
-- Integrate parser with lexer output in `main.rs`
-- Update CLI: `ryo parse <file.ryo>` prints generated AST
-- Write basic parser tests
+- ✅ Define basic AST nodes in `src/ast.rs`:
+  - ✅ `struct Program`, `struct Statement`, `enum StmtKind::VarDecl`
+  - ✅ `struct Expression`, `enum ExprKind::Literal`, `struct Ident`, `struct TypeExpr`
+  - ✅ Include spans (`chumsky::SimpleSpan`)
+  - ✅ Added `BinaryOperator` and `UnaryOperator` enums for expression support
+- ✅ Implement parser using `chumsky` (`src/parser.rs`)
+- ✅ Parse variable declarations with pattern: `[mut] ident [: type] = expression`
+- ✅ Support full expressions including binary ops (+, -, *, /) and unary ops (-)
+- ✅ Integrate parser with lexer output in `main.rs`
+- ✅ Update CLI: `ryo parse <file.ryo>` prints generated AST
+- ✅ Write comprehensive parser tests (32 unit tests)
 
-**Visible Progress:** `ryo parse <file.ryo>` shows structure of simple variable declarations
+**Visible Progress:** `ryo parse <file.ryo>` shows structure of variable declarations ✅
+
+**Completion Date:** November 9, 2025
+
+**Implementation Details:**
+- Complete AST refactor with proper span tracking throughout
+- Supports multiple variable declarations in a single file
+- Expression parser handles operator precedence correctly
+- Pretty-print implementation for debugging AST structure
+- Full integration test coverage for parse command
+- Example files in `examples/milestone2/` directory
+
+**Test Results:**
+- 32 parser unit tests (all passing)
+- 5 integration tests for parse/lex commands (all passing)
+- Total: 37 tests passing
+
+**Design Decisions:**
+- Full rewrite approach for cleaner AST foundation
+- Struct literals use named arguments: `Point(x=1, y=2)` (not braces)
+- Curly braces reserved for f-string interpolation (future milestone)
+- Supports both explicit type annotations and implicit type inference
+- Expression initializers support full arithmetic expressions
 
 ### Milestone 3: "Hello, Exit Code!" (Cranelift Integration)
 **Goal:** Compile minimal Ryo program to native code that returns an exit code

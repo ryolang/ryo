@@ -1,0 +1,4 @@
+# Variable declarations with expression initializers
+result = 2 + 3 * 4
+total: int = (10 + 5) * 2
+difference = 100 - 50

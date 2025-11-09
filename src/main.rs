@@ -1,15 +1,17 @@
 use crate::lexer::Token;
-use crate::parser::parser;
+use crate::parser::program_parser;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::{Parser as ChumskyParser, input::Stream, prelude::*};
 use clap::{Parser, Subcommand};
 use logos::Logos;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Instant;
-use target_lexicon::Triple;
+
+mod ast;
+mod codegen;
+mod evaluator;
+mod lexer;
+mod parser;
 
 // Constants for magic strings
 const SOURCE_ID: &str = "cmdline";
@@ -21,8 +23,12 @@ fn get_output_filenames(input_file: &Path) -> (String, String) {
         .and_then(|s| s.to_str())
         .unwrap_or("output");
 
-    let obj_filename = format!("{}.{}", stem, if cfg!(windows) { "obj" } else { "o" });
-    let exe_filename = format!("{}{}", stem, env::consts::EXE_SUFFIX);
+    let obj_filename = format!(
+        "{}.{}",
+        stem,
+        if cfg!(windows) { "obj" } else { "o" }
+    );
+    let exe_filename = format!("{}{}", stem, std::env::consts::EXE_SUFFIX);
 
     (obj_filename, exe_filename)
 }
@@ -57,12 +63,6 @@ impl From<std::io::Error> for CompilerError {
     }
 }
 
-mod ast;
-mod codegen;
-mod evaluator;
-mod lexer;
-mod parser;
-
 #[derive(Parser)]
 #[command(name = "ryo")]
 #[command(about = "The Ryo programming language compiler")]
@@ -78,11 +78,17 @@ enum Commands {
         /// Input file to tokenize
         file: PathBuf,
     },
-    /// Compile and run a Ryo program
-    Run {
-        /// Input file to compile and run
+    /// Parse a Ryo source file and print the AST
+    Parse {
+        /// Input file to parse
         file: PathBuf,
     },
+    // NOTE: Run command temporarily disabled until codegen is updated for new AST
+    // /// Compile and run a Ryo program
+    // Run {
+    //     /// Input file to compile and run
+    //     file: PathBuf,
+    // },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -92,9 +98,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Lex { file } => {
             lex_command(&file).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
-        Commands::Run { file } => {
-            run_file(&file).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+        Commands::Parse { file } => {
+            parse_command(&file).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
+        // Commands::Run { file } => {
+        //     run_file(&file).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+        // }
     }
 }
 
@@ -122,11 +131,18 @@ fn display_tokens(input: &str, file: &Path) {
     }
 }
 
+fn parse_command(file: &Path) -> Result<(), CompilerError> {
+    let input = read_source_file(file)?;
+    let program = parse_source(&input)?;
+    display_ast(&program);
+    Ok(())
+}
+
 fn read_source_file(file: &Path) -> Result<String, CompilerError> {
     fs::read_to_string(file).map_err(CompilerError::from)
 }
 
-fn parse_source(input: &str) -> Result<ast::Expr, CompilerError> {
+fn parse_source(input: &str) -> Result<ast::Program, CompilerError> {
     let token_iter = Token::lexer(input).spanned().map(|(tok, span)| match tok {
         Ok(tok) => (tok, span.into()),
         Err(()) => (Token::Error, span.into()),
@@ -135,8 +151,8 @@ fn parse_source(input: &str) -> Result<ast::Expr, CompilerError> {
     let token_stream =
         Stream::from_iter(token_iter).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
 
-    match parser().parse(token_stream).into_result() {
-        Ok(expr) => Ok(expr),
+    match program_parser().parse(token_stream).into_result() {
+        Ok(program) => Ok(program),
         Err(errs) => {
             display_parse_errors(&errs, input);
             Err(CompilerError::ParseError(
@@ -166,149 +182,7 @@ fn display_parse_errors(errs: &[Rich<'_, Token<'_>>], input: &str) {
     }
 }
 
-fn display_input_and_ast(input: &str, expr: &ast::Expr) {
-    println!("[Input Expression]\n{}", input);
-    println!("\n[AST]");
-    expr.pretty_print();
-}
-
-fn compile_to_object(expr: &ast::Expr) -> Result<Vec<u8>, CompilerError> {
-    println!("\n[Codegen]");
-
-    let target_triple = Triple::host();
-    println!("  Target: {}", target_triple);
-
-    let mut codegen =
-        codegen::Codegen::new(target_triple).map_err(|e| CompilerError::CodegenError(e))?;
-    println!("  Initialized Codegen for target.");
-
-    let _func_id = codegen
-        .compile(expr.clone())
-        .map_err(|e| CompilerError::CodegenError(e))?;
-    println!("  Compiled expression to Cranelift IR.");
-
-    let obj_bytes = codegen
-        .finish()
-        .map_err(|e| CompilerError::CodegenError(e))?;
-    println!("  Generated object code ({} bytes).", obj_bytes.len());
-
-    Ok(obj_bytes)
-}
-
-fn write_object_file(obj_bytes: Vec<u8>, obj_filename: &str) -> Result<(), CompilerError> {
-    fs::write(obj_filename, obj_bytes)?;
-    println!("  Wrote object file to '{}'.", obj_filename);
-    Ok(())
-}
-
-fn link_executable(obj_filename: &str, exe_filename: &str) -> Result<(), CompilerError> {
-    println!("\n[Linking]");
-    let link_start = Instant::now();
-
-    let status = try_linkers(obj_filename, exe_filename)?;
-
-    if !status.success() {
-        return Err(CompilerError::LinkError(format!(
-            "Linker failed with status: {}",
-            status
-        )));
-    }
-
-    let link_duration = link_start.elapsed();
-    println!(
-        "  Linked '{}' successfully -> '{}' in {:.2}ms.",
-        obj_filename,
-        exe_filename,
-        link_duration.as_secs_f64() * 1000.0
-    );
-    println!(
-        "  Executable size: {} bytes",
-        fs::metadata(exe_filename)
-            .map_err(CompilerError::from)?
-            .len()
-    );
-
-    Ok(())
-}
-
-fn try_linkers(
-    obj_filename: &str,
-    exe_filename: &str,
-) -> Result<std::process::ExitStatus, CompilerError> {
-    // Try zig cc first
-    if let Ok(status) = Command::new("zig")
-        .arg("cc")
-        .arg(obj_filename)
-        .arg("-o")
-        .arg(exe_filename)
-        .status()
-    {
-        println!("  Attempting link with 'zig cc'...");
-        return Ok(status);
-    }
-
-    // Try clang
-    println!("  'zig cc' not found or failed, trying 'clang'...");
-    if let Ok(status) = Command::new("clang")
-        .arg(obj_filename)
-        .arg("-o")
-        .arg(exe_filename)
-        .status()
-    {
-        return Ok(status);
-    }
-
-    // Try cc
-    println!("  'clang' not found, trying 'cc'...");
-    Command::new("cc")
-        .arg(obj_filename)
-        .arg("-o")
-        .arg(exe_filename)
-        .status()
-        .map_err(|e| CompilerError::LinkError(format!("Failed to run linker 'cc': {}", e)))
-}
-
-fn execute_program(exe_filename: &str) -> Result<Option<i32>, CompilerError> {
-    println!("\n[Execution]");
-    let run_status = Command::new(format!("./{}", exe_filename))
-        .status()
-        .map_err(|e| {
-            CompilerError::ExecutionError(format!(
-                "Failed to run executable '{}': {}",
-                exe_filename, e
-            ))
-        })?;
-
-    match run_status.code() {
-        Some(code) => {
-            println!("  '{}' exited with code: {}", exe_filename, code);
-            Ok(Some(code))
-        }
-        None => {
-            println!("  '{}' terminated by signal.", exe_filename);
-            Ok(None)
-        }
-    }
-}
-
-fn display_result(result: Option<i32>) {
-    if let Some(code) = result {
-        println!("\n[Result] => {}", code);
-    }
-}
-
-fn run_file(file: &Path) -> Result<(), CompilerError> {
-    let input = read_source_file(file)?;
-    let expr = parse_source(&input)?;
-
-    display_input_and_ast(&input, &expr);
-
-    let obj_bytes = compile_to_object(&expr)?;
-    let (obj_filename, exe_filename) = get_output_filenames(file);
-    write_object_file(obj_bytes, &obj_filename)?;
-    link_executable(&obj_filename, &exe_filename)?;
-    let result = execute_program(&exe_filename)?;
-
-    display_result(result);
-    Ok(())
+fn display_ast(program: &ast::Program) {
+    println!("[AST]");
+    program.pretty_print();
 }

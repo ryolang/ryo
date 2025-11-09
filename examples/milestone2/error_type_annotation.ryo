@@ -1,0 +1,3 @@
+# Error example: malformed type annotation
+# Missing type name after :
+x: = 42

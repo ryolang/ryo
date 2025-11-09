@@ -1,0 +1,15 @@
+# Complete Milestone 2 example showing all features
+# Simple declarations
+x = 42
+y = 100
+
+# Declarations with type annotations
+sum: int = 1 + 2
+product: int = 3 * 4
+
+# Mutable variables
+mut counter = 0
+mut running_total: int = 0
+
+# Expressions with operators
+result = (10 + 5) * 2 - 8 / 4
