@@ -318,27 +318,72 @@ fn main():
 
 ## 4. Error Handling
 
-Ryo provides type-safe error handling with **error types** and the `try`/`catch` operators.
+Ryo provides type-safe error handling with **error types** and the `try`/`catch` operators. The system is designed to prevent silent failures while remaining ergonomic and expressive.
 
-### Error Types
+### Single-Variant Errors
 
-Define errors with the `error` keyword:
+For simple error cases, Ryo provides syntactic sugar with single-variant errors:
+
+```ryo
+# Unit error (no data)
+error Timeout
+
+# Message-only error
+error NotFound(str)
+
+# Structured error with multiple fields
+error HttpError(status: int, message: str)
+```
+
+Single-variant errors make simple error cases concise:
+
+```ryo
+fn fetch_resource(url: str) -> HttpError!str:
+    response = make_request(url)
+    if response.status != 200:
+        return HttpError{status: response.status, message: "Failed to fetch"}
+    return response.body
+
+fn find_user(id: int) -> NotFound!User:
+    for user in users:
+        if user.id == id:
+            return user
+    return NotFound("User not found")
+
+fn main():
+    # Handling single-variant error
+    user = find_user(42) catch |e|:
+        print(e.message())  # Prints: "User not found"
+        return
+    print(user.name)
+```
+
+### Multi-Variant Errors
+
+For cases with multiple distinct error conditions, define errors with multiple variants:
 
 ```ryo
 error MathError:
     DivideByZero
     InvalidInput(message: str)
+    OverflowError
 ```
 
 ### Functions That Can Fail
 
-Use the `E!T` syntax to indicate a function can return an error or a value:
+Use the `ErrorType!T` syntax to indicate a function can return an error or a value:
 
 ```ryo
 fn divide(numerator: float, denominator: float) -> MathError!float:
     if denominator == 0.0:
-        return MathError.DivideByZero  # Return an error
-    return numerator / denominator     # Return success
+        return MathError.DivideByZero
+    return numerator / denominator
+
+fn parse_number(text: str) -> MathError!float:
+    if text.is_empty():
+        return MathError.InvalidInput("Text cannot be empty")
+    # Actual parsing...
+    return float(text)
 ```
 
 ### Handling Errors with `catch`
@@ -347,12 +392,15 @@ Use `catch` for error handling with pattern matching:
 
 ```ryo
 fn main():
+    # Single-variant error handling
     result = divide(10.0, 2.0) catch |e|:
         match e:
             MathError.DivideByZero:
                 print("Cannot divide by zero!")
             MathError.InvalidInput(msg):
                 print(f"Invalid input: {msg}")
+            MathError.OverflowError:
+                print("Arithmetic overflow!")
         return
 
     print(f"Division result: {result}")
@@ -360,13 +408,29 @@ fn main():
 
 ### Propagating Errors with `try`
 
-Use `try` to propagate errors up the call stack:
+Use `try` to propagate errors up the call stack. With `try`, errors are automatically composed when functions have different error types:
 
 ```ryo
+# Simple case: same error type
 fn calculate() -> MathError!float:
-    x = try divide(20.0, 4.0)      # If divide fails, propagate error
-    y = try divide(x, 2.0)         # If divide fails, propagate error
-    return y                        # Success!
+    x = try divide(20.0, 4.0)
+    y = try divide(x, 2.0)
+    return y
+
+# Composing different error types - automatic!
+error FileError:
+    NotFound
+    PermissionDenied
+
+error ParseError:
+    InvalidFormat
+    InvalidEncoding
+
+fn load_and_parse(path: str) -> !str:
+    content = try read_file(path)      # Returns FileError!str
+    parsed = try parse_json(content)   # Returns ParseError!str
+    return parsed
+# Compiler infers: (FileError | ParseError)!str
 
 fn main():
     result = calculate() catch |e|:
@@ -374,6 +438,52 @@ fn main():
         return
 
     print(f"Final result: {result}")
+```
+
+### Error Union Types
+
+When composing functions with different error types, Ryo automatically creates error unions. You can also express them explicitly:
+
+```ryo
+# Explicit error union
+fn complex_operation(x: float, y: float) -> (MathError | ValidationError)!float:
+    if x < 0.0:
+        return ValidationError.NegativeValue
+    return try divide(x, y)
+
+# Inferred error union from try expressions
+fn process_data(file_path: str) -> !Data:
+    # FileError from try read_file()
+    content = try read_file(file_path)
+    # ParseError from try parse()
+    parsed = try parse(content)
+    # MathError from try calculate()
+    result = try calculate(parsed.values)
+    return result
+# Compiler automatically infers: (FileError | ParseError | MathError)!Data
+```
+
+### Error Messages
+
+All errors automatically implement a `.message()` method:
+
+```ryo
+error HttpError(status: int, message: str)
+
+result = fetch_resource(url) catch |e|:
+    # .message() returns the message field automatically
+    print(e.message())  # Prints the message from the error
+    return
+```
+
+For simple message-only errors, the message is automatically available:
+
+```ryo
+error Timeout(str)
+
+result = try_with_timeout() catch |e|:
+    print(e.message())  # Automatically returns the string value
+    return
 ```
 
 ### Optional Values
@@ -394,7 +504,7 @@ fn main():
     name = find_user(users, 1)?.name orelse "Unknown"
     print(f"User name: {name}")
 
-    # Null check with smart casting
+    # Null check
     if find_user(users, 3) != none:
         print("User found!")
     else:
@@ -407,8 +517,8 @@ fn main():
 
 ```ryo
 # ❌ COMPILE ERROR: Cannot use error value directly
-divide(10.0, 0.0)  # This returns MathError!float, but we can't just use it
-value = result     # ERROR!
+divide(10.0, 0.0)  # Returns MathError!float
+value = result     # ERROR: must handle the error type!
 
 # ❌ COMPILE ERROR: Cannot access fields on optional
 user = find_user(users, 1)

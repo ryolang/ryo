@@ -1,13 +1,29 @@
 # async_example.ryo
 # Async/await example demonstrating concurrent programming with error handling
+# Includes examples of error union types and automatic error composition
 
 import std.time
 import std.http
+
+# ============================================================================
+# Error Type Definitions
+# ============================================================================
 
 error NetworkError:
     Timeout(duration: int)
     ConnectionFailed(reason: str)
     InvalidResponse
+
+error ParseError:
+    InvalidJson(reason: str)
+    MissingField(field: str)
+
+error ValidationError:
+    InvalidData(reason: str)
+
+# ============================================================================
+# Async Functions with Different Error Types
+# ============================================================================
 
 async fn fetch_data(url: str, delay: int) -> NetworkError!str:
     # Simulate network delay
@@ -16,44 +32,115 @@ async fn fetch_data(url: str, delay: int) -> NetworkError!str:
     # Simulate HTTP request (placeholder)
     return f"Data from {url} (took {delay}ms)"
 
+async fn parse_response(data: str) -> ParseError!str:
+    # Simulate JSON parsing
+    if data.is_empty():
+        return ParseError.InvalidJson("Empty response")
+    return data
+
+async fn validate_data(data: str) -> ValidationError!str:
+    # Simulate data validation
+    if data.len() < 10:
+        return ValidationError.InvalidData("Data too short")
+    return data
+
 async fn process_data(data: str) -> str:
     # Simulate some processing time
     await time.sleep(100)
     return f"Processed: {data}"
 
-async fn fetch_and_process(url: str, delay: int) -> NetworkError!str:
+# ============================================================================
+# Error Union Examples (automatic composition from try)
+# ============================================================================
+
+# Implicit error union - compiler infers the union from try expressions
+async fn fetch_and_process(url: str, delay: int) -> !str:
     # Chain async operations using try keyword
-    raw_data = try await fetch_data(url, delay)
-    processed = await process_data(raw_data)
+    # Each try expression contributes its error type to the union
+    raw_data = try await fetch_data(url, delay)       # NetworkError
+    parsed = try await parse_response(raw_data)       # ParseError
+    validated = try await validate_data(parsed)       # ValidationError
+    processed = await process_data(validated)
     return processed
+# Compiler infers: (NetworkError | ParseError | ValidationError)!str
+
+# Explicit error union - manually specified
+async fn fetch_with_fallback(url: str, backup_url: str) -> (NetworkError | ParseError)!str:
+    primary = try await fetch_data(url, 500)
+    return primary
+
+# ============================================================================
+# Error Handling with Error Unions
+# ============================================================================
+
+async fn handle_errors(url: str) -> !str:
+    # Handling inferred error union with catch
+    result = try await fetch_and_process(url, 200)
+    return result
 
 fn main():
     print("Starting async operations...")
 
-    # Sequential execution
-    print("\n=== Sequential Execution ===")
+    # ========================================================================
+    # SECTION 1: Handling error unions
+    # ========================================================================
+
+    print("\n=== Error Union Handling (Inferred) ===")
+
+    # fetch_and_process returns (NetworkError | ParseError | ValidationError)!str
+    # Note: Using non-exhaustive matching for error unions - we can handle
+    # some errors and let others propagate
+    result = fetch_and_process("api.example.com/data", 200) catch |e|:
+        match e:
+            NetworkError.Timeout(duration):
+                print(f"Network timeout after {duration}ms")
+            NetworkError.ConnectionFailed(reason):
+                print(f"Connection failed: {reason}")
+            ParseError.InvalidJson(reason):
+                print(f"Failed to parse JSON: {reason}")
+            # Other errors (ValidationError, InvalidResponse, MissingField)
+            # would be handled by the caller or propagated further
+        return
+
+    print(f"Result: {result}")
+
+    # ========================================================================
+    # SECTION 2: Sequential async operations
+    # ========================================================================
+
+    print("\n=== Sequential Async Execution ===")
     start_time = time.now()
 
+    # Result1 with error union handling
     result1 = fetch_and_process("api.example.com/users", 200) catch |e|:
         match e:
             NetworkError.Timeout(duration):
-                print(f"Request timed out after {duration}ms")
+                print(f"Request 1 timed out after {duration}ms")
             NetworkError.ConnectionFailed(reason):
-                print(f"Connection failed: {reason}")
-            NetworkError.InvalidResponse:
-                print("Invalid response from server")
+                print(f"Request 1 connection failed: {reason}")
+            ParseError.InvalidJson(reason):
+                print(f"Request 1 parse error: {reason}")
+            ValidationError.InvalidData(reason):
+                print(f"Request 1 validation error: {reason}")
+            _:
+                print("Request 1 failed with unexpected error")
         return
 
     print(result1)
 
+    # Result2 with error union handling
     result2 = fetch_and_process("api.example.com/posts", 300) catch |e|:
         match e:
             NetworkError.Timeout(duration):
-                print(f"Request timed out after {duration}ms")
+                print(f"Request 2 timed out after {duration}ms")
             NetworkError.ConnectionFailed(reason):
-                print(f"Connection failed: {reason}")
-            NetworkError.InvalidResponse:
-                print("Invalid response from server")
+                print(f"Request 2 connection failed: {reason}")
+            ParseError.InvalidJson(reason):
+                print(f"Request 2 parse error: {reason}")
+            ValidationError.InvalidData(reason):
+                print(f"Request 2 validation error: {reason}")
+            _:
+                print("Request 2 failed with unexpected error")
         return
 
     print(result2)
@@ -61,39 +148,55 @@ fn main():
     sequential_time = time.now() - start_time
     print(f"Sequential time: {sequential_time}ms")
 
-    # Concurrent execution
-    print("\n=== Concurrent Execution ===")
+    # ========================================================================
+    # SECTION 3: Concurrent async operations
+    # ========================================================================
+
+    print("\n=== Concurrent Async Execution ===")
     start_time = time.now()
 
-    # Start both operations concurrently
-    future1 = fetch_and_process("api.example.com/users", 200)
-    future2 = fetch_and_process("api.example.com/posts", 300)
-
-    # Wait for both to complete
-    results = gather([future1, future2]) catch |e|:
-        print(f"Error in concurrent operations: {e}")
+    # gather returns a union of all error types from the futures
+    results = gather([
+        fetch_and_process("api.example.com/users", 200),
+        fetch_and_process("api.example.com/posts", 300)
+    ]) catch |e|:
+        match e:
+            NetworkError.Timeout(duration):
+                print(f"Concurrent operation timed out after {duration}ms")
+            NetworkError.ConnectionFailed(reason):
+                print(f"Concurrent operation connection failed: {reason}")
+            ParseError.InvalidJson(reason):
+                print(f"Concurrent operation parse error: {reason}")
+            ValidationError.InvalidData(reason):
+                print(f"Concurrent operation validation error: {reason}")
+            _:
+                print("Concurrent operations failed")
         return
 
     for result in results:
         print(result)
 
     concurrent_time = time.now() - start_time
-    print(f"Concurrent time: {concurrent_time}ms")
+    print(f"Concurrent time: {concurrent_time}ms (should be faster than sequential)")
 
-    # Demonstrate timeout
-    print("\n=== Timeout Example ===")
-    slow_operation = fetch_data("slow.api.com", 5000)
+    # ========================================================================
+    # SECTION 4: Simple single-error-type async operation
+    # ========================================================================
 
-    timeout_result = time.timeout(slow_operation, 1000) catch |e|:
+    print("\n=== Single Error Type (NetworkError) ===")
+
+    # fetch_data only returns NetworkError, so we get exhaustive matching
+    single_result = fetch_data("api.example.com/simple", 100) catch |e|:
         match e:
             NetworkError.Timeout(duration):
-                print(f"Operation timed out after {duration}ms")
+                print(f"Single fetch timed out after {duration}ms")
             NetworkError.ConnectionFailed(reason):
-                print(f"Connection failed: {reason}")
+                print(f"Single fetch connection failed: {reason}")
             NetworkError.InvalidResponse:
-                print("Invalid response from server")
+                print("Single fetch got invalid response")
         return
 
-    print(f"Completed: {timeout_result}")
+    print(f"Single result: {single_result}")
 
-    print("Async example completed!")
+    print("\n=== Async example completed! ===")
+    print("Observed error union composition with try keyword in async contexts")

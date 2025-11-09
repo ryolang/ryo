@@ -152,37 +152,116 @@ impl Counter:
     fn drop(self): ...           # Drop takes ownership
 ```
 
-### 6. Error Trait System ✅ RESOLVED
+### 6. Error Handling with Automatic Composition ✅ RESOLVED
 
-**Previously**: `?` operator wouldn't work across different error types without conversion mechanism.
+**Previously**: Developers had to create wrapper error types when composing functions with different error types, creating boilerplate (the "wrapper problem").
 
-**Solution Implemented**:
-- Replaced `?` operator with `try` keyword for explicit error propagation
-- Implemented `From` trait for automatic error conversion with `try` operator
-- Error types are now defined with the `error` keyword with full ADT support
-- **Direct unwrap is forbidden** — All error values must be handled with `try`/`catch` or propagated with `try`
+**Solution Implemented**: Comprehensive error union system inspired by Zig with improvements from Swift and Rust.
 
-**Examples**:
+#### Key Features:
+
+1. **Single-Variant Errors** (syntactic sugar for simple cases):
+   ```ryo
+   error Timeout                          # Unit error
+   error NotFound(str)                    # Message-only error
+   error HttpError(status: int, message: str)  # Structured error
+   ```
+
+2. **Multi-Variant Errors** (full ADT support):
+   ```ryo
+   error MathError:
+       DivisionByZero
+       InvalidInput(message: str)
+       OverflowError
+   ```
+
+3. **Error Union Types** (automatic composition from `try`):
+   ```ryo
+   # Explicit union - manually specified
+   fn process() -> (FileError | ParseError)!Data:
+       file = try read_file(path)
+       data = try parse(file)
+       return data
+
+   # Inferred union - compiler automatically infers from try expressions
+   fn process() -> !Data:
+       file = try read_file(path)      # FileError
+       data = try parse(file)          # ParseError
+       return data
+   # Compiler infers: (FileError | ParseError)!Data
+   ```
+
+4. **Error Trait** (automatic message generation):
+   ```ryo
+   # All errors implement Error trait with .message() method
+   result = fetch_resource(url) catch |e|:
+       print(e.message())  # Automatic or custom message
+       return
+   ```
+
+5. **Error Propagation** (no wrapper boilerplate):
+   ```ryo
+   # Before (wrapper boilerplate):
+   error AppError:
+       Http(HttpError)
+       Io(IoError)
+
+   # After (automatic composition):
+   fn fetch_and_save() -> !():
+       data = try http.get("...")     # Different errors
+       try files.write(data)           # Automatically composed
+       return
+   # Compiler infers: (HttpError | IoError)!()
+   ```
+
+6. **Pattern Matching Flexibility**:
+   - **Single error types**: Exhaustive matching required (all variants must be handled)
+   - **Error unions**: Non-exhaustive matching allowed (can handle some, others propagate)
+
+#### Examples:
+
+**Exhaustive matching (single error type):**
 ```ryo
-error AppError:
-    Http(HttpError)
-    Io(IoError)
+result = divide(10.0, 0.0) catch |e|:
+    match e:
+        MathError.DivisionByZero:
+            print("Cannot divide by zero")
+        MathError.InvalidInput(msg):
+            print(f"Invalid: {msg}")
+        MathError.OverflowError:
+            print("Overflow!")
+    return
+# All variants MUST be handled (unless there's a catch-all _ pattern)
+```
 
-impl From[HttpError] for AppError:
-    fn from(err: HttpError) -> AppError:
-        return AppError.Http(err)
-
-impl From[IoError] for AppError:
-    fn from(err: IoError) -> AppError:
-        return AppError.Io(err)
-
-fn fetch_and_save() -> AppError!():
-    data = try await http.get("...")      # HttpError -> AppError
-    try await files.write(data)           # IoError -> AppError
+**Non-exhaustive matching (error unions):**
+```ryo
+result = complex_operation() catch |e|:
+    match e:
+        NetworkError.Timeout(duration):
+            print(f"Timeout after {duration}ms")
+        ParseError.InvalidJson(reason):
+            print(f"Parse error: {reason}")
+        # Other errors (FileError, ValidationError) can be unhandled
+        # They would propagate to the caller
     return
 ```
 
-**Key Safety Feature**: Direct access to error union values without `try`/`catch` is a compile-time error, ensuring all errors are explicitly handled.
+#### Benefits:
+- ✅ **Zero boilerplate**: No wrapper types needed
+- ✅ **Type safety**: All errors explicitly tracked by type system
+- ✅ **Composability**: Functions naturally compose without explicit error mapping
+- ✅ **Flexibility**: Can use exhaustive matching for single types, non-exhaustive for unions
+- ✅ **Ergonomic**: `try` keyword feels natural for error propagation
+- ✅ **Explicit handling**: `try`/`catch` makes all error paths visible in code
+
+#### Key Safety Features:
+- **No direct unwrap**: Error values cannot be used without `try`/`catch` or propagation
+- **Automatic inference**: Compiler tracks error types and infers unions automatically
+- **From trait**: Allows explicit cross-layer error conversion when needed
+- **Message support**: All errors can provide human-readable messages via trait
+
+This design eliminates the "wrapper problem" while maintaining type safety and enabling better error composition patterns than traditional exception systems.
 
 ## Moderate Issues
 

@@ -1,18 +1,69 @@
 # error_handling.ryo
-# Error handling example demonstrating error types and the try keyword with catch operator
+# Comprehensive error handling example demonstrating single-variant, multi-variant,
+# and error union types with try keyword and catch operator
+
+# ============================================================================
+# SECTION 1: Single-Variant Errors (simple cases)
+# ============================================================================
+
+# Unit error - no associated data
+error Timeout
+
+# Message-only error
+error NotFound(str)
+
+# Structured error with multiple fields
+error HttpError(status: int, message: str)
+
+
+# ============================================================================
+# SECTION 2: Multi-Variant Errors (complex cases)
+# ============================================================================
 
 error MathError:
     DivisionByZero
-    EmptyList
+    InvalidInput(message: str)
+    OverflowError
+
+
+error FileError:
+    NotFound(path: str)
+    PermissionDenied
+    CorruptedData(reason: str)
+
+
+# ============================================================================
+# SECTION 3: Functions with Single-Variant Errors
+# ============================================================================
 
 fn divide(a: float, b: float) -> MathError!float:
     if b == 0.0:
         return MathError.DivisionByZero
     return a / b
 
+
+fn fetch_user(id: int) -> NotFound!User:
+    # In real code, this would query a database
+    if id < 1:
+        return NotFound(f"User with ID {id} not found")
+    # Success case
+    return User{id: id, name: "Alice"}
+
+
+fn fetch_data(url: str) -> HttpError!str:
+    # In real code, this would make an HTTP request
+    if url.is_empty():
+        return HttpError{status: 400, message: "URL cannot be empty"}
+    return "response data"
+
+
+# ============================================================================
+# SECTION 4: Functions with Multi-Variant Errors
+# ============================================================================
+
 fn calculate_average(numbers: List[float]) -> MathError!float:
     if numbers.is_empty():
-        return MathError.EmptyList
+        return MathError.InvalidInput("List cannot be empty")
 
     sum = 0.0
     for num in numbers:
@@ -20,57 +71,144 @@ fn calculate_average(numbers: List[float]) -> MathError!float:
 
     return sum / float(numbers.len())
 
+
 fn safe_division_chain(a: float, b: float, c: float) -> MathError!float:
     # Using try keyword for elegant error propagation
     first_result = try divide(a, b)
     second_result = try divide(first_result, c)
     return second_result
 
+
+# ============================================================================
+# SECTION 5: Error Union Types (composing different error types)
+# ============================================================================
+
+fn load_and_parse(file_path: str) -> (FileError | MathError)!float:
+    # This function can fail with either FileError or MathError
+    content = try read_file(file_path)  # FileError
+    value = try float(content)           # Could fail
+    return value
+
+
+# Inferred error union - compiler automatically determines the union type
+fn process_config(config_file: str) -> !str:
+    # FileError from try read_file()
+    content = try read_file(config_file)
+    # Validate - returns MathError
+    validate(content)
+    # HTTP request - returns HttpError
+    data = try fetch_data(content)
+    return data
+# Compiler infers: (FileError | MathError | HttpError)!str
+
+
+# ============================================================================
+# SECTION 6: Main function demonstrating all error handling patterns
+# ============================================================================
+
 fn main():
-    # Basic error handling with catch
+    print("=== Single-Variant Error Example ===")
+
+    # Example 1: Single-variant NotFound error with message
+    user_result = fetch_user(1) catch |e|:
+        print(f"Error: {e.message()}")
+        return
+    print(f"Found user: {user_result.name}")
+
+    # Example 2: Single-variant NotFound error - failure case
+    user_error = fetch_user(-1) catch |e|:
+        print(f"User lookup failed: {e.message()}")
+        return
+    print(f"User: {user_error.name}")
+
+    print("\n=== Multi-Variant Error Example ===")
+
+    # Example 3: Multi-variant MathError with exhaustive matching
     result = divide(10.0, 2.0) catch |e|:
         match e:
             MathError.DivisionByZero:
                 print("Error: Cannot divide by zero")
+            MathError.InvalidInput(msg):
+                print(f"Error: {msg}")
+            MathError.OverflowError:
+                print("Error: Arithmetic overflow")
         return
     print(f"10.0 / 2.0 = {result}")
 
-    # Error case
+    # Example 4: Multi-variant error - error case
     error_result = divide(10.0, 0.0) catch |e|:
         match e:
             MathError.DivisionByZero:
-                print("Expected error: Division by zero")
-            MathError.EmptyList:
-                print("Unexpected: Empty list error in division")
+                print("Caught expected error: Division by zero")
+            MathError.InvalidInput(msg):
+                print(f"Unexpected InvalidInput: {msg}")
+            MathError.OverflowError:
+                print("Unexpected overflow")
         return
 
-    # Using try keyword for chain operations
+    print("\n=== Error Propagation with try ===")
+
+    # Example 5: Error propagation - same error type
     chain_result = safe_division_chain(100.0, 5.0, 2.0) catch |e|:
         match e:
             MathError.DivisionByZero:
-                print("Chain error: Division by zero encountered")
-            MathError.EmptyList:
-                print("Unexpected: Empty list error in chain")
+                print("Chain failed: Division by zero")
+            MathError.InvalidInput(msg):
+                print(f"Chain failed: {msg}")
+            MathError.OverflowError:
+                print("Chain failed: Overflow")
         return
-    print(f"Chain result: {chain_result}")
+    print(f"Chain result: (100.0 / 5.0) / 2.0 = {chain_result}")
 
-    # List average example with successful case
+    # Example 6: Error propagation failure
+    chain_fail = safe_division_chain(100.0, 5.0, 0.0) catch |e|:
+        match e:
+            MathError.DivisionByZero:
+                print("Caught in chain: Division by zero in second operation")
+            MathError.InvalidInput(msg):
+                print(f"Caught in chain: {msg}")
+            MathError.OverflowError:
+                print("Caught in chain: Overflow")
+        return
+
+    print("\n=== List Operations ===")
+
+    # Example 7: Successful average calculation
     numbers = [1.0, 2.0, 3.0, 4.0, 5.0]
     avg_result = calculate_average(numbers) catch |e|:
         match e:
-            MathError.EmptyList:
-                print("Error calculating average: List is empty")
+            MathError.InvalidInput(msg):
+                print(f"Error calculating average: {msg}")
             MathError.DivisionByZero:
-                print("Unexpected: Division by zero in average calculation")
+                print("Unexpected: Division by zero")
+            MathError.OverflowError:
+                print("Unexpected: Overflow")
         return
-    print(f"Average: {avg_result}")
+    print(f"Average of [1.0, 2.0, 3.0, 4.0, 5.0]: {avg_result}")
 
-    # Empty list case - demonstrates error handling
+    # Example 8: Average calculation with empty list
     empty_numbers = []
     empty_avg = calculate_average(empty_numbers) catch |e|:
         match e:
-            MathError.EmptyList:
-                print("Expected error: Cannot average empty list")
+            MathError.InvalidInput(msg):
+                print(f"Cannot calculate average: {msg}")
             MathError.DivisionByZero:
-                print("Unexpected: Division by zero error")
+                print("Unexpected: Division by zero")
+            MathError.OverflowError:
+                print("Unexpected: Overflow")
         return
+
+    print("\n=== HttpError Example ===")
+
+    # Example 9: HTTP error with status code
+    http_result = fetch_data("https://api.example.com") catch |e|:
+        print(f"HTTP error {e.status}: {e.message}")
+        return
+    print(f"Received: {http_result}")
+
+    # Example 10: HTTP error with empty URL
+    http_fail = fetch_data("") catch |e|:
+        print(f"HTTP error {e.status}: {e.message}")
+        return
+
+    print("\n=== All Examples Complete ===")

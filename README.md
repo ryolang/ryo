@@ -32,7 +32,14 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 *   **Concurrency:** Python-familiar async/await with high-performance async runtime
 *   **Syntax:** Python-inspired, tab-indented, expressions, statements
 *   **Types:** Static typing with bidirectional type inference (like Rust/TypeScript), primitives (`int`, `float`, `bool`, `str`, `char`), tuples, `struct`, `enum` (ADTs), `trait` (static dispatch initially). Function signatures require types, local variables inferred. Variables are immutable by default (no `let` keyword), use `mut` for mutability
-*   **Error Handling:** Error types (`error` keyword), error unions (`ErrorType!SuccessType`), optional types (`?T` and `none`), `try` operator for propagation, `catch` operator for handling, `panic` (aborts)
+*   **Error Handling:** Type-safe, explicit error handling system:
+    - **Single-variant errors** for simple cases: `error Timeout`, `error NotFound(str)`
+    - **Multi-variant errors** with full ADT support: `error MathError: DivisionByZero, InvalidInput(str)`
+    - **Error unions** with automatic composition: `fn process() -> !Data` infers `(FileError | ParseError | MathError)!Data`
+    - **Error trait** with automatic message generation: All errors implement `.message() -> str`
+    - **Try/catch operators** for ergonomic error propagation and handling
+    - **Optional types** (`?T` and `none`) for nullable values - no null pointer exceptions
+    - **Exhaustive pattern matching** for single errors, flexible non-exhaustive matching for error unions
 *   **Compile-Time Execution:** `comptime` blocks and functions
 *   **Tooling:** `ryo` command (compiler, runner, REPL, package manager frontend), `ryopkg` logic integrated, Cranelift backend (AOT/JIT/Wasm)
 *   **FFI:** C interoperability via `extern "C"` and `unsafe` blocks, `ffi` stdlib module. (Future Goal: Explore deeper integration with other language ecosystems like Python).

@@ -259,6 +259,52 @@ Ryo synthesizes ideas from several modern programming languages:
 ### 4.9 Error Types (`ErrorType!SuccessType`)
 
 *   **Purpose:** Error types are algebraic data types specifically designed for error handling. Use the `error` keyword to define error types with associated data.
+
+#### **Single-Variant Errors** (Simple Case)
+
+*   **Unit Error (No Data):** A simple error marker:
+    ```ryo
+    error Timeout
+    error Unauthorized
+    ```
+    **Usage:**
+    ```ryo
+    fn operation() -> Timeout!Data:
+        if elapsed > limit:
+            return Timeout  # Direct return
+        return data
+    ```
+
+*   **Message-Only Error (Most Common):** Single unnamed string field becomes the message:
+    ```ryo
+    error NotFound(str)
+    error ValidationFailed(str)
+    ```
+    **Usage:**
+    ```ryo
+    fn find_user(id: int) -> NotFound!User:
+        if not exists(id):
+            return NotFound("User not found")
+        return user
+    ```
+    **Automatic message:** The string is accessible via `.message()` method on error trait.
+
+*   **Structured Single-Variant Error:** Multiple named fields:
+    ```ryo
+    error HttpError(status: int, message: str)
+    error ValidationError(field: str, constraint: str)
+    ```
+    **Usage:**
+    ```ryo
+    fn fetch(url: str) -> HttpError!Data:
+        response = await http.get(url)
+        if response.status != 200:
+            return HttpError(status: response.status, message: response.body)
+        return parse(response.body)
+    ```
+
+#### **Multi-Variant Errors** (Complex Case)
+
 *   **Definition Syntax:**
     ```ryo
     error IoError:
@@ -271,6 +317,7 @@ Ryo synthesizes ideas from several modern programming languages:
         UnexpectedToken(expected: str, got: str)
         UnexpectedEof
     ```
+
 *   **Variants with Associated Data:** Error variants can carry data (tuple or struct variants):
     ```ryo
     error DatabaseError:
@@ -278,40 +325,155 @@ Ryo synthesizes ideas from several modern programming languages:
         QueryTimeout(Duration)
         InvalidQuery(sql: str, position: int)
     ```
-*   **Error Union Type (`ErrorType!T`):** Represents a value that can be the error type or the success type:
+
+#### **Error Union Types** (Composition)
+
+*   **Explicit Error Unions** - Compose multiple error types:
     ```ryo
-    fn read_file(path: str) -> IoError!str:
+    # Can return either FileError or ParseError
+    fn process(path: str) -> (FileError | ParseError)!Data:
+        file = try read_file(path)      # FileError
+        data = try parse_json(file)     # ParseError
+        return data
+    ```
+
+*   **Inferred Error Unions** - Compiler infers error set from `try` expressions:
+    ```ryo
+    # Just use ! and compiler infers: (FileError | ParseError)!Data
+    fn process(path: str) -> !Data:
+        file = try read_file(path)      # FileError
+        data = try parse_json(file)     # ParseError
+        return data
+
+    # Use --show-inferred-errors flag to see inferred type:
+    # process() -> (FileError | ParseError)!Data
+    ```
+    **Benefits:** No wrapper types needed, composition is automatic, refactoring-friendly.
+
+*   **Explicit Single Error Type** (`ErrorType!T`):
+    ```ryo
+    fn read_file(path: str) -> FileError!str:
         if not exists(path):
-            return IoError.FileNotFound(path)
+            return FileError.FileNotFound(path)
         return os.read(path)
     ```
-*   **Generic Error Type (`!T`):** When error type is not specified, `!T` means "any error or T":
+
+*   **Generic Error Type** (`!T`): Accept any error:
     ```ryo
     fn flexible_operation() -> !Data:
         # Can return any error type
         ...
     ```
-*   **Combined Error and Optional (`!?T`):** For operations that can fail (error), return no value (`none`), or return a value:
+
+*   **Combined Error and Optional** (`!?T`):
     ```ryo
-    fn find_user(db: Database, id: int) -> IoError!?User:
-        # Can return: IoError, none (not found), or User
+    fn find_user(db: Database, id: int) -> DatabaseError!?User:
+        # Can return: DatabaseError, none (not found), or User
         rows = try db.query("SELECT * FROM users WHERE id = ?", id)
         if rows.is_empty():
             return none
         return User.from_row(rows[0])
     ```
-*   **Pattern Matching on Errors:** Use full ADT pattern matching to handle different error variants:
+
+#### **Pattern Matching on Errors**
+
+*   **Single Error Type** (Exhaustive matching):
     ```ryo
-    result = load_config() catch |e|:
+    result = read_file(path) catch |e|:
         match e:
-            ParseError.InvalidSyntax(line, col):
-                print(f"Syntax error at {line}:{col}")
-            ParseError.UnexpectedToken(exp, got):
-                print(f"Expected {exp}, got {got}")
-            ParseError.UnexpectedEof:
-                print("Unexpected end of file")
+            FileError.FileNotFound(p):
+                print(f"File not found: {p}")
+            FileError.PermissionDenied(p):
+                print(f"Permission denied: {p}")
+            FileError.DiskFull:
+                print("Disk full")
+            # MUST handle all variants (exhaustive)
     ```
-*   *(Rationale: `error` keyword signals error-handling intent. Associated data enables rich error information. Zig-style `E!T` syntax is concise. Full pattern matching provides type-safe error handling)*
+
+*   **Error Union** (Non-exhaustive matching):
+    ```ryo
+    result = process(path) catch |e|:
+        match e:
+            FileError.FileNotFound(p):
+                return create_default(p)
+            ParseError.InvalidSyntax(line, col):
+                log_error(f"Syntax error at {line}:{col}")
+                return default_config()
+            # Don't need to handle all errors - non-exhaustive
+    ```
+    **With catch-all:**
+    ```ryo
+    result = process(path) catch |e|:
+        match e:
+            FileError.FileNotFound(p):
+                return create_default(p)
+            else:
+                panic(f"Unexpected error: {e.message()}")
+    ```
+
+*   *(Rationale: Single-variant errors optimize common case (just a message). Multi-variant errors provide rich type-safe variants. Error unions eliminate wrapper types through automatic composition (Zig-inspired). Non-exhaustive matching for unions allows partial error handling at boundaries.)*
+
+### 4.10 Error Trait and Message Handling
+
+*   **Error Trait:** All error types automatically implement the `Error` trait:
+    ```ryo
+    trait Error:
+        fn message(self) -> str  # Human-readable message
+    ```
+
+*   **Automatic Message Generation:**
+    *   **Single string field:** The string is used as the message.
+        ```ryo
+        error NotFound(str)
+        # .message() returns the string directly
+        ```
+    *   **Named message field:** The `message` field is used.
+        ```ryo
+        error HttpError(status: int, message: str)
+        # .message() returns the message field
+        ```
+    *   **Unit variant:** Variant name is used.
+        ```ryo
+        error Timeout
+        # .message() returns "Timeout"
+        ```
+    *   **Multiple fields (no message field):** Generated from Debug representation.
+        ```ryo
+        error FileError:
+            NotFound(path: str)
+        # .message() returns "File not found: /path/to/file"
+        ```
+
+*   **Custom Message Implementation:** Override automatic message generation:
+    ```ryo
+    error ValidationError:
+        TooShort(field: str, min_length: int)
+        TooLong(field: str, max_length: int)
+
+    impl Error for ValidationError:
+        fn message(self) -> str:
+            match self:
+                ValidationError.TooShort(field, min):
+                    return f"{field} must be at least {min} characters"
+                ValidationError.TooLong(field, max):
+                    return f"{field} cannot exceed {max} characters"
+    ```
+
+*   **Accessing Error Messages:**
+    ```ryo
+    result = operation() catch |e|:
+        # Access message directly
+        print(e.message())
+
+        # Or use in catch handlers
+        match e:
+            NotFound(msg):
+                print(f"Not found: {msg}")
+            else:
+                print(f"Error: {e.message()}")
+    ```
+
+*   *(Rationale: Error messages are essential for debugging and user feedback. Automatic generation from data reduces boilerplate. Custom implementations enable domain-specific messages.)*
 
 ### 4.11 FFI Types
 
@@ -397,22 +559,58 @@ error FileError:
 
 *   *(Rationale: `error` keyword signals error-handling intent. Associated data enables rich error information.)*
 
-### 7.2 Error Union Types (`ErrorType!T`)
+### 7.2 Error Union Types
 
-Function return types specify both the error type and success type using the `ErrorType!SuccessType` syntax:
+Function return types specify both the error type and success type:
+
+#### **Single Error Type**
+
+The `ErrorType!SuccessType` syntax indicates a function can return one specific error or a value:
 
 ```ryo
 fn read_file(path: str) -> FileError!str:
     if not exists(path):
         return FileError.NotFound(path)
     return os.read(path)
+```
 
-# Flexible error type - can return any error
+#### **Multiple Error Types (Error Unions)**
+
+**Explicit error union** - List all possible error types:
+
+```ryo
+# Can return FileError OR ParseError OR Data
+fn process(path: str) -> (FileError | ParseError)!Data:
+    file = try read_file(path)      # FileError
+    data = try parse_json(file)     # ParseError
+    return data
+```
+
+**Inferred error union** - Compiler infers from `try` expressions:
+
+```ryo
+# Compiler infers: (FileError | ParseError)!Data
+fn process(path: str) -> !Data:
+    file = try read_file(path)      # FileError
+    data = try parse_json(file)     # ParseError
+    return data
+```
+
+**Generic error type** - Accept any error:
+
+```ryo
 fn flexible_operation() -> !Data:
+    # Can return any error type
     ...
 ```
 
-*   *(Rationale: Zig-style `E!T` syntax is concise and reads naturally. Error type is explicitly documented in function signature.)*
+*   **Error Union Semantics:**
+    *   Error types are composed with `|` operator (unordered, not a sequence)
+    *   Inferred unions automatically track all possible errors from `try` expressions
+    *   Use `--show-inferred-errors` compiler flag to see inferred error set
+    *   Single error type is a special case of error union with one member
+
+*   *(Rationale: Zig-style `E!T` syntax is concise. Error unions eliminate wrapper types through automatic composition. Explicit unions document API contracts. Inferred unions reduce boilerplate.)*
 
 ### 7.3 Error Propagation (`try`)
 
@@ -426,8 +624,45 @@ fn load_and_parse(path: str) -> !Config:
     return config
 ```
 
-*   **Semantic:** `try expr` evaluates `expr`. If it succeeds, the value is returned. If it fails (error), the error is propagated to the caller.
-*   *(Rationale: `try` clearly signals error propagation. Familiar to async/await users.)*
+*   **Semantic:** `try expr` evaluates `expr`:
+    *   If success: returns the value
+    *   If error: propagates error to caller (with optional conversion via `From` trait)
+
+*   **Error Composition with `try`:**
+    *   In functions with inferred error unions, `try` automatically collects all error types
+    *   In explicit error unions, error must be in the union or convertible via `From` trait
+    *   In single error type, error must match exactly or be convertible via `From` trait
+
+*   **Example - Inferred Union:**
+    ```ryo
+    fn process() -> !Data:
+        a = try func_a()  # FileError
+        b = try func_b()  # ParseError
+        c = try func_c()  # NetworkError
+    # Inferred as: (FileError | ParseError | NetworkError)!Data
+    ```
+
+*   **Example - Explicit Union with Conversion:**
+    ```ryo
+    error AppError:
+        File(FileError)
+        Parse(ParseError)
+
+    impl From[FileError] for AppError:
+        fn from(err: FileError) -> AppError:
+            return AppError.File(err)
+
+    impl From[ParseError] for AppError:
+        fn from(err: ParseError) -> AppError:
+            return AppError.Parse(err)
+
+    fn process() -> AppError!Data:
+        a = try read_file(path)  # FileError -> AppError via From trait
+        b = try parse_json(a)    # ParseError -> AppError via From trait
+        return b
+    ```
+
+*   *(Rationale: `try` clearly signals error propagation. Familiar to async/await users. Automatic composition via inferred unions eliminates wrapper types (Zig-inspired). From trait provides explicit control when needed.)*
 
 ### 7.4 Error Handling (`catch`)
 
@@ -447,7 +682,40 @@ config = load_and_parse("app.toml") catch |e|:
 
 *   **Syntax:** `expr catch |e|: handle_error(e)`
 *   **Pattern Matching:** Full ADT pattern matching enables type-safe error handling.
-*   *(Rationale: `catch` follows familiar error-handling conventions. Full pattern matching prevents missed error cases.)*
+
+*   **Pattern Matching Differences:**
+    *   **Single Error Type** (exhaustive): Must handle all variants
+        ```ryo
+        result = read_file(path) catch |e|:
+            match e:
+                FileError.NotFound(p):
+                    # ...
+                FileError.PermissionDenied(p):
+                    # ...
+                FileError.ReadError(r):
+                    # ...
+                # MUST handle all variants
+        ```
+    *   **Error Union** (non-exhaustive): Can handle some variants, others propagate
+        ```ryo
+        result = process(path) catch |e|:
+            match e:
+                FileError.NotFound(p):
+                    return create_default(p)
+                # Don't need to handle ParseError or NetworkError
+                # Unhandled errors propagate up
+        ```
+    *   **With Catch-All**: Handle some specifically, catch rest
+        ```ryo
+        result = process(path) catch |e|:
+            match e:
+                FileError.NotFound(p):
+                    return create_default(p)
+                else:
+                    panic(f"Unexpected error: {e.message()}")
+        ```
+
+*   *(Rationale: `catch` follows familiar error-handling conventions. Exhaustive matching for single types ensures safety. Non-exhaustive matching for unions allows flexible error handling at API boundaries.)*
 
 ### 7.5 Error Conversion (`From` Trait)
 

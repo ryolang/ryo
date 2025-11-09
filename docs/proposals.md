@@ -398,14 +398,23 @@ result = data.iter()
     .collect[List[ProcessedItem]]()  # Evaluation happens here
 ```
 
-### **Standard Error Trait System** ✅ IMPLEMENTED
+### **Error Handling System** ✅ IMPLEMENTED
 
-Error handling has been implemented in the core language with the `error` keyword and `try`/`catch` operators. See the main specification for details.
+**Core Feature: Error Union Types**
 
-#### **Error Type Design (Implemented)**
+Error handling is fully implemented in the core language with automatic error composition via error unions. This eliminates the "wrapper problem" where developers previously had to manually create wrapper types to compose functions with different error types.
 
+#### **Key Features (Implemented)**
+
+1. **Single-Variant Errors** - Syntactic sugar for simple error cases:
 ```ryo
-# Error types are defined with the error keyword
+error Timeout                          # Unit error
+error NotFound(str)                    # Message-only error
+error HttpError(status: int, message: str)  # Structured error
+```
+
+2. **Multi-Variant Errors** - Full ADT support:
+```ryo
 error IoError:
     NotFound(path: str)
     PermissionDenied(path: str)
@@ -416,10 +425,75 @@ error ParseError:
     UnexpectedToken(expected: str, got: str)
 ```
 
-#### **Error Conversion and Propagation (Implemented)**
+3. **Automatic Error Composition** - Error unions inferred from `try` expressions:
+```ryo
+# Explicit union - manually specified
+fn process_file(path: str) -> (IoError | ParseError)!ProcessedData:
+    content = try files.read_text(path)
+    config = try parse_config(content)
+    return process(config)
+
+# Inferred union - compiler automatically determines the union
+fn process_file(path: str) -> !ProcessedData:
+    content = try files.read_text(path)    # IoError
+    config = try parse_config(content)     # ParseError
+    return process(config)
+# Compiler infers: (IoError | ParseError)!ProcessedData
+```
+
+#### **Error Trait (Implemented)**
+
+All errors implement an automatic `Error` trait with `.message()` method:
 
 ```ryo
-# Error conversion with From trait
+# Automatic message generation
+error HttpError(status: int, message: str)
+
+result = fetch_resource(url) catch |e|:
+    print(e.message())  # Returns: "400: Bad Request"
+    return
+
+# Custom message implementations
+impl Error for CustomError:
+    fn message(self) -> str:
+        match self:
+            CustomError.Timeout(duration):
+                return f"Operation timed out after {duration}ms"
+            CustomError.NotFound(resource):
+                return f"Resource not found: {resource}"
+```
+
+#### **Pattern Matching (Implemented)**
+
+- **Single error types**: Exhaustive matching required (all variants must be handled)
+- **Error unions**: Non-exhaustive matching allowed (can handle some errors, others propagate)
+
+```ryo
+# Exhaustive matching for single error type
+result = divide(10.0, 0.0) catch |e|:
+    match e:
+        MathError.DivisionByZero:
+            print("Cannot divide by zero")
+        MathError.InvalidInput(msg):
+            print(f"Invalid: {msg}")
+    return
+
+# Non-exhaustive matching for error unions
+result = complex_operation() catch |e|:
+    match e:
+        NetworkError.Timeout(duration):
+            print(f"Timeout after {duration}ms")
+        ParseError.InvalidJson(reason):
+            print(f"Parse error: {reason}")
+        # Other errors can be unhandled and propagate to caller
+    return
+```
+
+#### **Error Conversion (Implemented)**
+
+Optional `From` trait for explicit error conversion when automatic composition is not sufficient:
+
+```ryo
 error AppError:
     Io(IoError)
     Parse(ParseError)
@@ -433,36 +507,48 @@ impl From[ParseError] for AppError:
     fn from(err: ParseError) -> AppError:
         return AppError.Parse(err)
 
-# Error propagation with try keyword
-fn process_file(path: str) -> AppError!ProcessedData:
-    content = try files.read_text(path)   # IoError -> AppError automatically
-    config = try parse_config(content)    # ParseError -> AppError automatically
-    data = try fetch_remote_data(config)  # NetworkError -> AppError automatically
-    return process(data)
+# Usage with explicit conversion
+fn legacy_interface() -> AppError!ProcessedData:
+    content = try files.read_text(path)   # IoError, no conversion needed
+    config = try parse_config(content)    # ParseError, no conversion needed
+    return process(config)
 ```
 
 #### **Future: Error Context and Chaining**
 
+Enhanced error context for more informative error chains:
+
 ```ryo
-# Future error context system for more informative errors
-trait ErrorContext[T, E]:
-    fn with_context(self, context: str) -> !ContextError[E]
+# Future error context system
+trait ErrorContext[E]:
+    fn with_context(self, context: str) -> ContextError[E]
 
 struct ContextError[E]:
     source: E
     context: str
 
-impl[T, E] ErrorContext[T, E] for E:
-    fn with_context(self, context: str) -> !ContextError[E]:
+impl[E] ErrorContext[E] for E:
+    fn with_context(self, context: str) -> ContextError[E]:
         return ContextError { source: self, context }
 
 # Usage
-fn load_user_config(user_id: int) -> !UserConfig:
+fn load_user_config(user_id: int) -> !(UserConfig):
     path = f"/users/{user_id}/config.toml"
     config = try parse_config_file(path)
         .with_context(f"Failed to load config for user {user_id}")
     return config
 ```
+
+#### **Benefits of Error Unions**
+
+- ✅ **Zero boilerplate**: No manual wrapper types required
+- ✅ **Automatic inference**: Compiler tracks error types from `try` expressions
+- ✅ **Type safety**: All errors are tracked and checked by the type system
+- ✅ **Ergonomic**: `try` keyword makes error propagation natural
+- ✅ **Flexible**: Exhaustive matching for certainty, non-exhaustive for flexibility
+- ✅ **Composable**: Functions naturally compose without explicit error mapping
+
+**See the [Language Specification](specification.md) Sections 4.9, 4.10, and 7.2-7.4 for complete error handling documentation.**
 
 ### **Attribute System**
 
