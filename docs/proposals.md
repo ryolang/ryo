@@ -645,7 +645,7 @@ impl Display for Point:
 
 ```ryo
 # Future advanced formatting capabilities
-point = Point { x: 3.14159, y: 2.71828 }
+point = Point(x=3.14159, y=2.71828)
 
 # Precision control
 print(f"Point: ({point.x:.2}, {point.y:.3})")  # Point: (3.14, 2.718)

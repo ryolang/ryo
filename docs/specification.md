@@ -171,7 +171,7 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
 ### 4.5 Struct Type (Product Type)
 
 *   User-defined data aggregation: `struct Name: field: Type ...`.
-*   Instances created via struct literals: `Name { field: value, ... }`.
+*   Instances created via struct literals with named arguments: `Name(field=value, ...)`.
 *   Access via dot notation: `instance.field`. Mutable if instance bound `mut`.
 
 ### 4.6 Enum Type (Sum Type / Algebraic Data Type - ADT)

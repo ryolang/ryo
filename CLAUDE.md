@@ -404,8 +404,8 @@ module file:
     error NotFound(path: str)
     error PermissionDenied(path: str)
 
-# Struct literal (uses braces)
-point = Point{x: 3.14, y: 2.71}
+# Struct literal (uses parentheses with named arguments)
+point = Point(x=3.14, y=2.71)
 
 # Enum variant
 color = Color.Red
@@ -499,28 +499,32 @@ impl Drawable for Circle:
 
 ### What Uses Braces (Exceptions)
 
+Curly braces are **reserved for f-string interpolation only**:
+
 1. **F-string interpolation** (correct, keep as-is):
    ```ryo
    name = "Alice"
    print(f"Hello, {name}!")  # Braces for interpolation
    ```
 
-2. **Struct/enum literals** (correct, keep as-is):
+### What Does NOT Use Braces
+
+1. **Struct/enum literals** (use parentheses with named arguments):
    ```ryo
-   point = Point{x: 1.0, y: 2.0}
-   user = User{name: "Bob", age: 30}
+   point = Point(x=1.0, y=2.0)
+   user = User(name="Bob", age=30)
    ```
 
-3. **Pattern destructuring** (correct, keep as-is):
+2. **Pattern destructuring** (uses parentheses, not braces):
    ```ryo
    match shape:
-       Shape.Circle{radius}: print(radius)
-       Shape.Rectangle{width, height}: print(width, height)
+       Shape.Circle(radius): print(radius)
+       Shape.Rectangle(width, height): print(width, height)
    ```
 
-4. **Import grouping** (correct, keep as-is):
+3. **Import grouping** (parentheses):
    ```ryo
-   import utils.{math, strings, collections}
+   import utils.(math, strings, collections)
    ```
 
 ### Common Documentation Pitfalls
