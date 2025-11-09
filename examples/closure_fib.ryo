@@ -1,18 +1,27 @@
-# closure
+# Closure example - demonstrates higher-order functions
 
-# fibonacci is a function that returns
-# a function that returns an int.
+# fibonacci is a function that returns a closure
+# The returned function maintains state between calls
 fn fibonacci() -> fn() -> int:
+    # Tuple unpacking to initialize two variables
+    # Note: This syntax may require full language implementation
     a, b = 0, 1
+
     return fn() -> int:
         if a == 0:
-            a, b = 0, 1 # Initialize the first two Fibonacci numbers
+            # Initialize the first two Fibonacci numbers
+            a, b = 0, 1
         else:
-            a, b = b, a+b # Update to the next Fibonacci number
+            # Update to the next Fibonacci number
+            # Uses tuple unpacking for simultaneous assignment
+            a, b = b, a + b
         return a
 
 fn main():
+    # Get the fibonacci generator closure
     f = fibonacci()
-    for i in range(0,10):
-        println(f())
+
+    # Generate first 10 fibonacci numbers
+    for i in range(0, 10):
+        print(f())
 

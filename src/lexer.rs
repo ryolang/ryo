@@ -116,7 +116,7 @@ mod tests {
     use super::*;
 
     /// Helper function to tokenize a string and collect all tokens (except skipped ones)
-    fn tokenize(input: &str) -> Vec<Token> {
+    fn tokenize(input: &str) -> Vec<Token<'_>> {
         Token::lexer(input)
             .filter_map(|result| result.ok())
             .collect()

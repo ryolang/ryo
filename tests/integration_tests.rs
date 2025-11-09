@@ -1,32 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{env, fs};
+use std::fs;
 use tempfile::TempDir;
-
-// Helper to clean up generated files
-struct TestCleanup {
-    files_to_remove: Vec<String>,
-}
-
-impl TestCleanup {
-    fn new() -> Self {
-        Self {
-            files_to_remove: Vec::new(),
-        }
-    }
-
-    fn track(&mut self, filename: &str) {
-        self.files_to_remove.push(filename.to_string());
-    }
-}
-
-impl Drop for TestCleanup {
-    fn drop(&mut self) {
-        for file in &self.files_to_remove {
-            let _ = fs::remove_file(file);
-        }
-    }
-}
 
 // Helper function to run ryo compiler and capture output
 fn run_ryo_command(

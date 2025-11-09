@@ -1,5 +1,4 @@
-// TODO: Update for new AST (Program, Statement, Expression) after Milestone 2
-// use crate::ast::Expr;
+use crate::ast::{BinaryOperator, Expression, ExprKind, Literal, Program, UnaryOperator};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -49,96 +48,96 @@ impl Codegen {
         })
     }
 
-    // TODO: Update compile, translate, build_expr methods for new AST after Milestone 2
-    // /// Compiles the provided expression into the main function of the module.
-    // pub fn compile(&mut self, input: Expr) -> Result<FuncId, String> {
-    //     let sig = {
-    //         let mut sig = self.module.make_signature();
-    //         sig.returns.push(AbiParam::new(self.int_type));
-    //         sig
-    //     };
-    //
-    //     let func_id = self
-    //         .module
-    //         .declare_function("main", Linkage::Export, &sig)
-    //         .map_err(|e| format!("Failed to declare function: {}", e))?;
-    //
-    //     self.ctx.func.signature = sig;
-    //
-    //     {
-    //         let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
-    //         let int_type = self.int_type; // Get int_type before borrowing self mutably via builder
-    //
-    //         // Pass int_type explicitly, don't borrow self
-    //         Self::translate(&mut builder, input, int_type)?;
-    //
-    //         builder.finalize(); // Finalize the builder before the borrow of self.ctx.func ends
-    //     }
-    //
-    //     // Define the function body using the populated context
-    //     self.module
-    //         .define_function(func_id, &mut self.ctx)
-    //         .map_err(|e| format!("Failed to define function: {}", e))?;
-    //
-    //     self.ctx.clear(); // Clear context for next function
-    //
-    //     Ok(func_id)
-    // }
-    //
-    // /// Translates an expression AST into Cranelift IR using the provided FunctionBuilder.
-    // // Does not take self, receives int_type explicitly
-    // fn translate(builder: &mut FunctionBuilder, expr: Expr, int_type: Type) -> Result<(), String> {
-    //     let entry_block = builder.create_block();
-    //     builder.switch_to_block(entry_block);
-    //     builder.seal_block(entry_block);
-    //
-    //     // Build the IR for the expression, passing int_type
-    //     let result_val = Self::build_expr(builder, expr, int_type)?;
-    //
-    //     builder.ins().return_(&[result_val]);
-    //     // Finalization is handled in compile after this function returns
-    //     Ok(())
-    // }
-    //
-    // /// Recursively builds Cranelift IR for an expression.
-    // // Does not take self, receives int_type explicitly
-    // fn build_expr(
-    //     builder: &mut FunctionBuilder,
-    //     expr: Expr,
-    //     int_type: Type,
-    // ) -> Result<Value, String> {
-    //     match expr {
-    //         Expr::Int(val) => {
-    //             // Use passed int_type
-    //             Ok(builder.ins().iconst(int_type, val as i64))
-    //         }
-    //         Expr::Neg(sub_expr) => {
-    //             // Pass int_type down recursively
-    //             let sub_val = Self::build_expr(builder, *sub_expr, int_type)?;
-    //             Ok(builder.ins().ineg(sub_val))
-    //         }
-    //         Expr::Add(lhs, rhs) => {
-    //             let lhs_val = Self::build_expr(builder, *lhs, int_type)?;
-    //             let rhs_val = Self::build_expr(builder, *rhs, int_type)?;
-    //             Ok(builder.ins().iadd(lhs_val, rhs_val))
-    //         }
-    //         Expr::Sub(lhs, rhs) => {
-    //             let lhs_val = Self::build_expr(builder, *lhs, int_type)?;
-    //             let rhs_val = Self::build_expr(builder, *rhs, int_type)?;
-    //             Ok(builder.ins().isub(lhs_val, rhs_val))
-    //         }
-    //         Expr::Mul(lhs, rhs) => {
-    //             let lhs_val = Self::build_expr(builder, *lhs, int_type)?;
-    //             let rhs_val = Self::build_expr(builder, *rhs, int_type)?;
-    //             Ok(builder.ins().imul(lhs_val, rhs_val))
-    //         }
-    //         Expr::Div(lhs, rhs) => {
-    //             let lhs_val = Self::build_expr(builder, *lhs, int_type)?;
-    //             let rhs_val = Self::build_expr(builder, *rhs, int_type)?;
-    //             Ok(builder.ins().sdiv(lhs_val, rhs_val))
-    //         }
-    //     }
-    // }
+    /// Compiles the provided program into the main function of the module.
+    /// The main function evaluates all variable declarations and returns the value
+    /// of the last initializer expression.
+    pub fn compile(&mut self, program: Program) -> Result<FuncId, String> {
+        let sig = {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(self.int_type));
+            sig
+        };
+
+        let func_id = self
+            .module
+            .declare_function("main", Linkage::Export, &sig)
+            .map_err(|e| format!("Failed to declare function: {}", e))?;
+
+        self.ctx.func.signature = sig;
+
+        {
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
+            let int_type = self.int_type;
+
+            Self::translate(&mut builder, program, int_type)?;
+
+            builder.finalize();
+        }
+
+        self.module
+            .define_function(func_id, &mut self.ctx)
+            .map_err(|e| format!("Failed to define function: {}", e))?;
+
+        self.ctx.clear();
+
+        Ok(func_id)
+    }
+
+    /// Translates a program into Cranelift IR.
+    /// For now, we evaluate all statements and return the value of the last
+    /// initializer expression.
+    fn translate(builder: &mut FunctionBuilder, program: Program, int_type: Type) -> Result<(), String> {
+        let entry_block = builder.create_block();
+        builder.switch_to_block(entry_block);
+        builder.seal_block(entry_block);
+
+        if program.statements.is_empty() {
+            // Empty program returns 0
+            let zero = builder.ins().iconst(int_type, 0);
+            builder.ins().return_(&[zero]);
+            return Ok(());
+        }
+
+        // Evaluate each statement and keep track of the last value
+        let mut result_val = None;
+        for stmt in program.statements {
+            // Currently we only support variable declarations
+            // We evaluate the initializer and keep its value
+            let val = Self::eval_expr(builder, &stmt.kind.as_var_decl().initializer, int_type)?;
+            result_val = Some(val);
+        }
+
+        let return_val = result_val.unwrap_or_else(|| builder.ins().iconst(int_type, 0));
+        builder.ins().return_(&[return_val]);
+
+        Ok(())
+    }
+
+    /// Evaluates an expression into a Cranelift value.
+    fn eval_expr(builder: &mut FunctionBuilder, expr: &Expression, int_type: Type) -> Result<Value, String> {
+        match &expr.kind {
+            ExprKind::Literal(Literal::Int(val)) => {
+                Ok(builder.ins().iconst(int_type, *val as i64))
+            }
+            ExprKind::UnaryOp(UnaryOperator::Neg, sub_expr) => {
+                let sub_val = Self::eval_expr(builder, sub_expr, int_type)?;
+                Ok(builder.ins().ineg(sub_val))
+            }
+            ExprKind::BinaryOp(lhs, op, rhs) => {
+                let lhs_val = Self::eval_expr(builder, lhs, int_type)?;
+                let rhs_val = Self::eval_expr(builder, rhs, int_type)?;
+
+                let result = match op {
+                    BinaryOperator::Add => builder.ins().iadd(lhs_val, rhs_val),
+                    BinaryOperator::Sub => builder.ins().isub(lhs_val, rhs_val),
+                    BinaryOperator::Mul => builder.ins().imul(lhs_val, rhs_val),
+                    BinaryOperator::Div => builder.ins().sdiv(lhs_val, rhs_val),
+                };
+
+                Ok(result)
+            }
+        }
+    }
 
     /// Finalizes the module and returns the raw object file bytes.
     pub fn finish(self) -> Result<Vec<u8>, String> {

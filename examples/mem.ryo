@@ -1,28 +1,41 @@
+# Memory management and ownership in Ryo
+# This example demonstrates Ryo's simplified ownership model
 
-# https://github.com/modularml/mojo/blob/main/docs/manual/values/ownership.ipynb
-## Only a reference to the memory is passed in functions
-
-fn read_text(borrowed text: String): # default behaviour, fast
-    text += "!"  # This will fail because the function do not owns text, throws an error
-    var my_copy = text # slow, because you have to copy the full string if you want modify it, throws a warning
-    my_copy += ", read"
+# Immutable borrow - function receives a read-only reference
+fn read_text(text: &str):
+    # text is a read-only reference
+    # We cannot modify it
     print(text)
 
-fn mutate_text(inout text: String): # fast, but can be mutated by others (less secure)
-    text += ", mutated"
+# Mutable borrow - function can mutate but doesn't take ownership
+fn mutate_text(mut text: &str):
+    # text is a mutable reference
+    # We can modify it during this function's lifetime
+    text = f"{text}, mutated"
     print(text)
 
-fn take_text(owned text: String): # fast and secure, but if you want to use this value later you have to return it
-    text += ", owned"
-    print(text)
-    # text is destroyed here
+# Move semantics - function takes ownership
+fn take_text(move text: str):
+    # text is now owned by this function
+    # Original binding cannot be used after this call
+    modified = f"{text}, owned"
+    print(modified)
+    # text is destroyed when take_text returns
 
 fn my_function():
-    mut message: String = "Hello" # In Ryo: immutable by default, `mut` for mutable (like Rust but no `let`)
-    read_text(message) ## readonly, reference is pass but the owner is my_function
-    mutate_text(message) ## mutable, reference is pass but the owner is my_function
-    take_text(message) ## reference is moved to take_text
-    print(message) ## This will fail because now, take_text owned the string, throws an error
+    # In Ryo: immutable by default, `mut` for mutable
+    message = "Hello"
+
+    # Pass immutable reference - message still usable after
+    read_text(message)
+
+    # Pass mutable reference - message still usable after
+    mutate_text(message)
+
+    # Move ownership - message can no longer be used
+    take_text(message)
+
+    # This would fail - message is no longer owned by my_function
+    # print(message)
 
 my_function()
-

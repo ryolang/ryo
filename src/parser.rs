@@ -1,9 +1,8 @@
 use chumsky::{
-    input::{Stream, ValueInput},
+    input::ValueInput,
     prelude::*,
     span::SimpleSpan,
 };
-use logos::Logos;
 
 use crate::ast::*;
 use crate::lexer::Token;
@@ -160,9 +159,12 @@ where
 }
 
 #[cfg(test)]
+#[allow(irrefutable_let_patterns)]
 mod tests {
     use super::*;
     use chumsky::Parser;
+    use chumsky::input::Stream;
+    use logos::Logos;
 
     fn lex_and_parse(input: &str) -> Result<Program, Vec<Rich<'static, Token<'static>>>> {
         use crate::lexer::Token;

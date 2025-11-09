@@ -1,68 +1,54 @@
+# Example demonstrating error handling and various language features
 
-import std.error.Error
-# only allow module import
-
-#trait Error:
-#    Display() -> str
+module math:
+    error DivisionError(detail: str)
 
 struct MyCustomError:
     detail: str
     line_n: int
-    # you can add here another struct and do composition
 
-fn (e MyCustomError) Display() -> str:
-    return f"{e.detail} on {e.line_n}"
+impl MyCustomError:
+    fn display(self) -> str:
+        return f"{self.detail} on {self.line_n}"
 
-# This is a comment
-
-# custom errors ZeroDivisionError
-
-fn div(x:int, y: int)-> Result<int, str>:
+# Division function that can fail with DivisionError
+fn div(x: int, y: int) -> math.DivisionError!int:
     if y == 0:
-        MyCustomError("division by zero")
+        return math.DivisionError("division by zero")
     else:
-        Ok(x/y)
+        return x / y
 
-
-fn sum(x:int, y:int) -> int:
+# Simple addition
+fn sum(x: int, y: int) -> int:
     return x + y
 
-fn do_empty_error() -> Result<(), str>:
-    Err("Always return an error")
+# Function that always returns an error
+fn do_empty_error() -> math.DivisionError!():
+    return math.DivisionError("Always return an error")
 
-fn do_result() -> Result<int, str>:
-    do_empty_error()?
-
-
+# Function that calls do_empty_error and propagates errors with try
+fn do_result() -> math.DivisionError!int:
+    try do_empty_error()
+    return 42
 
 fn main():
-    x = 1  # type inference int, x is not mutable
+    x = 1  # type inference: int, x is immutable
     y = 2
 
-    z = sum(x,y)
+    z = sum(x, y)
 
-    x = match do_error(): # redeclaration of x, previous memory is freed
-        case Ok():
-            print("Never happen")
-        case Err(e):
-            print(f"Got an Error {e}")
+    # Error handling with catch block
+    result = do_result() catch |e|:
+        print(f"Got an Error: {e.detail}")
+        return 0
 
-    l = list() #incorrect can not do type inference
-    el = list[int]() #correct
-    l = [1,2,3]
+    # Lists
+    el = [1, 2, 3]  # type inferred as List[int]
+    is_empty = el == []
 
-    is_equal = true if el == [] else false
-
-    s = set[str]
-
-
-# loops
-# missing:
-# monoids
-# borrow
-# generics
-# concurrency -> https://tutorial.ponylang.io/types/actors  https://gist.github.com/lattner/31ed37682ef1576b16bca1432ea9f782
-
-# resources
-# fib https://www.statpan.com/2023/10/python-vs-mojo-vs-rust-fibonacci-speed.html
-# https://mojodojo.dev/
+    # Match expression
+    value = 5
+    match value:
+        1: print("one")
+        5: print("five")
+        _: print("other")

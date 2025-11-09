@@ -44,7 +44,7 @@ pub struct Statement {
 impl Statement {
     fn pretty_print_inline(&self) {
         match &self.kind {
-            StmtKind::VarDecl(decl) => {
+            StmtKind::VarDecl(_) => {
                 print!("Statement [VarDecl] ({}..{})", self.span.start, self.span.end);
             }
         }
@@ -65,6 +65,15 @@ impl Statement {
 pub enum StmtKind {
     /// Variable declaration: [mut] name [: type] = expr
     VarDecl(VarDecl),
+}
+
+impl StmtKind {
+    /// Extract the VarDecl if this is a VarDecl statement.
+    pub fn as_var_decl(&self) -> &VarDecl {
+        match self {
+            StmtKind::VarDecl(decl) => decl,
+        }
+    }
 }
 
 /// A variable declaration statement.

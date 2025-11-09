@@ -1,33 +1,41 @@
-# recursive
+# Recursive fibonacci implementation
 
-## https://mojodojo.dev/guides/std/Benchmark.html
-
+# Simple recursive implementation - exponential time complexity
 fn fibonacci(n: int) -> int:
     if n <= 1:
         return n
     else:
-        return fibonacci(n-1) + fibonacci(n-2)
+        return fibonacci(n - 1) + fibonacci(n - 2)
 
-fn fibonacci_meme(n: int) -> int:
-    memo = {}
+# Memoized recursive implementation - linear time complexity
+# Uses Map for caching results
+fn fibonacci_memo(n: int) -> int:
+    # Map literal - currently using empty map initialization
+    # Note: Map operations (in operator, indexing) are under development
+    memo: Map[int, int] = {}
 
     fn helper(x: int) -> int:
+        # Check if result is already cached
+        # Uses 'in' operator which requires Map.contains() support
         if x in memo:
             return memo[x]
+
+        # Base case
         if x <= 1:
             result = x
         else:
-            result = helper(x-1) + helper(x-2)
+            # Recursive case
+            result = helper(x - 1) + helper(x - 2)
+
+        # Cache the result
         memo[x] = result
         return result
 
     return helper(n)
 
 
-
 fn main():
     n = 10
     print(f"Fibonacci number at position {n} is {fibonacci_memo(n)}")
-
     print(f"Fibonacci number at position {n} is {fibonacci(n)}")
 
