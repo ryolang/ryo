@@ -255,15 +255,18 @@ _ = print("Second\n")
 **Goal:** Define and call simple functions with integer arguments and return values
 
 **Tasks:**
-- Extend AST: `StmtKind::FunctionDef`, `ExprKind::Call`
+- **From M3.5**: Add expression statement support (bare expressions without assignment)
+  - Extend Parser: `StmtKind::ExprStmt` to allow `print("...")` without `_ =`
+  - Enable side-effect-only function calls as statements
+- Extend AST: `StmtKind::FunctionDef`, `ExprKind::Call` (already have Call from M3.5)
 - Add `fn` keyword parsing for function definitions
 - Parse function signatures: `fn func_name(arg: type) -> type:`
 - Parse function bodies with `return` statements
-- Parse function calls: `func_name(arg)`
+- Parse function calls: `func_name(arg)` (already have syntax from M3.5)
 - Implement basic symbol table for function name resolution
 - Extend Codegen: Generate Cranelift IR for:
   - Function definitions with parameters
-  - Function calls with argument passing
+  - Function calls with argument passing (already support external calls from M3.5)
   - Return statements
 - Add `fn main() -> int` support for explicit exit codes
 - Write tests for function definition and calls
@@ -277,6 +280,7 @@ fn add(a: int, b: int) -> int:
 
 fn main() -> int:
     result = add(2, 3)
+    print("Result is: ")  # Expression statement (no assignment needed)
     return 0  # Success
 ```
 
@@ -329,6 +333,11 @@ remainder = a % b     # 1
 **Goal:** Implement `if/else` statements, `while` loops, and boolean logic
 
 **Tasks:**
+- **From M3.5**: Implement void/unit type (for functions with no return value)
+  - Add `void` type to type system (or use `()` unit type)
+  - Update `print()` signature from placeholder `int` to proper `void`
+  - Type checker prevents using void values in expressions
+  - Enable functions with no return: `fn do_something() -> void:`
 - Add `bool` type to type system
 - Add boolean literals: `true`, `false`
 - Add logical operators: `and`, `or`, `not`
@@ -354,11 +363,15 @@ fn is_positive(x: int) -> bool:
     else:
         return false
 
+fn print_if_even(n: int) -> void:  # void return type
+    if n % 2 == 0:
+        print("Even number")
+    # No return statement needed for void
+
 fn main() -> int:
     mut counter = 0
     while counter < 10:
-        if counter % 2 == 0:
-            print_int(counter)  # Placeholder - actual print in stdlib
+        print_if_even(counter)
         counter += 1
     return 0
 ```
@@ -612,10 +625,16 @@ fn main() -> int:
 ## Phase 3: Type System & Memory Safety
 
 ### Milestone 12: Basic Ownership & String Type
-**Goal:** Implement move semantics for heap-allocated `String` type and introduce `Copy` trait
+**Goal:** Implement move semantics for heap-allocated `str` type and introduce `Copy` trait
 
 **Tasks:**
-- Define `String` type with heap allocation (dynamic length)
+- **From M3.5**: Upgrade string literal implementation to full str type
+  - String literals from M3.5 currently store in `.rodata` (read-only)
+  - Upgrade to heap-allocated str type (dynamic length)
+  - Enable string variables: `s: str = "hello"`
+  - Add string concatenation: `s1 + s2` or `s.concat(other)`
+  - Add string methods: `.len()`, `.is_empty()`, `.chars()`, `.substring()`, etc.
+  - Add formatted string output (f-strings): `f"Value: {x}"`
 - Implement semantic analysis pass (`src/checker.rs`):
   - Track variable states (uninitialized, valid, moved)
   - Implement move semantics for non-Copy types
@@ -623,32 +642,44 @@ fn main() -> int:
 - Implement `Copy` trait concept:
   - Primitives (`int`, `float`, `bool`) are Copy
   - Structs/enums are Move by default
-- Add string literals to lexer/parser: `"hello world"`
+  - str is Move (heap-allocated)
 - Extend Codegen: Generate IR for:
-  - String allocation/deallocation
+  - str allocation/deallocation
   - Move operations (memcpy)
   - Copy operations (simple assignment)
-- Write tests for ownership violations
+  - str concatenation operations
+- Write tests for ownership violations and string operations
 
 **Visible Progress:** Compiler catches use-after-move errors at compile time
 
 **Example:**
 ```ryo
 fn main() -> int:
-    s1 = "hello"      # String allocated
-    s2 = s1           # s1 moved to s2
-    # print(s1)      # Error: s1 was moved
+    # String operations (from M3.5 deferred features)
+    s1: str = "hello"
+    s2: str = " world"
+    greeting = s1 + s2    # Concatenation
+    print(greeting)       # "hello world"
+
+    name = "Alice"
+    msg = f"Hello, {name}!"  # F-string formatting
+    print(msg)
+
+    # Ownership example
+    s3 = "test"       # str allocated
+    s4 = s3           # s3 moved to s4
+    # print(s3)      # Error: s3 was moved
 
     x: int = 42
     y = x             # x copied to y (int is Copy)
-    print(y)          # OK: x still valid
+    print(f"y = {y}") # OK: x still valid
     return 0
 ```
 
 **Implementation Notes:**
 - Move semantics are **implicit** (no explicit `move` keyword)
 - Copy trait is **marker-only** (no custom implementation yet)
-- String deallocation handled automatically at end of scope (RAII, refined in M19)
+- str deallocation handled automatically at end of scope (RAII, refined in M19)
 - Simple garbage-free memory management
 - Dependencies: Milestone 11 (error types for allocation failures)
 
@@ -870,8 +901,8 @@ fn main() -> int:
 - Parse slice operations:
   - Array slicing: `array[start:end]`
   - Full slice: `array[:]`
-- Distinguish `String` (owned) from `&str` (borrowed):
-  - `String` is heap-allocated, owned, mutable
+- Distinguish `str` (owned) from `&str` (borrowed):
+  - `str` is heap-allocated, owned, mutable
   - `&str` is borrowed view, immutable
 - Extend Codegen: Generate IR for:
   - Slice representation (pointer + length)
@@ -980,7 +1011,7 @@ fn main() -> int:
   - On early returns
   - On move (drop old value if reassigning)
 - Implement Drop for built-in types:
-  - `String`: Free heap memory
+  - `str`: Free heap memory
   - `List[T]`: Free array and drop elements
   - `Map[K, V]`: Free table and drop entries
 - Extend Codegen: Generate IR for:
@@ -1204,17 +1235,22 @@ fn main() -> int:
 **Goal:** Implement essential standard library modules
 
 **Tasks:**
+- **From M3.5**: Expand I/O beyond basic print()
+  - M3.5 provides basic `print()` for stdout
+  - This milestone adds full I/O operations
 - Implement `io` module:
-  - `print(str)`: Print to stdout
-  - `println(str)`: Print with newline
-  - `input() -> str`: Read from stdin
-  - `read_file(path: &str) -> io.Error!String`
-  - `write_file(path: &str, content: &str) -> io.Error!()`
+  - `print(str) -> void`: Print to stdout (already in M3.5 as builtin)
+  - `println(str) -> void`: Print with newline
+  - `eprint(str) -> void`, `eprintln(str) -> void`: Print to stderr
+  - `input() -> io.Error!str`: Read from stdin
+  - `read_file(path: &str) -> io.Error!str`: Read file contents
+  - `write_file(path: &str, content: &str) -> io.Error!()`: Write to file
+  - `append_file(path: &str, content: &str) -> io.Error!()`: Append to file
 - Implement `string` module:
   - `split(s: &str, delimiter: &str) -> List[str]`
-  - `join(parts: &[str], separator: &str) -> String`
+  - `join(parts: &[str], separator: &str) -> str`
   - `trim(s: &str) -> &str`
-  - `to_upper(s: &str) -> String`, `to_lower(s: &str) -> String`
+  - `to_upper(s: &str) -> str`, `to_lower(s: &str) -> str`
 - Implement `collections` module:
   - `List[T]` methods: `push`, `pop`, `len`, `get`, `clear`
   - `Map[K, V]` methods: `insert`, `remove`, `get`, `keys`, `values`
@@ -1226,7 +1262,7 @@ fn main() -> int:
   - Constants: `PI`, `E`
 - Implement `os` module:
   - `args() -> List[str]`: Command-line arguments
-  - `env(key: &str) -> ?String`: Environment variables
+  - `env(key: &str) -> ?str`: Environment variables
   - `exit(code: int)`: Exit program
 - Write comprehensive tests for stdlib
 
@@ -1257,16 +1293,27 @@ fn main() -> int:
 ```
 
 **Implementation Notes:**
+- **From M3.5**: Expand platform support beyond macOS/Linux
+  - M3.5 currently supports macOS (Darwin) and Linux only
+  - Add Windows support (using `WriteFile` instead of `write` syscall)
+  - Add comprehensive platform detection and conditional compilation
+  - Abstract platform differences in standard library
 - Standard library is **written in Ryo** (using FFI for OS calls)
 - Error types defined in respective modules (e.g., `io.Error`)
 - All I/O operations return error unions (explicit error handling)
 - UTF-8 string support throughout
+- Platform-specific code isolated to `os` module
 - Dependencies: Milestone 22 (modules for stdlib organization)
 
 ### Milestone 24: Panic & Debugging Support
 **Goal:** Implement panic mechanism and debugging features
 
 **Tasks:**
+- **From M3**: Add direct IR display capability
+  - M3 deferred this due to Cranelift API limitations
+  - Add `ryo ir <file>` command to display Cranelift IR
+  - Show optimized IR for debugging codegen issues
+  - Include IR visualization options (control flow graph)
 - Add `panic` function to stdlib:
   ```ryo
   fn panic(message: str) -> never
@@ -1448,6 +1495,58 @@ Test result: ok. 2 passed; 0 failed
 
 **Note:** These features are deferred to post-v1.0 releases. They're important for advanced use cases but not required for a production-ready core language.
 
+### REPL & JIT Compilation (Interactive Mode)
+**Goal:** Implement interactive REPL with JIT compilation using Cranelift
+
+**Why Post-v1.0:**
+- **From M3**: JIT compilation deferred to avoid delaying core features
+- AOT (ahead-of-time) compilation is sufficient for production use
+- REPL requires significant additional work (state management, incremental compilation)
+- Not essential for initial adoption (compile-run workflow works fine)
+- Community feedback will inform REPL design (IPython-style vs basic)
+
+**Features:**
+- Interactive Read-Eval-Print Loop (REPL)
+- JIT compilation using Cranelift (already a dependency)
+- Multi-line input support (functions, structs, etc.)
+- History and tab completion
+- Variable inspection and debugging commands
+- Hot code reloading (redefine functions on the fly)
+- Integration with debugger
+
+**Example REPL Session:**
+```
+$ ryo repl
+Welcome to Ryo v1.5 REPL
+>>> x = 42
+>>> y = x * 2
+>>> y
+84
+>>> fn double(n: int) -> int:
+...     return n * 2
+...
+>>> double(21)
+42
+>>> :type double
+fn double(n: int) -> int
+>>> :help
+Available commands:
+  :quit - Exit REPL
+  :type <expr> - Show type of expression
+  :clear - Clear all bindings
+  :help - Show this message
+```
+
+**Technical Notes:**
+- Use Cranelift's JIT mode (already available, unused in M3)
+- State management for incremental definitions
+- Error recovery (syntax errors don't crash REPL)
+- Integration with readline/rustyline for input editing
+
+**Timeline:** v1.4 (3-6 months after v1.0)
+**Effort:** 2-3 weeks
+**Dependencies:** Core language complete (M1-M26)
+
 ### Async/Await Runtime
 **Goal:** Implement asynchronous programming for I/O-bound applications
 
@@ -1466,7 +1565,7 @@ Test result: ok. 2 passed; 0 failed
 
 **Example:**
 ```ryo
-async fn fetch_url(url: &str) -> http.Error!String:
+async fn fetch_url(url: &str) -> http.Error!str:
     response = await http.get(url)
     body = await response.text()
     return body

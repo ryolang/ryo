@@ -1,6 +1,7 @@
 # TODO
 
 - [ ] ryo run must not generate compilation files as other languages do: Zig, Go.
+- [ ] Iterators??
 - [ ] Zen of ryo. https://dave.cheney.net/2020/02/23/the-zen-of-go
 - [ ] review https://docs.modular.com/mojo/manual/values/ownership copy design
 - [ ] Set up benchmarks for performance and memory in github workflows and keep track of them.
