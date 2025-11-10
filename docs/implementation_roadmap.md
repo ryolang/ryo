@@ -174,10 +174,80 @@ Exit code behavior changed from "last expression value" to "implicit 0 (success)
 **What's NOT Implemented (Deferred):**
 - ❌ JIT compilation (for REPL)
 - ❌ Direct IR display (technical limitation: would require pub access to Cranelift Context display)
-- ❌ String support (planned for future milestone)
+- ✅ String support → **Implemented in Milestone 3.5**
 - ❌ Functions (beyond main)
 - ❌ Control flow
 - ❌ Error handling
+
+### Milestone 3.5: "Hello, World!" (String Literals & Print) ✅ COMPLETE
+
+**Goal:** Add string literals and print() function for debugging and visible output
+
+**Status:** ✅ COMPLETE - String literals and print syscall implemented
+
+**Tasks:**
+- ✅ Extend lexer to tokenize string literals with escape sequences
+- ✅ Update AST to support `Literal::Str` and `ExprKind::Call`
+- ✅ Implement parser support for string literals and function call expressions
+- ✅ Add data section support in codegen for storing string constants
+- ✅ Implement print() as libc write() call (fd=1, stdout)
+- ✅ Add platform detection (macOS/Linux support)
+- ✅ Create hello world example program
+- ✅ Add integration tests for print functionality
+
+**Visible Progress:** `print("Hello, World!")` actually works! Real visible output! ✅
+
+**Completion Date:** January 10, 2025
+
+**Implementation Details:**
+- String literals stored in `.rodata` section with deduplication
+- Escape sequence support: `\n`, `\t`, `\r`, `\\`, `\"`, `\0`
+- Print implemented via external libc `write()` function call
+- Platform support: macOS (Darwin), Linux
+- Simple approach: string literals only (no variables yet), no heap allocation
+
+**Test Results:**
+- 4 new integration tests for print functionality (all passing)
+- Tests cover: hello world, newlines, multiple prints, empty strings
+- Total test count: 38 unit tests + 19 integration tests = 57 tests (all passing)
+
+**Features Implemented:**
+- ✅ String literal parsing with escape sequences
+- ✅ Call expression syntax: `print("message")`
+- ✅ Data section management for strings
+- ✅ libc write() syscall integration
+- ✅ Platform-specific support (Unix-like systems)
+
+**Design Decisions:**
+- String literals as compile-time constants only (no runtime heap allocation)
+- print() accepts only string literals (not variables)
+- No ownership semantics (deferred to Milestone 12)
+- Simple 3-5 day implementation vs full ownership (2-3 weeks)
+
+**Example:**
+```ryo
+# print() returns void (nothing) - use _ to indicate value is ignored
+_ = print("Hello, World!")
+_ = print("First\n")
+_ = print("Second\n")
+```
+
+**Known Limitations:**
+- **Return Type**: print() currently returns int(0) as a placeholder for the future void/unit type
+  - This value is semantically meaningless and should be ignored
+  - Proper void/unit type will be implemented in Milestone 6 (Type System)
+  - Aligns with Python's `None` and Rust's `()` conventions
+- **Parser Limitation**: Bare expression statements not supported yet
+  - Must use assignment syntax: `_ = print("...")`
+  - Expression statements will be added in Milestone 4 (Functions & Calls)
+- **Usage Pattern**: Use `_` as variable name to indicate the value is intentionally unused (Rust convention)
+
+**What's NOT Implemented (Deferred):**
+- ❌ String variables (requires ownership model)
+- ❌ String concatenation or manipulation
+- ❌ Formatted output (f-strings)
+- ❌ Other I/O functions (file operations)
+- ❌ Windows support (needs different syscall approach)
 
 ## Phase 2: Essential Language Features
 

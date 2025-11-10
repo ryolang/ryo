@@ -332,3 +332,89 @@ fn test_run_negation_operator() {
         "Should exit with code 0"
     );
 }
+
+// Milestone 3.5: String Literals and Print Tests
+
+#[test]
+fn test_print_hello_world() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "hello.ryo",
+        "msg = print(\"Hello, World!\")",
+    );
+
+    let output =
+        run_ryo_command(&["run", "hello.ryo"], &test_file).expect("Failed to run ryo run command");
+
+    assert!(output.status.success(), "ryo run should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Result] => 0"),
+        "Should exit with code 0"
+    );
+}
+
+#[test]
+fn test_print_with_newline() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "newline.ryo",
+        "line = print(\"Line\\n\")",
+    );
+
+    let output =
+        run_ryo_command(&["run", "newline.ryo"], &test_file).expect("Failed to run ryo run command");
+
+    assert!(output.status.success(), "ryo run should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Result] => 0"),
+        "Should exit with code 0"
+    );
+}
+
+#[test]
+fn test_multiple_print_calls() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "multi_print.ryo",
+        "a = print(\"First\\n\")\nb = print(\"Second\\n\")\nc = print(\"Third\\n\")",
+    );
+
+    let output =
+        run_ryo_command(&["run", "multi_print.ryo"], &test_file).expect("Failed to run ryo run command");
+
+    assert!(output.status.success(), "ryo run should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Result] => 0"),
+        "Should exit with code 0"
+    );
+}
+
+#[test]
+fn test_print_empty_string() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "empty.ryo",
+        "empty = print(\"\")",
+    );
+
+    let output =
+        run_ryo_command(&["run", "empty.ryo"], &test_file).expect("Failed to run ryo run command");
+
+    assert!(output.status.success(), "ryo run should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Result] => 0"),
+        "Should exit with code 0"
+    );
+}

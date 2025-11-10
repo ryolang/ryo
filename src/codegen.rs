@@ -122,8 +122,9 @@ use crate::ast::{BinaryOperator, Expression, ExprKind, Literal, Program, UnaryOp
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
-use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use std::collections::HashMap;
 use target_lexicon::Triple;
 
 /// Code generator for Ryo programs using Cranelift.
@@ -139,11 +140,17 @@ use target_lexicon::Triple;
 /// - `ctx`: Function compilation context (stores IR being built)
 /// - `module`: Object file builder (AOT compilation target)
 /// - `int_type`: Target's native integer type (i64 on 64-bit, i32 on 32-bit)
+/// - `data_ctx`: Context for defining data objects (strings, constants)
+/// - `string_data`: Maps string content to DataId for deduplication
+/// - `triple`: Target platform triple (for platform-specific code generation)
 pub struct Codegen {
     builder_context: FunctionBuilderContext,
     ctx: codegen::Context,
     module: ObjectModule,
     int_type: Type, // Store the integer type based on target
+    data_ctx: DataDescription,
+    string_data: HashMap<String, DataId>,
+    triple: Triple,
 }
 
 impl Codegen {
@@ -227,6 +234,9 @@ impl Codegen {
             ctx: module.make_context(),
             module,
             int_type,
+            data_ctx: DataDescription::new(),
+            string_data: HashMap::new(),
+            triple: target_triple,
         })
     }
 
@@ -296,9 +306,18 @@ impl Codegen {
         {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
             let int_type = self.int_type;
+            let triple = self.triple.clone();
 
             // Translate the AST into Cranelift IR instructions
-            Self::translate(&mut builder, program, int_type)?;
+            Self::translate_impl(
+                &mut builder,
+                program,
+                &mut self.module,
+                &mut self.data_ctx,
+                &mut self.string_data,
+                int_type,
+                triple,
+            )?;
 
             // Finalize the function (verifies IR is well-formed)
             builder.finalize();
@@ -323,18 +342,23 @@ impl Codegen {
     /// This method is the core of the code generation process. It walks through the AST
     /// and emits corresponding Cranelift IR instructions into the function body.
     ///
-    /// # Current Behavior (Milestone 3)
+    /// # Current Behavior (Milestone 3.5)
     ///
     /// - Creates a single basic block (entry block)
     /// - Evaluates each variable declaration in sequence
-    /// - Returns the value of the last initializer expression
+    /// - Handles string literals and print() calls
+    /// - Returns 0 (success) as exit code
     /// - Empty programs return 0
     ///
     /// # Arguments
     ///
     /// * `builder` - Cranelift's FunctionBuilder for emitting IR instructions
     /// * `program` - The parsed AST program to translate
-    /// * `int_type` - The target's integer type (i64 or i32)
+    /// * `module` - Object module for declaring data/functions
+    /// * `data_ctx` - Data context for string storage
+    /// * `string_data` - Cache for string deduplication
+    /// * `int_type` - Target integer type
+    /// * `triple` - Target platform triple
     ///
     /// # Returns
     ///
@@ -353,7 +377,15 @@ impl Codegen {
     /// - Symbol table for storing variable values on the stack
     /// - Multiple functions with local scopes
     /// - Control flow (if/else, loops) requiring multiple basic blocks
-    fn translate(builder: &mut FunctionBuilder, program: Program, int_type: Type) -> Result<(), String> {
+    fn translate_impl(
+        builder: &mut FunctionBuilder,
+        program: Program,
+        module: &mut ObjectModule,
+        data_ctx: &mut DataDescription,
+        string_data: &mut HashMap<String, DataId>,
+        int_type: Type,
+        triple: Triple,
+    ) -> Result<(), String> {
         // Step 1: Create and set up the entry basic block
         // In Cranelift, all code must be in basic blocks. For simple programs,
         // we only need one block. Control flow (if/loops) will require multiple blocks.
@@ -381,7 +413,15 @@ impl Codegen {
         for stmt in program.statements {
             // Evaluate the expression but don't use its value
             // The underscore prefix indicates the value is intentionally unused
-            let _val = Self::eval_expr(builder, &stmt.kind.as_var_decl().initializer, int_type)?;
+            let _val = Self::eval_expr(
+                builder,
+                &stmt.kind.as_var_decl().initializer,
+                module,
+                data_ctx,
+                string_data,
+                int_type,
+                &triple,
+            )?;
         }
 
         // Step 4: Return 0 (success) by default
@@ -395,6 +435,56 @@ impl Codegen {
         builder.ins().return_(&[zero]);
 
         Ok(())
+    }
+
+    /// Stores a string literal in the data section and returns its DataId.
+    ///
+    /// String literals are stored in the `.rodata` section (read-only data) of the object file.
+    /// This method implements deduplication: identical strings are only stored once.
+    ///
+    /// # Arguments
+    ///
+    /// * `content` - The string content to store
+    /// * `module` - The object module
+    /// * `data_ctx` - Data context for defining data
+    /// * `string_data` - Cache for string deduplication
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(DataId)` - Identifier for the stored string data
+    /// * `Err(String)` - Error message if storage fails
+    fn store_string(
+        content: &str,
+        module: &mut ObjectModule,
+        data_ctx: &mut DataDescription,
+        string_data: &mut HashMap<String, DataId>,
+    ) -> Result<DataId, String> {
+        // Check if we've already stored this string (deduplication)
+        if let Some(&data_id) = string_data.get(content) {
+            return Ok(data_id);
+        }
+
+        // Declare a new data object in the module
+        let data_id = module
+            .declare_anonymous_data(false, false) // read-only, not thread-local
+            .map_err(|e| format!("Failed to declare string data: {}", e))?;
+
+        // Clear any previous data and set up the new string
+        data_ctx.clear();
+
+        // Store the string bytes (without null terminator for now)
+        let bytes = content.as_bytes();
+        data_ctx.define(bytes.into());
+
+        // Define the data object in the module
+        module
+            .define_data(data_id, data_ctx)
+            .map_err(|e| format!("Failed to define string data: {}", e))?;
+
+        // Cache for deduplication
+        string_data.insert(content.to_string(), data_id);
+
+        Ok(data_id)
     }
 
     /// Recursively evaluates an expression into a Cranelift SSA value.
@@ -422,25 +512,38 @@ impl Codegen {
     ///
     /// * `builder` - Cranelift's FunctionBuilder for emitting instructions
     /// * `expr` - The expression AST node to evaluate
+    /// * `module` - Object module for declaring data/functions
+    /// * `data_ctx` - Data context for string storage
+    /// * `string_data` - Cache for string deduplication
     /// * `int_type` - The target's integer type (i64 or i32)
+    /// * `triple` - Target platform triple
     ///
     /// # Returns
     ///
     /// * `Ok(Value)` - A Cranelift value (SSA virtual register) containing the result
     /// * `Err(String)` - Error message if the expression cannot be evaluated
     ///
-    /// # Supported Expressions (Milestone 3)
+    /// # Supported Expressions (Milestone 3.5)
     ///
-    /// - **Literals**: `42`, `123`
+    /// - **Literals**: `42`, `123`, `"hello"`
     /// - **Unary Operations**: `-x` (negation)
     /// - **Binary Operations**: `+`, `-`, `*`, `/` (all signed integer operations)
+    /// - **Function Calls**: `print("message")` (syscall to stdout)
     ///
     /// # Safety Notes
     ///
     /// - **Division by zero**: Not checked, will cause undefined behavior (crash)
     /// - **Integer overflow**: Wraps (standard two's complement behavior)
     /// - These will be addressed with error handling in future milestones
-    fn eval_expr(builder: &mut FunctionBuilder, expr: &Expression, int_type: Type) -> Result<Value, String> {
+    fn eval_expr(
+        builder: &mut FunctionBuilder,
+        expr: &Expression,
+        module: &mut ObjectModule,
+        data_ctx: &mut DataDescription,
+        string_data: &mut HashMap<String, DataId>,
+        int_type: Type,
+        triple: &Triple,
+    ) -> Result<Value, String> {
         match &expr.kind {
             // Integer literals: Load constant value
             // Example: `42` → iconst.i64 42
@@ -448,11 +551,26 @@ impl Codegen {
                 Ok(builder.ins().iconst(int_type, *val as i64))
             }
 
+            // String literals: Store in data section and return pointer
+            // Example: `"hello"` → address of string in .rodata section
+            ExprKind::Literal(Literal::Str(content)) => {
+                // Store the string in the data section
+                let data_id = Self::store_string(content, module, data_ctx, string_data)?;
+
+                // Get a reference to the data (pointer to the string)
+                let data_ref = module.declare_data_in_func(data_id, builder.func);
+
+                // Load the address of the string
+                let ptr = builder.ins().global_value(int_type, data_ref);
+
+                Ok(ptr)
+            }
+
             // Unary negation: Negate the subexpression
             // Example: `-5` → iconst.i64 5, then ineg
             // This performs two's complement negation: -x = ~x + 1
             ExprKind::UnaryOp(UnaryOperator::Neg, sub_expr) => {
-                let sub_val = Self::eval_expr(builder, sub_expr, int_type)?;
+                let sub_val = Self::eval_expr(builder, sub_expr, module, data_ctx, string_data, int_type, triple)?;
                 Ok(builder.ins().ineg(sub_val))
             }
 
@@ -460,8 +578,8 @@ impl Codegen {
             // Example: `2 + 3` → iconst 2, iconst 3, iadd
             ExprKind::BinaryOp(lhs, op, rhs) => {
                 // Recursively evaluate left and right operands
-                let lhs_val = Self::eval_expr(builder, lhs, int_type)?;
-                let rhs_val = Self::eval_expr(builder, rhs, int_type)?;
+                let lhs_val = Self::eval_expr(builder, lhs, module, data_ctx, string_data, int_type, triple)?;
+                let rhs_val = Self::eval_expr(builder, rhs, module, data_ctx, string_data, int_type, triple)?;
 
                 // Emit the appropriate instruction based on operator
                 let result = match op {
@@ -473,7 +591,125 @@ impl Codegen {
 
                 Ok(result)
             }
+
+            // Function calls: Handle print() with syscall
+            ExprKind::Call(name, args) => {
+                if name == "print" {
+                    Self::generate_print_call(builder, args, module, data_ctx, string_data, int_type, triple)?;
+
+                    // IMPORTANT: print() should return void/unit type (nothing)
+                    // Currently returns int(0) as a placeholder until proper void type is implemented.
+                    // This value is semantically meaningless and should be ignored.
+                    //
+                    // Design Note: Aligns with Python's None and Rust's () conventions.
+                    // The libc write() call internally returns bytes written, but we discard it
+                    // since print() is a side-effect operation with no meaningful return value.
+                    //
+                    // TODO(Milestone 6 - Type System): Implement proper void/unit type
+                    // TODO(Milestone 6): Change signature to: fn print(s: &str) -> void
+                    // TODO(Milestone 15+ - Error Handling): Consider: fn print(s: &str) -> io.WriteError!void
+                    Ok(builder.ins().iconst(int_type, 0))
+                } else {
+                    Err(format!("Unknown function: {}", name))
+                }
+            }
         }
+    }
+
+    /// Generates a print() syscall to write a string to stdout.
+    ///
+    /// This method implements print() using platform-specific syscalls:
+    /// - **Linux**: syscall 1 (write)
+    /// - **macOS**: syscall 0x2000004 (write)
+    /// - **Windows**: Not yet supported (would use WriteFile)
+    ///
+    /// The syscall signature is: `write(fd, buf, len) -> ssize_t`
+    /// where fd=1 is stdout.
+    ///
+    /// # Arguments
+    ///
+    /// * `builder` - Cranelift FunctionBuilder for emitting instructions
+    /// * `args` - Arguments to print() (must be exactly one string literal)
+    /// * `module` - Object module for declaring functions
+    /// * `data_ctx` - Data context for string storage
+    /// * `string_data` - Cache for string deduplication
+    /// * `int_type` - Target integer type
+    /// * `triple` - Target platform triple
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Print call generated successfully
+    /// * `Err(String)` - Error if validation fails or platform unsupported
+    fn generate_print_call(
+        builder: &mut FunctionBuilder,
+        args: &[Expression],
+        module: &mut ObjectModule,
+        data_ctx: &mut DataDescription,
+        string_data: &mut HashMap<String, DataId>,
+        int_type: Type,
+        triple: &Triple,
+    ) -> Result<(), String> {
+        // Validate: print() takes exactly one argument
+        if args.len() != 1 {
+            return Err(format!("print() takes exactly 1 argument, got {}", args.len()));
+        }
+
+        // Extract the string literal argument
+        let arg = &args[0];
+        let string_content = match &arg.kind {
+            ExprKind::Literal(Literal::Str(content)) => content,
+            _ => return Err("print() argument must be a string literal".to_string()),
+        };
+
+        // Store the string and get its address
+        let data_id = Self::store_string(string_content, module, data_ctx, string_data)?;
+        let data_ref = module.declare_data_in_func(data_id, builder.func);
+        let string_ptr = builder.ins().global_value(int_type, data_ref);
+
+        // String length
+        let string_len = builder.ins().iconst(int_type, string_content.len() as i64);
+
+        // File descriptor: 1 = stdout
+        let fd = builder.ins().iconst(int_type, 1);
+
+        // Validate platform support
+        use target_lexicon::OperatingSystem;
+        match triple.operating_system {
+            OperatingSystem::Darwin { .. } | OperatingSystem::MacOSX { .. } | OperatingSystem::Linux => {
+                // Supported platforms (Darwin is the kernel name for macOS)
+            }
+            _ => {
+                return Err(format!(
+                    "print() not yet supported on platform: {:?}",
+                    triple.operating_system
+                ));
+            }
+        }
+
+        // Generate the call to write()
+        // We use libc's write() function instead of raw syscalls for portability.
+        // The linker will resolve this to the system's libc.
+
+        // Declare write as external function: write(fd: i64, buf: *i8, len: i64) -> i64
+        let mut write_sig = module.make_signature();
+        write_sig.params.push(AbiParam::new(int_type)); // fd
+        write_sig.params.push(AbiParam::new(int_type)); // buf (pointer)
+        write_sig.params.push(AbiParam::new(int_type)); // len
+        write_sig.returns.push(AbiParam::new(int_type)); // return value (bytes written)
+
+        let write_func = module
+            .declare_function("write", Linkage::Import, &write_sig)
+            .map_err(|e| format!("Failed to declare write function: {}", e))?;
+
+        let write_ref = module.declare_func_in_func(write_func, builder.func);
+
+        // Call write(1, string_ptr, string_len)
+        let call_inst = builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
+
+        // Get the return value (bytes written) - we don't use it for now
+        let _bytes_written = builder.inst_results(call_inst)[0];
+
+        Ok(())
     }
 
     /// Finalizes the module and emits the complete object file as raw bytes.

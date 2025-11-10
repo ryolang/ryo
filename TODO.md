@@ -1,12 +1,16 @@
 # TODO
 
+- [ ] ryo run must not generate compilation files as other languages do: Zig, Go.
+- [ ] Zen of ryo. https://dave.cheney.net/2020/02/23/the-zen-of-go
 - [ ] review https://docs.modular.com/mojo/manual/values/ownership copy design
-- [ ] get the domain https://ryolang.org
+- [ ] Set up benchmarks for performance and memory in github workflows and keep track of them.
+- [x] get the domain https://ryolang.org
 - [ ] Add https://scorecard.dev/
 - [ ] Set up clippy https://github.com/rust-lang/rust-clippy
 - [ ] set up https://codspeed.io/
 - [ ] review for more https://github.com/astral-sh/ruff/tree/main/.github/workflows
 - [ ] Bidirectional type inference (function signatures require types, local variables inferred)
+- [ ] Effective Go. review and get insigths https://go.dev/doc/effective_go
 
 ### Core language
 - Lexer: Lexical, Syntactic Grammar
