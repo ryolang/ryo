@@ -17,6 +17,51 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 > [!WARNING]
 > Ryo is currently in the **early stages of development** (pre-alpha). The language design is stabilizing, but the compiler is under active construction. It is **not yet ready for production use**. We welcome contributors!
 
+## Current Implementation Status (Milestone 3)
+
+**✅ What's Working Now:**
+
+The Ryo compiler currently implements **Milestone 3: AOT Compilation** with the following capabilities:
+
+- **Lexer & Parser**: Full tokenization and parsing of variable declarations and expressions
+- **Code Generation**: Compiles to native object files using Cranelift backend
+- **Linking**: Multi-linker fallback (`zig cc` → `clang` → `cc`) for cross-platform support
+- **Arithmetic Operations**: Integer literals, binary operators (`+`, `-`, `*`, `/`), unary negation
+- **Expressions**: Parenthesized expressions with correct operator precedence
+- **Variable Declarations**: With optional type annotations and `mut` keyword
+- **Exit Codes**: Programs return the last expression's value as exit code
+- **Cross-Platform**: Generates native executables for x86_64, aarch64 (Apple Silicon), and more
+
+**Working Example (Compiles Today):**
+
+```ryo
+# arithmetic.ryo - A working Milestone 3 program
+
+x = 2 + 3 * 4      # Result: 14 (operator precedence: multiply first)
+```
+
+```bash
+# Compile and run
+cargo run -- run arithmetic.ryo
+# Output: [Result] => 14
+```
+
+**Test Coverage:** 79 passing tests (32 lexer + 32 parser + 15 codegen integration tests)
+
+**❌ What's Coming Next:**
+
+The features described below are **design goals** under active development:
+
+- **Milestone 4**: Functions (beyond `main`), local variables with storage
+- **Milestone 5**: More operators and expressions
+- **Milestone 6**: Control flow (`if`/`else`, booleans)
+- **Milestone 7**: Error handling (`error`, `try`, `catch`)
+- **Milestone 8+**: Strings, ownership system, structs, traits, async/await, and more
+
+**See the full roadmap:** [Implementation Roadmap](docs/implementation_roadmap.md)
+
+**Try it now:** [Quick Start Guide](docs/quickstart.md) - Build and run your first Ryo program in 5 minutes!
+
 ## Why Ryo?
 
 *   **🐍 Simple & Productive:** Write clear, readable code with a clean syntax inspired by Python (tabs, f-strings, tuples, built-in `print`). Reduce boilerplate and focus on your logic.
@@ -62,8 +107,12 @@ Ryo draws inspiration from the best features of modern programming languages:
 
 ## Quick Example
 
+### Design Vision (Future)
+
+> **Note:** This example shows Ryo's planned features. Most are not yet implemented.
+
 ```ryo
-# src/main.ryo
+# src/main.ryo - Design example showing future features
 
 fn greet(name: &str) -> str:
     return f"Hello, {name}! Welcome to Ryo."
@@ -99,39 +148,121 @@ fn process_user(user: ?str) -> process.InvalidUser!str:
     return f"Processing user: {name}"
 ```
 
-Run with: `ryo run` (after building the `ryo` tool)
+### Working Today (Milestone 3)
+
+```ryo
+# arithmetic.ryo - Compiles and runs now!
+
+# Variable declarations with type annotations
+x: int = 42
+y: int = 10
+
+# Arithmetic expressions with correct precedence
+result = x + y * 2    # 42 + (10 * 2) = 62
+
+# Multiple statements - last value is exit code
+final = result - 20   # 62 - 20 = 42
+```
+
+```bash
+# Compile and run
+cargo run -- run arithmetic.ryo
+# Output: [Result] => 42
+
+# Or see the compilation stages
+cargo run -- lex arithmetic.ryo    # View tokens
+cargo run -- parse arithmetic.ryo  # View AST
+cargo run -- ir arithmetic.ryo     # View IR info
+```
+
+**More working examples:** See `examples/milestone3/` directory for additional programs you can compile and run today!
 
 ## Getting Started & Installation
 
-Ryo is under heavy development. Currently, installation requires building from source.
+### Prerequisites
 
-**(Instructions for building from source will go here)**
+Before building Ryo, you need:
+
+1. **Rust toolchain** (1.91): [Install Rust](https://rustup.rs/)
+2. **A C linker** (one of the following):
+   - **Zig** (recommended): [Download Zig](https://ziglang.org/download/)
+   - **Clang**: Included with Xcode Command Line Tools (macOS) or build-essential (Linux)
+   - **GCC/cc**: System default compiler
+
+### Building from Source
 
 ```bash
-# Example build steps (replace with actual steps)
-git clone https://github.com/ryolang/ryo.git
-cd ryo
+# Clone the repository
+git clone https://github.com/ryolang/ryox.git
+cd ryox
+
+# Build the compiler (debug mode for development)
+cargo build
+
+# Or build optimized release version
 cargo build --release
-# Add target/release to your PATH
-export PATH="$(pwd)/target/release:$PATH"
 
-# Verify
-ryo --version
+# Verify the build
+cargo run -- --version
 ```
 
-Once installed, you can create and run projects:
+### Your First Program
+
+Create a simple Ryo program:
 
 ```bash
-# Create a new project
-ryo new my_app
-cd my_app
+# Create a file called first.ryo
+echo "x = 42" > first.ryo
 
-# Edit src/main.ryo
-# ...
-
-# Build and run
-ryo run
+# Compile and run
+cargo run -- run first.ryo
 ```
+
+You should see output like:
+```
+[Input Source]
+x = 42
+
+[AST]
+Program (0..6)
+└── Statement [VarDecl] (0..6)
+    VarDecl
+      ├── name: x (0..1)
+      └── initializer:
+          Literal(Int(42)) (4..6)
+
+[Codegen]
+Generated object file: first.o
+Linked with zig cc: first
+[Result] => 42
+```
+
+**Next Steps:**
+
+- **[Quick Start Guide](docs/quickstart.md)** - Complete hands-on tutorial (5 minutes)
+- **[Getting Started](docs/getting_started.md)** - Language introduction and concepts
+- **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions
+- **[Examples](examples/milestone3/)** - Working code examples you can run today
+
+### Current Workflow (Milestone 3)
+
+Since Milestone 3 focuses on arithmetic expressions, the typical workflow is:
+
+```bash
+# Write a simple expression
+echo "result = 2 + 3 * 4" > calc.ryo
+
+# Compile and run
+cargo run -- run calc.ryo
+# Output: [Result] => 14
+
+# Inspect compilation stages
+cargo run -- lex calc.ryo     # See tokens
+cargo run -- parse calc.ryo   # See AST
+cargo run -- ir calc.ryo      # See IR generation info
+```
+
+**Note:** Advanced features like project creation (`ryo new`), package management, and REPL are planned for future milestones.
 
 ## Contributing
 
@@ -148,12 +279,25 @@ Please read our [Contributing Guide](CONTRIBUTING.md) and check out the [open is
 
 ## Documentation
 
-*   [Language Specification](docs/specification.md)
-*   *(Link to Tutorial)*
-*   *(Link to Standard Library Docs)*
-*   *(Link to Guides - Memory, Concurrency, etc.)*
+### Getting Started
+- **[Quick Start Guide](docs/quickstart.md)** - Build and run your first program in 5 minutes
+- **[Getting Started](docs/getting_started.md)** - Language introduction with examples
+- **[Troubleshooting](docs/troubleshooting.md)** - Solutions to common problems
 
-*(More documentation will be added as the project progresses)*
+### Language Reference
+- **[Language Specification](docs/specification.md)** - Complete language design and syntax
+- **[Proposals](docs/proposals.md)** - Future features and enhancements
+- **[Design Issues](docs/design_issues.md)** - Known design challenges and decisions
+
+### Implementation
+- **[Implementation Roadmap](docs/implementation_roadmap.md)** - Development milestones and progress
+- **[Compilation Pipeline](docs/dev/compilation_pipeline.md)** - How the compiler works (Milestone 3)
+- **[CLAUDE.md](CLAUDE.md)** - Project context for AI assistants and contributors
+
+### Examples
+- **[Milestone 3 Examples](examples/milestone3/)** - Working code you can compile and run today
+
+*More documentation will be added as the project progresses. See the [docs/](docs/) directory for all available documentation.*
 
 ## License
 

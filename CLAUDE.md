@@ -711,7 +711,7 @@ Fixes: #issue-number (if applicable)
 
 ### 6. Cranelift Backend
 
-**Decision**: Use Cranelift instead of LLVM
+**Decision**: Use [Cranelift](https://cranelift.dev/) instead of LLVM
 - Faster compilation
 - Simpler integration
 - JIT support for REPL
@@ -721,6 +721,11 @@ Fixes: #issue-number (if applicable)
 - Less mature optimizer than LLVM
 - Smaller ecosystem
 - Good enough for project goals
+
+**Resources**:
+- [Examples](https://github.com/simvux/cranelift-examples)
+- [API Reference](https://docs.rs/cranelift-codegen/latest/cranelift_codegen/)
+- [Documentation](https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/docs/index.md)
 
 ### 7. Bidirectional Type Checking
 

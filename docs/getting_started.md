@@ -59,7 +59,149 @@ Hello World
 
 Congratulations! You've run your first Ryo program.
 
+## 1.1 Current Implementation Status (Milestone 3)
+
+!!! warning "Implementation Notice"
+
+    **The examples above represent Ryo's design goals.** Most of these features are not yet implemented. The current compiler (Milestone 3) supports:
+
+    ✅ **What works now:**
+    - Integer literals and arithmetic expressions (`+`, `-`, `*`, `/`)
+    - Variable declarations with type annotations
+    - Parenthesized expressions for precedence
+    - Compiles to native executables via Cranelift
+
+    ❌ **What's coming later:**
+    - Functions (beyond `main`) - Milestone 4
+    - Strings and `print()` - Future milestone
+    - Control flow (`if`, `for`, `match`) - Milestones 6+
+    - Structs, enums, error handling - Milestones 7+
+    - Most features shown in this document
+
+    **To try Ryo now**, see the [Quick Start Guide](quickstart.md) for working examples you can compile and run today!
+
+### How Ryo Compiles Your Code (Current Implementation)
+
+Ryo uses a modern compilation pipeline that transforms your source code into native machine code:
+
+```
+Source Code  →  Lexer  →  Parser  →  Codegen  →  Linker  →  Executable
+  (.ryo)       (tokens)   (AST)     (.o file)  (native)    (runs)
+```
+
+#### Compilation Phases
+
+**1. Lexical Analysis (Lexer)**
+
+The lexer breaks your source code into tokens (keywords, operators, identifiers, literals):
+
+```ryo
+x = 42 + 3
+```
+
+Becomes:
+```
+IDENT("x"), ASSIGN, INT(42), ADD, INT(3)
+```
+
+**2. Parsing**
+
+The parser builds an Abstract Syntax Tree (AST) from tokens, checking syntax and establishing structure:
+
+```
+VarDecl(name: "x",
+  initializer: BinaryOp(
+    op: Add,
+    left: Int(42),
+    right: Int(3)
+  )
+)
+```
+
+**3. Code Generation**
+
+Cranelift (the code generator) translates the AST to machine code and creates an object file:
+
+```text
+Generated Cranelift IR (conceptual):
+  v0 = iconst.i64 42    ; Load constant 42
+  v1 = iconst.i64 3     ; Load constant 3
+  v2 = iadd v0, v1      ; Add: 42 + 3 = 45
+  return v2             ; Return as exit code
+```
+
+**4. Linking**
+
+The linker combines the object file with system libraries to create a standalone executable. Ryo tries multiple linkers automatically:
+- `zig cc` (preferred - excellent cross-platform support)
+- `clang` (common on macOS/Linux)
+- `cc` (system default)
+
+**5. Execution**
+
+The final executable runs natively on your platform with no runtime overhead.
+
+#### Understanding Exit Codes
+
+Currently, Ryo programs **return the value of the last expression as the exit code**:
+
+```ryo
+x = 42    # Program exits with code 42
+```
+
+**Exit Code Range:**
+- **Unix/macOS/Linux**: 0-255 (8-bit unsigned)
+  - Values wrap: `-1` becomes `255`, `256` becomes `0`
+- **Windows**: Full 32-bit signed integer range
+
+**Example:**
+```ryo
+result = 2 + 3 * 4    # 2 + 12 = 14
+# Program exits with code 14
+```
+
+**Why exit codes?**
+- In Milestone 3, there's no `print()` yet, so exit codes are how programs communicate results
+- Exit code 0 traditionally means "success" in Unix
+- Non-zero exit codes indicate errors or specific results
+
+**Checking exit codes:**
+```bash
+# Run program
+cargo run -- run program.ryo
+
+# Check the exit code (Unix/macOS)
+echo $?
+
+# Check the exit code (Windows)
+echo %ERRORLEVEL%
+```
+
+#### What Gets Generated
+
+When you compile a Ryo program, you get:
+
+1. **Object file** (`.o` on Unix, `.obj` on Windows)
+   - Contains compiled machine code
+   - Platform-specific format (ELF, Mach-O, or COFF)
+   - Can be inspected with `objdump` or `nm`
+
+2. **Executable** (no extension on Unix, `.exe` on Windows)
+   - Standalone native binary
+   - Runs without interpreter or VM
+   - Approximately 16KB for minimal programs
+
+**See also:**
+- [Quick Start Guide](quickstart.md) - Hands-on tutorial with working examples
+- [Troubleshooting Guide](troubleshooting.md) - Common compilation issues
+- [Compilation Pipeline](dev/compilation_pipeline.md) - Deep dive into compiler architecture
+- [Implementation Roadmap](implementation_roadmap.md) - Current status and future plans
+
 ### A More Practical Example: Temperature Converter
+
+!!! warning "Future Feature"
+
+    The temperature converter below is a **design example** showing Ryo's planned features. This code **will not compile** in the current Milestone 3 implementation.
 
 Let's try a slightly more practical example - a temperature converter that demonstrates more of Ryo's features:
 
