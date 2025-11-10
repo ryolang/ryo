@@ -567,7 +567,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
     *   **Borrowing:** Grants temporary access without transferring ownership.
         *   **Implicit Immutable Borrow (Default Function Params):**
             *   Function parameters are *implicitly* treated as immutable borrows (`&Type`) unless marked `mut` or `move`. *(Wording slightly adjusted for clarity)*
-            *   **Important Distinction:** This default implicit borrow for function arguments *contrasts* with the default *move* semantics for assignment and return values. This choice prioritizes ergonomics for the common case of read-only function access (enhancing Pythonic feel) over strict uniformity. Developers must be aware that `my_func(my_var)` typically borrows `my_var` immutably (leaving `my_var` valid), while `let new_var = my_var` moves `my_var` (invalidating `my_var`). The compiler must provide clear error messages when ownership rules are violated due to this distinction.
+            *   **Important Distinction:** This default implicit borrow for function arguments *contrasts* with the default *move* semantics for assignment and return values. This choice prioritizes ergonomics for the common case of read-only function access (enhancing Pythonic feel) over strict uniformity. Developers must be aware that `my_func(my_var)` typically borrows `my_var` immutably (leaving `my_var` valid), while `new_var = my_var` moves `my_var` (invalidating `my_var`). The compiler must provide clear error messages when ownership rules are violated due to this distinction.
             *   *(Example Added)*
                 ```ryo
                 fn process_data(data: &SomeType): # Explicit borrow, same effect as implicit

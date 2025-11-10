@@ -330,7 +330,7 @@ remainder = a % b     # 1
 - Dependencies: Milestone 4 (functions for testing)
 
 ### Milestone 6: Control Flow & Booleans
-**Goal:** Implement `if/else` statements, `while` loops, and boolean logic
+**Goal:** Implement `if/else` statements, `for` loops, and boolean logic
 
 **Tasks:**
 - **From M3.5**: Implement void/unit type (for functions with no return value)
@@ -343,12 +343,12 @@ remainder = a % b     # 1
 - Add logical operators: `and`, `or`, `not`
 - Extend Parser/AST:
   - `StmtKind::IfStmt` with optional `else` branch
-  - `StmtKind::WhileLoop`
+  - `StmtKind::ForLoop`
   - `StmtKind::Break`, `StmtKind::Continue`
   - Boolean expressions in conditions
 - Extend Codegen: Generate Cranelift IR for:
   - Conditional branching (if/else)
-  - Loop constructs (while)
+  - Loop constructs (for)
   - Break/continue statements
   - Boolean operations (and/or/not with short-circuiting)
 - Write tests for control flow and boolean logic
@@ -370,7 +370,7 @@ fn print_if_even(n: int) -> void:  # void return type
 
 fn main() -> int:
     mut counter = 0
-    while counter < 10:
+    for counter < 10:
         print_if_even(counter)
         counter += 1
     return 0

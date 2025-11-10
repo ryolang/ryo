@@ -358,9 +358,11 @@ else:
 for i in range(10):
     print(i)
 
-# While loops
-while condition:
-    do_something()
+# While loops does not exists in ryo, use same GO syntax.
+mut counter = 1
+for counter < 10:
+  do_something()
+  counter += 1s
 
 # Match expressions
 match value:

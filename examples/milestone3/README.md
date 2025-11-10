@@ -191,7 +191,7 @@ cargo run -- ir examples/milestone3/simple.ryo
 These examples do NOT demonstrate (coming in future milestones):
 - ❌ String literals
 - ❌ Functions
-- ❌ Control flow (if, for, while)
+- ❌ Control flow (if, for)
 - ❌ Pattern matching
 - ❌ Error handling
 - ❌ Structs and enums

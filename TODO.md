@@ -2,6 +2,8 @@
 
 - [ ] ryo run must not generate compilation files as other languages do: Zig, Go.
 - [ ] Iterators??
+- [ ] main function required?
+- [ ] my_str: str = "hello" when pass as reference fn world(hello: str) ->, should not include the derref world(&str), python and new developers do not understand &, we should use a short english word as we do for && -> and
 - [ ] Zen of ryo. https://dave.cheney.net/2020/02/23/the-zen-of-go
 - [ ] review https://docs.modular.com/mojo/manual/values/ownership copy design
 - [ ] Set up benchmarks for performance and memory in github workflows and keep track of them.
