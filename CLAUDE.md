@@ -23,7 +23,7 @@
 ## Project Overview
 
 **Ryo** is an early-stage (pre-alpha) statically-typed, compiled programming language that aims to combine:
-- **Simplicity of Python**: Readable syntax, type inference, f-strings, tab indentation
+- **Simplicity of Python/Go/Zig**: Readable syntax, type inference, f-strings, tab indentation
 - **Performance & Safety of Rust/Go**: Memory safety without GC, ownership model, native compilation
 - **Developer Ergonomics**: No steep learning curve, familiar async/await, built-in tooling
 
@@ -38,7 +38,7 @@
 ### Project Goals
 
 **Current Focus**: Build a proof-of-concept compiler demonstrating core language features
-**Long-Term Vision**: Production-ready language for web backends, CLI tools, and systems programming
+**Long-Term Vision**: Production-ready language for web backends, CLI tools, and general purpose (system programming is not the focus)
 
 ---
 
@@ -625,27 +625,34 @@ hexdump -C output.o | less # Canonical hex+ASCII dump
 
 ### Git Workflow
 
-**Branch naming convention**: `claude/<description>-<session-id>`
+**Branch naming convention**:
+
+Use [Conventional Branch](https://conventional-branch.github.io/):
+- main: The main development branch (e.g., main, master, or develop)
+- feature/ (or feat/): For new features (e.g., feature/add-login-page, feat/add-login-page)
+- bugfix/ (or fix/): For bug fixes (e.g., bugfix/fix-header-bug, fix/header-bug)
+- hotfix/: For urgent fixes (e.g., hotfix/security-patch)
+- release/: For branches preparing a release (e.g., release/v1.2.0)
+- chore/: For non-code tasks like dependency, docs updates (e.g., chore/update-dependencies)
 
 Example:
 ```bash
-git checkout -b claude/feature-parser-improvements-abc123xyz
+git checkout -b feat/parser-improvements-abc123xyz
 git add .
 git commit -m "Add: Description of changes"
-git push -u origin claude/feature-parser-improvements-abc123xyz
+git push -u origin feat/parser-improvements-abc123xyz
 ```
 
 **Commit message format**:
+
+Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
+
 ```
-<Type>: <Short description>
+<type>[optional scope]: <description>
 
-<Detailed explanation of what changed and why>
+[optional body]
 
-Changes:
-- Bullet point of change 1
-- Bullet point of change 2
-
-Fixes: #issue-number (if applicable)
+[optional footer(s)]
 ```
 
 **Types**: `Add`, `Fix`, `Update`, `Refactor`, `Docs`, `Test`, `Chore`
@@ -845,7 +852,7 @@ Currently, integration tests are minimal. Need to expand test coverage.
 ### High Priority
 
 1. **Parser Expansion** (Next Step)
-   - Add keywords: `let`, `mut`, `if`, `fn`, `return`
+   - Add keywords: `mut`, `if`, `fn`, `return`
    - Add identifiers and variable references
    - Add function definitions
    - Add basic statements
@@ -1043,6 +1050,17 @@ src/
 └── ...                     # Other unit tests inline
 ```
 
+### Integration Tests
+
+Located in `tests/integration_tests.rs`, these tests verify:
+- End-to-end compilation and execution
+- Filename-based output generation
+- Error handling (parse errors, file not found)
+- Lex command functionality
+- Complex expression compilation
+
+Tests use temporary directories and automatic cleanup via RAII patterns.
+
 ### Running Tests
 
 ```bash
@@ -1117,7 +1135,7 @@ cargo test --test integration_tests
 - [ ] Code follows Rust style guidelines (`cargo fmt`)
 - [ ] All tests pass (`cargo test`)
 - [ ] New features have tests
-- [ ] Documentation updated if needed
+- [ ] Documentation (docs/readme.md/claude.md) updated if needed
 - [ ] Ryo examples use Python-style syntax (colons, no braces)
 - [ ] Commit messages are descriptive
 - [ ] No breaking changes without discussion
@@ -1189,6 +1207,17 @@ impl TraitName for Type:
     fn method(self):
         implementation()
 ```
+
+## Future Architecture (Planned)
+
+The planned multi-crate workspace structure includes:
+- `ryo-core`: Shared definitions (Token, AST, Types)
+- `ryo-parser`: Lexer and parser logic
+- `ryo-checker`: Semantic analysis (type checking, borrow checking)
+- `ryo-codegen-clif`: Cranelift code generation
+- `ryo-runtime`: Runtime support library
+- `ryo-driver`: Compilation pipeline orchestration
+- `ryo`: Main CLI binary
 
 ---
 
