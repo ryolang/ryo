@@ -37,9 +37,9 @@ This roadmap outlines the planned development of the Ryo programming language co
 | Milestone 23: Standard Library Core | ⏳ Planned | Essential stdlib: io, string, collections, math, os. |
 | Milestone 24: Panic & Debugging | ⏳ Planned | Panic function, stack traces, debugging support. |
 | Milestone 25: Testing & Documentation | ⏳ Planned | Test framework, test runner, doc generation. |
-| Milestone 26: Core Language Complete | ⏳ Planned | Integration, polish, package manager, v1.0 prep. |
-| **Phase 5: Post-v1.0 Extensions** | | |
-| Async/Await, FFI, Generics | 🔮 Future | Advanced features deferred to v1.5+. See proposals.md. |
+| Milestone 26: Core Language Complete | ⏳ Planned | Integration, polish, package manager, v0.1.0 prep. |
+| **Phase 5: Post-v0.1.0 Extensions** | | |
+| Async/Await, FFI, Generics | 🔮 Future | Advanced features deferred to v0.2+. See proposals.md. |
 
 ## Guiding Principles
 
@@ -992,7 +992,7 @@ fn main() -> int:
 
 **Implementation Notes:**
 - **Hardcoded types** initially: `List[int]`, `List[str]`, `Map[str, int]`
-- Generics deferred to Phase 5 (post-v1.0)
+- Generics deferred to Phase 5 (post-v0.1.0)
 - Collections own their data (RAII cleanup in M19)
 - Iteration uses immutable borrows
 - Dependencies: Milestone 17 (slices for iteration)
@@ -1446,8 +1446,8 @@ Test result: ok. 2 passed; 0 failed
 - Generated docs include trait implementations, method signatures
 - Dependencies: Milestone 24 (assert functions)
 
-### Milestone 26: Core Language Complete & v1.0 Prep
-**Goal:** Finalize core language, polish, and prepare for v1.0 release
+### Milestone 26: Core Language Complete & v0.1.0 Prep
+**Goal:** Finalize core language, polish, and prepare for v0.1.0 release
 
 **Tasks:**
 - **Integration & Polish:**
@@ -1482,7 +1482,7 @@ Test result: ok. 2 passed; 0 failed
   - Binary distributions (Linux, macOS, Windows)
   - Installation script (`curl ... | sh`)
 
-**Visible Progress:** Ryo v1.0 is production-ready!
+**Visible Progress:** Ryo v0.1.0 is production-ready!
 
 **Implementation Notes:**
 - This milestone is about **polish and integration**, not new features
@@ -1491,14 +1491,14 @@ Test result: ok. 2 passed; 0 failed
 - Long-term support (LTS) considerations
 - Dependencies: Milestones 1-25 (everything!)
 
-## Phase 5: Post-v1.0 Extensions (v1.5+)
+## Phase 5: Post-v0.1.0 Extensions (v0.2+)
 
-**Note:** These features are deferred to post-v1.0 releases. They're important for advanced use cases but not required for a production-ready core language.
+**Note:** These features are deferred to post-v0.1.0 releases. They're important for advanced use cases but not required for a production-ready core language.
 
 ### REPL & JIT Compilation (Interactive Mode)
 **Goal:** Implement interactive REPL with JIT compilation using Cranelift
 
-**Why Post-v1.0:**
+**Why Post-v0.1.0:**
 - **From M3**: JIT compilation deferred to avoid delaying core features
 - AOT (ahead-of-time) compilation is sufficient for production use
 - REPL requires significant additional work (state management, incremental compilation)
@@ -1543,14 +1543,14 @@ Available commands:
 - Error recovery (syntax errors don't crash REPL)
 - Integration with readline/rustyline for input editing
 
-**Timeline:** v1.4 (3-6 months after v1.0)
+**Timeline:** v1.4 (3-6 months after v0.1.0)
 **Effort:** 2-3 weeks
 **Dependencies:** Core language complete (M1-M26)
 
 ### Async/Await Runtime
 **Goal:** Implement asynchronous programming for I/O-bound applications
 
-**Why Post-v1.0:**
+**Why Post-v0.1.0:**
 - Requires mature ownership and type system (Milestones 12-21)
 - Complex runtime implementation (executor, scheduler, reactor)
 - Not essential for initial adoption (synchronous code works fine)
@@ -1575,12 +1575,12 @@ async fn main():
     print(data)
 ```
 
-**Timeline:** v1.5 (6-12 months after v1.0)
+**Timeline:** v1.5 (6-12 months after v0.1.0)
 
 ### Foreign Function Interface (FFI)
 **Goal:** Comprehensive C interoperability for integrating with existing libraries
 
-**Why Post-v1.0:**
+**Why Post-v0.1.0:**
 - Safety model must be fully tested and stable
 - `unsafe` blocks require careful design and auditing
 - Not required for pure-Ryo applications
@@ -1605,13 +1605,13 @@ fn main():
         printf(c"Length: %d\n", len)
 ```
 
-**Timeline:** v1.6 (12-18 months after v1.0)
+**Timeline:** v1.6 (12-18 months after v0.1.0)
 
 ### Full Generics System
 **Goal:** Generic types and functions with trait bounds
 
-**Why Post-v1.0:**
-- Hardcoded collections (Milestone 18) sufficient for v1.0
+**Why Post-v0.1.0:**
+- Hardcoded collections (Milestone 18) sufficient for v0.1.0
 - Generic implementation is complex (monomorphization, specialization)
 - Trait system must be mature and stable (Milestone 14)
 - Community feedback will inform design (variance, associated types, etc.)
@@ -1644,9 +1644,9 @@ impl[T] Stack[T]:
         return self.items.pop()
 ```
 
-**Timeline:** v1.7 (18-24 months after v1.0)
+**Timeline:** v1.7 (18-24 months after v0.1.0)
 
-### Additional Post-v1.0 Features
+### Additional Post-v0.1.0 Features
 
 **Tooling & Developer Experience:**
 - **Language Server Protocol (LSP):** IDE integration (autocompletion, go-to-definition, diagnostics)
@@ -1696,9 +1696,9 @@ See [proposals.md](proposals.md) for detailed designs of these features.
 - Memory leak detection
 - Security audit for FFI boundaries
 
-## Core Language Goals (v1.0)
+## Core Language Goals (v0.1.0)
 
-The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v1.0. Upon completion, developers will have:
+The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v0.1.0. Upon completion, developers will have:
 
 ✅ **Memory Safety:** Ownership and borrowing prevent use-after-free, double-free, and data races
 ✅ **Null Safety:** Optional types (`?T`) eliminate null pointer exceptions
@@ -1711,11 +1711,11 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 ✅ **Tooling:** Compiler, test framework, documentation generator, package manager
 ✅ **Developer Experience:** Clear error messages with suggestions, comprehensive documentation
 
-**What v1.0 does NOT include** (deferred to Phase 5):
-- ❌ Async/await runtime (v1.5+)
-- ❌ FFI/unsafe blocks (v1.6+)
-- ❌ Full generics system (v1.7+)
-- ❌ LSP/advanced tooling (v1.5+)
+**What v0.1.0 does NOT include** (deferred to Phase 5):
+- ❌ Async/await runtime (v0.2+)
+- ❌ FFI/unsafe blocks (v0.3+)
+- ❌ Full generics system (v0.4+)
+- ❌ LSP/advanced tooling (v0.2+)
 
 This foundation enables building **synchronous applications** including CLI tools, build systems, compilers, data processing pipelines, and game engines. Async/FFI features will follow based on community needs.
 
@@ -1728,14 +1728,14 @@ This foundation enables building **synchronous applications** including CLI tool
 **Phase 3 (M12-M21):** 10 milestones × 3 weeks avg = ~30 weeks (~7.5 months)
 **Phase 4 (M22-M26):** 5 milestones × 4 weeks avg = ~20 weeks (~5 months)
 
-**Total Estimated Time:** 74-104 weeks (18-26 months) from Phase 2 start to v1.0
+**Total Estimated Time:** 74-104 weeks (18-26 months) from Phase 2 start to v0.1.0
 
 ### Development Approach
 
 - **Incremental:** Working software at every milestone
 - **Flexible:** Adjust timeline for quality (testing, bug fixes, polish)
 - **Parallel Work:** Documentation, testing, examples can overlap with implementation
-- **Community-Driven:** Beta testing and feedback incorporated before v1.0 release
+- **Community-Driven:** Beta testing and feedback incorporated before v0.1.0 release
 
 ### Milestones by Complexity
 
@@ -1749,31 +1749,31 @@ This timeline is **realistic** based on compiler development best practices. Eac
 
 This section documents intentional limitations and pragmatic trade-offs in the roadmap.
 
-### v1.0 Intentional Omissions
+### v0.1.0 Intentional Omissions
 
-**No Generics in v1.0:**
+**No Generics in v0.1.0:**
 - **Why:** Generic implementation is complex (monomorphization, specialization, error messages)
 - **Workaround:** Hardcoded collection types (`List[int]`, `List[str]`, `Map[str, int]`)
-- **Impact:** Some code duplication, but v1.0 remains usable for most applications
-- **Timeline:** Full generics in v1.7+ (Phase 5)
+- **Impact:** Some code duplication, but v0.1.0 remains usable for most applications
+- **Timeline:** Full generics in v0.4+ (Phase 5)
 
-**No Async/Await in v1.0:**
+**No Async/Await in v0.1.0:**
 - **Why:** Requires mature runtime, complex implementation, not essential for initial adoption
 - **Workaround:** Use synchronous I/O (works fine for many applications)
 - **Impact:** Higher latency for I/O-bound applications, but predictable performance
-- **Timeline:** Async runtime in v1.5+ (Phase 5)
+- **Timeline:** Async runtime in v0.2+ (Phase 5)
 
-**No FFI in v1.0:**
+**No FFI in v0.1.0:**
 - **Why:** Safety model must be stable, `unsafe` requires careful audit
 - **Workaround:** Write pure Ryo code or wait for FFI support
 - **Impact:** Cannot integrate with existing C libraries initially
-- **Timeline:** FFI in v1.6+ (Phase 5)
+- **Timeline:** FFI in v0.3+ (Phase 5)
 
-**No LSP in v1.0:**
+**No LSP in v0.1.0:**
 - **Why:** Core language must be stable before tooling investment
 - **Workaround:** Use basic text editor with syntax highlighting
 - **Impact:** No IDE autocompletion or diagnostics initially
-- **Timeline:** LSP in v1.5+ (Phase 5)
+- **Timeline:** LSP in v0.2+ (Phase 5)
 
 ### Simplified Features (vs. Rust)
 
@@ -1783,16 +1783,16 @@ This section documents intentional limitations and pragmatic trade-offs in the r
 - Trade-off: Simpler mental model but less flexibility than Rust
 - Some advanced patterns may not be expressible
 
-**No Trait Associated Types (v1.0):**
-- Deferred to post-v1.0 generics work
+**No Trait Associated Types (v0.1.0):**
+- Deferred to post-v0.1.0 generics work
 - Traits can only define methods initially
 - Trade-off: Simpler trait system but less powerful
 
-**No Default Trait Methods (v1.0):**
+**No Default Trait Methods (v0.1.0):**
 - All trait methods must be implemented
 - Trade-off: More explicit but more boilerplate
 
-**No Dynamic Dispatch (v1.0):**
+**No Dynamic Dispatch (v0.1.0):**
 - Only static dispatch via monomorphization
 - Trade-off: Better performance but larger binaries
 - Dynamic dispatch (`dyn Trait`) in future milestone
@@ -1804,7 +1804,7 @@ This section documents intentional limitations and pragmatic trade-offs in the r
 - Trade-off: Safety over raw performance
 - Future: Compiler may optimize away redundant checks
 
-**No Inline Assembly (v1.0):**
+**No Inline Assembly (v0.1.0):**
 - Cannot write performance-critical assembly code
 - Trade-off: Portability and safety over peak performance
 - Timeline: Inline assembly in Phase 5
@@ -1816,18 +1816,18 @@ This section documents intentional limitations and pragmatic trade-offs in the r
 
 ### Ecosystem Limitations
 
-**No Package Registry (v1.0):**
+**No Package Registry (v0.1.0):**
 - Only local path dependencies initially
-- Trade-off: Simpler implementation to reach v1.0 faster
+- Trade-off: Simpler implementation to reach v0.1.0 faster
 - Timeline: Central registry in Phase 5
 
-**Limited Standard Library (v1.0):**
+**Limited Standard Library (v0.1.0):**
 - Core I/O, strings, collections only
 - No HTTP, JSON, regex, crypto in stdlib initially
-- Trade-off: Smaller maintenance burden for v1.0
-- Timeline: Stdlib expansion in v1.5+
+- Trade-off: Smaller maintenance burden for v0.1.0
+- Timeline: Stdlib expansion in v0.2+
 
-**Single-Threaded (v1.0):**
+**Single-Threaded (v0.1.0):**
 - No multi-threading or parallelism support
 - Trade-off: Simpler concurrency model (no data races by design)
 - Timeline: Threading in Phase 5 (alongside async)
@@ -1835,7 +1835,7 @@ This section documents intentional limitations and pragmatic trade-offs in the r
 ### Rationale for Trade-offs
 
 These limitations are **intentional** to:
-1. **Reach v1.0 faster** - Avoid scope creep, ship working language
+1. **Reach v0.1.0 faster** - Avoid scope creep, ship working language
 2. **Validate core design** - Get community feedback before advanced features
 3. **Maintain quality** - Better to ship complete simple features than half-baked complex ones
 4. **Iterate based on usage** - Real-world usage will inform priorities for Phase 5
@@ -1844,13 +1844,13 @@ The goal is a **production-ready core language** that can evolve based on actual
 
 ## Conclusion
 
-This roadmap represents an **honest, achievable plan** for building Ryo v1.0 over approximately 18-26 months. By deferring advanced features (async, FFI, generics) to Phase 5, we can deliver a solid, usable language faster while maintaining room for future growth.
+This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 over approximately 18-26 months. By deferring advanced features (async, FFI, generics) to Phase 5, we can deliver a solid, usable language faster while maintaining room for future growth.
 
 **Next steps:**
 1. Complete Phase 2 (Functions, Control Flow, Core Types)
 2. Implement Phase 3 (Ownership, Type System, Memory Safety)
 3. Build Phase 4 (Modules, Stdlib, Tooling)
-4. Release v1.0 and gather community feedback
+4. Release v0.1.0 and gather community feedback
 5. Iterate on Phase 5 features based on real-world needs
 
 **Join us in building Ryo!** See [CONTRIBUTING.md](../CONTRIBUTING.md) for how to get involved.
