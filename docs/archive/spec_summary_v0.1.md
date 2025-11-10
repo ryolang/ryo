@@ -36,7 +36,7 @@ Ryo is a proposed statically-typed, compiled programming language designed to of
     *   *Rationale:* Pythonic feel for common case (`name = value`), explicitness available when needed or required (signatures, struct fields). `mut` required for mutability (safety).
 *   **Basic Types:** `bool`, `str` (UTF-8 owned string - TBD name?), sized integers (`i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`), architecture-dependent integers (`isize`, `usize`), floating point (`float32`, `float64`).
     *   *Rationale:* Explicit sized types needed for control and FFI. `usize`/`isize` needed for indexing/pointers.
-*   **String & Slice Types (TBD - Needs Refinement):** Requires clear distinction between owned, mutable strings (e.g., `String`) and immutable string slices/views (e.g., `&str`). Also generic slice types (`&[T]`, `&mut [T]`).
+*   **String & Slice Types (TBD - Needs Refinement):** Requires clear distinction between owned, mutable strings (e.g., `str`) and immutable string slices/views (e.g., `&str`). Also generic slice types (`&[T]`, `&mut [T]`).
     *   *Rationale:* Essential for efficient string/data handling without unnecessary copying.
 *   **Composite Types:**
     *   `struct Name:` Defines data structures. Fields require type annotations.

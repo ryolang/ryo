@@ -1,15 +1,47 @@
-// TODO: Update for new AST (Program, Statement, Expression) after Milestone 2
-// use crate::ast::Expr;
+use crate::ast::{BinaryOperator, Expression, ExprKind, Literal, Program, UnaryOperator};
 
-// impl Expr {
-//     pub fn eval(&self) -> isize {
-//         match self {
-//             Expr::Int(n) => *n,
-//             Expr::Neg(rhs) => -rhs.eval(),
-//             Expr::Add(lhs, rhs) => lhs.eval() + rhs.eval(),
-//             Expr::Sub(lhs, rhs) => lhs.eval() - rhs.eval(),
-//             Expr::Mul(lhs, rhs) => lhs.eval() * rhs.eval(),
-//             Expr::Div(lhs, rhs) => lhs.eval() / rhs.eval(),
-//         }
-//     }
-// }
+/// Evaluate a program by evaluating all statements and returning the value
+/// of the last initializer expression.
+#[allow(dead_code)]
+pub fn eval_program(program: &Program) -> isize {
+    program
+        .statements
+        .iter()
+        .map(|stmt| {
+            // For now, we only support variable declarations
+            // In the future, we'll track variable bindings in a scope
+            eval_expr(&stmt.kind.as_var_decl().initializer)
+        })
+        .last()
+        .unwrap_or(0)
+}
+
+/// Evaluate an expression to an integer value.
+#[allow(dead_code)]
+pub fn eval_expr(expr: &Expression) -> isize {
+    match &expr.kind {
+        ExprKind::Literal(Literal::Int(n)) => *n,
+        ExprKind::Literal(Literal::Str(_)) => {
+            // String literals don't have an integer value
+            // This evaluator is currently unused; proper handling will come later
+            0
+        }
+        ExprKind::UnaryOp(UnaryOperator::Neg, sub_expr) => -eval_expr(sub_expr),
+        ExprKind::BinaryOp(lhs, op, rhs) => {
+            let lhs_val = eval_expr(lhs);
+            let rhs_val = eval_expr(rhs);
+
+            match op {
+                BinaryOperator::Add => lhs_val + rhs_val,
+                BinaryOperator::Sub => lhs_val - rhs_val,
+                BinaryOperator::Mul => lhs_val * rhs_val,
+                BinaryOperator::Div => lhs_val / rhs_val,
+            }
+        }
+        ExprKind::Call(_name, _args) => {
+            // Function calls don't have an integer value
+            // This evaluator is currently unused; proper handling will come later
+            0
+        }
+    }
+}

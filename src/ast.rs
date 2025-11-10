@@ -44,7 +44,7 @@ pub struct Statement {
 impl Statement {
     fn pretty_print_inline(&self) {
         match &self.kind {
-            StmtKind::VarDecl(decl) => {
+            StmtKind::VarDecl(_) => {
                 print!("Statement [VarDecl] ({}..{})", self.span.start, self.span.end);
             }
         }
@@ -65,6 +65,15 @@ impl Statement {
 pub enum StmtKind {
     /// Variable declaration: [mut] name [: type] = expr
     VarDecl(VarDecl),
+}
+
+impl StmtKind {
+    /// Extract the VarDecl if this is a VarDecl statement.
+    pub fn as_var_decl(&self) -> &VarDecl {
+        match self {
+            StmtKind::VarDecl(decl) => decl,
+        }
+    }
 }
 
 /// A variable declaration statement.
@@ -169,9 +178,11 @@ impl Expression {
         let connector_name = match &self.kind {
             ExprKind::Literal(lit) => match lit {
                 Literal::Int(n) => format!("Literal(Int({}))", n),
+                Literal::Str(s) => format!("Literal(Str(\"{}\"))", s),
             },
             ExprKind::BinaryOp(_, op, _) => format!("BinaryOp({})", op),
             ExprKind::UnaryOp(op, _) => format!("UnaryOp({})", op),
+            ExprKind::Call(name, _) => format!("Call({})", name),
         };
 
         println!("{}{} ({}..{})", prefix, connector_name, self.span.start, self.span.end);
@@ -186,6 +197,13 @@ impl Expression {
             ExprKind::UnaryOp(_op, expr) => {
                 expr.pretty_print(&format!("{}└── ", new_prefix));
             }
+            ExprKind::Call(_name, args) => {
+                for (i, arg) in args.iter().enumerate() {
+                    let is_last = i == args.len() - 1;
+                    let prefix_char = if is_last { "└── " } else { "├── " };
+                    arg.pretty_print(&format!("{}{}", new_prefix, prefix_char));
+                }
+            }
         }
     }
 }
@@ -199,6 +217,8 @@ pub enum ExprKind {
     BinaryOp(Box<Expression>, BinaryOperator, Box<Expression>),
     /// Unary operation: op expr
     UnaryOp(UnaryOperator, Box<Expression>),
+    /// Function call: function_name(arg1, arg2, ...)
+    Call(String, Vec<Expression>),
 }
 
 /// Literal values.
@@ -206,6 +226,8 @@ pub enum ExprKind {
 pub enum Literal {
     /// Integer literal
     Int(isize),
+    /// String literal
+    Str(String),
 }
 
 /// Binary operators.

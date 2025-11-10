@@ -2,6 +2,83 @@
 
 This document identifies critical design inconsistencies in the Ryo language specification that must be resolved before implementation.
 
+## Resolved Design Decisions
+
+### Exit Code Handling ✅ RESOLVED (2025-01-10)
+
+**Issue:** How should Ryo programs communicate exit codes to the operating system?
+
+**Decision:** Programs exit with 0 (success) by default. Explicit return statements will control exit codes in Milestone 4+.
+
+**Previous Behavior (Milestone 3.0):**
+The last expression's value was used as the exit code:
+```ryo
+x = 42  # Program exited with code 42
+```
+
+**Why Changed:**
+1. **No precedent:** No mainstream language uses this pattern (checked C, Rust, Go, Python, Ruby, Node.js, Zig, Swift)
+2. **Confusing:** Assignments look like exit codes (`x = 42` suggests assignment, not "exit with 42")
+3. **Future incompatible:** Conflicts with functions, types, error handling
+   - What if last expression is a string? A function return? An error type?
+   - `x = calculate()` - does this exit with calculate's return value?
+4. **Violates principles:** "Explicit is better than implicit" (Python Zen)
+5. **Type safety:** Can't enforce exit code types with implicit conversion
+
+**Current Behavior (Milestone 3.1+):**
+All programs exit with 0 (success):
+```ryo
+x = 42  # Evaluates to 42, program exits with code 0
+y = 100  # Evaluates to 100, program exits with code 0
+```
+
+**Future Behavior (Milestone 4+):**
+Rust-style return type annotations for explicit exit codes:
+```ryo
+# Implicit success (default)
+fn main():
+    x = 42  # Exits with 0
+
+# Explicit exit code
+fn main() -> int:
+    if error_condition:
+        return 1  # Error
+    return 0      # Success
+```
+
+**Future Behavior (Milestone 7+):**
+Integration with error handling:
+```ryo
+module app:
+    error ConfigError
+    error ConnectionFailed
+
+fn main() -> (app.ConfigError | app.ConnectionFailed)!():
+    config = try load_config()
+    try connect_to_server(config)
+    # Success: exit 0
+    # Error: exit 1 + error message
+```
+
+**Rationale:**
+- **Industry standard:** Aligns with Rust, Go, Python, C, Zig (all default to 0)
+- **Type-safe:** Return type annotation enforces exit code types
+- **Explicit:** Clear intent when non-zero exit codes are needed
+- **Flexible:** Simple programs stay simple, complex programs have options
+- **Future-proof:** Works with functions, types, and error handling
+- **Developer expectations:** 0 = success is universal convention
+
+**Implementation:**
+- Changed in `src/codegen.rs` (lines 350-369)
+- Always returns 0 by default
+- Explicit returns deferred to Milestone 4 with function implementation
+
+**References:**
+- See research in plan mode analysis (2025-01-10)
+- Industry survey: Rust (Termination trait), Go (implicit 0), Python (sys.exit), C (return 0)
+
+---
+
 ## Critical Issues Requiring Immediate Resolution
 
 ### 1. Tuple Syntax Ambiguity 🔴

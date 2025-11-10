@@ -8,6 +8,8 @@ pub enum Token<'a> {
     // Literals
     #[regex(r"[0-9]+")]
     Int(&'a str),
+    #[regex(r#""([^"\\]|\\.)*""#)]
+    Str(&'a str),
     //#[regex(r"[+-]?([0-9]*[.])?[0-9]+")]
     //Float(&'a str),
 
@@ -58,6 +60,8 @@ pub enum Token<'a> {
     LBrace,
     #[token("}")]
     RBrace,
+    #[token(",")]
+    Comma,
 
     // Comments (skip to end of line)
     #[regex(r"#[^\n]*", logos::skip)]
@@ -72,6 +76,7 @@ impl fmt::Display for Token<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Int(s) => write!(f, "{}", s),
+            Self::Str(s) => write!(f, "{}", s),
             //Self::Float(s) => write!(f, "{}", s),
 
             // Keywords
@@ -102,6 +107,7 @@ impl fmt::Display for Token<'_> {
             Self::RParen => write!(f, ")"),
             Self::LBrace => write!(f, "{{"),
             Self::RBrace => write!(f, "}}"),
+            Self::Comma => write!(f, ","),
 
             // Comments and Whitespace
             Self::Comment => write!(f, "<comment>"),
@@ -116,7 +122,7 @@ mod tests {
     use super::*;
 
     /// Helper function to tokenize a string and collect all tokens (except skipped ones)
-    fn tokenize(input: &str) -> Vec<Token> {
+    fn tokenize(input: &str) -> Vec<Token<'_>> {
         Token::lexer(input)
             .filter_map(|result| result.ok())
             .collect()
@@ -315,5 +321,50 @@ mod tests {
         let tokens = tokenize("return x");
         assert_eq!(tokens[0], Token::Return);
         assert!(matches!(tokens[1], Token::Ident("x")));
+    }
+
+    #[test]
+    fn lex_string_literal_simple() {
+        let tokens = tokenize(r#""hello""#);
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0], Token::Str("\"hello\"")));
+    }
+
+    #[test]
+    fn lex_string_literal_with_spaces() {
+        let tokens = tokenize(r#""hello world""#);
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0], Token::Str("\"hello world\"")));
+    }
+
+    #[test]
+    fn lex_string_literal_empty() {
+        let tokens = tokenize(r#""""#);
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0], Token::Str("\"\"")));
+    }
+
+    #[test]
+    fn lex_string_literal_with_escapes() {
+        let tokens = tokenize(r#""hello\nworld""#);
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0], Token::Str("\"hello\\nworld\"")));
+    }
+
+    #[test]
+    fn lex_string_literal_with_quotes() {
+        let tokens = tokenize(r#""say \"hello\"""#);
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0], Token::Str("\"say \\\"hello\\\"\"")));
+    }
+
+    #[test]
+    fn lex_print_call() {
+        let tokens = tokenize(r#"print("hello")"#);
+        assert_eq!(tokens.len(), 4);
+        assert!(matches!(tokens[0], Token::Ident("print")));
+        assert_eq!(tokens[1], Token::LParen);
+        assert!(matches!(tokens[2], Token::Str("\"hello\"")));
+        assert_eq!(tokens[3], Token::RParen);
     }
 }

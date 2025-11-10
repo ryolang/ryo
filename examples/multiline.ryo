@@ -1,0 +1,4 @@
+# print() returns void (nothing) - assignment required by current parser
+_ = print("Hello,")
+_ = print(" World!")
+_ = print("\n")

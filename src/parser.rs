@@ -1,12 +1,40 @@
 use chumsky::{
-    input::{Stream, ValueInput},
+    input::ValueInput,
     prelude::*,
     span::SimpleSpan,
 };
-use logos::Logos;
 
 use crate::ast::*;
 use crate::lexer::Token;
+
+/// Unescape a string literal (handle \n, \t, \", \\, etc.)
+fn unescape_string(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('r') => result.push('\r'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some('0') => result.push('\0'),
+                Some(c) => {
+                    // Unknown escape sequence, keep backslash and character
+                    result.push('\\');
+                    result.push(c);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
+}
 
 /// Parse a complete Ryo program with multiple statements
 pub fn program_parser<'a, I>() -> impl Parser<'a, I, Program, extra::Err<Rich<'a, Token<'a>>>> + 'a
@@ -89,20 +117,41 @@ where
     I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     recursive(|expr| {
-        // Atomic expressions: literals and parenthesized expressions
+        // Atomic expressions: literals, calls, and parenthesized expressions
         let atom = {
             let literal = select! {
                 Token::Int(s) => {
                     let n: isize = s.parse().unwrap();
                     ExprKind::Literal(Literal::Int(n))
-                }
+                },
+                Token::Str(s) => {
+                    // Remove surrounding quotes and unescape
+                    let unquoted = &s[1..s.len()-1];
+                    let unescaped = unescape_string(unquoted);
+                    ExprKind::Literal(Literal::Str(unescaped))
+                },
             }
             .map_with(|kind, e| Expression::new(kind, e.span()));
+
+            // Function call: identifier(arg1, arg2, ...)
+            let call = select! {
+                Token::Ident(name) => name.to_string()
+            }
+            .then(
+                expr.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+            )
+            .map_with(|(name, args), e| {
+                Expression::new(ExprKind::Call(name, args), e.span())
+            });
 
             let parenthesized = expr
                 .delimited_by(just(Token::LParen), just(Token::RParen));
 
-            literal.or(parenthesized)
+            call.or(literal).or(parenthesized)
         };
 
         // Unary operators (negation has highest precedence)
@@ -160,9 +209,12 @@ where
 }
 
 #[cfg(test)]
+#[allow(irrefutable_let_patterns)]
 mod tests {
     use super::*;
     use chumsky::Parser;
+    use chumsky::input::Stream;
+    use logos::Logos;
 
     fn lex_and_parse(input: &str) -> Result<Program, Vec<Rich<'static, Token<'static>>>> {
         use crate::lexer::Token;
@@ -177,6 +229,10 @@ mod tests {
                 Token::Int(s) => {
                     let leaked_str: &'static str = Box::leak(s.to_string().into_boxed_str());
                     Token::Int(leaked_str)
+                }
+                Token::Str(s) => {
+                    let leaked_str: &'static str = Box::leak(s.to_string().into_boxed_str());
+                    Token::Str(leaked_str)
                 }
                 Token::Ident(s) => {
                     let leaked_str: &'static str = Box::leak(s.to_string().into_boxed_str());
@@ -200,6 +256,7 @@ mod tests {
                 Token::RParen => Token::RParen,
                 Token::LBrace => Token::LBrace,
                 Token::RBrace => Token::RBrace,
+                Token::Comma => Token::Comma,
                 Token::Comment => Token::Comment,
                 Token::Whitespace => Token::Whitespace,
                 Token::Error => Token::Error,
