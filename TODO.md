@@ -15,6 +15,7 @@
 - [ ] Bidirectional type inference (function signatures require types, local variables inferred)
 - [ ] Effective Go. review and get insigths https://go.dev/doc/effective_go
 
+
 ### Core language
 - Lexer: Lexical, Syntactic Grammar
   1. Arithmetic
@@ -49,6 +50,11 @@
 
 ## Resources
 
+- memory: https://github.com/modularml/mojo/blob/main/docs/manual/values/ownership.ipynb
+- fibonacci bench: https://mojodojo.dev/guides/std/Benchmark.html
+- concurrency -> https://tutorial.ponylang.io/types/actors  https://gist.github.com/lattner/31ed37682ef1576b16bca1432ea9f782
+- fib https://www.statpan.com/2023/10/python-vs-mojo-vs-rust-fibonacci-speed.html
+- https://mojodojo.dev/
 - https://www.python-httpx.org/
 - https://mlir.llvm.org/docs/Dialects/
 - https://edgl.dev/blog/mlir-with-rust/
