@@ -21,6 +21,11 @@ pub fn eval_program(program: &Program) -> isize {
 pub fn eval_expr(expr: &Expression) -> isize {
     match &expr.kind {
         ExprKind::Literal(Literal::Int(n)) => *n,
+        ExprKind::Literal(Literal::Str(_)) => {
+            // String literals don't have an integer value
+            // This evaluator is currently unused; proper handling will come later
+            0
+        }
         ExprKind::UnaryOp(UnaryOperator::Neg, sub_expr) => -eval_expr(sub_expr),
         ExprKind::BinaryOp(lhs, op, rhs) => {
             let lhs_val = eval_expr(lhs);
@@ -32,6 +37,11 @@ pub fn eval_expr(expr: &Expression) -> isize {
                 BinaryOperator::Mul => lhs_val * rhs_val,
                 BinaryOperator::Div => lhs_val / rhs_val,
             }
+        }
+        ExprKind::Call(_name, _args) => {
+            // Function calls don't have an integer value
+            // This evaluator is currently unused; proper handling will come later
+            0
         }
     }
 }
