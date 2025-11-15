@@ -169,9 +169,13 @@ enum Option[T]:
     None
 
 # Error types use 'error' keyword (single-variant)
-module processing:
-    error InvalidInput(str)
-    error ParseFailed
+
+# File: processing/errors.ryo
+error InvalidInput(str)
+error ParseFailed
+
+# File: main.ryo
+import processing
 
 # Usage
 maybe = Option[str].Some("hello")
@@ -417,14 +421,18 @@ error HttpError(status: int, message: str)  # Structured error
 
 2. **Module-Based Error Grouping** - Organize related errors:
 ```ryo
-module io:
-    error NotFound(path: str)
-    error PermissionDenied(path: str)
-    error ReadFailed(reason: str)
+# File: io/errors.ryo
+error NotFound(path: str)
+error PermissionDenied(path: str)
+error ReadFailed(reason: str)
 
-module parse:
-    error InvalidSyntax(line: int, column: int)
-    error UnexpectedToken(expected: str, got: str)
+# File: parse/errors.ryo
+error InvalidSyntax(line: int, column: int)
+error UnexpectedToken(expected: str, got: str)
+
+# File: main.ryo
+import io
+import parse
 ```
 
 3. **Automatic Error Composition** - Error unions inferred from `try` expressions:
@@ -1213,9 +1221,12 @@ pub extern "C" fn process_point(p: *const Point) -> f64:
 fn ryo_str_to_c(s: &str) -> (*const c_char, usize):
     return (s.as_ptr(), s.len())
 
-module conversion:
-    error InvalidUtf8
-    error NullPointer
+# File: conversion/errors.ryo
+error InvalidUtf8
+error NullPointer
+
+# File: main.ryo
+import conversion
 
 fn c_str_to_ryo(ptr: *const c_char) -> conversion.InvalidUtf8!str:
     unsafe:
@@ -1535,9 +1546,12 @@ A high-performance web framework leveraging Ryo's async capabilities and memory 
 ```ryo
 import web
 
-module http:
-    error NotFound
-    error DatabaseError(message: str)
+# File: http/errors.ryo
+error NotFound
+error DatabaseError(message: str)
+
+# File: main.ryo
+import http
 
 #[route("/users/{id}")]
 async fn get_user(id: int) -> (http.NotFound | http.DatabaseError)!JsonResponse[User]:

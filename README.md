@@ -142,8 +142,11 @@ fn main():
     # Safe error handling
     print(process_user(user))
 
-module process:
-    error InvalidUser
+# File: process/errors.ryo
+error InvalidUser
+
+# File: main.ryo
+import process
 
 fn process_user(user: ?str) -> process.InvalidUser!str:
     name = user orelse return process.InvalidUser

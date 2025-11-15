@@ -95,9 +95,12 @@ Ryo isn't just a collection of features - it's a carefully designed synthesis:
 
 ```ryo
 # Python-like syntax
-module price:
-    error OutOfStock
-    error InvalidPrice(reason: str)
+# File: price/errors.ryo
+error OutOfStock
+error InvalidPrice(reason: str)
+
+# File: main.ryo
+import price
 
 fn calculate_total(items: List[Item]) -> (price.OutOfStock | price.InvalidPrice)!float:
     # Rust/Mojo-like ownership (simplified)
@@ -372,9 +375,12 @@ match value:
 
 #### Async Functions
 ```ryo
-module http:
-    error ConnectionFailed(reason: str)
-    error RequestTimeout
+# File: http/errors.ryo
+error ConnectionFailed(reason: str)
+error RequestTimeout
+
+# File: main.ryo
+import http
 
 async fn fetch_data() -> (http.ConnectionFailed | http.RequestTimeout)!Data:
     response = try await http.get("https://api.example.com")
@@ -402,9 +408,9 @@ enum Color:
     Blue
 
 # Error types for error handling
-module file:
-    error NotFound(path: str)
-    error PermissionDenied(path: str)
+# File: file/errors.ryo
+error NotFound(path: str)
+error PermissionDenied(path: str)
 
 # Struct literal (uses parentheses with named arguments)
 point = Point(x=3.14, y=2.71)
@@ -444,11 +450,13 @@ match config:
 
 #### Error Handling (`error`, `try`, `catch`)
 ```ryo
-# Define error types using module-based grouping
-module database:
-    error ConnectionFailed(reason: str)
-    error QueryTimeout(duration: Duration)
-    error InvalidQuery(sql: str)
+# File: database/errors.ryo
+error ConnectionFailed(reason: str)
+error QueryTimeout(duration: Duration)
+error InvalidQuery(sql: str)
+
+# File: main.ryo
+import database
 
 # Function that can error (explicit error union)
 fn query(sql: str) -> (database.ConnectionFailed | database.QueryTimeout | database.InvalidQuery)!Data:

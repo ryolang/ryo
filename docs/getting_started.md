@@ -795,19 +795,21 @@ fn main():
 
 ### Grouping Related Errors with Modules
 
-For organizing related errors, use modules:
+For organizing related errors, use directory-based modules:
 
 ```ryo
-# In math module
-module math:
-    error DivideByZero
-    error InvalidInput(str)
-    error OverflowError
+# File: math/errors.ryo
+error DivideByZero
+error InvalidInput(str)
+error OverflowError
 
-# In parse module
-module parse:
-    error InvalidFormat(str)
-    error InvalidEncoding
+# File: parse/errors.ryo
+error InvalidFormat(str)
+error InvalidEncoding
+
+# File: main.ryo
+import math
+import parse
 ```
 
 ### Functions That Can Fail
@@ -868,13 +870,18 @@ fn calculate() -> math.DivideByZero!float:
     return y
 
 # Composing different error types - automatic!
-module io:
-    error NotFound
-    error PermissionDenied
 
-module parse:
-    error InvalidFormat(str)
-    error InvalidEncoding
+# File: io/errors.ryo
+error NotFound
+error PermissionDenied
+
+# File: parse/errors.ryo
+error InvalidFormat(str)
+error InvalidEncoding
+
+# File: main.ryo
+import io
+import parse
 
 fn load_and_parse(path: str) -> !str:
     content = try read_file(path)      # Returns io.NotFound or io.PermissionDenied
@@ -1213,8 +1220,11 @@ When something goes wrong, Ryo provides helpful debugging information to quickly
 When an error occurs in your Ryo program, you'll get a clear message with location information:
 
 ```ryo
-module user:
-    error NotFound(id: int)
+# File: user/errors.ryo
+error NotFound(id: int)
+
+# File: main.ryo
+import user
 
 fn get_user(id: int) -> user.NotFound!User:
     if id < 0:
@@ -1317,8 +1327,11 @@ error ValidationFailed(field: str, reason: str)
 
 **2. Include context in errors:**
 ```ryo
-module database:
-    error QueryFailed(sql: str, reason: str)
+# File: database/errors.ryo
+error QueryFailed(sql: str, reason: str)
+
+# File: main.ryo
+import database
 
 fn query_users(age: int) -> database.QueryFailed!List[User]:
     sql = f"SELECT * FROM users WHERE age > {age}"
@@ -1344,8 +1357,12 @@ fn divide(a: float, b: float) -> float:
     a / b
 
 # ✅ Better - use error types
-module math:
-    error DivisionByZero
+
+# File: math/errors.ryo
+error DivisionByZero
+
+# File: main.ryo
+import math
 
 fn divide(a: float, b: float) -> math.DivisionByZero!float:
     if b == 0:

@@ -310,24 +310,28 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
 
 #### **Grouping Related Errors with Modules**
 
-For organizing related errors, use module namespacing instead of multi-variant syntax:
+For organizing related errors, use directory-based module organization:
+
+> **Note:** Ryo does NOT have a `module` keyword for inline definitions. Modules are defined by directory structure, and all `.ryo` files in a directory automatically form one module. Use `import` statements to reference errors from other modules. See Section 11 (Module System) for complete details.
 
 ```ryo
-# In module 'io'
-module io:
-    error FileNotFound(path: str)
-    error PermissionDenied(path: str)
-    error DiskFull
+# File: io/errors.ryo
+error FileNotFound(path: str)
+error PermissionDenied(path: str)
+error DiskFull
 
-# In module 'parse'
-module parse:
-    error InvalidSyntax(line: int, column: int)
-    error UnexpectedToken(expected: str, got: str)
-    error UnexpectedEof
+# File: parse/errors.ryo
+error InvalidSyntax(line: int, column: int)
+error UnexpectedToken(expected: str, got: str)
+error UnexpectedEof
 ```
 
 Usage:
 ```ryo
+# File: main.ryo
+import io
+import parse
+
 fn read_file(path: str) -> io.FileNotFound!str:
     if not exists(path):
         return io.FileNotFound(path)
@@ -335,8 +339,8 @@ fn read_file(path: str) -> io.FileNotFound!str:
 
 fn parse_json(text: str) -> parse.InvalidSyntax!Data:
     if invalid_json(text):
-        return parse.InvalidSyntax(line: 0, column: 0)
-    return Data{...}
+        return parse.InvalidSyntax(line=0, column=0)
+    return Data(...)
 ```
 
 #### **Error Union Types** (Composition)
@@ -469,8 +473,11 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
     Example:
     ```ryo
-    module file:
-        error NotFound(path: str)
+    # File: file/errors.ryo
+    error NotFound(path: str)
+
+    # File: main.ryo
+    import file
 
     fn find_config() -> file.NotFound!Config:
         # Error created here captures: line 5, column 8, file "src/main.ryo"
@@ -617,18 +624,18 @@ Error handling in Ryo uses algebraic error types (defined with the `error` keywo
 
 ### 7.1 Error Types and Definitions
 
-Error types are defined with the `error` keyword, using modules to organize related errors:
+Error types are defined with the `error` keyword, using directory-based modules to organize related errors:
 
 ```ryo
-module network:
-    error ConnectionTimeout
-    error DnsResolutionFailed(domain: str)
-    error HttpError(status: int, message: str)
+# File: network/errors.ryo
+error ConnectionTimeout
+error DnsResolutionFailed(domain: str)
+error HttpError(status: int, message: str)
 
-module io:
-    error NotFound(path: str)
-    error PermissionDenied(path: str)
-    error ReadFailed(reason: str)
+# File: io/errors.ryo
+error NotFound(path: str)
+error PermissionDenied(path: str)
+error ReadFailed(reason: str)
 ```
 
 *   *(Rationale: `error` keyword signals error-handling intent. Single-variant errors with module organization provide clear composition without wrapper types. Associated data enables rich error information.)*
@@ -926,8 +933,11 @@ Do **not** use `panic()` for:
 #### **Example: Understanding a Panic**
 
 ```ryo
-module database:
-    error ConnectionFailed(reason: str)
+# File: database/errors.ryo
+error ConnectionFailed(reason: str)
+
+# File: main.ryo
+import database
 
 fn connect(host: str, port: int) -> database.ConnectionFailed!Connection:
     if port < 1 or port > 65535:
@@ -1021,8 +1031,11 @@ fn main():
 
 **From Errors:**
 ```ryo
-module db:
-    error QueryFailed(sql: str)
+# File: db/errors.ryo
+error QueryFailed(sql: str)
+
+# File: main.ryo
+import db
 
 fn query_user(id: int) -> db.QueryFailed!User:
     # Error automatically captures file/line/function at creation

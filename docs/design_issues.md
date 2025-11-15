@@ -49,9 +49,12 @@ fn main() -> int:
 **Future Behavior (Milestone 7+):**
 Integration with error handling:
 ```ryo
-module app:
-    error ConfigError
-    error ConnectionFailed
+# File: app/errors.ryo
+error ConfigError
+error ConnectionFailed
+
+# File: main.ryo
+import app
 
 fn main() -> (app.ConfigError | app.ConnectionFailed)!():
     config = try load_config()
@@ -740,10 +743,13 @@ impl Counter:
 
 2. **Module-Based Grouping** (organize related errors):
    ```ryo
-   module math:
-       error DivisionByZero
-       error InvalidInput(message: str)
-       error OverflowError
+   # File: math/errors.ryo
+   error DivisionByZero
+   error InvalidInput(message: str)
+   error OverflowError
+
+   # File: main.ryo
+   import math
    ```
 
 3. **Error Union Types** (automatic composition from `try`):

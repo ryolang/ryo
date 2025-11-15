@@ -755,13 +755,15 @@ fn main() -> int:
 
 **Tasks:**
 - Add `error` keyword to lexer/parser
-- Add `module` keyword for error grouping
-- Extend AST: `StmtKind::ErrorDef`, `StmtKind::ModuleDef`
+- Extend AST: `StmtKind::ErrorDef`
 - Parse error definitions:
   ```ryo
-  module file:
-      error NotFound(path: str)
-      error PermissionDenied(path: str)
+  # File: file/errors.ryo
+  error NotFound(path: str)
+  error PermissionDenied(path: str)
+
+  # File: main.ryo
+  import file
   ```
 - Parse error union syntax: `(ErrorA | ErrorB)!SuccessType`
 - Parse function signatures with error returns: `fn foo() -> FileError!Data`
@@ -776,12 +778,16 @@ fn main() -> int:
 
 **Example:**
 ```ryo
-module http:
-    error ConnectionFailed(reason: str)
-    error RequestTimeout
+# File: http/errors.ryo
+error ConnectionFailed(reason: str)
+error RequestTimeout
 
-module parse:
-    error InvalidJson(message: str)
+# File: parse/errors.ryo
+error InvalidJson(message: str)
+
+# File: main.ryo
+import http
+import parse
 
 fn fetch_and_parse() -> (http.ConnectionFailed | http.RequestTimeout | parse.InvalidJson)!Data:
     response = try http_get("https://api.example.com")  # Returns http errors
@@ -1318,12 +1324,16 @@ fn main() -> int:
 
 **Example:**
 ```ryo
-module file:
-    error NotFound(path: str)
-    error PermissionDenied(path: str)
+# File: file/errors.ryo
+error NotFound(path: str)
+error PermissionDenied(path: str)
 
-module parse:
-    error InvalidFormat(message: str)
+# File: parse/errors.ryo
+error InvalidFormat(message: str)
+
+# File: main.ryo
+import file
+import parse
 
 fn load_config(path: &str) -> (file.NotFound | file.PermissionDenied | parse.InvalidFormat)!Config:
     content = try read_file(path)       # Propagates file errors
