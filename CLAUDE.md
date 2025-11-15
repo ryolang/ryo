@@ -2,7 +2,7 @@
 
 > **Context Document for AI Assistants and Contributors**
 >
-> This document provides comprehensive context about the Ryo programming language project, its architecture, conventions, and development practices. Last updated: 2025-11-05
+> This document provides comprehensive context about the Ryo programming language project, its architecture, conventions, and development practices. Last updated: 2025-11-15
 
 ---
 
@@ -444,19 +444,19 @@ match config:
 
 #### Error Handling (`error`, `try`, `catch`)
 ```ryo
-# Define error types
-error DatabaseError:
-    ConnectionFailed(reason: str)
-    QueryTimeout(Duration)
-    InvalidQuery(sql: str)
+# Define error types using module-based grouping
+module database:
+    error ConnectionFailed(reason: str)
+    error QueryTimeout(duration: Duration)
+    error InvalidQuery(sql: str)
 
-# Function that can error
-fn query(sql: str) -> DatabaseError!Data:
+# Function that can error (explicit error union)
+fn query(sql: str) -> (database.ConnectionFailed | database.QueryTimeout | database.InvalidQuery)!Data:
     if not connected:
-        return DatabaseError.ConnectionFailed("no db")
+        return database.ConnectionFailed("no db")
     return db.execute(sql)
 
-# Propagate errors with try
+# Propagate errors with try (inferred error union)
 fn load_config() -> !Config:
     content = try read_file("config.toml")
     config = try parse_config(content)
@@ -464,21 +464,21 @@ fn load_config() -> !Config:
 
 # Handle errors with catch
 config = load_config() catch |e|:
-    print(f"Error loading config: {e}")
+    print(f"Error loading config: {e.message()}")
     return default_config()
 
-# Pattern matching on errors
+# Pattern matching on error unions
 data = query("SELECT * FROM users") catch |e|:
     match e:
-        DatabaseError.ConnectionFailed(reason):
+        database.ConnectionFailed(reason):
             print(f"Connection failed: {reason}")
-        DatabaseError.QueryTimeout(duration):
+        database.QueryTimeout(duration):
             print(f"Query timed out after {duration}")
-        DatabaseError.InvalidQuery(sql):
+        database.InvalidQuery(sql):
             print(f"Invalid query: {sql}")
 
 # Combined error + optional (!?T)
-fn find_user(db: Database, id: int) -> DatabaseError!?User:
+fn find_user(db: Database, id: int) -> !?User:
     rows = try db.query("SELECT * FROM users WHERE id = ?", id)
     if rows.is_empty():
         return none  # Not found (not an error)
@@ -1300,6 +1300,14 @@ cargo test --test integration_tests
 
 ## Version History
 
+- **2025-11-15**: Struct literal syntax unification
+  - Established parentheses with equals as standard: `Point(x=1, y=2)`
+  - Unified enum struct variant syntax to use parentheses: `Message.Coords(x=10, y=-5)`
+  - Fixed 17 documentation inconsistencies across 6 files
+  - Updated error handling examples to use module-based single-variant errors
+  - Braces reserved exclusively for f-string interpolation
+  - Rationale: Maintains "no braces" philosophy, Python-familiar for target audience
+
 - **2025-11-11**: Module system documentation
   - Added comprehensive module system design to Key Design Decisions (Section 7.8)
   - Added Modules and Imports subsection to Syntax Conventions
@@ -1360,7 +1368,7 @@ match value:
 struct Name:
     field: Type
 
-point = Name{field: value}  # Literal uses braces
+point = Point(x=1.0, y=2.0)  # Literal uses parentheses with named arguments
 
 # Traits
 trait TraitName:

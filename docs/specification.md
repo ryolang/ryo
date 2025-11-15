@@ -182,13 +182,13 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
     enum EnumName[T]: # Optional type parameters for generics
         UnitVariant             # Variant with no data
         TupleVariant(Type1, Type2) # Variant holding ordered data
-        StructVariant { name1: TypeA, name2: TypeB } # Variant holding named fields
+        StructVariant(name1: TypeA, name2: TypeB) # Variant holding named fields
     ```
 *   **Instantiation:** Use `EnumName.VariantName`. Provide data for tuple/struct variants.
     ```ryo
     msg1 = Message.Quit
     msg2 = Message.Write("hello")
-    msg3 = Message.Coords { x: 10, y: -5 }
+    msg3 = Message.Coords(x=10, y=-5)
     ```
 *   **Pattern Matching (`match`):** The primary way to use enum values. `match` destructures variants and allows executing code based on the current variant.
     ```ryo
@@ -197,7 +197,7 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
             # Code for Variant1
         MyEnum.TupleVariant(data1, data2): # Bind tuple data
             # Code using data1, data2
-        MyEnum.StructVariant { field_a, count }: # Bind struct fields
+        MyEnum.StructVariant(field_a, count): # Bind struct fields
             # Code using field_a, count
         _ : # Wildcard for unlisted variants (required if not exhaustive)
             # Default code
@@ -228,7 +228,7 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
 *   **Declaration and Assignment:**
     ```ryo
     user: ?User = none
-    user: ?User = User{name: "Alice"}
+    user: ?User = User(name="Alice")
 
     config: ?Config = load_config()  # If load_config returns ?Config
     ```

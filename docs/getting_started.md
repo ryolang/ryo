@@ -37,7 +37,7 @@ fn main():
     * **`name`**: This is the name of the parameter.
     * **`: str`**: This is the **type annotation**, specifying that the `name` parameter is expected to be a **string** (`str`). Ryo is a **statically-typed** language, which means types are checked at compile time to catch errors early.
   * **`:`**: The colon `:` marks the end of the function signature and the beginning of the function body.
-* **`print(f"Hello {name}")`**: This line is the **body** of the `hello` function. It's **indented** using four spaces. Indentation is important in Ryo to define code blocks, just like in Python!
+* **`print(f"Hello {name}")`**: This line is the **body** of the `hello` function. It's **indented** using one tab. Indentation is important in Ryo to define code blocks, just like in Python! (Note: Ryo enforces tab-based indentation, not spaces)
   * **`print(...)`**: This is a built-in Ryo function to display output to the console.
   * **`f"Hello {name}"`**: This is an **f-string** (formatted string literal), similar to Python. It allows you to embed variables directly into strings by placing them inside curly braces `{}`. In this case, it creates a string "Hello " followed by the value of the `name` parameter.
 * **`fn main():`**: This defines the **`main` function**. In Ryo, the `main` function is the **entry point** of your program – where the execution begins.
@@ -950,7 +950,7 @@ fn find_user(users: List[User], id: int) -> ?User:
     return none  # No user found
 
 fn main():
-    users = [User{id: 1, name: "Alice"}, User{id: 2, name: "Bob"}]
+    users = [User(id=1, name="Alice"), User(id=2, name="Bob")]
 
     # Safe optional chaining
     name = find_user(users, 1)?.name orelse "Unknown"
@@ -1221,7 +1221,7 @@ fn get_user(id: int) -> user.NotFound!User:
         # This error will capture: file, line, column, function name
         return user.NotFound(id)
     # ... fetch user ...
-    User{...}
+    return User(...)
 
 fn main():
     user = get_user(42) catch |e|:
@@ -1274,7 +1274,7 @@ fn validate_age(age: int):
 
 fn create_user(name: str, age: int) -> User:
     validate_age(age)  # This is frame 1
-    User{name: name, age: age}
+    return User(name=name, age=age)
 
 fn main():
     # This is frame 2

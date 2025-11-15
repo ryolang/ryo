@@ -571,7 +571,7 @@ fn main() -> int:
       x: float
       y: float
   ```
-- Parse struct literals with braces: `Point{x: 1.0, y: 2.0}`
+- Parse struct literals with parentheses: `Point(x=1.0, y=2.0)`
 - Parse field access: `point.x`, `point.y`
 - Extend type system:
   - Track struct definitions in symbol table
@@ -595,7 +595,7 @@ fn area(rect: Rectangle) -> float:
     return rect.width * rect.height
 
 fn main() -> int:
-    r = Rectangle{width: 10.0, height: 5.0}
+    r = Rectangle(width=10.0, height=5.0)
     a = area(r)
     return 0
 ```
@@ -605,7 +605,8 @@ fn main() -> int:
 - Field order matters (affects memory layout)
 - No default values for fields (all must be initialized)
 - No methods yet (added in Milestone 15)
-- Braces `{...}` used for struct literals (not Python-style syntax, special case)
+- Parentheses with named arguments used for struct literals: `Point(x=1, y=2)`, consistent with language design
+- Braces reserved exclusively for f-string interpolation
 - Dependencies: Milestone 4 (functions for passing structs)
 
 ### Milestone 8: Enums (Algebraic Data Types)
@@ -890,7 +891,7 @@ fn main() -> int:
 fn find_user(id: int) -> ?User:
     if id < 0:
         return none
-    return User{name: "Alice", id: id}
+    return User(name="Alice", id=id)
 
 fn main() -> int:
     user = find_user(42)
@@ -1050,8 +1051,8 @@ impl Point:
         return sqrt(dx * dx + dy * dy)
 
 fn main() -> int:
-    p1 = Point{x: 0.0, y: 0.0}
-    p2 = Point{x: 3.0, y: 4.0}
+    p1 = Point(x=0.0, y=0.0)
+    p2 = Point(x=3.0, y=4.0)
 
     d = p1.distance(&p2)   # Borrow p2, don't move it
     print(d)               # Can still use p1 and p2
@@ -1266,7 +1267,7 @@ fn main() -> int:
     increment(&mut count)
     print(count)  # 1
 
-    mut p = Point{x: 0.0, y: 0.0}
+    mut p = Point(x=0.0, y=0.0)
     p.translate(5.0, 10.0)
     print(p.x)  # 5.0
 

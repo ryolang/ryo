@@ -409,6 +409,170 @@ src/
 
 ---
 
+### Struct Literal Syntax ✅ RESOLVED (2025-11-15)
+
+**Issue:** Should struct literals use braces `Point{x: 1, y: 2}` (like Rust/Go) or parentheses with equals `Point(x=1, y=2)` (like Python/Swift)?
+
+**Decision:** Parentheses with named arguments: `Point(x=1, y=2)`
+
+**Rationale:**
+
+#### **1. Consistency with "No Braces" Philosophy**
+
+Ryo's core design principle: **braces are reserved exclusively for f-string interpolation**
+
+```ryo
+# Braces ONLY for f-strings
+name = "Alice"
+print(f"Hello {name}!")
+
+# Struct literals use parentheses
+point = Point(x=1.0, y=2.0)
+user = User(name="Alice", age=30)
+```
+
+**Why this matters:**
+- Maintains visual consistency across the language
+- Aligns with Python-style syntax (colons, indentation, no braces for code blocks)
+- Prevents "slippery slope" - if structs use braces, why not functions?
+
+#### **2. Target Audience: Python Developers**
+
+Python developers expect parentheses for object construction:
+
+```python
+# Python dataclass
+from dataclasses import dataclass
+
+@dataclass
+class Point:
+    x: float
+    y: float
+
+point = Point(x=1.0, y=2.0)  # Parentheses with named args
+```
+
+Ryo mirrors this familiar pattern:
+```ryo
+struct Point:
+    x: float
+    y: float
+
+point = Point(x=1.0, y=2.0)  # Same syntax!
+```
+
+#### **3. Modern Language Precedent**
+
+Languages with **clean, modern syntax** use parentheses:
+
+| Language | Struct Literal Syntax | Philosophy Match |
+|----------|----------------------|------------------|
+| **Swift** | `Point(x: 1, y: 2)` | ✅ Clean syntax, parentheses |
+| **Kotlin** | `Point(x = 1, y = 2)` | ✅ Clean syntax, parentheses |
+| **Python** | `Point(x=1, y=2)` | ✅ Clean syntax, parentheses |
+| **Rust** | `Point { x: 1, y: 2 }` | ❌ C-like syntax, braces |
+| **Go** | `Point{X: 1, Y: 2}` | ❌ C-like syntax, braces |
+| **Zig** | `Point{ .x = 1, .y = 2 }` | ❌ C-like syntax, braces |
+
+**Observation**: Languages with C-like syntax use braces. Languages with cleaner, more expressive syntax use parentheses.
+
+#### **4. Consistency with Type Conversion**
+
+Specification (Section 3) defines type conversion using parentheses:
+
+```ryo
+# Type conversion uses parentheses
+x = int(3.14)      # Convert float to int
+y = float(42)      # Convert int to float
+
+# Struct "construction" should match
+point = Point(x=1.0, y=2.0)  # Construct a Point type
+```
+
+**Same pattern**: Calling a type name with arguments.
+
+#### **5. Unified Enum Syntax**
+
+Initially, enum struct variants used braces, creating inconsistency:
+
+```ryo
+# BEFORE (inconsistent)
+struct Point:
+    x: int
+    y: int
+
+enum Message:
+    Coords { x: int, y: int }  # Braces!
+
+point = Point{x: 1, y: 2}       # Braces
+msg = Message.Coords { x: 1, y: 2 }  # Braces
+```
+
+**Resolution**: Unify both to use parentheses:
+
+```ryo
+# AFTER (consistent)
+struct Point:
+    x: int
+    y: int
+
+enum Message:
+    Coords(x: int, y: int)  # Parentheses!
+
+point = Point(x=1, y=2)       # Parentheses
+msg = Message.Coords(x=1, y=2)  # Parentheses
+
+# Pattern matching also uses parentheses
+match msg:
+    Message.Coords(x, y):  # Consistent!
+        print(f"x={x}, y={y}")
+```
+
+**Benefits**:
+- Single syntax for all product types (structs, enum variants)
+- Construction and destruction use same syntax
+- Simpler mental model for developers
+
+#### **6. Parser Simplicity**
+
+**Parentheses approach:**
+- Parentheses already used for: tuples, function calls, grouping, type conversion
+- No context switching between `()` and `{}`
+- Fewer lexical tokens to track
+- Named arguments (`=`) clearly distinguish from function calls
+
+**Braces approach would require:**
+- Context-dependent parsing (f-string braces vs struct braces vs enum braces)
+- More complex error messages
+- Special cases in the parser
+
+#### **Trade-offs Accepted**
+
+**Against braces:**
+- Different from Rust/Go (but Ryo targets Python devs, not systems programmers)
+- Slightly less common in systems languages (but more common in modern high-level languages)
+
+**For parentheses:**
+- Philosophically consistent
+- Target-audience familiar
+- Simpler implementation
+- Unified across language features
+
+**Implementation Changes (2025-11-15):**
+
+Fixed 17 documentation inconsistencies:
+- `docs/getting_started.md` - 4 instances
+- `docs/implementation_roadmap.md` - 6 instances
+- `docs/specification.md` - 4 instances (struct + enum syntax)
+- `CLAUDE.md` - 3 instances (error example + quick ref + version)
+
+**References:**
+- Language comparison research (Swift, Kotlin, Python, Rust, Go, Zig)
+- CLAUDE.md Section 5 (Syntax Conventions)
+- docs/specification.md Section 4.5 (Struct Type) and 4.6 (Enum Type)
+
+---
+
 ## Critical Issues Requiring Immediate Resolution
 
 ### 1. Tuple Syntax Ambiguity 🔴
