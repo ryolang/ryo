@@ -33,7 +33,7 @@ Ryo synthesizes ideas from several modern programming languages:
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
 *   **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
     *   *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for types (structs, enums, traits) and enum variants. *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
-*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `true`, `false`, `none`, `void`, `async`, `await`, `move`, `error`, `try`, `catch`, `orelse`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `as`, `default`, `package`, `let` are not keywords).
+*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `package`, `true`, `false`, `none`, `void`, `async`, `await`, `move`, `error`, `try`, `catch`, `orelse`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `as`, `default`, `let` are not keywords. `package` is an access modifier keyword added for package-internal visibility).
 *   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error union prefix (`!`), optional chaining (`?.`).
     *   **Important Note:** The `!` operator is used exclusively for error union type prefixes (`!T` = error or T, `ErrorType!T` = ErrorType or T). The `!` is NOT used for logical negation—use `not` instead (following Python convention). Similarly, `?` operator in type context (`?T`) denotes optional types, while `?.` is the optional chaining operator.
     *   `_` (Underscore): The underscore `_` is treated as a special identifier. When used in patterns (`match`, destructuring assignment), it signifies a wildcard or an intentionally ignored value; it does not bind to a variable.
@@ -182,13 +182,13 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
     enum EnumName[T]: # Optional type parameters for generics
         UnitVariant             # Variant with no data
         TupleVariant(Type1, Type2) # Variant holding ordered data
-        StructVariant { name1: TypeA, name2: TypeB } # Variant holding named fields
+        StructVariant(name1: TypeA, name2: TypeB) # Variant holding named fields
     ```
 *   **Instantiation:** Use `EnumName.VariantName`. Provide data for tuple/struct variants.
     ```ryo
     msg1 = Message.Quit
     msg2 = Message.Write("hello")
-    msg3 = Message.Coords { x: 10, y: -5 }
+    msg3 = Message.Coords(x=10, y=-5)
     ```
 *   **Pattern Matching (`match`):** The primary way to use enum values. `match` destructures variants and allows executing code based on the current variant.
     ```ryo
@@ -197,7 +197,7 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
             # Code for Variant1
         MyEnum.TupleVariant(data1, data2): # Bind tuple data
             # Code using data1, data2
-        MyEnum.StructVariant { field_a, count }: # Bind struct fields
+        MyEnum.StructVariant(field_a, count): # Bind struct fields
             # Code using field_a, count
         _ : # Wildcard for unlisted variants (required if not exhaustive)
             # Default code
@@ -228,7 +228,7 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
 *   **Declaration and Assignment:**
     ```ryo
     user: ?User = none
-    user: ?User = User{name: "Alice"}
+    user: ?User = User(name="Alice")
 
     config: ?Config = load_config()  # If load_config returns ?Config
     ```
@@ -310,24 +310,28 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
 
 #### **Grouping Related Errors with Modules**
 
-For organizing related errors, use module namespacing instead of multi-variant syntax:
+For organizing related errors, use directory-based module organization:
+
+> **Note:** Ryo does NOT have a `module` keyword for inline definitions. Modules are defined by directory structure, and all `.ryo` files in a directory automatically form one module. Use `import` statements to reference errors from other modules. See Section 11 (Module System) for complete details.
 
 ```ryo
-# In module 'io'
-module io:
-    error FileNotFound(path: str)
-    error PermissionDenied(path: str)
-    error DiskFull
+# File: io/errors.ryo
+error FileNotFound(path: str)
+error PermissionDenied(path: str)
+error DiskFull
 
-# In module 'parse'
-module parse:
-    error InvalidSyntax(line: int, column: int)
-    error UnexpectedToken(expected: str, got: str)
-    error UnexpectedEof
+# File: parse/errors.ryo
+error InvalidSyntax(line: int, column: int)
+error UnexpectedToken(expected: str, got: str)
+error UnexpectedEof
 ```
 
 Usage:
 ```ryo
+# File: main.ryo
+import io
+import parse
+
 fn read_file(path: str) -> io.FileNotFound!str:
     if not exists(path):
         return io.FileNotFound(path)
@@ -335,8 +339,8 @@ fn read_file(path: str) -> io.FileNotFound!str:
 
 fn parse_json(text: str) -> parse.InvalidSyntax!Data:
     if invalid_json(text):
-        return parse.InvalidSyntax(line: 0, column: 0)
-    return Data{...}
+        return parse.InvalidSyntax(line=0, column=0)
+    return Data(...)
 ```
 
 #### **Error Union Types** (Composition)
@@ -469,8 +473,11 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
     Example:
     ```ryo
-    module file:
-        error NotFound(path: str)
+    # File: file/errors.ryo
+    error NotFound(path: str)
+
+    # File: main.ryo
+    import file
 
     fn find_config() -> file.NotFound!Config:
         # Error created here captures: line 5, column 8, file "src/main.ryo"
@@ -617,18 +624,18 @@ Error handling in Ryo uses algebraic error types (defined with the `error` keywo
 
 ### 7.1 Error Types and Definitions
 
-Error types are defined with the `error` keyword, using modules to organize related errors:
+Error types are defined with the `error` keyword, using directory-based modules to organize related errors:
 
 ```ryo
-module network:
-    error ConnectionTimeout
-    error DnsResolutionFailed(domain: str)
-    error HttpError(status: int, message: str)
+# File: network/errors.ryo
+error ConnectionTimeout
+error DnsResolutionFailed(domain: str)
+error HttpError(status: int, message: str)
 
-module io:
-    error NotFound(path: str)
-    error PermissionDenied(path: str)
-    error ReadFailed(reason: str)
+# File: io/errors.ryo
+error NotFound(path: str)
+error PermissionDenied(path: str)
+error ReadFailed(reason: str)
 ```
 
 *   *(Rationale: `error` keyword signals error-handling intent. Single-variant errors with module organization provide clear composition without wrapper types. Associated data enables rich error information.)*
@@ -926,8 +933,11 @@ Do **not** use `panic()` for:
 #### **Example: Understanding a Panic**
 
 ```ryo
-module database:
-    error ConnectionFailed(reason: str)
+# File: database/errors.ryo
+error ConnectionFailed(reason: str)
+
+# File: main.ryo
+import database
 
 fn connect(host: str, port: int) -> database.ConnectionFailed!Connection:
     if port < 1 or port > 65535:
@@ -1021,8 +1031,11 @@ fn main():
 
 **From Errors:**
 ```ryo
-module db:
-    error QueryFailed(sql: str)
+# File: db/errors.ryo
+error QueryFailed(sql: str)
+
+# File: main.ryo
+import db
 
 fn query_user(id: int) -> db.QueryFailed!User:
     # Error automatically captures file/line/function at creation
@@ -1154,10 +1167,519 @@ RYOLANG_BACKTRACE=0 ./my_program
 
 ## 11. Modules & Packages
 
-*   **Implicit Packaging:** Directory structure under `src/` defines hierarchy. No `package` keyword. *(Rationale: Pythonic simplicity, reduces boilerplate).*
-*   **Imports:** `import path.to.module`, `import path.{item}`, `import pkg:dep_name`, `import path as alias`. Paths relative to `src/`.
-*   **Visibility:** Default private, `pub` for public.
-*   **Cycles:** Disallowed.
+### 11.1 Package Definition
+
+**Package** = The entire project defined by `ryo.toml`. This is the unit of compilation, versioning, and distribution.
+
+*   **Properties:**
+    *   One `ryo.toml` file defines one package
+    *   Contains one or more modules
+    *   Compiled as a single unit
+    *   Published to package registry as one unit
+    *   Has a unique name (e.g., "mywebapp")
+    *   Defines the boundary for `package` visibility
+
+*   **Equivalent to:** Rust's crate, Go's module (go.mod), Swift's package (Package.swift), Python's distribution package
+
+**Example Structure:**
+```
+mywebapp/              # Package "mywebapp"
+├── ryo.toml           # Package manifest
+└── src/
+    ├── main.ryo       # Entry point
+    ├── server/        # Module "server"
+    └── database/      # Module "database"
+```
+
+**ryo.toml:**
+```toml
+[package]
+name = "mywebapp"
+version = "1.0.0"
+authors = ["Your Name <you@example.com>"]
+
+[dependencies]
+http = "1.0"
+json = "0.5"
+```
+
+### 11.2 Module Definition
+
+**Module** = A directory containing `.ryo` files. All `.ryo` files in the same directory are part of one module and share a namespace.
+
+*   **Properties:**
+    *   One directory = one module
+    *   All `.ryo` files in directory share the same namespace
+    *   Can contain both `.ryo` files AND subdirectories (submodules)
+    *   Hierarchical: parent modules can contain child modules
+    *   Module-private items are shared among all files in the directory
+    *   Imported by full path (e.g., `import utils.math`)
+    *   Implicit discovery - no `mod` keyword needed
+
+*   **Equivalent to:** Go's package (directory concept), Rust's module (organizational concept), Python's package (directory)
+
+**Example:**
+```
+src/
+  utils/               # Module "utils"
+    core.ryo           # Part of "utils" module
+    helpers.ryo        # Part of "utils" module
+```
+
+All functions and types in `core.ryo` and `helpers.ryo` are part of the `utils` module namespace.
+
+### 11.3 Hierarchical Module Structure
+
+Modules can contain submodules, creating a hierarchical organization.
+
+**Example:**
+```
+src/
+  utils/               # Module "utils" (parent)
+    core.ryo           # Part of "utils" module
+    helpers.ryo        # Part of "utils" module
+    math/              # Module "utils.math" (child of utils)
+      basic.ryo        # Part of "utils.math" module
+      geometry/        # Module "utils.math.geometry" (child of utils.math)
+        shapes.ryo     # Part of "utils.math.geometry" module
+```
+
+**Module Hierarchy:**
+*   `utils` module contains:
+    *   Files: `core.ryo`, `helpers.ryo`
+    *   Submodule: `utils.math`
+*   `utils.math` module contains:
+    *   Files: `basic.ryo`
+    *   Submodule: `utils.math.geometry`
+*   `utils.math.geometry` module contains:
+    *   Files: `shapes.ryo`
+
+**Key Properties:**
+*   Parent directories can have BOTH `.ryo` files AND subdirectories (submodules)
+*   Each directory level is a separate module with its own namespace
+*   Child modules do NOT automatically see parent module's private items
+*   Must import parent explicitly to use its items
+
+### 11.4 Access Control Levels
+
+Ryo provides three access control levels for fine-grained visibility control:
+
+#### **1. `pub` - Public (Exported)**
+
+Visible everywhere, including external packages that import your library.
+
+```ryo
+# server/http.ryo
+pub fn start():        # Public API - anyone can use
+    _bind_port()
+```
+
+**Use when:**
+*   It's your library's public API
+*   External projects will import it
+*   You promise stability (semver applies)
+
+#### **2. `package` - Package-Internal**
+
+Visible to all modules within the same package (defined by `ryo.toml`), but NOT to external packages.
+
+```ryo
+# internal/config.ryo
+package fn load_config():  # Shared across modules in project
+    pass
+
+# server/http.ryo (different module, same package)
+import internal.config
+
+fn start():
+    config.load_config()   # ✅ OK - package visibility
+```
+
+**Use when:**
+*   Multiple modules in your project need it
+*   It's an implementation detail, not public API
+*   You want to share code without exposing it externally
+
+#### **3. No Keyword - Module-Private**
+
+Visible only within the same module (directory). All files in the directory can access module-private items.
+
+```ryo
+# server/http.ryo
+fn _bind_port():       # Module-private
+    pass
+
+# server/routes.ryo (same directory = same module)
+fn register():
+    http._bind_port()  # ✅ OK - same module
+
+# database/connection.ryo (different directory = different module)
+fn connect():
+    server.http._bind_port()  # ❌ ERROR - module-private
+```
+
+**Use when:**
+*   Only one module needs it
+*   It's an implementation detail within that module
+*   You want to hide complexity from other modules
+
+#### **Comparison to Other Languages**
+
+| Language | Public | Package/Crate | Module/Internal | File |
+|----------|--------|---------------|-----------------|------|
+| **Ryo** | `pub` | `package` | *(no keyword)* | - |
+| **Rust** | `pub` | `pub(crate)` | `pub(super)` / *(no keyword)* | - |
+| **Go** | Capitalized | `internal/` | *(lowercase)* | - |
+| **Swift 6** | `public`/`open` | `package` | `internal` | `fileprivate` |
+| **Zig** | `pub` | - | *(no keyword)* | - |
+| **Python** | *(default)* | - | *(by convention)* | - |
+
+*Rationale: Three levels provide the right balance - simpler than Rust/Swift (4-6 levels), more expressive than Go/Zig (2 levels). Swift 6 added `package` in 2025, validating this need.*
+
+### 11.5 Import System
+
+#### **Import Syntax**
+
+```ryo
+import utils                         # Import module
+import utils.math                    # Import submodule (full path required)
+import utils.math.geometry           # Import nested submodule
+import server.middleware as mw       # Aliased import
+import utils.{add, subtract}         # Import specific items (future)
+import pkg:external_dep              # External dependency from ryo.toml
+```
+
+#### **Import Rules**
+
+1.  **Full Path Required:** Must specify complete module path
+    ```ryo
+    import utils.math.geometry  # ✓ Full path
+    import geometry             # ✗ Missing parent path
+    ```
+
+2.  **No Implicit Parent Access:** Child modules must import parent explicitly
+    ```ryo
+    # utils/math/basic.ryo
+    import utils  # Must import parent to use it
+
+    fn example():
+        utils.helper()  # ✓ After importing
+    ```
+
+3.  **Paths Relative to `src/`:** Import paths resolve from `src/` directory
+    ```ryo
+    import server      # → src/server/
+    import utils.math  # → src/utils/math/
+    ```
+
+4.  **External Dependencies:** Use `pkg:` prefix for dependencies in `ryo.toml`
+    ```ryo
+    import pkg:http    # From [dependencies]
+    import pkg:json    # From [dependencies]
+    ```
+
+### 11.6 Module Visibility Rules
+
+#### **Within Same Module (Directory)**
+
+All files in the same directory share namespace and can access each other's module-private items.
+
+```ryo
+# server/http.ryo
+fn _helper():  # Module-private
+    pass
+
+pub fn start():
+    _helper()  # ✓ Same module
+
+# server/routes.ryo (same directory)
+fn register():
+    http._helper()  # ✓ Same module (server)
+```
+
+#### **Between Different Modules**
+
+Only `pub` and `package` items are visible between modules.
+
+```ryo
+# utils/math.ryo
+pub fn add():        # Public
+    pass
+
+package fn internal():  # Package-visible
+    pass
+
+fn _private():       # Module-private
+    pass
+
+# server/http.ryo (different module)
+import utils.math
+
+fn example():
+    math.add()       # ✓ Public
+    math.internal()  # ✓ Package visibility
+    math._private()  # ✗ ERROR - module-private
+```
+
+#### **Between Parent and Child Modules**
+
+Child modules are separate namespaces from parent. Must import parent explicitly.
+
+```ryo
+# utils/core.ryo (parent module)
+pub fn parent_pub():
+    pass
+
+package fn parent_package():
+    pass
+
+fn parent_private():
+    pass
+
+# utils/math/basic.ryo (child module)
+import utils  # Must import parent!
+
+fn example():
+    utils.parent_pub()      # ✓ Public
+    utils.parent_package()  # ✓ Package visibility
+    utils.parent_private()  # ✗ ERROR - module-private to utils
+```
+
+### 11.7 Circular Dependencies
+
+#### **Forbidden Between Modules**
+
+Circular dependencies between modules are **compile-time errors**.
+
+```ryo
+# server/http.ryo
+import database  # Server imports database
+
+# database/connection.ryo
+import server    # ✗ ERROR - Circular dependency!
+```
+
+**Error Message:**
+```
+Error: Circular dependency detected
+  server → database → server
+```
+
+*Rationale: Prevents spaghetti code, forces clearer architecture, enables deterministic compilation order.*
+
+#### **Allowed Within Module**
+
+Files in the same module (directory) can freely reference each other.
+
+```ryo
+# server/http.ryo
+fn start():
+    routes.register()  # ✓ OK - same module
+
+# server/routes.ryo
+fn register():
+    http.start()       # ✓ OK - same module
+```
+
+#### **Common Workarounds for Cross-Module Dependencies**
+
+**Problem:** User ↔ Post circular dependency
+
+**Solution 1: Extract Common Types**
+```ryo
+# types/core.ryo
+pub struct UserID(int)
+pub struct PostID(int)
+
+# user/user.ryo
+import types.core
+
+pub struct User:
+    id: core.UserID
+    posts: List[core.PostID]  # Reference by ID
+
+# post/post.ryo
+import types.core
+
+pub struct Post:
+    id: core.PostID
+    author_id: core.UserID    # Reference by ID
+```
+
+**Solution 2: Merge Modules**
+```ryo
+# domain/models.ryo - Combined module
+pub struct User: ...
+pub struct Post:
+    author: User  # ✓ Same module
+```
+
+### 11.8 Complete Examples
+
+#### **Example 1: Simple Package**
+
+```
+myapp/
+├── ryo.toml
+└── src/
+    ├── main.ryo
+    └── utils/
+        └── math.ryo
+```
+
+**src/utils/math.ryo:**
+```ryo
+pub fn add(a: int, b: int) -> int:
+    return a + b
+```
+
+**src/main.ryo:**
+```ryo
+import utils.math
+
+fn main():
+    result = math.add(2, 3)
+    print(result)  # 5
+```
+
+#### **Example 2: Multi-File Module**
+
+```
+myapp/
+└── src/
+    └── server/
+        ├── http.ryo    # Part of "server" module
+        └── routes.ryo  # Part of "server" module
+```
+
+**src/server/http.ryo:**
+```ryo
+pub fn start():              # Public
+    _bind_port()             # Module-private
+
+fn _bind_port():             # Module-private
+    routes.register()        # ✓ Same module
+```
+
+**src/server/routes.ryo:**
+```ryo
+pub fn register():
+    http._bind_port()        # ✓ Same module
+```
+
+#### **Example 3: Hierarchical Modules**
+
+```
+myapp/
+└── src/
+    └── utils/
+        ├── core.ryo       # Part of "utils"
+        └── math/
+            └── basic.ryo  # Part of "utils.math"
+```
+
+**src/utils/core.ryo:**
+```ryo
+pub fn helper():
+    pass
+
+package fn internal():
+    pass
+```
+
+**src/utils/math/basic.ryo:**
+```ryo
+import utils  # Import parent
+
+pub fn calculate():
+    utils.helper()      # ✓ Public
+    utils.internal()    # ✓ Package visibility
+```
+
+**src/main.ryo:**
+```ryo
+import utils
+import utils.math
+
+fn main():
+    utils.helper()         # ✓ Public
+    utils.math.calculate() # ✓ Public
+```
+
+#### **Example 4: Access Levels**
+
+```ryo
+# lib/api.ryo
+
+pub fn public_api():              # External API
+    package_helper()
+
+package fn package_helper():      # Internal API for project
+    _module_helper()
+
+fn _module_helper():             # Implementation detail
+    pass
+```
+
+**Usage from same package:**
+```ryo
+# server/main.ryo
+import lib.api
+
+fn main():
+    api.public_api()       # ✓ Public
+    api.package_helper()   # ✓ Package visibility
+    api._module_helper()   # ✗ ERROR - module-private
+```
+
+**Usage from external package:**
+```ryo
+# external-project/main.ryo
+import myapp.lib.api
+
+fn main():
+    api.public_api()       # ✓ Public
+    api.package_helper()   # ✗ ERROR - package-private
+```
+
+#### **Example 5: Package Boundary**
+
+**Package 1 (mylib):**
+```
+mylib/
+├── ryo.toml  # name = "mylib"
+└── src/
+    └── utils/
+        └── helper.ryo
+```
+
+**mylib/src/utils/helper.ryo:**
+```ryo
+pub fn public_helper():
+    pass
+
+package fn internal_helper():  # Only within mylib package
+    pass
+```
+
+**Package 2 (myapp):**
+```
+myapp/
+├── ryo.toml  # name = "myapp", depends on mylib
+└── src/
+    └── main.ryo
+```
+
+**myapp/src/main.ryo:**
+```ryo
+import pkg:mylib.utils.helper
+
+fn main():
+    helper.public_helper()    # ✓ Public
+    helper.internal_helper()  # ✗ ERROR - Different package!
+```
+
+*Rationale: Implicit module discovery reduces boilerplate (no `mod` keyword), hierarchical paths enable clear organization, three access levels balance simplicity and expressiveness, forbidden circular dependencies enforce good architecture.*
 
 ## 12. Application Entry Point
 

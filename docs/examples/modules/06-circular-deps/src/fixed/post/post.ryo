@@ -1,0 +1,35 @@
+# Example 06: Circular Dependencies - FIXED Post Module
+#
+# ✓ This module uses ID references instead of direct object references.
+# Now there's no circular dependency!
+
+import fixed.models.ids
+
+pub struct Post:
+	id: ids.PostID
+	title: str
+	author_id: ids.UserID  # Store USER ID, not User object!
+
+pub fn create_post(id: ids.PostID, title: str, author_id: ids.UserID) -> Post:
+	return Post(id: id, title: title, author_id: author_id)
+
+pub fn display_post(post: Post):
+	print(f"[FIXED] Post: \"{post.title}\" by user ID {post.author_id.value}")
+
+pub fn get_author_id(post: Post) -> ids.UserID:
+	return post.author_id
+
+# Key insight: Post stores USER ID, not User object.
+# To get the actual User data, the caller would:
+# 1. Get the author_id from the post
+# 2. Call user.get_user(author_id) to fetch the user
+#
+# This decouples the modules:
+# - post module doesn't need to import user module
+# - user module doesn't need to import post module
+# - Both only depend on the models module (shared types)
+#
+# Dependency graph:
+#   user → models ✓
+#   post → models ✓
+#   No circular dependencies!

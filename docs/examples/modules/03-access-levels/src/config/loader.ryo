@@ -1,0 +1,47 @@
+# Example 03: Access Levels - Config Module
+#
+# This file demonstrates:
+# - pub: Public API for external users
+# - package: Internal API for other modules in this package
+# - (no keyword): Implementation details for this module only
+
+# ===== PUBLIC API =====
+# These functions can be used by ANYONE importing this package
+pub fn get_config() -> Config:
+	print("[CONFIG] Loading configuration...")
+	return load_config()  # Calls package-internal function
+
+pub struct Config:
+	database_url: str
+	port: int
+	debug_mode: bool
+
+# ===== PACKAGE-INTERNAL API =====
+# These functions can be used by OTHER MODULES in this PACKAGE
+# (e.g., database module can call this)
+package fn load_config() -> Config:
+	print("[CONFIG] Using package-internal loader")
+	content = _read_config_file()
+	return _parse_config(content)
+
+package fn validate_config(cfg: Config) -> bool:
+	# Other modules in this package can validate configs
+	return cfg.port > 0 and cfg.port < 65536
+
+# ===== MODULE-PRIVATE =====
+# These functions can ONLY be used within the config module
+fn _read_config_file() -> str:
+	# In a real app, would read from file
+	return "database_url=localhost;port=5432;debug=true"
+
+fn _parse_config(content: str) -> Config:
+	# In a real app, would parse the content
+	return Config(
+		database_url: "localhost",
+		port: 5432,
+		debug_mode: true
+	)
+
+fn _validate_format(content: str) -> bool:
+	# Internal validation logic
+	return true

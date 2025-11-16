@@ -1,0 +1,19 @@
+# Example 01: Simple Module - Main Entry Point
+#
+# This file demonstrates how to import and use functions from another module.
+
+import math
+
+fn main():
+	# Use public functions from the math module
+	result1 = math.add(5, 3)
+	print(f"Addition: 5 + 3 = {result1}")
+
+	result2 = math.subtract(10, 4)
+	print(f"Subtraction: 10 - 4 = {result2}")
+
+	result3 = math.multiply(7, 6)
+	print(f"Multiplication: 7 * 6 = {result3}")
+
+	# This would be a compile error - _internal_helper is module-private:
+	# math._internal_helper()  # ❌ Error: _internal_helper is not public

@@ -1,0 +1,25 @@
+# Example 02: Multi-File Module - Request Middleware
+#
+# This file is part of the "server" module.
+# Module-private functions here can be called by http.ryo and routes.ryo.
+
+# Module-private function - only callable within the server module
+# This is called by both http.ryo and routes.ryo
+fn _initialize_middleware():
+	print("[MIDDLEWARE] Initializing middleware stack")
+	_load_middleware_config()
+
+# Module-private function - only callable within the server module
+# This is called by routes.ryo
+fn _apply_logging(method: str, path: str):
+	print(f"[MIDDLEWARE] Logging request: {method} {path}")
+
+# Module-private helper
+fn _load_middleware_config():
+	# In a real app, this would load middleware configuration
+	pass
+
+# Module-private helper
+fn _apply_cors():
+	# CORS middleware logic would go here
+	pass

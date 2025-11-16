@@ -14,8 +14,9 @@ This roadmap outlines the planned development of the Ryo programming language co
 | Milestone 3: Cranelift Integration | ✅ **COMPLETE (AOT)** | Full AOT compilation pipeline working. `ryo run` compiles and executes programs. 15 codegen integration tests + `ryo ir` command for IR display. Total: 47 tests passing. |
 | **Phase 2: Essential Language Features** | | |
 | Milestone 4: Functions & Calls | ⏳ Planned | Define and call functions with arguments and return values. |
-| Milestone 5: Expressions & Operators | ⏳ Planned | Arithmetic, comparison, logical operators. Float type. |
-| Milestone 6: Control Flow & Booleans | ⏳ Planned | if/else, while loops, break/continue, boolean logic. |
+| Milestone 5: Module System (Design) | ✅ **COMPLETE** | Directory-based modules with three access levels designed and documented. |
+| Milestone 6: Expressions & Operators | ⏳ Planned | Arithmetic, comparison, logical operators. Float type. |
+| Milestone 6.5: Control Flow & Booleans | ⏳ Planned | if/else, while loops, break/continue, boolean logic. |
 | Milestone 7: Structs | ⏳ Planned | User-defined composite types with named fields. |
 | Milestone 8: Enums (ADTs) | ⏳ Planned | Algebraic data types with variants. |
 | Milestone 9: Pattern Matching | ⏳ Planned | Match expressions with exhaustiveness checking. |
@@ -290,7 +291,183 @@ fn main() -> int:
 - No function overloading (one function per name)
 - Dependencies: Milestone 3 (codegen foundation)
 
-### Milestone 5: Expressions & Operators (Extended)
+### Milestone 5: Module System (Design Phase) ✅ COMPLETE
+
+**Goal:** Design and document the module system for code organization and visibility control
+
+**Status:** ✅ COMPLETE - Module system fully designed and documented (2025-11-11)
+
+**What Was Completed:**
+
+1. **Formal Definitions**:
+   - **Package**: Entire project defined by `ryo.toml` (compilation/distribution unit)
+   - **Module**: Directory containing `.ryo` files (organizational unit)
+   - **Directory = Module**: All `.ryo` files in a directory form a single module
+   - **Hierarchical Structure**: Parent modules can contain both files and child submodules
+
+2. **Access Level Design** (3 levels for simplicity):
+   - **`pub`**: Public - accessible from any module
+   - **`package`**: Package-internal - accessible within same `ryo.toml` package
+   - **No keyword**: Module-private - accessible only within same module
+
+3. **Key Design Decisions**:
+   - Implicit discovery (no `mod` keyword needed, filesystem structure defines modules)
+   - Hierarchical modules (Rust-style structure with Go-style directory=package)
+   - Circular dependencies forbidden between modules, allowed within modules
+   - Three access levels validated by Swift 6 (added `package` keyword in March 2025)
+
+4. **Documentation Created**:
+   - `docs/specification.md` Section 11: Complete module system specification (270+ lines)
+   - `docs/specification.md` Section 2: Added `package` keyword to language keywords
+   - `docs/proposals.md`: 8 future enhancement proposals (re-exports, workspaces, etc.)
+   - `docs/design_issues.md`: Comprehensive design rationale and trade-off analysis
+   - `docs/getting_started.md` Section 3: Complete module tutorial with examples
+   - `docs/examples/modules/`: 6 practical examples demonstrating all features
+   - `CLAUDE.md`: Module system design added to Key Design Decisions
+
+5. **Practical Examples** (6 comprehensive examples):
+   - `01-simple-module/`: Basic module creation and imports
+   - `02-multi-file-module/`: Multiple files sharing namespace
+   - `03-access-levels/`: pub, package, and module-private demonstration
+   - `04-nested-modules/`: Hierarchical module structure
+   - `05-package-visibility/`: Package boundary demonstration
+   - `06-circular-deps/`: Circular dependency errors and solutions
+
+**Design Validation:**
+
+Comparison with other languages informed the design:
+
+| Language | Module Unit | Access Levels | Discovery | Circular Deps | Ryo's Choice |
+|----------|-------------|---------------|-----------|---------------|--------------|
+| **Ryo** | Directory | 3 (pub, package, private) | Implicit | Forbidden | ✅ Sweet spot |
+| Rust | File | 4 (pub, pub(crate), pub(super), private) | Explicit (`mod`) | Forbidden | Too complex |
+| Go | Directory | 2 (Exported, unexported) | Implicit | Forbidden | Too limiting |
+| Python | Directory | 1 (convention-based) | Implicit | Allowed | Too loose |
+| Zig | Build-defined | 2 (pub, private) | Explicit | Forbidden | Too low-level |
+| Swift 6 | Target | 6 levels | Explicit | Allowed | Too complex |
+
+**Key Insights:**
+- Swift 6 added `package` keyword in March 2025, validating Ryo's three-level design
+- Go's 15+ years prove directory-based structure works at scale
+- Rust's 2018 edition deprecated `mod.rs` for simpler structure (Ryo adopts this)
+
+**Examples:**
+
+```ryo
+# Project structure
+myproject/
+├── ryo.toml              # Package boundary
+└── src/
+    ├── main.ryo          # Module "main"
+    ├── utils/            # Module "utils" (parent)
+    │   ├── core.ryo
+    │   └── math/         # Module "utils.math" (child)
+    │       └── ops.ryo
+    └── server/           # Module "server" (multi-file)
+        ├── http.ryo
+        └── routes.ryo
+
+# Access levels in utils/core.ryo
+pub fn public_api():           # External users can call
+    package_configure()
+
+package fn package_configure(): # Only this package can call
+    _internal_setup()
+
+fn _internal_setup():          # Only utils module can call
+    pass
+
+# Importing modules
+import utils              # Parent module
+import utils.math         # Child module
+import server             # Multi-file module
+```
+
+**Circular Dependency Solution Pattern:**
+
+```ryo
+# Problem: user imports post, post imports user (circular!)
+
+# Solution: Extract common types
+# models/ids.ryo
+pub struct UserID(int)
+pub struct PostID(int)
+
+# user/user.ryo
+import models.ids
+struct User:
+    id: ids.UserID
+    post_ids: List[ids.PostID]  # Store IDs, not Post objects
+
+# post/post.ryo
+import models.ids
+struct Post:
+    id: ids.PostID
+    author_id: ids.UserID  # Store ID, not User object
+```
+
+**Design Rationale:**
+
+- **Simpler than Rust**: No `mod` declarations, no file vs module confusion
+- **More powerful than Go**: Three access levels vs Go's two, explicit package boundaries
+- **Familiar to Python/Go developers**: Directory-based structure is intuitive
+- **Validated by industry**: Swift 6's addition of `package` proves the three-level model
+
+**What's NOT Implemented (Design Complete, Implementation Deferred):**
+
+- ❌ Parser support for `module`, `import`, `package` keywords (Milestone 22 implementation)
+- ❌ AST nodes for module system
+- ❌ Symbol table and name resolution across modules
+- ❌ Visibility checking
+- ❌ Multi-file project support
+- ❌ Module-aware compilation
+
+**Implementation Roadmap:**
+
+The module system will be **implemented** in:
+- **Milestone 22 (Implementation)**: Lexer/parser/AST for modules and imports
+- **Phase 4**: Full module system integration with codegen and linking
+
+**Future Enhancements** (documented in proposals.md):
+
+1. Re-exports with `pub use` (High Priority)
+2. File-level privacy `file fn` (Deferred/Maybe Never)
+3. Parent-only visibility `pub(super)` (v2.0+)
+4. Conditional compilation `#[cfg(...)]` (Post-v1.0 Essential)
+5. Workspace support for multi-package projects (Post-v1.0 Important)
+6. Module control files (optional `mod.ryo`) (Post-v1.0)
+7. Glob imports `import utils.*` (Low Priority)
+8. Visibility aliases `pub(friend)` (Future Research)
+
+**Completion Date:** November 11, 2025
+
+**Completion Criteria Met:**
+
+- ✅ Formal package/module terminology defined
+- ✅ Three access levels designed and justified
+- ✅ Implicit discovery specified
+- ✅ Circular dependency rules established
+- ✅ Comprehensive documentation created
+- ✅ Practical examples provided
+- ✅ Comparison with other languages completed
+- ✅ Future enhancements documented
+
+**References:**
+
+- `docs/specification.md` Section 11 - Complete specification
+- `docs/design_issues.md` - Design rationale and trade-offs
+- `docs/proposals.md` - Future enhancements
+- `docs/examples/modules/` - Practical examples
+- `docs/getting_started.md` Section 3 - Tutorial
+- `CLAUDE.md` - Architecture guidelines
+
+**Next Steps:**
+
+Proceed with Milestone 22 (Implementation) after Milestone 4 (Functions & Calls) is complete. The design is stable and ready for implementation.
+
+---
+
+### Milestone 6: Expressions & Operators (Extended)
 **Goal:** Support float type and extended operators
 
 **Tasks:**
@@ -329,7 +506,7 @@ remainder = a % b     # 1
 - Type errors are clear and localized (bidirectional type checking)
 - Dependencies: Milestone 4 (functions for testing)
 
-### Milestone 6: Control Flow & Booleans
+### Milestone 6.5: Control Flow & Booleans
 **Goal:** Implement `if/else` statements, `for` loops, and boolean logic
 
 **Tasks:**
@@ -394,7 +571,7 @@ fn main() -> int:
       x: float
       y: float
   ```
-- Parse struct literals with braces: `Point{x: 1.0, y: 2.0}`
+- Parse struct literals with parentheses: `Point(x=1.0, y=2.0)`
 - Parse field access: `point.x`, `point.y`
 - Extend type system:
   - Track struct definitions in symbol table
@@ -418,7 +595,7 @@ fn area(rect: Rectangle) -> float:
     return rect.width * rect.height
 
 fn main() -> int:
-    r = Rectangle{width: 10.0, height: 5.0}
+    r = Rectangle(width=10.0, height=5.0)
     a = area(r)
     return 0
 ```
@@ -428,7 +605,8 @@ fn main() -> int:
 - Field order matters (affects memory layout)
 - No default values for fields (all must be initialized)
 - No methods yet (added in Milestone 15)
-- Braces `{...}` used for struct literals (not Python-style syntax, special case)
+- Parentheses with named arguments used for struct literals: `Point(x=1, y=2)`, consistent with language design
+- Braces reserved exclusively for f-string interpolation
 - Dependencies: Milestone 4 (functions for passing structs)
 
 ### Milestone 8: Enums (Algebraic Data Types)
@@ -577,13 +755,15 @@ fn main() -> int:
 
 **Tasks:**
 - Add `error` keyword to lexer/parser
-- Add `module` keyword for error grouping
-- Extend AST: `StmtKind::ErrorDef`, `StmtKind::ModuleDef`
+- Extend AST: `StmtKind::ErrorDef`
 - Parse error definitions:
   ```ryo
-  module file:
-      error NotFound(path: str)
-      error PermissionDenied(path: str)
+  # File: file/errors.ryo
+  error NotFound(path: str)
+  error PermissionDenied(path: str)
+
+  # File: main.ryo
+  import file
   ```
 - Parse error union syntax: `(ErrorA | ErrorB)!SuccessType`
 - Parse function signatures with error returns: `fn foo() -> FileError!Data`
@@ -598,12 +778,16 @@ fn main() -> int:
 
 **Example:**
 ```ryo
-module http:
-    error ConnectionFailed(reason: str)
-    error RequestTimeout
+# File: http/errors.ryo
+error ConnectionFailed(reason: str)
+error RequestTimeout
 
-module parse:
-    error InvalidJson(message: str)
+# File: parse/errors.ryo
+error InvalidJson(message: str)
+
+# File: main.ryo
+import http
+import parse
 
 fn fetch_and_parse() -> (http.ConnectionFailed | http.RequestTimeout | parse.InvalidJson)!Data:
     response = try http_get("https://api.example.com")  # Returns http errors
@@ -713,7 +897,7 @@ fn main() -> int:
 fn find_user(id: int) -> ?User:
     if id < 0:
         return none
-    return User{name: "Alice", id: id}
+    return User(name="Alice", id=id)
 
 fn main() -> int:
     user = find_user(42)
@@ -873,8 +1057,8 @@ impl Point:
         return sqrt(dx * dx + dy * dy)
 
 fn main() -> int:
-    p1 = Point{x: 0.0, y: 0.0}
-    p2 = Point{x: 3.0, y: 4.0}
+    p1 = Point(x=0.0, y=0.0)
+    p2 = Point(x=3.0, y=4.0)
 
     d = p1.distance(&p2)   # Borrow p2, don't move it
     print(d)               # Can still use p1 and p2
@@ -1089,7 +1273,7 @@ fn main() -> int:
     increment(&mut count)
     print(count)  # 1
 
-    mut p = Point{x: 0.0, y: 0.0}
+    mut p = Point(x=0.0, y=0.0)
     p.translate(5.0, 10.0)
     print(p.x)  # 5.0
 
@@ -1140,12 +1324,16 @@ fn main() -> int:
 
 **Example:**
 ```ryo
-module file:
-    error NotFound(path: str)
-    error PermissionDenied(path: str)
+# File: file/errors.ryo
+error NotFound(path: str)
+error PermissionDenied(path: str)
 
-module parse:
-    error InvalidFormat(message: str)
+# File: parse/errors.ryo
+error InvalidFormat(message: str)
+
+# File: main.ryo
+import file
+import parse
 
 fn load_config(path: &str) -> (file.NotFound | file.PermissionDenied | parse.InvalidFormat)!Config:
     content = try read_file(path)       # Propagates file errors
@@ -1176,60 +1364,133 @@ fn main() -> int:
 
 ## Phase 4: Module System & Core Ecosystem
 
-### Milestone 22: Module System
+### Milestone 22: Module System (Implementation)
 **Goal:** Implement module system for code organization and visibility control
 
-**Tasks:**
-- Add `module`, `import`, `pub` keywords to lexer/parser
-- Extend AST: `StmtKind::ModuleDef`, `StmtKind::ImportStmt`
-- Parse module definitions:
-  ```ryo
-  module math:
-      pub fn sqrt(x: float) -> float
-      fn internal_helper() -> int  # Private
-  ```
-- Parse import statements:
-  ```ryo
-  import math
-  import utils.{string, collections}
-  ```
-- Implement visibility rules:
-  - Items are **private by default**
-  - `pub` makes items public
-  - Sub-modules can access parent private items
-- Implement name resolution across modules
-- Support multi-file projects:
-  - `src/main.ryo` as entry point
-  - `src/module_name.ryo` as module file
-- Write tests for modules and imports
+**Status:** ⏳ Planned (Design completed in Milestone 5)
+
+**Prerequisites:**
+- ✅ Module system design complete (Milestone 5)
+- ⏳ All core language features (Milestones 4-21)
+
+**Design Reference:**
+The module system design was completed in **Milestone 5** with full documentation:
+- Directory-based modules (directory = module)
+- Three access levels: `pub`, `package`, module-private
+- Implicit discovery (no `mod` keyword)
+- Hierarchical structure
+- Circular dependency prevention
+
+See Milestone 5 (above) and `docs/specification.md` Section 11 for complete design details.
+
+**Implementation Tasks:**
+
+1. **Lexer/Parser Extensions:**
+   - Add `import`, `package` keywords to lexer (note: `pub` already exists)
+   - Extend AST: `StmtKind::ImportStmt` for import declarations
+   - Parse import statements:
+     ```ryo
+     import math                    # Simple import
+     import utils.strings           # Nested module import
+     ```
+   - Parse `package` visibility modifier:
+     ```ryo
+     package fn helper()            # Package-internal function
+     ```
+
+2. **Multi-File Project Support:**
+   - Update project structure handling:
+     - `src/` as root directory
+     - Directories as modules
+     - Multiple `.ryo` files per module
+   - File system traversal for module discovery
+   - Build module dependency graph
+
+3. **Symbol Table & Name Resolution:**
+   - Implement per-module symbol tables
+   - Implement cross-module name resolution
+   - Resolve qualified names: `math.add()`, `utils.strings.format()`
+   - Track visibility modifiers: `pub`, `package`, module-private
+
+4. **Visibility Checking:**
+   - Implement three-level access control:
+     - `pub`: accessible from any module
+     - `package`: accessible within same `ryo.toml` package
+     - (no keyword): accessible only within same module
+   - Check visibility at use sites
+   - Provide clear error messages for visibility violations
+
+5. **Circular Dependency Detection:**
+   - Build module dependency graph during compilation
+   - Detect cycles between modules (error)
+   - Allow cycles within modules (same directory)
+
+6. **Compilation Pipeline Updates:**
+   - Update compilation order (dependency-first)
+   - Generate separate object files per module (or whole-program)
+   - Link modules together
+
+7. **Testing:**
+   - Tests for import statements
+   - Tests for visibility checking (pub, package, private)
+   - Tests for multi-file modules
+   - Tests for nested modules
+   - Tests for circular dependency detection
+   - Integration tests with real multi-module projects
 
 **Visible Progress:** Can organize code into multiple files with proper encapsulation
 
 **Example:**
 ```ryo
-# src/math.ryo
-module math:
-    pub fn add(a: int, b: int) -> int:
-        return a + b
+# Project structure:
+# myproject/
+# ├── ryo.toml
+# └── src/
+#     ├── main.ryo
+#     └── math/
+#         └── operations.ryo
 
-    fn internal_check(x: int) -> bool:
-        return x > 0
+# src/math/operations.ryo
+pub fn add(a: int, b: int) -> int:
+    return _validate(a) + _validate(b)
+
+package fn internal_helper(x: int) -> int:
+    # Package-internal, can be used by other modules in this package
+    return x * 2
+
+fn _validate(x: int) -> int:
+    # Module-private, only math module can use
+    if x < 0:
+        panic("Negative values not allowed")
+    return x
 
 # src/main.ryo
 import math
 
 fn main() -> int:
-    result = math.add(2, 3)
-    # math.internal_check(5)  # Error: private function
+    result = math.add(2, 3)              # ✓ OK: add is pub
+    # math.internal_helper(5)            # ✓ OK: same package
+    # math._validate(10)                 # ❌ Error: module-private
     return 0
 ```
 
 **Implementation Notes:**
-- Modules are **namespaces** (not values)
-- File system mirrors module structure (like Rust, Python)
-- Circular imports detected at compile time (error)
-- Re-exports via `pub import` (advanced feature)
-- Dependencies: Milestone 21 (all language features for module contents)
+- Directory = module (not file = module like Rust)
+- All `.ryo` files in a directory share the module namespace
+- Modules are **namespaces** (not values or types)
+- Filesystem structure defines module hierarchy
+- Circular imports between modules detected at compile time (error)
+- Re-exports via `pub use` deferred to future enhancement (see proposals.md)
+
+**Dependencies:**
+- Milestone 21 (all core language features needed for module contents)
+- Milestone 5 (design complete, ready for implementation)
+
+**Future Enhancements** (see proposals.md):
+- Re-exports: `pub use math.geometry.{Point, Line}`
+- Glob imports: `import utils.*` (low priority)
+- Conditional compilation: `#[cfg(test)]`
+- Workspace support for multi-package projects
 
 ### Milestone 23: Standard Library Core
 **Goal:** Implement essential standard library modules

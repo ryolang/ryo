@@ -1,0 +1,52 @@
+# Example 03: Access Levels - Database Module
+#
+# This file demonstrates how the database module uses config's PACKAGE-internal API
+
+import config.loader
+
+# ===== PUBLIC API =====
+pub fn connect() -> Connection:
+	print("[DATABASE] Connecting to database...")
+
+	# ✓ Can use PUBLIC API from config module
+	cfg = loader.get_config()
+
+	# ✓ Can use PACKAGE-internal API from config module
+	# This works because we're in the same package!
+	internal_cfg = loader.load_config()
+	print("[DATABASE] Using config from package")
+
+	# ❌ Cannot use MODULE-PRIVATE functions from config module
+	# This would be a compile error:
+	# content = loader._read_config_file()  # Error: _read_config_file is module-private
+
+	# Use our own module-private function
+	conn = _establish_connection(cfg)
+	return conn
+
+pub struct Connection:
+	url: str
+	is_connected: bool
+
+# ===== PACKAGE-INTERNAL API =====
+package fn get_pool_size() -> int:
+	# Other modules in this package can query pool size
+	return 10
+
+package fn healthcheck() -> bool:
+	# Other modules in this package can check health
+	return _ping_database()
+
+# ===== MODULE-PRIVATE =====
+fn _establish_connection(cfg: loader.Config) -> Connection:
+	# Implementation detail - only database module knows about this
+	_validate_connection(cfg)
+	return Connection(url: cfg.database_url, is_connected: true)
+
+fn _validate_connection(cfg: loader.Config) -> bool:
+	# Can use config's package-internal validator
+	return loader.validate_config(cfg)
+
+fn _ping_database() -> bool:
+	# Internal health check implementation
+	return true

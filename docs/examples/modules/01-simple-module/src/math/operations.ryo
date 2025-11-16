@@ -1,0 +1,31 @@
+# Example 01: Simple Module - Math Operations
+#
+# This file demonstrates:
+# - Public functions (marked with 'pub')
+# - Module-private functions (no 'pub' keyword)
+# - Using module-private helpers internally
+
+# Public API - These functions can be imported by other modules
+pub fn add(a: int, b: int) -> int:
+	_log_operation("add", a, b)
+	return a + b
+
+pub fn subtract(a: int, b: int) -> int:
+	_log_operation("subtract", a, b)
+	return a - b
+
+pub fn multiply(a: int, b: int) -> int:
+	_log_operation("multiply", a, b)
+	return a * b
+
+# Module-private helper - Only visible within the math module
+# By convention, we prefix private functions with underscore
+fn _log_operation(op: str, a: int, b: int):
+	# In a real application, this might log to a file or monitoring system
+	# For now, it's just an internal implementation detail
+	pass
+
+# Another module-private helper
+fn _validate_input(value: int) -> bool:
+	# Could check for overflow, special cases, etc.
+	return true

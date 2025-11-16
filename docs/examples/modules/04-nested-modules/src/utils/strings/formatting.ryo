@@ -1,0 +1,24 @@
+# Example 04: Nested Modules - String Formatting
+#
+# This file is part of the "utils.strings" child module.
+# It is a SEPARATE module from "utils" (the parent).
+
+pub fn format_text(text: str) -> str:
+	print(f"[STRINGS] Formatting text: \"{text}\"")
+	return _apply_formatting(text)
+
+pub fn uppercase(text: str) -> str:
+	# In a real implementation, would convert to uppercase
+	return text
+
+pub fn lowercase(text: str) -> str:
+	# In a real implementation, would convert to lowercase
+	return text
+
+# Module-private helper
+fn _apply_formatting(text: str) -> str:
+	# Could apply various formatting rules
+	return text
+
+# NOTE: This module (utils.strings) is SEPARATE from the parent module (utils).
+# Module-private functions here are NOT accessible to utils/core.ryo or utils.math

@@ -1,0 +1,20 @@
+# Example 02: Multi-File Module - Main Entry Point
+#
+# This file demonstrates importing from a multi-file module.
+# All public functions from http.ryo, routes.ryo, and middleware.ryo
+# are accessible through the 'server' module.
+
+import server
+
+fn main():
+	# The server module's public API comes from multiple files,
+	# but we import it as a single module
+	server.start()
+
+	# We can call public functions from different files:
+	server.handle_request("GET", "/api/users")  # From routes.ryo
+	server.log_message("Server running!")       # From http.ryo
+
+	# Module-private functions are NOT accessible:
+	# server._bind_port()      # ❌ Error: _bind_port is module-private
+	# server._apply_logging()  # ❌ Error: _apply_logging is module-private

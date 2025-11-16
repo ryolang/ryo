@@ -1,0 +1,9 @@
+[package]
+name = "package_visibility_example"
+version = "0.1.0"
+
+# This ryo.toml defines the PACKAGE BOUNDARY.
+# Everything in src/ is part of this package.
+# - pub functions: accessible from anywhere (external users)
+# - package functions: accessible only within this package
+# - module-private functions: accessible only within the same module

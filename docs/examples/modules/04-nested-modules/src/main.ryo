@@ -1,0 +1,25 @@
+# Example 04: Nested Modules - Main Entry Point
+#
+# This file demonstrates importing from hierarchical module structures.
+
+import utils
+import utils.strings
+import utils.math
+
+fn main():
+	# Use function from parent module (utils/core.ryo)
+	utils.initialize()
+
+	# Use function from nested module (utils/strings/formatting.ryo)
+	formatted = utils.strings.format_text("Hello, World!")
+	print(formatted)
+
+	# Use functions from nested module (utils/math/basic.ryo and advanced.ryo)
+	sum = utils.math.add(5, 3)
+	print(f"[MAIN] Sum: {sum}")
+
+	power = utils.math.power(2, 8)
+	print(f"[MAIN] Power: {power}")
+
+	# Note: We import the parent module separately
+	# Each module in the hierarchy must be imported explicitly if you want to use it

@@ -1,0 +1,45 @@
+# Example 05: Package Visibility - Request Router
+#
+# This module uses PACKAGE-INTERNAL helpers from the internal module.
+
+import internal.helpers
+
+# ===== PUBLIC API =====
+# This is the ONLY function external users can call
+pub fn handle_request(method: str, path: str):
+	print(f"[ROUTER] Handling request: {method} {path}")
+
+	# ✓ Can use PACKAGE-INTERNAL functions from internal module
+	is_valid = helpers.validate_request(method, path)
+
+	if not is_valid:
+		_send_error_response()
+		return
+
+	# Use our own module-private helper
+	_route_to_handler(path)
+
+	# Log the event using package-internal helper
+	helpers.log_event(f"request_handled: {method} {path}")
+
+# ===== MODULE-PRIVATE =====
+# These are implementation details
+
+fn _route_to_handler(path: str):
+	# In a real app, would route to appropriate handler
+	if path.starts_with("/api/"):
+		_handle_api_route(path)
+	else:
+		_handle_web_route(path)
+
+fn _handle_api_route(path: str):
+	# API route handler
+	pass
+
+fn _handle_web_route(path: str):
+	# Web route handler
+	pass
+
+fn _send_error_response():
+	# Send 400 Bad Request
+	pass

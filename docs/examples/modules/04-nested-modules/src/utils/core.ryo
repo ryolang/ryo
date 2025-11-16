@@ -1,0 +1,18 @@
+# Example 04: Nested Modules - Utils Core
+#
+# This file is part of the "utils" parent module.
+# The "utils" module has both:
+# - Files in this directory (core.ryo)
+# - Subdirectories (strings/, math/)
+
+pub fn initialize():
+	print("[UTILS] Core utility initialized")
+	_setup_logging()
+
+pub fn version() -> str:
+	return "1.0.0"
+
+# Module-private helper
+fn _setup_logging():
+	# Internal logging setup
+	pass

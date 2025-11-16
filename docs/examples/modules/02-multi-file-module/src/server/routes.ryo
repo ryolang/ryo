@@ -1,0 +1,26 @@
+# Example 02: Multi-File Module - Route Handlers
+#
+# This file is part of the "server" module.
+# It can access module-private functions from http.ryo and middleware.ryo.
+
+# Public function - callable from outside the server module
+pub fn setup_routes():
+	# Can call module-private function from middleware.ryo
+	_initialize_middleware()
+	_register_route("GET", "/api/users")
+	_register_route("POST", "/api/users")
+
+# Public function - callable from outside the server module
+pub fn handle_request(method: str, path: str):
+	# Can call module-private function from middleware.ryo
+	_apply_logging(method, path)
+	print(f"[ROUTES] Handling {method} {path}")
+
+# Module-private helper - only callable within the server module
+fn _register_route(method: str, path: str):
+	print(f"[ROUTES] Registering {method} {path}")
+
+# Module-private helper - only callable within the server module
+fn _validate_route(path: str) -> bool:
+	# Could check for valid path format, conflicts, etc.
+	return true

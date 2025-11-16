@@ -1,0 +1,37 @@
+# Example 05: Package Visibility - Internal Helpers
+#
+# This module provides PACKAGE-INTERNAL utilities.
+# These are shared across router, middleware, etc., but NOT exposed to external users.
+
+# ===== PACKAGE-INTERNAL API =====
+# These functions are available to OTHER MODULES in this PACKAGE
+# but NOT to external users of this package
+
+package fn validate_request(method: str, path: str) -> bool:
+	print("[INTERNAL] Validating request (package-internal helper)")
+	_check_method(method)
+	_check_path(path)
+	return true
+
+package fn log_event(event: str):
+	print(f"[INTERNAL] Logging event (package-internal helper)")
+	_write_to_log(event)
+
+package fn get_timestamp() -> int:
+	# Returns current timestamp (simplified)
+	return 1234567890
+
+# ===== MODULE-PRIVATE =====
+# These are implementation details of the internal module
+
+fn _check_method(method: str) -> bool:
+	# Validate HTTP method
+	return method == "GET" or method == "POST"
+
+fn _check_path(path: str) -> bool:
+	# Validate path format
+	return path.starts_with("/")
+
+fn _write_to_log(message: str):
+	# In a real app, would write to log file
+	pass

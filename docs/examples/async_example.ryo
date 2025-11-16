@@ -2,24 +2,54 @@
 # Async/await example demonstrating concurrent programming with error handling
 # Using single-variant errors and error unions
 
+# NOTE: This is a simplified single-file example for demonstration purposes.
+# In a real multi-file project, these errors would be defined in separate module directories:
+#
+#   network/errors.ryo:
+#     error Timeout(duration: int)
+#     error ConnectionFailed(reason: str)
+#     error InvalidResponse
+#
+#   parse/errors.ryo:
+#     error InvalidJson(reason: str)
+#     error MissingField(field: str)
+#
+#   validation/errors.ryo:
+#     error InvalidData(reason: str)
+#
+#   main.ryo:
+#     import network
+#     import parse
+#     import validation
+#
+# See docs/examples/modules/ for multi-file module examples.
+
 import std.time
 import std.http
 
 # ============================================================================
-# Single-Variant Error Definitions (Organized by Module)
+# Single-Variant Error Definitions (Organized by Module Namespace)
 # ============================================================================
 
-module network:
-    error Timeout(duration: int)
-    error ConnectionFailed(reason: str)
-    error InvalidResponse
+# Network module errors (in real project: network/errors.ryo)
+# File: network/errors.ryo
+error Timeout(duration: int)
+error ConnectionFailed(reason: str)
+error InvalidResponse
 
-module parse:
-    error InvalidJson(reason: str)
-    error MissingField(field: str)
+# Parse module errors (in real project: parse/errors.ryo)
+# File: parse/errors.ryo
+error InvalidJson(reason: str)
+error MissingField(field: str)
 
-module validation:
-    error InvalidData(reason: str)
+# Validation module errors (in real project: validation/errors.ryo)
+# File: validation/errors.ryo
+error InvalidData(reason: str)
+
+# File: main.ryo
+import network
+import parse
+import validation
 
 # ============================================================================
 # Async Functions with Different Error Types

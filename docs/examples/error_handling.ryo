@@ -1,25 +1,53 @@
 # error_handling.ryo
 # Comprehensive error handling example with single-variant errors and error unions
 
+# NOTE: This is a simplified single-file example for demonstration purposes.
+# In a real multi-file project, these errors would be defined in separate module directories:
+#
+#   math/errors.ryo:
+#     error DivisionByZero
+#     error InvalidInput(str)
+#     error OverflowError
+#
+#   io/errors.ryo:
+#     error FileNotFound(path: str)
+#     error PermissionDenied(path: str)
+#
+#   parse/errors.ryo:
+#     error InvalidFormat(str)
+#     error UnexpectedToken(str)
+#
+#   main.ryo:
+#     import math
+#     import io
+#     import parse
+#
+# See docs/examples/modules/ for multi-file module examples.
+
 # ============================================================================
-# SECTION 1: Single-Variant Error Definitions (Organized by Module)
+# SECTION 1: Single-Variant Error Definitions (Organized by Module Namespace)
 # ============================================================================
 
-# Math module errors
-module math:
-    error DivisionByZero
-    error InvalidInput(str)
-    error OverflowError
+# Math module errors (in real project: math/errors.ryo)
+# File: math/errors.ryo
+error DivisionByZero
+error InvalidInput(str)
+error OverflowError
 
-# IO module errors
-module io:
-    error FileNotFound(path: str)
-    error PermissionDenied(path: str)
+# IO module errors (in real project: io/errors.ryo)
+# File: io/errors.ryo
+error FileNotFound(path: str)
+error PermissionDenied(path: str)
 
-# Parse module errors
-module parse:
-    error InvalidFormat(str)
-    error UnexpectedToken(str)
+# Parse module errors (in real project: parse/errors.ryo)
+# File: parse/errors.ryo
+error InvalidFormat(str)
+error UnexpectedToken(str)
+
+# File: main.ryo
+import math
+import io
+import parse
 
 # ============================================================================
 # SECTION 2: Functions with Single Errors

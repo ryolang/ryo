@@ -53,11 +53,11 @@ cargo run -- run arithmetic.ryo
 
 The features described below are **design goals** under active development:
 
-- **Milestone 4**: Functions (beyond `main`), local variables with storage
-- **Milestone 5**: More operators and expressions
-- **Milestone 6**: Control flow (`if`/`else`, booleans)
-- **Milestone 7**: Error handling (`error`, `try`, `catch`)
-- **Milestone 8+**: Strings, ownership system, structs, traits, async/await, and more
+- **Milestone 4**: Functions & Calls - Define and call functions with arguments and return values
+- **Milestone 5**: Module System (Design) ✅ **COMPLETE** - Directory-based modules with three access levels
+- **Milestone 6**: Expressions & Operators - Arithmetic, comparison, logical operators; float type
+- **Milestone 7**: Structs - User-defined data types with fields
+- **Milestone 8+**: Enums, control flow, error handling, ownership system, traits, async/await, and more
 
 **See the full roadmap:** [Implementation Roadmap](docs/implementation_roadmap.md)
 
@@ -78,6 +78,7 @@ The features described below are **design goals** under active development:
 *   **Concurrency:** Python-familiar async/await with high-performance async runtime
 *   **Syntax:** Python-inspired, tab-indented, expressions, statements
 *   **Types:** Static typing with bidirectional type inference (like Rust/TypeScript), primitives (`int`, `float`, `bool`, `str`, `char`), tuples, `struct`, `enum` (ADTs), `trait` (static dispatch initially). Function signatures require types, local variables inferred. Variables are immutable by default (no `let` keyword), use `mut` for mutability
+*   **Module System:** Directory-based modules with three access levels: `pub` (public), `package` (package-internal), and module-private (no keyword). Implicit discovery from filesystem structure (no `mod` declarations). See [Module System Design](CLAUDE.md#8-module-system-design) for details.
 *   **Error Handling:** Type-safe, explicit error handling system:
     - **Single-variant errors only**: `error Timeout`, `error NotFound(str)`, `error HttpError(status: int, message: str)` - unified syntax for all error definitions
     - **Module-based error grouping**: Organize related errors in modules: `module math: error DivisionByZero`
@@ -141,8 +142,11 @@ fn main():
     # Safe error handling
     print(process_user(user))
 
-module process:
-    error InvalidUser
+# File: process/errors.ryo
+error InvalidUser
+
+# File: main.ryo
+import process
 
 fn process_user(user: ?str) -> process.InvalidUser!str:
     name = user orelse return process.InvalidUser

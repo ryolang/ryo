@@ -1,0 +1,29 @@
+# Example 06: Circular Dependencies - FIXED User Module
+#
+# ✓ This module uses ID references instead of direct object references.
+# Now there's no circular dependency!
+
+import fixed.models.ids
+
+pub struct User:
+	id: ids.UserID
+	name: str
+	post_ids: List[ids.PostID]  # Store POST IDs, not Post objects!
+
+pub fn create_user(id: ids.UserID, name: str) -> User:
+	return User(id: id, name: name, post_ids: [])
+
+pub fn add_post_id(user: mut User, post_id: ids.PostID):
+	user.post_ids.append(post_id)
+
+pub fn get_post_count(user: User) -> int:
+	return user.post_ids.len()
+
+# Key insight: User stores POST IDs, not Post objects.
+# To get the actual Post data, the caller would:
+# 1. Get the post_ids from the user
+# 2. Call post.get_post(post_id) for each ID
+#
+# This is a common pattern in database-backed applications:
+# - Store foreign keys (IDs) in structs
+# - Fetch related data when needed

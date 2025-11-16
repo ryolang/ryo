@@ -55,9 +55,12 @@ struct User:
     id: int
     name: str
 
-module http:
-    error NetworkFailure(reason: str)
-    error InvalidResponse
+# File: http/errors.ryo
+error NetworkFailure(reason: str)
+error InvalidResponse
+
+# File: main.ryo
+import http
 
 async fn fetch_user(id: int) -> (http.NetworkFailure | http.InvalidResponse)!User:
     response = try await http.get(f"https://api.example.com/users/{id}")

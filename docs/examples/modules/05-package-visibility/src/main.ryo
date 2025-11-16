@@ -1,0 +1,24 @@
+# Example 05: Package Visibility - Main Entry Point
+#
+# This file simulates an EXTERNAL USER of this package.
+# It can only access PUBLIC (pub) functions, not package-internal ones.
+
+import router
+import middleware
+
+fn main():
+	# ✓ Can use PUBLIC API
+	middleware.authenticate()
+	router.handle_request("GET", "/api/users")
+
+	print("Request handled successfully!")
+
+	# ❌ CANNOT use PACKAGE-INTERNAL API
+	# These would be compile errors if we tried:
+	# internal.validate_request()    # Error: package-internal
+	# internal.log_event()           # Error: package-internal
+	# middleware._check_token()      # Error: module-private
+
+	# This demonstrates the clean public API:
+	# - Only router.handle_request() and middleware.authenticate() are public
+	# - All internal helpers are hidden

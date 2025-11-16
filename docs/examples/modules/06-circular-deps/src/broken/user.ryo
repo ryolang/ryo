@@ -1,0 +1,27 @@
+# Example 06: Circular Dependencies - BROKEN User Module
+#
+# ❌ This file demonstrates a CIRCULAR DEPENDENCY (compile error)
+#
+# This module imports 'broken.post', which imports 'broken.user' (this module).
+# This creates a circular dependency: broken.user → broken.post → broken.user
+
+import broken.post  # ❌ Circular dependency!
+
+struct User:
+	id: int
+	name: str
+	posts: List[post.Post]  # User has a list of Post objects
+
+pub fn create_user(name: str) -> User:
+	return User(id: 1, name: name, posts: [])
+
+pub fn add_post(user: mut User, p: post.Post):
+	user.posts.append(p)
+
+# COMPILER ERROR (if this were compiled):
+# Error: Circular dependency detected
+#   broken.user imports broken.post
+#   broken.post imports broken.user
+#
+# Circular dependencies between modules are forbidden in Ryo.
+# See the fixed/ directory for solutions.

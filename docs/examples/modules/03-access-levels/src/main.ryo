@@ -1,0 +1,26 @@
+# Example 03: Access Levels - Main Entry Point
+#
+# This file demonstrates the three access levels:
+# - pub: accessible from anywhere
+# - package: accessible within this package
+# - (no keyword): accessible only within the same module
+
+import database
+import config
+
+fn main():
+	# ✓ Can use PUBLIC functions (marked 'pub')
+	db = database.connect()
+	cfg = config.get_config()
+
+	print("Connected successfully!")
+
+	# ❌ Cannot use PACKAGE functions from here (would work from database/config modules)
+	# These would be compile errors:
+	# loader = config.load_config()      # Error: load_config is package-internal
+	# database._validate_connection()    # Error: _validate_connection is module-private
+
+	# ❌ Cannot use MODULE-PRIVATE functions (no 'pub' or 'package')
+	# These would be compile errors:
+	# config._parse_file()               # Error: _parse_file is module-private
+	# database._establish_connection()   # Error: _establish_connection is module-private

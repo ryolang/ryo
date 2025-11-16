@@ -1,0 +1,28 @@
+# Example 02: Multi-File Module - HTTP Server Logic
+#
+# This file is part of the "server" module (along with routes.ryo and middleware.ryo).
+# Files in the same module can call each other's module-private functions.
+
+# Public function - callable from outside the server module
+pub fn start():
+	print("[SERVER] Starting HTTP server...")
+	_bind_port()           # Call module-private function from this file
+	setup_routes()         # Call public function from routes.ryo
+	_initialize_middleware() # Call module-private function from middleware.ryo
+
+# Public function - callable from outside the server module
+pub fn log_message(msg: str):
+	print(f"[SERVER] {msg}")
+
+# Module-private helper - only callable within the server module
+fn _bind_port():
+	print("[SERVER] Binding to port 8080")
+
+# Module-private helper - only callable within the server module
+fn _get_config() -> Config:
+	# In a real app, this would load configuration
+	return Config(port: 8080, host: "0.0.0.0")
+
+struct Config:
+	port: int
+	host: str

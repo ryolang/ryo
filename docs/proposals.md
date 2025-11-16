@@ -169,9 +169,13 @@ enum Option[T]:
     None
 
 # Error types use 'error' keyword (single-variant)
-module processing:
-    error InvalidInput(str)
-    error ParseFailed
+
+# File: processing/errors.ryo
+error InvalidInput(str)
+error ParseFailed
+
+# File: main.ryo
+import processing
 
 # Usage
 maybe = Option[str].Some("hello")
@@ -417,14 +421,18 @@ error HttpError(status: int, message: str)  # Structured error
 
 2. **Module-Based Error Grouping** - Organize related errors:
 ```ryo
-module io:
-    error NotFound(path: str)
-    error PermissionDenied(path: str)
-    error ReadFailed(reason: str)
+# File: io/errors.ryo
+error NotFound(path: str)
+error PermissionDenied(path: str)
+error ReadFailed(reason: str)
 
-module parse:
-    error InvalidSyntax(line: int, column: int)
-    error UnexpectedToken(expected: str, got: str)
+# File: parse/errors.ryo
+error InvalidSyntax(line: int, column: int)
+error UnexpectedToken(expected: str, got: str)
+
+# File: main.ryo
+import io
+import parse
 ```
 
 3. **Automatic Error Composition** - Error unions inferred from `try` expressions:
@@ -811,15 +819,312 @@ Runtime reflection adds significant complexity and performance overhead. For Ryo
 
 ### **Module System Extensions**
 
-**Conditional Compilation**
+While Ryo's base module system (directory = module, three access levels) is designed for simplicity, several extensions are proposed for advanced use cases.
+
+#### **Re-exports with `pub use`**
+
+**Status:** Post-v1.0 Proposal
+**Priority:** High (for library authors)
+
+**Problem:**
+Cannot control public API surface independently of internal module structure. Users must know exact import paths to deeply nested modules.
+
+**Current Limitation:**
 ```ryo
-# Future conditional compilation
+# utils module organized as:
+# utils/
+#   core.ryo
+#   math/
+#     geometry.ryo
+#     algebra.ryo
+
+# Users must do:
+import utils.math.geometry
+geometry.Point()  # Verbose, exposes internal structure
+```
+
+**Proposed Solution:**
+```ryo
+# utils/mod.ryo (optional module control file)
+pub use math.geometry.{Point, Line}  # Re-export from submodule
+pub use math.algebra.Matrix          # Selective re-export
+pub use core.*                       # Re-export all from core
+
+# Now users can do:
+import utils
+utils.Point()    # Shorter, hides internal structure
+utils.Matrix()   # Clean public API
+```
+
+**Benefits:**
+- **API Control:** Library authors control what's public vs internal
+- **Refactoring Freedom:** Can reorganize internals without breaking users
+- **Cleaner Imports:** Users don't need to know deep module structure
+- **Gradual Evolution:** Can promote internal items to public gradually
+
+**Design Questions:**
+1. **Syntax:** Use Rust's `pub use` or different keyword?
+2. **Wildcard:** Allow `pub use module.*` or require explicit listing?
+3. **Conflicts:** How to handle re-export name conflicts?
+4. **Visibility:** Can re-export change visibility (pub to package)?
+
+**Implementation Complexity:** Medium
+**Comparison:** Rust has this (essential for libraries), Go doesn't (major pain point)
+
+---
+
+#### **File-Level Privacy (`file` keyword)**
+
+**Status:** Deferred (maybe never implement)
+**Priority:** Low
+
+**Problem:**
+Sometimes want items visible only within one file, not entire module (directory).
+
+**Current Limitation:**
+```ryo
+# server/http.ryo
+fn helper1():  # Module-private - visible to routes.ryo too
+    pass
+
+fn helper2():  # Module-private - also visible to routes.ryo
+    pass
+
+# server/routes.ryo can see helper1() and helper2()
+```
+
+**Proposed Solution:**
+```ryo
+# server/http.ryo
+file fn truly_private_helper():  # Only visible in http.ryo
+    pass
+
+fn module_helper():              # Visible to all server/*.ryo
+    truly_private_helper()       # OK - same file
+
+# server/routes.ryo
+fn register():
+    http.module_helper()            # ✓ OK
+    http.truly_private_helper()     # ✗ ERROR - file-private
+```
+
+**Benefits:**
+- **Finer Control:** Can hide implementation details within single file
+- **Large Modules:** Helps organize large multi-file modules
+- **Swift Compatibility:** Matches Swift's `fileprivate`
+
+**Drawbacks:**
+- **Complexity:** Fourth access level complicates mental model
+- **Limited Use:** Most cases solved by splitting modules
+- **Go Precedent:** Go manages fine without this
+
+**Decision:** Defer indefinitely. Three access levels are sufficient.
+**Alternative:** Use code comments and naming conventions (`_internal_helper`)
+
+---
+
+#### **Parent-Only Visibility (`pub(super)`)**
+
+**Status:** Deferred to post-v1.0
+**Priority:** Medium
+
+**Problem:**
+Child module wants to expose helpers to parent module only, not entire package.
+
+**Current Limitation:**
+```ryo
+# utils/math/internal.ryo
+package fn helper():  # Visible to ALL modules in package
+    pass
+
+# Only want utils/ to use this, not database/ or server/
+```
+
+**Proposed Solution:**
+```ryo
+# utils/math/internal.ryo
+pub(super) fn parent_only_helper():  # Only visible to utils/* modules
+    pass
+
+# utils/core.ryo (parent module)
+import utils.math.internal
+internal.parent_only_helper()  # ✓ OK - parent can access
+
+# database/connection.ryo (sibling package)
+import utils.math.internal
+internal.parent_only_helper()  # ✗ ERROR - not parent
+```
+
+**Benefits:**
+- **Precise Visibility:** More granular than `package`
+- **Module Cohesion:** Parent and children can share helpers privately
+- **Rust Compatibility:** Matches Rust's `pub(super)`
+
+**Drawbacks:**
+- **Fourth Access Level:** Adds complexity
+- **Rare Use Case:** Most code doesn't need this precision
+- **Alternative:** Use `package` and trust other modules not to use
+
+**Decision:** Defer to v2.0+. If users frequently request, reconsider.
+
+---
+
+#### **Conditional Compilation**
+
+**Status:** Post-v1.0 Essential
+**Priority:** High
+
+**Problem:**
+Need different code for test builds, features, platforms, or configurations.
+
+**Use Cases:**
+1. **Test-Only Code:** Helpers visible only in test builds
+2. **Feature Flags:** Optional features (async runtime, simd, etc.)
+3. **Platform-Specific:** Different implementations for Windows/Linux/macOS
+4. **Debug vs Release:** Additional checks in debug mode
+
+**Proposed Syntax:**
+```ryo
+# Test-only helpers
+#[cfg(test)]
+fn test_helper():
+    pass
+
+# Feature flags
 #[cfg(feature = "async")]
 import async_runtime
 
+#[cfg(feature = "simd")]
+fn vectorized_add(a: &[float], b: &[float]) -> Vec[float]:
+    # SIMD implementation
+
+#[cfg(not(feature = "simd"))]
+fn vectorized_add(a: &[float], b: &[float]) -> Vec[float]:
+    # Fallback implementation
+
+# Platform-specific code
 #[cfg(target_os = "linux")]
-import linux_specific
+fn get_home_dir() -> str:
+    return env("HOME")
+
+#[cfg(target_os = "windows")]
+fn get_home_dir() -> str:
+    return env("USERPROFILE")
+
+# Debug assertions
+#[cfg(debug)]
+fn validate_invariants():
+    assert(condition, "Invariant violated")
 ```
+
+**Conditional Access Levels:**
+```ryo
+# Public API in release, visible for testing in debug
+#[cfg(debug)]
+pub fn debug_inspect() -> InternalState:
+    return get_internal_state()
+```
+
+**Benefits:**
+- **Testing:** Can expose internals for testing without polluting public API
+- **Performance:** Compile out debug code in release builds
+- **Portability:** Clean platform abstraction
+- **Features:** Optional dependencies and capabilities
+
+**Implementation:** Integrates with build system (ryo.toml features)
+**Comparison:** Rust's `#[cfg]` is essential, Zig's `comptime` achieves similar goals
+
+---
+
+#### **Workspace Support (Monorepos)**
+
+**Status:** Post-v1.0 Important
+**Priority:** Medium
+
+**Problem:**
+Large projects often have multiple related packages that should share dependencies and build configuration.
+
+**Current Limitation:**
+```
+monorepo/
+  server/
+    ryo.toml     # Separate package
+    src/...
+  client/
+    ryo.toml     # Separate package, duplicate dependencies
+    src/...
+  common/
+    ryo.toml     # Shared code, but duplicated in server & client
+    src/...
+```
+
+**Proposed Solution:**
+```toml
+# workspace.toml (root)
+[workspace]
+members = [
+    "server",
+    "client",
+    "common",
+]
+
+[workspace.dependencies]  # Shared dependency versions
+http = "1.0"
+json = "0.5"
+
+[workspace.features]
+async = ["server/async", "client/async"]
+```
+
+**Per-Package Configuration:**
+```toml
+# server/ryo.toml
+[package]
+name = "server"
+version = "1.0.0"
+
+[dependencies]
+http = { workspace = true }  # Use workspace version
+common = { path = "../common" }  # Local dependency
+```
+
+**Benefits:**
+- **Shared Dependencies:** One version across all packages
+- **Local Development:** Easy to work on multiple packages together
+- **Build Performance:** Share build artifacts and caches
+- **Consistency:** Ensures compatible versions across packages
+
+**Comparison:** Cargo workspaces (essential for Rust monorepos), Go modules (less ergonomic)
+
+---
+
+#### **Module Aliases**
+
+**Status:** Low Priority Proposal
+**Priority:** Low
+
+**Problem:**
+Long import paths become repetitive. Want shorter aliases at project level.
+
+**Proposed Solution:**
+```toml
+# ryo.toml
+[module_aliases]
+db = "database.postgresql.connection"
+cache = "caching.redis.client"
+```
+
+**Usage:**
+```ryo
+import db  # Instead of database.postgresql.connection
+import cache  # Instead of caching.redis.client
+
+fn main():
+    db.connect()
+    cache.set("key", "value")
+```
+
+**Decision:** Low priority. Import aliases (`import foo as bar`) already solve this.
 
 ### **Dynamic Dispatch (Trait Objects)**
 
@@ -916,9 +1221,12 @@ pub extern "C" fn process_point(p: *const Point) -> f64:
 fn ryo_str_to_c(s: &str) -> (*const c_char, usize):
     return (s.as_ptr(), s.len())
 
-module conversion:
-    error InvalidUtf8
-    error NullPointer
+# File: conversion/errors.ryo
+error InvalidUtf8
+error NullPointer
+
+# File: main.ryo
+import conversion
 
 fn c_str_to_ryo(ptr: *const c_char) -> conversion.InvalidUtf8!str:
     unsafe:
@@ -1238,9 +1546,12 @@ A high-performance web framework leveraging Ryo's async capabilities and memory 
 ```ryo
 import web
 
-module http:
-    error NotFound
-    error DatabaseError(message: str)
+# File: http/errors.ryo
+error NotFound
+error DatabaseError(message: str)
+
+# File: main.ryo
+import http
 
 #[route("/users/{id}")]
 async fn get_user(id: int) -> (http.NotFound | http.DatabaseError)!JsonResponse[User]:

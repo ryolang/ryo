@@ -37,7 +37,7 @@ fn main():
     * **`name`**: This is the name of the parameter.
     * **`: str`**: This is the **type annotation**, specifying that the `name` parameter is expected to be a **string** (`str`). Ryo is a **statically-typed** language, which means types are checked at compile time to catch errors early.
   * **`:`**: The colon `:` marks the end of the function signature and the beginning of the function body.
-* **`print(f"Hello {name}")`**: This line is the **body** of the `hello` function. It's **indented** using four spaces. Indentation is important in Ryo to define code blocks, just like in Python!
+* **`print(f"Hello {name}")`**: This line is the **body** of the `hello` function. It's **indented** using one tab. Indentation is important in Ryo to define code blocks, just like in Python! (Note: Ryo enforces tab-based indentation, not spaces)
   * **`print(...)`**: This is a built-in Ryo function to display output to the console.
   * **`f"Hello {name}"`**: This is an **f-string** (formatted string literal), similar to Python. It allows you to embed variables directly into strings by placing them inside curly braces `{}`. In this case, it creates a string "Hello " followed by the value of the `name` parameter.
 * **`fn main():`**: This defines the **`main` function**. In Ryo, the `main` function is the **entry point** of your program – where the execution begins.
@@ -397,76 +397,358 @@ fn count_to(limit: int):
 
 * **`range(start, end)`**: This built-in function generates a sequence of numbers starting from `start` and going up to (but not including) `end`.
 
-## 3. Working with Imports
+## 3. Working with Modules & Imports
 
-In Ryo, you can import code from other files and packages using the `import` statement. This helps organize your code into reusable modules.
+Ryo uses a simple, intuitive module system for organizing code. Understanding modules is key to building larger applications.
 
-### Basic Import Syntax
+### 3.1 Understanding Packages and Modules
 
-```ryo
-# Import a local module
-import my_module
-
-# Use a function from the imported module
-result = my_module.some_function()
-```
-
-### Importing Multiple Modules from a Package
-
-You can group related modules using curly braces:
-
-```ryo
-# Import math and strings modules from the utils package
-import utils.{math, strings}
-
-# Use functions from these modules
-sum_result = math.sum(2, 3)
-capitalized = strings.capitalize("hello")
-```
-
-### Importing External Packages
-
-For external packages installed via the package manager, use the `pkg:` prefix:
-
-```ryo
-# Import an external package
-import pkg:http
-
-# Use the package
-response = http.get("https://api.example.com/data")
-```
-
-### Project Structure Example
-
-A typical Ryo project might be structured like this:
+**Package** = Your entire project (defined by `ryo.toml`)
+**Module** = A directory containing `.ryo` files
 
 ```
-my_app/
-├── ryo.toml           # Project configuration
+myapp/                 # Package "myapp"
+├── ryo.toml           # Package definition
 └── src/
     ├── main.ryo       # Entry point
-    ├── utils/
-    │   ├── math.ryo   # package utils
-    │   └── strings.ryo# package utils
-    └── api/
-        └── v1/
-            └── users.ryo # package api.v1.users
+    └── utils/         # Module "utils"
+        └── math.ryo   # Part of utils module
 ```
 
-### Complete Import Example
+### 3.2 Creating Your First Module
 
+Let's create a simple project with a utility module:
+
+**Step 1: Create project structure**
+```bash
+myapp/
+├── ryo.toml
+└── src/
+    ├── main.ryo
+    └── math/
+        └── operations.ryo
+```
+
+**Step 2: Write the module** (`src/math/operations.ryo`)
 ```ryo
-# main.ryo
-import utils.{math, strings}
-import api.v1.users
-import pkg:http
+# Public functions (visible to importers)
+pub fn add(a: int, b: int) -> int:
+    return a + b
+
+pub fn multiply(a: int, b: int) -> int:
+    return a * b
+
+# Private function (only visible within math module)
+fn validate(x: int) -> bool:
+    return x >= 0
+```
+
+**Step 3: Use the module** (`src/main.ryo`)
+```ryo
+import math
 
 fn main():
-    print(math.sum(2, 3))                 # 5
-    name = strings.capitalize("john")     # "John"
-    users = users.get_all()               # Function from api/v1/users.ryo
-    response = http.get("https://api.example.com/data")
-    print(response.body)
+    result = math.add(5, 3)
+    print(f"5 + 3 = {result}")
+
+    product = math.multiply(4, 7)
+    print(f"4 × 7 = {product}")
+```
+
+**Run it:**
+```bash
+$ ryo run src/main.ryo
+5 + 3 = 8
+4 × 7 = 28
+```
+
+### 3.3 Multi-File Modules
+
+A module can span multiple files in the same directory. All files share the same namespace.
+
+**Structure:**
+```
+src/
+  server/              # Module "server"
+    ├── http.ryo       # Part of server module
+    └── routes.ryo     # Part of server module
+```
+
+**src/server/http.ryo:**
+```ryo
+pub fn start():
+    print("Server starting...")
+    _bind_port()       # Call module-private function
+    routes.setup()     # Call function from routes.ryo
+
+fn _bind_port():       # Module-private
+    print("Binding to port 8080")
+```
+
+**src/server/routes.ryo:**
+```ryo
+pub fn setup():
+    http._bind_port()  # ✓ Can access - same module!
+    print("Routes configured")
+```
+
+**Key Point:** Files in the same directory can see each other's private items!
+
+### 3.4 Access Control Levels
+
+Ryo has three visibility levels:
+
+#### **1. `pub` - Public (Exported)**
+Visible to anyone who imports your module.
+
+```ryo
+pub fn public_api():  # External code can use this
+    pass
+```
+
+#### **2. `package` - Package-Internal**
+Visible to all modules in your project, but NOT to external projects.
+
+```ryo
+package fn internal_helper():  # Only your project can use this
+    pass
+```
+
+**Use case:** Shared utilities between your modules
+```
+myapp/
+  src/
+    internal/
+      logger.ryo
+    server/
+      http.ryo        # Can use logger
+    database/
+      connection.ryo  # Can use logger
+```
+
+**src/internal/logger.ryo:**
+```ryo
+package fn log(msg: str):  # All modules in myapp can use this
+    print(f"[LOG] {msg}")
+```
+
+**src/server/http.ryo:**
+```ryo
+import internal.logger
+
+pub fn start():
+    logger.log("Server started")  # ✓ OK - same package
+```
+
+#### **3. No Keyword - Module-Private**
+Only visible within the same module (directory).
+
+```ryo
+fn _helper():  # Only files in this directory can use this
+    pass
+```
+
+**When to use each:**
+- `pub`: Your library's public API
+- `package`: Shared code between YOUR modules
+- No keyword: Implementation details
+
+### 3.5 Hierarchical Modules
+
+Modules can contain submodules, creating a tree structure:
+
+```
+src/
+  utils/               # Module "utils"
+    ├── core.ryo       # Part of utils
+    └── math/          # Module "utils.math"
+        └── geometry.ryo
+```
+
+**src/utils/core.ryo:**
+```ryo
+pub fn hello():
+    print("Hello from utils!")
+```
+
+**src/utils/math/geometry.ryo:**
+```ryo
+import utils  # Must import parent explicitly!
+
+pub fn calculate():
+    utils.hello()  # Use parent function
+    return 42
+```
+
+**src/main.ryo:**
+```ryo
+import utils
+import utils.math.geometry
+
+fn main():
+    utils.hello()            # From utils/core.ryo
+    utils.math.geometry.calculate()  # From utils/math/geometry.ryo
+```
+
+**Key Point:** Child modules must import parent explicitly - no automatic access!
+
+### 3.6 Import Syntax
+
+```ryo
+# Basic import
+import utils
+
+# Nested module
+import utils.math.geometry
+
+# Import alias
+import server.middleware as mw
+
+# Multiple imports (future)
+import utils.{math, string}
+
+# External dependency
+import pkg:http
+```
+
+### 3.7 Avoiding Circular Dependencies
+
+Circular dependencies between modules are **forbidden** (compile error):
+
+**❌ This won't work:**
+```ryo
+# user/user.ryo
+import post
+struct User:
+    posts: List[post.Post]
+
+# post/post.ryo
+import user
+struct Post:
+    author: user.User  # ERROR: Circular dependency!
+```
+
+**✓ Solutions:**
+
+**Solution 1: Extract shared types**
+```ryo
+# types/ids.ryo
+pub struct UserID(int)
+pub struct PostID(int)
+
+# user/user.ryo
+import types.ids
+struct User:
+    posts: List[ids.PostID]  # Use ID instead
+
+# post/post.ryo
+import types.ids
+struct Post:
+    author_id: ids.UserID  # Use ID instead
+```
+
+**Solution 2: Merge modules**
+```ryo
+# domain/models.ryo
+pub struct User: ...
+pub struct Post:
+    author: User  # ✓ Same module!
+```
+
+### 3.8 Coming from Other Languages
+
+**From Go:**
+- ✓ Directory = module (same)
+- ✓ Implicit discovery (same)
+- ✗ Hierarchical structure (Ryo has this, Go doesn't)
+- ✗ Three access levels (Go only has 2)
+
+**From Python:**
+- ✓ Hierarchical packages (similar)
+- ✓ Import by path (similar)
+- ✗ No `__init__.py` needed (simpler)
+- ✗ Compile-time visibility (Python is runtime)
+
+**From Rust:**
+- ✓ Hierarchical modules (similar)
+- ✓ `pub` keyword (same)
+- ✗ No `mod` declarations needed (simpler)
+- ✗ Directory = module (Rust: file = module)
+
+### 3.9 Best Practices
+
+1. **One module per feature/domain**
+   ```
+   src/
+     auth/        # Authentication module
+     database/    # Database module
+     api/         # API module
+   ```
+
+2. **Use descriptive module names**
+   - ✓ `src/user_management/`
+   - ✗ `src/um/`
+
+3. **Keep modules focused**
+   - Each module should have a clear, single purpose
+   - If a module gets too large, split it
+
+4. **Use `package` for internal APIs**
+   ```ryo
+   # config/loader.ryo
+   package fn load():  # Used by multiple modules, not public
+       pass
+   ```
+
+5. **Organize by domain, not type**
+   - ✓ `user/models.ryo`, `user/handlers.ryo`
+   - ✗ `models/user.ryo`, `handlers/user.ryo`
+
+### 3.10 Complete Example
+
+```
+mywebapp/
+├── ryo.toml
+└── src/
+    ├── main.ryo
+    ├── config/
+    │   └── loader.ryo
+    ├── database/
+    │   └── connection.ryo
+    └── api/
+        └── handlers.ryo
+```
+
+**src/config/loader.ryo:**
+```ryo
+package fn load_config() -> Config:  # Package-internal
+    return Config { port: 8080 }
+```
+
+**src/database/connection.ryo:**
+```ryo
+import config.loader
+
+pub fn connect() -> Connection:
+    cfg = loader.load_config()  # ✓ Can use package items
+    return Connection.new(cfg)
+```
+
+**src/api/handlers.ryo:**
+```ryo
+import database.connection
+
+pub fn handle_request():
+    db = connection.connect()
+    # ... handle request
+```
+
+**src/main.ryo:**
+```ryo
+import api.handlers
+
+fn main():
+    handlers.handle_request()
 ```
 
 ## 4. Error Handling
@@ -513,19 +795,21 @@ fn main():
 
 ### Grouping Related Errors with Modules
 
-For organizing related errors, use modules:
+For organizing related errors, use directory-based modules:
 
 ```ryo
-# In math module
-module math:
-    error DivideByZero
-    error InvalidInput(str)
-    error OverflowError
+# File: math/errors.ryo
+error DivideByZero
+error InvalidInput(str)
+error OverflowError
 
-# In parse module
-module parse:
-    error InvalidFormat(str)
-    error InvalidEncoding
+# File: parse/errors.ryo
+error InvalidFormat(str)
+error InvalidEncoding
+
+# File: main.ryo
+import math
+import parse
 ```
 
 ### Functions That Can Fail
@@ -586,13 +870,18 @@ fn calculate() -> math.DivideByZero!float:
     return y
 
 # Composing different error types - automatic!
-module io:
-    error NotFound
-    error PermissionDenied
 
-module parse:
-    error InvalidFormat(str)
-    error InvalidEncoding
+# File: io/errors.ryo
+error NotFound
+error PermissionDenied
+
+# File: parse/errors.ryo
+error InvalidFormat(str)
+error InvalidEncoding
+
+# File: main.ryo
+import io
+import parse
 
 fn load_and_parse(path: str) -> !str:
     content = try read_file(path)      # Returns io.NotFound or io.PermissionDenied
@@ -668,7 +957,7 @@ fn find_user(users: List[User], id: int) -> ?User:
     return none  # No user found
 
 fn main():
-    users = [User{id: 1, name: "Alice"}, User{id: 2, name: "Bob"}]
+    users = [User(id=1, name="Alice"), User(id=2, name="Bob")]
 
     # Safe optional chaining
     name = find_user(users, 1)?.name orelse "Unknown"
@@ -931,15 +1220,18 @@ When something goes wrong, Ryo provides helpful debugging information to quickly
 When an error occurs in your Ryo program, you'll get a clear message with location information:
 
 ```ryo
-module user:
-    error NotFound(id: int)
+# File: user/errors.ryo
+error NotFound(id: int)
+
+# File: main.ryo
+import user
 
 fn get_user(id: int) -> user.NotFound!User:
     if id < 0:
         # This error will capture: file, line, column, function name
         return user.NotFound(id)
     # ... fetch user ...
-    User{...}
+    return User(...)
 
 fn main():
     user = get_user(42) catch |e|:
@@ -992,7 +1284,7 @@ fn validate_age(age: int):
 
 fn create_user(name: str, age: int) -> User:
     validate_age(age)  # This is frame 1
-    User{name: name, age: age}
+    return User(name=name, age=age)
 
 fn main():
     # This is frame 2
@@ -1035,8 +1327,11 @@ error ValidationFailed(field: str, reason: str)
 
 **2. Include context in errors:**
 ```ryo
-module database:
-    error QueryFailed(sql: str, reason: str)
+# File: database/errors.ryo
+error QueryFailed(sql: str, reason: str)
+
+# File: main.ryo
+import database
 
 fn query_users(age: int) -> database.QueryFailed!List[User]:
     sql = f"SELECT * FROM users WHERE age > {age}"
@@ -1062,8 +1357,12 @@ fn divide(a: float, b: float) -> float:
     a / b
 
 # ✅ Better - use error types
-module math:
-    error DivisionByZero
+
+# File: math/errors.ryo
+error DivisionByZero
+
+# File: main.ryo
+import math
 
 fn divide(a: float, b: float) -> math.DivisionByZero!float:
     if b == 0:

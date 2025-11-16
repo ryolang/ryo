@@ -52,8 +52,11 @@ else:
 
 **Ryo:**
 ```ryo
-module math:
-    error DivisionByZero
+# File: math/errors.ryo
+error DivisionByZero
+
+# File: main.ryo
+import math
 
 fn divide(a: int, b: int) -> math.DivisionByZero!int:
     if b == 0:

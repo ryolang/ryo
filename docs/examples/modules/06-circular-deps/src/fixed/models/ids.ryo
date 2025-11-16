@@ -1,0 +1,26 @@
+# Example 06: Circular Dependencies - Solution 1: Common Types
+#
+# ✓ This module defines SHARED TYPES that both user and post can use.
+# By extracting common types, we break the circular dependency.
+
+# Instead of:
+#   user → post → user (circular)
+# We have:
+#   user → models (ok)
+#   post → models (ok)
+#   No circular dependency!
+
+pub struct UserID:
+	value: int
+
+pub struct PostID:
+	value: int
+
+# We could also define other shared types here:
+pub struct Timestamp:
+	seconds: int
+
+pub enum Status:
+	Active
+	Inactive
+	Deleted

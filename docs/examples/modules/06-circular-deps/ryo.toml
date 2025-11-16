@@ -1,0 +1,3 @@
+[package]
+name = "circular_deps_example"
+version = "0.1.0"

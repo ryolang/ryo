@@ -1,0 +1,29 @@
+# Example 05: Package Visibility - Authentication Middleware
+#
+# This module uses PACKAGE-INTERNAL helpers from the internal module.
+
+import internal.helpers
+
+# ===== PUBLIC API =====
+# This is the ONLY function external users can call
+pub fn authenticate() -> bool:
+	print("[AUTH] Authenticating request...")
+
+	# ✓ Can use PACKAGE-INTERNAL functions from internal module
+	timestamp = helpers.get_timestamp()
+	helpers.log_event("authentication_attempt")
+
+	# Use our own module-private helper
+	token = _get_token()
+	return _check_token(token)
+
+# ===== MODULE-PRIVATE =====
+# These are implementation details
+
+fn _get_token() -> str:
+	# In a real app, would extract from request headers
+	return "dummy_token"
+
+fn _check_token(token: str) -> bool:
+	# In a real app, would validate token
+	return token.len() > 0

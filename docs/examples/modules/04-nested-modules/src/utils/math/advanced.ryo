@@ -1,0 +1,36 @@
+# Example 04: Nested Modules - Advanced Math
+#
+# This file is part of the "utils.math" module (along with basic.ryo).
+# Both files share the same module namespace.
+
+pub fn power(base: int, exponent: int) -> int:
+	result = _compute_power(base, exponent)
+	print(f"[MATH.ADVANCED] Computing power: {base}^{exponent} = {result}")
+	return result
+
+pub fn square_root(n: int) -> float:
+	# In a real implementation, would compute square root
+	return 0.0
+
+pub fn factorial(n: int) -> int:
+	if n <= 1:
+		return 1
+	return n * factorial(n - 1)
+
+# Module-private helper
+fn _compute_power(base: int, exp: int) -> int:
+	if exp == 0:
+		return 1
+	if exp == 1:
+		return base
+
+	# Can call module-private function from basic.ryo
+	# because we're in the same module!
+	_validate_divisor(exp)  # This is from basic.ryo
+
+	result = base
+	mut i = 1
+	for i < exp:
+		result = multiply(result, base)  # Uses public function from basic.ryo
+		i += 1
+	return result
