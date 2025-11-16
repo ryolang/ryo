@@ -251,6 +251,143 @@ fn main() -> int:
 - No function overloading (one function per name)
 - Dependencies: Milestone 3 (codegen foundation)
 
+**Next Milestone:** Closures and lambda expressions are implemented in **Milestone 4.5** to enable higher-order functions and callbacks.
+
+### Milestone 4.5: Closures & Lambda Expressions
+
+**Goal:** Implement anonymous functions with ownership-aware capture semantics
+
+**Status:** ⏳ Planned (depends on Milestone 4)
+
+**Tasks:**
+
+1. **Lexer/Parser Extensions:**
+   - Add `move` keyword to lexer (for explicit move capture)
+   - Extend AST: `ExprKind::Closure` with capture mode enum
+   - Parse single-line closures: `fn(args): expression`
+   - Parse multi-line closures with colon-indentation:
+     ```ryo
+     fn(args):
+         statement1
+         statement2
+     ```
+   - Parse move keyword: `move fn(args): ...`
+   - Distinguish closure expression from regular function definition
+
+2. **Capture Analysis:**
+   - Implement variable usage tracking in closure body
+   - Determine which variables are captured from enclosing scope
+   - Infer capture mode:
+     - Default: immutable borrow
+     - Explicit: move (via `move fn` keyword)
+     - Inferred: mutable borrow (when closure mutates captured variable)
+   - Build capture environment data structure
+
+3. **Type System Extensions:**
+   - Define closure types: `Fn`, `FnMut`, `FnMove` (conceptual categories for type checking)
+   - Type-check captured variables against borrow rules
+   - Type-check closure body
+   - Support closures as function parameters: `fn process(f: fn(int) -> int)`
+   - Type inference for closure parameters when context is clear
+
+4. **Semantic Analysis:**
+   - Check borrow rules for captures:
+     - Only one mutable borrow
+     - No simultaneous mutable + immutable borrows
+   - Verify moved variables are not used after move
+   - Validate closure call site matches closure signature
+   - Track closure lifetime (simplified, no explicit lifetime annotations)
+
+5. **Code Generation:**
+   - Generate IR for closure creation:
+     - Allocate closure environment (captured variables)
+     - Copy/move captured values into environment
+   - Generate IR for closure invocation:
+     - Pass environment as hidden parameter
+     - Access captured variables from environment
+   - Handle move semantics (invalidate original variables)
+   - Optimize: inline closures when possible
+
+6. **Testing:**
+   - Unit tests for capture analysis
+   - Tests for borrow checking on captures
+   - Tests for move semantics
+   - Tests for mutable captures
+   - Tests for closures as function parameters
+   - Integration tests with error handling
+   - Integration tests with higher-order functions
+
+**Visible Progress:** Can pass functions as values, write callbacks, use higher-order functions like map/filter
+
+**Example:**
+
+```ryo
+# Single-line closure
+square = fn(x: int): x * x
+print(square(5))  # 25
+
+# Multi-line closure with complex logic
+validator = fn(x: int) -> bool:
+	if x < 0:
+		return false
+	return x % 2 == 0
+
+# Closure as parameter (higher-order function)
+fn filter(items: &[int], predicate: fn(int) -> bool) -> list[int]:
+	mut result = list[int]()
+	for item in items:
+		if predicate(item):
+			result.append(item)
+	return result
+
+evens = filter([1, 2, 3, 4, 5], validator)
+# evens = [2, 4]
+
+# Move capture
+name = "Alice"
+greeter = move fn(): f"Hello, {name}"
+# name is moved, cannot be used here
+print(greeter())  # "Hello, Alice"
+
+# Mutable capture
+mut counter = 0
+increment = fn():
+	counter += 1  # Inferred mutable capture
+	return counter
+
+print(increment())  # 1
+print(increment())  # 2
+```
+
+**Implementation Notes:**
+
+- Closures are **first-class values** (can be passed, returned, stored)
+- Capture environment created at closure definition time
+- Borrow checker enforces capture rules (no runtime overhead)
+- Move semantics prevent accidental sharing in concurrent contexts
+- Multi-line closures use **tab-based indentation** (enforced)
+- Closure types (`Fn`, `FnMut`, `FnMove`) are compiler concepts, not full traits initially
+- No higher-kinded types or advanced trait bounds yet (deferred to generics milestone)
+
+**Performance Considerations:**
+
+- Closures that don't capture variables can be optimized to function pointers (zero overhead)
+- Small captured environments can be stack-allocated
+- Compiler can inline closures when beneficial
+- Move closures avoid reference counting overhead
+
+**Dependencies:**
+
+- Milestone 4 (Functions & Calls) - function implementation must be complete
+- Precedes Milestone 15 (Basic Ownership) - closures will work with simplified capture initially
+
+**Future Enhancements** (post-v0.1.0):
+
+- Closure traits (`Fn`, `FnMut`, `FnOnce`) as actual traits
+- Generic closures: `fn[T](x: T) -> T`
+- Async closures for async runtime
+- Closure optimization (devirtualization)
+
 ### Milestone 5: Module System (Design Phase) ✅ COMPLETE
 
 **Goal:** Design and document the module system for code organization and visibility control
@@ -1945,11 +2082,11 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Realistic Estimates (2-4 weeks per milestone)
 
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
-**Phase 2 (M4-M14):** 11 milestones × 3 weeks avg = ~33 weeks (~8 months)
+**Phase 2 (M4-M14):** 12 milestones (includes M4.5 Closures) × 3 weeks avg = ~36 weeks (~9 months)
 **Phase 3 (M15-M23):** 9 milestones × 3 weeks avg = ~27 weeks (~7 months)
 **Phase 4 (M24-M27):** 4 milestones × 4 weeks avg = ~16 weeks (~4 months)
 
-**Total Estimated Time:** 76 weeks (~19 months) from Phase 2 start to v0.1.0
+**Total Estimated Time:** 79 weeks (~20 months) from Phase 2 start to v0.1.0
 
 ### Development Approach
 

@@ -187,7 +187,11 @@ See Section 7.10 for complete configuration reference.
         data = try await response.json[Data]()
         return data
     ```
-*   **Closures:** `fn(args): expression`.
+*   **Closures:** Anonymous functions with capture semantics.
+    *   Single-line: `fn(args): expression`
+    *   Multi-line: `fn(args):` followed by indented block (tab-based)
+    *   Move capture: `move fn(args): ...`
+    *   See Section 6.2 for complete closure specification including capture semantics and examples.
 *   **Tuple Destructuring:** `(a, b) = my_tuple`.
 *   **Type Conversion Syntax:** Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
@@ -716,10 +720,216 @@ All three layers are required for Ryo to successfully deliver on its vision.
 
 ## 6. Functions & Closures
 
+### 6.1 Functions & Methods
+
 *   **Functions/Methods:** Standard definition/call. Return single value (can be tuple). Methods use `&self` (immutable borrow), `&mut self` (mutable borrow), or `self` (take ownership).
-*   **Closures:** Anonymous functions `fn(args): expression`.
-    *   **Capture:** Default immutable borrow. `move fn` captures by move. Mutable borrow inferred on mutation (requires original `mut`). Compiler checks rules. *(Rationale: Provides explicit control over captures, crucial for safety with `spawn` and non-escaping closures).*
-    *   **Conceptual Types:** `Fn`, `FnMut`, `FnMove` describe capabilities, guiding type checking for functions accepting closures. *(Rationale: Defines closure behavior without full initial trait complexity).*
+
+### 6.2 Closures & Lambda Expressions
+
+*   **Concept:** Closures are anonymous functions that can capture variables from their enclosing scope. They provide first-class function values, enabling higher-order functions, callbacks, and functional programming patterns.
+
+#### 6.2.1 Syntax
+
+**Single-line closures:**
+```ryo
+fn(args): expression
+```
+
+**Multi-line closures (with colon-indentation):**
+```ryo
+fn(args):
+	# Indented block (tab-based)
+	statement1
+	statement2
+	return value
+```
+
+**Examples:**
+```ryo
+# Single-line closure
+square = fn(x: int): x * x
+print(square(5))  # 25
+
+# Multi-line closure with complex logic
+validator = fn(x: int) -> bool:
+	if x < 0:
+		return false
+	if x > 100:
+		return false
+	return x % 2 == 0
+
+result = validator(42)  # true
+```
+
+#### 6.2.2 Capture Semantics
+
+Closures can capture variables from their enclosing scope in three ways:
+
+**1. Default Immutable Borrow**
+
+By default, closures capture variables by immutable reference. The original variable remains valid after closure creation.
+
+```ryo
+counter = 10
+read_counter = fn(): counter + 1
+print(read_counter())  # 11
+print(counter)         # 10 (still valid)
+```
+
+**2. Explicit Move Capture**
+
+Use the `move` keyword to transfer ownership of captured variables into the closure's environment. The original variables become invalid after the move.
+
+```ryo
+name = "Alice"
+greeter = move fn(): f"Hello, {name}"
+# name is now moved - cannot be used here
+print(greeter())  # "Hello, Alice"
+```
+
+**3. Mutable Capture (Inferred)**
+
+When a closure mutates a captured variable, the compiler infers a mutable borrow. The original variable must be declared `mut`.
+
+```ryo
+mut total = 0
+add = fn(x: int):
+	total += x  # Inferred mutable capture
+	return total
+
+print(add(5))   # 5
+print(add(10))  # 15
+print(total)    # 15
+```
+
+**Ownership Rules:**
+
+*   **Move capture** invalidates the original variable (use-after-move is a compile error)
+*   **Only one mutable borrow** at a time (prevents data races)
+*   **No simultaneous mutable and immutable borrows** (enforced by borrow checker)
+*   Compiler enforces these rules at closure creation time (no runtime overhead)
+
+#### 6.2.3 Conceptual Types
+
+Closures are categorized by their capture behavior for type checking purposes:
+
+| Type | Capture Mode | Can Call Multiple Times? | Use Case |
+|------|--------------|--------------------------|----------|
+| **`Fn`** | Immutable borrow | Yes | Read-only operations, pure functions |
+| **`FnMut`** | Mutable borrow | Yes (requires mut) | Stateful operations, accumulators |
+| **`FnMove`** | Move ownership | No (consumes closure) | Transfer ownership, one-time use |
+
+*(Rationale: These conceptual types guide type checking for functions accepting closures without requiring full trait complexity initially. They describe closure behavior and capabilities without implementing the complete trait system).*
+
+**Note:** In the initial implementation, these are compiler-internal concepts, not user-facing traits. Full trait-based closures are planned for post-v0.1.0.
+
+#### 6.2.4 Closures as Function Parameters
+
+Closures can be passed as function parameters, enabling higher-order functions:
+
+```ryo
+fn apply(x: int, f: fn(int) -> int) -> int:
+	return f(x)
+
+result = apply(5, fn(n): n * 2)  # 10
+```
+
+**Type inference:** When the parameter type is clear from context, closure argument types can often be inferred:
+
+```ryo
+fn map(items: &[int], transform: fn(int) -> int) -> list[int]:
+	mut result = list[int]()
+	for item in items:
+		result.append(transform(item))
+	return result
+
+# Argument type inferred from map signature
+doubled = map([1, 2, 3], fn(x): x * 2)
+# doubled = [2, 4, 6]
+```
+
+#### 6.2.5 Practical Examples
+
+**Example 1: Higher-order functions (map/filter)**
+
+```ryo
+fn filter(items: &[int], predicate: fn(int) -> bool) -> list[int]:
+	mut result = list[int]()
+	for item in items:
+		if predicate(item):
+			result.append(item)
+	return result
+
+numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+evens = filter(numbers, fn(x): x % 2 == 0)
+# evens = [2, 4, 6, 8, 10]
+```
+
+**Example 2: Closures with error handling**
+
+```ryo
+fn process_items(items: &[int], handler: fn(int) -> !void) -> !void:
+	for item in items:
+		try handler(item)
+	return void
+
+# Multi-line closure with error handling
+result = try process_items([1, 2, 3], fn(n):
+	if n < 0:
+		return error.InvalidValue
+	print(f"Processing: {n}")
+)
+```
+
+**Example 3: Closure capturing mutable state (accumulator)**
+
+```ryo
+fn make_counter(start: int) -> fn() -> int:
+	mut count = start
+	# Return closure that captures count mutably
+	return fn():
+		count += 1
+		return count
+
+counter = make_counter(0)
+print(counter())  # 1
+print(counter())  # 2
+print(counter())  # 3
+```
+
+**Example 4: Move capture for ownership transfer**
+
+```ryo
+fn create_greeter(name: str) -> fn() -> str:
+	# Move name into the closure's environment
+	# name is owned by the returned closure
+	return move fn(): f"Hello, {name}!"
+
+greeter = create_greeter("Bob")
+# name is moved into closure, owned by closure's environment
+message = greeter()  # "Hello, Bob!"
+```
+
+**Example 5: Closure with complex multi-line logic**
+
+```ryo
+# Closure that validates and transforms input
+validator = fn(x: int) -> ?int:
+	# Multi-line validation logic
+	if x < 0:
+		return none
+	if x > 100:
+		return none
+	if x % 2 != 0:
+		return none
+	# Transform even numbers in range [0, 100]
+	return x * 2
+
+results = [validator(10), validator(-5), validator(42), validator(105)]
+# results = [Some(20), none, Some(84), none]
+```
+
+*(Rationale: Closures provide essential functional programming capabilities. Explicit move semantics prevent accidental data races in concurrent contexts. Python-like syntax with colon-indentation maintains consistency. Borrow checker ensures capture safety without runtime overhead. Closures are crucial for callbacks, higher-order functions, and future concurrency primitives).*
 
 ## 7. Error Handling
 
