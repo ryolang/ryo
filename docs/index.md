@@ -48,18 +48,23 @@ Ryo's design prioritizes preventing entire classes of bugs at compile time:
 - **No direct unwrap allowed** — The compiler rejects any attempt to use an error or optional value without proper handling
 - **No use-after-free** — Ownership and borrowing rules prevent accessing freed memory
 
-```ryo title="hello.ryo"
+```ryo
+# src/hello.ryo
 import net.http
 
 struct User:
     id: int
     name: str
+```
 
-# File: http/errors.ryo
+```ryo
+# src/http/errors.ryo
 error NetworkFailure(reason: str)
 error InvalidResponse
+```
 
-# File: main.ryo
+```ryo
+# src/main.ryo
 import http
 
 async fn fetch_user(id: int) -> (http.NetworkFailure | http.InvalidResponse)!User:
