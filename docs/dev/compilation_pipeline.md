@@ -647,21 +647,7 @@ fn execute_program(exe_file: &str) -> Result<i32, CompilerError> {
 
 ### Exit Code Capture
 
-The compiled program's `main` function returns an integer:
-
-```c
-// Generated code (conceptual)
-int main() {
-    return 42;  // Our Ryo program's last expression
-}
-```
-
-The OS captures this return value as the process exit code.
-
-### Code Reference
-
-- **Execution function:** `src/main.rs:284-302`
-- **Result display:** `src/main.rs:304-306`
+The compiled program's `main` function returns zero, the OS captures this return value as the process exit code.
 
 ---
 
@@ -725,19 +711,6 @@ z = x + y  # Error: Can't reference x or y yet
 
 Only the last expression value matters.
 
-### Return Value as Exit Code
-
-**Decision:** Last expression value becomes process exit code
-
-**Rationale:**
-- Simple for Milestone 3 demonstration
-- Easy to test (check exit code)
-- Shows end-to-end compilation
-- Will evolve:
-  - Milestone 4: Proper `return` statements
-  - Future: `main` returns `Result` for error handling
-
----
 
 ## Future Evolution
 

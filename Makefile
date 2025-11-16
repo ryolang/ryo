@@ -8,7 +8,7 @@
 ##@ Documentation
 
 serve: ## Run MkDocs development server with uvx
-	uvx --with mkdocs-material mkdocs serve -a 0.0.0.0:65533 -o
+	uvx --with mkdocs-material mkdocs serve --dirty -a 0.0.0.0:65533 -o
 
 
 build: ## Build the documentation site

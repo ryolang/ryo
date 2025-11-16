@@ -9,7 +9,7 @@
 
 Ryo is a new, statically-typed, compiled programming language designed for developers who love the **simplicity of Python** but need the **performance and memory safety** guarantees of languages like Rust or Go, without the steep learning curve.
 
-Build reliable and efficient **web backends, CLI tools, and scripts** with an approachable syntax, powerful compile-time checks, and a familiar async/await concurrency model. Ryo manages memory safely via ownership and borrowing (simplified, no manual lifetimes) **without a garbage collector**, ensuring predictable performance and eliminating entire classes of bugs.
+Build reliable and efficient **web backends, CLI tools, and scripts** with an approachable syntax, powerful compile-time checks, and a built in concurrency model. Ryo manages memory safely via ownership and borrowing (simplified, no manual lifetimes) **without a garbage collector**, ensuring predictable performance and eliminating entire classes of bugs.
 
 **This project contains the source code for the Ryo compiler, standard library, and tooling.**
 
@@ -21,43 +21,7 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 
 **✅ What's Working Now:**
 
-The Ryo compiler currently implements **Milestone 3: AOT Compilation** with the following capabilities:
-
-- **Lexer & Parser**: Full tokenization and parsing of variable declarations and expressions
-- **Code Generation**: Compiles to native object files using Cranelift backend
-- **Linking**: Multi-linker fallback (`zig cc` → `clang` → `cc`) for cross-platform support
-- **Arithmetic Operations**: Integer literals, binary operators (`+`, `-`, `*`, `/`), unary negation
-- **Expressions**: Parenthesized expressions with correct operator precedence
-- **Variable Declarations**: With optional type annotations and `mut` keyword
-- **Exit Codes**: All programs exit with 0 (success) - explicit returns coming in Milestone 4
-- **Cross-Platform**: Generates native executables for x86_64, aarch64 (Apple Silicon), and more
-
-**Working Example (Compiles Today):**
-
-```ryo
-# arithmetic.ryo - A working Milestone 3 program
-
-x = 2 + 3 * 4      # Computes 14 (operator precedence: multiply first)
-                    # Program exits with 0 (success)
-```
-
-```bash
-# Compile and run
-cargo run -- run arithmetic.ryo
-# Output: [Result] => 0
-```
-
-**Test Coverage:** 79 passing tests (32 lexer + 32 parser + 15 codegen integration tests)
-
-**❌ What's Coming Next:**
-
-The features described below are **design goals** under active development:
-
-- **Milestone 4**: Functions & Calls - Define and call functions with arguments and return values
-- **Milestone 5**: Module System (Design) ✅ **COMPLETE** - Directory-based modules with three access levels
-- **Milestone 6**: Expressions & Operators - Arithmetic, comparison, logical operators; float type
-- **Milestone 7**: Structs - User-defined data types with fields
-- **Milestone 8+**: Enums, control flow, error handling, ownership system, traits, async/await, and more
+The Ryo compiler currently implements **Milestone 3: AOT Compilation**
 
 **See the full roadmap:** [Implementation Roadmap](docs/implementation_roadmap.md)
 
@@ -67,7 +31,7 @@ The features described below are **design goals** under active development:
 
 *   **🐍 Simple & Productive:** Write clear, readable code with a clean syntax inspired by Python (tabs, f-strings, tuples, built-in `print`). Reduce boilerplate and focus on your logic.
 *   **🛡️ Safe & Reliable:** Compile-time memory safety via "Ownership Lite" prevents dangling pointers, data races, and use-after-free errors without a GC. Explicit error handling with `error` types, `try`, and `catch` makes code robust. No null thanks to optional types (`?T` and `none`).
-*   **🚀 Fast & Efficient:** Compiled to native code using **Cranelift** for excellent performance. No garbage collection pauses mean predictable speed. Familiar async/await concurrency for scalable applications with excellent Python developer ergonomics.
+*   **🚀 Fast & Efficient:** Compiled to native code using **Cranelift** for excellent performance. No garbage collection pauses mean predictable speed. Built it concurrency primitives for scalable applications with excellent Python developer ergonomics.
 *   **🧩 Modern Tooling:** Integrated package manager (`ryo`), fast compiler, interactive REPL (JIT), built-in testing framework.
 *   **✨ Compile-Time Power (`comptime`):** Run code at compile time for metaprogramming, configuration loading, and pre-computation without runtime cost or complex macros.
 *   **🧩 Pragmatic Interoperability:** Designed with C FFI for leveraging existing native code. (Future goals include exploring closer integration with ecosystems like Python).
@@ -75,7 +39,7 @@ The features described below are **design goals** under active development:
 ## Features Overview
 
 *   **Memory Management:** Ownership & Borrowing (Simplified, "Ownership Lite"), No GC, RAII (`Drop`), Immutable-by-Default variables for safer code.
-*   **Concurrency:** Python-familiar async/await with high-performance async runtime
+*   **Concurrency:** Built in primitives inspired by CSP's GO  model
 *   **Syntax:** Python-inspired, tab-indented, expressions, statements
 *   **Types:** Static typing with bidirectional type inference (like Rust/TypeScript), primitives (`int`, `float`, `bool`, `str`, `char`), tuples, `struct`, `enum` (ADTs), `trait` (static dispatch initially). Function signatures require types, local variables inferred. Variables are immutable by default (no `let` keyword), use `mut` for mutability
 *   **Module System:** Directory-based modules with three access levels: `pub` (public), `package` (package-internal), and module-private (no keyword). Implicit discovery from filesystem structure (no `mod` declarations). See [Module System Design](CLAUDE.md#8-module-system-design) for details.
@@ -109,8 +73,6 @@ Ryo draws inspiration from the best features of modern programming languages:
 
 ## Quick Example
 
-### Design Vision (Future)
-
 > **Note:** This example shows Ryo's planned features. Most are not yet implemented.
 
 ```ryo
@@ -141,32 +103,21 @@ fn main():
 
     # Safe error handling
     print(process_user(user))
+```
 
-# File: process/errors.ryo
+
+```ryo
+# src/process/errors.ryo
 error InvalidUser
+```
 
-# File: main.ryo
+```ryo
+# src/main.ryo
 import process
 
 fn process_user(user: ?str) -> process.InvalidUser!str:
     name = user orelse return process.InvalidUser
     return f"Processing user: {name}"
-```
-
-### Working Today (Milestone 3)
-
-```ryo
-# arithmetic.ryo - Compiles and runs now!
-
-# Variable declarations with type annotations
-x: int = 42
-y: int = 10
-
-# Arithmetic expressions with correct precedence
-result = x + y * 2    # 42 + (10 * 2) = 62
-
-# Multiple statements - all evaluated, program exits with 0
-final = result - 20   # 62 - 20 = 42 (computed, but exit code is 0)
 ```
 
 ```bash
@@ -249,24 +200,6 @@ Linked with zig cc: first
 - **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions
 - **[Examples](examples/milestone3/)** - Working code examples you can run today
 
-### Current Workflow (Milestone 3)
-
-Since Milestone 3 focuses on arithmetic expressions, the typical workflow is:
-
-```bash
-# Write a simple expression
-echo "result = 2 + 3 * 4" > calc.ryo
-
-# Compile and run
-cargo run -- run calc.ryo
-# Output: [Result] => 0
-
-# Inspect compilation stages
-cargo run -- lex calc.ryo     # See tokens
-cargo run -- parse calc.ryo   # See AST
-cargo run -- ir calc.ryo      # See IR generation info
-```
-
 **Note:** Advanced features like project creation (`ryo new`), package management, and REPL are planned for future milestones.
 
 ## Contributing
@@ -295,7 +228,7 @@ Please read our [Contributing Guide](CONTRIBUTING.md) and check out the [open is
 - **[Design Issues](docs/design_issues.md)** - Known design challenges and decisions
 
 ### Implementation
-- **[Implementation Roadmap](docs/implementation_roadmap.md)** - Development milestones and progress
+- **[Implementation Roadmap](docs/dev/implementation_roadmap.md)** - Development milestones and progress
 - **[Compilation Pipeline](docs/dev/compilation_pipeline.md)** - How the compiler works (Milestone 3)
 - **[CLAUDE.md](CLAUDE.md)** - Project context for AI assistants and contributors
 

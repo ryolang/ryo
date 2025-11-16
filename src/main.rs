@@ -25,11 +25,7 @@ fn get_output_filenames(input_file: &Path) -> (String, String) {
         .and_then(|s| s.to_str())
         .unwrap_or("output");
 
-    let obj_filename = format!(
-        "{}.{}",
-        stem,
-        if cfg!(windows) { "obj" } else { "o" }
-    );
+    let obj_filename = format!("{}.{}", stem, if cfg!(windows) { "obj" } else { "o" });
     let exe_filename = format!("{}{}", stem, std::env::consts::EXE_SUFFIX);
 
     (obj_filename, exe_filename)
@@ -94,7 +90,9 @@ enum Commands {
     Run {
         /// Input file to compile and run
         file: PathBuf,
+        // TODO: run behaviour must be same as GO
     },
+    //TODO: build generate a binary, by default without object file.
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -214,11 +212,11 @@ fn generate_and_display_ir(program: &ast::Program) -> Result<(), CompilerError> 
 
     let target = Triple::host();
     let target_str = target.to_string();
-    let mut codegen = codegen::Codegen::new(target)
-        .map_err(CompilerError::CodegenError)?;
+    let mut codegen = codegen::Codegen::new(target).map_err(CompilerError::CodegenError)?;
 
     // Compile the program (this generates IR)
-    codegen.compile(program.clone())
+    codegen
+        .compile(program.clone())
         .map_err(CompilerError::CodegenError)?;
 
     // The generated IR is stored in the codegen's context
@@ -259,24 +257,26 @@ fn run_file(file: &Path) -> Result<(), CompilerError> {
     Ok(())
 }
 
-fn compile_program(program: &ast::Program, obj_filename: &str, exe_filename: &str) -> Result<(), CompilerError> {
+fn compile_program(
+    program: &ast::Program,
+    obj_filename: &str,
+    exe_filename: &str,
+) -> Result<(), CompilerError> {
     println!("[Codegen]");
 
     let target = Triple::host();
-    let mut codegen = codegen::Codegen::new(target)
-        .map_err(CompilerError::CodegenError)?;
+    let mut codegen = codegen::Codegen::new(target).map_err(CompilerError::CodegenError)?;
 
     // Compile the program
-    codegen.compile(program.clone())
+    codegen
+        .compile(program.clone())
         .map_err(CompilerError::CodegenError)?;
 
     // Get object bytes
-    let obj_bytes = codegen.finish()
-        .map_err(CompilerError::CodegenError)?;
+    let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
     // Write object file
-    fs::write(obj_filename, obj_bytes)
-        .map_err(CompilerError::from)?;
+    fs::write(obj_filename, obj_bytes).map_err(CompilerError::from)?;
 
     println!("Generated object file: {}", obj_filename);
 
@@ -343,7 +343,7 @@ fn execute_program(exe_file: &str) -> Result<i32, CompilerError> {
     match output.status.code() {
         Some(code) => Ok(code),
         None => Err(CompilerError::ExecutionError(
-            "Could not determine exit code".to_string()
+            "Could not determine exit code".to_string(),
         )),
     }
 }

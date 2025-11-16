@@ -65,7 +65,12 @@ extra:
       name: Official Website
   generator: false
 extra_css:
+  - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/atom-one-dark.min.css
   - extra/tweaks.css
+extra_javascript:
+  - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js
+  - extra/ryo-highlight.js
+  - extra/init-highlight.js
 nav:
   - index.md
   - Getting Started:
@@ -99,6 +104,7 @@ markdown_extensions:
   - pymdownx.details
   - pymdownx.emoji
   - pymdownx.highlight:
+      use_pygments: false
       anchor_linenums: true
       line_spans: __span
       pygments_lang_class: true
