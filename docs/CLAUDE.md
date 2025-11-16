@@ -2,6 +2,13 @@
 
 ---
 
+## When writing specification
+
+* Ryo is a general programming language, do not need system programming features
+* Ryo Prioritizes DX
+* Ryo is not yet implemented, this is the first specification, we don't need to take care about versions, all specification is future work.
+* Ryo built in types are lowercase, user-defined types are PascalCase
+
 ## Diagrams
 
 Use mermaid for diagrams.

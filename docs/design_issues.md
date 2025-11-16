@@ -4,7 +4,9 @@ This document identifies critical design inconsistencies in the Ryo language spe
 
 ## Critical Issues Requiring Immediate Resolution
 
-### 1. Tuple Syntax Ambiguity 🔴
+### 1. Tuple Syntax Ambiguity ✅ RESOLVED
+
+**Resolution**: Adopted `void` keyword for unit type. Empty tuple `()` is no longer used for unit type values. This eliminates the primary ambiguity between unit type and empty tuple syntax.
 
 **Problem**: Identical syntax `(...)` used for multiple contexts causes parser ambiguity.
 
@@ -25,16 +27,16 @@ bar((42, "hello"))  # One tuple arg or two separate args?
 # Expression grouping
 result = (a + b) * c
 
-# Empty tuple vs unit
-empty = ()
-fn unit_func() -> ():
+# Empty tuple vs unit (RESOLVED: use void keyword)
+# Old (ambiguous): fn unit_func() -> ():
+fn unit_func() -> void:  # New: explicit void keyword
     ...
 ```
 
-**Recommendation**:
-- Use different syntax for unit type: `fn unit_func() -> unit:`
-- Or use explicit tuple constructors: `tuple(42, "hello")`
-- Or require trailing comma for single-element tuples: `(42,)`
+**Decision Made**:
+- ✅ Use `void` keyword for unit type: `fn unit_func() -> void:`
+- ✅ Empty tuple `()` syntax is no longer used for unit type
+- ⏳ Trailing comma for single-element tuples: `(42,)` (separate issue, not yet decided)
 
 ### 2. Implicit Borrow vs Move Inconsistency 🔴
 
@@ -112,11 +114,11 @@ impl Counter:
 fn main():
     async_runtime.run(async_main())
 
-async fn async_main() -> AppError!():
+async fn async_main() -> AppError!void:
     ...
 
 # Option B: Compiler magic
-async fn main() -> AppError!():  # Compiler starts runtime
+async fn main() -> AppError!void:  # Compiler starts runtime
     # ...
 ```
 
@@ -136,7 +138,7 @@ async fn main() -> AppError!():  # Compiler starts runtime
 trait Drawable:
     fn draw(self)
 
-fn process_shapes(shapes: List[&dyn Drawable]):
+fn process_shapes(shapes: list[&dyn Drawable]):
     for shape in shapes:
         shape.draw()  # Dynamic dispatch
 ```
@@ -148,7 +150,7 @@ fn process_shapes(shapes: List[&dyn Drawable]):
 **Recommendation**: Define clear syntax:
 ```ryo
 [T; N]    # Fixed-size array of N elements
-[T]       # Dynamic array (List[T])  
+[T]       # Dynamic array (list[T])  
 &[T]      # Slice (borrowed view)
 ```
 

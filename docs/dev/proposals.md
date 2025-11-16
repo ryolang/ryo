@@ -127,7 +127,7 @@ However, async/await remains the primary model because:
 
 ### **Advanced Generics**
 
-Currently, Ryo uses built-in generic types like `List[T]`, `Map[K,V]`, and collection types. Error types use the `error` keyword and optional types use `?T`. User-defined generics are planned for future implementation.
+Currently, Ryo uses built-in generic types like `list[T]`, `map[K,V]`, and collection types. Error types use the `error` keyword and optional types use `?T`. User-defined generics are planned for future implementation.
 
 #### **Generic Type Definitions**
 
@@ -188,7 +188,7 @@ result = try some_operation() catch |e|:
 **Basic Trait Bounds**
 ```ryo
 # Future syntax for trait bounds
-fn sort[T](list: &mut List[T])
+fn sort[T](list: &mut list[T])
 where T: Comparable {
     # Implementation using T's comparison capabilities
 }
@@ -256,7 +256,7 @@ trait Collection:
     fn iter(&self) -> Self.Iter
 
 # Implementation for List
-impl[T] Collection for List[T]:
+impl[T] Collection for list[T]:
     type Item = T
     type Iter = ListIterator[T]
 
@@ -295,7 +295,7 @@ where T: Clone:
 ```ryo
 # Future type inference capabilities
 list = List.new()  # Type inferred from usage
-list.push(42)      # List[int] inferred
+list.push(42)      # list[int] inferred
 
 result = identity(42)      # identity[int] inferred
 pair = Pair.new("a", 1)    # Pair[str, int] inferred
@@ -317,7 +317,7 @@ pair = Pair.new("a", 1)    # Pair[str, int] inferred
 
 **No Higher-Kinded Types**
 - Generic types cannot be parameterized by other generics initially
-- `Container[List]` not supported, only `Container[List[int]]`
+- `Container[List]` not supported, only `Container[list[int]]`
 - Keeps type system complexity manageable
 
 **Coherence Rules**
@@ -377,7 +377,7 @@ trait IntoIterator:
     
     fn into_iter(self) -> Self.IntoIter
 
-impl IntoIterator for List[T]:
+impl IntoIterator for list[T]:
     type Item = T
     type IntoIter = ListIterator[T]
     
@@ -389,7 +389,7 @@ numbers = [1, 2, 3, 4, 5]
 doubled = numbers.iter()
     .map(fn(x): x * 2)
     .filter(fn(x): x > 5)
-    .collect[List[int]]()
+    .collect[list[int]]()
 ```
 
 #### **Lazy Evaluation**
@@ -401,7 +401,7 @@ result = data.iter()
     .filter(is_valid)           # Only processes when consumed
     .map(transform)             # Lazy transformation
     .take(10)                   # Limit processing
-    .collect[List[ProcessedItem]]()  # Evaluation happens here
+    .collect[list[ProcessedItem]]()  # Evaluation happens here
 ```
 
 ### **Error Handling System** ✅ IMPLEMENTED
@@ -633,10 +633,10 @@ Currently, Ryo has basic f-strings. Enhanced formatting capabilities are planned
 ```ryo
 # Future formatting trait system
 trait Display:
-    fn fmt(&self, formatter: &mut Formatter) -> FormatError!()
+    fn fmt(&self, formatter: &mut Formatter) -> FormatError!void
 
 trait Debug:
-    fn fmt(&self, formatter: &mut Formatter) -> FormatError!()
+    fn fmt(&self, formatter: &mut Formatter) -> FormatError!void
 
 # Automatic implementations possible with attributes
 #[derive(Debug)]
@@ -645,7 +645,7 @@ struct Point:
     y: float
 
 impl Display for Point:
-    fn fmt(&self, formatter: &mut Formatter) -> FormatError!():
+    fn fmt(&self, formatter: &mut Formatter) -> FormatError!void:
         formatter.write(f"({self.x}, {self.y})")
 ```
 
@@ -682,7 +682,7 @@ struct Currency:
     symbol: str
 
 impl Display for Currency:
-    fn fmt(&self, formatter: &mut Formatter) -> FormatError!():
+    fn fmt(&self, formatter: &mut Formatter) -> FormatError!void:
         formatter.write(f"{self.symbol}{self.amount:.2}")
 
 price = Currency { amount: 123.456, symbol: "$" }
@@ -793,9 +793,9 @@ struct TypeInfo:
 
 enum TypeKind:
     Primitive { primitive_type: PrimitiveType }
-    Struct { fields: List[FieldInfo] }
-    Enum { variants: List[VariantInfo> }
-    Tuple { elements: List[TypeInfo] }
+    Struct { fields: list[FieldInfo] }
+    Enum { variants: list[VariantInfo> }
+    Tuple { elements: list[TypeInfo] }
     Array { element_type: TypeInfo, length: int }
 
 struct FieldInfo:
@@ -1157,7 +1157,7 @@ impl Drawable for Rectangle:
         return self.width * self.height
 
 # Dynamic dispatch with trait objects
-fn process_shapes(shapes: List[&dyn Drawable]):
+fn process_shapes(shapes: list[&dyn Drawable]):
     for shape in shapes:
         shape.draw()  # Dynamic dispatch - runtime polymorphism
         print(f"Area: {shape.area()}")
@@ -1400,7 +1400,7 @@ A Jupyter kernel would enable interactive development and data exploration with 
 **Basic Kernel Features:**
 ```ryo
 # Interactive cell execution
-fn analyze_data(data: List[f64]) -> Statistics:
+fn analyze_data(data: list[f64]) -> Statistics:
     return Statistics{
         mean: data.sum() / data.len(),
         median: data.median(),

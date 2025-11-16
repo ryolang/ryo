@@ -38,8 +38,8 @@ ryo/
 │   └── src/
 │       ├── lib.rs
 │       ├── string.rs  # Runtime implementation for owned `str` (allocation, etc.)
-│       ├── list.rs    # Runtime implementation for `List[T]`
-│       ├── map.rs     # Runtime implementation for `Map[K,V]`
+│       ├── list.rs    # Runtime implementation for `list[T]`
+│       ├── map.rs     # Runtime implementation for `map[K,V]`
 │       ├── channel.rs # Runtime implementation for `chan[T]` and scheduler interaction
 │       ├── spawn.rs   # Runtime support for spawning tasks (needs executor)
 │       └── panic.rs   # Panic handling (abort implementation)

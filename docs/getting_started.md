@@ -620,7 +620,7 @@ Circular dependencies between modules are **forbidden** (compile error):
 # user/user.ryo
 import post
 struct User:
-    posts: List[post.Post]
+    posts: list[post.Post]
 
 # post/post.ryo
 import user
@@ -639,7 +639,7 @@ pub struct PostID(int)
 # user/user.ryo
 import types.ids
 struct User:
-    posts: List[ids.PostID]  # Use ID instead
+    posts: list[ids.PostID]  # Use ID instead
 
 # post/post.ryo
 import types.ids
@@ -950,7 +950,7 @@ result = try_with_timeout() catch |e|:
 Ryo also provides optional types (`?T`) for when a value may or may not be present:
 
 ```ryo
-fn find_user(users: List[User], id: int) -> ?User:
+fn find_user(users: list[User], id: int) -> ?User:
     for user in users:
         if user.id == id:
             return user
@@ -1333,7 +1333,7 @@ error QueryFailed(sql: str, reason: str)
 # File: main.ryo
 import database
 
-fn query_users(age: int) -> database.QueryFailed!List[User]:
+fn query_users(age: int) -> database.QueryFailed!list[User]:
     sql = f"SELECT * FROM users WHERE age > {age}"
     result = try db.execute(sql)
     # Error will show the SQL query, helping you debug

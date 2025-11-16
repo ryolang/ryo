@@ -42,7 +42,7 @@ Ryo is a proposed statically-typed, compiled programming language designed to of
     *   `struct Name:` Defines data structures. Fields require type annotations.
     *   `enum Name:` Algebraic data types (sum types), supporting variants with associated data (e.g., `enum Message: Quit, Write(str), Move { x: i32, y: i32 }`).
     *   `trait Name:` Defines a set of method signatures (behavior).
-*   **Built-in Collections:** Generic `List[T]` (dynamic array), `Map[K, V]` (hash map). Literals: `[1, 2, 3]`, `{"a": 1, "b": 2}`. Respect ownership/borrowing.
+*   **Built-in Collections:** Generic `list[T]` (dynamic array), `map[K, V]` (hash map). Literals: `[1, 2, 3]`, `{"a": 1, "b": 2}`. Respect ownership/borrowing.
     *   *Rationale:* Essential data structures provided out-of-the-box.
 *   **Optionality:** Built-in `enum Optional[T]: Some(T), Empty`. Replaces `null`/`None`. Functions must return `Optional[T]` if they might not return a value. Handled via `match` or optional chaining (`?.`).
     *   *Rationale:* Explicit handling of absence significantly improves safety over nullable types.

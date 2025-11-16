@@ -15,9 +15,9 @@
 - `File` struct (within io):
   - `File.read_all() -> IoError!str`: Reads the entire content of a file as a string.
   - `File.read_line() -> IoError!str`: Reads a single line from a file.
-  - `File.write_all(content: str) -> IoError!()`: Writes the entire content string to the file.
-  - `File.write_line(line: str) -> IoError!()`: Writes a single line to the file.
-  - `File.close() -> IoError!()`: Closes the file.
+  - `File.write_all(content: str) -> IoError!void`: Writes the entire content string to the file.
+  - `File.write_line(line: str) -> IoError!void`: Writes a single line to the file.
+  - `File.close() -> IoError!void`: Closes the file.
 
 ## 2. str Package (String Manipulation)
 
@@ -80,6 +80,10 @@
 
 - `time.now_ms() -> int`: Returns the current time in milliseconds since some epoch (e.g., Unix epoch). Useful for measuring durations and timestamps.
 - `time.duration_ms(milliseconds: int) -> Duration`: Creates a `Duration` object representing a duration in milliseconds (for clarity and type safety when dealing with time durations - `Duration` could be a simple struct).
+
+## Missing
+
+- TOML: for the project files
 
 ## References
 

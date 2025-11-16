@@ -4,44 +4,6 @@ This roadmap outlines the planned development of the Ryo programming language co
 
 **Development Timeline:** Each milestone is designed for approximately 2-4 weeks of development (assuming ~8 hours/week), but timelines should remain flexible to ensure quality over speed.
 
-## Current Status
-
-| Milestone | Status | Notes |
-|-----------|--------|-------|
-| **Phase 1: Core Foundation** | | |
-| Milestone 1: Lexer Basics | ✅ **COMPLETE** | All tokens implemented and tested. `ryo lex` command fully functional. |
-| Milestone 2: Parser & AST | ✅ **COMPLETE** | Full AST implemented with variable declarations, type annotations, and expressions. `ryo parse` command functional. 32 unit tests + 5 integration tests. |
-| Milestone 3: Cranelift Integration | ✅ **COMPLETE (AOT)** | Full AOT compilation pipeline working. `ryo run` compiles and executes programs. 15 codegen integration tests + `ryo ir` command for IR display. Total: 47 tests passing. |
-| **Phase 2: Essential Language Features** | | |
-| Milestone 4: Functions & Calls | ⏳ Planned | Define and call functions with arguments and return values. |
-| Milestone 5: Module System (Design) | ✅ **COMPLETE** | Directory-based modules with three access levels designed and documented. |
-| Milestone 6: Expressions & Operators | ⏳ Planned | Arithmetic, comparison, logical operators. Float type. |
-| Milestone 6.5: Control Flow & Booleans | ⏳ Planned | if/else, while loops, break/continue, boolean logic. |
-| Milestone 7: Structs | ⏳ Planned | User-defined composite types with named fields. |
-| Milestone 8: Enums (ADTs) | ⏳ Planned | Algebraic data types with variants. |
-| Milestone 9: Pattern Matching | ⏳ Planned | Match expressions with exhaustiveness checking. |
-| Milestone 10: Tuples | ⏳ Planned | Multiple return values, tuple destructuring. |
-| Milestone 11: Error Types & Unions | ⏳ Planned | Error types, error unions, exhaustive error handling. |
-| **Phase 3: Type System & Memory Safety** | | |
-| Milestone 12: Basic Ownership & String | ⏳ Planned | Move semantics, String type, Copy trait concept. |
-| Milestone 13: Optional Types (`?T`) | ⏳ Planned | Null safety with optional types, chaining, orelse. |
-| Milestone 14: Traits | ⏳ Planned | Behavior abstraction, trait definitions and implementations. |
-| Milestone 15: Method Implementations | ⏳ Planned | Methods on types via impl blocks. |
-| Milestone 16: Immutable Borrows | ⏳ Planned | Borrow checking with `&T` for immutable references. |
-| Milestone 17: Slices & String Slices | ⏳ Planned | Array slices `&[T]` and string slices `&str`. |
-| Milestone 18: Collections | ⏳ Planned | List[T] and Map[K, V] with hardcoded types. |
-| Milestone 19: RAII & Drop Trait | ⏳ Planned | Automatic resource cleanup, Drop trait. |
-| Milestone 20: Mutable Borrows | ⏳ Planned | Mutable references `&mut T` with aliasing rules. |
-| Milestone 21: Try/Catch Operators | ⏳ Planned | Error propagation with try, handling with catch. |
-| **Phase 4: Module System & Core Ecosystem** | | |
-| Milestone 22: Module System | ⏳ Planned | Modules, imports, visibility control. |
-| Milestone 23: Standard Library Core | ⏳ Planned | Essential stdlib: io, string, collections, math, os. |
-| Milestone 24: Panic & Debugging | ⏳ Planned | Panic function, stack traces, debugging support. |
-| Milestone 25: Testing & Documentation | ⏳ Planned | Test framework, test runner, doc generation. |
-| Milestone 26: Core Language Complete | ⏳ Planned | Integration, polish, package manager, v0.1.0 prep. |
-| **Phase 5: Post-v0.1.0 Extensions** | | |
-| Async/Await, FFI, Generics | 🔮 Future | Advanced features deferred to v0.2+. See proposals.md. |
-
 ## Guiding Principles
 
 * **Iterate:** Get something working end-to-end quickly, then refine
@@ -169,8 +131,6 @@ This roadmap outlines the planned development of the Ryo programming language co
 - Object file and executable remain in current directory after execution
 - `ryo ir` command provides IR generation confirmation (full IR display requires deeper Cranelift integration)
 
-**Design Change (2025-01-10):**
-Exit code behavior changed from "last expression value" to "implicit 0 (success)". This aligns with industry standards (Rust, Go, Python, C) and prepares for Milestone 4's return statements. See `docs/design_issues.md` for detailed rationale. Previous behavior was confusing and incompatible with future features.
 
 **What's NOT Implemented (Deferred):**
 - ❌ JIT compilation (for REPL)
@@ -198,7 +158,7 @@ Exit code behavior changed from "last expression value" to "implicit 0 (success)
 
 **Visible Progress:** `print("Hello, World!")` actually works! Real visible output! ✅
 
-**Completion Date:** January 10, 2025
+**Completion Date:** November 10, 2025
 
 **Implementation Details:**
 - String literals stored in `.rodata` section with deduplication
@@ -222,7 +182,7 @@ Exit code behavior changed from "last expression value" to "implicit 0 (success)
 **Design Decisions:**
 - String literals as compile-time constants only (no runtime heap allocation)
 - print() accepts only string literals (not variables)
-- No ownership semantics (deferred to Milestone 12)
+- No ownership semantics (deferred to Milestone 15)
 - Simple 3-5 day implementation vs full ownership (2-3 weeks)
 
 **Example:**
@@ -236,8 +196,8 @@ _ = print("Second\n")
 **Known Limitations:**
 - **Return Type**: print() currently returns int(0) as a placeholder for the future void/unit type
   - This value is semantically meaningless and should be ignored
-  - Proper void/unit type will be implemented in Milestone 6 (Type System)
-  - Aligns with Python's `None` and Rust's `()` conventions
+  - Proper void/unit type will be implemented in Milestone 8 (Control Flow & Booleans)
+  - Aligns with Python's `None` convention and uses `void` keyword similar to C/Java/TypeScript
 - **Parser Limitation**: Bare expression statements not supported yet
   - Must use assignment syntax: `_ = print("...")`
   - Expression statements will be added in Milestone 4 (Functions & Calls)
@@ -397,7 +357,7 @@ pub struct PostID(int)
 import models.ids
 struct User:
     id: ids.UserID
-    post_ids: List[ids.PostID]  # Store IDs, not Post objects
+    post_ids: list[ids.PostID]  # Store IDs, not Post objects
 
 # post/post.ryo
 import models.ids
@@ -415,7 +375,7 @@ struct Post:
 
 **What's NOT Implemented (Design Complete, Implementation Deferred):**
 
-- ❌ Parser support for `module`, `import`, `package` keywords (Milestone 22 implementation)
+- ❌ Parser support for `module`, `import`, `package` keywords (Milestone 6 implementation)
 - ❌ AST nodes for module system
 - ❌ Symbol table and name resolution across modules
 - ❌ Visibility checking
@@ -425,8 +385,8 @@ struct Post:
 **Implementation Roadmap:**
 
 The module system will be **implemented** in:
-- **Milestone 22 (Implementation)**: Lexer/parser/AST for modules and imports
-- **Phase 4**: Full module system integration with codegen and linking
+- **Milestone 6 (Implementation)**: Lexer/parser/AST for modules and imports
+- **Phase 2**: Full module system integration with codegen and linking
 
 **Future Enhancements** (documented in proposals.md):
 
@@ -463,908 +423,11 @@ The module system will be **implemented** in:
 
 **Next Steps:**
 
-Proceed with Milestone 22 (Implementation) after Milestone 4 (Functions & Calls) is complete. The design is stable and ready for implementation.
+Proceed with Milestone 6 (Implementation) after Milestone 4 (Functions & Calls) is complete. The design is stable and ready for implementation.
 
 ---
 
-### Milestone 6: Expressions & Operators (Extended)
-**Goal:** Support float type and extended operators
-
-**Tasks:**
-- Add `float` type to lexer/parser/AST
-- Extend type system to handle `int` and `float` separately
-- Add float literal parsing: `3.14`, `2.5`
-- Add comparison operators: `==`, `!=`, `<`, `>`, `<=`, `>=`
-- Add division operator (`/`) with integer division semantics
-- Add modulo operator (`%`)
-- Implement basic type checking:
-  - Cannot mix `int` and `float` in operations without explicit conversion
-  - Comparison operators return `bool` (added in M6)
-- Extend Codegen: Generate IR for:
-  - Float arithmetic operations
-  - Comparison operations
-  - Type conversions (if needed)
-- Write tests for float operations and comparisons
-
-**Visible Progress:** Can use floats and compare values. Clear type error messages when mixing types.
-
-**Example:**
-```ryo
-x: float = 3.14
-y: float = 2.71
-pi_approx = x + y / 2.0
-
-a = 10
-b = 3
-quotient = a / b      # 3 (integer division)
-remainder = a % b     # 1
-```
-
-**Implementation Notes:**
-- Float arithmetic uses IEEE 754 semantics
-- Integer division truncates toward zero
-- Type errors are clear and localized (bidirectional type checking)
-- Dependencies: Milestone 4 (functions for testing)
-
-### Milestone 6.5: Control Flow & Booleans
-**Goal:** Implement `if/else` statements, `for` loops, and boolean logic
-
-**Tasks:**
-- **From M3.5**: Implement void/unit type (for functions with no return value)
-  - Add `void` type to type system (or use `()` unit type)
-  - Update `print()` signature from placeholder `int` to proper `void`
-  - Type checker prevents using void values in expressions
-  - Enable functions with no return: `fn do_something() -> void:`
-- Add `bool` type to type system
-- Add boolean literals: `true`, `false`
-- Add logical operators: `and`, `or`, `not`
-- Extend Parser/AST:
-  - `StmtKind::IfStmt` with optional `else` branch
-  - `StmtKind::ForLoop`
-  - `StmtKind::Break`, `StmtKind::Continue`
-  - Boolean expressions in conditions
-- Extend Codegen: Generate Cranelift IR for:
-  - Conditional branching (if/else)
-  - Loop constructs (for)
-  - Break/continue statements
-  - Boolean operations (and/or/not with short-circuiting)
-- Write tests for control flow and boolean logic
-
-**Visible Progress:** Can write programs with conditionals and loops
-
-**Example:**
-```ryo
-fn is_positive(x: int) -> bool:
-    if x > 0:
-        return true
-    else:
-        return false
-
-fn print_if_even(n: int) -> void:  # void return type
-    if n % 2 == 0:
-        print("Even number")
-    # No return statement needed for void
-
-fn main() -> int:
-    mut counter = 0
-    for counter < 10:
-        print_if_even(counter)
-        counter += 1
-    return 0
-```
-
-**Implementation Notes:**
-- Short-circuit evaluation for `and`/`or` (don't evaluate right side if not needed)
-- Break/continue only valid inside loops (checked at compile time)
-- If expressions (returning values) deferred to later milestone
-- Dependencies: Milestone 5 (comparison operators)
-
-### Milestone 7: Structs
-**Goal:** Implement user-defined composite types with named fields
-
-**Tasks:**
-- Add `struct` keyword to lexer/parser
-- Extend AST: `StmtKind::StructDef`
-- Parse struct definitions:
-  ```ryo
-  struct Point:
-      x: float
-      y: float
-  ```
-- Parse struct literals with parentheses: `Point(x=1.0, y=2.0)`
-- Parse field access: `point.x`, `point.y`
-- Extend type system:
-  - Track struct definitions in symbol table
-  - Type-check struct literals (all fields present, correct types)
-  - Type-check field access (field exists, correct type)
-- Extend Codegen: Generate IR for:
-  - Stack allocation of structs
-  - Field access (offset calculations)
-  - Struct initialization
-- Write tests for struct definition, initialization, and field access
-
-**Visible Progress:** Can define and use custom types with multiple fields
-
-**Example:**
-```ryo
-struct Rectangle:
-    width: float
-    height: float
-
-fn area(rect: Rectangle) -> float:
-    return rect.width * rect.height
-
-fn main() -> int:
-    r = Rectangle(width=10.0, height=5.0)
-    a = area(r)
-    return 0
-```
-
-**Implementation Notes:**
-- Structs are **moved by default** (ownership semantics)
-- Field order matters (affects memory layout)
-- No default values for fields (all must be initialized)
-- No methods yet (added in Milestone 15)
-- Parentheses with named arguments used for struct literals: `Point(x=1, y=2)`, consistent with language design
-- Braces reserved exclusively for f-string interpolation
-- Dependencies: Milestone 4 (functions for passing structs)
-
-### Milestone 8: Enums (Algebraic Data Types)
-**Goal:** Implement enums with variants (sum types / tagged unions)
-
-**Tasks:**
-- Add `enum` keyword to lexer/parser
-- Extend AST: `StmtKind::EnumDef`
-- Parse enum definitions with variants:
-  ```ryo
-  enum Color:
-      Red
-      Green
-      Blue
-
-  enum Shape:
-      Circle(radius: float)
-      Rectangle(width: float, height: float)
-  ```
-- Parse enum variant construction: `Color.Red`, `Shape.Circle(5.0)`
-- Extend type system:
-  - Track enum definitions in symbol table
-  - Type-check variant construction
-- Extend Codegen: Generate IR for:
-  - Enum representation (tag + data)
-  - Variant construction
-  - Tag checking (for pattern matching in M9)
-- Write tests for enum definition and variant construction
-
-**Visible Progress:** Can define sum types and construct variants
-
-**Example:**
-```ryo
-enum Result:
-    Success(value: int)
-    Error(message: str)
-
-fn divide(a: int, b: int) -> Result:
-    if b == 0:
-        return Result.Error("Division by zero")
-    return Result.Success(a / b)
-```
-
-**Implementation Notes:**
-- Enums are tagged unions (tag indicates which variant is active)
-- Memory layout: tag (int) + max variant size
-- Cannot access variant data without pattern matching (safety)
-- String type needed for example above (added in Milestone 12)
-- Dependencies: Milestone 7 (structs provide foundation for variant data)
-
-### Milestone 9: Pattern Matching
-**Goal:** Implement exhaustive pattern matching on enums and literals
-
-**Tasks:**
-- Add `match` keyword to lexer/parser
-- Extend AST: `ExprKind::Match` with arms
-- Parse match expressions:
-  ```ryo
-  match value:
-      Pattern1: expression1
-      Pattern2: expression2
-      _: default_expression
-  ```
-- Parse patterns:
-  - Literal patterns: `42`, `true`, `Color.Red`
-  - Enum variant patterns: `Shape.Circle(radius)` (destructuring)
-  - Wildcard pattern: `_`
-- Implement exhaustiveness checking:
-  - All enum variants must be covered
-  - Or use wildcard `_` to catch remaining cases
-- Extend Codegen: Generate IR for:
-  - Match expressions (tag checking, jumps to arms)
-  - Variable binding from patterns
-- Write tests for pattern matching and exhaustiveness
-
-**Visible Progress:** Can safely destructure enums and handle all cases
-
-**Example:**
-```ryo
-enum Option:
-    Some(value: int)
-    None
-
-fn unwrap_or(opt: Option, default: int) -> int:
-    match opt:
-        Option.Some(v): return v
-        Option.None: return default
-
-fn describe_color(color: Color) -> str:
-    match color:
-        Color.Red: return "red"
-        Color.Green: return "green"
-        Color.Blue: return "blue"
-```
-
-**Implementation Notes:**
-- Match is an **expression** (returns a value)
-- All arms must have same return type
-- Exhaustiveness checking at compile time (prevents missing cases)
-- Nested patterns deferred to later milestone
-- Dependencies: Milestone 8 (enums to match on)
-
-### Milestone 10: Tuples
-**Goal:** Implement tuple types for multiple return values and grouping
-
-**Tasks:**
-- Add tuple syntax to lexer/parser
-- Extend type system: `Type::Tuple(Vec<Type>)`
-- Parse tuple type annotations: `(int, str)`
-- Parse tuple literals: `(42, "hello")`
-- Parse tuple destructuring:
-  ```ryo
-  (x, y) = get_point()
-  ```
-- Extend Codegen: Generate IR for:
-  - Tuple construction (stack allocation)
-  - Tuple field access by index
-  - Tuple destructuring in assignments
-- Write tests for tuple types, literals, and destructuring
-
-**Visible Progress:** Can return multiple values from functions and destructure them
-
-**Example:**
-```ryo
-fn divmod(a: int, b: int) -> (int, int):
-    quotient = a / b
-    remainder = a % b
-    return (quotient, remainder)
-
-fn main() -> int:
-    (q, r) = divmod(10, 3)
-    # q = 3, r = 1
-    return 0
-```
-
-**Implementation Notes:**
-- Tuples are **anonymous structs** (no named fields)
-- Fixed size (known at compile time)
-- Can be nested: `((int, int), str)`
-- Tuple indexing syntax deferred (use destructuring for now)
-- Tuples are **moved** like structs (ownership)
-- Dependencies: Milestone 7 (structs provide foundation)
-
-### Milestone 11: Error Types & Unions
-**Goal:** Implement error types, error unions, and the error trait
-
-**Tasks:**
-- Add `error` keyword to lexer/parser
-- Extend AST: `StmtKind::ErrorDef`
-- Parse error definitions:
-  ```ryo
-  # File: file/errors.ryo
-  error NotFound(path: str)
-  error PermissionDenied(path: str)
-
-  # File: main.ryo
-  import file
-  ```
-- Parse error union syntax: `(ErrorA | ErrorB)!SuccessType`
-- Parse function signatures with error returns: `fn foo() -> FileError!Data`
-- Implement automatic error union inference from `try` expressions
-- Implement `.message()` method for all errors (Error trait)
-- Extend Codegen: Generate IR for:
-  - Error variant construction
-  - Error unions (tagged union of errors + success value)
-- Write tests for error definitions and error unions
-
-**Visible Progress:** Can define domain-specific errors and compose them in error unions
-
-**Example:**
-```ryo
-# File: http/errors.ryo
-error ConnectionFailed(reason: str)
-error RequestTimeout
-
-# File: parse/errors.ryo
-error InvalidJson(message: str)
-
-# File: main.ryo
-import http
-import parse
-
-fn fetch_and_parse() -> (http.ConnectionFailed | http.RequestTimeout | parse.InvalidJson)!Data:
-    response = try http_get("https://api.example.com")  # Returns http errors
-    data = try parse_json(response.body())              # Returns parse errors
-    return data
-
-fn main() -> int:
-    # Error handling with try/catch added in Milestone 21
-    return 0
-```
-
-**Implementation Notes:**
-- Errors are **single-variant only** (no multi-variant enums for errors)
-- Error unions use `|` syntax for composition
-- All errors implement `.message() -> str` automatically
-- `try`/`catch` operators added in Milestone 21 for ergonomics
-- Dependencies: Milestone 8 (enums), Milestone 9 (pattern matching for handling)
-
-## Phase 3: Type System & Memory Safety
-
-### Milestone 12: Basic Ownership & String Type
-**Goal:** Implement move semantics for heap-allocated `str` type and introduce `Copy` trait
-
-**Tasks:**
-- **From M3.5**: Upgrade string literal implementation to full str type
-  - String literals from M3.5 currently store in `.rodata` (read-only)
-  - Upgrade to heap-allocated str type (dynamic length)
-  - Enable string variables: `s: str = "hello"`
-  - Add string concatenation: `s1 + s2` or `s.concat(other)`
-  - Add string methods: `.len()`, `.is_empty()`, `.chars()`, `.substring()`, etc.
-  - Add formatted string output (f-strings): `f"Value: {x}"`
-- Implement semantic analysis pass (`src/checker.rs`):
-  - Track variable states (uninitialized, valid, moved)
-  - Implement move semantics for non-Copy types
-  - Detect use-after-move errors
-- Implement `Copy` trait concept:
-  - Primitives (`int`, `float`, `bool`) are Copy
-  - Structs/enums are Move by default
-  - str is Move (heap-allocated)
-- Extend Codegen: Generate IR for:
-  - str allocation/deallocation
-  - Move operations (memcpy)
-  - Copy operations (simple assignment)
-  - str concatenation operations
-- Write tests for ownership violations and string operations
-
-**Visible Progress:** Compiler catches use-after-move errors at compile time
-
-**Example:**
-```ryo
-fn main() -> int:
-    # String operations (from M3.5 deferred features)
-    s1: str = "hello"
-    s2: str = " world"
-    greeting = s1 + s2    # Concatenation
-    print(greeting)       # "hello world"
-
-    name = "Alice"
-    msg = f"Hello, {name}!"  # F-string formatting
-    print(msg)
-
-    # Ownership example
-    s3 = "test"       # str allocated
-    s4 = s3           # s3 moved to s4
-    # print(s3)      # Error: s3 was moved
-
-    x: int = 42
-    y = x             # x copied to y (int is Copy)
-    print(f"y = {y}") # OK: x still valid
-    return 0
-```
-
-**Implementation Notes:**
-- Move semantics are **implicit** (no explicit `move` keyword)
-- Copy trait is **marker-only** (no custom implementation yet)
-- str deallocation handled automatically at end of scope (RAII, refined in M19)
-- Simple garbage-free memory management
-- Dependencies: Milestone 11 (error types for allocation failures)
-
-**References:**
-- https://www.modular.com/blog/mojo-vs-rust
-- https://docs.modular.com/mojo/manual/values/
-
-### Milestone 13: Optional Types (`?T`)
-**Goal:** Implement null-safe optional types with `?T`, `none`, and `orelse`
-
-**Tasks:**
-- Add `none` keyword to lexer/parser
-- Extend type system: `Type::Optional(Box<Type>)`
-- Parse optional type annotations: `?User`, `?str`
-- Parse `none` literal
-- Parse optional chaining: `user?.name?.len()`
-- Parse `orelse` operator: `value orelse default`
-- Implement smart casting:
-  - `if x != none:` narrows type from `?T` to `T` in true branch
-  - `x orelse return err` narrows type after statement
-- Extend Codegen: Generate IR for:
-  - Optional representation (tag + value)
-  - None checks
-  - Optional chaining short-circuiting
-- Write tests for optional types and null safety
-
-**Visible Progress:** No more null pointer exceptions! Type-safe optional handling.
-
-**Example:**
-```ryo
-fn find_user(id: int) -> ?User:
-    if id < 0:
-        return none
-    return User(name="Alice", id=id)
-
-fn main() -> int:
-    user = find_user(42)
-
-    # Optional chaining
-    name_len = user?.name?.len()  # Returns ?int
-
-    # Providing defaults
-    display_name = user?.name orelse "Unknown"
-
-    # Early return with smart casting
-    u = user orelse return 1
-    # u is now User (not ?User) after this line
-    print(u.name)
-
-    return 0
-```
-
-**Implementation Notes:**
-- Optional types use **tagged union** (tag + value)
-- `none` is **not null** (different representation, type-safe)
-- Smart casting narrows types in control flow
-- Chaining returns `?T` (must handle with `orelse` or check)
-- Dependencies: Milestone 8 (enums provide foundation for tagged unions)
-
-### Milestone 14: Traits
-**Goal:** Implement trait system for behavior abstraction
-
-**Tasks:**
-- Add `trait` keyword to lexer/parser
-- Extend AST: `StmtKind::TraitDef`
-- Parse trait definitions:
-  ```ryo
-  trait Drawable:
-      fn draw(self)
-      fn area(self) -> float
-  ```
-- Parse trait bounds in function signatures: `fn process[T: Drawable](obj: T)`
-- Extend type system:
-  - Track trait definitions
-  - Track trait implementations
-  - Check trait bounds
-- **Static dispatch only** (monomorphization, no dynamic dispatch yet)
-- Write tests for trait definition and bounds
-
-**Visible Progress:** Can define shared behavior across types
-
-**Example:**
-```ryo
-trait Printable:
-    fn to_string(self) -> str
-
-impl Printable for int:
-    fn to_string(self) -> str:
-        # Convert int to string
-        return int_to_str(self)
-
-impl Printable for User:
-    fn to_string(self) -> str:
-        return f"User({self.name})"
-```
-
-**Implementation Notes:**
-- Traits define **required methods** only
-- No associated types or constants yet (future milestone)
-- No default implementations yet (future milestone)
-- Static dispatch via monomorphization (like Rust)
-- Dependencies: Milestone 15 (methods needed for trait impl)
-
-### Milestone 15: Method Implementations
-**Goal:** Implement methods on types via `impl` blocks
-
-**Tasks:**
-- Add `impl` keyword to lexer/parser
-- Extend AST: `StmtKind::ImplBlock`
-- Parse impl blocks:
-  ```ryo
-  impl Rectangle:
-      fn area(self) -> float:
-          return self.width * self.height
-  ```
-- Parse method calls: `rect.area()`
-- Handle `self` parameter:
-  - `self` for consuming methods (move)
-  - `&self` for immutable borrow (added in M16)
-  - `&mut self` for mutable borrow (added in M20)
-- Extend type system:
-  - Associate methods with types
-  - Type-check method calls
-- Extend Codegen: Generate IR for:
-  - Method calls (pass self as first argument)
-  - Method definitions
-- Write tests for methods
-
-**Visible Progress:** Can call methods on custom types with dot syntax
-
-**Example:**
-```ryo
-struct Circle:
-    radius: float
-
-impl Circle:
-    fn area(self) -> float:
-        return 3.14159 * self.radius * self.radius
-
-    fn scale(self, factor: float) -> Circle:
-        return Circle{radius: self.radius * factor}
-
-fn main() -> int:
-    c = Circle{radius: 5.0}
-    a = c.area()              # Consumes c (moved)
-    # c.area()                # Error: c was moved
-    return 0
-```
-
-**Implementation Notes:**
-- `self` **moves by default** (ownership)
-- Method call syntax: `obj.method()` desugars to `Type::method(obj)`
-- No method overloading (one method per name per type)
-- Dependencies: Milestone 12 (ownership for self parameter)
-
-### Milestone 16: Immutable Borrows (`&T`)
-**Goal:** Implement immutable references to avoid unnecessary moves
-
-**Tasks:**
-- Add `&` syntax to lexer/parser for borrow operator
-- Extend type system: `Type::Ref(Box<Type>)`
-- Parse immutable borrow syntax:
-  - Type annotations: `&str`, `&User`
-  - Borrow expressions: `&value`
-- Implement borrow checking rules:
-  - Can have multiple immutable borrows
-  - Cannot mutate through immutable borrow
-  - Borrows must not outlive the value
-- Update method signatures to use `&self`:
-  ```ryo
-  fn area(&self) -> float
-  ```
-- Extend Codegen: Generate IR for:
-  - Taking references (get address)
-  - Dereferencing (automatic for method calls)
-  - Passing pointers
-- Write tests for borrow checking
-
-**Visible Progress:** Can share data without moving ownership
-
-**Example:**
-```ryo
-struct Point:
-    x: float
-    y: float
-
-impl Point:
-    fn distance(&self, other: &Point) -> float:
-        dx = self.x - other.x
-        dy = self.y - other.y
-        return sqrt(dx * dx + dy * dy)
-
-fn main() -> int:
-    p1 = Point(x=0.0, y=0.0)
-    p2 = Point(x=3.0, y=4.0)
-
-    d = p1.distance(&p2)   # Borrow p2, don't move it
-    print(d)               # Can still use p1 and p2
-
-    # p1.x = 10.0          # Error: p1 is immutably borrowed (if concurrent borrow)
-    return 0
-```
-
-**Implementation Notes:**
-- Borrows are **implicit** in many cases (function parameters)
-- References are **non-nullable** (always point to valid data)
-- Lifetime tracking is **simplified** (no explicit lifetimes like Rust)
-- Borrow checker uses basic scope-based analysis
-- Dependencies: Milestone 15 (methods with &self)
-
-### Milestone 17: Slices & String Slices
-**Goal:** Implement borrowed views into arrays and strings
-
-**Tasks:**
-- Add slice syntax to lexer/parser
-- Extend type system:
-  - `Type::Slice(Box<Type>)` for array slices `&[T]`
-  - `&str` as string slice (borrowed view)
-- Parse slice operations:
-  - Array slicing: `array[start:end]`
-  - Full slice: `array[:]`
-- Distinguish `str` (owned) from `&str` (borrowed):
-  - `str` is heap-allocated, owned, mutable
-  - `&str` is borrowed view, immutable
-- Extend Codegen: Generate IR for:
-  - Slice representation (pointer + length)
-  - Slice bounds checking
-  - String slice operations
-- Write tests for slices and string slices
-
-**Visible Progress:** Efficient string/array operations without copying
-
-**Example:**
-```ryo
-fn first_word(text: &str) -> &str:
-    for i in range(text.len()):
-        if text[i] == ' ':
-            return text[0:i]  # Return slice (no copy)
-    return text
-
-fn sum_slice(numbers: &[int]) -> int:
-    mut total = 0
-    for n in numbers:
-        total += n
-    return total
-
-fn main() -> int:
-    s = "hello world"
-    word = first_word(s)  # word is &str (view into s)
-    print(word)           # "hello"
-
-    nums = [1, 2, 3, 4, 5]
-    total = sum_slice(&nums[1:4])  # Pass slice [2, 3, 4]
-    print(total)  # 9
-    return 0
-```
-
-**Implementation Notes:**
-- Slices are **fat pointers** (pointer + length)
-- Bounds checking at runtime (panic on out-of-bounds)
-- String slices must be **UTF-8 valid** (checked at slice boundaries)
-- No mutable slices yet (added in M20)
-- Dependencies: Milestone 16 (borrows for slice references)
-
-### Milestone 18: Collections (List, Map)
-**Goal:** Implement `List[T]` and `Map[K, V]` with hardcoded types
-
-**Tasks:**
-- Implement `List[int]` and `List[str]` as built-in types:
-  - Dynamic array with growth
-  - Methods: `append`, `len`, `get`, `remove`
-- Implement `Map[str, int]` as built-in type:
-  - Hash table implementation
-  - Methods: `insert`, `get`, `remove`, `contains`
-- Add `for` loop support for collections:
-  ```ryo
-  for item in list:
-      process(item)
-  ```
-- Extend Codegen: Generate IR for:
-  - Collection allocation/deallocation
-  - Dynamic resizing
-  - Iteration
-- Write tests for collections
-
-**Visible Progress:** Can use dynamic collections for real programs
-
-**Example:**
-```ryo
-fn main() -> int:
-    mut numbers = List[int]()
-    numbers.append(1)
-    numbers.append(2)
-    numbers.append(3)
-
-    mut sum = 0
-    for n in numbers:
-        sum += n
-    print(sum)  # 6
-
-    mut scores = Map[str, int]()
-    scores.insert("Alice", 100)
-    scores.insert("Bob", 85)
-
-    alice_score = scores.get("Alice") orelse 0
-    print(alice_score)  # 100
-
-    return 0
-```
-
-**Implementation Notes:**
-- **Hardcoded types** initially: `List[int]`, `List[str]`, `Map[str, int]`
-- Generics deferred to Phase 5 (post-v0.1.0)
-- Collections own their data (RAII cleanup in M19)
-- Iteration uses immutable borrows
-- Dependencies: Milestone 17 (slices for iteration)
-
-### Milestone 19: RAII & Drop Trait
-**Goal:** Implement automatic resource cleanup with Drop trait
-
-**Tasks:**
-- Add `Drop` trait to standard library:
-  ```ryo
-  trait Drop:
-      fn drop(&mut self)
-  ```
-- Implement automatic drop calls:
-  - At end of scope
-  - On early returns
-  - On move (drop old value if reassigning)
-- Implement Drop for built-in types:
-  - `str`: Free heap memory
-  - `List[T]`: Free array and drop elements
-  - `Map[K, V]`: Free table and drop entries
-- Extend Codegen: Generate IR for:
-  - Drop calls at scope exit
-  - Drop calls on early returns
-- Write tests for RAII and Drop
-
-**Visible Progress:** No memory leaks! Resources cleaned up automatically.
-
-**Example:**
-```ryo
-struct File:
-    handle: int  # File descriptor
-
-impl Drop for File:
-    fn drop(&mut self):
-        close_file(self.handle)  # FFI call
-
-fn process_file(path: &str):
-    file = open_file(path)  # File opened
-    # ... use file ...
-    # File automatically closed at end of scope (drop called)
-
-fn early_return():
-    file = open_file("data.txt")
-    if file.is_empty():
-        return  # File dropped here (drop called on early return)
-    # ... use file ...
-    # File dropped here (drop called at end of scope)
-```
-
-**Implementation Notes:**
-- Drop is **automatic** (compiler inserts calls)
-- Drop order: **reverse of declaration order** (like Rust)
-- User-defined Drop for custom resources
-- Prevents resource leaks (files, sockets, memory)
-- Dependencies: Milestone 14 (traits), Milestone 20 (mutable borrows for &mut self)
-
-### Milestone 20: Mutable Borrows (`&mut T`)
-**Goal:** Implement mutable references with aliasing restrictions
-
-**Tasks:**
-- Add `&mut` syntax to lexer/parser
-- Extend type system: `Type::MutRef(Box<Type>)`
-- Parse mutable borrow syntax:
-  - Type annotations: `&mut User`, `&mut [int]`
-  - Borrow expressions: `&mut value`
-- Implement borrow checking rules:
-  - **At most one mutable borrow** at a time
-  - **No immutable borrows while mutable borrow exists**
-  - Borrows must not outlive the value
-- Update method signatures to use `&mut self`:
-  ```ryo
-  fn set_x(&mut self, x: float)
-  ```
-- Extend Codegen: Generate IR for:
-  - Mutable references (pointers with write access)
-  - Dereferencing for mutation
-- Write tests for mutable borrow checking
-
-**Visible Progress:** Can mutate through references safely (no data races)
-
-**Example:**
-```ryo
-fn increment(x: &mut int):
-    *x += 1  # Dereference and mutate
-
-impl Point:
-    fn translate(&mut self, dx: float, dy: float):
-        self.x += dx
-        self.y += dy
-
-fn main() -> int:
-    mut count = 0
-    increment(&mut count)
-    print(count)  # 1
-
-    mut p = Point(x=0.0, y=0.0)
-    p.translate(5.0, 10.0)
-    print(p.x)  # 5.0
-
-    # Aliasing prevented:
-    # r1 = &mut p
-    # r2 = &mut p      # Error: cannot borrow as mutable twice
-    # r3 = &p          # Error: cannot borrow as immutable while mutable borrow exists
-
-    return 0
-```
-
-**Implementation Notes:**
-- Mutable borrows are **exclusive** (no other borrows allowed)
-- Prevents data races at compile time
-- Explicit dereference `*x` for mutation in some cases (automatic for method calls)
-- Simplified borrow checker (no lifetimes like Rust)
-- Dependencies: Milestone 16 (immutable borrows provide foundation)
-
-### Milestone 21: Try/Catch Operators
-**Goal:** Implement ergonomic error propagation and handling
-
-**Tasks:**
-- Add `try` and `catch` keywords to lexer/parser
-- Extend AST: `ExprKind::Try`, `ExprKind::Catch`
-- Parse try expressions:
-  ```ryo
-  result = try fallible_operation()
-  ```
-- Parse catch expressions:
-  ```ryo
-  value = operation() catch |e|:
-      handle_error(e)
-      return default_value
-  ```
-- Implement try semantics:
-  - If operation returns error, propagate to caller
-  - Automatically composes error unions
-- Implement catch semantics:
-  - If operation returns error, execute handler block
-  - Handler has access to error value
-  - Can return, re-throw, or provide default
-- Extend Codegen: Generate IR for:
-  - Error checking and propagation
-  - Catch handler jumps
-- Write tests for try/catch
-
-**Visible Progress:** Clean error handling without verbose match statements
-
-**Example:**
-```ryo
-# File: file/errors.ryo
-error NotFound(path: str)
-error PermissionDenied(path: str)
-
-# File: parse/errors.ryo
-error InvalidFormat(message: str)
-
-# File: main.ryo
-import file
-import parse
-
-fn load_config(path: &str) -> (file.NotFound | file.PermissionDenied | parse.InvalidFormat)!Config:
-    content = try read_file(path)       # Propagates file errors
-    config = try parse_config(content)  # Propagates parse errors
-    return config
-
-fn main() -> int:
-    config = load_config("config.toml") catch |e|:
-        match e:
-            file.NotFound(path):
-                print(f"File not found: {path}")
-            file.PermissionDenied(path):
-                print(f"Permission denied: {path}")
-            parse.InvalidFormat(msg):
-                print(f"Invalid config: {msg}")
-        return 1  # Error exit code
-
-    print("Config loaded successfully")
-    return 0
-```
-
-**Implementation Notes:**
-- Try is **expression-based** (returns success value or propagates error)
-- Catch is **expression-based** (can return value from handler)
-- Error unions composed automatically (no manual enum definition)
-- Pattern matching in catch for specific error handling
-- Dependencies: Milestone 11 (error types), Milestone 9 (pattern matching)
-
-## Phase 4: Module System & Core Ecosystem
-
-### Milestone 22: Module System (Implementation)
+### Milestone 6: Module System (Implementation)
 **Goal:** Implement module system for code organization and visibility control
 
 **Status:** ⏳ Planned (Design completed in Milestone 5)
@@ -1483,7 +546,7 @@ fn main() -> int:
 - Re-exports via `pub use` deferred to future enhancement (see proposals.md)
 
 **Dependencies:**
-- Milestone 21 (all core language features needed for module contents)
+- Milestone 4 (functions needed for module contents)
 - Milestone 5 (design complete, ready for implementation)
 
 **Future Enhancements** (see proposals.md):
@@ -1492,7 +555,904 @@ fn main() -> int:
 - Conditional compilation: `#[cfg(test)]`
 - Workspace support for multi-package projects
 
-### Milestone 23: Standard Library Core
+### Milestone 7: Expressions & Operators (Extended)
+**Goal:** Support float type and extended operators
+
+**Tasks:**
+- Add `float` type to lexer/parser/AST
+- Extend type system to handle `int` and `float` separately
+- Add float literal parsing: `3.14`, `2.5`
+- Add comparison operators: `==`, `!=`, `<`, `>`, `<=`, `>=`
+- Add division operator (`/`) with integer division semantics
+- Add modulo operator (`%`)
+- Implement basic type checking:
+  - Cannot mix `int` and `float` in operations without explicit conversion
+  - Comparison operators return `bool` (added in M6)
+- Extend Codegen: Generate IR for:
+  - Float arithmetic operations
+  - Comparison operations
+  - Type conversions (if needed)
+- Write tests for float operations and comparisons
+
+**Visible Progress:** Can use floats and compare values. Clear type error messages when mixing types.
+
+**Example:**
+```ryo
+x: float = 3.14
+y: float = 2.71
+pi_approx = x + y / 2.0
+
+a = 10
+b = 3
+quotient = a / b      # 3 (integer division)
+remainder = a % b     # 1
+```
+
+**Implementation Notes:**
+- Float arithmetic uses IEEE 754 semantics
+- Integer division truncates toward zero
+- Type errors are clear and localized (bidirectional type checking)
+- Dependencies: Milestone 4 (functions for testing)
+
+### Milestone 8: Control Flow & Booleans
+**Goal:** Implement `if/else` statements, `for` loops, and boolean logic
+
+**Tasks:**
+- **From M3.5**: Implement void/unit type (for functions with no return value)
+  - Add `void` type to type system as the unit type
+  - Update `print()` signature from placeholder `int` to proper `void`
+  - Type checker prevents using void values in expressions
+  - Enable functions with no return: `fn do_something() -> void:`
+- Add `bool` type to type system
+- Add boolean literals: `true`, `false`
+- Add logical operators: `and`, `or`, `not`
+- Extend Parser/AST:
+  - `StmtKind::IfStmt` with optional `else` branch
+  - `StmtKind::ForLoop`
+  - `StmtKind::Break`, `StmtKind::Continue`
+  - Boolean expressions in conditions
+- Extend Codegen: Generate Cranelift IR for:
+  - Conditional branching (if/else)
+  - Loop constructs (for)
+  - Break/continue statements
+  - Boolean operations (and/or/not with short-circuiting)
+- Write tests for control flow and boolean logic
+
+**Visible Progress:** Can write programs with conditionals and loops
+
+**Example:**
+```ryo
+fn is_positive(x: int) -> bool:
+    if x > 0:
+        return true
+    else:
+        return false
+
+fn print_if_even(n: int) -> void:  # void return type
+    if n % 2 == 0:
+        print("Even number")
+    # No return statement needed for void
+
+fn main() -> int:
+    mut counter = 0
+    for counter < 10:
+        print_if_even(counter)
+        counter += 1
+    return 0
+```
+
+**Implementation Notes:**
+- Short-circuit evaluation for `and`/`or` (don't evaluate right side if not needed)
+- Break/continue only valid inside loops (checked at compile time)
+- If expressions (returning values) deferred to later milestone
+- Dependencies: Milestone 7 (comparison operators)
+
+### Milestone 9: Structs
+**Goal:** Implement user-defined composite types with named fields
+
+**Tasks:**
+- Add `struct` keyword to lexer/parser
+- Extend AST: `StmtKind::StructDef`
+- Parse struct definitions:
+  ```ryo
+  struct Point:
+      x: float
+      y: float
+  ```
+- Parse struct literals with parentheses: `Point(x=1.0, y=2.0)`
+- Parse field access: `point.x`, `point.y`
+- Extend type system:
+  - Track struct definitions in symbol table
+  - Type-check struct literals (all fields present, correct types)
+  - Type-check field access (field exists, correct type)
+- Extend Codegen: Generate IR for:
+  - Stack allocation of structs
+  - Field access (offset calculations)
+  - Struct initialization
+- Write tests for struct definition, initialization, and field access
+
+**Visible Progress:** Can define and use custom types with multiple fields
+
+**Example:**
+```ryo
+struct Rectangle:
+    width: float
+    height: float
+
+fn area(rect: Rectangle) -> float:
+    return rect.width * rect.height
+
+fn main() -> int:
+    r = Rectangle(width=10.0, height=5.0)
+    a = area(r)
+    return 0
+```
+
+**Implementation Notes:**
+- Structs are **moved by default** (ownership semantics)
+- Field order matters (affects memory layout)
+- No default values for fields (all must be initialized)
+- No methods yet (added in Milestone 18)
+- Parentheses with named arguments used for struct literals: `Point(x=1, y=2)`, consistent with language design
+- Braces reserved exclusively for f-string interpolation
+- Dependencies: Milestone 4 (functions for passing structs)
+
+### Milestone 10: Enums (Algebraic Data Types)
+**Goal:** Implement enums with variants (sum types / tagged unions)
+
+**Tasks:**
+- Add `enum` keyword to lexer/parser
+- Extend AST: `StmtKind::EnumDef`
+- Parse enum definitions with variants:
+  ```ryo
+  enum Color:
+      Red
+      Green
+      Blue
+
+  enum Shape:
+      Circle(radius: float)
+      Rectangle(width: float, height: float)
+  ```
+- Parse enum variant construction: `Color.Red`, `Shape.Circle(5.0)`
+- Extend type system:
+  - Track enum definitions in symbol table
+  - Type-check variant construction
+- Extend Codegen: Generate IR for:
+  - Enum representation (tag + data)
+  - Variant construction
+  - Tag checking (for pattern matching in M9)
+- Write tests for enum definition and variant construction
+
+**Visible Progress:** Can define sum types and construct variants
+
+**Example:**
+```ryo
+enum Result:
+    Success(value: int)
+    Error(message: str)
+
+fn divide(a: int, b: int) -> Result:
+    if b == 0:
+        return Result.Error("Division by zero")
+    return Result.Success(a / b)
+```
+
+**Implementation Notes:**
+- Enums are tagged unions (tag indicates which variant is active)
+- Memory layout: tag (int) + max variant size
+- Cannot access variant data without pattern matching (safety)
+- String type needed for example above (added in Milestone 15)
+- Dependencies: Milestone 9 (structs provide foundation for variant data)
+
+### Milestone 11: Pattern Matching
+**Goal:** Implement exhaustive pattern matching on enums and literals
+
+**Tasks:**
+- Add `match` keyword to lexer/parser
+- Extend AST: `ExprKind::Match` with arms
+- Parse match expressions:
+  ```ryo
+  match value:
+      Pattern1: expression1
+      Pattern2: expression2
+      _: default_expression
+  ```
+- Parse patterns:
+  - Literal patterns: `42`, `true`, `Color.Red`
+  - Enum variant patterns: `Shape.Circle(radius)` (destructuring)
+  - Wildcard pattern: `_`
+- Implement exhaustiveness checking:
+  - All enum variants must be covered
+  - Or use wildcard `_` to catch remaining cases
+- Extend Codegen: Generate IR for:
+  - Match expressions (tag checking, jumps to arms)
+  - Variable binding from patterns
+- Write tests for pattern matching and exhaustiveness
+
+**Visible Progress:** Can safely destructure enums and handle all cases
+
+**Example:**
+```ryo
+enum Option:
+    Some(value: int)
+    None
+
+fn unwrap_or(opt: Option, default: int) -> int:
+    match opt:
+        Option.Some(v): return v
+        Option.None: return default
+
+fn describe_color(color: Color) -> str:
+    match color:
+        Color.Red: return "red"
+        Color.Green: return "green"
+        Color.Blue: return "blue"
+```
+
+**Implementation Notes:**
+- Match is an **expression** (returns a value)
+- All arms must have same return type
+- Exhaustiveness checking at compile time (prevents missing cases)
+- Nested patterns deferred to later milestone
+- Dependencies: Milestone 10 (enums to match on)
+
+### Milestone 12: Tuples
+**Goal:** Implement tuple types for multiple return values and grouping
+
+**Tasks:**
+- Add tuple syntax to lexer/parser
+- Extend type system: `Type::Tuple(Vec<Type>)`
+- Parse tuple type annotations: `(int, str)`
+- Parse tuple literals: `(42, "hello")`
+- Parse tuple destructuring:
+  ```ryo
+  (x, y) = get_point()
+  ```
+- Extend Codegen: Generate IR for:
+  - Tuple construction (stack allocation)
+  - Tuple field access by index
+  - Tuple destructuring in assignments
+- Write tests for tuple types, literals, and destructuring
+
+**Visible Progress:** Can return multiple values from functions and destructure them
+
+**Example:**
+```ryo
+fn divmod(a: int, b: int) -> (int, int):
+    quotient = a / b
+    remainder = a % b
+    return (quotient, remainder)
+
+fn main() -> int:
+    (q, r) = divmod(10, 3)
+    # q = 3, r = 1
+    return 0
+```
+
+**Implementation Notes:**
+- Tuples are **anonymous structs** (no named fields)
+- Fixed size (known at compile time)
+- Can be nested: `((int, int), str)`
+- Tuple indexing syntax deferred (use destructuring for now)
+- Tuples are **moved** like structs (ownership)
+- Dependencies: Milestone 9 (structs provide foundation)
+
+### Milestone 13: Error Types & Unions
+**Goal:** Implement error types, error unions, and the error trait
+
+**Tasks:**
+- Add `error` keyword to lexer/parser
+- Extend AST: `StmtKind::ErrorDef`
+- Parse error definitions:
+  ```ryo
+  # File: file/errors.ryo
+  error NotFound(path: str)
+  error PermissionDenied(path: str)
+
+  # File: main.ryo
+  import file
+  ```
+- Parse error union syntax: `(ErrorA | ErrorB)!SuccessType`
+- Parse function signatures with error returns: `fn foo() -> FileError!Data`
+- Implement automatic error union inference from `try` expressions
+- Implement `.message()` method for all errors (Error trait)
+- Extend Codegen: Generate IR for:
+  - Error variant construction
+  - Error unions (tagged union of errors + success value)
+- Write tests for error definitions and error unions
+
+**Visible Progress:** Can define domain-specific errors and compose them in error unions
+
+**Example:**
+```ryo
+# File: http/errors.ryo
+error ConnectionFailed(reason: str)
+error RequestTimeout
+
+# File: parse/errors.ryo
+error InvalidJson(message: str)
+
+# File: main.ryo
+import http
+import parse
+
+fn fetch_and_parse() -> (http.ConnectionFailed | http.RequestTimeout | parse.InvalidJson)!Data:
+    response = try http_get("https://api.example.com")  # Returns http errors
+    data = try parse_json(response.body())              # Returns parse errors
+    return data
+
+fn main() -> int:
+    # Error handling with try/catch added in Milestone 14
+    return 0
+```
+
+**Implementation Notes:**
+- Errors are **single-variant only** (no multi-variant enums for errors)
+- Error unions use `|` syntax for composition
+- All errors implement `.message() -> str` automatically
+- `try`/`catch` operators added in Milestone 14 for ergonomics
+- Dependencies: Milestone 10 (enums), Milestone 11 (pattern matching for handling)
+
+### Milestone 14: Try/Catch Operators
+**Goal:** Implement ergonomic error propagation and handling
+
+**Tasks:**
+- Add `try` and `catch` keywords to lexer/parser
+- Extend AST: `ExprKind::Try`, `ExprKind::Catch`
+- Parse try expressions:
+  ```ryo
+  result = try fallible_operation()
+  ```
+- Parse catch expressions:
+  ```ryo
+  value = operation() catch |e|:
+      handle_error(e)
+      return default_value
+  ```
+- Implement try semantics:
+  - If operation returns error, propagate to caller
+  - Automatically composes error unions
+- Implement catch semantics:
+  - If operation returns error, execute handler block
+  - Handler has access to error value
+  - Can return, re-throw, or provide default
+- Extend Codegen: Generate IR for:
+  - Error checking and propagation
+  - Catch handler jumps
+- Write tests for try/catch
+
+**Visible Progress:** Clean error handling without verbose match statements
+
+**Example:**
+```ryo
+# File: file/errors.ryo
+error NotFound(path: str)
+error PermissionDenied(path: str)
+
+# File: parse/errors.ryo
+error InvalidFormat(message: str)
+
+# File: main.ryo
+import file
+import parse
+
+fn load_config(path: &str) -> (file.NotFound | file.PermissionDenied | parse.InvalidFormat)!Config:
+    content = try read_file(path)       # Propagates file errors
+    config = try parse_config(content)  # Propagates parse errors
+    return config
+
+fn main() -> int:
+    config = load_config("config.toml") catch |e|:
+        match e:
+            file.NotFound(path):
+                print(f"File not found: {path}")
+            file.PermissionDenied(path):
+                print(f"Permission denied: {path}")
+            parse.InvalidFormat(msg):
+                print(f"Invalid config: {msg}")
+        return 1  # Error exit code
+
+    print("Config loaded successfully")
+    return 0
+```
+
+**Implementation Notes:**
+- Try is **expression-based** (returns success value or propagates error)
+- Catch is **expression-based** (can return value from handler)
+- Error unions composed automatically (no manual enum definition)
+- Pattern matching in catch for specific error handling
+- Dependencies: Milestone 13 (error types), Milestone 11 (pattern matching)
+
+## Phase 3: Type System & Memory Safety
+
+### Milestone 15: Basic Ownership & String Type
+**Goal:** Implement move semantics for heap-allocated `str` type and introduce `Copy` trait
+
+**Tasks:**
+- **From M3.5**: Upgrade string literal implementation to full str type
+  - String literals from M3.5 currently store in `.rodata` (read-only)
+  - Upgrade to heap-allocated str type (dynamic length)
+  - Enable string variables: `s: str = "hello"`
+  - Add string concatenation: `s1 + s2` or `s.concat(other)`
+  - Add string methods: `.len()`, `.is_empty()`, `.chars()`, `.substring()`, etc.
+  - Add formatted string output (f-strings): `f"Value: {x}"`
+- Implement semantic analysis pass (`src/checker.rs`):
+  - Track variable states (uninitialized, valid, moved)
+  - Implement move semantics for non-Copy types
+  - Detect use-after-move errors
+- Implement `Copy` trait concept:
+  - Primitives (`int`, `float`, `bool`) are Copy
+  - Structs/enums are Move by default
+  - str is Move (heap-allocated)
+- Extend Codegen: Generate IR for:
+  - str allocation/deallocation
+  - Move operations (memcpy)
+  - Copy operations (simple assignment)
+  - str concatenation operations
+- Write tests for ownership violations and string operations
+
+**Visible Progress:** Compiler catches use-after-move errors at compile time
+
+**Example:**
+```ryo
+fn main() -> int:
+    # String operations (from M3.5 deferred features)
+    s1: str = "hello"
+    s2: str = " world"
+    greeting = s1 + s2    # Concatenation
+    print(greeting)       # "hello world"
+
+    name = "Alice"
+    msg = f"Hello, {name}!"  # F-string formatting
+    print(msg)
+
+    # Ownership example
+    s3 = "test"       # str allocated
+    s4 = s3           # s3 moved to s4
+    # print(s3)      # Error: s3 was moved
+
+    x: int = 42
+    y = x             # x copied to y (int is Copy)
+    print(f"y = {y}") # OK: x still valid
+    return 0
+```
+
+**Implementation Notes:**
+- Move semantics are **implicit** (no explicit `move` keyword)
+- Copy trait is **marker-only** (no custom implementation yet)
+- str deallocation handled automatically at end of scope (RAII, refined in M23)
+- Simple garbage-free memory management
+- Dependencies: Milestone 13 (error types for allocation failures)
+
+**References:**
+- https://www.modular.com/blog/mojo-vs-rust
+- https://docs.modular.com/mojo/manual/values/
+
+### Milestone 16: Optional Types (`?T`)
+**Goal:** Implement null-safe optional types with `?T`, `none`, and `orelse`
+
+**Tasks:**
+- Add `none` keyword to lexer/parser
+- Extend type system: `Type::Optional(Box<Type>)`
+- Parse optional type annotations: `?User`, `?str`
+- Parse `none` literal
+- Parse optional chaining: `user?.name?.len()`
+- Parse `orelse` operator: `value orelse default`
+- Implement smart casting:
+  - `if x != none:` narrows type from `?T` to `T` in true branch
+  - `x orelse return err` narrows type after statement
+- Extend Codegen: Generate IR for:
+  - Optional representation (tag + value)
+  - None checks
+  - Optional chaining short-circuiting
+- Write tests for optional types and null safety
+
+**Visible Progress:** No more null pointer exceptions! Type-safe optional handling.
+
+**Example:**
+```ryo
+fn find_user(id: int) -> ?User:
+    if id < 0:
+        return none
+    return User(name="Alice", id=id)
+
+fn main() -> int:
+    user = find_user(42)
+
+    # Optional chaining
+    name_len = user?.name?.len()  # Returns ?int
+
+    # Providing defaults
+    display_name = user?.name orelse "Unknown"
+
+    # Early return with smart casting
+    u = user orelse return 1
+    # u is now User (not ?User) after this line
+    print(u.name)
+
+    return 0
+```
+
+**Implementation Notes:**
+- Optional types use **tagged union** (tag + value)
+- `none` is **not null** (different representation, type-safe)
+- Smart casting narrows types in control flow
+- Chaining returns `?T` (must handle with `orelse` or check)
+- Dependencies: Milestone 10 (enums provide foundation for tagged unions)
+
+### Milestone 17: Traits
+**Goal:** Implement trait system for behavior abstraction
+
+**Tasks:**
+- Add `trait` keyword to lexer/parser
+- Extend AST: `StmtKind::TraitDef`
+- Parse trait definitions:
+  ```ryo
+  trait Drawable:
+      fn draw(self)
+      fn area(self) -> float
+  ```
+- Parse trait bounds in function signatures: `fn process[T: Drawable](obj: T)`
+- Extend type system:
+  - Track trait definitions
+  - Track trait implementations
+  - Check trait bounds
+- **Static dispatch only** (monomorphization, no dynamic dispatch yet)
+- Write tests for trait definition and bounds
+
+**Visible Progress:** Can define shared behavior across types
+
+**Example:**
+```ryo
+trait Printable:
+    fn to_string(self) -> str
+
+impl Printable for int:
+    fn to_string(self) -> str:
+        # Convert int to string
+        return int_to_str(self)
+
+impl Printable for User:
+    fn to_string(self) -> str:
+        return f"User({self.name})"
+```
+
+**Implementation Notes:**
+- Traits define **required methods** only
+- No associated types or constants yet (future milestone)
+- No default implementations yet (future milestone)
+- Static dispatch via monomorphization (like Rust)
+- Dependencies: Milestone 18 (methods needed for trait impl)
+
+### Milestone 18: Method Implementations
+**Goal:** Implement methods on types via `impl` blocks
+
+**Tasks:**
+- Add `impl` keyword to lexer/parser
+- Extend AST: `StmtKind::ImplBlock`
+- Parse impl blocks:
+  ```ryo
+  impl Rectangle:
+      fn area(self) -> float:
+          return self.width * self.height
+  ```
+- Parse method calls: `rect.area()`
+- Handle `self` parameter:
+  - `self` for consuming methods (move)
+  - `&self` for immutable borrow (added in M16)
+  - `&mut self` for mutable borrow (added in M20)
+- Extend type system:
+  - Associate methods with types
+  - Type-check method calls
+- Extend Codegen: Generate IR for:
+  - Method calls (pass self as first argument)
+  - Method definitions
+- Write tests for methods
+
+**Visible Progress:** Can call methods on custom types with dot syntax
+
+**Example:**
+```ryo
+struct Circle:
+    radius: float
+
+impl Circle:
+    fn area(self) -> float:
+        return 3.14159 * self.radius * self.radius
+
+    fn scale(self, factor: float) -> Circle:
+        return Circle{radius: self.radius * factor}
+
+fn main() -> int:
+    c = Circle{radius: 5.0}
+    a = c.area()              # Consumes c (moved)
+    # c.area()                # Error: c was moved
+    return 0
+```
+
+**Implementation Notes:**
+- `self` **moves by default** (ownership)
+- Method call syntax: `obj.method()` desugars to `Type::method(obj)`
+- No method overloading (one method per name per type)
+- Dependencies: Milestone 15 (ownership for self parameter)
+
+### Milestone 19: Immutable Borrows (`&T`)
+**Goal:** Implement immutable references to avoid unnecessary moves
+
+**Tasks:**
+- Add `&` syntax to lexer/parser for borrow operator
+- Extend type system: `Type::Ref(Box<Type>)`
+- Parse immutable borrow syntax:
+  - Type annotations: `&str`, `&User`
+  - Borrow expressions: `&value`
+- Implement borrow checking rules:
+  - Can have multiple immutable borrows
+  - Cannot mutate through immutable borrow
+  - Borrows must not outlive the value
+- Update method signatures to use `&self`:
+  ```ryo
+  fn area(&self) -> float
+  ```
+- Extend Codegen: Generate IR for:
+  - Taking references (get address)
+  - Dereferencing (automatic for method calls)
+  - Passing pointers
+- Write tests for borrow checking
+
+**Visible Progress:** Can share data without moving ownership
+
+**Example:**
+```ryo
+struct Point:
+    x: float
+    y: float
+
+impl Point:
+    fn distance(&self, other: &Point) -> float:
+        dx = self.x - other.x
+        dy = self.y - other.y
+        return sqrt(dx * dx + dy * dy)
+
+fn main() -> int:
+    p1 = Point(x=0.0, y=0.0)
+    p2 = Point(x=3.0, y=4.0)
+
+    d = p1.distance(&p2)   # Borrow p2, don't move it
+    print(d)               # Can still use p1 and p2
+
+    # p1.x = 10.0          # Error: p1 is immutably borrowed (if concurrent borrow)
+    return 0
+```
+
+**Implementation Notes:**
+- Borrows are **implicit** in many cases (function parameters)
+- References are **non-nullable** (always point to valid data)
+- Lifetime tracking is **simplified** (no explicit lifetimes like Rust)
+- Borrow checker uses basic scope-based analysis
+- Dependencies: Milestone 18 (methods with &self)
+
+### Milestone 21: Slices & String Slices
+**Goal:** Implement borrowed views into arrays and strings
+
+**Tasks:**
+- Add slice syntax to lexer/parser
+- Extend type system:
+  - `Type::Slice(Box<Type>)` for array slices `&[T]`
+  - `&str` as string slice (borrowed view)
+- Parse slice operations:
+  - Array slicing: `array[start:end]`
+  - Full slice: `array[:]`
+- Distinguish `str` (owned) from `&str` (borrowed):
+  - `str` is heap-allocated, owned, mutable
+  - `&str` is borrowed view, immutable
+- Extend Codegen: Generate IR for:
+  - Slice representation (pointer + length)
+  - Slice bounds checking
+  - String slice operations
+- Write tests for slices and string slices
+
+**Visible Progress:** Efficient string/array operations without copying
+
+**Example:**
+```ryo
+fn first_word(text: &str) -> &str:
+    for i in range(text.len()):
+        if text[i] == ' ':
+            return text[0:i]  # Return slice (no copy)
+    return text
+
+fn sum_slice(numbers: &[int]) -> int:
+    mut total = 0
+    for n in numbers:
+        total += n
+    return total
+
+fn main() -> int:
+    s = "hello world"
+    word = first_word(s)  # word is &str (view into s)
+    print(word)           # "hello"
+
+    nums = [1, 2, 3, 4, 5]
+    total = sum_slice(&nums[1:4])  # Pass slice [2, 3, 4]
+    print(total)  # 9
+    return 0
+```
+
+**Implementation Notes:**
+- Slices are **fat pointers** (pointer + length)
+- Bounds checking at runtime (panic on out-of-bounds)
+- String slices must be **UTF-8 valid** (checked at slice boundaries)
+- No mutable slices yet (added in M20)
+- Dependencies: Milestone 19 (borrows for slice references)
+
+### Milestone 22: Collections (List, Map)
+**Goal:** Implement `list[T]` and `map[K, V]` with hardcoded types
+
+**Tasks:**
+- Implement `list[int]` and `list[str]` as built-in types:
+  - Dynamic array with growth
+  - Methods: `append`, `len`, `get`, `remove`
+- Implement `map[str, int]` as built-in type:
+  - Hash table implementation
+  - Methods: `insert`, `get`, `remove`, `contains`
+- Add `for` loop support for collections:
+  ```ryo
+  for item in list:
+      process(item)
+  ```
+- Extend Codegen: Generate IR for:
+  - Collection allocation/deallocation
+  - Dynamic resizing
+  - Iteration
+- Write tests for collections
+
+**Visible Progress:** Can use dynamic collections for real programs
+
+**Example:**
+```ryo
+fn main() -> int:
+    mut numbers = list[int]()
+    numbers.append(1)
+    numbers.append(2)
+    numbers.append(3)
+
+    mut sum = 0
+    for n in numbers:
+        sum += n
+    print(sum)  # 6
+
+    mut scores = map[str, int]()
+    scores.insert("Alice", 100)
+    scores.insert("Bob", 85)
+
+    alice_score = scores.get("Alice") orelse 0
+    print(alice_score)  # 100
+
+    return 0
+```
+
+**Implementation Notes:**
+- **Hardcoded types** initially: `list[int]`, `list[str]`, `map[str, int]`
+- Generics deferred to Phase 5 (post-v0.1.0)
+- Collections own their data (RAII cleanup in M23)
+- Iteration uses immutable borrows
+- Dependencies: Milestone 21 (slices for iteration)
+
+### Milestone 23: RAII & Drop Trait
+**Goal:** Implement automatic resource cleanup with Drop trait
+
+**Tasks:**
+- Add `Drop` trait to standard library:
+  ```ryo
+  trait Drop:
+      fn drop(&mut self)
+  ```
+- Implement automatic drop calls:
+  - At end of scope
+  - On early returns
+  - On move (drop old value if reassigning)
+- Implement Drop for built-in types:
+  - `str`: Free heap memory
+  - `list[T]`: Free array and drop elements
+  - `map[K, V]`: Free table and drop entries
+- Extend Codegen: Generate IR for:
+  - Drop calls at scope exit
+  - Drop calls on early returns
+- Write tests for RAII and Drop
+
+**Visible Progress:** No memory leaks! Resources cleaned up automatically.
+
+**Example:**
+```ryo
+struct File:
+    handle: int  # File descriptor
+
+impl Drop for File:
+    fn drop(&mut self):
+        close_file(self.handle)  # FFI call
+
+fn process_file(path: &str):
+    file = open_file(path)  # File opened
+    # ... use file ...
+    # File automatically closed at end of scope (drop called)
+
+fn early_return():
+    file = open_file("data.txt")
+    if file.is_empty():
+        return  # File dropped here (drop called on early return)
+    # ... use file ...
+    # File dropped here (drop called at end of scope)
+```
+
+**Implementation Notes:**
+- Drop is **automatic** (compiler inserts calls)
+- Drop order: **reverse of declaration order** (like Rust)
+- User-defined Drop for custom resources
+- Prevents resource leaks (files, sockets, memory)
+- Dependencies: Milestone 17 (traits), Milestone 20 (mutable borrows for &mut self)
+
+### Milestone 20: Mutable Borrows (`&mut T`)
+**Goal:** Implement mutable references with aliasing restrictions
+
+**Tasks:**
+- Add `&mut` syntax to lexer/parser
+- Extend type system: `Type::MutRef(Box<Type>)`
+- Parse mutable borrow syntax:
+  - Type annotations: `&mut User`, `&mut [int]`
+  - Borrow expressions: `&mut value`
+- Implement borrow checking rules:
+  - **At most one mutable borrow** at a time
+  - **No immutable borrows while mutable borrow exists**
+  - Borrows must not outlive the value
+- Update method signatures to use `&mut self`:
+  ```ryo
+  fn set_x(&mut self, x: float)
+  ```
+- Extend Codegen: Generate IR for:
+  - Mutable references (pointers with write access)
+  - Dereferencing for mutation
+- Write tests for mutable borrow checking
+
+**Visible Progress:** Can mutate through references safely (no data races)
+
+**Example:**
+```ryo
+fn increment(x: &mut int):
+    *x += 1  # Dereference and mutate
+
+impl Point:
+    fn translate(&mut self, dx: float, dy: float):
+        self.x += dx
+        self.y += dy
+
+fn main() -> int:
+    mut count = 0
+    increment(&mut count)
+    print(count)  # 1
+
+    mut p = Point(x=0.0, y=0.0)
+    p.translate(5.0, 10.0)
+    print(p.x)  # 5.0
+
+    # Aliasing prevented:
+    # r1 = &mut p
+    # r2 = &mut p      # Error: cannot borrow as mutable twice
+    # r3 = &p          # Error: cannot borrow as immutable while mutable borrow exists
+
+    return 0
+```
+
+**Implementation Notes:**
+- Mutable borrows are **exclusive** (no other borrows allowed)
+- Prevents data races at compile time
+- Explicit dereference `*x` for mutation in some cases (automatic for method calls)
+- Simplified borrow checker (no lifetimes like Rust)
+- Dependencies: Milestone 19 (immutable borrows provide foundation)
+
+## Phase 4: Module System & Core Ecosystem
+
+### Milestone 24: Standard Library Core
 **Goal:** Implement essential standard library modules
 
 **Tasks:**
@@ -1505,16 +1465,16 @@ fn main() -> int:
   - `eprint(str) -> void`, `eprintln(str) -> void`: Print to stderr
   - `input() -> io.Error!str`: Read from stdin
   - `read_file(path: &str) -> io.Error!str`: Read file contents
-  - `write_file(path: &str, content: &str) -> io.Error!()`: Write to file
-  - `append_file(path: &str, content: &str) -> io.Error!()`: Append to file
+  - `write_file(path: &str, content: &str) -> io.Error!void`: Write to file
+  - `append_file(path: &str, content: &str) -> io.Error!void`: Append to file
 - Implement `string` module:
-  - `split(s: &str, delimiter: &str) -> List[str]`
+  - `split(s: &str, delimiter: &str) -> list[str]`
   - `join(parts: &[str], separator: &str) -> str`
   - `trim(s: &str) -> &str`
   - `to_upper(s: &str) -> str`, `to_lower(s: &str) -> str`
 - Implement `collections` module:
-  - `List[T]` methods: `push`, `pop`, `len`, `get`, `clear`
-  - `Map[K, V]` methods: `insert`, `remove`, `get`, `keys`, `values`
+  - `list[T]` methods: `push`, `pop`, `len`, `get`, `clear`
+  - `map[K, V]` methods: `insert`, `remove`, `get`, `keys`, `values`
   - Iterator support for `for` loops
 - Implement `math` module:
   - `abs(x: float) -> float`
@@ -1522,7 +1482,7 @@ fn main() -> int:
   - `pow(base: float, exp: float) -> float`
   - Constants: `PI`, `E`
 - Implement `os` module:
-  - `args() -> List[str]`: Command-line arguments
+  - `args() -> list[str]`: Command-line arguments
   - `env(key: &str) -> ?str`: Environment variables
   - `exit(code: int)`: Exit program
 - Write comprehensive tests for stdlib
@@ -1564,9 +1524,9 @@ fn main() -> int:
 - All I/O operations return error unions (explicit error handling)
 - UTF-8 string support throughout
 - Platform-specific code isolated to `os` module
-- Dependencies: Milestone 22 (modules for stdlib organization)
+- Dependencies: Milestone 6 (modules for stdlib organization)
 
-### Milestone 24: Panic & Debugging Support
+### Milestone 25: Panic & Debugging Support
 **Goal:** Implement panic mechanism and debugging features
 
 **Tasks:**
@@ -1631,9 +1591,9 @@ note: run with `RYOLANG_BACKTRACE=1` for full backtrace
 - Panic is **not recoverable** (use error handling for that)
 - Stack traces use DWARF debug info (compiled in debug mode)
 - Release builds can strip debug info for smaller binaries
-- Dependencies: Milestone 19 (Drop trait for unwinding)
+- Dependencies: Milestone 23 (Drop trait for unwinding)
 
-### Milestone 25: Testing Framework & Documentation
+### Milestone 26: Testing Framework & Documentation
 **Goal:** Implement built-in testing and documentation generation
 
 **Tasks:**
@@ -1705,9 +1665,9 @@ Test result: ok. 2 passed; 0 failed
 - Test discovery scans all files in project
 - Doc comments use **Markdown** (like Rust)
 - Generated docs include trait implementations, method signatures
-- Dependencies: Milestone 24 (assert functions)
+- Dependencies: Milestone 25 (assert functions)
 
-### Milestone 26: Core Language Complete & v0.1.0 Prep
+### Milestone 27: Core Language Complete & v0.1.0 Prep
 **Goal:** Finalize core language, polish, and prepare for v0.1.0 release
 
 **Tasks:**
@@ -1872,9 +1832,9 @@ fn main():
 **Goal:** Generic types and functions with trait bounds
 
 **Why Post-v0.1.0:**
-- Hardcoded collections (Milestone 18) sufficient for v0.1.0
+- Hardcoded collections (Milestone 22) sufficient for v0.1.0
 - Generic implementation is complex (monomorphization, specialization)
-- Trait system must be mature and stable (Milestone 14)
+- Trait system must be mature and stable (Milestone 17)
 - Community feedback will inform design (variance, associated types, etc.)
 
 **Features:**
@@ -1895,7 +1855,7 @@ fn max[T: Comparable](a: T, b: T) -> T:
     return b
 
 struct Stack[T]:
-    items: List[T]
+    items: list[T]
 
 impl[T] Stack[T]:
     fn push(&mut self, item: T):
@@ -1984,12 +1944,12 @@ This foundation enables building **synchronous applications** including CLI tool
 
 ### Realistic Estimates (2-4 weeks per milestone)
 
-**Phase 1 (M1-M3):** ✅ COMPLETE (~2 months)
-**Phase 2 (M4-M11):** 8 milestones × 3 weeks avg = ~24 weeks (~6 months)
-**Phase 3 (M12-M21):** 10 milestones × 3 weeks avg = ~30 weeks (~7.5 months)
-**Phase 4 (M22-M26):** 5 milestones × 4 weeks avg = ~20 weeks (~5 months)
+**Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
+**Phase 2 (M4-M14):** 11 milestones × 3 weeks avg = ~33 weeks (~8 months)
+**Phase 3 (M15-M23):** 9 milestones × 3 weeks avg = ~27 weeks (~7 months)
+**Phase 4 (M24-M27):** 4 milestones × 4 weeks avg = ~16 weeks (~4 months)
 
-**Total Estimated Time:** 74-104 weeks (18-26 months) from Phase 2 start to v0.1.0
+**Total Estimated Time:** 76 weeks (~19 months) from Phase 2 start to v0.1.0
 
 ### Development Approach
 
@@ -2000,9 +1960,9 @@ This foundation enables building **synchronous applications** including CLI tool
 
 ### Milestones by Complexity
 
-**Simple (2 weeks):** M4, M5, M6, M10, M22
-**Medium (3 weeks):** M7, M8, M9, M11, M12, M13, M14, M15, M16, M17, M18, M23, M24, M25
-**Complex (4-5 weeks):** M19, M20, M21, M26
+**Simple (2 weeks):** M4, M5, M6, M7, M12
+**Medium (3 weeks):** M8, M9, M10, M11, M13, M14, M15, M16, M17, M18, M19, M21, M22, M24, M25, M26
+**Complex (4-5 weeks):** M20, M23, M27
 
 This timeline is **realistic** based on compiler development best practices. Each milestone includes implementation, testing, documentation, and examples.
 
@@ -2014,7 +1974,7 @@ This section documents intentional limitations and pragmatic trade-offs in the r
 
 **No Generics in v0.1.0:**
 - **Why:** Generic implementation is complex (monomorphization, specialization, error messages)
-- **Workaround:** Hardcoded collection types (`List[int]`, `List[str]`, `Map[str, int]`)
+- **Workaround:** Hardcoded collection types (`list[int]`, `list[str]`, `map[str, int]`)
 - **Impact:** Some code duplication, but v0.1.0 remains usable for most applications
 - **Timeline:** Full generics in v0.4+ (Phase 5)
 

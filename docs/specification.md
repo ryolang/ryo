@@ -2,16 +2,16 @@
 
 ## 1. Introduction & Vision
 
-*   **Vision:** Ryo is a statically-typed, compiled programming language designed to offer a pragmatic balance between performance, memory safety, and developer ergonomics. It aims to combine the compile-time memory safety guarantees inspired by Rust (simplified, without a garbage collector), the approachable syntax and developer experience reminiscent of Python, and familiar async/await concurrency patterns.
+*   **Vision:** Ryo is a statically-typed, compiled programming language designed to prioritize developer experience while maintaining memory safety and competitive performance. It aims to combine the compile-time memory safety guarantees inspired by Rust (simplified, without a garbage collector), the approachable syntax and developer experience reminiscent of Python, and familiar async/await concurrency patterns. Where trade-offs exist, Ryo explicitly chooses developer productivity and debugging capability over raw performance optimization.
 
 *   **Target Domains:** Web Backend Development (API Servers, Microservices), CLI Tools, Network Services & Proxies, WebAssembly (Wasm) Applications & Libraries, Game Development (Tooling, Scripting, Core Logic), Data Processing & ETL Pipelines, and Higher-Level Embedded Systems.
 *   **Core Goals:**
     *   **Python-like Simplicity:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
     *   **Rust-like Safety (Simplified):** Memory safe by default via ownership and borrowing, without GC. Compile-time checks prevent dangling pointers, data races, use-after-free. Simplified borrowing model compared to Rust (no manual lifetimes).
     *   **Go-like Simplicity:** Minimal keyword set, straightforward core concepts, avoid unnecessary feature creep. Focus on providing essential, orthogonal features.
-    *   **Performance:** Compiled to efficient native code (or Wasm) via **Cranelift**. No GC pauses. Deterministic resource management.
-    *   **Effective Concurrency:** Simple and safe concurrency using familiar async/await patterns with a high-performance async runtime.
-    *   **Compile-Time Power:** Integrated compile-time function execution (`comptime`) for metaprogramming, configuration, and optimization.
+    *   **Competitive Performance:** Compiled to efficient native code (or Wasm) via **Cranelift**. No GC pauses. Deterministic resource management. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
+    *   **Effective Concurrency:** Simple and safe concurrency using familiar async/await patterns with an async runtime (planned).
+    *   **Compile-Time Power:** Integrated compile-time function execution (`comptime`) for metaprogramming, configuration, and optimization (planned for future implementation).
     *.  **Excellent Tooling:** Provide a seamless experience out-of-the-box, including a fast compiler, integrated package manager, REPL, and testing framework.
 
 *   **Target Audience:** Developers familiar with languages like Python, Go, TypeScript, or C# seeking better performance and stronger safety guarantees without the steep learning curve of Rust or the runtime overhead of GC languages, especially for backend services, CLI tools, and scripting.
@@ -24,15 +24,79 @@ Ryo synthesizes ideas from several modern programming languages:
 *   **Rust** - Ownership model for memory safety, algebraic data types (enums with data), pattern matching, trait system, Result/Option types
 *   **Mojo** - Simplified ownership without manual lifetimes, value semantics, progressive complexity model
 *   **Go** - Simplicity as a core design principle, fast compilation, built-in concurrency primitives, minimal feature set
-*   **Zig** - Comptime execution for zero-cost abstractions, explicit error handling, no hidden control flow, minimal runtime
+*   **Zig** - Explicit error handling with error unions, no hidden control flow, minimal runtime, comptime execution (Ryo plans similar compile-time features for future versions)
 
 **Key Differentiators**: Ryo aims to be easier than Rust (no lifetimes), safer than Python (compile-time memory safety), more expressive than Go (generics, algebraic types), and more familiar than Zig (Python-like syntax).
+
+### 1.1 DX-First Philosophy: Performance vs. Developer Experience Trade-offs
+
+Ryo explicitly prioritizes **developer experience and debugging capability over raw performance** in key areas. This philosophical choice distinguishes Ryo from languages that pursue zero-cost abstractions at the expense of usability.
+
+**Where Ryo Trades Performance for DX:**
+
+| Feature | Runtime Overhead | Binary Size Impact | DX Benefit | Rationale |
+|---------|------------------|-------------------|------------|-----------|
+| **Automatic error stack traces** | ~5-10% (at error creation) | - | Complete error origin tracking with file/line/function | Eliminates hours of debugging; worth the cost for most applications |
+| **Stack frame capture at `try`** | ~5-10% cumulative (at each propagation) | - | Full error propagation chain | Shows exactly how errors bubble through call stack |
+| **Panic stack traces** | ~5-10% always-on | - | Post-mortem analysis without debugger | Critical for production debugging |
+| **Debug symbols in binaries** | - | +20-30% | Resolve stack traces to source code | Use `--strip` flag for production if needed |
+
+**Total Estimated Overhead:** ~5-10% for error-heavy workloads, negligible for error-free paths.
+
+**When Ryo Is/Isn't Appropriate:**
+
+✅ **Good fit:**
+- Web backends, APIs, microservices (I/O-bound)
+- CLI tools, build systems, developer tooling
+- Applications where debugging time > runtime performance
+- Prototyping and rapid development
+- Teams prioritizing maintainability
+
+❌ **Not ideal for:**
+- Ultra-low-latency systems (HFT, real-time audio/video)
+- Bare-metal embedded systems with tight resource constraints
+- Applications where every microsecond matters
+- Systems that cannot afford 5-10% overhead
+
+**Comparison to Other Languages:**
+
+- **Rust:** Optional stack traces (`RUST_BACKTRACE`), no overhead by default. Harder to debug but faster.
+- **Go:** Simple stack traces with lower overhead. Less detailed than Ryo.
+- **Zig:** Minimal runtime, opt-in stack traces. More control, less automation.
+- **Ryo:** Rich debugging by default, configurable. Best DX out-of-box, with escape hatches.
+
+*Rationale: Most applications spend more engineering time debugging than optimizing. Ryo chooses to save developer time at the cost of runtime performance, making it ideal for the 95% of applications where developer productivity matters more than the last 10% of performance.*
+
+#### Configuration: Choice Without Complexity
+
+True DX means **smart defaults + user choice**, not mandatory overhead. Ryo provides configuration options for performance-critical applications:
+
+**Build-time control (compiler flags):**
+```bash
+ryo build                        # Default: full traces (~5-10% overhead)
+ryo build --error-traces=minimal # Location only (~2-3% overhead)
+ryo build --error-traces=off     # No capture (0% overhead)
+```
+
+**Profile-based defaults:**
+```toml
+# ryo.toml
+[profile.dev]
+error-traces = "full"      # Development wants full DX
+
+[profile.release]
+error-traces = "minimal"   # Production balances DX + performance
+```
+
+**Key principle:** Most developers never configure this. Defaults prioritize DX. Escape hatches exist for the 5% of applications where performance is critical.
+
+See Section 7.10 for complete configuration reference.
 
 ## 2. Lexical Structure
 
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
 *   **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
-    *   *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for types (structs, enums, traits) and enum variants. *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
+    *   *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for user-defined types (structs, enums, traits) and enum variants. Built-in fundamental types (primitives and collections) use lowercase (e.g., `int`, `str`, `list`, `map`). *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
 *   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `package`, `true`, `false`, `none`, `void`, `async`, `await`, `move`, `error`, `try`, `catch`, `orelse`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `as`, `default`, `let` are not keywords. `package` is an access modifier keyword added for package-internal visibility).
 *   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error union prefix (`!`), optional chaining (`?.`).
     *   **Important Note:** The `!` operator is used exclusively for error union type prefixes (`!T` = error or T, `ErrorType!T` = ErrorType or T). The `!` is NOT used for logical negation—use `not` instead (following Python convention). Similarly, `?` operator in type context (`?T`) denotes optional types, while `?.` is the optional chaining operator.
@@ -141,12 +205,12 @@ Ryo synthesizes ideas from several modern programming languages:
 *   `bool`: `true`, `false`.
 *   `str`: Owned, heap-allocated, UTF-8 string. Can grow and shrink dynamically when bound to a `mut` variable. *(Rationale: Provides a primary, easy-to-use string type. Mutability controlled by binding aligns with general variable mutability).*
 *   `char`: Unicode Scalar Value. Literal: `'a'`.
-*   `void`: Unit type. Represents a value with no data. Used for functions that return no meaningful value. Reserved keyword for future implementation. *(Rationale: Provides explicit way to represent "no return value" concept, common in many programming languages for side-effecting functions)*.
+*   `void`: Unit type. Represents a value with no data. Used for functions that return no meaningful value. *(Rationale: Provides explicit way to represent "no return value" concept, common in many programming languages for side-effecting functions)*.
 *   Explicit Sizes: `i8`-`i64`, `u8`-`u64`, `usize`, `float32`. *(Rationale: Necessary for control over representation, performance, and FFI).**
 
 ### 4.3 Tuple Type
 
-*   **Tuple Type:** `(T1, T2, ...)`. Literal `(v1, v2, ...)`. Access `.0`, `.1`, etc. Destructuring. The empty tuple `()` represents the unit type value. *(Rationale: High Pythonic familiarity. Ergonomic for returning multiple values and simple ad-hoc grouping without needing named structs. The empty tuple provides a natural syntax for the unit type)*.*
+*   **Tuple Type:** `(T1, T2, ...)`. Literal `(v1, v2, ...)`. Access `.0`, `.1`, etc. Destructuring. *(Rationale: High Pythonic familiarity. Ergonomic for returning multiple values and simple ad-hoc grouping without needing named structs. Note: The unit type is represented by the `void` keyword, not an empty tuple, to avoid syntax ambiguity)*.*
 
 ### 4.4 Slice Types (Borrowed Views)
 
@@ -216,8 +280,8 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
 
 ### 4.7 Built-in Collections
 
-*   `List[T]`: Dynamic array. Homogeneous. *(Built-in generic type)*
-*   `Map[K, V]`: Hash map. Homogeneous keys/values. `K` must be hashable/comparable. *(Built-in generic type)*
+*   `list[T]`: Dynamic array. Homogeneous. *(Built-in fundamental type)*
+*   `map[K, V]`: Hash map. Homogeneous keys/values. `K` must be hashable/comparable. *(Built-in fundamental type)*
 
 *Note: User-defined generics are planned for future implementation. See [Language Proposals](proposals.md#advanced-generics) for detailed generic type system design.*
 
@@ -442,6 +506,12 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 ### 4.10 Error Trait and Message Handling
 
+
+* **Error Creation:** When an error value is created (`return MyError(...)`), the compiler automatically captures the full call stack at that moment, storing it as the initial stack trace. **Performance Note:** Stack capture incurs ~5-10% overhead at error creation, but only when errors actually occur (error-free code paths have no overhead). See Section 1.1 for DX vs. performance trade-off rationale.
+* **Error Propagation (`try`):** When an error is propagated via try, the compiler appends a new frame to the error's stack trace. This new frame contains the location (file, line, function) of the try expression itself. **Performance Note:** Each propagation adds ~5-10% overhead at that specific `try` site when an error is being propagated (no overhead on success path).
+* **Result:** The final `.stack_trace()` provides a complete, easy-to-read "story" of the failure, starting with the original error and showing every function that propagated it. This rich debugging information is a core part of Ryo's DX-first philosophy.
+
+
 *   **Error Trait:** All error types automatically implement the `Error` trait:
     ```ryo
     trait Error:
@@ -456,7 +526,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
         function: str      # Function name with module path
 
     struct StackTrace:
-        frames: List[StackFrame]
+        frames: list[StackFrame]
 
     struct StackFrame:
         function: str      # Function name with module path
@@ -565,51 +635,84 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 *   Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
 
-## 5. Memory Management: "Ownership Lite"
+### 5. Memory Management: "Ownership Lite"
 
+The core principle of Ryo's "Ownership Lite" will be: **Borrow-by-Default for Functions, Move-by-Default for Assignment.** This is the crucial ergonomic trade-off that simplifies the model compared to Rust while maintaining safety.
+
+*   **Core Principle:** Simplified Ownership & Borrowing, inspired by Rust but using Mojo's access-mode mental model.
 *   **No Garbage Collector.** Provides deterministic performance and resource management.
-*   **Core Principle:** Simplified Ownership & Borrowing, inspired by Rust but aiming for lower complexity.
-    *   **Ownership:** Single owner responsible for deallocation.
-    *   **Move Semantics (Default):** Assignment (`new = old`), return, and passing owned arguments to functions (that don't declare borrows) *moves* ownership. The original variable (`old`) becomes invalid after the move (compile-time check). *(Rationale: Prevents accidental aliasing of owned mutable data. Provides clear resource responsibility transfer. This is the foundational rule).*
-    *   **Borrowing:** Grants temporary access without transferring ownership.
-        *   **Implicit Immutable Borrow (Default Function Params):**
-            *   Function parameters are *implicitly* treated as immutable borrows (`&Type`) unless marked `mut` or `move`. *(Wording slightly adjusted for clarity)*
-            *   **Important Distinction:** This default implicit borrow for function arguments *contrasts* with the default *move* semantics for assignment and return values. This choice prioritizes ergonomics for the common case of read-only function access (enhancing Pythonic feel) over strict uniformity. Developers must be aware that `my_func(my_var)` typically borrows `my_var` immutably (leaving `my_var` valid), while `new_var = my_var` moves `my_var` (invalidating `my_var`). The compiler must provide clear error messages when ownership rules are violated due to this distinction.
-            *   *(Example Added)*
-                ```ryo
-                fn process_data(data: &SomeType): # Explicit borrow, same effect as implicit
-                    # ... read data ...
 
-                fn read_data(data: SomeType): # Implicit immutable borrow
-                    # ... read data ...
+#### 5.1 Value Semantics (Copy) vs. Ownership Semantics (Move)
 
-                fn consume_data(move data: SomeType): # Explicit move (alternative to default borrow)
-                    # ... takes ownership ...
+*   **Value Types (Copy):** Primitive types (`int`, `float`, `bool`, `char`) and small, user-defined structs (that contain only Copy types) are **copied** on assignment, function call, and return. Ownership is trivial.
+*   **Ownership Types (Move):** Types that manage external resources (e.g., `str`, `list[T]`, `map[K, V]`, and most user-defined structs/enums) are **moved** by default.
 
-                fn main():
-                    my_data = SomeType { ... }
-                    read_data(my_data) # Implicitly borrows my_data, my_data still valid here
-                    # process_data(&my_data) # Explicit borrow, my_data still valid
+#### 5.2 The Three Modes of Data Access (Mojo-Inspired)
 
-                    moved_data = my_data # MOVES my_data, my_data is now INVALID
-                    # read_data(my_data) # Compile Error: Use of moved value 'my_data'
+Ryo defines three explicit ways to pass or assign data, which the compiler uses to enforce safety without manual lifetime annotations.
 
-                    another_data = SomeType { ... }
-                    consume_data(move another_data) # MOVES another_data, another_data is now INVALID
-                ```
-        *   **Explicit Mutable Borrow (`mut` Keyword):** `mut param: Type` requires a mutable borrow (`&mut Type`). The variable passed *must* be declared `mut`. *(Rationale: Makes mutation intent explicit. Tying it to variable declaration simplifies reasoning compared to call-site mutability markers).*
-        *   **Explicit Move (`move` Keyword on Param):** `move param: Type` explicitly enforces move semantics for a function parameter, overriding the implicit borrow default. *(Added for completeness)*
-        *   **Lifetime Inference:** Lifetimes are inferred by the compiler based primarily on **lexical scopes**. Borrows are valid only within the scope where they are created and cannot outlive the owner. **No manual lifetime annotations (`'a`)**. *(Rationale: Core simplification vs Rust, crucial for approachability).*
-            *   This simplification means some complex borrowing patterns possible in languages with manual lifetime annotations may not be directly expressible or may require different structuring (e.g., returning owned data instead of borrows, using reference counting). It prioritizes approachability over maximum flexibility.
-        *   **Borrowing Rules (Compile-Time Enforced):**
-            1.  At any point in time, a variable can have *either*: One or more **immutable borrows** OR Exactly **one mutable borrow**.
-            2.  Borrows must not outlive the owner's scope.
-            3.  A mutable borrow cannot exist simultaneously with any other borrow (mutable or immutable) to the same variable within the same or overlapping scopes.
-        *   **Collection Borrowing Rules:** Mutable borrow of collection prevents *any* other borrows to the collection *or its elements*. Reallocation may invalidate element borrows (compiler tracked). *(Rationale: Prioritizes safety and implementation simplicity over fine-grained element borrowing initially, preventing iterator invalidation and element dangling pointer issues, This rule simplifies safety by preventing issues like iterator invalidation, potentially being refined in future versions if safe fine-grained borrowing patterns are identified without significantly increasing complexity).*
-*   **RAII (`Drop` Trait):**
-    *   `impl Drop for Type: fn drop(self): ...`. Automatic cleanup on scope exit for owned values. Drop order is reverse declaration order within scope.
-    *   Errors in `drop` cannot propagate; must not panic. Use explicit methods for fallible cleanup. *(Rationale: Ensures deterministic, non-failing scope exit critical for resource safety).*
-*   **Shared Ownership:** `Shared[T]` (ARC) / `Weak[T]` provided in stdlib (e.g., `sync` module) for opt-in shared ownership and cycle breaking. API uses dot notation (`Shared.new`, `ref.clone`, `ref.downgrade`, `weak_ref.upgrade`). *(Rationale: Provides necessary mechanism for shared state and cyclic data when single ownership is insufficient, while making the associated overhead (ARC) explicit).*
+| Mode | Syntax/Keyword | Semantics | Variable State After Operation |
+| :--- | :--- | :--- | :--- |
+| **1. Ownership Transfer** | `move` keyword on parameter, or implicit on assignment/return | Transfers ownership. The resource is now managed by the new owner. | **Invalidated** (Use-After-Move is a compile error) |
+| **2. Exclusive Mutable Borrow** | `&mut` prefix on type (e.g., `&mut T`, `&mut self`) | Grants a temporary, **exclusive** mutable reference. Prevents all other access until the borrow ends. | **Valid** (Temporarily frozen from move/borrow) |
+| **3. Shared Immutable Borrow** | `&` prefix on type (e.g., `&T`, `&self`) or **Implicit Default** for function parameters | Grants a temporary, **shared** immutable reference. Read-only access. | **Valid** (Temporarily frozen from mutable borrow/move) |
+
+#### 5.3 Formalized Rules
+
+1.  **Assignment & Return (Default: MOVE):**
+    *   For Ownership Types, assignment (`new = old`) and return statements **move** the value, invalidating the original variable (`old`).
+    *   Example: `new_str = old_str` (moves `old_str`)
+
+2.  **Function Parameters (Default: IMMUTABLE BORROW):**
+    *   Function parameters are **implicitly treated as Shared Immutable Borrows (`&Type`)** unless explicitly marked with `&mut` or `move`.
+    *   This is the core ergonomic trade-off: `fn read(data: MyStruct)` is equivalent to `fn read(data: &MyStruct)`.
+    *   The compiler enforces the borrow rule: the argument passed *cannot* be mutated by the function, and the caller's variable remains valid after the call.
+
+3.  **Explicit Mutability:**
+    *   **Mutable Variable:** Use `mut` on declaration: `mut my_data = ...`
+    *   **Mutable Parameter:** Use the `&mut` symbol: `fn mutate(data: &mut MyType):` (This replaces the confusing `mut data: Type` syntax from the original spec).
+    *   **Explicit Move Parameter:** Use the `move` keyword: `fn consume(move data: MyType):` (Overrides the implicit borrow default).
+
+4.  **Borrowing Rules (Compile-Time Enforced):**
+    *   **One Writer OR Many Readers:** At any point, a variable can have *either* one or more Shared Immutable Borrows (`&`) *OR* exactly one Exclusive Mutable Borrow (`&mut`).
+    *   **Lexical Scopes:** Lifetimes are inferred by the compiler based on **lexical scopes**. A borrow cannot outlive the scope of its owner. **No manual lifetime annotations (`'a`) are required.**
+
+### 5.4 RAII (`Drop` Trait) - The Core of Non-GC Safety
+
+The `Drop` trait is the fundamental mechanism that allows Ryo to manage resources deterministically and avoid a GC.
+
+*   **Function:** It guarantees that a resource (like a file handle, network socket, or heap memory) is cleaned up *exactly* when its owning variable goes out of scope.
+*   **Safety & Performance:** Without `Drop`, Ryo would have to rely on manual cleanup calls, which are error-prone, or implement a full GC, which violates the "no GC pauses" performance goal.
+*   **Relation to Ownership:** The Move/Borrow model (Ownership Lite) dictates *who* owns the value and *when* that ownership ends (e.g., on scope exit or after a move). The `Drop` trait dictates *what happens* when ownership ends. They work together.
+
+The provided definition is sound:
+
+> `impl Drop for Type: fn drop(self): ...`. Automatic cleanup on scope exit for owned values. Drop order is reverse declaration order within scope.
+
+### 5.5 Shared Ownership (`Shared[T]` / ARC) - The Single-Owner Escape Hatch
+
+The Move/Borrow model is excellent for hierarchical, tree-like data structures where a single owner is clear. However, it cannot safely handle two common scenarios:
+
+1.  **Graph/Cyclic Data:** Structures like doubly linked lists or general graph data where nodes must reference each other, creating cycles that violate the single-owner rule.
+2.  **Shared State:** Intentional sharing of a resource among multiple, independent entities (e.g., a configuration object accessed by multiple worker threads).
+
+*   **Function:** `Shared[T]` (Atomic Reference Counted pointer) allows multiple "owners" to safely access the same data. The data is only dropped when the last `Shared[T]` reference is released. `Weak[T]` breaks cycles.
+*   **Safety:** By making this mechanism explicit, Ryo retains its safety guarantee. The developer must opt-in to the overhead and understand the shared nature of the data, rather than having it happen implicitly (like in a GC language).
+*   **Relation to Ownership:** When a value is wrapped in `Shared[T]`, the `Shared[T]` container becomes the new single owner, and the value inside is governed by the container's reference count.
+
+The provided definition is sound:
+
+> `Shared[T]` (ARC) / `Weak[T]` provided in stdlib... for opt-in shared ownership and cycle breaking. API uses dot notation... *(Rationale: Provides necessary mechanism... while making the associated overhead (ARC) explicit).*
+
+### Summary
+
+The Ryo Ownership Model is a three-layered system:
+
+1.  **Layer 1 (The Core):** **Move/Borrow/Exclusive Access** (The Mojo-inspired rules) - *Governs how data can be accessed and transferred.*
+2.  **Layer 2 (Resource Cleanup):** **RAII/Drop** - *Governs what happens when data ownership ends.*
+3.  **Layer 3 (The Escape Hatch):** **Shared[T]/Weak[T]** - *Governs how to handle multi-owner scenarios safely.*
+
+All three layers are required for Ryo to successfully deliver on its vision.
 
 ## 6. Functions & Closures
 
@@ -707,6 +810,8 @@ fn flexible_operation() -> !Data:
 *   *(Rationale: Zig-style `E!T` syntax is concise. Error unions eliminate wrapper types through automatic composition. Explicit unions document API contracts. Inferred unions reduce boilerplate.)*
 
 ### 7.3 Error Propagation (`try`)
+
+**Error Context Preservation (DX Priority):** When `try` propagates an error, it captures the current execution context (file, line, function name) and appends this frame to the error's internal stack trace. **Performance Impact:** This process incurs approximately **5-10% runtime overhead** (due to memory allocation and stack frame capture) at every propagation boundary where an error is actually being propagated. The success path (no error) has no overhead. Ryo prioritizes complete debugging information over raw performance; see Section 1.1 for trade-off rationale. The final stack trace shows the complete chain of propagation.
 
 The `try` keyword unwraps success or propagates the error early:
 
@@ -900,23 +1005,51 @@ note: Set RYOLANG_BACKTRACE=full for more verbose output
 
 #### **Debug Symbols and Stack Traces**
 
-*   **Debug symbols always included** by default (DWARF format via Cranelift)
-*   **Stack traces automatically captured** - no performance trade-off option in v1.0
-*   **Binary size impact** - approximately 20-30% larger with debug symbols
-*   **Environment variable `RYOLANG_BACKTRACE`** controls output verbosity:
-    - `RYOLANG_BACKTRACE=1` (default) - standard stack trace
-    - `RYOLANG_BACKTRACE=full` - verbose output with additional context
-    - `RYOLANG_BACKTRACE=0` - minimal output (not recommended, disables stack trace)
+**Default behavior (DX-optimized):**
+- Stack traces automatically captured for all panics
+- Debug symbols included (DWARF format via Cranelift)
+- Binary size impact: +20-30%
+
+**Configuration options:**
+
+*Build-time (compiler flags):*
+```bash
+ryo build                        # Default: full traces
+ryo build --error-traces=minimal # Location only (~2-3% overhead)
+ryo build --error-traces=off     # No automatic capture (0% overhead)
+ryo build --strip                # Remove debug symbols (production)
+```
+
+*Runtime (environment variables):*
+```bash
+RYOLANG_ERROR_TRACES=full    # Show all frames
+RYOLANG_ERROR_TRACES=short   # Show 3-5 frames (default)
+RYOLANG_ERROR_TRACES=off     # Only error message
+```
+
+**Recommended approach:**
+- Development: Use defaults (`--error-traces=full`)
+- Production: Use `--error-traces=minimal` or profile-based config
+- HFT/embedded: Use `--error-traces=off` for zero overhead
 
 #### **Performance Implications**
 
-*   **Stack trace capture adds overhead** (~5-10% estimated, varies by workload)
-*   **Memory overhead** for maintaining stack frame information
-*   **Trade-off philosophy**: Developer productivity and debugging capability prioritized over raw performance
-*   **Mitigation strategies**:
-    - For performance-critical inner loops, structure code to avoid panic in hot paths
-    - Use error types for recoverable errors instead of panics
-    - Consider `RYOLANG_BACKTRACE=0` only in extreme cases (not recommended)
+Panic stack traces incur runtime overhead even when no panic occurs (in `full` mode):
+
+*   **Runtime overhead** - ~5-10% estimated (varies by workload) for stack frame maintenance
+*   **Memory overhead** - Maintaining stack frame information uses additional memory
+*   **Configurable** - Use `--error-traces=minimal` or `=off` to reduce/eliminate overhead (see Section 7.10)
+
+**When to configure:**
+- Ultra-low-latency systems → Use `--error-traces=off`
+- Performance-sensitive services → Use `--error-traces=minimal`
+- Most applications → Use defaults (debugging capability > 5-10% overhead)
+
+**Mitigation strategies:**
+- Use build profiles (dev: full, release: minimal)
+- Structure code to avoid panic in hot paths
+- Use error types (`!T`) for recoverable errors instead of panics
+- See Section 7.10 for complete configuration guide
 
 #### **When to Use `panic`**
 
@@ -1006,10 +1139,20 @@ Ryo provides comprehensive stack trace and debugging information to help diagnos
 
 #### **Automatic Stack Trace Capture**
 
-*   **Always captured** - Stack traces are automatically captured for all panics and errors
-*   **No performance trade-off option** - Debugging capability is prioritized over micro-optimization
-*   **Full call chain** - Shows complete function call path from entry point to error location
-*   **Accessible at runtime** - Use `.stack_trace()` method on errors to access frame information
+**Default behavior (DX-first):**
+- Stack traces automatically captured for all panics and errors
+- ~5-10% runtime overhead in default mode
+- Can be configured at build-time or runtime
+
+**Configuration tiers:**
+
+1. **Build-time** (most common): `--error-traces=full|minimal|off`
+2. **Runtime**: `RYOLANG_ERROR_TRACES` env var (controls display only)
+
+See Section 7.10 for complete configuration options and trade-offs.
+
+**Full call chain** - Shows complete function call path from entry point to error location
+**Accessible at runtime** - Use `.stack_trace()` method on errors to access frame information
 
 #### **Using Stack Traces for Debugging**
 
@@ -1081,15 +1224,22 @@ RYOLANG_BACKTRACE=full ./my_program
 RYOLANG_BACKTRACE=0 ./my_program
 ```
 
-#### **Performance and Overhead**
+#### **Comparison: Ryo vs Other Languages**
 
-*   **Runtime overhead** - Stack trace capture adds approximately 5-10% overhead (varies by workload)
-*   **Memory overhead** - Maintaining stack frame information uses additional memory
-*   **Trade-off philosophy** - Debugging capability and developer productivity prioritized over raw performance
-*   **Mitigation strategies**:
-    - Structure performance-critical code to avoid panics in hot paths
-    - Use error types for recoverable errors instead of panics
-    - Profile real-world workloads to measure actual impact
+Understanding how Ryo's debugging approach compares to alternatives:
+
+| Language | Stack Trace Approach | Overhead | DX Rating | When to Choose |
+|----------|---------------------|----------|-----------|----------------|
+| **Ryo** | Always-on, automatic, rich context | ~5-10% always | ⭐⭐⭐⭐⭐ Excellent | When debugging ease > raw performance |
+| **Rust** | Optional (`RUST_BACKTRACE=1`), opt-in | ~0% default, ~3-5% when enabled | ⭐⭐⭐ Good (requires env var) | When performance > debugging ease |
+| **Go** | Always-on, simpler traces | ~1-3% | ⭐⭐⭐⭐ Very good (less detail) | Balanced, but less detail than Ryo |
+| **Zig** | Optional, manual stack walking | ~0% default | ⭐⭐ Fair (manual effort) | Maximum control, minimal overhead |
+| **Python** | Always-on, interpreter traces | High (GC+interpreter) | ⭐⭐⭐⭐⭐ Excellent | Prototyping, development |
+| **C/C++** | Debugger-only, no built-in traces | ~0% | ⭐ Poor (debugger required) | Maximum performance, embedded |
+
+**Key Takeaway:** Ryo sits between Python (maximum DX, high overhead) and Rust (maximum performance, manual DX). Ryo chooses mandatory rich debugging at a measurable but acceptable cost for most applications.
+
+For complete performance implications and mitigation strategies, see Section 7.6.
 
 #### **Best Practices for Debugging**
 
@@ -1120,6 +1270,107 @@ RYOLANG_BACKTRACE=0 ./my_program
    - Use error types for expected failures
    - Reserve `panic()` for bugs and internal inconsistencies
    - Structured error handling is better for debugging than post-mortem panic analysis
+
+### 7.10 Error Trace Configuration
+
+Ryo provides flexible configuration for error stack traces, balancing DX with performance needs.
+
+#### **Configuration Levels**
+
+**1. Build-Time (Recommended)**
+
+Compiler flag: `--error-traces=LEVEL`
+
+| Level | Creation Overhead | Propagation Overhead | Total | Use Case |
+|-------|-------------------|----------------------|-------|----------|
+| `full` (default) | ~5-10% | ~5-10% cumulative | ~5-10% | Development, most production |
+| `minimal` | ~2-3% | 0% | ~2-3% | Performance-sensitive services |
+| `off` | 0% | 0% | 0% | HFT, real-time, embedded |
+
+**Examples:**
+```bash
+# Default build with full traces
+ryo build
+
+# Minimal traces for production
+ryo build --release --error-traces=minimal
+
+# Zero overhead for performance-critical applications
+ryo build --release --error-traces=off --strip
+```
+
+**2. Profile-Based Configuration**
+
+Configure per build profile in `ryo.toml`:
+
+```toml
+[profile.dev]
+error-traces = "full"      # Full DX during development
+
+[profile.release]
+error-traces = "minimal"   # Balanced for production
+
+[profile.production]
+error-traces = "off"       # Maximum performance if needed
+```
+
+**3. Runtime Configuration (Display Control)**
+
+Environment variables control **display**, not capture:
+
+```bash
+RYOLANG_ERROR_TRACES=full    # Show all frames (verbose)
+RYOLANG_ERROR_TRACES=short   # Show 3-5 frames (default)
+RYOLANG_ERROR_TRACES=off     # Only error message
+```
+
+**Note:** Runtime variables only affect what's printed, not what's captured. Use build-time flags to eliminate capture overhead.
+
+#### **Recommended Configurations by Use Case**
+
+**Web Backend / API Server:**
+```toml
+[profile.dev]
+error-traces = "full"
+
+[profile.release]
+error-traces = "full"  # Still useful for debugging production issues
+```
+
+**High-Performance Service:**
+```toml
+[profile.dev]
+error-traces = "full"
+
+[profile.release]
+error-traces = "minimal"  # Location only, minimal overhead
+```
+
+**Real-Time / Embedded Systems:**
+```toml
+[profile.release]
+error-traces = "off"  # Zero overhead, manual logging required
+```
+
+**CLI Tools / Developer Tooling:**
+```toml
+# Use defaults - full traces everywhere
+```
+
+#### **How Configuration Works**
+
+**Build-time (`--error-traces`):**
+- Compiler generates different IR based on flag
+- `full`: Captures stack at error creation + every `try`
+- `minimal`: Only captures location at error creation
+- `off`: No automatic capture, errors only have `.message()`
+
+**Runtime (`RYOLANG_ERROR_TRACES`):**
+- Controls output format when panic/error occurs
+- Does NOT affect capture (that's build-time decision)
+- Useful for CI/CD where you want concise logs
+
+*Rationale: Configuration respects DX-first philosophy while providing escape hatches for performance-critical code. Smart defaults mean most developers never need to configure anything.*
 
 ## 8. Traits (Behavior)
 
@@ -1496,7 +1747,7 @@ import types.core
 
 pub struct User:
     id: core.UserID
-    posts: List[core.PostID]  # Reference by ID
+    posts: list[core.PostID]  # Reference by ID
 
 # post/post.ryo
 import types.core
@@ -1684,7 +1935,7 @@ fn main():
 ## 12. Application Entry Point
 
 *   **Convention:** Default entry point file is `src/main.ryo`.
-*   **`fn main()`:** Required in entry point. Takes no parameters, returns the unit type (empty tuple `()`). Use `try/catch` for error handling within main.
+*   **`fn main()`:** Required in entry point. Takes no parameters, returns the unit type `void`. Use `try/catch` for error handling within main.
 *   **Compiler Enforcement:** `fn main()` only allowed in the designated entry point file for executable compilation. *(Rationale: Clear convention without needing `package main` keyword).*
 
 ## 13. Package Manager (`ryopkg`)
@@ -1703,7 +1954,7 @@ fn main():
     *   `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`), error and optional type support.
     *   `io`: Console (`readln`), Files (`File`), Buffering (functions return `IoError!T`), implements `Drop`.
     *   `string`: `&str` manipulation, parsing (functions return `ParseError!T`).
-    *   `collections`: `List[T]`, `Map[K, V]` types and methods.
+    *   `collections`: `list[T]`, `map[K, V]` types and methods.
     *   `math`: Functions, constants, explicit overflow methods.
     *   `time`: `Instant`, `SystemTime`, `Duration`.
     *   `encoding.json`: `encode -> JsonError!str`, `decode -> JsonError!JsonValue`, `decode_into[T] -> JsonError!T`.

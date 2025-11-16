@@ -1,6 +1,6 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::fs;
 use tempfile::TempDir;
 
 // Helper function to run ryo compiler and capture output
@@ -59,8 +59,8 @@ fn test_parse_command_simple_declaration() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "simple.ryo", "x = 42");
 
-    let output =
-        run_ryo_command(&["parse", "simple.ryo"], &test_file).expect("Failed to run ryo parse command");
+    let output = run_ryo_command(&["parse", "simple.ryo"], &test_file)
+        .expect("Failed to run ryo parse command");
 
     if !output.status.success() {
         println!("STDOUT: {}", String::from_utf8_lossy(&output.stdout));
@@ -81,8 +81,8 @@ fn test_parse_command_with_type_annotation() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "typed.ryo", "x: int = 42");
 
-    let output =
-        run_ryo_command(&["parse", "typed.ryo"], &test_file).expect("Failed to run ryo parse command");
+    let output = run_ryo_command(&["parse", "typed.ryo"], &test_file)
+        .expect("Failed to run ryo parse command");
 
     if !output.status.success() {
         println!("STDOUT: {}", String::from_utf8_lossy(&output.stdout));
@@ -102,8 +102,8 @@ fn test_parse_command_multiple_statements() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "multi.ryo", "x = 1\ny = 2\nz = 3");
 
-    let output =
-        run_ryo_command(&["parse", "multi.ryo"], &test_file).expect("Failed to run ryo parse command");
+    let output = run_ryo_command(&["parse", "multi.ryo"], &test_file)
+        .expect("Failed to run ryo parse command");
 
     if !output.status.success() {
         println!("STDOUT: {}", String::from_utf8_lossy(&output.stdout));
@@ -148,8 +148,8 @@ fn test_run_simple_integer_exit_code() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "exit_simple.ryo", "x = 42");
 
-    let output =
-        run_ryo_command(&["run", "exit_simple.ryo"], &test_file).expect("Failed to run ryo run command");
+    let output = run_ryo_command(&["run", "exit_simple.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
 
     // Verify compilation succeeded
     assert!(
@@ -179,8 +179,8 @@ fn test_run_zero_exit_code() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "exit_zero.ryo", "x = 0");
 
-    let output =
-        run_ryo_command(&["run", "exit_zero.ryo"], &test_file).expect("Failed to run ryo run command");
+    let output = run_ryo_command(&["run", "exit_zero.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
 
@@ -234,16 +234,13 @@ fn test_run_division_by_constant() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "exit_div.ryo", "result = 100 / 2");
 
-    let output =
-        run_ryo_command(&["run", "exit_div.ryo"], &test_file).expect("Failed to run ryo run command");
+    let output = run_ryo_command(&["run", "exit_div.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0"
-    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
@@ -251,16 +248,13 @@ fn test_run_subtraction() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "exit_sub.ryo", "result = 100 - 30");
 
-    let output =
-        run_ryo_command(&["run", "exit_sub.ryo"], &test_file).expect("Failed to run ryo run command");
+    let output = run_ryo_command(&["run", "exit_sub.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0"
-    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
@@ -268,17 +262,14 @@ fn test_run_parenthesized_expression() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "exit_paren.ryo", "result = (10 + 5) * 2");
 
-    let output =
-        run_ryo_command(&["run", "exit_paren.ryo"], &test_file).expect("Failed to run ryo run command");
+    let output = run_ryo_command(&["run", "exit_paren.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     // (10 + 5) * 2 = 15 * 2 = 30 (computed), but exit code is 0
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0"
-    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
@@ -286,8 +277,8 @@ fn test_run_with_type_annotation() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "exit_typed.ryo", "x: int = 99");
 
-    let output =
-        run_ryo_command(&["run", "exit_typed.ryo"], &test_file).expect("Failed to run ryo run command");
+    let output = run_ryo_command(&["run", "exit_typed.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
 
@@ -303,8 +294,8 @@ fn test_run_mutable_variable() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "exit_mut.ryo", "mut x = 55");
 
-    let output =
-        run_ryo_command(&["run", "exit_mut.ryo"], &test_file).expect("Failed to run ryo run command");
+    let output = run_ryo_command(&["run", "exit_mut.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
 
@@ -320,17 +311,14 @@ fn test_run_negation_operator() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "exit_neg.ryo", "x = -42");
 
-    let output =
-        run_ryo_command(&["run", "exit_neg.ryo"], &test_file).expect("Failed to run ryo run command");
+    let output = run_ryo_command(&["run", "exit_neg.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     // All programs exit with 0 (success)
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0"
-    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 // Milestone 3.5: String Literals and Print Tests
@@ -350,31 +338,21 @@ fn test_print_hello_world() {
     assert!(output.status.success(), "ryo run should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0"
-    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
 fn test_print_with_newline() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let test_file = create_test_file(
-        temp_dir.path(),
-        "newline.ryo",
-        "line = print(\"Line\\n\")",
-    );
+    let test_file = create_test_file(temp_dir.path(), "newline.ryo", "line = print(\"Line\\n\")");
 
-    let output =
-        run_ryo_command(&["run", "newline.ryo"], &test_file).expect("Failed to run ryo run command");
+    let output = run_ryo_command(&["run", "newline.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0"
-    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
@@ -386,26 +364,19 @@ fn test_multiple_print_calls() {
         "a = print(\"First\\n\")\nb = print(\"Second\\n\")\nc = print(\"Third\\n\")",
     );
 
-    let output =
-        run_ryo_command(&["run", "multi_print.ryo"], &test_file).expect("Failed to run ryo run command");
+    let output = run_ryo_command(&["run", "multi_print.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0"
-    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
 fn test_print_empty_string() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let test_file = create_test_file(
-        temp_dir.path(),
-        "empty.ryo",
-        "empty = print(\"\")",
-    );
+    let test_file = create_test_file(temp_dir.path(), "empty.ryo", "empty = print(\"\")");
 
     let output =
         run_ryo_command(&["run", "empty.ryo"], &test_file).expect("Failed to run ryo run command");
@@ -413,8 +384,5 @@ fn test_print_empty_string() {
     assert!(output.status.success(), "ryo run should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0"
-    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }

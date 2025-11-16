@@ -13,6 +13,8 @@
 - [ ] set up https://codspeed.io/
 - [ ] review for more https://github.com/astral-sh/ruff/tree/main/.github/workflows
 - [ ] Effective Go. review and get insigths https://go.dev/doc/effective_go
+- [ ] Integration with Notebooks [Jupytext](https://jupytext.readthedocs.io/en/latest/formats-scripts.html)
+- [ ] Include integration for [Tilelang IR](https://github.com/tile-ai/tilelang)
 
 ## Resources
 
@@ -21,6 +23,8 @@
 - [Grammar visualizer](https://ohmjs.org/editor/)
 - [Mojo Manual - Ownership](https://docs.modular.com/mojo/manual/values/ownership)
 - [Mojo Ownership Notebook](https://github.com/modularml/mojo/blob/main/docs/manual/values/ownership.ipynb)
+- [Mojo mental model](https://www.modular.com/blog/what-ownership-is-really-about-a-mental-model-approach)
+- [Mojo Ownership deep dive](https://www.modular.com/blog/deep-dive-into-ownership-in-mojo)
 - [Type Inference Course](https://course.ccs.neu.edu/cs4410sp19/lec_type-inference_notes.html)
 - [Rustc Dev Guide - Type Inference](https://rustc-dev-guide.rust-lang.org/type-inference.html)
 - [Pony Tutorial - Actors](https://tutorial.ponylang.io/types/actors) - Concurrency via actors
