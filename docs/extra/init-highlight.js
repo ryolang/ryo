@@ -6,9 +6,9 @@ document$.subscribe(() => {
     hljs.registerLanguage("ryo", ryo);
   }
 
-  // Now, find all Ryo code blocks and highlight them.
+  // Now, highlight all code blocks (all languages).
   // This will run every time a new page is loaded via instant navigation.
-  document.querySelectorAll("pre code.language-ryo").forEach((block) => {
+  document.querySelectorAll("pre code").forEach((block) => {
     hljs.highlightElement(block);
   });
 });

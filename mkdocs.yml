@@ -69,6 +69,7 @@ extra_css:
   - extra/tweaks.css
 extra_javascript:
   - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js
+  - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/zig.min.js
   - extra/ryo-highlight.js
   - extra/init-highlight.js
 nav:
