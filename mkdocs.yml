@@ -1,0 +1,105 @@
+site_name: The Ryo Programming Language
+site_url: https://ryolang.org
+site_description: A statically typed programming language with a focus on simplicity and ease of use.
+theme:
+  name: material
+  logo: assets/ryo_transparent.svg
+  favicon: assets/ryo_transparent.png
+  features:
+    - content.code.annotate
+    - content.code.copy
+    - content.tabs.link
+    - navigation.expand
+    - navigation.footer
+    - navigation.indexes
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.path
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  palette:
+    # Palette toggle for automatic mode
+    - media: "(prefers-color-scheme)"
+      primary: amber
+      accent: amber
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: amber
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: amber
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+repo_url: https://github.com/ryolang/ryo
+repo_name: ryo
+site_author: artefactop
+plugins:
+  - search
+extra:
+  homepage: https://ryolang.org
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ryolang/ryo
+      name: Ryo on GitHub
+    - icon: fontawesome/solid/globe
+      link: https://ryolang.org
+      name: Official Website
+  generator: false
+extra_css:
+  - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/atom-one-dark.min.css
+  - extra/tweaks.css
+extra_javascript:
+  - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js
+  - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/zig.min.js
+  - extra/ryo-highlight.js
+  - extra/init-highlight.js
+nav:
+  - Home: index.md
+  - Language Specification: specification.md
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji
+  - pymdownx.highlight:
+      use_pygments: false
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
