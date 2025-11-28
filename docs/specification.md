@@ -1,3 +1,61 @@
+> **Document Status**: Design Specification (Pre-Implementation)  
+> **Last Updated**: 2025-11-28  
+> **Version**: 0.1.0-draft
+>
+> ---
+>
+> ## About This Document
+>
+> This is the **design specification** for the Ryo programming language—a statically-typed, compiled language prioritizing developer experience, memory safety, and performance. This document defines the language's syntax, semantics, type system, and standard library design.
+>
+> ### Current Status
+>
+> - **Stage**: Pre-implementation design phase
+> - **Purpose**: Language design documentation and reference for future implementation
+> - **Completeness**: Core design is comprehensive; some features marked as "planned for future implementation"
+> - **Stability**: Design is evolving based on analysis and feedback
+>
+> ### What's Documented
+>
+> ✅ **Complete Design**:
+> - Core syntax and semantics
+> - Type system (primitives, collections, enums, errors, optionals)
+> - Memory management ("Ownership Lite" model)
+> - Error handling with error unions
+> - Concurrency model (Green Threads/Task/Future/Channel)
+> - Module system with three-tier visibility
+> - Standard library architecture
+> - Tooling approach (Cranelift backend, Zig linker)
+>
+> ⏳ **Acknowledged Gaps** (see Section 19):
+> - Formal grammar (EBNF/BNF)
+> - Detailed standard library API signatures
+> - Precise borrow checker algorithm specification
+> - Some features marked "planned for future implementation"
+>
+> ### Target Audience
+>
+> This specification is written for:
+> - **Language designers** evaluating design decisions
+> - **Potential contributors** understanding the vision
+> - **Developers** familiar with Rust/Go/Python/Zig assessing whether Ryo fits their needs
+>
+> **Not a tutorial**: For learning Ryo, see the planned Getting Started Guide and code examples.
+>
+> ### How to Provide Feedback
+>
+> We welcome feedback on:
+> 1. **Design Philosophy**: Does the DX-first approach (trading some performance for debugging) make sense?
+> 2. **Ownership Model**: Is "Ownership Lite" (simplified borrowing without lifetimes) clear and practical?
+> 3. **Error Handling**: Are error unions (Zig-inspired) and exhaustive matching intuitive?
+> 4. **Concurrency**: Does the green threads + ambient runtime model solve real-world use cases?
+> 5. **Module System**: Is the three-tier visibility (`pub`/`package`/private) appropriate?
+> 6. **Missing Elements**: What critical details are needed for evaluation?
+>
+> **Note**: Design decisions include explicit trade-offs documented throughout (see Section 1.1 for DX vs. Performance philosophy).
+>
+> ---
+
 # Ryo Programming Language Specification
 
 ## 1. Introduction & Vision
@@ -6,7 +64,7 @@
 
 *   **Target Domains:** Web Backend Development (API Servers, Microservices), CLI Tools, Network Services & Proxies, WebAssembly (Wasm) Applications & Libraries, Game Development (Tooling, Scripting, Core Logic), Data Processing & ETL Pipelines, and Higher-Level Embedded Systems.
 *   **Core Goals:**
-    *   **Python-like Simplicity:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
+    *   **Python-like Ergonomics:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
     *   **Rust-like Safety (Simplified):** Memory safe by default via ownership and borrowing, without GC. Compile-time checks prevent dangling pointers, data races, use-after-free. Simplified borrowing model compared to Rust (no manual lifetimes).
     *   **Go-like Simplicity:** Minimal keyword set, straightforward core concepts, avoid unnecessary feature creep. Focus on providing essential, orthogonal features.
     *   **Competitive Performance:** Compiled to efficient native code (or Wasm) via **Cranelift**. No GC pauses. Deterministic resource management. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
@@ -143,6 +201,11 @@ See Section 7.10 for complete configuration reference.
         count: int = 42              # Immutable int (explicit type)
         mut counter = 0              # Mutable integer (type inferred)
         mut temperature: float = 98.6 # Mutable float (explicit type)
+        ```
+    *   **Variable Shadowing:** Shadowing is **allowed** (Rust-style). Declaring a new variable with the same name as an existing one in the same scope (or an outer scope) creates a new variable, effectively "shadowing" the previous one. This is useful for type transformations or reusing names without mutation.
+        ```ryo
+        x = "123"        # x is a string
+        x = int(x)       # x is now an int (new variable, shadows previous x)
         ```
     *   *(Rationale: Immutable-by-default promotes safer code. No `let` keyword provides Pythonic simplicity. Type inference reduces boilerplate while explicit types remain available for clarity. The `mut` keyword makes mutability explicit and visible).*
     *   **Type Inference:** Ryo uses **bidirectional type checking** (like Rust, TypeScript, and modern statically-typed languages) which provides:
@@ -291,7 +354,7 @@ To prevent "Iterator Invalidation" bugs (modifying a collection while iterating)
 *   Direct indexing `s[i]` is **forbidden** for strings.
 *   *(Rationale: Strings are UTF-8. Byte indexing is dangerous (can split characters), and O(N) character indexing is a performance trap. Use `.bytes()` or `.chars()` explicitly).*
 
-*Note: User-defined generics are planned for future implementation. For v0.1 polymorphism, use **Enum Wrappers** (Enum Dispatch) instead of `dyn Trait`. See [Language Proposals](proposals.md#advanced-generics) for detailed generic type system design.*
+*Note: User-defined generics are planned for future implementation. For v0.1 polymorphism, use **Enum Wrappers** (Enum Dispatch) instead of `dyn Trait`. Advanced generics with trait bounds are detailed in Section 19 (Future Work).*
 
 ### 4.8 Optional Types (`?T`)
 
@@ -634,12 +697,82 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 *   *(Rationale: Error messages are essential for debugging and user feedback. Automatic generation from data reduces boilerplate. Custom implementations enable domain-specific messages. Location tracking and stack traces enable efficient debugging without requiring external tools or logging.)*
 
-### 4.11 FFI Types
+### 4.11 FFI & C Interoperability
 
-*   **Note:** FFI types are planned for future implementation. See [Language Proposals](proposals.md#foreign-function-interface-ffi--unsafe-code) for detailed design.
+Ryo provides a simple, powerful, and unified system for interoperating with external libraries written in other languages, such as C and Rust.
+
+#### The Universal Contract: The C Header
+
+The core principle of Ryo's FFI is that the **C header file (`.h`) is the universal contract**. Any library that can present its public API as a C header can be seamlessly integrated into a Ryo project.
+
+Ryo includes a built-in tool, **`ryo-bindgen`**, whose sole purpose is to read these C header files and automatically generate the corresponding Ryo FFI declarations. This process is fully automated by the `ryo build` command, providing a developer experience as simple as Zig's.
+
+#### The Unified Workflow
+
+The workflow involves declaring your external library in `ryo.toml` under the `[c_dependencies]` table. The build system then handles the rest.
+
+**Case 1: Integrating a C Library**
+
+This is the most direct case. You have the C source and header files.
+
+1.  **Project Structure**:
+    ```
+    my_ryo_project/
+    ├── ryo.toml
+    └── c_libs/
+        ├── my_c_lib.h
+        └── my_c_lib.c
+    ```
+2.  **`ryo.toml` Configuration**:
+    ```toml
+    [c_dependencies]
+    my_lib = { header = "c_libs/my_c_lib.h", source = "c_libs/my_c_lib.c" }
+    ```
+3.  **Build Process**: When you run `ryo build`:
+    *   `ryo-bindgen` reads `my_c_lib.h` to generate Ryo bindings.
+    *   `zig cc` compiles `my_c_lib.c` into an object file.
+    *   The Ryo compiler links everything together.
+
+**Case 2: Integrating a Rust Library**
+
+To be used by Ryo, a Rust library must first be compiled to expose a C ABI. This typically involves using a tool like `cbindgen` to generate a C header file from the Rust source.
+
+1.  **Project Structure**: You would have the Rust library's generated header (`.h`) and its pre-compiled static library (`.a`).
+    ```
+    my_ryo_project/
+    ├── ryo.toml
+    └── rust_libs/
+        ├── my_rust_lib.h           # Generated by cbindgen
+        └── libmy_rust_lib.a        # Compiled with 'cargo build'
+    ```
+2.  **`ryo.toml` Configuration**: The configuration is almost identical. You just point `source` to the `.a` file instead of a `.c` file.
+    ```toml
+    [c_dependencies]
+    my_rust_lib = { header = "rust_libs/my_rust_lib.h", source = "rust_libs/libmy_rust_lib.a" }
+    ```
+3.  **Build Process**: When you run `ryo build`:
+    *   `ryo-bindgen` reads `my_rust_lib.h` to generate the Ryo bindings. (It doesn't care the source was Rust).
+    *   The build system sees the `.a` file and skips compilation.
+    *   The Ryo compiler links your Ryo code directly with `libmy_rust_lib.a`.
+
+#### Usage in Ryo
+
+In both cases, the usage in Ryo code is identical. You import the bindings using the `c:` prefix.
+
+```ryo
+import c:my_lib         # Imports the C library
+import c:my_rust_lib    # Imports the Rust library
+
+fn main():
+    let c_result = my_lib.c_function(1)
+    let rust_result = my_rust_lib.rust_function_with_c_abi(2)
+
+    print(f"C result: {c_result}, Rust result: {rust_result}")
+```
+
+This unified approach makes `ryo-bindgen` a cornerstone of Ryo's ecosystem, providing a consistent and simple path for integrating with the vast number of libraries that can expose a C ABI.
 
 ### 4.12 Type Conversion Syntax
-
 *   Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
 
@@ -1444,7 +1577,7 @@ Understanding how Ryo's debugging approach compares to alternatives:
 
 | Language | Stack Trace Approach | Overhead | DX Rating | When to Choose |
 |----------|---------------------|----------|-----------|----------------|
-| **Ryo** | Always-on, automatic, rich context | ~5-10% always | ⭐⭐⭐⭐⭐ Excellent | When debugging ease > raw performance |
+| **Ryo** | Always-on, automatic, rich context | ~TBD% always | ⭐⭐⭐⭐⭐ Excellent | When debugging ease > raw performance |
 | **Rust** | Optional (`RUST_BACKTRACE=1`), opt-in | ~0% default, ~3-5% when enabled | ⭐⭐⭐ Good (requires env var) | When performance > debugging ease |
 | **Go** | Always-on, simpler traces | ~1-3% | ⭐⭐⭐⭐ Very good (less detail) | Balanced, but less detail than Ryo |
 | **Zig** | Optional, manual stack walking | ~0% default | ⭐⭐ Fair (manual effort) | Maximum control, minimal overhead |
@@ -1592,7 +1725,7 @@ error-traces = "off"  # Zero overhead, manual logging required
 *   **Implementation:** `impl Trait for Type: fn method(...) ...`. Can override defaults.
 *   **Dispatch:** **Static Dispatch** via monomorphization only (initially). *(Rationale: Prioritizes runtime performance and implementation simplicity).* No dynamic dispatch (`dyn Trait`).
     *   This means polymorphism is primarily achieved through generics (compile-time polymorphism). For runtime polymorphism in v0.1, use **Enum Dispatch** (wrapping variants in an enum) instead of `dyn Trait`. This is simpler, more performant, and covers 90% of use cases.
-    *   **Future Extension:** Dynamic dispatch via trait objects (e.g., `&dyn Trait`) is planned for future versions to enable more flexible polymorphism patterns familiar to Python developers. See [Language Proposals](proposals.md#dynamic-dispatch-trait-objects) for details.
+    *   **Future Extension:** Dynamic dispatch via trait objects (e.g., `&dyn Trait`) is planned for future versions to enable more flexible polymorphism patterns familiar to Python developers. See Section 19 (Future Work) for details.
 *   **Associated Types:** Not supported initially. *(Rationale: Significant type system complexity).*
 
 ## 9. Concurrency Model: Task/Future/Channel
@@ -1725,7 +1858,7 @@ fn main():
 
 ## 10. Compile-Time Execution (`comptime`)
 
-*   **Note:** Compile-time execution is planned for future implementation. See [Language Proposals](proposals.md#compile-time-execution-comptime) for detailed design.
+*   **Note:** Compile-time execution is planned for future implementation. See Section 19 (Future Work) for details.
 
 ## 11. Modules & Packages
 
@@ -1757,7 +1890,6 @@ mywebapp/              # Package "mywebapp"
 ```toml
 [package]
 name = "mywebapp"
-version = "1.0.0"
 version = "1.0.0"
 kind = "application" # Default. Use "system" to enable unsafe blocks.
 authors = ["Your Name <you@example.com>"]
@@ -2583,13 +2715,17 @@ Ryo includes a first-class testing framework.
 *   **Linker/Driver:** **Zig (`zig cc`)** is the mandatory linker and driver.
     *   *Rationale:* Enables easy cross-compilation (e.g., `ryo build --target x86_64-linux-musl`) and seamless C interop.
 *   **Compiler Backend:** **Cranelift**. Supports AOT, JIT, WebAssembly. *(Rationale: Good balance of performance, compile speed, JIT/Wasm support).*
-*   **Tools:** `ryo` package manager integrated, `ryo` REPL (using JIT), Integrated Testing (`ryo test`). LSP future goal.
+*   **Tools:** `ryo` package manager integrated, `ryo-bindgen` for automatic C FFI binding generation, `ryo` REPL (using JIT), Integrated Testing (`ryo test`). LSP future goal.
 
 ## 17. FFI & `unsafe`
 
-*   **Gatekeeping:** `unsafe` blocks are **forbidden** by default.
-*   **System Packages:** To use `unsafe`, `extern "C"`, or `export`, the package must be declared as `kind = "system"` in `ryo.toml`.
-*   *Rationale:* Prevents accidental unsafety in application code while allowing library authors to build safe abstractions over low-level resources.
+Ryo provides a powerful, high-level workflow for C interoperability, as detailed in **Section 4.11**. This system uses the `ryo-bindgen` tool to automatically handle most FFI complexity.
+
+However, the underlying mechanisms involve `unsafe` code and `extern "C"` blocks, which are strictly controlled.
+
+*   **Gatekeeping:** Direct use of `unsafe` blocks and manual `extern "C"` declarations is **forbidden** by default.
+*   **System Packages:** To enable these low-level FFI features for manual binding or to build foundational libraries, the package must be declared as `kind = "system"` in `ryo.toml`.
+*   *Rationale:* This prevents accidental unsafety in application code. The primary way to interact with C code should be through the automated `ryo-bindgen` workflow. Manual `unsafe` FFI is reserved for library authors who are building the safe abstractions that application developers will consume.
 
 ## 18. Integer Overflow Behavior
 
@@ -2600,7 +2736,7 @@ Ryo includes a first-class testing framework.
 
 ## 19. Missing Elements / Future Work
 
-For detailed future features and extensions, see the dedicated [Language Proposals](proposals.md) document.
+Future features and extensions are listed in this section below.
 
 **Current Specification Gaps:**
 *   **Formal Grammar (EBNF/BNF).**
@@ -2613,7 +2749,7 @@ For detailed future features and extensions, see the dedicated [Language Proposa
 *   **Memory Layout Guarantees** (Beyond `#[repr(C)]`).
 *   **WebAssembly Target Details** (ABI, JS interop bindings, WASI support).
 
-**Planned Future Extensions (see [proposals.md](proposals.md)):**
+**Planned Future Extensions:**
 *   **Compile-Time Execution** (`comptime` blocks and functions)
 *   **Foreign Function Interface & Unsafe Operations** (C FFI, raw pointers, unsafe blocks)
 *   **CSP Concurrency Extensions** (channels, select, spawn - optional)
@@ -2631,7 +2767,8 @@ For detailed future features and extensions, see the dedicated [Language Proposa
 ## See Also
 
 - **[Code Examples](examples/)** - Practical examples demonstrating the features described in this specification
-- **[Getting Started Guide](getting_started.md)** - Step-by-step tutorial for learning Ryo
-- **[Standard Library](std.md)** - Built-in functions and modules available in Ryo programs
+- **[Executive Summary](executive_summary.md)** - Quick 2-page overview of Ryo's design and features
+
+> **Note**: More code examples, getting started guide, and standard library documentation will be available as the project progresses.
 
 ---

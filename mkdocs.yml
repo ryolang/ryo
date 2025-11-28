@@ -73,23 +73,9 @@ extra_javascript:
   - extra/ryo-highlight.js
   - extra/init-highlight.js
 nav:
-  - index.md
-  - Getting Started:
-      - Installation: installation.md
-      - Tutorial: getting_started.md
-      - Examples: examples/README.md
-  - Documentation:
-      - Language Specification: specification.md
-      - Standard Library: std.md
-      - Language Comparison: language_comparison.md
-  - Development:
-      - Package Manager: pkg_manager.md
-      - Design Issues: design_issues.md
-      - Implementation Roadmap: dev/implementation_roadmap.md
-      - Development Docs:
-          - Project Structure: dev/project_structure.md
-          - Token Implementation: dev/token.rs.md
-          - Parser Implementation: dev/parser.rs.md
+  - Home: index.md
+  - Executive Summary: executive_summary.md
+  - Language Specification: specification.md
 markdown_extensions:
   - admonition
   - attr_list
