@@ -1,3 +1,61 @@
+> **Document Status**: Design Specification (Pre-Implementation)  
+> **Last Updated**: 2025-11-28  
+> **Version**: 0.1.0-draft
+>
+> ---
+>
+> ## About This Document
+>
+> This is the **design specification** for the Ryo programming language—a statically-typed, compiled language prioritizing developer experience, memory safety, and performance. This document defines the language's syntax, semantics, type system, and standard library design.
+>
+> ### Current Status
+>
+> - **Stage**: Pre-implementation design phase
+> - **Purpose**: Language design documentation and reference for future implementation
+> - **Completeness**: Core design is comprehensive; some features marked as "planned for future implementation"
+> - **Stability**: Design is evolving based on analysis and feedback
+>
+> ### What's Documented
+>
+> ✅ **Complete Design**:
+> - Core syntax and semantics
+> - Type system (primitives, collections, enums, errors, optionals)
+> - Memory management ("Ownership Lite" model)
+> - Error handling with error unions
+> - Concurrency model (Green Threads/Task/Future/Channel)
+> - Module system with three-tier visibility
+> - Standard library architecture
+> - Tooling approach (Cranelift backend, Zig linker)
+>
+> ⏳ **Acknowledged Gaps** (see Section 19):
+> - Formal grammar (EBNF/BNF)
+> - Detailed standard library API signatures
+> - Precise borrow checker algorithm specification
+> - Some features marked "planned for future implementation"
+>
+> ### Target Audience
+>
+> This specification is written for:
+> - **Language designers** evaluating design decisions
+> - **Potential contributors** understanding the vision
+> - **Developers** familiar with Rust/Go/Python/Zig assessing whether Ryo fits their needs
+>
+> **Not a tutorial**: For learning Ryo, see the planned Getting Started Guide and code examples.
+>
+> ### How to Provide Feedback
+>
+> We welcome feedback on:
+> 1. **Design Philosophy**: Does the DX-first approach (trading some performance for debugging) make sense?
+> 2. **Ownership Model**: Is "Ownership Lite" (simplified borrowing without lifetimes) clear and practical?
+> 3. **Error Handling**: Are error unions (Zig-inspired) and exhaustive matching intuitive?
+> 4. **Concurrency**: Does the green threads + ambient runtime model solve real-world use cases?
+> 5. **Module System**: Is the three-tier visibility (`pub`/`package`/private) appropriate?
+> 6. **Missing Elements**: What critical details are needed for evaluation?
+>
+> **Note**: Design decisions include explicit trade-offs documented throughout (see Section 1.1 for DX vs. Performance philosophy).
+>
+> ---
+
 # Ryo Programming Language Specification
 
 ## 1. Introduction & Vision
@@ -6,7 +64,7 @@
 
 *   **Target Domains:** Web Backend Development (API Servers, Microservices), CLI Tools, Network Services & Proxies, WebAssembly (Wasm) Applications & Libraries, Game Development (Tooling, Scripting, Core Logic), Data Processing & ETL Pipelines, and Higher-Level Embedded Systems.
 *   **Core Goals:**
-    *   **Python-like Simplicity:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
+    *   **Python-like Ergonomics:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
     *   **Rust-like Safety (Simplified):** Memory safe by default via ownership and borrowing, without GC. Compile-time checks prevent dangling pointers, data races, use-after-free. Simplified borrowing model compared to Rust (no manual lifetimes).
     *   **Go-like Simplicity:** Minimal keyword set, straightforward core concepts, avoid unnecessary feature creep. Focus on providing essential, orthogonal features.
     *   **Competitive Performance:** Compiled to efficient native code (or Wasm) via **Cranelift**. No GC pauses. Deterministic resource management. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
@@ -144,6 +202,11 @@ See Section 7.10 for complete configuration reference.
         mut counter = 0              # Mutable integer (type inferred)
         mut temperature: float = 98.6 # Mutable float (explicit type)
         ```
+    *   **Variable Shadowing:** Shadowing is **allowed** (Rust-style). Declaring a new variable with the same name as an existing one in the same scope (or an outer scope) creates a new variable, effectively "shadowing" the previous one. This is useful for type transformations or reusing names without mutation.
+        ```ryo
+        x = "123"        # x is a string
+        x = int(x)       # x is now an int (new variable, shadows previous x)
+        ```
     *   *(Rationale: Immutable-by-default promotes safer code. No `let` keyword provides Pythonic simplicity. Type inference reduces boilerplate while explicit types remain available for clarity. The `mut` keyword makes mutability explicit and visible).*
     *   **Type Inference:** Ryo uses **bidirectional type checking** (like Rust, TypeScript, and modern statically-typed languages) which provides:
         *   **Function signatures require type annotations** - Good for documentation and API clarity
@@ -196,12 +259,13 @@ See Section 7.10 for complete configuration reference.
 
 ### 4.2 Primitive Types
 
-*   `int`: Defaults to `isize` (signed pointer-sized integer).
+*   `int`: Defaults to `i64` (64-bit signed integer). *(Rationale: Consistent behavior across platforms, unlike C's `long` or Rust's `isize` default).*
 *   `float`: Defaults to `float64` (64-bit IEEE 754 float).
 *   `bool`: `true`, `false`.
 *   `str`: Owned, heap-allocated, UTF-8 string. Can grow and shrink dynamically when bound to a `mut` variable. *(Rationale: Provides a primary, easy-to-use string type. Mutability controlled by binding aligns with general variable mutability).*
 *   `char`: Unicode Scalar Value. Literal: `'a'`.
 *   `void`: Unit type. Represents a value with no data. Used for functions that return no meaningful value. *(Rationale: Provides explicit way to represent "no return value" concept, common in many programming languages for side-effecting functions)*.
+*   `never`: Bottom type. Represents a computation that never completes (e.g., `panic`, infinite loop, `exit`). *(Rationale: Useful for control flow analysis and type theory completeness).*
 *   Explicit Sizes: `i8`-`i64`, `u8`-`u64`, `usize`, `float32`. *(Rationale: Necessary for control over representation, performance, and FFI).**
 
 ### 4.3 Tuple Type
@@ -279,7 +343,18 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
 *   `list[T]`: Dynamic array. Homogeneous. *(Built-in fundamental type)*
 *   `map[K, V]`: Hash map. Homogeneous keys/values. `K` must be hashable/comparable. *(Built-in fundamental type)*
 
-*Note: User-defined generics are planned for future implementation. See [Language Proposals](proposals.md#advanced-generics) for detailed generic type system design.*
+#### **Safety Note: Versioned Iterators**
+To prevent "Iterator Invalidation" bugs (modifying a collection while iterating), Ryo uses **Versioned Iterators**.
+*   Each collection has a modification counter.
+*   Iterators capture this counter on creation.
+*   If the collection is modified during iteration, the next iterator step panics.
+*   *(Rationale: Prevents memory safety issues and logical bugs common in mutable iteration).*
+
+#### **String Indexing**
+*   Direct indexing `s[i]` is **forbidden** for strings.
+*   *(Rationale: Strings are UTF-8. Byte indexing is dangerous (can split characters), and O(N) character indexing is a performance trap. Use `.bytes()` or `.chars()` explicitly).*
+
+*Note: User-defined generics are planned for future implementation. For v0.1 polymorphism, use **Enum Wrappers** (Enum Dispatch) instead of `dyn Trait`. Advanced generics with trait bounds are detailed in Section 19 (Future Work).*
 
 ### 4.8 Optional Types (`?T`)
 
@@ -622,16 +697,86 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 *   *(Rationale: Error messages are essential for debugging and user feedback. Automatic generation from data reduces boilerplate. Custom implementations enable domain-specific messages. Location tracking and stack traces enable efficient debugging without requiring external tools or logging.)*
 
-### 4.11 FFI Types
+### 4.11 FFI & C Interoperability
 
-*   **Note:** FFI types are planned for future implementation. See [Language Proposals](proposals.md#foreign-function-interface-ffi--unsafe-code) for detailed design.
+Ryo provides a simple, powerful, and unified system for interoperating with external libraries written in other languages, such as C and Rust.
+
+#### The Universal Contract: The C Header
+
+The core principle of Ryo's FFI is that the **C header file (`.h`) is the universal contract**. Any library that can present its public API as a C header can be seamlessly integrated into a Ryo project.
+
+Ryo includes a built-in tool, **`ryo-bindgen`**, whose sole purpose is to read these C header files and automatically generate the corresponding Ryo FFI declarations. This process is fully automated by the `ryo build` command, providing a developer experience as simple as Zig's.
+
+#### The Unified Workflow
+
+The workflow involves declaring your external library in `ryo.toml` under the `[c_dependencies]` table. The build system then handles the rest.
+
+**Case 1: Integrating a C Library**
+
+This is the most direct case. You have the C source and header files.
+
+1.  **Project Structure**:
+    ```
+    my_ryo_project/
+    ├── ryo.toml
+    └── c_libs/
+        ├── my_c_lib.h
+        └── my_c_lib.c
+    ```
+2.  **`ryo.toml` Configuration**:
+    ```toml
+    [c_dependencies]
+    my_lib = { header = "c_libs/my_c_lib.h", source = "c_libs/my_c_lib.c" }
+    ```
+3.  **Build Process**: When you run `ryo build`:
+    *   `ryo-bindgen` reads `my_c_lib.h` to generate Ryo bindings.
+    *   `zig cc` compiles `my_c_lib.c` into an object file.
+    *   The Ryo compiler links everything together.
+
+**Case 2: Integrating a Rust Library**
+
+To be used by Ryo, a Rust library must first be compiled to expose a C ABI. This typically involves using a tool like `cbindgen` to generate a C header file from the Rust source.
+
+1.  **Project Structure**: You would have the Rust library's generated header (`.h`) and its pre-compiled static library (`.a`).
+    ```
+    my_ryo_project/
+    ├── ryo.toml
+    └── rust_libs/
+        ├── my_rust_lib.h           # Generated by cbindgen
+        └── libmy_rust_lib.a        # Compiled with 'cargo build'
+    ```
+2.  **`ryo.toml` Configuration**: The configuration is almost identical. You just point `source` to the `.a` file instead of a `.c` file.
+    ```toml
+    [c_dependencies]
+    my_rust_lib = { header = "rust_libs/my_rust_lib.h", source = "rust_libs/libmy_rust_lib.a" }
+    ```
+3.  **Build Process**: When you run `ryo build`:
+    *   `ryo-bindgen` reads `my_rust_lib.h` to generate the Ryo bindings. (It doesn't care the source was Rust).
+    *   The build system sees the `.a` file and skips compilation.
+    *   The Ryo compiler links your Ryo code directly with `libmy_rust_lib.a`.
+
+#### Usage in Ryo
+
+In both cases, the usage in Ryo code is identical. You import the bindings using the `c:` prefix.
+
+```ryo
+import c:my_lib         # Imports the C library
+import c:my_rust_lib    # Imports the Rust library
+
+fn main():
+    let c_result = my_lib.c_function(1)
+    let rust_result = my_rust_lib.rust_function_with_c_abi(2)
+
+    print(f"C result: {c_result}, Rust result: {rust_result}")
+```
+
+This unified approach makes `ryo-bindgen` a cornerstone of Ryo's ecosystem, providing a consistent and simple path for integrating with the vast number of libraries that can expose a C ABI.
 
 ### 4.12 Type Conversion Syntax
-
 *   Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
 
-### 5. Memory Management: "Ownership Lite"
+## 5. Memory Management: "Ownership Lite"
 
 The core principle of Ryo's "Ownership Lite" will be: **Borrow-by-Default for Functions, Move-by-Default for Assignment.** This is the crucial ergonomic trade-off that simplifies the model compared to Rust while maintaining safety.
 
@@ -1432,7 +1577,7 @@ Understanding how Ryo's debugging approach compares to alternatives:
 
 | Language | Stack Trace Approach | Overhead | DX Rating | When to Choose |
 |----------|---------------------|----------|-----------|----------------|
-| **Ryo** | Always-on, automatic, rich context | ~5-10% always | ⭐⭐⭐⭐⭐ Excellent | When debugging ease > raw performance |
+| **Ryo** | Always-on, automatic, rich context | ~TBD% always | ⭐⭐⭐⭐⭐ Excellent | When debugging ease > raw performance |
 | **Rust** | Optional (`RUST_BACKTRACE=1`), opt-in | ~0% default, ~3-5% when enabled | ⭐⭐⭐ Good (requires env var) | When performance > debugging ease |
 | **Go** | Always-on, simpler traces | ~1-3% | ⭐⭐⭐⭐ Very good (less detail) | Balanced, but less detail than Ryo |
 | **Zig** | Optional, manual stack walking | ~0% default | ⭐⭐ Fair (manual effort) | Maximum control, minimal overhead |
@@ -1579,15 +1724,21 @@ error-traces = "off"  # Zero overhead, manual logging required
 *   **Definition:** `trait Name: fn method(...) ...` (with optional default implementations). Default methods allowed. *(Rationale: Default methods reduce boilerplate).*
 *   **Implementation:** `impl Trait for Type: fn method(...) ...`. Can override defaults.
 *   **Dispatch:** **Static Dispatch** via monomorphization only (initially). *(Rationale: Prioritizes runtime performance and implementation simplicity).* No dynamic dispatch (`dyn Trait`).
-    *   This means polymorphism is primarily achieved through generics (compile-time polymorphism). Patterns requiring runtime dynamic dispatch (common in some OOP/dynamic languages) will need alternative approaches in Ryo, such as using enums with associated data to represent variants or passing function pointers/closures.
-    *   **Future Extension:** Dynamic dispatch via trait objects (e.g., `&dyn Trait`) is planned for future versions to enable more flexible polymorphism patterns familiar to Python developers. See [Language Proposals](proposals.md#dynamic-dispatch-trait-objects) for details.
+    *   This means polymorphism is primarily achieved through generics (compile-time polymorphism). For runtime polymorphism in v0.1, use **Enum Dispatch** (wrapping variants in an enum) instead of `dyn Trait`. This is simpler, more performant, and covers 90% of use cases.
+    *   **Future Extension:** Dynamic dispatch via trait objects (e.g., `&dyn Trait`) is planned for future versions to enable more flexible polymorphism patterns familiar to Python developers. See Section 19 (Future Work) for details.
 *   **Associated Types:** Not supported initially. *(Rationale: Significant type system complexity).*
 
 ## 9. Concurrency Model: Task/Future/Channel
 
-### 9.1 Rationale: Why This Model
+### 9.1 Rationale: Green Threads & Ambient Runtime
 
-The Task/Future/Channel model, inspired by Go and adapted for Ryo's ownership system, provides a superior developer experience by eliminating function coloring while maintaining safety and performance. This aligns perfectly with Ryo's core goal of **Python-like Simplicity and Developer Experience (DX)**.
+Ryo uses a **Green Thread (M:N) Concurrency Model**, similar to Go.
+*   **Green Threads:** Tasks are lightweight, userspace threads managed by the Ryo runtime, not OS threads.
+*   **Stack Swapping:** The runtime swaps stacks to switch tasks, avoiding the "colored function" problem of `async`/`await`.
+*   **Ambient Runtime:** The runtime context is stored in Thread-Local Storage (TLS), allowing functions to spawn tasks without passing a runtime handle.
+*   **Work Stealing:** A multi-threaded scheduler distributes tasks across CPU cores.
+
+This model aligns with Ryo's goal of **Python-like Simplicity** by making concurrency look and feel like synchronous code, while maintaining high performance.
 
 ### 9.2 Core Primitives and Safety
 
@@ -1599,11 +1750,13 @@ Tasks are Ryo's lightweight, non-OS-thread concurrency unit (like Go's goroutine
 
 | Primitive | Ryo Syntax | Type Signature | Semantics |
 | :--- | :--- | :--- | :--- |
-| **Run** | `task.run(fn): ...` | `fn(f: fn() -> T) -> future[T]` | Executes the function `f` concurrently. Returns a **`future[T]`** to retrieve the result. |
-| **Spawn** | `task.spawn(fn): ...` | `fn(f: fn() -> void) -> void` | Executes the function `f` concurrently (fire-and-forget). Returns immediately. |
-| **Await** | `fut.await` | **`future[T]`** | A handle to a potentially pending value of type `T`. The `.await` method **suspends the current task** until the value is ready (it **does not block the OS thread**). |
+| **Run** | `task.run(fn): ...` | `fn(f: fn() -> T) -> future[T]` | Executes `f` on a green thread. Returns a **`future[T]`** to retrieve the result. |
+| **Spawn** | `task.spawn(fn): ...` | `fn(f: fn() -> void) -> void` | **Fire-and-forget**. Executes `f` on a green thread. Returns immediately. |
+| **Scope** | `task.scope(fn): ...` | `fn` | **Structured Concurrency**. Creates a scope where spawned tasks must complete before the scope exits. **Recommended default.** |
+| **Await** | `fut.await` | **`future[T]`** | **Suspends the current green thread** until the value is ready. Does NOT block the OS thread. |
 
-**Ownership Safety:** All data passed into `task.run` or `task.spawn` closures is **moved** by default (enforced by the compiler) to guarantee the new task owns all required state, preventing data races on captured variables.
+**Ownership Safety:** All data passed into tasks is **moved** by default.
+**FFI Warning:** Calling blocking C functions (like `sleep`) will block the underlying OS thread. Use `#[blocking]` attribute on FFI imports to hint the runtime to spawn a dedicated thread.
 
 #### 9.2.2 Channels (Communication and Synchronization)
 
@@ -1612,8 +1765,20 @@ Channels are the idiomatic, memory-safe way to communicate and synchronize betwe
 | Primitive | Ryo Syntax | Semantics |
 | :--- | :--- | :--- |
 | **Create** | `tx, rx = std.channel.create[T]()` | Creates a pair of `sender[T]` and `receiver[T]` for type `T`. |
-| **Send** | `tx.send(value)` | Sends `value` to the channel. `value` is **moved** into the channel. The sending task may **suspend** if the channel's buffer is full. |
-| **Receive** | `rx.recv()` | **Suspends the current task** until a message is available. Returns the received value, gaining ownership of it. |
+| **Send** | `tx.send(value)` | Sends `value`. `value` is **moved**. Suspends task if buffer full. |
+| **Receive** | `rx.recv()` | **Suspends task** until message available. Returns received value. |
+
+#### 9.2.4 Shared State
+For shared mutable state, Ryo uses the `Shared[Mutex[T]]` pattern:
+*   `Shared[T]`: Reference counting (ARC).
+*   `Mutex[T]`: Interior mutability with locking.
+*   **Deadlock Safety:** Ryo's Mutex is designed to detect deadlocks in debug mode where possible.
+```ryo
+state = Shared(Mutex(0))
+task.spawn:
+    lock = state.lock()
+    *lock += 1
+```
 
 #### 9.2.3 Error Integration
 
@@ -1693,7 +1858,7 @@ fn main():
 
 ## 10. Compile-Time Execution (`comptime`)
 
-*   **Note:** Compile-time execution is planned for future implementation. See [Language Proposals](proposals.md#compile-time-execution-comptime) for detailed design.
+*   **Note:** Compile-time execution is planned for future implementation. See Section 19 (Future Work) for details.
 
 ## 11. Modules & Packages
 
@@ -1726,6 +1891,7 @@ mywebapp/              # Package "mywebapp"
 [package]
 name = "mywebapp"
 version = "1.0.0"
+kind = "application" # Default. Use "system" to enable unsafe blocks.
 authors = ["Your Name <you@example.com>"]
 
 [dependencies]
@@ -2227,7 +2393,10 @@ fn main():
 
 ## 14. Standard Library
 
-*   **Philosophy:** Modular packages, practical, ergonomic, safe, reasonably "batteries-included" for web/scripting.
+*   **Philosophy:** Modular packages, practical, ergonomic, safe.
+*   **Hybrid Architecture:** The Standard Library is a **hybrid** of:
+    *   **Rust Runtime (`libryo_runtime`):** Low-level primitives (allocator, scheduler, I/O loop) written in Rust for performance and stability.
+    *   **Ryo Standard Library (`std`):** High-level APIs written in Ryo, wrapping the runtime via internal FFI.
 *   **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
 *   **Core Packages (Initial):**
     *   `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`), error and optional type support.
@@ -2242,29 +2411,332 @@ fn main():
     *   `channel`: Channel communication primitives (`channel.create[T]`, `sender[T]`, `receiver[T]`), ownership-based message passing. *(Planned)*
     *   `os`: Env, args, basic filesystem ops (functions return `OsError!T`).
     *   `testing`: `#[test]` attribute, `assert()`, `assert_eq()`. *(Planned)*
-    *   `sync`: `Shared[T]`/`Weak[T]` types for optional shared ownership.
+    *   `sync`: `Shared[T]`/`Weak[T]` types for optional shared ownership, `Mutex[T]` and `RwLock[T]` for thread-safe interior mutability. *(Planned)*
     *   `mem`: Basic memory utilities, `Drop` trait definition.
     *   `utf8`: Utilities for `str`/`&str` validation, char iteration.
 
-## 15. Tooling
+### 14.5 Concurrency Model
 
+Ryo's concurrency model is designed to provide **"colorless" functions** (no `async`/`await` keywords) with **pythonic simplicity** while maintaining memory safety and competitive performance. The design is heavily inspired by Go's green threads and Zig's 2025 I/O model.
+
+#### 14.5.1 Implementation Strategy: Green Threads
+
+**Design Decision:** Ryo uses **Green Threads (Stack Swapping)** instead of async/await state machines.
+
+*Rationale:*
+- Avoids the "function coloring" problem where async functions cannot call sync functions and vice versa
+- Provides simpler developer experience compared to Rust's async ecosystem
+- Enables pythonic code style without runtime overhead of a garbage collector
+- Proven approach: Go has used green threads successfully for 15+ years
+
+**How It Works:**
+1. **M:N Threading Model:** M green threads (user-space tasks) run on N OS threads (typically = CPU cores)
+2. **Stack Swapping:** When a task blocks (I/O, sleep), the runtime saves its stack pointer and switches to another task
+3. **Work-Stealing Scheduler:** OS threads steal tasks from each other to balance load
+4. **Standard Functions:** Regular functions can perform I/O without special syntax
+
+**Comparison to Alternatives:**
+
+| Approach | Function Coloring | Implementation Complexity | DX | Example Language |
+|----------|-------------------|---------------------------|-----|------------------|
+| **Green Threads** | No | Medium (runtime stack management) | Excellent | Go, Ryo (planned) |
+| **async/await** | Yes | High (compiler state machines) | Good | Rust, JavaScript |
+| **Callbacks** | No | Low | Poor | Node.js (old style) |
+
+#### 14.5.2 The Ambient Runtime Pattern
+
+Ryo uses **Thread-Local Storage (TLS)** to provide a runtime context without polluting function signatures.
+
+**Python-like Usage:**
+```ryo
+import std.task
+import std.net
+
+fn fetch_data(url: str) -> !Data:
+    # Looks like regular code - no explicit runtime parameter
+    task.sleep(100ms)
+    response = try net.get(url)
+    return parse(response.body)
+```
+
+**Under the Hood:**
+- When `task.sleep()` is called, it accesses a **Thread-Local Variable** pointing to the current scheduler
+- If running in async runtime: Swaps stack to another task
+- If running in blocking runtime: Blocks OS thread
+- If running in test: Uses mock runtime
+
+**Testing Pattern:**
+```ryo
+#[test]
+fn test_fetch_fast():
+    # Override ambient runtime for this test
+    mock = MockRuntime.create()
+    task.with_runtime(mock, fn():
+        # This runs instantly - mock runtime doesn't actually sleep
+        data = fetch_data("http://example.com")
+        assert_eq(data.status, 200)
+    )
+```
+
+**Runtime Initialization:**
+1. **Default:** First call to `task` or `net` initializes a simple single-threaded blocking runtime
+2. **Explicit:** User can create a multi-threaded runtime:
+    ```ryo
+    fn main():
+        rt = MultiThreadedRuntime.new(threads=4)
+        rt.run(app_logic)
+    ```
+
+*Rationale: Balances Python-like simplicity with the ability to test and swap implementations. Avoids "context parameter pollution" seen in explicit context-passing patterns.*
+
+#### 14.5.3 Structured Concurrency
+
+Ryo makes **structured concurrency** the primary pattern to prevent resource leaks and zombie tasks.
+
+**Primary Pattern: `task.scope`**
+```ryo
+import std.task
+
+fn process_all(urls: list[str]) -> !list[Data]:
+    task.scope |s|:
+        for url in urls:
+            s.spawn(fn(): fetch_data(url))
+    # Implicit join: all tasks finished or cancelled when scope ends
+```
+
+**Properties:**
+- All spawned tasks **must** complete before scope exits
+- If any task panics, all tasks in scope are cancelled
+- Prevents "fire-and-forget" bugs common in unstructured concurrency
+- Parent cannot finish before children (enforced by compiler)
+
+**Detached Tasks (Rare):**
+For the rare case where you truly need fire-and-forget:
+```ryo
+task.spawn_detached(background_worker)  # No join point
+```
+
+*Rationale: Following modern concurrency best practices (Kotlin Coroutines, Swift, Python Trio). Fire-and-forget is opt-in, not default.*
+
+#### 14.5.4 Synchronization Primitives
+
+While channels are preferred for communication ("share memory by communicating"), Ryo provides traditional sync primitives for shared state.
+
+**Mutex (Exclusive Lock):**
+```ryo
+import std.sync
+
+cache = Shared(Mutex(map[str, int]()))
+
+fn worker(cache: Shared[Mutex[map[str, int]]]):
+    mut m = cache.lock()  # Blocks until lock acquired
+    m.insert("key", 100)
+    # Lock released automatically when 'm' goes out of scope (RAII)
+```
+
+**RwLock (Reader-Writer Lock):**
+```ryo
+data = Shared(RwLock(config))
+
+fn reader(data: Shared[RwLock[Config]]):
+    r = data.read_lock()   # Multiple readers allowed
+    print(r.port)
+
+fn writer(data: Shared[RwLock[Config]]):
+    mut w = data.write_lock()  # Exclusive write access
+    w.port = 8080
+```
+
+*Available Primitives:*
+- `Mutex[T]` - Mutual exclusion lock
+- `RwLock[T]` - Reader-writer lock (multiple readers or single writer)
+- `Atomic[T]` - Lock-free atomic operations (integers, booleans)
+
+*Rationale: Channels are great for tasks communicating, but sometimes you just need a shared cache or counter. Explicit sync primitives are clearer than complex channel-based solutions for simple shared state.*
+
+#### 14.5.5 Select Statement and Cancel Safety
+
+The `select` statement enables non-deterministic operations (first to complete wins):
+
+```ryo
+import std.task
+import std.channel
+
+select:
+    case data = rx.recv():
+        print(f"Received: {data}")
+    case tx.send(my_value):
+        print("Sent")
+    case task.timeout(1s):
+        print("Timed out")
+```
+
+**Cancel Safety:** If a case is not selected, ownership transfer does not happen:
+- `my_value` in the `tx.send()` case remains valid in outer scope if timeout hits
+- Operations are atomic regarding ownership
+- Unselected operations are cancelled without side effects
+
+*Rationale: Ensures ownership rules are preserved even with non-deterministic control flow. Prevents accidental data loss.*
+
+#### 14.5.6 Parallelism and Specification Updates
+
+Adding parallelism (M:N green threads across multiple OS threads) has **specification impacts** beyond the concurrency API.
+
+**Required Specification Changes:**
+
+**1. `Shared[T]` Must Be Atomic Reference Counted (ARC)**
+
+*Current (Single-Threaded):* Simple integer refcount
+*Required (Parallel):* Atomic CPU instructions for thread-safe increment/decrement
+
+```ryo
+# Implementation detail (not user code):
+# Old: refcount += 1  # ❌ Data race!
+# New: atomic_fetch_add(&refcount, 1)  # ✅ Thread-safe
+```
+
+**Impact:** Small performance cost (~5-10 CPU cycles per clone/drop) for thread safety.
+
+**2. Global Mutable State Rules**
+
+*Problem:* Two threads accessing `mut counter = 0` without locks causes undefined behavior.
+
+*Solution:*
+- **Global `mut` variables:** Forbidden (compile error) OR require `unsafe`
+- **Global constants:** Allowed (read-only is safe)
+- **Recommended pattern:**
+  ```ryo
+  # ❌ Forbidden
+  mut global_cache = map[str, int]()
+  
+  # ✅ Use static with sync primitive
+  static CACHE: Shared[Mutex[map[str, int]]] = Shared(Mutex(map[str, int]()))
+  ```
+
+**3. FFI Blocking Annotation**
+
+*Problem:* C function calls can block OS threads, starving the green thread scheduler.
+
+*Solution:* `#[blocking]` attribute signals runtime to spawn new OS thread:
+
+```ryo
+#[blocking]
+extern "C" fn sqlite_exec(db: *void, sql: *c_char) -> int
+
+fn query_db(sql: str):
+    # Runtime detects #[blocking], runs on detached OS thread
+    result = sqlite_exec(db_handle, sql.as_ptr())
+```
+
+**Impact:** Prevents green thread scheduler from getting blocked by slow C calls.
+
+**4. Panic Isolation (Task-Level Boundaries)**
+
+*Problem:* Should one panicking task crash the entire process?
+
+*Solution:*
+- Panics inside `task.spawn()` **kill only that task**, not the process
+- Error is logged to stderr or captured in `Future` result
+- OS thread survives to handle other tasks
+
+```ryo
+task.spawn(fn():
+    panic("Task failed")  # Only this task dies
+)
+# Main program continues
+```
+
+*Exception:* Panic in `main()` or outside task context still crashes the process.
+
+**5. Thread-Safe Allocator**
+
+*Requirement:* Memory allocator must handle concurrent allocations from multiple threads.
+
+*Implementation:* Ryo runtime uses **mimalloc** or **jemalloc** (configurable) instead of system `malloc`.
+
+**6. Send Constraint (Implicit)**
+
+*Policy:* In safe Ryo code, almost all types are thread-safe to send between tasks because:
+- No raw pointers (in safe code)
+- `Shared[T]` uses ARC (atomic)
+- Ownership rules prevent data races
+
+*Exception:* FFI types or `unsafe` code may introduce thread-unsafe types.
+
+#### 14.5.7 Keywords and Syntax
+
+**Reserved Keywords (Future-Proofing):**
+Even though Ryo does not use `async`/`await` syntax, these keywords are **reserved** in the lexer to prevent breaking changes if the design evolves:
+- `async` (reserved, unused)
+- `await` (reserved, unused)
+
+**Active Keywords:**
+- `select` - Non-deterministic operation selection
+- `case` - Branch in `select` statement
+- `move` - Move capture for closures (relevant for concurrent task spawning)
+
+**Standard Library Modules:**
+- `std.task` - Task spawning, scheduling, scopes
+- `std.channel` - Channel creation and communication
+- `std.sync` - Mutex, RwLock, Atomic primitives
+- `std.net` - Async network I/O (TCP, UDP, HTTP)
+
+#### 14.5.8 Implementation Timeline
+
+Concurrency is implemented in **Phase 5** (post-v0.1.0):
+- **Milestone 32:** Green threads runtime and ambient context
+- **Milestone 33:** Parallelism, sync primitives, and spec updates
+- **Milestone 34:** Data parallelism (`par_iter()`)
+
+*Rationale: Core language features and ownership model must stabilize before adding concurrency complexity.*
+
+## 15. Testing Framework
+
+Ryo includes a first-class testing framework.
+
+*   **Test Functions:** Marked with `#[test]`.
+*   **Benchmarks:** Marked with `#[bench]`.
+*   **Fixtures:** Use **RAII (Drop)** for setup/teardown.
+    ```ryo
+    struct DbFixture:
+        fn new() -> DbFixture: ...
+        impl Drop: fn drop(self): cleanup()
+
+    #[test]
+    fn test_db():
+        db = DbFixture.new() # Setup
+        # ... test ...
+        # Teardown (drop) happens automatically
+    ```
+*   **Integration Tests:** Placed in `tests/` directory. Treated as external packages (black-box testing).
+
+## 16. Tooling
+
+*   **Linker/Driver:** **Zig (`zig cc`)** is the mandatory linker and driver.
+    *   *Rationale:* Enables easy cross-compilation (e.g., `ryo build --target x86_64-linux-musl`) and seamless C interop.
 *   **Compiler Backend:** **Cranelift**. Supports AOT, JIT, WebAssembly. *(Rationale: Good balance of performance, compile speed, JIT/Wasm support).*
-*   **Tools:** `ryo` package manager integrated, `ryo` REPL (using JIT), Integrated Testing (`ryo test`). LSP future goal.
+*   **Tools:** `ryo` package manager integrated, `ryo-bindgen` for automatic C FFI binding generation, `ryo` REPL (using JIT), Integrated Testing (`ryo test`). LSP future goal.
 
-## 16. FFI & `unsafe`
+## 17. FFI & `unsafe`
 
-*   **Note:** Foreign Function Interface and unsafe operations are planned for future implementation. See [Language Proposals](proposals.md#foreign-function-interface-ffi--unsafe-code) for detailed design.
+Ryo provides a powerful, high-level workflow for C interoperability, as detailed in **Section 4.11**. This system uses the `ryo-bindgen` tool to automatically handle most FFI complexity.
 
-## 17. Integer Overflow Behavior
+However, the underlying mechanisms involve `unsafe` code and `extern "C"` blocks, which are strictly controlled.
+
+*   **Gatekeeping:** Direct use of `unsafe` blocks and manual `extern "C"` declarations is **forbidden** by default.
+*   **System Packages:** To enable these low-level FFI features for manual binding or to build foundational libraries, the package must be declared as `kind = "system"` in `ryo.toml`.
+*   *Rationale:* This prevents accidental unsafety in application code. The primary way to interact with C code should be through the automated `ryo-bindgen` workflow. Manual `unsafe` FFI is reserved for library authors who are building the safe abstractions that application developers will consume.
+
+## 18. Integer Overflow Behavior
 
 *   **Default:** Panic (debug), Wrap (release). *(Rationale: Balance safety during dev with performance in release).*
 *   **Explicit Methods:** `checked_* -> Optional`, `wrapping_*`, `saturating_*` (on types or in `math`).
 *   **Division by Zero:** Always panics.
 *   **Numeric Conversions (`TargetType(value)`):** Safe, explicitly defined behavior (widening ok, float->int truncates towards zero, narrowing int wraps/truncates). Does *not* require `unsafe`. This defined behavior ensures portability and avoids undefined behavior common in some other languages for certain conversions.
 
-## 18. Missing Elements / Future Work
+## 19. Missing Elements / Future Work
 
-For detailed future features and extensions, see the dedicated [Language Proposals](proposals.md) document.
+Future features and extensions are listed in this section below.
 
 **Current Specification Gaps:**
 *   **Formal Grammar (EBNF/BNF).**
@@ -2277,7 +2749,7 @@ For detailed future features and extensions, see the dedicated [Language Proposa
 *   **Memory Layout Guarantees** (Beyond `#[repr(C)]`).
 *   **WebAssembly Target Details** (ABI, JS interop bindings, WASI support).
 
-**Planned Future Extensions (see [proposals.md](proposals.md)):**
+**Planned Future Extensions:**
 *   **Compile-Time Execution** (`comptime` blocks and functions)
 *   **Foreign Function Interface & Unsafe Operations** (C FFI, raw pointers, unsafe blocks)
 *   **CSP Concurrency Extensions** (channels, select, spawn - optional)
@@ -2295,7 +2767,8 @@ For detailed future features and extensions, see the dedicated [Language Proposa
 ## See Also
 
 - **[Code Examples](examples/)** - Practical examples demonstrating the features described in this specification
-- **[Getting Started Guide](getting_started.md)** - Step-by-step tutorial for learning Ryo
-- **[Standard Library](std.md)** - Built-in functions and modules available in Ryo programs
+- **[Executive Summary](executive_summary.md)** - Quick 2-page overview of Ryo's design and features
+
+> **Note**: More code examples, getting started guide, and standard library documentation will be available as the project progresses.
 
 ---
