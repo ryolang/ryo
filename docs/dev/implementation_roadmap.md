@@ -1980,43 +1980,192 @@ Available commands:
 **Effort:** 2-3 weeks
 **Dependencies:** Core language complete (M1-M26)
 
-### Task/Future/Channel Runtime
-**Goal:** Implement concurrent programming for I/O-bound applications
+### Task/Future/Channel Runtime (Green Threads & Ambient Runtime)
+**Goal:** Implement concurrent programming for I/O-bound applications with "colorless" functions
 
 **Why Post-v0.1.0:**
 - Requires mature ownership and type system (Milestones 12-21)
-- Complex runtime implementation (executor, scheduler, reactor)
+- Complex runtime implementation (executor, scheduler, reactor, stack swapping)
 - Not essential for initial adoption (synchronous code works fine)
 - Allows more design iteration based on community feedback
 
-**Features:**
-- `task.run`, `task.spawn`, `select`, and `case` keywords
-- `future[T]` type and concurrent runtime
-- Standard library modules (`std.task`, `std.channel`)
-- **Green Threads (M:N)** and **Ambient Runtime** model
-- **Structured Concurrency** (`task.scope`) as the default
-- Cancellation and timeouts via `task.cancel()` and `task.timeout()`
-- Channel-based communication (`sender[T]`, `receiver[T]`)
+**Design Decision: Green Threads (Stack Swapping) vs async/await**
 
-**Example:**
+Ryo deliberately **does NOT use `async`/`await` keywords**. Instead, it uses **Green Threads (M:N Threading)** with **Stack Swapping** for the following reasons:
+
+*Rationale:*
+- **Avoids function coloring problem:** No distinction between async and sync functions
+- **Pythonic simplicity:** Functions look normal, concurrency is transparent
+- **Proven approach:** Go has used this successfully for 15+ years
+- **Better DX:** No need to mark everything with `async`, no `.await` everywhere
+
+**Implementation: Ambient Runtime Pattern**
+
+Instead of passing runtime context as function parameters (Zig approach), Ryo uses **Thread-Local Storage (TLS)** to provide an "ambient" runtime:
+
+```ryo
+import std.task
+import std.net
+
+# No runtime parameter needed - looks like regular code!
+fn fetch_data(url: str) -> !Data:
+    task.sleep(100ms)  # Accesses TLS runtime
+    response = try net.get(url)
+    return parse(response.body)
+```
+
+**How it works:**
+1. `task.sleep()` accesses a Thread-Local Variable pointing to the current scheduler
+2. If in async runtime: Swaps stack to another task
+3. If in blocking runtime: Blocks OS thread
+4. If in test: Uses mock runtime
+
+**Testing Pattern:**
+```ryo
+#[test]
+fn test_fetch():
+    mock = MockRuntime.create()
+    task.with_runtime(mock, fn():
+        data = fetch_data("http://example.com")  # Runs instantly
+        assert_eq(data.status, 200)
+    )
+```
+
+**Features Implemented:**
+
+**1. Structured Concurrency (Primary Pattern)**
+- `task.scope` - Primary concurrency pattern (not `task.spawn`)
+- Prevents resource leaks and zombie tasks
+- All tasks in scope must complete before scope exits
+- **Fire-and-forget is opt-in:** `task.spawn_detached()` for rare cases
+
+```ryo
+import std.task
+
+fn process_all(urls: list[str]) -> !list[Data]:
+    task.scope |s|:
+        for url in urls:
+            s.spawn(fn(): fetch_data(url))
+    # Implicit join - all tasks finished or cancelled
+    return results
+```
+
+**2. Sync Primitives (Not Just Channels)**
+- `Mutex[T]` - Mutual exclusion lock
+- `RwLock[T]` - Reader-writer lock
+- `Atomic[T]` - Lock-free atomic operations
+
+```ryo
+import std.sync
+
+cache = Shared(Mutex(map[str, int]()))
+
+fn worker(cache: Shared[Mutex[map[str, int]]]):
+    mut m = cache.lock()  # RAII - unlock on scope exit
+    m.insert("key", 100)
+```
+
+**3. Select Statement & Cancel Safety**
+- Non-deterministic operation selection (first to complete wins)
+- **Cancel safety:** Unselected operations don't transfer ownership
+
+```ryo
+select:
+    case data = rx.recv():
+        print(f"Received: {data}")
+    case tx.send(my_value):
+        print("Sent")
+    case task.timeout(1s):
+        print("Timed out")  # my_value remains valid!
+```
+
+**4. Parallelism Spec Updates (Breaking Changes from Single-Threaded)**
+
+Adding M:N threading has **specification impacts** that require changes to earlier milestones:
+
+**A. `Shared[T]` Must Be Atomic Reference Counted (ARC)**
+- **Change in Milestone 19 (RAII & Drop)**: `Shared[T]` uses atomic CPU instructions
+- **Performance cost:** ~5-10 CPU cycles per clone/drop for thread safety
+- **Rationale:** Prevents data races when multiple threads share ownership
+
+**B. Global Mutable State Rules**
+- **New Rule:** Global `mut` variables are **forbidden** (compile error) or require `unsafe`
+- **Pattern:** Use `static CACHE: Shared[Mutex[Map]]` instead
+- **Rationale:** Prevents data races on global state
+
+**C. FFI `#[blocking]` Annotation**
+- **New Attribute:** Mark C functions that block OS threads
+- **Runtime behavior:** Spawn new OS thread to prevent scheduler starvation
+- **Example:**
+  ```ryo
+  #[blocking]
+  extern "C" fn sqlite_exec(db: *void, sql: *c_char) -> int
+  ```
+
+**D. Panic Isolation (Task-Level Boundaries)**
+- **Behavior:** Panics inside `task.spawn()` kill only that task, not the process
+- **Exception:** Panic in `main()` or outside task context crashes process
+- **Rationale:** Server with 10,000 requests shouldn't crash if one request panics
+
+**E. Thread-Safe Allocator**
+- **Requirement:** Use **mimalloc** or **jemalloc** instead of system malloc
+- **Rationale:** System malloc is often slow/contended for multi-threaded workloads
+
+**F. Reserved Keywords**
+- `async` and `await` are **reserved** (unused) to prevent breaking changes if design evolves
+
+**Runtime Architecture:**
+- **M:N Threading:** M green threads on N OS threads (N = CPU cores)
+- **Work-Stealing Scheduler:** Threads steal tasks from each other
+- **Stack Swapping:** Save/restore stack pointers when tasks block
+- **Default Runtime:** Single-threaded blocking (initialized on first `task` call)
+- **Production Runtime:** Multi-threaded, explicit initialization
+
+**Standard Library Modules:**
+- `std.task` - Task spawning, scheduling, scopes, timeouts
+- `std.channel` - Channel creation, sender/receiver types
+- `std.sync` - Mutex, RwLock, Atomic primitives
+- `std.net` - Async network I/O (TCP, UDP, HTTP)
+
+**Example (Full Workflow):**
 ```ryo
 import std.task
 import std.channel
 
-fn fetch_url(url: &str) -> http.Error!str:
-    response = try http.get(url).await
-    body = try response.text().await
-    return body
+fn worker(rx: receiver[int], tx: sender[str]):
+    for num in rx:
+        result = process(num)
+        tx.send(result)
 
 fn main():
-    data_future = task.run:
-        fetch_url("https://api.example.com")
-
-    data = try data_future.await
-    print(data)
+    rt = MultiThreadedRuntime.new(threads=4)
+    rt.run(fn():
+        (tx_in, rx_in) = channel.create[int]()
+        (tx_out, rx_out) = channel.create[str]()
+        
+        task.scope |s|:
+            # Spawn workers
+            for _ in range(4):
+                s.spawn(fn(): worker(rx_in.clone(), tx_out.clone()))
+            
+            # Send work
+            for i in range(100):
+                tx_in.send(i)
+            
+            # Collect results
+            for _ in range(100):
+                result = rx_out.recv()
+                print(result)
+    )
 ```
 
-**Timeline:** v1.5 (6-12 months after v0.1.0)
+**Implementation Phases:**
+1. **Milestone 32:** Green threads runtime, ambient context, basic task spawning
+2. **Milestone 33:** Parallelism, sync primitives (Mutex/RwLock), spec updates, work-stealing
+3. **Milestone 34:** Data parallelism (par_iter, fork-join)
+4. **Milestone 35 (optional):** Select statement and advanced cancellation
+
+**Timeline:** v1.5-1.6 (6-12 months after v0.1.0)
 
 ### Foreign Function Interface (FFI)
 **Goal:** Comprehensive C interoperability for integrating with existing libraries

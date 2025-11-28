@@ -278,7 +278,6 @@ fn process_owned(data: MyStruct): # No & needed - implicit immutable borrow
 ### 4.7 Built-in Collections
 
 *   `list[T]`: Dynamic array. Homogeneous. *(Built-in fundamental type)*
-*   `list[T]`: Dynamic array. Homogeneous. *(Built-in fundamental type)*
 *   `map[K, V]`: Hash map. Homogeneous keys/values. `K` must be hashable/comparable. *(Built-in fundamental type)*
 
 #### **Safety Note: Versioned Iterators**
@@ -2280,9 +2279,284 @@ fn main():
     *   `channel`: Channel communication primitives (`channel.create[T]`, `sender[T]`, `receiver[T]`), ownership-based message passing. *(Planned)*
     *   `os`: Env, args, basic filesystem ops (functions return `OsError!T`).
     *   `testing`: `#[test]` attribute, `assert()`, `assert_eq()`. *(Planned)*
-    *   `sync`: `Shared[T]`/`Weak[T]` types for optional shared ownership.
+    *   `sync`: `Shared[T]`/`Weak[T]` types for optional shared ownership, `Mutex[T]` and `RwLock[T]` for thread-safe interior mutability. *(Planned)*
     *   `mem`: Basic memory utilities, `Drop` trait definition.
     *   `utf8`: Utilities for `str`/`&str` validation, char iteration.
+
+### 14.5 Concurrency Model
+
+Ryo's concurrency model is designed to provide **"colorless" functions** (no `async`/`await` keywords) with **pythonic simplicity** while maintaining memory safety and competitive performance. The design is heavily inspired by Go's green threads and Zig's 2025 I/O model.
+
+#### 14.5.1 Implementation Strategy: Green Threads
+
+**Design Decision:** Ryo uses **Green Threads (Stack Swapping)** instead of async/await state machines.
+
+*Rationale:*
+- Avoids the "function coloring" problem where async functions cannot call sync functions and vice versa
+- Provides simpler developer experience compared to Rust's async ecosystem
+- Enables pythonic code style without runtime overhead of a garbage collector
+- Proven approach: Go has used green threads successfully for 15+ years
+
+**How It Works:**
+1. **M:N Threading Model:** M green threads (user-space tasks) run on N OS threads (typically = CPU cores)
+2. **Stack Swapping:** When a task blocks (I/O, sleep), the runtime saves its stack pointer and switches to another task
+3. **Work-Stealing Scheduler:** OS threads steal tasks from each other to balance load
+4. **Standard Functions:** Regular functions can perform I/O without special syntax
+
+**Comparison to Alternatives:**
+
+| Approach | Function Coloring | Implementation Complexity | DX | Example Language |
+|----------|-------------------|---------------------------|-----|------------------|
+| **Green Threads** | No | Medium (runtime stack management) | Excellent | Go, Ryo (planned) |
+| **async/await** | Yes | High (compiler state machines) | Good | Rust, JavaScript |
+| **Callbacks** | No | Low | Poor | Node.js (old style) |
+
+#### 14.5.2 The Ambient Runtime Pattern
+
+Ryo uses **Thread-Local Storage (TLS)** to provide a runtime context without polluting function signatures.
+
+**Python-like Usage:**
+```ryo
+import std.task
+import std.net
+
+fn fetch_data(url: str) -> !Data:
+    # Looks like regular code - no explicit runtime parameter
+    task.sleep(100ms)
+    response = try net.get(url)
+    return parse(response.body)
+```
+
+**Under the Hood:**
+- When `task.sleep()` is called, it accesses a **Thread-Local Variable** pointing to the current scheduler
+- If running in async runtime: Swaps stack to another task
+- If running in blocking runtime: Blocks OS thread
+- If running in test: Uses mock runtime
+
+**Testing Pattern:**
+```ryo
+#[test]
+fn test_fetch_fast():
+    # Override ambient runtime for this test
+    mock = MockRuntime.create()
+    task.with_runtime(mock, fn():
+        # This runs instantly - mock runtime doesn't actually sleep
+        data = fetch_data("http://example.com")
+        assert_eq(data.status, 200)
+    )
+```
+
+**Runtime Initialization:**
+1. **Default:** First call to `task` or `net` initializes a simple single-threaded blocking runtime
+2. **Explicit:** User can create a multi-threaded runtime:
+    ```ryo
+    fn main():
+        rt = MultiThreadedRuntime.new(threads=4)
+        rt.run(app_logic)
+    ```
+
+*Rationale: Balances Python-like simplicity with the ability to test and swap implementations. Avoids "context parameter pollution" seen in explicit context-passing patterns.*
+
+#### 14.5.3 Structured Concurrency
+
+Ryo makes **structured concurrency** the primary pattern to prevent resource leaks and zombie tasks.
+
+**Primary Pattern: `task.scope`**
+```ryo
+import std.task
+
+fn process_all(urls: list[str]) -> !list[Data]:
+    task.scope |s|:
+        for url in urls:
+            s.spawn(fn(): fetch_data(url))
+    # Implicit join: all tasks finished or cancelled when scope ends
+```
+
+**Properties:**
+- All spawned tasks **must** complete before scope exits
+- If any task panics, all tasks in scope are cancelled
+- Prevents "fire-and-forget" bugs common in unstructured concurrency
+- Parent cannot finish before children (enforced by compiler)
+
+**Detached Tasks (Rare):**
+For the rare case where you truly need fire-and-forget:
+```ryo
+task.spawn_detached(background_worker)  # No join point
+```
+
+*Rationale: Following modern concurrency best practices (Kotlin Coroutines, Swift, Python Trio). Fire-and-forget is opt-in, not default.*
+
+#### 14.5.4 Synchronization Primitives
+
+While channels are preferred for communication ("share memory by communicating"), Ryo provides traditional sync primitives for shared state.
+
+**Mutex (Exclusive Lock):**
+```ryo
+import std.sync
+
+cache = Shared(Mutex(map[str, int]()))
+
+fn worker(cache: Shared[Mutex[map[str, int]]]):
+    mut m = cache.lock()  # Blocks until lock acquired
+    m.insert("key", 100)
+    # Lock released automatically when 'm' goes out of scope (RAII)
+```
+
+**RwLock (Reader-Writer Lock):**
+```ryo
+data = Shared(RwLock(config))
+
+fn reader(data: Shared[RwLock[Config]]):
+    r = data.read_lock()   # Multiple readers allowed
+    print(r.port)
+
+fn writer(data: Shared[RwLock[Config]]):
+    mut w = data.write_lock()  # Exclusive write access
+    w.port = 8080
+```
+
+*Available Primitives:*
+- `Mutex[T]` - Mutual exclusion lock
+- `RwLock[T]` - Reader-writer lock (multiple readers or single writer)
+- `Atomic[T]` - Lock-free atomic operations (integers, booleans)
+
+*Rationale: Channels are great for tasks communicating, but sometimes you just need a shared cache or counter. Explicit sync primitives are clearer than complex channel-based solutions for simple shared state.*
+
+#### 14.5.5 Select Statement and Cancel Safety
+
+The `select` statement enables non-deterministic operations (first to complete wins):
+
+```ryo
+import std.task
+import std.channel
+
+select:
+    case data = rx.recv():
+        print(f"Received: {data}")
+    case tx.send(my_value):
+        print("Sent")
+    case task.timeout(1s):
+        print("Timed out")
+```
+
+**Cancel Safety:** If a case is not selected, ownership transfer does not happen:
+- `my_value` in the `tx.send()` case remains valid in outer scope if timeout hits
+- Operations are atomic regarding ownership
+- Unselected operations are cancelled without side effects
+
+*Rationale: Ensures ownership rules are preserved even with non-deterministic control flow. Prevents accidental data loss.*
+
+#### 14.5.6 Parallelism and Specification Updates
+
+Adding parallelism (M:N green threads across multiple OS threads) has **specification impacts** beyond the concurrency API.
+
+**Required Specification Changes:**
+
+**1. `Shared[T]` Must Be Atomic Reference Counted (ARC)**
+
+*Current (Single-Threaded):* Simple integer refcount
+*Required (Parallel):* Atomic CPU instructions for thread-safe increment/decrement
+
+```ryo
+# Implementation detail (not user code):
+# Old: refcount += 1  # ❌ Data race!
+# New: atomic_fetch_add(&refcount, 1)  # ✅ Thread-safe
+```
+
+**Impact:** Small performance cost (~5-10 CPU cycles per clone/drop) for thread safety.
+
+**2. Global Mutable State Rules**
+
+*Problem:* Two threads accessing `mut counter = 0` without locks causes undefined behavior.
+
+*Solution:*
+- **Global `mut` variables:** Forbidden (compile error) OR require `unsafe`
+- **Global constants:** Allowed (read-only is safe)
+- **Recommended pattern:**
+  ```ryo
+  # ❌ Forbidden
+  mut global_cache = map[str, int]()
+  
+  # ✅ Use static with sync primitive
+  static CACHE: Shared[Mutex[map[str, int]]] = Shared(Mutex(map[str, int]()))
+  ```
+
+**3. FFI Blocking Annotation**
+
+*Problem:* C function calls can block OS threads, starving the green thread scheduler.
+
+*Solution:* `#[blocking]` attribute signals runtime to spawn new OS thread:
+
+```ryo
+#[blocking]
+extern "C" fn sqlite_exec(db: *void, sql: *c_char) -> int
+
+fn query_db(sql: str):
+    # Runtime detects #[blocking], runs on detached OS thread
+    result = sqlite_exec(db_handle, sql.as_ptr())
+```
+
+**Impact:** Prevents green thread scheduler from getting blocked by slow C calls.
+
+**4. Panic Isolation (Task-Level Boundaries)**
+
+*Problem:* Should one panicking task crash the entire process?
+
+*Solution:*
+- Panics inside `task.spawn()` **kill only that task**, not the process
+- Error is logged to stderr or captured in `Future` result
+- OS thread survives to handle other tasks
+
+```ryo
+task.spawn(fn():
+    panic("Task failed")  # Only this task dies
+)
+# Main program continues
+```
+
+*Exception:* Panic in `main()` or outside task context still crashes the process.
+
+**5. Thread-Safe Allocator**
+
+*Requirement:* Memory allocator must handle concurrent allocations from multiple threads.
+
+*Implementation:* Ryo runtime uses **mimalloc** or **jemalloc** (configurable) instead of system `malloc`.
+
+**6. Send Constraint (Implicit)**
+
+*Policy:* In safe Ryo code, almost all types are thread-safe to send between tasks because:
+- No raw pointers (in safe code)
+- `Shared[T]` uses ARC (atomic)
+- Ownership rules prevent data races
+
+*Exception:* FFI types or `unsafe` code may introduce thread-unsafe types.
+
+#### 14.5.7 Keywords and Syntax
+
+**Reserved Keywords (Future-Proofing):**
+Even though Ryo does not use `async`/`await` syntax, these keywords are **reserved** in the lexer to prevent breaking changes if the design evolves:
+- `async` (reserved, unused)
+- `await` (reserved, unused)
+
+**Active Keywords:**
+- `select` - Non-deterministic operation selection
+- `case` - Branch in `select` statement
+- `move` - Move capture for closures (relevant for concurrent task spawning)
+
+**Standard Library Modules:**
+- `std.task` - Task spawning, scheduling, scopes
+- `std.channel` - Channel creation and communication
+- `std.sync` - Mutex, RwLock, Atomic primitives
+- `std.net` - Async network I/O (TCP, UDP, HTTP)
+
+#### 14.5.8 Implementation Timeline
+
+Concurrency is implemented in **Phase 5** (post-v0.1.0):
+- **Milestone 32:** Green threads runtime and ambient context
+- **Milestone 33:** Parallelism, sync primitives, and spec updates
+- **Milestone 34:** Data parallelism (`par_iter()`)
+
+*Rationale: Core language features and ownership model must stabilize before adding concurrency complexity.*
 
 ## 15. Testing Framework
 
