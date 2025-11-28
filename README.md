@@ -1,4 +1,4 @@
-![Ryo](./docs/assets/ryo.png)
+<img src="./docs/assets/ryo.png" alt="Ryo Logo" width="160" />
 # Ryo Programming Language ⚡
 
 **Ryo /ˈraɪoʊ/: Productive, Safe, Fast.**
