@@ -71,6 +71,17 @@ Ryo draws inspiration from the best features of modern programming languages:
 
 **The Result:** A language that's **easier than Rust** (no lifetimes), **safer than Python** (compile-time memory safety), **more expressive than Go** (generics, ADTs), and **more familiar than Zig** (Python-like syntax).
 
+## Designed for the AI Era
+
+As of 2026, most application code is written by AI agents and reviewed by humans. Ryo's design acknowledges this shift:
+
+*   **Strict over convenient** - Verbose safety patterns (`task.spawn_detached` over `task.spawn`) cost the AI nothing but help the human reviewer instantly understand intent.
+*   **Compiler strictness over runtime flexibility** - Strict compile-time enforcement catches errors before code reaches production. Warnings on unused `future[T]`, implicit move enforcement for task closures, and forbidden global mutable state.
+*   **Predictable patterns over clever shortcuts** - A small set of orthogonal primitives with consistent behavior serves both AI writers and human readers.
+*   **Explicit is readable** - `shared[mutex[map[str, int]]]` tells the reviewer at a glance: "shared, locked, concurrent state." No hidden magic.
+
+Python-style syntax, clean error messages, and readable stack traces serve the human side. The AI handles the ceremony; the human benefits from the clarity.
+
 ## Quick Example
 
 > **Note:** This example shows Ryo's planned features. Most are not yet implemented.

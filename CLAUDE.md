@@ -45,11 +45,14 @@
 
 **Design Philosophy:**
 1. **Simplicity** - Fewer language features, done well
-1. **Ownership Lite** - Simplified memory management without manual lifetimes
-2. **Python-Inspired Syntax** - Colons and indentation instead of braces
-3. **Compile-Time Safety** - Static typing with inference, exhaustive pattern matching
-4. **No Garbage Collection** - Predictable performance through ownership
-5. **Built in Concurrency** - Task/Future/Channel runtime for I/O-bound work
+2. **Ownership Lite** - Simplified memory management without manual lifetimes
+3. **Python-Inspired Syntax** - Colons and indentation instead of braces
+4. **Compile-Time Safety** - Static typing with inference, exhaustive pattern matching
+5. **No Garbage Collection** - Predictable performance through ownership
+6. **Built in Concurrency** - Task/Future/Channel runtime for I/O-bound work
+7. **AI-Era Design** - Optimized for the AI-writes, human-reviews workflow
+
+**AI-Era Language Design:** As of 2026, most code is written by AI agents and reviewed by humans. Ryo optimizes for this: strict rules and verbose safety patterns (the AI handles ceremony), explicit naming and predictable semantics (the human benefits from clarity). Compiler strictness catches errors before production. Python-style syntax and readable error messages serve the human side of the workflow.
 
 **Target Audience:** Python developers who need better performance, memory safety, and static type checking with an easier learning curve than Rust.
 
