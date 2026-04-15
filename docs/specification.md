@@ -150,6 +150,29 @@ error-traces = "minimal"   # Production balances DX + performance
 
 See Section 7.10 for complete configuration reference.
 
+### 1.2 AI-Era Language Design
+
+As of 2026, the majority of application code is written by AI agents and reviewed, debugged, and maintained by both AI agents and human developers. Ryo's design acknowledges this shift and optimizes for this workflow.
+
+**The AI-Writes, Human-Reviews Model:**
+
+| Actor | Primary Activity | What They Need |
+|-------|-----------------|----------------|
+| **AI Agent** | Writing code, fixing bugs, refactoring | Strict rules, unambiguous semantics, predictable patterns |
+| **Human Developer** | Reviewing diffs, debugging production, understanding intent | Explicit code, readable patterns, clear error messages |
+
+**Design Implications:**
+
+1. **Strict over convenient.** Verbose safety patterns (`task.spawn_detached` over `task.spawn`) cost the AI nothing — it types for free. But explicit names help the human reviewer instantly understand intent without reading surrounding context.
+
+2. **Compiler strictness over runtime flexibility.** The AI will follow the rules perfectly. Strict compile-time enforcement catches the rare cases where it doesn't, before code reaches production. Warnings on unused `future[T]` values, implicit move enforcement for task closures, and forbidden global mutable state are examples of this principle.
+
+3. **Predictable patterns over clever shortcuts.** An AI benefits from a small set of orthogonal primitives with consistent behavior. A human benefits from reading code that always follows the same patterns. Both are served by fewer features, done well.
+
+4. **Explicit is readable.** When an AI writes `shared[mutex[map[str, int]]]`, a human reviewer can see at a glance: "this is shared, locked, concurrent state." No hidden magic, no implicit conversions, no operator overloading obscuring intent.
+
+**Balance:** Ryo does not sacrifice human ergonomics for machine convenience. Python-style syntax, clean error messages, and readable stack traces serve the human side of the workflow. The AI handles the ceremony; the human benefits from the clarity.
+
 ## 2. Lexical Structure
 
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
