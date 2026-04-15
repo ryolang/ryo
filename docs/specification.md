@@ -155,7 +155,7 @@ See Section 7.10 for complete configuration reference.
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
 *   **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
     *   *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for user-defined types (structs, enums, traits) and enum variants. Built-in fundamental types (primitives and collections) use lowercase (e.g., `int`, `str`, `list`, `map`). *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
-*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `package`, `true`, `false`, `none`, `void`, `move`, `error`, `try`, `catch`, `orelse`, `select`, `case`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `as`, `default`, `let` are not keywords. `package` is an access modifier keyword added for package-internal visibility. `select` and `case` are used for non-deterministic concurrent operations).
+*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `package`, `true`, `false`, `none`, `void`, `move`, `error`, `try`, `catch`, `orelse`, `select`, `case`, `default`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `as` and `let` are not keywords. `package` is an access modifier keyword added for package-internal visibility. `select`, `case`, and `default` are used for non-deterministic concurrent operations).
 *   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error union prefix (`!`), optional chaining (`?.`).
     *   **Important Note:** The `!` operator is used exclusively for error union type prefixes (`!T` = error or T, `ErrorType!T` = ErrorType or T). The `!` is NOT used for logical negation—use `not` instead (following Python convention). Similarly, `?` operator in type context (`?T`) denotes optional types, while `?.` is the optional chaining operator.
     *   `_` (Underscore): The underscore `_` is treated as a special identifier. When used in patterns (`match`, destructuring assignment), it signifies a wildcard or an intentionally ignored value; it does not bind to a variable.
@@ -766,8 +766,8 @@ import c:my_lib         # Imports the C library
 import c:my_rust_lib    # Imports the Rust library
 
 fn main():
-    let c_result = my_lib.c_function(1)
-    let rust_result = my_rust_lib.rust_function_with_c_abi(2)
+    c_result = my_lib.c_function(1)
+    rust_result = my_rust_lib.rust_function_with_c_abi(2)
 
     print(f"C result: {c_result}, Rust result: {rust_result}")
 ```
