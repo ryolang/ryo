@@ -2717,11 +2717,11 @@ fn main():
     *   `time`: `Instant`, `SystemTime`, `Duration`.
     *   `encoding.json`: `encode -> JsonError!str`, `decode -> JsonError!JsonValue`, `decode_into[T] -> JsonError!T`.
     *   `net.http`: Client/Server primitives (`Request`, `Response`, handlers, functions return `HttpError!T`).
-    *   `task`: Task execution primitives (`task.run`, `task.spawn`, `task.join`, `task.gather`, `task.any`, `task.delay`, `task.timeout`, `task.group`), `future[T]` type. *(Planned)*
+    *   `task`: Task execution primitives (`task.run`, `task.scope`, `task.spawn_detached`, `task.join`, `task.gather`, `task.any`, `task.delay`, `task.timeout`), `future[T]` type. *(Planned)*
     *   `channel`: Channel communication primitives (`channel.create[T]`, `sender[T]`, `receiver[T]`), ownership-based message passing. *(Planned)*
     *   `os`: Env, args, basic filesystem ops (functions return `OsError!T`).
     *   `testing`: `#[test]` attribute, `assert()`, `assert_eq()`. *(Planned)*
-    *   `sync`: `Shared[T]`/`Weak[T]` types for optional shared ownership, `Mutex[T]` and `RwLock[T]` for thread-safe interior mutability. *(Planned)*
+    *   `sync`: `shared[T]`/`weak[T]` types for optional shared ownership, `mutex[T]` and `rwlock[T]` for thread-safe interior mutability. *(Planned)*
     *   `mem`: Basic memory utilities, `Drop` trait definition.
     *   `utf8`: Utilities for `str`/`&str` validation, char iteration.
 
@@ -2836,9 +2836,9 @@ While channels are preferred for communication ("share memory by communicating")
 ```ryo
 import std.sync
 
-cache = Shared(Mutex(map[str, int]()))
+cache = shared(mutex(map[str, int]()))
 
-fn worker(cache: Shared[Mutex[map[str, int]]]):
+fn worker(cache: shared[mutex[map[str, int]]]):
     mut m = cache.lock()  # Blocks until lock acquired
     m.insert("key", 100)
     # Lock released automatically when 'm' goes out of scope (RAII)
@@ -2846,21 +2846,21 @@ fn worker(cache: Shared[Mutex[map[str, int]]]):
 
 **RwLock (Reader-Writer Lock):**
 ```ryo
-data = Shared(RwLock(config))
+data = shared(rwlock(config))
 
-fn reader(data: Shared[RwLock[Config]]):
+fn reader(data: shared[rwlock[Config]]):
     r = data.read_lock()   # Multiple readers allowed
     print(r.port)
 
-fn writer(data: Shared[RwLock[Config]]):
+fn writer(data: shared[rwlock[Config]]):
     mut w = data.write_lock()  # Exclusive write access
     w.port = 8080
 ```
 
 *Available Primitives:*
-- `Mutex[T]` - Mutual exclusion lock
-- `RwLock[T]` - Reader-writer lock (multiple readers or single writer)
-- `Atomic[T]` - Lock-free atomic operations (integers, booleans)
+- `mutex[T]` - Mutual exclusion lock
+- `rwlock[T]` - Reader-writer lock (multiple readers or single writer)
+- `atomic[T]` - Lock-free atomic operations (integers, booleans)
 
 *Rationale: Channels are great for tasks communicating, but sometimes you just need a shared cache or counter. Explicit sync primitives are clearer than complex channel-based solutions for simple shared state.*
 
@@ -2894,7 +2894,7 @@ Adding parallelism (M:N green threads across multiple OS threads) has **specific
 
 **Required Specification Changes:**
 
-**1. `Shared[T]` Must Be Atomic Reference Counted (ARC)**
+**1. `shared[T]` Must Be Atomic Reference Counted (ARC)**
 
 *Current (Single-Threaded):* Simple integer refcount
 *Required (Parallel):* Atomic CPU instructions for thread-safe increment/decrement
@@ -2920,7 +2920,7 @@ Adding parallelism (M:N green threads across multiple OS threads) has **specific
   mut global_cache = map[str, int]()
   
   # ✅ Use static with sync primitive
-  static CACHE: Shared[Mutex[map[str, int]]] = Shared(Mutex(map[str, int]()))
+  static CACHE: shared[mutex[map[str, int]]] = shared(mutex(map[str, int]()))
   ```
 
 **3. FFI Blocking Annotation**
@@ -2945,14 +2945,16 @@ fn query_db(sql: str):
 *Problem:* Should one panicking task crash the entire process?
 
 *Solution:*
-- Panics inside `task.spawn()` **kill only that task**, not the process
-- Error is logged to stderr or captured in `Future` result
+- Panics inside `task.run` or `task.spawn_detached` **kill only that task**, not the process
+- Error is logged to stderr or captured in the `future[T]` result (if using `task.run`)
 - OS thread survives to handle other tasks
 
 ```ryo
-task.spawn(fn():
+worker = task.run:
     panic("Task failed")  # Only this task dies
-)
+
+result = worker.await catch |e|:
+    io.println(f"Task panicked: {e}")
 # Main program continues
 ```
 
@@ -2968,7 +2970,7 @@ task.spawn(fn():
 
 *Policy:* In safe Ryo code, almost all types are thread-safe to send between tasks because:
 - No raw pointers (in safe code)
-- `Shared[T]` uses ARC (atomic)
+- `shared[T]` uses ARC (atomic)
 - Ownership rules prevent data races
 
 *Exception:* FFI types or `unsafe` code may introduce thread-unsafe types.
@@ -2978,12 +2980,13 @@ task.spawn(fn():
 **Reserved Keywords (Future-Proofing):**
 Even though Ryo does not use `async`/`await` syntax, these keywords are **reserved** in the lexer to prevent breaking changes if the design evolves:
 - `async` (reserved, unused)
-- `await` (reserved, unused)
+- `await` (reserved — used as postfix operator `.await` on `future[T]`, not as a standalone keyword)
 
 **Active Keywords:**
 - `select` - Non-deterministic operation selection
 - `case` - Branch in `select` statement
-- `move` - Move capture for closures (relevant for concurrent task spawning)
+- `default` - Non-blocking fallback in `select` statement
+- `move` - Move capture for closures (redundant but accepted in task closures, which implicitly move)
 
 **Standard Library Modules:**
 - `std.task` - Task spawning, scheduling, scopes
