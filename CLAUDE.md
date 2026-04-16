@@ -25,31 +25,35 @@
 
 **Rationale**: Mojo demonstrates that ownership doesn't require Rust's complexity. Ryo follows this philosophy, making memory safety accessible to Python developers.
 
-### 🔷 Go - Simplicity & Concurrency
-- **Simplicity as a core value** - fewer language features, done well
+### 🔷 Go - Simplicity-Inspired & Concurrency
+- **Simplicity as inspiration** - fewer language features, done well. Simpler than Rust, more expressive than Go
 - **Fast compilation** times for rapid development
 - **Built-in concurrency primitives** future: CSP-style channels with a twist
 - **Single, standard toolchain** no build configuration hell
 - **Pragmatic approach** to language design
 
-**Rationale**: Go proves that simplicity and performance aren't mutually exclusive. Ryo adopts this pragmatic philosophy while adding modern type safety.
+**Rationale**: Go proves that simplicity and performance aren't mutually exclusive. Ryo adopts this pragmatic philosophy while adding modern type safety. Ryo is not as minimal as Go — it adds ownership, generics, and ADTs — but targets the same "few features, done well" ethos.
 
-### ⚡ Zig - Simplicity, Error Handling & Compile-Time
-- **No hidden control flow** - explicit is better than implicit
+### ⚡ Zig - Error Handling, Compile-Time & Predictability
+- **Readable by default** - implicit where ceremony hurts clarity (parameter borrowing, type narrowing), explicit where the reviewer needs to see intent (`shared[mutex[T]]`, `try`, `move`)
 - **Comptime execution** for zero-cost abstractions without macros
 - **Simple error handling** with explicit error sets, IMPORTANT!
 - **No operator overloading** - predictable code behavior
+- **No exceptions** - errors are values, not hidden control flow
 - **Minimal runtime** requirements
 
-**Rationale**: Zig's `comptime` provides powerful metaprogramming without complex macro systems. Ryo adopts this for configuration, code generation, and type introspection.
+**Rationale**: Zig's `comptime` provides powerful metaprogramming without complex macro systems. Ryo adopts its error-handling philosophy and predictability while prioritizing DX — removing ceremony that adds noise without aiding comprehension.
 
 **Design Philosophy:**
 1. **Simplicity** - Fewer language features, done well
-1. **Ownership Lite** - Simplified memory management without manual lifetimes
-2. **Python-Inspired Syntax** - Colons and indentation instead of braces
-3. **Compile-Time Safety** - Static typing with inference, exhaustive pattern matching
-4. **No Garbage Collection** - Predictable performance through ownership
-5. **Built in Concurrency** - Task/Future/Channel runtime for I/O-bound work
+2. **Ownership Lite** - Simplified memory management without manual lifetimes
+3. **Python-Inspired Syntax** - Colons and indentation instead of braces
+4. **Compile-Time Safety** - Static typing with inference, exhaustive pattern matching
+5. **No Garbage Collection** - Predictable performance through ownership
+6. **Built in Concurrency** - Task/Future/Channel runtime for I/O-bound work
+7. **AI-Era Design** - Optimized for the AI-writes, human-reviews workflow
+
+**AI-Era Language Design:** As of 2026, most code is written by AI agents and reviewed by humans. Ryo optimizes for this: strict rules and verbose safety patterns (the AI handles ceremony), explicit naming and predictable semantics (the human benefits from clarity). Compiler strictness catches errors before production. Python-style syntax and readable error messages serve the human side of the workflow.
 
 **Target Audience:** Python developers who need better performance, memory safety, and static type checking with an easier learning curve than Rust.
 

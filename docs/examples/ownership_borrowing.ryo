@@ -1,75 +1,78 @@
 # ownership_borrowing.ryo
-# Memory management example demonstrating ownership and borrowing
+# Memory management example demonstrating Ryo's "Ownership Lite" model
+#
+# Key rules:
+#   Rule 2: Function parameters are implicitly borrowed (no & needed)
+#   Rule 3: Mutable borrows require &mut in signature AND call site
+#   Rule 4: Move parameters use `move` keyword in signature
+#   Rule 5: Functions cannot return borrows — always return owned values
 
 struct Person:
-    name: str
-    age: int
+	name: str
+	age: int
 
-fn greet_person(person: &Person):
-    # Immutable borrow - can read but not modify
-    print(f"Hello, {person.name}! You are {person.age} years old.")
+fn greet_person(person: Person):
+	# Implicit immutable borrow — can read but not modify
+	print(f"Hello, {person.name}! You are {person.age} years old.")
 
 fn have_birthday(person: &mut Person):
-    # Mutable borrow - can modify the person
-    person.age += 1
-    print(f"Happy birthday, {person.name}! Now you are {person.age}.")
+	# Mutable borrow — can modify the person
+	person.age += 1
+	print(f"Happy birthday, {person.name}! Now you are {person.age}.")
 
-fn take_ownership(person: Person) -> str:
-    # Takes ownership of person - original variable becomes invalid
-    return f"{person.name} (age {person.age})"
+fn take_ownership(move person: Person) -> str:
+	# Takes ownership of person — original variable becomes invalid
+	return f"{person.name} (age {person.age})"
 
-fn create_greeting(name: &str, age: int) -> str:
-    # Borrows the name string
-    return f"Greetings, {name}, age {age}!"
+fn create_greeting(name: str, age: int) -> str:
+	# name is implicitly borrowed — read-only access
+	return f"Greetings, {name}, age {age}!"
 
 fn main():
-    # Create a person (owns the data)
-    mut alice = Person{name: "Alice", age: 25}
+	# Create a person (owns the data)
+	mut alice = Person(name="Alice", age=25)
 
-    # Immutable borrow - can call this multiple times
-    greet_person(&alice)
-    greet_person(&alice)
+	# Implicit immutable borrow — can call this multiple times
+	greet_person(alice)
+	greet_person(alice)
 
-    # Mutable borrow - can only have one at a time
-    have_birthday(&mut alice)
+	# Mutable borrow — explicit &mut at call site
+	have_birthday(&mut alice)
 
-    # Another immutable borrow after mutable borrow is done
-    greet_person(&alice)
+	# Implicit borrow again after mutable borrow is done
+	greet_person(alice)
 
-    # Borrowing for string processing
-    name_ref = &alice.name
-    greeting = create_greeting(name_ref, alice.age)
-    print(greeting)
+	# String is implicitly borrowed when passed to a function
+	greeting = create_greeting(alice.name, alice.age)
+	print(greeting)
 
-    # Moving ownership
-    description = take_ownership(alice)
-    # alice is no longer valid here - would cause compile error if used
-    print(f"Description: {description}")
+	# Moving ownership — alice is consumed
+	description = take_ownership(alice)
+	# alice is no longer valid here — would cause compile error if used
+	print(f"Description: {description}")
 
-    # String ownership examples
-    original_message = "Hello, Ryo!"
+	# String ownership examples
+	original_message = "Hello, Ryo!"
+	print(f"Message: {original_message}")
 
-    # Borrow the string
-    borrowed_message = &original_message
-    print(f"Borrowed: {borrowed_message}")
+	# Strings are implicitly borrowed when passed to functions
+	# No need for explicit & — just pass the variable naturally
+	print(f"Still valid: {original_message}")
 
-    # Original is still valid
-    print(f"Original: {original_message}")
+	# List ownership example
+	mut numbers = [1, 2, 3, 4, 5]
 
-    # List ownership example
-    mut numbers = [1, 2, 3, 4, 5]
+	# Implicit borrow for reading
+	fn print_first(list: list[int]):
+		if not list.is_empty():
+			print(f"First number: {list[0]}")
 
-    # Borrow for reading
-    fn print_first(list: &List[int]):
-        if not list.is_empty():
-            print(f"First number: {list[0]}")
+	print_first(numbers)
 
-    print_first(&numbers)
+	# Explicit &mut for modification
+	fn double_first(list: &mut list[int]):
+		if not list.is_empty():
+			list[0] *= 2
 
-    # Borrow for modification
-    fn double_first(list: &mut List[int]):
-        if not list.is_empty():
-            list[0] *= 2
-
-    double_first(&mut numbers)
-    print_first(&numbers)
+	double_first(&mut numbers)
+	print_first(numbers)

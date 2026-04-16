@@ -9,12 +9,13 @@
 # - Transferring ownership via tx.send (data is moved)
 # - Receiving data with rx.recv (suspends until message available)
 # - Move semantics in concurrent contexts
+# - Task boundaries move data by default
 
 import std.channel
 import std.task
 import std.io
 
-fn background_worker(tx: sender[str]):
+fn background_worker(move tx: sender[str]):
 	message = "Hello from the worker task!" # message is owned here
 
 	# Ownership of 'message' is MOVED into the channel
@@ -24,9 +25,9 @@ fn main():
 	# Create a buffered channel (e.g., buffer size 1)
 	tx, rx = std.channel.create[str](1)
 
-	# Spawn the worker, moving ownership of the sender into it
+	# Spawn the worker — data passed into tasks is moved by default
 	task.spawn:
-		background_worker(move tx) # 'tx' is moved into the closure
+		background_worker(tx)
 
 	io.println("Waiting for message on channel...")
 

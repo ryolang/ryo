@@ -14,26 +14,26 @@ Currently, Ryo uses built-in generic types like `list[T]`, `map[K,V]`, and colle
 ```ryo
 # Future syntax for generic structs
 struct Container[T]:
-    value: T
-    count: int
+	value: T
+	count: int
 
 struct Pair[A, B]:
-    first: A
-    second: B
+	first: A
+	second: B
 
 # Usage
-container = Container[int] { value: 42, count: 1 }
-pair = Pair[str, float] { first: "hello", second: 3.14 }
+container = Container[int](value=42, count=1)
+pair = Pair[str, float](first="hello", second=3.14)
 ```
 
 **Generic Functions**
 ```ryo
 # Future syntax for generic functions
 fn identity[T](x: T) -> T:
-    return x
+	return x
 
 fn swap[A, B](pair: Pair[A, B]) -> Pair[B, A]:
-    return Pair[B, A] { first: pair.second, second: pair.first }
+	return Pair[B, A](first=pair.second, second=pair.first)
 
 # Usage
 result = identity[int](42)
@@ -44,8 +44,8 @@ swapped = swap(my_pair)  # Type inference
 ```ryo
 # Future syntax for generic enums
 enum Option[T]:
-    Some(T)
-    None
+	Some(T)
+	None
 
 # Error types use 'error' keyword (single-variant)
 
@@ -59,7 +59,7 @@ import processing
 # Usage
 maybe = Option[str].Some("hello")
 result = try some_operation() catch |e|:
-    handle_error(e)
+	handle_error(e)
 ```
 
 #### **Trait Bounds and Constraints**
@@ -68,14 +68,12 @@ result = try some_operation() catch |e|:
 ```ryo
 # Future syntax for trait bounds
 fn sort[T](list: &mut list[T])
-where T: Comparable {
-    # Implementation using T's comparison capabilities
-}
+where T: Comparable:
+	# Implementation using T's comparison capabilities
 
 fn serialize[T](data: T) -> str
-where T: Serializable {
-    return data.to_string()
-}
+where T: Serializable:
+	return data.to_string()
 ```
 
 **Multiple Bounds**
@@ -83,7 +81,7 @@ where T: Serializable {
 # Future syntax for multiple trait bounds
 fn process[T](data: T) -> ProcessingError!ProcessedData
 where T: Serializable + Clone + Send:
-    # Implementation using multiple T capabilities
+	# Implementation using multiple T capabilities
 ```
 
 **Where Clauses**
@@ -91,11 +89,10 @@ where T: Serializable + Clone + Send:
 # Future syntax for complex where clauses
 fn complex_function[T, U, V](a: T, b: U) -> V
 where 
-    T: Clone + Send,
-    U: Serializable,
-    V: From[T] + From[U] {
-    # Complex implementation
-}
+	T: Clone + Send,
+	U: Serializable,
+	V: From[T] + From[U]:
+	# Complex implementation
 ```
 
 #### **Associated Types**
@@ -104,47 +101,46 @@ where
 ```ryo
 # Future trait with associated types
 trait Iterator:
-    type Item
+	type Item
 
-    fn next(&mut self) -> ?Self.Item
+	fn next(&mut self) -> ?Self.Item
 
-    # Default implementations
-    fn collect[C](self) -> C
-    where C: FromIterator[Self.Item] {
-        # Default collect implementation
-    }
+	# Default implementations
+	fn collect[C](self) -> C
+	where C: FromIterator[Self.Item]:
+		# Default collect implementation
 
 # Implementation
 impl Iterator for ListIterator[T]:
-    type Item = T
+	type Item = T
 
-    fn next(&mut self) -> ?T:
-        # Implementation
-        pass
+	fn next(&mut self) -> ?T:
+		# Implementation
+		pass
 ```
 
 **Collection Traits**
 ```ryo
 # Future collection trait with associated types
 trait Collection:
-    type Item
-    type Iter: Iterator[Item = Self.Item]
-    
-    fn len(&self) -> int
-    fn is_empty(&self) -> bool
-    fn iter(&self) -> Self.Iter
+	type Item
+	type Iter: Iterator[Item = Self.Item]
+	
+	fn len(&self) -> int
+	fn is_empty(&self) -> bool
+	fn iter(&self) -> Self.Iter
 
 # Implementation for List
 impl[T] Collection for list[T]:
-    type Item = T
-    type Iter = ListIterator[T]
+	type Item = T
+	type Iter = ListIterator[T]
 
-    fn len(&self) -> int:
-        return self.count
-    fn is_empty(&self) -> bool:
-        return self.count == 0
-    fn iter(&self) -> ListIterator[T]:
-        return ListIterator.new(self)
+	fn len(&self) -> int:
+		return self.count
+	fn is_empty(&self) -> bool:
+		return self.count == 0
+	fn iter(&self) -> ListIterator[T]:
+		return ListIterator.new(self)
 ```
 
 #### **Generic Implementation Blocks**
@@ -152,20 +148,20 @@ impl[T] Collection for list[T]:
 ```ryo
 # Future syntax for generic implementations
 impl[T] Container[T]:
-    fn new(value: T) -> Container[T]:
-        return Container[T] { value, count: 1 }
-    
-    fn get(&self) -> &T:
-        return &self.value
-    
-    fn set(&mut self, new_value: T):
-        self.value = new_value
+	fn new(value: T) -> Container[T]:
+		return Container[T](value=value, count=1)
+	
+	fn get(&self) -> &T:
+		return &self.value
+	
+	fn set(&mut self, new_value: T):
+		self.value = new_value
 
 # Conditional implementations
 impl[T] Container[T]
 where T: Clone:
-    fn duplicate(&self) -> Container[T]:
-        return Container[T] { value: self.value.clone(), count: self.count }
+	fn duplicate(&self) -> Container[T]:
+		return Container[T](value=self.value.clone(), count=self.count)
 ```
 
 #### **Type Inference and Monomorphization**
@@ -213,26 +209,26 @@ Currently, Ryo supports `for item in collection:` syntax but lacks a formal iter
 ```ryo
 # Future iterator trait design
 trait Iterator:
-    type Item
+	type Item
 
-    fn next(&mut self) -> ?Self.Item
+	fn next(&mut self) -> ?Self.Item
 
-    # Default implementations for common operations
-    fn map[B](self, f: fn(Self.Item) -> B) -> MapIterator[Self, B]:
-        return MapIterator.new(self, f)
+	# Default implementations for common operations
+	fn map[B](self, f: fn(Self.Item) -> B) -> MapIterator[Self, B]:
+		return MapIterator.new(self, f)
 
-    fn filter(self, predicate: fn(&Self.Item) -> bool) -> FilterIterator[Self]:
-        return FilterIterator.new(self, predicate)
-    
-    fn collect[C](self) -> C
-    where C: FromIterator[Self.Item]:
-        return C.from_iter(self)
-    
-    fn fold[B](self, init: B, f: fn(B, Self.Item) -> B) -> B:
-        accumulator = init
-        for item in self:
-            accumulator = f(accumulator, item)
-        return accumulator
+	fn filter(self, predicate: fn(&Self.Item) -> bool) -> FilterIterator[Self]:
+		return FilterIterator.new(self, predicate)
+	
+	fn collect[C](self) -> C
+	where C: FromIterator[Self.Item]:
+		return C.from_iter(self)
+	
+	fn fold[B](self, init: B, f: fn(B, Self.Item) -> B) -> B:
+		accumulator = init
+		for item in self:
+			accumulator = f(accumulator, item)
+		return accumulator
 ```
 
 #### **Collection Integration**
@@ -240,35 +236,35 @@ trait Iterator:
 ```ryo
 # Future iterator implementations for built-in collections
 impl Iterator for ListIterator[T]:
-    type Item = T
+	type Item = T
 
-    fn next(&mut self) -> ?T:
-        if self.index < self.list.len():
-            item = self.list[self.index]
-            self.index += 1
-            return item
-        return none
+	fn next(&mut self) -> ?T:
+		if self.index < self.list.len():
+			item = self.list[self.index]
+			self.index += 1
+			return item
+		return none
 
 # IntoIterator trait for collections
 trait IntoIterator:
-    type Item
-    type IntoIter: Iterator[Item = Self.Item]
-    
-    fn into_iter(self) -> Self.IntoIter
+	type Item
+	type IntoIter: Iterator[Item = Self.Item]
+	
+	fn into_iter(self) -> Self.IntoIter
 
 impl IntoIterator for list[T]:
-    type Item = T
-    type IntoIter = ListIterator[T]
-    
-    fn into_iter(self) -> ListIterator[T]:
-        return ListIterator.new(self)
+	type Item = T
+	type IntoIter = ListIterator[T]
+	
+	fn into_iter(self) -> ListIterator[T]:
+		return ListIterator.new(self)
 
 # Usage examples
 numbers = [1, 2, 3, 4, 5]
 doubled = numbers.iter()
-    .map(fn(x): x * 2)
-    .filter(fn(x): x > 5)
-    .collect[list[int]]()
+	.map(fn(x): x * 2)
+	.filter(fn(x): x > 5)
+	.collect[list[int]]()
 ```
 
 #### **Lazy Evaluation**
@@ -277,10 +273,10 @@ doubled = numbers.iter()
 # Future lazy iterator chains
 data = large_dataset()
 result = data.iter()
-    .filter(is_valid)           # Only processes when consumed
-    .map(transform)             # Lazy transformation
-    .take(10)                   # Limit processing
-    .collect[list[ProcessedItem]]()  # Evaluation happens here
+	.filter(is_valid)           # Only processes when consumed
+	.map(transform)             # Lazy transformation
+	.take(10)                   # Limit processing
+	.collect[list[ProcessedItem]]()  # Evaluation happens here
 ```
 
 ### **Error Handling System** ✅ IMPLEMENTED
@@ -318,15 +314,15 @@ import parse
 ```ryo
 # Explicit union - manually specified
 fn process_file(path: str) -> (io.NotFound | io.PermissionDenied | parse.InvalidSyntax)!ProcessedData:
-    content = try files.read_text(path)
-    config = try parse_config(content)
-    return process(config)
+	content = try files.read_text(path)
+	config = try parse_config(content)
+	return process(config)
 
 # Inferred union - compiler automatically determines the union
 fn process_file(path: str) -> !ProcessedData:
-    content = try files.read_text(path)    # io errors
-    config = try parse_config(content)     # parse errors
-    return process(config)
+	content = try files.read_text(path)    # io errors
+	config = try parse_config(content)     # parse errors
+	return process(config)
 # Compiler infers: (io.NotFound | io.PermissionDenied | parse.InvalidSyntax | ...)!ProcessedData
 ```
 
@@ -345,16 +341,16 @@ Currently, attributes like `#[test]` are mentioned but not formally specified. A
 # Built-in attributes
 #[test]
 fn test_addition():
-    assert_eq(2 + 2, 4)
+	assert_eq(2 + 2, 4)
 
 #[repr(C)]
 struct Point:
-    x: float
-    y: float
+	x: float
+	y: float
 
 #[no_mangle]
 pub extern "C" fn exported_function(x: int) -> int:
-    return x * 2
+	return x * 2
 ```
 
 #### **Conditional Compilation**
@@ -366,17 +362,17 @@ import task_runtime
 
 #[cfg(target_os = "linux")]
 fn platform_specific_function():
-    # Linux-specific implementation
-    pass
+	# Linux-specific implementation
+	pass
 
 #[cfg(target_os = "windows")]
 fn platform_specific_function():
-    # Windows-specific implementation
-    pass
+	# Windows-specific implementation
+	pass
 
 #[cfg(debug_assertions)]
 fn debug_only_function():
-    print("This only runs in debug builds")
+	print("This only runs in debug builds")
 ```
 
 #### **Derive-like Attributes**
@@ -385,9 +381,9 @@ fn debug_only_function():
 # Future derive-like attributes for code generation
 #[derive(Debug, Clone, PartialEq)]
 struct User:
-    id: int
-    name: str
-    email: str
+	id: int
+	name: str
+	email: str
 
 # Generates implementations automatically:
 # impl Debug for User { ... }
@@ -404,20 +400,20 @@ Currently, Ryo has basic f-strings. Enhanced formatting capabilities are planned
 ```ryo
 # Future formatting trait system
 trait Display:
-    fn fmt(&self, formatter: &mut Formatter) -> FormatError!void
+	fn fmt(&self, formatter: &mut Formatter) -> FormatError!void
 
 trait Debug:
-    fn fmt(&self, formatter: &mut Formatter) -> FormatError!void
+	fn fmt(&self, formatter: &mut Formatter) -> FormatError!void
 
 # Automatic implementations possible with attributes
 #[derive(Debug)]
 struct Point:
-    x: float
-    y: float
+	x: float
+	y: float
 
 impl Display for Point:
-    fn fmt(&self, formatter: &mut Formatter) -> FormatError!void:
-        formatter.write(f"({self.x}, {self.y})")
+	fn fmt(&self, formatter: &mut Formatter) -> FormatError!void:
+		formatter.write(f"({self.x}, {self.y})")
 ```
 
 #### **Enhanced Format Strings**
@@ -449,14 +445,14 @@ print(f"Display: {point}")     # Uses Display trait
 ```ryo
 # Future custom formatting
 struct Currency:
-    amount: float
-    symbol: str
+	amount: float
+	symbol: str
 
 impl Display for Currency:
-    fn fmt(&self, formatter: &mut Formatter) -> FormatError!void:
-        formatter.write(f"{self.symbol}{self.amount:.2}")
+	fn fmt(&self, formatter: &mut Formatter) -> FormatError!void:
+		formatter.write(f"{self.symbol}{self.amount:.2}")
 
-price = Currency { amount: 123.456, symbol: "$" }
+price = Currency(amount=123.456, symbol="$")
 print(f"Price: {price}")  # Price: $123.46
 ```
 
@@ -466,16 +462,16 @@ print(f"Price: {price}")  # Price: $123.46
 ```ryo
 # Future pattern matching extensions
 match value:
-    User { age, .. } if age >= 18:
-        # Adult user handling
-    User { name @ "admin", .. }:
-        # Admin user handling  
-    [first, *rest, last]:
-        # Slice pattern matching
-    1 | 2 | 3:
-        # OR patterns
-    x @ 1..=10:
-        # Range patterns with binding
+	User(age, ..) if age >= 18:
+		# Adult user handling
+	User(name @ "admin", ..):
+		# Admin user handling  
+	[first, *rest, last]:
+		# Slice pattern matching
+	1 | 2 | 3:
+		# OR patterns
+	x @ 1..=10:
+		# Range patterns with binding
 ```
 
 ### **Compile-Time Execution (`comptime`)**
@@ -486,18 +482,17 @@ Compile-time code execution for metaprogramming and optimization is a planned fe
 
 ```ryo
 # Future basic comptime functionality
-comptime {
-    # Code that runs at compile time
-    print("This executes during compilation")
-}
+comptime:
+	# Code that runs at compile time
+	print("This executes during compilation")
 
 const PI = comptime 3.14159265359
 
 comptime fn generate_lookup_table() -> [int; 256]:
-    table = [0; 256]
-    for i in range(256):
-        table[i] = expensive_calculation(i)
-    return table
+	table = [0; 256]
+	for i in range(256):
+		table[i] = expensive_calculation(i)
+	return table
 
 # Pre-computed at compile time
 LOOKUP = comptime generate_lookup_table()
@@ -529,27 +524,26 @@ Beyond basic `comptime`, more advanced reflection capabilities are under conside
 ```ryo
 # Future comptime reflection API
 comptime fn generate_serializer[T]() -> str:
-    type_info = comptime.type_info[T]()
+	type_info = comptime.type_info[T]()
 
-    match type_info.kind:
-        TypeKind.Struct { fields }:
-            # Generate struct serialization code
-            serializer_code = "fn serialize(value: T) -> str {\n"
-            for field in fields:
-                serializer_code += f"    {field.name}_json = serialize_field(value.{field.name})\n"
-            serializer_code += "}\n"
-            return serializer_code
+	match type_info.kind:
+		TypeKind.Struct(fields):
+			# Generate struct serialization code
+			serializer_code = "fn serialize(value: T) -> str:\n"
+			for field in fields:
+				serializer_code += f"    {field.name}_json = serialize_field(value.{field.name})\n"
+			return serializer_code
 
-        TypeKind.Enum { variants }:
-            # Generate enum serialization code
-            return generate_enum_serializer(variants)
+		TypeKind.Enum(variants):
+			# Generate enum serialization code
+			return generate_enum_serializer(variants)
 
 # Usage
 #[derive(Serialize)]  # Uses comptime reflection
 struct User:
-    id: int
-    name: str
-    email: str
+	id: int
+	name: str
+	email: str
 ```
 
 #### **Type Information API**
@@ -557,26 +551,26 @@ struct User:
 ```ryo
 # Future type introspection API
 struct TypeInfo:
-    name: str
-    size: int
-    alignment: int
-    kind: TypeKind
+	name: str
+	size: int
+	alignment: int
+	kind: TypeKind
 
 enum TypeKind:
-    Primitive { primitive_type: PrimitiveType }
-    Struct { fields: list[FieldInfo] }
-    Enum { variants: list[VariantInfo> }
-    Tuple { elements: list[TypeInfo] }
-    Array { element_type: TypeInfo, length: int }
+	Primitive(primitive_type: PrimitiveType)
+	Struct(fields: list[FieldInfo])
+	Enum(variants: list[VariantInfo])
+	Tuple(elements: list[TypeInfo])
+	Array(element_type: TypeInfo, length: int)
 
 struct FieldInfo:
-    name: str
-    type_info: TypeInfo
-    offset: int
+	name: str
+	type_info: TypeInfo
+	offset: int
 
 comptime fn analyze_type[T]():
-    info = comptime.type_info[T]()
-    print(f"Type {info.name} has size {info.size} and alignment {info.alignment}")
+	info = comptime.type_info[T]()
+	print(f"Type {info.name} has size {info.size} and alignment {info.alignment}")
 ```
 
 #### **Runtime Reflection Considerations**
@@ -656,7 +650,7 @@ Child module wants to expose helpers to parent module only, not entire package.
 ```ryo
 # utils/math/internal.ryo
 package fn helper():  # Visible to ALL modules in package
-    pass
+	pass
 
 # Only want utils/ to use this, not database/ or server/
 ```
@@ -665,7 +659,7 @@ package fn helper():  # Visible to ALL modules in package
 ```ryo
 # utils/math/internal.ryo
 pub(super) fn parent_only_helper():  # Only visible to utils/* modules
-    pass
+	pass
 
 # utils/core.ryo (parent module)
 import utils.math.internal
@@ -709,7 +703,7 @@ Need different code for test builds, features, platforms, or configurations.
 # Test-only helpers
 #[cfg(test)]
 fn test_helper():
-    pass
+	pass
 
 # Feature flags
 #[cfg(feature = "runtime")]
@@ -717,25 +711,25 @@ import task_runtime
 
 #[cfg(feature = "simd")]
 fn vectorized_add(a: &[float], b: &[float]) -> Vec[float]:
-    # SIMD implementation
+	# SIMD implementation
 
 #[cfg(not(feature = "simd"))]
 fn vectorized_add(a: &[float], b: &[float]) -> Vec[float]:
-    # Fallback implementation
+	# Fallback implementation
 
 # Platform-specific code
 #[cfg(target_os = "linux")]
 fn get_home_dir() -> str:
-    return env("HOME")
+	return env("HOME")
 
 #[cfg(target_os = "windows")]
 fn get_home_dir() -> str:
-    return env("USERPROFILE")
+	return env("USERPROFILE")
 
 # Debug assertions
 #[cfg(debug)]
 fn validate_invariants():
-    assert(condition, "Invariant violated")
+	assert(condition, "Invariant violated")
 ```
 
 **Conditional Access Levels:**
@@ -743,7 +737,7 @@ fn validate_invariants():
 # Public API in release, visible for testing in debug
 #[cfg(debug)]
 pub fn debug_inspect() -> InternalState:
-    return get_internal_state()
+	return get_internal_state()
 ```
 
 **Benefits:**
@@ -841,8 +835,8 @@ import db  # Instead of database.postgresql.connection
 import cache  # Instead of caching.redis.client
 
 fn main():
-    db.connect()
-    cache.set("key", "value")
+	db.connect()
+	cache.set("key", "value")
 ```
 
 **Decision:** Low priority. Import aliases (`import foo as bar`) already solve this.
@@ -855,37 +849,37 @@ Currently, Ryo only supports static dispatch for traits, but dynamic dispatch is
 ```ryo
 # Future syntax for dynamic dispatch
 trait Drawable:
-    fn draw(&self)
-    fn area(&self) -> float
+	fn draw(&self)
+	fn area(&self) -> float
 
 struct Circle:
-    radius: float
+	radius: float
 
 struct Rectangle:
-    width: float
-    height: float
+	width: float
+	height: float
 
 impl Drawable for Circle:
-    fn draw(&self):
-        print(f"Drawing circle with radius {self.radius}")
-    fn area(&self) -> float:
-        return 3.14159 * self.radius * self.radius
+	fn draw(&self):
+		print(f"Drawing circle with radius {self.radius}")
+	fn area(&self) -> float:
+		return 3.14159 * self.radius * self.radius
 
 impl Drawable for Rectangle:
-    fn draw(&self):
-        print(f"Drawing rectangle {self.width}x{self.height}")
-    fn area(&self) -> float:
-        return self.width * self.height
+	fn draw(&self):
+		print(f"Drawing rectangle {self.width}x{self.height}")
+	fn area(&self) -> float:
+		return self.width * self.height
 
 # Dynamic dispatch with trait objects
 fn process_shapes(shapes: list[&dyn Drawable]):
-    for shape in shapes:
-        shape.draw()  # Dynamic dispatch - runtime polymorphism
-        print(f"Area: {shape.area()}")
+	for shape in shapes:
+		shape.draw()  # Dynamic dispatch - runtime polymorphism
+		print(f"Area: {shape.area()}")
 
 # Usage
-circle = Circle { radius: 5.0 }
-rectangle = Rectangle { width: 10.0, height: 8.0 }
+circle = Circle(radius=5.0)
+rectangle = Rectangle(width=10.0, height=8.0)
 
 shapes = [&circle as &dyn Drawable, &rectangle as &dyn Drawable]
 process_shapes(shapes)
@@ -911,22 +905,21 @@ For interoperability with existing native code and systems programming, Ryo plan
 
 ```ryo
 # Future FFI capabilities
-extern "C" {
-    fn malloc(size: usize) -> *mut void
-    fn free(ptr: *mut void)
-    fn printf(format: *const c_char, ...) -> c_int
-}
+extern "C":
+	fn malloc(size: usize) -> *mut void
+	fn free(ptr: *mut void)
+	fn printf(format: *const c_char, ...) -> c_int
 
 #[repr(C)]
 struct Point:
-    x: f64
-    y: f64
+	x: f64
+	y: f64
 
 #[no_mangle]
 pub extern "C" fn process_point(p: *const Point) -> f64:
-    unsafe:
-        point = &*p  # Dereference raw pointer
-        return (point.x * point.x + point.y * point.y).sqrt()
+	unsafe:
+		point = &*p  # Dereference raw pointer
+		return (point.x * point.x + point.y * point.y).sqrt()
 ```
 
 #### **Type Mapping and Utilities**
@@ -940,7 +933,7 @@ pub extern "C" fn process_point(p: *const Point) -> f64:
 ```ryo
 # Future string FFI utilities
 fn ryo_str_to_c(s: &str) -> (*const c_char, usize):
-    return (s.as_ptr(), s.len())
+	return (s.as_ptr(), s.len())
 
 # File: conversion/errors.ryo
 error InvalidUtf8
@@ -950,9 +943,9 @@ error NullPointer
 import conversion
 
 fn c_str_to_ryo(ptr: *const c_char) -> conversion.InvalidUtf8!str:
-    unsafe:
-        # Safe conversion with validation
-        return try ffi.cstr_to_string(ptr)
+	unsafe:
+		# Safe conversion with validation
+		return try ffi.cstr_to_string(ptr)
 ```
 
 **Complex Types:**
@@ -966,12 +959,12 @@ fn c_str_to_ryo(ptr: *const c_char) -> conversion.InvalidUtf8!str:
 ```ryo
 # Future unsafe functionality
 unsafe fn manipulate_raw_memory(ptr: *mut u8, len: usize):
-    for i in range(len):
-        *ptr.offset(i) = 0  # Raw pointer arithmetic and dereference
+	for i in range(len):
+		*ptr.offset(i) = 0  # Raw pointer arithmetic and dereference
 
 fn safe_wrapper(data: &mut [u8]):
-    unsafe:
-        manipulate_raw_memory(data.as_mut_ptr(), data.len())
+	unsafe:
+		manipulate_raw_memory(data.as_mut_ptr(), data.len())
 ```
 
 **Required for Unsafe:**
@@ -1003,7 +996,7 @@ However, these features are advanced and should be used sparingly, with safety a
 import simd
 
 fn parallel_add(a: simd.f32x4, b: simd.f32x4) -> simd.f32x4:
-    return a + b  # Vectorized addition
+	return a + b  # Vectorized addition
 ```
 
 ---
@@ -1040,9 +1033,9 @@ fn parallel_add(a: simd.f32x4, b: simd.f32x4) -> simd.f32x4:
    ```ryo
    # Allow registering custom panic handlers
    fn custom_panic_handler(panic_info: PanicInfo):
-       # Custom logging, error reporting, cleanup
-       log_error_to_monitoring_service(panic_info)
-       cleanup_resources()
+	   # Custom logging, error reporting, cleanup
+	   log_error_to_monitoring_service(panic_info)
+	   cleanup_resources()
 
    thread::set_panic_handler(custom_panic_handler)
    ```
@@ -1122,11 +1115,11 @@ A Jupyter kernel would enable interactive development and data exploration with 
 ```ryo
 # Interactive cell execution
 fn analyze_data(data: list[f64]) -> Statistics:
-    return Statistics{
-        mean: data.sum() / data.len(),
-        median: data.median(),
-        std_dev: data.std_deviation()
-    }
+	return Statistics(
+		mean=data.sum() / data.len(),
+		median=data.median(),
+		std_dev=data.std_deviation()
+	)
 
 # Cell state preservation between executions
 mut global_data = load_dataset("data.csv")
@@ -1228,17 +1221,17 @@ A comprehensive testing framework built into the language and tooling.
 ```ryo
 #[test]
 fn test_addition():
-    assert_eq(add(2, 3), 5)
+	assert_eq(add(2, 3), 5)
 
 #[test]
 fn test_http_request():
-    response = http.get("https://api.test.com/health").await
-    assert_eq(response.status, 200)
+	response = http.get("https://api.test.com/health").await
+	assert_eq(response.status, 200)
 
 #[benchmark]
 fn bench_sort():
-    data = generate_test_data(10000)
-    sort(&mut data)
+	data = generate_test_data(10000)
+	sort(&mut data)
 ```
 
 #### **Documentation Generator**
@@ -1277,13 +1270,13 @@ import http
 
 #[route("/users/{id}")]
 fn get_user(id: int) -> (http.NotFound | http.DatabaseError)!JsonResponse[User]:
-    user = try database.find_user(id).await
-    return JsonResponse.new(user)
+	user = try database.find_user(id).await
+	return JsonResponse.new(user)
 
 fn main():
-    app = web.App.new()
-    app.route_handler(get_user)
-    try app.serve("0.0.0.0:8080").await
+	app = web.App.new()
+	app.route_handler(get_user)
+	try app.serve("0.0.0.0:8080").await
 ```
 
 ## Implementation Priority and Timeline

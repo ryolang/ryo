@@ -2,129 +2,129 @@
 # Data structures example demonstrating collections and custom types
 
 struct Point:
-    x: float
-    y: float
+	x: float
+	y: float
 
 struct Rectangle:
-    top_left: Point
-    bottom_right: Point
+	top_left: Point
+	bottom_right: Point
 
 impl Rectangle:
-    fn area(&self) -> float:
-        width = self.bottom_right.x - self.top_left.x
-        height = self.top_left.y - self.bottom_right.y
-        return width * height
+	fn area(self) -> float:
+		width = self.bottom_right.x - self.top_left.x
+		height = self.top_left.y - self.bottom_right.y
+		return width * height
 
-    fn contains_point(&self, point: &Point) -> bool:
-        return point.x >= self.top_left.x and
-               point.x <= self.bottom_right.x and
-               point.y <= self.top_left.y and
-               point.y >= self.bottom_right.y
+	fn contains_point(self, point: Point) -> bool:
+		return point.x >= self.top_left.x and
+		       point.x <= self.bottom_right.x and
+		       point.y <= self.top_left.y and
+		       point.y >= self.bottom_right.y
 
 enum Shape:
-    Circle { center: Point, radius: float }
-    Rectangle { rect: Rectangle }
-    Triangle { p1: Point, p2: Point, p3: Point }
+	Circle { center: Point, radius: float }
+	Rectangle { rect: Rectangle }
+	Triangle { p1: Point, p2: Point, p3: Point }
 
 impl Shape:
-    fn area(&self) -> float:
-        match self:
-            Shape.Circle { center, radius }:
-                return 3.14159 * radius * radius
-            Shape.Rectangle { rect }:
-                return rect.area()
-            Shape.Triangle { p1, p2, p3 }:
-                # Using the shoelace formula
-                return 0.5 * abs(
-                    (p1.x * (p2.y - p3.y) +
-                     p2.x * (p3.y - p1.y) +
-                     p3.x * (p1.y - p2.y))
-                )
+	fn area(self) -> float:
+		match self:
+			Shape.Circle { center, radius }:
+				return 3.14159 * radius * radius
+			Shape.Rectangle { rect }:
+				return rect.area()
+			Shape.Triangle { p1, p2, p3 }:
+				# Using the shoelace formula
+				return 0.5 * abs(
+					(p1.x * (p2.y - p3.y) +
+					 p2.x * (p3.y - p1.y) +
+					 p3.x * (p1.y - p2.y))
+				)
 
 fn main():
-    # Working with basic collections
-    mut numbers = [1, 2, 3, 4, 5]
-    print(f"Original numbers: {numbers}")
+	# Working with basic collections
+	mut numbers = [1, 2, 3, 4, 5]
+	print(f"Original numbers: {numbers}")
 
-    # List operations
-    numbers.append(6)
-    numbers.insert(0, 0)
-    print(f"After modifications: {numbers}")
+	# List operations
+	numbers.append(6)
+	numbers.insert(0, 0)
+	print(f"After modifications: {numbers}")
 
-    # List comprehension-style operations
-    doubled = []
-    for num in numbers:
-        doubled.append(num * 2)
-    print(f"Doubled: {doubled}")
+	# List comprehension-style operations
+	doubled = []
+	for num in numbers:
+		doubled.append(num * 2)
+	print(f"Doubled: {doubled}")
 
-    # Working with maps
-    mut scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-    print(f"Scores: {scores}")
+	# Working with maps
+	mut scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
+	print(f"Scores: {scores}")
 
-    # Map operations
-    scores["David"] = 89
-    alice_score = scores.get("Alice") orelse:
-        print("Alice not found")
-        return
-    print(f"Alice's score: {alice_score}")
+	# Map operations
+	scores["David"] = 89
+	alice_score = scores.get("Alice") orelse:
+		print("Alice not found")
+		return
+	print(f"Alice's score: {alice_score}")
 
-    # Working with custom structs
-    point1 = Point{x: 0.0, y: 0.0}
-    point2 = Point{x: 10.0, y: 5.0}
+	# Working with custom structs
+	point1 = Point(x=0.0, y=0.0)
+	point2 = Point(x=10.0, y=5.0)
 
-    rectangle = Rectangle{
-        top_left: point1,
-        bottom_right: point2
-    }
+	rectangle = Rectangle(
+		top_left=point1,
+		bottom_right=point2
+	)
 
-    print(f"Rectangle area: {rectangle.area()}")
+	print(f"Rectangle area: {rectangle.area()}")
 
-    test_point = Point{x: 5.0, y: 2.5}
-    if rectangle.contains_point(&test_point):
-        print("Point is inside rectangle")
-    else:
-        print("Point is outside rectangle")
+	test_point = Point(x=5.0, y=2.5)
+	if rectangle.contains_point(test_point):
+		print("Point is inside rectangle")
+	else:
+		print("Point is outside rectangle")
 
-    # Working with enums
-    shapes = [
-        Shape.Circle { center: Point{x: 0.0, y: 0.0}, radius: 5.0 },
-        Shape.Rectangle { rect: rectangle },
-        Shape.Triangle {
-            p1: Point{x: 0.0, y: 0.0},
-            p2: Point{x: 3.0, y: 0.0},
-            p3: Point{x: 1.5, y: 2.0}
-        }
-    ]
+	# Working with enums
+	shapes = [
+		Shape.Circle(center=Point(x=0.0, y=0.0), radius=5.0),
+		Shape.Rectangle(rect=rectangle),
+		Shape.Triangle(
+			p1=Point(x=0.0, y=0.0),
+			p2=Point(x=3.0, y=0.0),
+			p3=Point(x=1.5, y=2.0)
+		)
+	]
 
-    total_area = 0.0
-    for shape in shapes:
-        area = shape.area()
-        total_area += area
+	total_area = 0.0
+	for shape in shapes:
+		area = shape.area()
+		total_area += area
 
-        match shape:
-            Shape.Circle { center, radius }:
-                print(f"Circle at ({center.x}, {center.y}) with radius {radius}: area = {area}")
-            Shape.Rectangle { rect }:
-                print(f"Rectangle: area = {area}")
-            Shape.Triangle { p1, p2, p3 }:
-                print(f"Triangle: area = {area}")
+		match shape:
+			Shape.Circle { center, radius }:
+				print(f"Circle at ({center.x}, {center.y}) with radius {radius}: area = {area}")
+			Shape.Rectangle { rect }:
+				print(f"Rectangle: area = {area}")
+			Shape.Triangle { p1, p2, p3 }:
+				print(f"Triangle: area = {area}")
 
-    print(f"Total area of all shapes: {total_area}")
+	print(f"Total area of all shapes: {total_area}")
 
-    # Working with nested data structures
-    mut inventory = {
-        "fruits": ["apple", "banana", "orange"],
-        "vegetables": ["carrot", "broccoli", "spinach"],
-        "dairy": ["milk", "cheese", "yogurt"]
-    }
+	# Working with nested data structures
+	mut inventory = {
+		"fruits": ["apple", "banana", "orange"],
+		"vegetables": ["carrot", "broccoli", "spinach"],
+		"dairy": ["milk", "cheese", "yogurt"]
+	}
 
-    for category, items in inventory:
-        print(f"{category}:")
-        for item in items:
-            print(f"  - {item}")
+	for category, items in inventory:
+		print(f"{category}:")
+		for item in items:
+			print(f"  - {item}")
 
-    # Adding new items
-    inventory["fruits"].append("grape")
-    inventory["meat"] = ["chicken", "beef", "pork"]
+	# Adding new items
+	inventory["fruits"].append("grape")
+	inventory["meat"] = ["chicken", "beef", "pork"]
 
-    print(f"Updated inventory has {inventory.len()} categories")
+	print(f"Updated inventory has {inventory.len()} categories")

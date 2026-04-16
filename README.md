@@ -67,9 +67,20 @@ Ryo draws inspiration from the best features of modern programming languages:
 *   **🦀 Rust** - Ownership model for memory safety, algebraic data types (enums), pattern matching, trait system
 *   **🔥 Mojo** - Simplified ownership without lifetimes, value semantics, progressive complexity
 *   **🔷 Go** - Simplicity as a core value, fast compilation, pragmatic concurrency (CSP channels planned)
-*   **⚡ Zig** - Comptime execution for zero-cost abstractions, explicit error handling, no hidden control flow
+*   **⚡ Zig** - Comptime execution for zero-cost abstractions, explicit error handling, no operator overloading, readable-by-default design
 
 **The Result:** A language that's **easier than Rust** (no lifetimes), **safer than Python** (compile-time memory safety), **more expressive than Go** (generics, ADTs), and **more familiar than Zig** (Python-like syntax).
+
+## Designed for the AI Era
+
+As of 2026, most application code is written by AI agents and reviewed by humans. Ryo's design acknowledges this shift:
+
+*   **Strict over convenient** - Verbose safety patterns (`task.spawn_detached` over `task.spawn`) cost the AI nothing but help the human reviewer instantly understand intent.
+*   **Compiler strictness over runtime flexibility** - Strict compile-time enforcement catches errors before code reaches production. Warnings on unused `future[T]`, implicit move enforcement for task closures, and forbidden global mutable state.
+*   **Predictable patterns over clever shortcuts** - A small set of orthogonal primitives with consistent behavior serves both AI writers and human readers.
+*   **Readable by default** - `shared[mutex[map[str, int]]]` tells the reviewer at a glance: "shared, locked, concurrent state." Implicit where ceremony hurts clarity (parameter borrowing, type narrowing after checks), explicit where the reviewer needs to see intent (`try` for errors, `move` for ownership transfer, `shared` for concurrent state).
+
+Python-style syntax, clean error messages, and readable stack traces serve the human side. The AI handles the ceremony; the human benefits from the clarity.
 
 ## Quick Example
 
@@ -79,30 +90,30 @@ Ryo draws inspiration from the best features of modern programming languages:
 # src/main.ryo - Design example showing future features
 
 fn greet(name: &str) -> str:
-    return f"Hello, {name}! Welcome to Ryo."
+	return f"Hello, {name}! Welcome to Ryo."
 
 fn main():
-    # Variables are immutable by default (no 'let' keyword)
-    message = greet("World")  # Type inferred: str
-    print(message)
+	# Variables are immutable by default (no 'let' keyword)
+	message = greet("World")  # Type inferred: str
+	print(message)
 
-    # Mutable variables use 'mut'
-    mut counter = 0  # Type inferred: int
-    counter += 1
+	# Mutable variables use 'mut'
+	mut counter = 0  # Type inferred: int
+	counter += 1
 
-    # Safe collections
-    numbers = [1, 2, 3, 4, 5]
-    print(f"Numbers: {numbers}")
+	# Safe collections
+	numbers = [1, 2, 3, 4, 5]
+	print(f"Numbers: {numbers}")
 
-    # Memory safe - optional types prevent null pointer exceptions!
-    user: ?str = "Alice"
+	# Memory safe - optional types prevent null pointer exceptions!
+	user: ?str = "Alice"
 
-    # Safe optional chaining
-    message = user?.len() orelse 0
-    print(f"User message length: {message}")
+	# Safe optional chaining
+	message = user?.len() orelse 0
+	print(f"User message length: {message}")
 
-    # Safe error handling
-    print(process_user(user))
+	# Safe error handling
+	print(process_user(user))
 ```
 
 
@@ -116,8 +127,8 @@ error InvalidUser
 import process
 
 fn process_user(user: ?str) -> process.InvalidUser!str:
-    name = user orelse return process.InvalidUser
-    return f"Processing user: {name}"
+	name = user orelse return process.InvalidUser
+	return f"Processing user: {name}"
 ```
 
 ```bash

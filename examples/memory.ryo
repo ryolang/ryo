@@ -1,13 +1,13 @@
 # Ownership and borrowing
 fn main():
-    scores = [90, 85, 95]  # Owned by `scores`
-    total = sum(&scores)    # Immutable borrow
-    print(total)            # 270
+	mut scores = [90, 85, 95]
+	total = sum(scores)         # implicit immutable borrow
+	print(total)                # 270
 
-    add_extra(&mut scores, 5)  # Mutable borrow
-    print(scores)           # [95, 90, 100]
+	add_extra(&mut scores, 5)   # explicit mutable borrow
+	print(scores)               # [95, 90, 100]
 
 # Compiler ensures `list` is valid for the borrow duration
 fn add_extra(list: &mut [int], bonus: int):
-    for i in 0..len(list):
-        list[i] += bonus
+	for i in 0..len(list):
+		list[i] += bonus

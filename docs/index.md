@@ -107,8 +107,8 @@ hide:
 ```ryo
 # src/models.ryo
 struct User:
-    id: int
-    name: str
+	id: int
+	name: str
 ```
 
 ```ryo
@@ -125,35 +125,35 @@ import models
 import errors
 
 fn fetch_user(id: int) -> (http.NetworkFailure | errors.InvalidResponse | json.ParseError)!models.User:
-    # Green threads: no async/await needed - functions automatically suspend
-    # try handle errors and returns http.NetworkFailure
-    response = try http.get(f"https://api.example.com/users/{id}")
-    
-    # Parse JSON response (v0.1.0 uses runtime type checking, not generics)
-    data = try response.body_json() orelse return errors.InvalidResponse
-    user = models.User(
-        id: data["id"],
-        name: data["name"]
-    )
-    return user
+	# Green threads: no async/await needed - functions automatically suspend
+	# try handle errors and returns http.NetworkFailure
+	response = try http.get(f"https://api.example.com/users/{id}")
+	
+	# Parse JSON response (v0.1.0 uses runtime type checking, not generics)
+	data = try response.body_json() orelse return errors.InvalidResponse
+	user = models.User(
+		id: data["id"],
+		name: data["name"]
+	)
+	return user
 
 fn main():
-    # Spawn task - returns future
-    user_future = task.run:
-        return fetch_user(1)
+	# Spawn task - returns future
+	user_future = task.run:
+		return fetch_user(1)
 
-    # Wait for result - green thread suspends, OS thread continues
-    user = user_future.wait() catch |e|:
-        match e:
-            http.NetworkFailure(reason):
-                print(f"Network error: {reason}")
-            errors.InvalidResponse:
-                print("Invalid response from server")
-            json.ParseError(msg):
-                print(f"JSON parse error: {msg}")
-        return
-    
-    print(f"Hello, {user.name}!")
+	# Wait for result - green thread suspends, OS thread continues
+	user = user_future.wait() catch |e|:
+		match e:
+			http.NetworkFailure(reason):
+				print(f"Network error: {reason}")
+			errors.InvalidResponse:
+				print("Invalid response from server")
+			json.ParseError(msg):
+				print(f"JSON parse error: {msg}")
+		return
+	
+	print(f"Hello, {user.name}!")
 ```
 
 ---

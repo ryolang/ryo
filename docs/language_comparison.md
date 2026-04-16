@@ -59,15 +59,15 @@ error DivisionByZero
 import math
 
 fn divide(a: int, b: int) -> math.DivisionByZero!int:
-    if b == 0:
-        return math.DivisionByZero
-    return a / b
+	if b == 0:
+		return math.DivisionByZero
+	return a / b
 
 result = divide(10, 2) catch |e|:
-    match e:
-        math.DivisionByZero:
-            print("Division failed: division by zero")
-    return
+	match e:
+		math.DivisionByZero:
+			print("Division failed: division by zero")
+	return
 
 print(f"Result: {result}")
 ```
@@ -116,13 +116,13 @@ fn main() {
 **Ryo:**
 ```ryo
 fn process_data(data: &str) -> &str:
-    # No lifetime annotations needed - scope-based
-    return data.trim()
+	# No lifetime annotations needed - scope-based
+	return data.trim()
 
 fn main():
-    input = "  hello  "
-    result = process_data(&input)
-    print(result)
+	input = "  hello  "
+	result = process_data(&input)
+	print(result)
 ```
 
 **Migration Path:**
@@ -175,20 +175,20 @@ func main() {
 import std.task
 
 fn fetch_data(url: str) -> str:
-    # Simulate network request
-    task.delay(100ms).await
-    return f"data from {url}"
+	# Simulate network request
+	task.delay(100ms).await
+	return f"data from {url}"
 
 fn main():
-    futures = [
-        task.run: fetch_data("url1"),
-        task.run: fetch_data("url2")
-    ]
+	futures = [
+		task.run: fetch_data("url1"),
+		task.run: fetch_data("url2")
+	]
 
-    results = task.join(futures).await
+	results = task.join(futures).await
 
-    for result in results:
-        print(result)
+	for result in results:
+		print(result)
 ```
 
 **Migration Path:**
@@ -304,7 +304,7 @@ func main() {
 **Ryo:**
 ```ryo
 fn main():
-    print("Hello, World!")
+	print("Hello, World!")
 ```
 
 ### HTTP Server
@@ -348,12 +348,12 @@ import std.http
 import std.task
 
 fn hello(request: Request) -> Response:
-    return Response.ok("Hello, World!")
+	return Response.ok("Hello, World!")
 
 fn main():
-    server = http.Server.new()
-    server.route("/", hello)
-    try server.listen(8080).await
+	server = http.Server.new()
+	server.route("/", hello)
+	try server.listen(8080).await
 ```
 
 ## Performance Characteristics

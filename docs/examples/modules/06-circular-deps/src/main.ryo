@@ -10,14 +10,14 @@ import fixed.models.ids
 fn main():
 	# Solution 1: Use ID references instead of direct object references
 	user_id = ids.UserID(1)
-	user_obj = user.User(id: user_id, name: "Alice")
+	user_obj = user.User(id=user_id, name="Alice")
 	print(f"[FIXED] User created: {user_obj.name}")
 
 	post_id = ids.PostID(1)
 	post_obj = post.Post(
-		id: post_id,
-		title: "Hello World",
-		author_id: user_id  # Reference by ID, not by object
+		id=post_id,
+		title="Hello World",
+		author_id=user_id  # Reference by ID, not by object
 	)
 	print(f"[FIXED] Post created by user ID: {post_obj.author_id}")
 

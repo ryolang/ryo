@@ -5,22 +5,22 @@
 # In a real multi-file project, these errors would be defined in separate module directories:
 #
 #   math/errors.ryo:
-#     error DivisionByZero
-#     error InvalidInput(str)
-#     error OverflowError
+#\t error DivisionByZero
+#\t error InvalidInput(str)
+#\t error OverflowError
 #
 #   io/errors.ryo:
-#     error FileNotFound(path: str)
-#     error PermissionDenied(path: str)
+#\t error FileNotFound(path: str)
+#\t error PermissionDenied(path: str)
 #
 #   parse/errors.ryo:
-#     error InvalidFormat(str)
-#     error UnexpectedToken(str)
+#\t error InvalidFormat(str)
+#\t error UnexpectedToken(str)
 #
 #   main.ryo:
-#     import math
-#     import io
-#     import parse
+#\t import math
+#\t import io
+#\t import parse
 #
 # See docs/examples/modules/ for multi-file module examples.
 
@@ -44,36 +44,36 @@ error PermissionDenied(path: str)
 error InvalidFormat(str)
 error UnexpectedToken(str)
 
-# File: main.ryo
-import math
-import io
-import parse
+# In a real project, the main file would import these modules:
+# import math
+# import io
+# import parse
 
 # ============================================================================
 # SECTION 2: Functions with Single Errors
 # ============================================================================
 
 fn divide(a: float, b: float) -> math.DivisionByZero!float:
-    if b == 0.0:
-        return math.DivisionByZero
-    return a / b
+\tif b == 0.0:
+\t\treturn math.DivisionByZero
+\treturn a / b
 
 
 fn validate_number(text: str) -> math.InvalidInput!float:
-    if text.is_empty():
-        return math.InvalidInput("Text cannot be empty")
-    return float(text)
+\tif text.is_empty():
+\t\treturn math.InvalidInput("Text cannot be empty")
+\treturn float(text)
 
 
-fn calculate_average(numbers: List[float]) -> math.InvalidInput!float:
-    if numbers.is_empty():
-        return math.InvalidInput("List cannot be empty")
+fn calculate_average(numbers: list[float]) -> math.InvalidInput!float:
+\tif numbers.is_empty():
+\t\treturn math.InvalidInput("List cannot be empty")
 
-    sum = 0.0
-    for num in numbers:
-        sum += num
+\tsum = 0.0
+\tfor num in numbers:
+\t\tsum += num
 
-    return sum / float(numbers.len())
+\treturn sum / float(numbers.len())
 
 
 # ============================================================================
@@ -81,19 +81,19 @@ fn calculate_average(numbers: List[float]) -> math.InvalidInput!float:
 # ============================================================================
 
 fn safe_division_chain(a: float, b: float, c: float) -> math.DivisionByZero!float:
-    # Using try keyword for elegant error propagation
-    first_result = try divide(a, b)
-    second_result = try divide(first_result, c)
-    return second_result
+\t# Using try keyword for elegant error propagation
+\tfirst_result = try divide(a, b)
+\tsecond_result = try divide(first_result, c)
+\treturn second_result
 
 
 # Inferred error union - compiler determines the union type automatically
 fn validate_and_process(input: str) -> !float:
-    # math.InvalidInput from try validate_number()
-    value = try validate_number(input)
-    # math.DivisionByZero from try divide()
-    result = try divide(value, 2.0)
-    return result
+\t# math.InvalidInput from try validate_number()
+\tvalue = try validate_number(input)
+\t# math.DivisionByZero from try divide()
+\tresult = try divide(value, 2.0)
+\treturn result
 # Compiler infers: (math.InvalidInput | math.DivisionByZero)!float
 
 
@@ -102,90 +102,90 @@ fn validate_and_process(input: str) -> !float:
 # ============================================================================
 
 fn main():
-    print("=== Single Error Type Examples ===")
+\tprint("=== Single Error Type Examples ===")
 
-    # Example 1: Successful operation
-    result = divide(10.0, 2.0) catch |e|:
-        match e:
-            math.DivisionByZero:
-                print("Error: Cannot divide by zero")
-        return
+\t# Example 1: Successful operation
+\tresult = divide(10.0, 2.0) catch |e|:
+\t\tmatch e:
+\t\t\tmath.DivisionByZero:
+\t\t\t\tprint("Error: Cannot divide by zero")
+\t\treturn
 
-    print(f"10.0 / 2.0 = {result}")
+\tprint(f"10.0 / 2.0 = {result}")
 
-    # Example 2: Error case
-    error_result = divide(10.0, 0.0) catch |e|:
-        match e:
-            math.DivisionByZero:
-                print("Caught error: Division by zero")
-        return
+\t# Example 2: Error case
+\terror_result = divide(10.0, 0.0) catch |e|:
+\t\tmatch e:
+\t\t\tmath.DivisionByZero:
+\t\t\t\tprint("Caught error: Division by zero")
+\t\treturn
 
-    print("\n=== Error Propagation with try ===")
+\tprint("\n=== Error Propagation with try ===")
 
-    # Example 3: Chain of operations (same error type)
-    chain_result = safe_division_chain(100.0, 5.0, 2.0) catch |e|:
-        match e:
-            math.DivisionByZero:
-                print("Chain failed: Division by zero")
-        return
+\t# Example 3: Chain of operations (same error type)
+\tchain_result = safe_division_chain(100.0, 5.0, 2.0) catch |e|:
+\t\tmatch e:
+\t\t\tmath.DivisionByZero:
+\t\t\t\tprint("Chain failed: Division by zero")
+\t\treturn
 
-    print(f"Chain result: (100.0 / 5.0) / 2.0 = {chain_result}")
+\tprint(f"Chain result: (100.0 / 5.0) / 2.0 = {chain_result}")
 
-    # Example 4: Chain with error
-    chain_error = safe_division_chain(100.0, 5.0, 0.0) catch |e|:
-        match e:
-            math.DivisionByZero:
-                print("Chain error caught: Division by zero in second operation")
-        return
+\t# Example 4: Chain with error
+\tchain_error = safe_division_chain(100.0, 5.0, 0.0) catch |e|:
+\t\tmatch e:
+\t\t\tmath.DivisionByZero:
+\t\t\t\tprint("Chain error caught: Division by zero in second operation")
+\t\treturn
 
-    print("\n=== Error Union Handling (Multiple Error Types) ===")
+\tprint("\n=== Error Union Handling (Multiple Error Types) ===")
 
-    # Example 5: Error union - must handle all variants exhaustively
-    union_result = validate_and_process("42") catch |e|:
-        match e:
-            math.InvalidInput(msg):
-                print(f"Validation error: {msg}")
-            math.DivisionByZero:
-                print("Division error occurred")
-        return
+\t# Example 5: Error union - must handle all variants exhaustively
+\tunion_result = validate_and_process("42") catch |e|:
+\t\tmatch e:
+\t\t\tmath.InvalidInput(msg):
+\t\t\t\tprint(f"Validation error: {msg}")
+\t\t\tmath.DivisionByZero:
+\t\t\t\tprint("Division error occurred")
+\t\treturn
 
-    print(f"Processed value: {union_result}")
+\tprint(f"Processed value: {union_result}")
 
-    # Example 6: Error union with error case
-    union_error = validate_and_process("") catch |e|:
-        match e:
-            math.InvalidInput(msg):
-                print(f"Caught validation error: {msg}")
-            math.DivisionByZero:
-                print("This shouldn't happen with empty input")
-        return
+\t# Example 6: Error union with error case
+\tunion_error = validate_and_process("") catch |e|:
+\t\tmatch e:
+\t\t\tmath.InvalidInput(msg):
+\t\t\t\tprint(f"Caught validation error: {msg}")
+\t\t\tmath.DivisionByZero:
+\t\t\t\tprint("This shouldn't happen with empty input")
+\t\treturn
 
-    print("\n=== List Operations ===")
+\tprint("\n=== List Operations ===")
 
-    # Example 7: Successful average
-    numbers = [1.0, 2.0, 3.0, 4.0, 5.0]
-    avg_result = calculate_average(numbers) catch |e|:
-        match e:
-            math.InvalidInput(msg):
-                print(f"Error: {msg}")
-        return
+\t# Example 7: Successful average
+\tnumbers = [1.0, 2.0, 3.0, 4.0, 5.0]
+\tavg_result = calculate_average(numbers) catch |e|:
+\t\tmatch e:
+\t\t\tmath.InvalidInput(msg):
+\t\t\t\tprint(f"Error: {msg}")
+\t\treturn
 
-    print(f"Average of [1.0, 2.0, 3.0, 4.0, 5.0]: {avg_result}")
+\tprint(f"Average of [1.0, 2.0, 3.0, 4.0, 5.0]: {avg_result}")
 
-    # Example 8: Average with empty list
-    empty_numbers = []
-    empty_avg = calculate_average(empty_numbers) catch |e|:
-        match e:
-            math.InvalidInput(msg):
-                print(f"Expected error: {msg}")
-        return
+\t# Example 8: Average with empty list
+\tempty_numbers = []
+\tempty_avg = calculate_average(empty_numbers) catch |e|:
+\t\tmatch e:
+\t\t\tmath.InvalidInput(msg):
+\t\t\t\tprint(f"Expected error: {msg}")
+\t\treturn
 
-    print("\n=== Error Messages ===")
+\tprint("\n=== Error Messages ===")
 
-    # Example 9: Accessing error messages
-    result9 = validate_number("invalid") catch |e|:
-        # All errors implement .message() automatically
-        print(f"Error message: {e.message()}")
-        return
+\t# Example 9: Accessing error messages
+\tresult9 = validate_number("invalid") catch |e|:
+\t\t# All errors implement .message() automatically
+\t\tprint(f"Error message: {e.message()}")
+\t\treturn
 
-    print("\n=== All Examples Complete ===")
+\tprint("\n=== All Examples Complete ===")

@@ -2,8 +2,8 @@
 # Basic Hello World example demonstrating Ryo syntax
 
 fn greet(name: str):
-    print(f"Hello, {name}!")
+\tprint(f"Hello, {name}!")
 
 fn main():
-    greet("World")
-    greet("Ryo")
+\tgreet("World")
+\tgreet("Ryo")

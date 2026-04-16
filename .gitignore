@@ -28,3 +28,6 @@ site/
 # Output files
 *.o
 output_executable
+
+# Superpowers (agent-generated plans/specs)
+docs/superpowers/
