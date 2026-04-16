@@ -66,11 +66,32 @@
 *   **Core Goals:**
     *   **Python-like Ergonomics:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
     *   **Rust-like Safety (Simplified):** Memory safe by default via ownership and borrowing, without GC. Compile-time checks prevent dangling pointers, data races, use-after-free. Simplified borrowing model compared to Rust (no manual lifetimes).
-    *   **Go-like Simplicity:** Minimal keyword set, straightforward core concepts, avoid unnecessary feature creep. Focus on providing essential, orthogonal features.
+    *   **Go-Inspired Simplicity:** Minimal keyword set, straightforward core concepts, avoid unnecessary feature creep. Focus on providing essential, orthogonal features. Simpler than Rust, more expressive than Go — the right trade-off for Ryo's target audience.
     *   **Competitive Performance:** Compiled to efficient native code (or Wasm) via **Cranelift**. No GC pauses. Deterministic resource management. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
     *   **Effective Concurrency:** Simple and safe concurrency using Task/Future/Channel patterns with a concurrent runtime (planned).
     *   **Compile-Time Power:** Integrated compile-time function execution (`comptime`) for metaprogramming, configuration, and optimization (planned for future implementation).
     *.  **Excellent Tooling:** Provide a seamless experience out-of-the-box, including a fast compiler, integrated package manager, REPL, and testing framework.
+
+### Feature Availability
+
+This specification describes the full target design. Not all features are available in v0.1. The table below summarizes the rollout plan:
+
+| Feature | v0.1 | v0.2 | v0.3 | v0.4+ |
+|---------|------|------|------|-------|
+| Core types, variables, functions | Yes | | | |
+| Ownership & borrowing (Ownership Lite) | Yes | | | |
+| Error handling (`try`/`catch`, error unions) | Yes | | | |
+| Traits (static dispatch only) | Yes | | | |
+| Pattern matching (basic `match`) | Yes | | | |
+| Modules & packages | Yes | | | |
+| FFI, `unsafe`, `ryo-bindgen` | | Yes | | |
+| REPL (JIT) | | Yes | | |
+| User-defined generics (monomorphization) | | | Yes | |
+| Dynamic dispatch (`dyn Trait`) | | | Yes | |
+| Concurrency runtime (task/future/channel) | | | | Yes |
+| `comptime` (compile-time execution) | | | | TBD |
+
+Sections describing planned features are marked with a status banner.
 
 *   **Target Audience:** Developers familiar with languages like Python, Go, TypeScript, or C# seeking better performance and stronger safety guarantees without the steep learning curve of Rust or the runtime overhead of GC languages, especially for backend services, CLI tools, and scripting.
 
@@ -82,7 +103,7 @@ Ryo synthesizes ideas from several modern programming languages:
 *   **Rust** - Ownership model for memory safety, algebraic data types (enums with data), pattern matching, trait system, Result/Option types
 *   **Mojo** - Simplified ownership without manual lifetimes, value semantics, progressive complexity model
 *   **Go** - Simplicity as a core design principle, fast compilation, built-in concurrency primitives, minimal feature set
-*   **Zig** - Explicit error handling with error unions, no hidden control flow, minimal runtime, comptime execution (Ryo plans similar compile-time features for future versions)
+*   **Zig** - Explicit error handling with error unions, no operator overloading, readable-by-default design, minimal runtime, comptime execution (Ryo plans similar compile-time features for future versions)
 
 **Key Differentiators**: Ryo aims to be easier than Rust (no lifetimes), safer than Python (compile-time memory safety), more expressive than Go (generics, algebraic types), and more familiar than Zig (Python-like syntax).
 
@@ -169,9 +190,9 @@ As of 2026, the majority of application code is written by AI agents and reviewe
 
 3. **Predictable patterns over clever shortcuts.** An AI benefits from a small set of orthogonal primitives with consistent behavior. A human benefits from reading code that always follows the same patterns. Both are served by fewer features, done well.
 
-4. **Explicit is readable.** When an AI writes `shared[mutex[map[str, int]]]`, a human reviewer can see at a glance: "this is shared, locked, concurrent state." No hidden magic, no implicit conversions, no operator overloading obscuring intent.
+4. **Readable by default.** Ryo is implicit where ceremony would hurt clarity (parameter borrowing, type narrowing after null checks) and explicit where the reviewer needs to see intent (`shared[mutex[map[str, int]]]`, `try` for error propagation, `move` for ownership transfer). The test: *can a human reviewer understand the semantics by reading the code, without memorizing special rules?* No operator overloading, no exceptions, no implicit numeric conversions — but also no unnecessary annotations that add noise without aiding comprehension.
 
-**Balance:** Ryo does not sacrifice human ergonomics for machine convenience. Python-style syntax, clean error messages, and readable stack traces serve the human side of the workflow. The AI handles the ceremony; the human benefits from the clarity.
+**Balance:** Ryo prioritizes DX over theoretical purity. Python-style syntax, clean error messages, and readable stack traces serve the human side of the workflow. The AI handles the ceremony; the human benefits from the clarity.
 
 ## 2. Lexical Structure
 
@@ -186,22 +207,22 @@ As of 2026, the majority of application code is written by AI agents and reviewe
 *   **Comments:**
     *   **Regular Comment:** Starts with `#` followed by a space or directly by the comment text. Continues to the end of the line. Ignored by the compiler.
         ```ryo
-        # This is a comment
-        #Another comment
-        x = 1 # Comment after code
-        ```
+		# This is a comment
+		#Another comment
+		x = 1 # Comment after code
+		```
     *   **Documentation Comment:** Starts with the specific sequence `#:` (hash symbol immediately followed by a colon). Continues to the end of the line. Processed by documentation tooling (supports Markdown). Ignored otherwise by the compiler. Applies to the item immediately following it. Consecutive `#:` lines form a single documentation block.
         ```ryo
-        #: Represents a point in 2D space.
-        #: Supports basic arithmetic.
-        struct Point:
-            x: int #: X coordinate (doc comment for field)
-            y: int # Regular comment for field
+		#: Represents a point in 2D space.
+		#: Supports basic arithmetic.
+		struct Point:
+			x: int #: X coordinate (doc comment for field)
+			y: int # Regular comment for field
 
-        #: Calculates the distance from the origin.
-        fn distance(p: &Point) -> float:
-            ...
-        ```
+		#: Calculates the distance from the origin.
+		fn distance(p: &Point) -> float:
+			...
+		```
     *   *(Rationale: Uses `#` as the base. The `#:` marker provides an unambiguous distinction for documentation tooling, avoiding whitespace sensitivity and block comment syntax. Attributes `#[...]` remain separate).*
 *   **Attributes:** Metadata annotations use the `#[...]` syntax, placed before the documented item. *(Rationale: Distinct syntax using brackets clearly separates attributes from code and comments).*
 *   **Indentation:** **Tabs** strictly denote code blocks. One tab per indentation level. Mixing tabs and spaces for indentation is a compile-time error. *(Rationale: Enforces a single, consistent style like Go, avoids common Python indentation issues).*
@@ -219,17 +240,17 @@ As of 2026, the majority of application code is written by AI agents and reviewe
     *   Mutable with explicit type: `mut name: Type = value`
     *   Examples:
         ```ryo
-        pi = 3.14                    # Immutable float (type inferred)
-        name = "Alice"               # Immutable string (type inferred)
-        count: int = 42              # Immutable int (explicit type)
-        mut counter = 0              # Mutable integer (type inferred)
-        mut temperature: float = 98.6 # Mutable float (explicit type)
-        ```
+		pi = 3.14                    # Immutable float (type inferred)
+		name = "Alice"               # Immutable string (type inferred)
+		count: int = 42              # Immutable int (explicit type)
+		mut counter = 0              # Mutable integer (type inferred)
+		mut temperature: float = 98.6 # Mutable float (explicit type)
+		```
     *   **Variable Shadowing:** Shadowing is **allowed** (Rust-style). Declaring a new variable with the same name as an existing one in the same scope (or an outer scope) creates a new variable, effectively "shadowing" the previous one. This is useful for type transformations or reusing names without mutation.
         ```ryo
-        x = "123"        # x is a string
-        x = int(x)       # x is now an int (new variable, shadows previous x)
-        ```
+		x = "123"        # x is a string
+		x = int(x)       # x is now an int (new variable, shadows previous x)
+		```
     *   *(Rationale: Immutable-by-default promotes safer code. No `let` keyword provides Pythonic simplicity. Type inference reduces boilerplate while explicit types remain available for clarity. The `mut` keyword makes mutability explicit and visible).*
     *   **Type Inference:** Ryo uses **bidirectional type checking** (like Rust, TypeScript, and modern statically-typed languages) which provides:
         *   **Function signatures require type annotations** - Good for documentation and API clarity
@@ -239,28 +260,28 @@ As of 2026, the majority of application code is written by AI agents and reviewe
         *   **Comptime with enhanced inference** - More aggressive type inference in compile-time contexts
         *   Examples:
             ```ryo
-            fn add(a: int, b: int) -> int:  # Parameters need types
-                result = a + b              # Local variable type inferred: int
-                return result               # Return type checked against signature
+			fn add(a: int, b: int) -> int:  # Parameters need types
+				result = a + b              # Local variable type inferred: int
+				return result               # Return type checked against signature
 
-            # Type errors are localized and clear
-            x = 5              # Inferred: int
-            y = 3.14           # Inferred: float
-            z = x + y          # Error: cannot add int and float (clear, localized)
-            ```
+			# Type errors are localized and clear
+			x = 5              # Inferred: int
+			y = 3.14           # Inferred: float
+			z = x + y          # Error: cannot add int and float (clear, localized)
+			```
         *   *(Rationale: Bidirectional type checking provides the right balance - function signatures serve as documentation and API contracts while local code remains concise. This matches developer expectations from Rust/TypeScript and provides better error messages than fully implicit systems like Hindley-Milner).*
 *   **Struct Definition:** `struct Name: field: Type ...`
-*   **Enum Definition:** `enum Name: Variant1, Variant2(Type), Variant3 { field: Type } ...`
+*   **Enum Definition:** `enum Name: Variant1, Variant2(Type), Variant3(field: Type) ...`
 *   **Trait Definition:** `trait Name: fn method(...) -> RetType ... (with optional default implementation)`
 *   **Implementation:** `impl Trait for Type: fn method(...) -> RetType: ...`
     ```ryo
-    struct Counter:
-        count: int
-    trait Resettable:
-        fn reset(&mut self)
-    impl Resettable for Counter:
-        fn reset(&mut self): self.count = 0
-    ```
+	struct Counter:
+		count: int
+	trait Resettable:
+		fn reset(&mut self)
+	impl Resettable for Counter:
+		fn reset(&mut self): self.count = 0
+	```
 *   **Method Call:** `instance.method(args...)`. Field Access: `instance.field`.
 *   **Control Flow:** `if/elif/else`, `for item in iterable:`, `for i in range(start, end):`.
 *   **Pattern Matching:** `match expr: Pattern1: ... Pattern2(bind): ... Pattern3 { x, y }: ... _ : ...` (`_` for wildcard/default).
@@ -328,39 +349,39 @@ fn mutate_list(items: &mut list[int]):  # Explicit mutable borrow
 *   **Concept:** Defines a type that can be exactly *one* of several named **variants**. Each variant can optionally hold associated data. Enums are fundamental for representing alternatives, states, and structured data safely.
 *   **Syntax:**
     ```ryo
-    enum EnumName[T]: # Optional type parameters for generics
-        UnitVariant             # Variant with no data
-        TupleVariant(Type1, Type2) # Variant holding ordered data
-        StructVariant(name1: TypeA, name2: TypeB) # Variant holding named fields
-    ```
+	enum EnumName[T]: # Optional type parameters for generics
+		UnitVariant             # Variant with no data
+		TupleVariant(Type1, Type2) # Variant holding ordered data
+		StructVariant(name1: TypeA, name2: TypeB) # Variant holding named fields
+	```
 *   **Instantiation:** Use `EnumName.VariantName`. Provide data for tuple/struct variants.
     ```ryo
-    msg1 = Message.Quit
-    msg2 = Message.Write("hello")
-    msg3 = Message.Coords(x=10, y=-5)
-    ```
+	msg1 = Message.Quit
+	msg2 = Message.Write("hello")
+	msg3 = Message.Coords(x=10, y=-5)
+	```
 *   **Pattern Matching (`match`):** The primary way to use enum values. `match` destructures variants and allows executing code based on the current variant.
     ```ryo
-    match my_enum_value:
-        MyEnum.Variant1:
-            # Code for Variant1
-        MyEnum.TupleVariant(data1, data2): # Bind tuple data
-            # Code using data1, data2
-        MyEnum.StructVariant(field_a, count): # Bind struct fields
-            # Code using field_a, count
-        _ : # Wildcard for unlisted variants (required if not exhaustive)
-            # Default code
-    ```
+	match my_enum_value:
+		MyEnum.Variant1:
+			# Code for Variant1
+		MyEnum.TupleVariant(data1, data2): # Bind tuple data
+			# Code using data1, data2
+		MyEnum.StructVariant(field_a, count): # Bind struct fields
+			# Code using field_a, count
+		_ : # Wildcard for unlisted variants (required if not exhaustive)
+			# Default code
+	```
 *   **Exhaustiveness:** The compiler **enforces** that `match` expressions handle *all* possible variants of an enum, preventing runtime errors from unhandled cases. A wildcard `_` can be used to satisfy exhaustiveness if not all variants are explicitly matched. *(Rationale: Core safety feature, eliminates bugs from missed cases).*
 *   **Ownership:** Enum values follow standard ownership rules. An enum value owns any data contained within its current variant. Moving the enum moves the contained data. Destructuring in `match` can move or borrow contained data based on the pattern.
 *   **Methods:** Methods can be defined on enums using `impl EnumName: ...`, often using `match self:` internally.
     ```ryo
-    impl MyEnum:
-        fn process(self):
-            match self:
-                MyEnum.Variant1: io.println("Processing V1")
-                # ... other variants ...
-    ```
+	impl MyEnum:
+		fn process(self):
+			match self:
+				MyEnum.Variant1: io.println("Processing V1")
+				# ... other variants ...
+	```
 *   *(Rationale: Enums provide type-safe ways to represent alternatives (like `Result`/`Optional`), states, and structured messages, crucial for robust software and eliminating `null` errors. Exhaustive matching is a key safety feature derived from functional programming and Rust).*
 
 ### 4.7 Built-in Collections
@@ -387,38 +408,38 @@ To prevent "Iterator Invalidation" bugs (modifying a collection while iterating)
 *   **Null literal:** `none` (lowercase keyword, consistent with `true` and `false`). *(Rationale: Python-familiar, semantically clear—"none" means "no value")*
 *   **Declaration and Assignment:**
     ```ryo
-    user: ?User = none
-    user: ?User = User(name="Alice")
+	user: ?User = none
+	user: ?User = User(name="Alice")
 
-    config: ?Config = load_config()  # If load_config returns ?Config
-    ```
+	config: ?Config = load_config()  # If load_config returns ?Config
+	```
 *   **Optional Chaining (`?.`):** Access nested optional fields without explicit unwrapping. Returns an optional type if any step is `none`:
     ```ryo
-    city = user?.profile?.address?.city  # Returns ?str
+	city = user?.profile?.address?.city  # Returns ?str
 
-    # Equivalent to (conceptually):
-    city = if user != none and user.profile != none and user.profile.address != none:
-        user.profile.address.city
-    else:
-        none
-    ```
+	# Equivalent to (conceptually):
+	city = if user != none and user.profile != none and user.profile.address != none:
+		user.profile.address.city
+	else:
+		none
+	```
 *   **Default Values with `orelse`:** Provide defaults or early return:
     ```ryo
-    name = user?.name orelse "Unknown"
-    port = config?.port orelse 8080
+	name = user?.name orelse "Unknown"
+	port = config?.port orelse 8080
 
-    # Early return pattern (with smart casting)
-    user = optional_user orelse return error.NoUser
-    # 'user' is now User (not ?User)
-    ```
+	# Early return pattern (with smart casting)
+	user = optional_user orelse return error.NoUser
+	# 'user' is now User (not ?User)
+	```
 *   **Smart Casting after Null Checks:** After a null check, the type is automatically narrowed:
     ```ryo
-    if user != none:
-        print(user.name)  # user is User here, not ?User (smart cast)
+	if user != none:
+		print(user.name)  # user is User here, not ?User (smart cast)
 
-    if let user = optional_user:  # Future: if-let syntax
-        print(user.name)
-    ```
+	if let user = optional_user:  # Future: if-let syntax
+		print(user.name)
+	```
 *   *(Rationale: Zig-inspired `?T` syntax is concise and compositional. The `none` keyword aligns with Python's `None`. Optional chaining (`?.`) and `orelse` provide ergonomic handling. Smart casting reduces boilerplate after validation)*
 
 ### 4.9 Error Types (`ErrorType!SuccessType`)
@@ -429,44 +450,44 @@ To prevent "Iterator Invalidation" bugs (modifying a collection while iterating)
 
 *   **Unit Error (No Data):** A simple error marker:
     ```ryo
-    error Timeout
-    error Unauthorized
-    ```
+	error Timeout
+	error Unauthorized
+	```
     **Usage:**
     ```ryo
-    fn operation() -> Timeout!Data:
-        if elapsed > limit:
-            return Timeout  # Direct return
-        return data
-    ```
+	fn operation() -> Timeout!Data:
+		if elapsed > limit:
+			return Timeout  # Direct return
+		return data
+	```
 
 *   **Message-Only Error (Most Common):** Single unnamed string field becomes the message:
     ```ryo
-    error NotFound(str)
-    error ValidationFailed(str)
-    ```
+	error NotFound(str)
+	error ValidationFailed(str)
+	```
     **Usage:**
     ```ryo
-    fn find_user(id: int) -> NotFound!User:
-        if not exists(id):
-            return NotFound("User not found")
-        return user
-    ```
+	fn find_user(id: int) -> NotFound!User:
+		if not exists(id):
+			return NotFound("User not found")
+		return user
+	```
     **Automatic message:** The string is accessible via `.message()` method on error trait.
 
 *   **Structured Single-Variant Error:** Multiple named fields:
     ```ryo
-    error HttpError(status: int, message: str)
-    error ValidationError(field: str, constraint: str)
-    ```
+	error HttpError(status: int, message: str)
+	error ValidationError(field: str, constraint: str)
+	```
     **Usage:**
     ```ryo
-    fn fetch(url: str) -> HttpError!Data:
-        response = await http.get(url)
-        if response.status != 200:
-            return HttpError(status: response.status, message: response.body)
-        return parse(response.body)
-    ```
+	fn fetch(url: str) -> HttpError!Data:
+		response = await http.get(url)
+		if response.status != 200:
+			return HttpError(status=response.status, message=response.body)
+		return parse(response.body)
+	```
 
 #### **Grouping Related Errors with Modules**
 
@@ -493,110 +514,110 @@ import io
 import parse
 
 fn read_file(path: str) -> io.FileNotFound!str:
-    if not exists(path):
-        return io.FileNotFound(path)
-    return os.read(path)
+	if not exists(path):
+		return io.FileNotFound(path)
+	return os.read(path)
 
 fn parse_json(text: str) -> parse.InvalidSyntax!Data:
-    if invalid_json(text):
-        return parse.InvalidSyntax(line=0, column=0)
-    return Data(...)
+	if invalid_json(text):
+		return parse.InvalidSyntax(line=0, column=0)
+	return Data(...)
 ```
 
 #### **Error Union Types** (Composition)
 
 *   **Explicit Error Unions** - Compose multiple error types:
     ```ryo
-    # Can return either FileError or ParseError
-    fn process(path: str) -> (FileError | ParseError)!Data:
-        file = try read_file(path)      # FileError
-        data = try parse_json(file)     # ParseError
-        return data
-    ```
+	# Can return either FileError or ParseError
+	fn process(path: str) -> (FileError | ParseError)!Data:
+		file = try read_file(path)      # FileError
+		data = try parse_json(file)     # ParseError
+		return data
+	```
 
 *   **Inferred Error Unions** - Compiler infers error set from `try` expressions:
     ```ryo
-    # Just use ! and compiler infers: (FileError | ParseError)!Data
-    fn process(path: str) -> !Data:
-        file = try read_file(path)      # FileError
-        data = try parse_json(file)     # ParseError
-        return data
+	# Just use ! and compiler infers: (FileError | ParseError)!Data
+	fn process(path: str) -> !Data:
+		file = try read_file(path)      # FileError
+		data = try parse_json(file)     # ParseError
+		return data
 
-    # Use --show-inferred-errors flag to see inferred type:
-    # process() -> (FileError | ParseError)!Data
-    ```
+	# Use --show-inferred-errors flag to see inferred type:
+	# process() -> (FileError | ParseError)!Data
+	```
     **Benefits:** No wrapper types needed, composition is automatic, refactoring-friendly.
 
 *   **Explicit Single Error Type** (`ErrorType!T`):
     ```ryo
-    fn read_file(path: str) -> io.FileNotFound!str:
-        if not exists(path):
-            return io.FileNotFound(path)
-        return os.read(path)
-    ```
+	fn read_file(path: str) -> io.FileNotFound!str:
+		if not exists(path):
+			return io.FileNotFound(path)
+		return os.read(path)
+	```
 
 *   **Generic Error Type** (`!T`): Accept any error:
     ```ryo
-    fn flexible_operation() -> !Data:
-        # Can return any error type
-        ...
-    ```
+	fn flexible_operation() -> !Data:
+		# Can return any error type
+		...
+	```
 
 *   **Combined Error and Optional** (`!?T`):
     ```ryo
-    fn find_user(db: Database, id: int) -> DatabaseError!?User:
-        # Can return: DatabaseError, none (not found), or User
-        rows = try db.query("SELECT * FROM users WHERE id = ?", id)
-        if rows.is_empty():
-            return none
-        return User.from_row(rows[0])
-    ```
+	fn find_user(db: Database, id: int) -> DatabaseError!?User:
+		# Can return: DatabaseError, none (not found), or User
+		rows = try db.query("SELECT * FROM users WHERE id = ?", id)
+		if rows.is_empty():
+			return none
+		return User.from_row(rows[0])
+	```
 
 #### **Pattern Matching on Errors**
 
 *   **Single Error Type** (Exhaustive matching required):
     ```ryo
-    result = read_file(path) catch |e|:
-        match e:
-            io.FileNotFound(p):
-                print(f"File not found: {p}")
-            io.PermissionDenied(p):
-                print(f"Permission denied: {p}")
-            io.DiskFull:
-                print("Disk full")
-            # MUST handle all variants - compiler error if missing
-    ```
+	result = read_file(path) catch |e|:
+		match e:
+			io.FileNotFound(p):
+				print(f"File not found: {p}")
+			io.PermissionDenied(p):
+				print(f"Permission denied: {p}")
+			io.DiskFull:
+				print("Disk full")
+			# MUST handle all variants - compiler error if missing
+	```
 
 *   **Error Union** (Exhaustive matching required):
     ```ryo
-    result = process(path) catch |e|:
-        match e:
-            io.FileNotFound(p):
-                return create_default(p)
-            io.PermissionDenied(p):
-                return request_permissions()
-            parse.InvalidSyntax(line, col):
-                log_error(f"Syntax error at {line}:{col}")
-                return default_config()
-            parse.UnexpectedToken(exp, got):
-                log_error(f"Expected {exp}, got {got}")
-                return default_config()
-            parse.UnexpectedEof:
-                log_error("Unexpected end of file")
-                return default_config()
-            # MUST handle all variants in union - compiler enforces this
-    ```
+	result = process(path) catch |e|:
+		match e:
+			io.FileNotFound(p):
+				return create_default(p)
+			io.PermissionDenied(p):
+				return request_permissions()
+			parse.InvalidSyntax(line, col):
+				log_error(f"Syntax error at {line}:{col}")
+				return default_config()
+			parse.UnexpectedToken(exp, got):
+				log_error(f"Expected {exp}, got {got}")
+				return default_config()
+			parse.UnexpectedEof:
+				log_error("Unexpected end of file")
+				return default_config()
+			# MUST handle all variants in union - compiler enforces this
+	```
 
     **Using catch-all when needed:**
     ```ryo
-    result = process(path) catch |e|:
-        match e:
-            io.FileNotFound(p):
-                return create_default(p)
-            _:  # Explicit catch-all: "handle everything else the same way"
-                log_error(e.message())
-                return default_config()
-    ```
+	result = process(path) catch |e|:
+		match e:
+			io.FileNotFound(p):
+				return create_default(p)
+			_:  # Explicit catch-all: "handle everything else the same way"
+				log_error(e.message())
+				return default_config()
+	```
 
 *   *(Rationale: Single-variant errors provide simplicity (one syntax). Error unions enable automatic composition without wrapper types (Zig-inspired). Exhaustive matching by default ensures all error cases are explicitly handled. The `_` catch-all provides an escape hatch for truly generic handling.)*
 
@@ -610,26 +631,26 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 *   **Error Trait:** All error types automatically implement the `Error` trait:
     ```ryo
-    trait Error:
-        fn message(self) -> str           # Human-readable message
-        fn location(self) -> ?Location    # Where error was created
-        fn stack_trace(self) -> ?StackTrace  # Call stack when created
+	trait Error:
+		fn message(self) -> str           # Human-readable message
+		fn location(self) -> ?Location    # Where error was created
+		fn stack_trace(self) -> ?StackTrace  # Call stack when created
 
-    struct Location:
-        file: str          # File path (absolute or relative)
-        line: int          # Line number (1-indexed)
-        column: int        # Column number (1-indexed)
-        function: str      # Function name with module path
+	struct Location:
+		file: str          # File path (absolute or relative)
+		line: int          # Line number (1-indexed)
+		column: int        # Column number (1-indexed)
+		function: str      # Function name with module path
 
-    struct StackTrace:
-        frames: list[StackFrame]
+	struct StackTrace:
+		frames: list[StackFrame]
 
-    struct StackFrame:
-        function: str      # Function name with module path
-        file: str          # File path
-        line: int          # Line number
-        column: int        # Column number
-    ```
+	struct StackFrame:
+		function: str      # Function name with module path
+		file: str          # File path
+		line: int          # Line number
+		column: int        # Column number
+	```
 
 *   **Automatic Location Tracking:** All error values automatically capture the location where they are created:
     *   **`.location()`** returns `Location` with file, line, column, and function name
@@ -639,90 +660,92 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
     Example:
     ```ryo
-    # File: file/errors.ryo
-    error NotFound(path: str)
+	# File: file/errors.ryo
+	error NotFound(path: str)
 
-    # File: main.ryo
-    import file
+	# File: main.ryo
+	import file
 
-    fn find_config() -> file.NotFound!Config:
-        # Error created here captures: line 5, column 8, file "src/main.ryo"
-        return file.NotFound("/etc/config.toml")
+	fn find_config() -> file.NotFound!Config:
+		# Error created here captures: line 5, column 8, file "src/main.ryo"
+		return file.NotFound("/etc/config.toml")
 
-    fn main():
-        config = find_config() catch |e|:
-            # Access location information
-            loc = e.location()  # Returns Location{file: "src/main.ryo", line: 5, ...}
-            print(f"Error at {loc.file}:{loc.line}:{loc.column} in {loc.function}")
+	fn main():
+		config = find_config() catch |e|:
+			# Access location information
+			loc = e.location()  # Returns Location(file="src/main.ryo", line=5, ...)
+			print(f"Error at {loc.file}:{loc.line}:{loc.column} in {loc.function}")
 
-            # Get full stack trace
-            trace = e.stack_trace()
-            for frame in trace.frames:
-                print(f"  {frame.function} at {frame.file}:{frame.line}")
-    ```
+			# Get full stack trace
+			trace = e.stack_trace()
+			for frame in trace.frames:
+				print(f"  {frame.function} at {frame.file}:{frame.line}")
+	```
 
 *   **Automatic Message Generation:**
     *   **Single string field:** The string is used as the message.
         ```ryo
-        error NotFound(str)
-        # .message() returns the string directly
-        ```
+		error NotFound(str)
+		# .message() returns the string directly
+		```
     *   **Named message field:** The `message` field is used.
         ```ryo
-        error HttpError(status: int, message: str)
-        # .message() returns the message field
-        ```
+		error HttpError(status: int, message: str)
+		# .message() returns the message field
+		```
     *   **Unit variant:** Variant name is used.
         ```ryo
-        error Timeout
-        # .message() returns "Timeout"
-        ```
+		error Timeout
+		# .message() returns "Timeout"
+		```
     *   **Multiple fields (no message field):** Generated from Debug representation.
         ```ryo
-        error FileNotFound(path: str, permission_level: int)
-        # .message() returns "FileNotFound(path=/var/log, permission_level=0700)"
-        ```
+		error FileNotFound(path: str, permission_level: int)
+		# .message() returns "FileNotFound(path=/var/log, permission_level=0700)"
+		```
 
 *   **Custom Message Implementation:** Override automatic message generation:
     ```ryo
-    # Single-variant errors with custom messages
-    error TooShort(field: str, min_length: int)
-    error TooLong(field: str, max_length: int)
+	# Single-variant errors with custom messages
+	error TooShort(field: str, min_length: int)
+	error TooLong(field: str, max_length: int)
 
-    impl Error for TooShort:
-        fn message(self) -> str:
-            return f"{self.field} must be at least {self.min_length} characters"
+	impl Error for TooShort:
+		fn message(self) -> str:
+			return f"{self.field} must be at least {self.min_length} characters"
 
-    impl Error for TooLong:
-        fn message(self) -> str:
-            return f"{self.field} cannot exceed {self.max_length} characters"
-    ```
+	impl Error for TooLong:
+		fn message(self) -> str:
+			return f"{self.field} cannot exceed {self.max_length} characters"
+	```
 
 *   **Accessing Error Messages and Location:**
     ```ryo
-    result = operation() catch |e|:
-        # Access message directly
-        print(e.message())
+	result = operation() catch |e|:
+		# Access message directly
+		print(e.message())
 
-        # Access location information for debugging
-        if loc = e.location():
-            print(f"Error at {loc.file}:{loc.line} in {loc.function}")
+		# Access location information for debugging
+		if loc = e.location():
+			print(f"Error at {loc.file}:{loc.line} in {loc.function}")
 
-        # Or use in catch handlers
-        match e:
-            NotFound(msg):
-                print(f"Not found: {msg}")
-            _:
-                print(f"Error: {e.message()}")
-                if trace = e.stack_trace():
-                    print("Stack trace:")
-                    for frame in trace.frames:
-                        print(f"  {frame.function} at {frame.file}:{frame.line}")
-    ```
+		# Or use in catch handlers
+		match e:
+			NotFound(msg):
+				print(f"Not found: {msg}")
+			_:
+				print(f"Error: {e.message()}")
+				if trace = e.stack_trace():
+					print("Stack trace:")
+					for frame in trace.frames:
+						print(f"  {frame.function} at {frame.file}:{frame.line}")
+	```
 
 *   *(Rationale: Error messages are essential for debugging and user feedback. Automatic generation from data reduces boilerplate. Custom implementations enable domain-specific messages. Location tracking and stack traces enable efficient debugging without requiring external tools or logging.)*
 
 ### 4.11 FFI & C Interoperability
+
+> **Status: Planned for v0.2** — This section describes the target design for FFI. It is not available in v0.1.
 
 Ryo provides a simple, powerful, and unified system for interoperating with external libraries written in other languages, such as C and Rust.
 
@@ -789,10 +812,10 @@ import c:my_lib         # Imports the C library
 import c:my_rust_lib    # Imports the Rust library
 
 fn main():
-    c_result = my_lib.c_function(1)
-    rust_result = my_rust_lib.rust_function_with_c_abi(2)
+	c_result = my_lib.c_function(1)
+	rust_result = my_rust_lib.rust_function_with_c_abi(2)
 
-    print(f"C result: {c_result}, Rust result: {rust_result}")
+	print(f"C result: {c_result}, Rust result: {rust_result}")
 ```
 
 This unified approach makes `ryo-bindgen` a cornerstone of Ryo's ecosystem, providing a consistent and simple path for integrating with the vast number of libraries that can expose a C ABI.
@@ -1378,9 +1401,9 @@ The `ErrorType!SuccessType` syntax indicates a function can return one specific 
 
 ```ryo
 fn read_file(path: str) -> FileError!str:
-    if not exists(path):
-        return FileError.NotFound(path)
-    return os.read(path)
+	if not exists(path):
+		return FileError.NotFound(path)
+	return os.read(path)
 ```
 
 #### **Multiple Error Types (Error Unions)**
@@ -1390,9 +1413,9 @@ fn read_file(path: str) -> FileError!str:
 ```ryo
 # Can return FileError OR ParseError OR Data
 fn process(path: str) -> (FileError | ParseError)!Data:
-    file = try read_file(path)      # FileError
-    data = try parse_json(file)     # ParseError
-    return data
+	file = try read_file(path)      # FileError
+	data = try parse_json(file)     # ParseError
+	return data
 ```
 
 **Inferred error union** - Compiler infers from `try` expressions:
@@ -1400,17 +1423,17 @@ fn process(path: str) -> (FileError | ParseError)!Data:
 ```ryo
 # Compiler infers: (FileError | ParseError)!Data
 fn process(path: str) -> !Data:
-    file = try read_file(path)      # FileError
-    data = try parse_json(file)     # ParseError
-    return data
+	file = try read_file(path)      # FileError
+	data = try parse_json(file)     # ParseError
+	return data
 ```
 
 **Generic error type** - Accept any error:
 
 ```ryo
 fn flexible_operation() -> !Data:
-    # Can return any error type
-    ...
+	# Can return any error type
+	...
 ```
 
 *   **Error Union Semantics:**
@@ -1429,10 +1452,10 @@ The `try` keyword unwraps success or propagates the error early:
 
 ```ryo
 fn load_and_parse(path: str) -> !Config:
-    # Both try expressions propagate errors
-    content = try read_file(path)      # FileError propagates
-    config = try parse_config(content) # ParseError propagates
-    return config
+	# Both try expressions propagate errors
+	content = try read_file(path)      # FileError propagates
+	config = try parse_config(content) # ParseError propagates
+	return config
 ```
 
 *   **Semantic:** `try expr` evaluates `expr`:
@@ -1446,44 +1469,44 @@ fn load_and_parse(path: str) -> !Config:
 
 *   **Example - Inferred Union:**
     ```ryo
-    fn process() -> !Data:
-        a = try func_a()  # FileError
-        b = try func_b()  # ParseError
-        c = try func_c()  # NetworkError
-    # Inferred as: (FileError | ParseError | NetworkError)!Data
-    ```
+	fn process() -> !Data:
+		a = try func_a()  # FileError
+		b = try func_b()  # ParseError
+		c = try func_c()  # NetworkError
+	# Inferred as: (FileError | ParseError | NetworkError)!Data
+	```
 
 *   **Example - Explicit Union with Conversion:**
     ```ryo
-    # Example using separate error types with error unions
-    fn process() -> (FileError | ParseError)!Data:
-        a = try read_file(path)  # Can return FileError
-        b = try parse_json(a)    # Can return ParseError
-        return b
-    ```
+	# Example using separate error types with error unions
+	fn process() -> (FileError | ParseError)!Data:
+		a = try read_file(path)  # Can return FileError
+		b = try parse_json(a)    # Can return ParseError
+		return b
+	```
 
 *   **Error Context Preservation:** When `try` propagates an error, the original error's location and stack trace are preserved intact. No context is lost as the error bubbles up through the call stack. Each level can inspect `.location()` and `.stack_trace()` to see where the error originated.
 
     Example:
     ```ryo
-    fn level3() -> db.QueryFailed!Result:
-        # Error created here with location information
-        return db.QueryFailed("Invalid query")
+	fn level3() -> db.QueryFailed!Result:
+		# Error created here with location information
+		return db.QueryFailed("Invalid query")
 
-    fn level2() -> db.QueryFailed!Result:
-        result = try level3()  # Error propagates, context preserved
-        return result
+	fn level2() -> db.QueryFailed!Result:
+		result = try level3()  # Error propagates, context preserved
+		return result
 
-    fn level1() -> !Result:
-        result = try level2()  # Error propagates, context preserved
-        return result
+	fn level1() -> !Result:
+		result = try level2()  # Error propagates, context preserved
+		return result
 
-    fn main():
-        data = level1() catch |e|:
-            # Can still access original location from level3
-            loc = e.location()
-            print(f"Original error at {loc.file}:{loc.line}")
-    ```
+	fn main():
+		data = level1() catch |e|:
+			# Can still access original location from level3
+			loc = e.location()
+			print(f"Original error at {loc.file}:{loc.line}")
+	```
 
 *   *(Rationale: `try` clearly signals error propagation. Familiar to concurrent programming users. Automatic composition via inferred unions eliminates wrapper types (Zig-inspired). Error context preservation ensures debugging information is never lost during propagation.)*
 
@@ -1495,14 +1518,14 @@ The `catch` operator handles errors with pattern matching:
 
 ```ryo
 config = load_and_parse("app.toml") catch |e|:
-    match e:
-        FileError.NotFound(path):
-            print(f"Creating default config at {path}")
-            return default_config()
+	match e:
+		FileError.NotFound(path):
+			print(f"Creating default config at {path}")
+			return default_config()
 
-        ParseError.InvalidSyntax(line, col):
-            print(f"Syntax error at {line}:{col}")
-            exit(1)
+		ParseError.InvalidSyntax(line, col):
+			print(f"Syntax error at {line}:{col}")
+			exit(1)
 ```
 
 *   **Syntax:** `expr catch |e|: handle_error(e)`
@@ -1511,39 +1534,39 @@ config = load_and_parse("app.toml") catch |e|:
 *   **Pattern Matching Differences:**
     *   **Single Error Type** (exhaustive): Must handle all variants
         ```ryo
-        result = read_file(path) catch |e|:
-            match e:
-                FileError.NotFound(p):
-                    # ...
-                FileError.PermissionDenied(p):
-                    # ...
-                FileError.ReadError(r):
-                    # ...
-                # MUST handle all variants
-        ```
+		result = read_file(path) catch |e|:
+			match e:
+				FileError.NotFound(p):
+					# ...
+				FileError.PermissionDenied(p):
+					# ...
+				FileError.ReadError(r):
+					# ...
+				# MUST handle all variants
+		```
     *   **Error Union** (Exhaustive matching required): Must handle all error types in union:
         ```ryo
-        result = process(path) catch |e|:
-            match e:
-                io.FileNotFound(p):
-                    return create_default(p)
-                parse.InvalidFormat(reason):
-                    log_error(f"Parse error: {reason}")
-                    return default_config()
-                network.ConnectionFailed(reason):
-                    return retry_later()
-                # MUST handle all variants in union
-        ```
+		result = process(path) catch |e|:
+			match e:
+				io.FileNotFound(p):
+					return create_default(p)
+				parse.InvalidFormat(reason):
+					log_error(f"Parse error: {reason}")
+					return default_config()
+				network.ConnectionFailed(reason):
+					return retry_later()
+				# MUST handle all variants in union
+		```
     *   **With Catch-All**: When you want generic handling for some errors:
         ```ryo
-        result = process(path) catch |e|:
-            match e:
-                io.FileNotFound(p):
-                    return create_default(p)
-                _:  # Explicit catch-all for all other error types
-                    log_error(e.message())
-                    return default_config()
-        ```
+		result = process(path) catch |e|:
+			match e:
+				io.FileNotFound(p):
+					return create_default(p)
+				_:  # Explicit catch-all for all other error types
+					log_error(e.message())
+					return default_config()
+		```
 
 *   *(Rationale: `catch` follows familiar error-handling conventions. Exhaustive matching for all error types (single or union) ensures all error cases are explicitly handled, improving code reliability and preventing silent failures.)*
 
@@ -1553,23 +1576,23 @@ For operations that can fail (error), return no value (`none`), or succeed:
 
 ```ryo
 fn find_user(db: Database, id: int) -> DatabaseError!?User:
-    # Can return: DatabaseError, none (not found), or User
-    rows = try db.query("SELECT * FROM users WHERE id = ?", id)
-    if rows.is_empty():
-        return none
-    return User.from_row(rows[0])
+	# Can return: DatabaseError, none (not found), or User
+	rows = try db.query("SELECT * FROM users WHERE id = ?", id)
+	if rows.is_empty():
+		return none
+	return User.from_row(rows[0])
 
 # Sequential unwrapping pattern
 fn authenticate(db: Database, token: ?str) -> !User:
-    t = token orelse return error.MissingToken
-    # t is now str (smart cast from ?str)
+	t = token orelse return error.MissingToken
+	# t is now str (smart cast from ?str)
 
-    user = try find_user(db, 42) orelse return error.UserNotFound
-    # First try: handle error (!?User -> ?User)
-    # Then orelse: handle optional (?User -> User)
-    # user is now User (fully unwrapped)
+	user = try find_user(db, 42) orelse return error.UserNotFound
+	# First try: handle error (!?User -> ?User)
+	# Then orelse: handle optional (?User -> User)
+	# user is now User (fully unwrapped)
 
-    return user
+	return user
 ```
 
 *   **Sequential Unwrapping:** `try` handles errors, `orelse` handles optionals.
@@ -1582,8 +1605,8 @@ For unrecoverable errors, use `panic("message")`. When a panic occurs, the progr
 
 ```ryo
 fn critical_operation():
-    if not initialized:
-        panic("System not initialized!")  # Aborts immediately
+	if not initialized:
+		panic("System not initialized!")  # Aborts immediately
 ```
 
 #### **Panic Behavior**
@@ -1685,18 +1708,18 @@ error ConnectionFailed(reason: str)
 import database
 
 fn connect(host: str, port: int) -> database.ConnectionFailed!Connection:
-    if port < 1 or port > 65535:
-        # BUG: Invalid port should never reach here if caller validates
-        panic(f"Invalid port {port}: must be 1-65535")
+	if port < 1 or port > 65535:
+		# BUG: Invalid port should never reach here if caller validates
+		panic(f"Invalid port {port}: must be 1-65535")
 
-    # ... actual connection code ...
-    Connection{...}
+	# ... actual connection code ...
+	Connection(...)
 
 fn main():
-    # If this panics with invalid port, stack trace shows:
-    # 1. panic location (in connect function)
-    # 2. call to connect (in main)
-    # 3. where to fix the bug
+	# If this panics with invalid port, stack trace shows:
+	# 1. panic location (in connect function)
+	# 2. call to connect (in main)
+	# 3. where to fix the bug
 ```
 
 *   *(Rationale: Immediate abort without unwinding simplifies runtime and guarantees clean termination. Comprehensive stack traces provide essential debugging information for post-mortem analysis.)*
@@ -1726,13 +1749,13 @@ name = maybe_user.name  # ERROR: Cannot access fields on optional type
 # ✅ CORRECT: Use try to unwrap errors
 result: ParseError!int = parse_int("42")
 value = try result catch |e|:
-    handle_error(e)
-    return
+	handle_error(e)
+	return
 
 # ✅ CORRECT: Use try to unwrap and propagate
 fn load_data() -> ParseError!int:
-    result = try parse_int("42")  # Propagates error on failure
-    return result
+	result = try parse_int("42")  # Propagates error on failure
+	return result
 
 # ✅ CORRECT: Use orelse for optionals
 maybe_user: ?User = get_user(id)
@@ -1740,7 +1763,7 @@ name = maybe_user?.name orelse "Unknown"
 
 # ✅ CORRECT: Use smart casting after null check
 if maybe_user != none:
-    name = maybe_user.name  # Type narrowed to User
+	name = maybe_user.name  # Type narrowed to User
 ```
 
 *   **Rationale:** Direct unwrap removes type safety. By requiring explicit `try`/`catch`/`orelse`, Ryo ensures all error and null cases are handled, preventing silent failures and unexpected panics. This design choice makes error handling visible and intentional.
@@ -1771,17 +1794,17 @@ See Section 7.10 for complete configuration options and trade-offs.
 **From Panics:**
 ```ryo
 fn dangerous_operation() -> int:
-    panic("Something went very wrong!")
+	panic("Something went very wrong!")
 
 fn main():
-    # When panic occurs, stderr shows:
-    # thread 'main' panicked at src/main.ryo:10:5 in function 'dangerous_operation':
-    # Something went very wrong!
-    #
-    # Stack trace:
-    #   0: main::dangerous_operation (src/main.ryo:10:5)
-    #   1: main (src/main.ryo:5:5)
-    dangerous_operation()
+	# When panic occurs, stderr shows:
+	# thread 'main' panicked at src/main.ryo:10:5 in function 'dangerous_operation':
+	# Something went very wrong!
+	#
+	# Stack trace:
+	#   0: main::dangerous_operation (src/main.ryo:10:5)
+	#   1: main (src/main.ryo:5:5)
+	dangerous_operation()
 ```
 
 **From Errors:**
@@ -1793,20 +1816,20 @@ error QueryFailed(sql: str)
 import db
 
 fn query_user(id: int) -> db.QueryFailed!User:
-    # Error automatically captures file/line/function at creation
-    return db.QueryFailed(f"SELECT * FROM users WHERE id = {id}")
+	# Error automatically captures file/line/function at creation
+	return db.QueryFailed(f"SELECT * FROM users WHERE id = {id}")
 
 fn main():
-    user = query_user(42) catch |e|:
-        # Access location where error was created
-        if loc = e.location():
-            print(f"Error created at {loc.file}:{loc.line} in {loc.function}")
+	user = query_user(42) catch |e|:
+		# Access location where error was created
+		if loc = e.location():
+			print(f"Error created at {loc.file}:{loc.line} in {loc.function}")
 
-        # Access full stack at time of error creation
-        if trace = e.stack_trace():
-            for frame in trace.frames:
-                print(f"  Frame: {frame.function} at {frame.file}:{frame.line}")
-        return
+		# Access full stack at time of error creation
+		if trace = e.stack_trace():
+			for frame in trace.frames:
+				print(f"  Frame: {frame.function} at {frame.file}:{frame.line}")
+		return
 ```
 
 #### **Debug Symbols and Build Information**
@@ -1858,18 +1881,18 @@ For complete performance implications and mitigation strategies, see Section 7.6
 1. **Use error location for quick diagnosis:**
    ```ryo
    result = risky_operation() catch |e|:
-       loc = e.location()
-       print(f"Quick fix: Check {loc.file}:{loc.line}")
+	   loc = e.location()
+	   print(f"Quick fix: Check {loc.file}:{loc.line}")
    ```
 
 2. **Print full stack trace for complex error chains:**
    ```ryo
    result = risky_operation() catch |e|:
-       print(f"Error: {e.message()}")
-       if trace = e.stack_trace():
-           print("Debug stack trace:")
-           for frame in trace.frames:
-               print(f"  {frame.function}")
+	   print(f"Error: {e.message()}")
+	   if trace = e.stack_trace():
+		   print("Debug stack trace:")
+		   for frame in trace.frames:
+			   print(f"  {frame.function}")
    ```
 
 3. **Use messages with context:**
@@ -1995,6 +2018,8 @@ error-traces = "off"  # Zero overhead, manual logging required
 
 ## 9. Concurrency Model: Task/Future/Channel
 
+> **Status: Planned for v0.4** — This section describes the target design for concurrency. It is not available in v0.1. The design is stable but implementation depends on runtime work in earlier phases.
+
 ### 9.1 Rationale: Green Threads & Ambient Runtime
 
 Ryo uses a **Green Thread (M:N) Concurrency Model**, similar to Go.
@@ -2041,8 +2066,8 @@ For shared mutable state, Ryo uses the `shared[mutex[T]]` pattern:
 ```ryo
 state = shared(mutex(0))
 worker = task.run:
-    lock = state.lock()
-    *lock += 1
+	lock = state.lock()
+	*lock += 1
 result = worker.await
 ```
 
@@ -2053,13 +2078,13 @@ The `future` type integrates seamlessly with Ryo's error system, using the corre
 *   **Type:** A future that can fail is represented as **`future[!T]`** (using the error-union prefix `!`).
 *   **Unwrap:** The `.await` operation is designed to work with the `try` operator:
     ```ryo
-    # task.run returns future[!str]
-    fetch_future = task.run:
-        # ... some operation that returns !str ...
-        return some_string
+	# task.run returns future[!str]
+	fetch_future = task.run:
+		# ... some operation that returns !str ...
+		return some_string
 
-    body: str = try fetch_future.await # .await unwraps the outer future, try unwraps the inner Error Union.
-    ```
+	body: str = try fetch_future.await # .await unwraps the outer future, try unwraps the inner Error Union.
+	```
 
 ### 9.3 Concurrency Control Flow and Utilities
 
@@ -2069,14 +2094,14 @@ The `future` type integrates seamlessly with Ryo's error system, using the corre
 
 ```ryo
 select:
-    case res = fut.await:              # Wait for a future
-        handle(res)
-    case msg = rx.recv():             # Wait for a channel message
-        handle(msg)
-    case task.delay(10s).await:       # Wait for a timeout
-        print("timed out")
-    default:                           # Non-blocking: if nothing is ready
-        print("nothing ready")
+	case res = fut.await:              # Wait for a future
+		handle(res)
+	case msg = rx.recv():             # Wait for a channel message
+		handle(msg)
+	case task.delay(10s).await:       # Wait for a timeout
+		print("timed out")
+	default:                           # Non-blocking: if nothing is ready
+		print("nothing ready")
 ```
 
 #### 9.3.2 Task Grouping and Management
@@ -2167,6 +2192,8 @@ fn main():
 *   *(Rationale: Task/Future/Channel eliminates function coloring while providing safe, ergonomic concurrency. Dropping a future cancels the task, making structured concurrency the natural default. `task.spawn_detached` exists for the rare fire-and-forget case. No async/await keywords simplifies the language and removes the sync/async divide).*
 
 ## 10. Compile-Time Execution (`comptime`)
+
+> **Status: Planned (timeline TBD)** — This feature is reserved but not yet designed in detail. See Section 19 (Future Work).
 
 *   **Note:** Compile-time execution is planned for future implementation. See Section 19 (Future Work) for details.
 
@@ -2277,7 +2304,7 @@ Visible everywhere, including external packages that import your library.
 ```ryo
 # server/http.ryo
 pub fn start():        # Public API - anyone can use
-    _bind_port()
+	_bind_port()
 ```
 
 **Use when:**
@@ -2292,13 +2319,13 @@ Visible to all modules within the same package (defined by `ryo.toml`), but NOT 
 ```ryo
 # internal/config.ryo
 package fn load_config():  # Shared across modules in project
-    pass
+	pass
 
 # server/http.ryo (different module, same package)
 import internal.config
 
 fn start():
-    config.load_config()   # ✅ OK - package visibility
+	config.load_config()   # ✅ OK - package visibility
 ```
 
 **Use when:**
@@ -2313,15 +2340,15 @@ Visible only within the same module (directory). All files in the directory can 
 ```ryo
 # server/http.ryo
 fn _bind_port():       # Module-private
-    pass
+	pass
 
 # server/routes.ryo (same directory = same module)
 fn register():
-    http._bind_port()  # ✅ OK - same module
+	http._bind_port()  # ✅ OK - same module
 
 # database/connection.ryo (different directory = different module)
 fn connect():
-    server.http._bind_port()  # ❌ ERROR - module-private
+	server.http._bind_port()  # ❌ ERROR - module-private
 ```
 
 **Use when:**
@@ -2359,30 +2386,30 @@ import pkg:external_dep              # External dependency from ryo.toml
 
 1.  **Full Path Required:** Must specify complete module path
     ```ryo
-    import utils.math.geometry  # ✓ Full path
-    import geometry             # ✗ Missing parent path
-    ```
+	import utils.math.geometry  # ✓ Full path
+	import geometry             # ✗ Missing parent path
+	```
 
 2.  **No Implicit Parent Access:** Child modules must import parent explicitly
     ```ryo
-    # utils/math/basic.ryo
-    import utils  # Must import parent to use it
+	# utils/math/basic.ryo
+	import utils  # Must import parent to use it
 
-    fn example():
-        utils.helper()  # ✓ After importing
-    ```
+	fn example():
+		utils.helper()  # ✓ After importing
+	```
 
 3.  **Paths Relative to `src/`:** Import paths resolve from `src/` directory
     ```ryo
-    import server      # → src/server/
-    import utils.math  # → src/utils/math/
-    ```
+	import server      # → src/server/
+	import utils.math  # → src/utils/math/
+	```
 
 4.  **External Dependencies:** Use `pkg:` prefix for dependencies in `ryo.toml`
     ```ryo
-    import pkg:http    # From [dependencies]
-    import pkg:json    # From [dependencies]
-    ```
+	import pkg:http    # From [dependencies]
+	import pkg:json    # From [dependencies]
+	```
 
 ### 11.6 Module Visibility Rules
 
@@ -2393,14 +2420,14 @@ All files in the same directory share namespace and can access each other's modu
 ```ryo
 # server/http.ryo
 fn _helper():  # Module-private
-    pass
+	pass
 
 pub fn start():
-    _helper()  # ✓ Same module
+	_helper()  # ✓ Same module
 
 # server/routes.ryo (same directory)
 fn register():
-    http._helper()  # ✓ Same module (server)
+	http._helper()  # ✓ Same module (server)
 ```
 
 #### **Between Different Modules**
@@ -2410,21 +2437,21 @@ Only `pub` and `package` items are visible between modules.
 ```ryo
 # utils/math.ryo
 pub fn add():        # Public
-    pass
+	pass
 
 package fn internal():  # Package-visible
-    pass
+	pass
 
 fn _private():       # Module-private
-    pass
+	pass
 
 # server/http.ryo (different module)
 import utils.math
 
 fn example():
-    math.add()       # ✓ Public
-    math.internal()  # ✓ Package visibility
-    math._private()  # ✗ ERROR - module-private
+	math.add()       # ✓ Public
+	math.internal()  # ✓ Package visibility
+	math._private()  # ✗ ERROR - module-private
 ```
 
 #### **Between Parent and Child Modules**
@@ -2434,21 +2461,21 @@ Child modules are separate namespaces from parent. Must import parent explicitly
 ```ryo
 # utils/core.ryo (parent module)
 pub fn parent_pub():
-    pass
+	pass
 
 package fn parent_package():
-    pass
+	pass
 
 fn parent_private():
-    pass
+	pass
 
 # utils/math/basic.ryo (child module)
 import utils  # Must import parent!
 
 fn example():
-    utils.parent_pub()      # ✓ Public
-    utils.parent_package()  # ✓ Package visibility
-    utils.parent_private()  # ✗ ERROR - module-private to utils
+	utils.parent_pub()      # ✓ Public
+	utils.parent_package()  # ✓ Package visibility
+	utils.parent_private()  # ✗ ERROR - module-private to utils
 ```
 
 ### 11.7 Circular Dependencies
@@ -2480,11 +2507,11 @@ Files in the same module (directory) can freely reference each other.
 ```ryo
 # server/http.ryo
 fn start():
-    routes.register()  # ✓ OK - same module
+	routes.register()  # ✓ OK - same module
 
 # server/routes.ryo
 fn register():
-    http.start()       # ✓ OK - same module
+	http.start()       # ✓ OK - same module
 ```
 
 #### **Common Workarounds for Cross-Module Dependencies**
@@ -2501,15 +2528,15 @@ pub struct PostID(int)
 import types.core
 
 pub struct User:
-    id: core.UserID
-    posts: list[core.PostID]  # Reference by ID
+	id: core.UserID
+	posts: list[core.PostID]  # Reference by ID
 
 # post/post.ryo
 import types.core
 
 pub struct Post:
-    id: core.PostID
-    author_id: core.UserID    # Reference by ID
+	id: core.PostID
+	author_id: core.UserID    # Reference by ID
 ```
 
 **Solution 2: Merge Modules**
@@ -2517,7 +2544,7 @@ pub struct Post:
 # domain/models.ryo - Combined module
 pub struct User: ...
 pub struct Post:
-    author: User  # ✓ Same module
+	author: User  # ✓ Same module
 ```
 
 ### 11.8 Complete Examples
@@ -2536,7 +2563,7 @@ myapp/
 **src/utils/math.ryo:**
 ```ryo
 pub fn add(a: int, b: int) -> int:
-    return a + b
+	return a + b
 ```
 
 **src/main.ryo:**
@@ -2544,8 +2571,8 @@ pub fn add(a: int, b: int) -> int:
 import utils.math
 
 fn main():
-    result = math.add(2, 3)
-    print(result)  # 5
+	result = math.add(2, 3)
+	print(result)  # 5
 ```
 
 #### **Example 2: Multi-File Module**
@@ -2561,16 +2588,16 @@ myapp/
 **src/server/http.ryo:**
 ```ryo
 pub fn start():              # Public
-    _bind_port()             # Module-private
+	_bind_port()             # Module-private
 
 fn _bind_port():             # Module-private
-    routes.register()        # ✓ Same module
+	routes.register()        # ✓ Same module
 ```
 
 **src/server/routes.ryo:**
 ```ryo
 pub fn register():
-    http._bind_port()        # ✓ Same module
+	http._bind_port()        # ✓ Same module
 ```
 
 #### **Example 3: Hierarchical Modules**
@@ -2587,10 +2614,10 @@ myapp/
 **src/utils/core.ryo:**
 ```ryo
 pub fn helper():
-    pass
+	pass
 
 package fn internal():
-    pass
+	pass
 ```
 
 **src/utils/math/basic.ryo:**
@@ -2598,8 +2625,8 @@ package fn internal():
 import utils  # Import parent
 
 pub fn calculate():
-    utils.helper()      # ✓ Public
-    utils.internal()    # ✓ Package visibility
+	utils.helper()      # ✓ Public
+	utils.internal()    # ✓ Package visibility
 ```
 
 **src/main.ryo:**
@@ -2608,8 +2635,8 @@ import utils
 import utils.math
 
 fn main():
-    utils.helper()         # ✓ Public
-    utils.math.calculate() # ✓ Public
+	utils.helper()         # ✓ Public
+	utils.math.calculate() # ✓ Public
 ```
 
 #### **Example 4: Access Levels**
@@ -2618,13 +2645,13 @@ fn main():
 # lib/api.ryo
 
 pub fn public_api():              # External API
-    package_helper()
+	package_helper()
 
 package fn package_helper():      # Internal API for project
-    _module_helper()
+	_module_helper()
 
 fn _module_helper():             # Implementation detail
-    pass
+	pass
 ```
 
 **Usage from same package:**
@@ -2633,9 +2660,9 @@ fn _module_helper():             # Implementation detail
 import lib.api
 
 fn main():
-    api.public_api()       # ✓ Public
-    api.package_helper()   # ✓ Package visibility
-    api._module_helper()   # ✗ ERROR - module-private
+	api.public_api()       # ✓ Public
+	api.package_helper()   # ✓ Package visibility
+	api._module_helper()   # ✗ ERROR - module-private
 ```
 
 **Usage from external package:**
@@ -2644,8 +2671,8 @@ fn main():
 import myapp.lib.api
 
 fn main():
-    api.public_api()       # ✓ Public
-    api.package_helper()   # ✗ ERROR - package-private
+	api.public_api()       # ✓ Public
+	api.package_helper()   # ✗ ERROR - package-private
 ```
 
 #### **Example 5: Package Boundary**
@@ -2662,10 +2689,10 @@ mylib/
 **mylib/src/utils/helper.ryo:**
 ```ryo
 pub fn public_helper():
-    pass
+	pass
 
 package fn internal_helper():  # Only within mylib package
-    pass
+	pass
 ```
 
 **Package 2 (myapp):**
@@ -2681,8 +2708,8 @@ myapp/
 import pkg:mylib.utils.helper
 
 fn main():
-    helper.public_helper()    # ✓ Public
-    helper.internal_helper()  # ✗ ERROR - Different package!
+	helper.public_helper()    # ✓ Public
+	helper.internal_helper()  # ✗ ERROR - Different package!
 ```
 
 *Rationale: Implicit module discovery reduces boilerplate (no `mod` keyword), hierarchical paths enable clear organization, three access levels balance simplicity and expressiveness, forbidden circular dependencies enforce good architecture.*
@@ -2763,10 +2790,10 @@ import std.task
 import std.net
 
 fn fetch_data(url: str) -> !Data:
-    # Looks like regular code - no explicit runtime parameter
-    task.sleep(100ms)
-    response = try net.get(url)
-    return parse(response.body)
+	# Looks like regular code - no explicit runtime parameter
+	task.sleep(100ms)
+	response = try net.get(url)
+	return parse(response.body)
 ```
 
 **Under the Hood:**
@@ -2779,23 +2806,23 @@ fn fetch_data(url: str) -> !Data:
 ```ryo
 #[test]
 fn test_fetch_fast():
-    # Override ambient runtime for this test
-    mock = MockRuntime.create()
-    task.with_runtime(mock, fn():
-        # This runs instantly - mock runtime doesn't actually sleep
-        data = fetch_data("http://example.com")
-        assert_eq(data.status, 200)
-    )
+	# Override ambient runtime for this test
+	mock = MockRuntime.create()
+	task.with_runtime(mock, fn():
+		# This runs instantly - mock runtime doesn't actually sleep
+		data = fetch_data("http://example.com")
+		assert_eq(data.status, 200)
+	)
 ```
 
 **Runtime Initialization:**
 1. **Default:** First call to `task` or `net` initializes a simple single-threaded blocking runtime
 2. **Explicit:** User can create a multi-threaded runtime:
     ```ryo
-    fn main():
-        rt = MultiThreadedRuntime.new(threads=4)
-        rt.run(app_logic)
-    ```
+	fn main():
+		rt = MultiThreadedRuntime.new(threads=4)
+		rt.run(app_logic)
+	```
 
 *Rationale: Balances Python-like simplicity with the ability to test and swap implementations. Avoids "context parameter pollution" seen in explicit context-passing patterns.*
 
@@ -2808,10 +2835,10 @@ Ryo makes **structured concurrency** the primary pattern to prevent resource lea
 import std.task
 
 fn process_all(urls: list[str]) -> !list[Data]:
-    task.scope |s|:
-        for url in urls:
-            s.spawn(fn(): fetch_data(url))
-    # Implicit join: all tasks finished or cancelled when scope ends
+	task.scope |s|:
+		for url in urls:
+			s.spawn(fn(): fetch_data(url))
+	# Implicit join: all tasks finished or cancelled when scope ends
 ```
 
 **Properties:**
@@ -2839,9 +2866,9 @@ import std.sync
 cache = shared(mutex(map[str, int]()))
 
 fn worker(cache: shared[mutex[map[str, int]]]):
-    mut m = cache.lock()  # Blocks until lock acquired
-    m.insert("key", 100)
-    # Lock released automatically when 'm' goes out of scope (RAII)
+	mut m = cache.lock()  # Blocks until lock acquired
+	m.insert("key", 100)
+	# Lock released automatically when 'm' goes out of scope (RAII)
 ```
 
 **RwLock (Reader-Writer Lock):**
@@ -2849,12 +2876,12 @@ fn worker(cache: shared[mutex[map[str, int]]]):
 data = shared(rwlock(config))
 
 fn reader(data: shared[rwlock[Config]]):
-    r = data.read_lock()   # Multiple readers allowed
-    print(r.port)
+	r = data.read_lock()   # Multiple readers allowed
+	print(r.port)
 
 fn writer(data: shared[rwlock[Config]]):
-    mut w = data.write_lock()  # Exclusive write access
-    w.port = 8080
+	mut w = data.write_lock()  # Exclusive write access
+	w.port = 8080
 ```
 
 *Available Primitives:*
@@ -2873,12 +2900,12 @@ import std.task
 import std.channel
 
 select:
-    case data = rx.recv():
-        print(f"Received: {data}")
-    case tx.send(my_value):
-        print("Sent")
-    case task.timeout(1s):
-        print("Timed out")
+	case data = rx.recv():
+		print(f"Received: {data}")
+	case tx.send(my_value):
+		print("Sent")
+	case task.timeout(1s):
+		print("Timed out")
 ```
 
 **Cancel Safety:** If a case is not selected, ownership transfer does not happen:
@@ -2934,8 +2961,8 @@ Adding parallelism (M:N green threads across multiple OS threads) has **specific
 extern "C" fn sqlite_exec(db: *void, sql: *c_char) -> int
 
 fn query_db(sql: str):
-    # Runtime detects #[blocking], runs on detached OS thread
-    result = sqlite_exec(db_handle, sql.as_ptr())
+	# Runtime detects #[blocking], runs on detached OS thread
+	result = sqlite_exec(db_handle, sql.as_ptr())
 ```
 
 **Impact:** Prevents green thread scheduler from getting blocked by slow C calls.
@@ -2951,10 +2978,10 @@ fn query_db(sql: str):
 
 ```ryo
 worker = task.run:
-    panic("Task failed")  # Only this task dies
+	panic("Task failed")  # Only this task dies
 
 result = worker.await catch |e|:
-    io.println(f"Task panicked: {e}")
+	io.println(f"Task panicked: {e}")
 # Main program continues
 ```
 
@@ -3011,16 +3038,16 @@ Ryo includes a first-class testing framework.
 *   **Benchmarks:** Marked with `#[bench]`.
 *   **Fixtures:** Use **RAII (Drop)** for setup/teardown.
     ```ryo
-    struct DbFixture:
-        fn new() -> DbFixture: ...
-        impl Drop: fn drop(self): cleanup()
+	struct DbFixture:
+		fn new() -> DbFixture: ...
+		impl Drop: fn drop(self): cleanup()
 
-    #[test]
-    fn test_db():
-        db = DbFixture.new() # Setup
-        # ... test ...
-        # Teardown (drop) happens automatically
-    ```
+	#[test]
+	fn test_db():
+		db = DbFixture.new() # Setup
+		# ... test ...
+		# Teardown (drop) happens automatically
+	```
 *   **Integration Tests:** Placed in `tests/` directory. Treated as external packages (black-box testing).
 
 ## 16. Tooling
@@ -3031,6 +3058,8 @@ Ryo includes a first-class testing framework.
 *   **Tools:** `ryo` package manager integrated, `ryo-bindgen` for automatic C FFI binding generation, `ryo` REPL (using JIT), Integrated Testing (`ryo test`). LSP future goal.
 
 ## 17. FFI & `unsafe`
+
+> **Status: Planned for v0.2** — See Section 4.11 for the full FFI design. Not available in v0.1.
 
 Ryo provides a powerful, high-level workflow for C interoperability, as detailed in **Section 4.11**. This system uses the `ryo-bindgen` tool to automatically handle most FFI complexity.
 

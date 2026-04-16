@@ -69,17 +69,17 @@ fn main():
 	print(f"Alice's score: {alice_score}")
 
 	# Working with custom structs
-	point1 = Point{x: 0.0, y: 0.0}
-	point2 = Point{x: 10.0, y: 5.0}
+	point1 = Point(x=0.0, y=0.0)
+	point2 = Point(x=10.0, y=5.0)
 
-	rectangle = Rectangle{
-		top_left: point1,
-		bottom_right: point2
-	}
+	rectangle = Rectangle(
+		top_left=point1,
+		bottom_right=point2
+	)
 
 	print(f"Rectangle area: {rectangle.area()}")
 
-	test_point = Point{x: 5.0, y: 2.5}
+	test_point = Point(x=5.0, y=2.5)
 	if rectangle.contains_point(test_point):
 		print("Point is inside rectangle")
 	else:
@@ -87,13 +87,13 @@ fn main():
 
 	# Working with enums
 	shapes = [
-		Shape.Circle { center: Point{x: 0.0, y: 0.0}, radius: 5.0 },
-		Shape.Rectangle { rect: rectangle },
-		Shape.Triangle {
-			p1: Point{x: 0.0, y: 0.0},
-			p2: Point{x: 3.0, y: 0.0},
-			p3: Point{x: 1.5, y: 2.0}
-		}
+		Shape.Circle(center=Point(x=0.0, y=0.0), radius=5.0),
+		Shape.Rectangle(rect=rectangle),
+		Shape.Triangle(
+			p1=Point(x=0.0, y=0.0),
+			p2=Point(x=3.0, y=0.0),
+			p3=Point(x=1.5, y=2.0)
+		)
 	]
 
 	total_area = 0.0

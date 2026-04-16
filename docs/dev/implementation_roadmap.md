@@ -237,12 +237,12 @@ _ = print("Second\n")
 **Example:**
 ```ryo
 fn add(a: int, b: int) -> int:
-    return a + b
+	return a + b
 
 fn main() -> int:
-    result = add(2, 3)
-    print("Result is: ")  # Expression statement (no assignment needed)
-    return 0  # Success
+	result = add(2, 3)
+	print("Result is: ")  # Expression statement (no assignment needed)
+	return 0  # Success
 ```
 
 **Implementation Notes:**
@@ -267,10 +267,10 @@ fn main() -> int:
    - Parse single-line closures: `fn(args): expression`
    - Parse multi-line closures with colon-indentation:
      ```ryo
-     fn(args):
-         statement1
-         statement2
-     ```
+	 fn(args):
+		 statement1
+		 statement2
+	 ```
    - Parse move keyword: `move fn(args): ...`
    - Distinguish closure expression from regular function definition
 
@@ -455,24 +455,24 @@ Comparison with other languages informed the design:
 myproject/
 ├── ryo.toml              # Package boundary
 └── src/
-    ├── main.ryo          # Module "main"
-    ├── utils/            # Module "utils" (parent)
-    │   ├── core.ryo
-    │   └── math/         # Module "utils.math" (child)
-    │       └── ops.ryo
-    └── server/           # Module "server" (multi-file)
-        ├── http.ryo
-        └── routes.ryo
+	├── main.ryo          # Module "main"
+	├── utils/            # Module "utils" (parent)
+	│   ├── core.ryo
+	│   └── math/         # Module "utils.math" (child)
+	│       └── ops.ryo
+	└── server/           # Module "server" (multi-file)
+		├── http.ryo
+		└── routes.ryo
 
 # Access levels in utils/core.ryo
 pub fn public_api():           # External users can call
-    package_configure()
+	package_configure()
 
 package fn package_configure(): # Only this package can call
-    _internal_setup()
+	_internal_setup()
 
 fn _internal_setup():          # Only utils module can call
-    pass
+	pass
 
 # Importing modules
 import utils              # Parent module
@@ -493,14 +493,14 @@ pub struct PostID(int)
 # user/user.ryo
 import models.ids
 struct User:
-    id: ids.UserID
-    post_ids: list[ids.PostID]  # Store IDs, not Post objects
+	id: ids.UserID
+	post_ids: list[ids.PostID]  # Store IDs, not Post objects
 
 # post/post.ryo
 import models.ids
 struct Post:
-    id: ids.PostID
-    author_id: ids.UserID  # Store ID, not User object
+	id: ids.PostID
+	author_id: ids.UserID  # Store ID, not User object
 ```
 
 **Design Rationale:**
@@ -590,13 +590,13 @@ See Milestone 5 (above) and `docs/specification.md` Section 11 for complete desi
    - Extend AST: `StmtKind::ImportStmt` for import declarations
    - Parse import statements:
      ```ryo
-     import math                    # Simple import
-     import utils.strings           # Nested module import
-     ```
+	 import math                    # Simple import
+	 import utils.strings           # Nested module import
+	 ```
    - Parse `package` visibility modifier:
      ```ryo
-     package fn helper()            # Package-internal function
-     ```
+	 package fn helper()            # Package-internal function
+	 ```
 
 2. **Multi-File Project Support:**
    - Update project structure handling:
@@ -652,26 +652,26 @@ See Milestone 5 (above) and `docs/specification.md` Section 11 for complete desi
 
 # src/math/operations.ryo
 pub fn add(a: int, b: int) -> int:
-    return _validate(a) + _validate(b)
+	return _validate(a) + _validate(b)
 
 package fn internal_helper(x: int) -> int:
-    # Package-internal, can be used by other modules in this package
-    return x * 2
+	# Package-internal, can be used by other modules in this package
+	return x * 2
 
 fn _validate(x: int) -> int:
-    # Module-private, only math module can use
-    if x < 0:
-        panic("Negative values not allowed")
-    return x
+	# Module-private, only math module can use
+	if x < 0:
+		panic("Negative values not allowed")
+	return x
 
 # src/main.ryo
 import math
 
 fn main() -> int:
-    result = math.add(2, 3)              # ✓ OK: add is pub
-    # math.internal_helper(5)            # ✓ OK: same package
-    # math._validate(10)                 # ❌ Error: module-private
-    return 0
+	result = math.add(2, 3)              # ✓ OK: add is pub
+	# math.internal_helper(5)            # ✓ OK: same package
+	# math._validate(10)                 # ❌ Error: module-private
+	return 0
 ```
 
 **Implementation Notes:**
@@ -760,22 +760,22 @@ remainder = a % b     # 1
 **Example:**
 ```ryo
 fn is_positive(x: int) -> bool:
-    if x > 0:
-        return true
-    else:
-        return false
+	if x > 0:
+		return true
+	else:
+		return false
 
 fn print_if_even(n: int) -> void:  # void return type
-    if n % 2 == 0:
-        print("Even number")
-    # No return statement needed for void
+	if n % 2 == 0:
+		print("Even number")
+	# No return statement needed for void
 
 fn main() -> int:
-    mut counter = 0
-    for counter < 10:
-        print_if_even(counter)
-        counter += 1
-    return 0
+	mut counter = 0
+	for counter < 10:
+		print_if_even(counter)
+		counter += 1
+	return 0
 ```
 
 **Implementation Notes:**
@@ -793,8 +793,8 @@ fn main() -> int:
 - Parse struct definitions:
   ```ryo
   struct Point:
-      x: float
-      y: float
+	  x: float
+	  y: float
   ```
 - Parse struct literals with parentheses: `Point(x=1.0, y=2.0)`
 - Parse field access: `point.x`, `point.y`
@@ -813,16 +813,16 @@ fn main() -> int:
 **Example:**
 ```ryo
 struct Rectangle:
-    width: float
-    height: float
+	width: float
+	height: float
 
 fn area(rect: Rectangle) -> float:
-    return rect.width * rect.height
+	return rect.width * rect.height
 
 fn main() -> int:
-    r = Rectangle(width=10.0, height=5.0)
-    a = area(r)
-    return 0
+	r = Rectangle(width=10.0, height=5.0)
+	a = area(r)
+	return 0
 ```
 
 **Implementation Notes:**
@@ -843,13 +843,13 @@ fn main() -> int:
 - Parse enum definitions with variants:
   ```ryo
   enum Color:
-      Red
-      Green
-      Blue
+	  Red
+	  Green
+	  Blue
 
   enum Shape:
-      Circle(radius: float)
-      Rectangle(width: float, height: float)
+	  Circle(radius: float)
+	  Rectangle(width: float, height: float)
   ```
 - Parse enum variant construction: `Color.Red`, `Shape.Circle(5.0)`
 - Extend type system:
@@ -866,13 +866,13 @@ fn main() -> int:
 **Example:**
 ```ryo
 enum Result:
-    Success(value: int)
-    Error(message: str)
+	Success(value: int)
+	Error(message: str)
 
 fn divide(a: int, b: int) -> Result:
-    if b == 0:
-        return Result.Error("Division by zero")
-    return Result.Success(a / b)
+	if b == 0:
+		return Result.Error("Division by zero")
+	return Result.Success(a / b)
 ```
 
 **Implementation Notes:**
@@ -891,9 +891,9 @@ fn divide(a: int, b: int) -> Result:
 - Parse match expressions:
   ```ryo
   match value:
-      Pattern1: expression1
-      Pattern2: expression2
-      _: default_expression
+	  Pattern1: expression1
+	  Pattern2: expression2
+	  _: default_expression
   ```
 - Parse patterns:
   - Literal patterns: `42`, `true`, `Color.Red`
@@ -912,19 +912,19 @@ fn divide(a: int, b: int) -> Result:
 **Example:**
 ```ryo
 enum Option:
-    Some(value: int)
-    None
+	Some(value: int)
+	None
 
 fn unwrap_or(opt: Option, default: int) -> int:
-    match opt:
-        Option.Some(v): return v
-        Option.None: return default
+	match opt:
+		Option.Some(v): return v
+		Option.None: return default
 
 fn describe_color(color: Color) -> str:
-    match color:
-        Color.Red: return "red"
-        Color.Green: return "green"
-        Color.Blue: return "blue"
+	match color:
+		Color.Red: return "red"
+		Color.Green: return "green"
+		Color.Blue: return "blue"
 ```
 
 **Implementation Notes:**
@@ -957,14 +957,14 @@ fn describe_color(color: Color) -> str:
 **Example:**
 ```ryo
 fn divmod(a: int, b: int) -> (int, int):
-    quotient = a / b
-    remainder = a % b
-    return (quotient, remainder)
+	quotient = a / b
+	remainder = a % b
+	return (quotient, remainder)
 
 fn main() -> int:
-    (q, r) = divmod(10, 3)
-    # q = 3, r = 1
-    return 0
+	(q, r) = divmod(10, 3)
+	# q = 3, r = 1
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1015,13 +1015,13 @@ import http
 import parse
 
 fn fetch_and_parse() -> (http.ConnectionFailed | http.RequestTimeout | parse.InvalidJson)!Data:
-    response = try http_get("https://api.example.com")  # Returns http errors
-    data = try parse_json(response.body())              # Returns parse errors
-    return data
+	response = try http_get("https://api.example.com")  # Returns http errors
+	data = try parse_json(response.body())              # Returns parse errors
+	return data
 
 fn main() -> int:
-    # Error handling with try/catch added in Milestone 14
-    return 0
+	# Error handling with try/catch added in Milestone 14
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1044,8 +1044,8 @@ fn main() -> int:
 - Parse catch expressions:
   ```ryo
   value = operation() catch |e|:
-      handle_error(e)
-      return default_value
+	  handle_error(e)
+	  return default_value
   ```
 - Implement try semantics:
   - If operation returns error, propagate to caller
@@ -1075,23 +1075,23 @@ import file
 import parse
 
 fn load_config(path: &str) -> (file.NotFound | file.PermissionDenied | parse.InvalidFormat)!Config:
-    content = try read_file(path)       # Propagates file errors
-    config = try parse_config(content)  # Propagates parse errors
-    return config
+	content = try read_file(path)       # Propagates file errors
+	config = try parse_config(content)  # Propagates parse errors
+	return config
 
 fn main() -> int:
-    config = load_config("config.toml") catch |e|:
-        match e:
-            file.NotFound(path):
-                print(f"File not found: {path}")
-            file.PermissionDenied(path):
-                print(f"Permission denied: {path}")
-            parse.InvalidFormat(msg):
-                print(f"Invalid config: {msg}")
-        return 1  # Error exit code
+	config = load_config("config.toml") catch |e|:
+		match e:
+			file.NotFound(path):
+				print(f"File not found: {path}")
+			file.PermissionDenied(path):
+				print(f"Permission denied: {path}")
+			parse.InvalidFormat(msg):
+				print(f"Invalid config: {msg}")
+		return 1  # Error exit code
 
-    print("Config loaded successfully")
-    return 0
+	print("Config loaded successfully")
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1134,25 +1134,25 @@ fn main() -> int:
 **Example:**
 ```ryo
 fn main() -> int:
-    # String operations (from M3.5 deferred features)
-    s1: str = "hello"
-    s2: str = " world"
-    greeting = s1 + s2    # Concatenation
-    print(greeting)       # "hello world"
+	# String operations (from M3.5 deferred features)
+	s1: str = "hello"
+	s2: str = " world"
+	greeting = s1 + s2    # Concatenation
+	print(greeting)       # "hello world"
 
-    name = "Alice"
-    msg = f"Hello, {name}!"  # F-string formatting
-    print(msg)
+	name = "Alice"
+	msg = f"Hello, {name}!"  # F-string formatting
+	print(msg)
 
-    # Ownership example
-    s3 = "test"       # str allocated
-    s4 = s3           # s3 moved to s4
-    # print(s3)      # Error: s3 was moved
+	# Ownership example
+	s3 = "test"       # str allocated
+	s4 = s3           # s3 moved to s4
+	# print(s3)      # Error: s3 was moved
 
-    x: int = 42
-    y = x             # x copied to y (int is Copy)
-    print(f"y = {y}") # OK: x still valid
-    return 0
+	x: int = 42
+	y = x             # x copied to y (int is Copy)
+	print(f"y = {y}") # OK: x still valid
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1190,25 +1190,25 @@ fn main() -> int:
 **Example:**
 ```ryo
 fn find_user(id: int) -> ?User:
-    if id < 0:
-        return none
-    return User(name="Alice", id=id)
+	if id < 0:
+		return none
+	return User(name="Alice", id=id)
 
 fn main() -> int:
-    user = find_user(42)
+	user = find_user(42)
 
-    # Optional chaining
-    name_len = user?.name?.len()  # Returns ?int
+	# Optional chaining
+	name_len = user?.name?.len()  # Returns ?int
 
-    # Providing defaults
-    display_name = user?.name orelse "Unknown"
+	# Providing defaults
+	display_name = user?.name orelse "Unknown"
 
-    # Early return with smart casting
-    u = user orelse return 1
-    # u is now User (not ?User) after this line
-    print(u.name)
+	# Early return with smart casting
+	u = user orelse return 1
+	# u is now User (not ?User) after this line
+	print(u.name)
 
-    return 0
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1227,8 +1227,8 @@ fn main() -> int:
 - Parse trait definitions:
   ```ryo
   trait Drawable:
-      fn draw(self)
-      fn area(self) -> float
+	  fn draw(self)
+	  fn area(self) -> float
   ```
 - Parse trait bounds in function signatures: `fn process[T: Drawable](obj: T)`
 - Extend type system:
@@ -1243,16 +1243,16 @@ fn main() -> int:
 **Example:**
 ```ryo
 trait Printable:
-    fn to_string(self) -> str
+	fn to_string(self) -> str
 
 impl Printable for int:
-    fn to_string(self) -> str:
-        # Convert int to string
-        return int_to_str(self)
+	fn to_string(self) -> str:
+		# Convert int to string
+		return int_to_str(self)
 
 impl Printable for User:
-    fn to_string(self) -> str:
-        return f"User({self.name})"
+	fn to_string(self) -> str:
+		return f"User({self.name})"
 ```
 
 **Implementation Notes:**
@@ -1271,8 +1271,8 @@ impl Printable for User:
 - Parse impl blocks:
   ```ryo
   impl Rectangle:
-      fn area(self) -> float:
-          return self.width * self.height
+	  fn area(self) -> float:
+		  return self.width * self.height
   ```
 - Parse method calls: `rect.area()`
 - Handle `self` parameter:
@@ -1292,20 +1292,20 @@ impl Printable for User:
 **Example:**
 ```ryo
 struct Circle:
-    radius: float
+	radius: float
 
 impl Circle:
-    fn area(self) -> float:
-        return 3.14159 * self.radius * self.radius
+	fn area(self) -> float:
+		return 3.14159 * self.radius * self.radius
 
-    fn scale(self, factor: float) -> Circle:
-        return Circle{radius: self.radius * factor}
+	fn scale(self, factor: float) -> Circle:
+		return Circle(radius=self.radius * factor)
 
 fn main() -> int:
-    c = Circle{radius: 5.0}
-    a = c.area()              # Consumes c (moved)
-    # c.area()                # Error: c was moved
-    return 0
+	c = Circle(radius=5.0)
+	a = c.area()              # Consumes c (moved)
+	# c.area()                # Error: c was moved
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1342,24 +1342,24 @@ fn main() -> int:
 **Example:**
 ```ryo
 struct Point:
-    x: float
-    y: float
+	x: float
+	y: float
 
 impl Point:
-    fn distance(&self, other: &Point) -> float:
-        dx = self.x - other.x
-        dy = self.y - other.y
-        return sqrt(dx * dx + dy * dy)
+	fn distance(&self, other: &Point) -> float:
+		dx = self.x - other.x
+		dy = self.y - other.y
+		return sqrt(dx * dx + dy * dy)
 
 fn main() -> int:
-    p1 = Point(x=0.0, y=0.0)
-    p2 = Point(x=3.0, y=4.0)
+	p1 = Point(x=0.0, y=0.0)
+	p2 = Point(x=3.0, y=4.0)
 
-    d = p1.distance(&p2)   # Borrow p2, don't move it
-    print(d)               # Can still use p1 and p2
+	d = p1.distance(&p2)   # Borrow p2, don't move it
+	print(d)               # Can still use p1 and p2
 
-    # p1.x = 10.0          # Error: p1 is immutably borrowed (if concurrent borrow)
-    return 0
+	# p1.x = 10.0          # Error: p1 is immutably borrowed (if concurrent borrow)
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1394,26 +1394,26 @@ fn main() -> int:
 **Example:**
 ```ryo
 fn first_word(text: &str) -> &str:
-    for i in range(text.len()):
-        if text[i] == ' ':
-            return text[0:i]  # Return slice (no copy)
-    return text
+	for i in range(text.len()):
+		if text[i] == ' ':
+			return text[0:i]  # Return slice (no copy)
+	return text
 
 fn sum_slice(numbers: &[int]) -> int:
-    mut total = 0
-    for n in numbers:
-        total += n
-    return total
+	mut total = 0
+	for n in numbers:
+		total += n
+	return total
 
 fn main() -> int:
-    s = "hello world"
-    word = first_word(s)  # word is &str (view into s)
-    print(word)           # "hello"
+	s = "hello world"
+	word = first_word(s)  # word is &str (view into s)
+	print(word)           # "hello"
 
-    nums = [1, 2, 3, 4, 5]
-    total = sum_slice(&nums[1:4])  # Pass slice [2, 3, 4]
-    print(total)  # 9
-    return 0
+	nums = [1, 2, 3, 4, 5]
+	total = sum_slice(&nums[1:4])  # Pass slice [2, 3, 4]
+	print(total)  # 9
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1436,7 +1436,7 @@ fn main() -> int:
 - Add `for` loop support for collections:
   ```ryo
   for item in list:
-      process(item)
+	  process(item)
   ```
 - Extend Codegen: Generate IR for:
   - Collection allocation/deallocation
@@ -1449,24 +1449,24 @@ fn main() -> int:
 **Example:**
 ```ryo
 fn main() -> int:
-    mut numbers = list[int]()
-    numbers.append(1)
-    numbers.append(2)
-    numbers.append(3)
+	mut numbers = list[int]()
+	numbers.append(1)
+	numbers.append(2)
+	numbers.append(3)
 
-    mut sum = 0
-    for n in numbers:
-        sum += n
-    print(sum)  # 6
+	mut sum = 0
+	for n in numbers:
+		sum += n
+	print(sum)  # 6
 
-    mut scores = map[str, int]()
-    scores.insert("Alice", 100)
-    scores.insert("Bob", 85)
+	mut scores = map[str, int]()
+	scores.insert("Alice", 100)
+	scores.insert("Bob", 85)
 
-    alice_score = scores.get("Alice") orelse 0
-    print(alice_score)  # 100
+	alice_score = scores.get("Alice") orelse 0
+	print(alice_score)  # 100
 
-    return 0
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1483,7 +1483,7 @@ fn main() -> int:
 - Add `Drop` trait to standard library:
   ```ryo
   trait Drop:
-      fn drop(&mut self)
+	  fn drop(&mut self)
   ```
 - Implement automatic drop calls:
   - At end of scope
@@ -1503,23 +1503,23 @@ fn main() -> int:
 **Example:**
 ```ryo
 struct File:
-    handle: int  # File descriptor
+	handle: int  # File descriptor
 
 impl Drop for File:
-    fn drop(&mut self):
-        close_file(self.handle)  # FFI call
+	fn drop(&mut self):
+		close_file(self.handle)  # FFI call
 
 fn process_file(path: &str):
-    file = open_file(path)  # File opened
-    # ... use file ...
-    # File automatically closed at end of scope (drop called)
+	file = open_file(path)  # File opened
+	# ... use file ...
+	# File automatically closed at end of scope (drop called)
 
 fn early_return():
-    file = open_file("data.txt")
-    if file.is_empty():
-        return  # File dropped here (drop called on early return)
-    # ... use file ...
-    # File dropped here (drop called at end of scope)
+	file = open_file("data.txt")
+	if file.is_empty():
+		return  # File dropped here (drop called on early return)
+	# ... use file ...
+	# File dropped here (drop called at end of scope)
 ```
 
 **Implementation Notes:**
@@ -1556,28 +1556,28 @@ fn early_return():
 **Example:**
 ```ryo
 fn increment(x: &mut int):
-    *x += 1  # Dereference and mutate
+	*x += 1  # Dereference and mutate
 
 impl Point:
-    fn translate(&mut self, dx: float, dy: float):
-        self.x += dx
-        self.y += dy
+	fn translate(&mut self, dx: float, dy: float):
+		self.x += dx
+		self.y += dy
 
 fn main() -> int:
-    mut count = 0
-    increment(&mut count)
-    print(count)  # 1
+	mut count = 0
+	increment(&mut count)
+	print(count)  # 1
 
-    mut p = Point(x=0.0, y=0.0)
-    p.translate(5.0, 10.0)
-    print(p.x)  # 5.0
+	mut p = Point(x=0.0, y=0.0)
+	p.translate(5.0, 10.0)
+	print(p.x)  # 5.0
 
-    # Aliasing prevented:
-    # r1 = &mut p
-    # r2 = &mut p      # Error: cannot borrow as mutable twice
-    # r3 = &p          # Error: cannot borrow as immutable while mutable borrow exists
+	# Aliasing prevented:
+	# r1 = &mut p
+	# r2 = &mut p      # Error: cannot borrow as mutable twice
+	# r3 = &p          # Error: cannot borrow as immutable while mutable borrow exists
 
-    return 0
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1634,20 +1634,20 @@ import collections
 import os
 
 fn main() -> int:
-    args = os.args()
-    if args.len() < 2:
-        io.println("Usage: program <file>")
-        return 1
+	args = os.args()
+	if args.len() < 2:
+		io.println("Usage: program <file>")
+		return 1
 
-    filename = args[1]
-    content = io.read_file(filename) catch |e|:
-        io.println(f"Error reading file: {e.message()}")
-        return 1
+	filename = args[1]
+	content = io.read_file(filename) catch |e|:
+		io.println(f"Error reading file: {e.message()}")
+		return 1
 
-    words = string.split(content, " ")
-    io.println(f"Word count: {words.len()}")
+	words = string.split(content, " ")
+	io.println(f"Word count: {words.len()}")
 
-    return 0
+	return 0
 ```
 
 **Implementation Notes:**
@@ -1702,16 +1702,16 @@ fn main() -> int:
 import io
 
 fn divide(a: int, b: int) -> int:
-    if b == 0:
-        panic("Division by zero")
-    return a / b
+	if b == 0:
+		panic("Division by zero")
+	return a / b
 
 fn main() -> int:
-    assert(1 + 1 == 2, "Math is broken!")
+	assert(1 + 1 == 2, "Math is broken!")
 
-    result = divide(10, 0)  # Panics with stack trace
-    io.println(f"Result: {result}")
-    return 0
+	result = divide(10, 0)  # Panics with stack trace
+	io.println(f"Result: {result}")
+	return 0
 ```
 
 **Output on panic:**
@@ -1738,7 +1738,7 @@ note: run with `RYOLANG_BACKTRACE=1` for full backtrace
   ```ryo
   #[test]
   fn test_addition():
-      assert(1 + 1 == 2, "Addition works")
+	  assert(1 + 1 == 2, "Addition works")
   ```
 - Implement test runner:
   - `ryo test` command discovers and runs all tests
@@ -2009,9 +2009,9 @@ import std.net
 
 # No runtime parameter needed - looks like regular code!
 fn fetch_data(url: str) -> !Data:
-    task.sleep(100ms)  # Accesses TLS runtime
-    response = try net.get(url)
-    return parse(response.body)
+	task.sleep(100ms)  # Accesses TLS runtime
+	response = try net.get(url)
+	return parse(response.body)
 ```
 
 **How it works:**
@@ -2024,11 +2024,11 @@ fn fetch_data(url: str) -> !Data:
 ```ryo
 #[test]
 fn test_fetch():
-    mock = MockRuntime.create()
-    task.with_runtime(mock, fn():
-        data = fetch_data("http://example.com")  # Runs instantly
-        assert_eq(data.status, 200)
-    )
+	mock = MockRuntime.create()
+	task.with_runtime(mock, fn():
+		data = fetch_data("http://example.com")  # Runs instantly
+		assert_eq(data.status, 200)
+	)
 ```
 
 **Features Implemented:**
@@ -2043,11 +2043,11 @@ fn test_fetch():
 import std.task
 
 fn process_all(urls: list[str]) -> !list[Data]:
-    task.scope |s|:
-        for url in urls:
-            s.spawn(fn(): fetch_data(url))
-    # Implicit join - all tasks finished or cancelled
-    return results
+	task.scope |s|:
+		for url in urls:
+			s.spawn(fn(): fetch_data(url))
+	# Implicit join - all tasks finished or cancelled
+	return results
 ```
 
 **2. Sync Primitives (Not Just Channels)**
@@ -2061,8 +2061,8 @@ import std.sync
 cache = Shared(Mutex(map[str, int]()))
 
 fn worker(cache: Shared[Mutex[map[str, int]]]):
-    mut m = cache.lock()  # RAII - unlock on scope exit
-    m.insert("key", 100)
+	mut m = cache.lock()  # RAII - unlock on scope exit
+	m.insert("key", 100)
 ```
 
 **3. Select Statement & Cancel Safety**
@@ -2071,12 +2071,12 @@ fn worker(cache: Shared[Mutex[map[str, int]]]):
 
 ```ryo
 select:
-    case data = rx.recv():
-        print(f"Received: {data}")
-    case tx.send(my_value):
-        print("Sent")
-    case task.timeout(1s):
-        print("Timed out")  # my_value remains valid!
+	case data = rx.recv():
+		print(f"Received: {data}")
+	case tx.send(my_value):
+		print("Sent")
+	case task.timeout(1s):
+		print("Timed out")  # my_value remains valid!
 ```
 
 **4. Parallelism Spec Updates (Breaking Changes from Single-Threaded)**
@@ -2133,30 +2133,30 @@ import std.task
 import std.channel
 
 fn worker(rx: receiver[int], tx: sender[str]):
-    for num in rx:
-        result = process(num)
-        tx.send(result)
+	for num in rx:
+		result = process(num)
+		tx.send(result)
 
 fn main():
-    rt = MultiThreadedRuntime.new(threads=4)
-    rt.run(fn():
-        (tx_in, rx_in) = channel.create[int]()
-        (tx_out, rx_out) = channel.create[str]()
-        
-        task.scope |s|:
-            # Spawn workers
-            for _ in range(4):
-                s.spawn(fn(): worker(rx_in.clone(), tx_out.clone()))
-            
-            # Send work
-            for i in range(100):
-                tx_in.send(i)
-            
-            # Collect results
-            for _ in range(100):
-                result = rx_out.recv()
-                print(result)
-    )
+	rt = MultiThreadedRuntime.new(threads=4)
+	rt.run(fn():
+		(tx_in, rx_in) = channel.create[int]()
+		(tx_out, rx_out) = channel.create[str]()
+		
+		task.scope |s|:
+			# Spawn workers
+			for _ in range(4):
+				s.spawn(fn(): worker(rx_in.clone(), tx_out.clone()))
+			
+			# Send work
+			for i in range(100):
+				tx_in.send(i)
+			
+			# Collect results
+			for _ in range(100):
+				result = rx_out.recv()
+				print(result)
+	)
 ```
 
 **Implementation Phases:**
@@ -2186,13 +2186,13 @@ fn main():
 **Example:**
 ```ryo
 extern "C":
-    fn strlen(s: *const char) -> int
-    fn printf(format: *const char, ...) -> int
+	fn strlen(s: *const char) -> int
+	fn printf(format: *const char, ...) -> int
 
 fn main():
-    unsafe:
-        len = strlen(c"Hello")
-        printf(c"Length: %d\n", len)
+	unsafe:
+		len = strlen(c"Hello")
+		printf(c"Length: %d\n", len)
 ```
 
 **Timeline:** v1.6 (12-18 months after v0.1.0)
@@ -2216,22 +2216,22 @@ fn main():
 **Example:**
 ```ryo
 trait Comparable:
-    fn compare(&self, other: &Self) -> int
+	fn compare(&self, other: &Self) -> int
 
 fn max[T: Comparable](a: T, b: T) -> T:
-    if a.compare(b) > 0:
-        return a
-    return b
+	if a.compare(b) > 0:
+		return a
+	return b
 
 struct Stack[T]:
-    items: list[T]
+	items: list[T]
 
 impl[T] Stack[T]:
-    fn push(&mut self, item: T):
-        self.items.append(item)
+	fn push(&mut self, item: T):
+		self.items.append(item)
 
-    fn pop(&mut self) -> ?T:
-        return self.items.pop()
+	fn pop(&mut self) -> ?T:
+		return self.items.pop()
 ```
 
 **Timeline:** v1.7 (18-24 months after v0.1.0)

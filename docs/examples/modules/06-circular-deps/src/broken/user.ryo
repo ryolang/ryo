@@ -10,10 +10,10 @@ import broken.post  # ❌ Circular dependency!
 struct User:
 	id: int
 	name: str
-	posts: List[post.Post]  # User has a list of Post objects
+	posts: list[post.Post]  # User has a list of Post objects
 
 pub fn create_user(name: str) -> User:
-	return User(id: 1, name: name, posts: [])
+	return User(id=1, name=name, posts=[])
 
 pub fn add_post(user: mut User, p: post.Post):
 	user.posts.append(p)

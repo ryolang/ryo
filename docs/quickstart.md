@@ -51,6 +51,8 @@ From the ryox directory, run:
 cargo run -- run first.ryo
 ```
 
+> **Note:** `cargo run -- run` compiles the Ryo compiler from source, then runs your file. This is for working within the `ryox` repository. After installing Ryo (via `cargo install` or a package manager), you would use `ryo run first.ryo` instead — both do the same thing.
+
 ### Step 3: Understand the Output
 
 You'll see output like this:
@@ -138,9 +140,9 @@ In future milestones, you'll be able to explicitly control exit codes:
 ```ryo
 # Planned for Milestone 4 (NOT YET IMPLEMENTED)
 fn main() -> int:
-    if check_error():
-        return 1    # Error
-    return 0        # Success
+	if check_error():
+		return 1    # Error
+	return 0        # Success
 ```
 
 ## Try More Examples

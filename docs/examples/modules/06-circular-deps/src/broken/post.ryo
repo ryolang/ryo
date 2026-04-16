@@ -13,7 +13,7 @@ struct Post:
 	author: user.User  # Post has a User object
 
 pub fn create_post(title: str, author: user.User) -> Post:
-	return Post(id: 1, title: title, author: author)
+	return Post(id=1, title=title, author=author)
 
 pub fn get_author_name(post: Post) -> str:
 	return post.author.name

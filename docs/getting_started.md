@@ -21,10 +21,10 @@ Let's start with the classic "Hello, World!" program, Ryo style:
 # main.ryo
 
 fn hello(name: str):
-    print(f"Hello {name}")
+	print(f"Hello {name}")
 
 fn main():
-    hello("World")
+	hello("World")
 ```
 
 **Let's break this down:**
@@ -39,7 +39,7 @@ fn main():
   * **`:`**: The colon `:` marks the end of the function signature and the beginning of the function body.
 * **`print(f"Hello {name}")`**: This line is the **body** of the `hello` function. It's **indented** using one tab. Indentation is important in Ryo to define code blocks, just like in Python! (Note: Ryo enforces tab-based indentation, not spaces)
   * **`print(...)`**: This is a built-in Ryo function to display output to the console.
-  * **`f"Hello {name}"`**: This is an **f-string** (formatted string literal), similar to Python. It allows you to embed variables directly into strings by placing them inside curly braces `{}`. In this case, it creates a string "Hello " followed by the value of the `name` parameter.
+  * **`f"Hello {name}"`**: This is an **f-string** (formatted string literal), similar to Python. It allows you to embed variables directly into strings by placing them inside curly braces `{}`. In this case, it creates a string "Hello " followed by the value of the `name` parameter. F-strings also support **format specifiers** using the syntax `{expression:spec}` — for example, `{price:.2f}` formats a float to 2 decimal places, `{count:d}` formats as an integer, and `{value:x}` formats as hexadecimal. This follows the same format spec syntax as Python.
 * **`fn main():`**: This defines the **`main` function**. In Ryo, the `main` function is the **entry point** of your program – where the execution begins.
 * **`hello("World")`**: This line inside `main` **calls** the `hello` function, passing the string `"World"` as the argument for the `name` parameter.
 
@@ -170,9 +170,9 @@ Explicit exit codes via return statements:
 ```ryo
 # Planned syntax (NOT YET IMPLEMENTED)
 fn main() -> int:
-    if error_condition:
-        return 1    # Error
-    return 0        # Success
+	if error_condition:
+		return 1    # Error
+	return 0        # Success
 ```
 
 **Checking exit codes:**
@@ -221,77 +221,77 @@ Let's try a slightly more practical example - a temperature converter that demon
 
 # Define an enumeration for temperature scales
 enum TempScale:
-    Celsius
-    Fahrenheit
-    Kelvin
+	Celsius
+	Fahrenheit
+	Kelvin
 
 # Define a struct to hold temperature data
 struct Temperature:
-    value: float
-    scale: TempScale
+	value: float
+	scale: TempScale
 
 # Define functions to convert between scales
 fn to_celsius(temp: Temperature) -> Temperature:
-    match temp.scale:
-        TempScale.Celsius:
-            return temp  # Already Celsius
-        TempScale.Fahrenheit:
-            return Temperature{
-                value: (temp.value - 32.0) * 5.0 / 9.0,
-                scale: TempScale.Celsius
-            }
-        TempScale.Kelvin:
-            return Temperature{
-                value: temp.value - 273.15,
-                scale: TempScale.Celsius
-            }
+	match temp.scale:
+		TempScale.Celsius:
+			return temp  # Already Celsius
+		TempScale.Fahrenheit:
+			return Temperature(
+				value=(temp.value - 32.0) * 5.0 / 9.0,
+				scale=TempScale.Celsius
+			)
+		TempScale.Kelvin:
+			return Temperature(
+				value=temp.value - 273.15,
+				scale=TempScale.Celsius
+			)
 
 fn to_fahrenheit(temp: Temperature) -> Temperature:
-    # First convert to Celsius if needed
-    celsius = to_celsius(temp)
-    # Then convert Celsius to Fahrenheit
-    return Temperature{
-        value: celsius.value * 9.0 / 5.0 + 32.0,
-        scale: TempScale.Fahrenheit
-    }
+	# First convert to Celsius if needed
+	celsius = to_celsius(temp)
+	# Then convert Celsius to Fahrenheit
+	return Temperature(
+		value=celsius.value * 9.0 / 5.0 + 32.0,
+		scale=TempScale.Fahrenheit
+	)
 
 fn to_kelvin(temp: Temperature) -> Temperature:
-    # First convert to Celsius if needed
-    celsius = to_celsius(temp)
-    # Then convert Celsius to Kelvin
-    return Temperature{
-        value: celsius.value + 273.15,
-        scale: TempScale.Kelvin
-    }
+	# First convert to Celsius if needed
+	celsius = to_celsius(temp)
+	# Then convert Celsius to Kelvin
+	return Temperature(
+		value=celsius.value + 273.15,
+		scale=TempScale.Kelvin
+	)
 
 fn main():
-    # Get user input
-    print("Enter a temperature value:")
-    input_value = float(input())
+	# Get user input
+	print("Enter a temperature value:")
+	input_value = float(input())
 
-    print("Enter the scale (C for Celsius, F for Fahrenheit, K for Kelvin):")
-    input_scale = input()
+	print("Enter the scale (C for Celsius, F for Fahrenheit, K for Kelvin):")
+	input_scale = input()
 
-    # Create Temperature struct based on input
-    temp = match input_scale:
-        "C" | "c":
-            Temperature{value: input_value, scale: TempScale.Celsius}
-        "F" | "f":
-            Temperature{value: input_value, scale: TempScale.Fahrenheit}
-        "K" | "k":
-            Temperature{value: input_value, scale: TempScale.Kelvin}
-        _:
-            print("Invalid scale! Defaulting to Celsius.")
-            Temperature{value: input_value, scale: TempScale.Celsius}
+	# Create Temperature struct based on input
+	temp = match input_scale:
+		"C" | "c":
+			Temperature(value=input_value, scale=TempScale.Celsius)
+		"F" | "f":
+			Temperature(value=input_value, scale=TempScale.Fahrenheit)
+		"K" | "k":
+			Temperature(value=input_value, scale=TempScale.Kelvin)
+		_:
+			print("Invalid scale! Defaulting to Celsius.")
+			Temperature(value=input_value, scale=TempScale.Celsius)
 
-    # Convert to all scales and display
-    celsius = to_celsius(temp)
-    fahrenheit = to_fahrenheit(temp)
-    kelvin = to_kelvin(temp)
+	# Convert to all scales and display
+	celsius = to_celsius(temp)
+	fahrenheit = to_fahrenheit(temp)
+	kelvin = to_kelvin(temp)
 
-    print(f"Celsius: {celsius.value:.2f}°C")
-    print(f"Fahrenheit: {fahrenheit.value:.2f}°F")
-    print(f"Kelvin: {kelvin.value:.2f}K")
+	print(f"Celsius: {celsius.value:.2f}°C")
+	print(f"Fahrenheit: {fahrenheit.value:.2f}°F")
+	print(f"Kelvin: {kelvin.value:.2f}K")
 ```
 
 This more advanced example showcases:
@@ -321,8 +321,8 @@ We've already seen comments. Use `#` to start a single-line comment:
 ```ryo
 # This is a comment in Ryo
 fn some_function():
-    # Another comment inside the function
-    print("This code will run") # And a comment at the end of a line
+	# Another comment inside the function
+	print("This code will run") # And a comment at the end of a line
 ```
 
 ### Functions
@@ -331,7 +331,7 @@ We define functions using the `fn` keyword, followed by the function name, param
 
 ```ryo
 fn add(x: int, y: int) -> int: # Function to add two integers, returns an integer
-    return x + y
+	return x + y
 ```
 
 * **`-> int`**: This after the parameter list is the **return type annotation**. It specifies the type of value the function will return. If a function doesn't explicitly return a value (like `hello` function above), you can omit the `->` and return type annotation.
@@ -342,13 +342,32 @@ Variables in Ryo **do not require a declaration keyword**. You simply use a vari
 
 ```ryo
 fn example_variables():
-    message = "Welcome to Ryo!" # 'message' is implicitly declared as a string
-    count = 10                  # 'count' is implicitly declared as an integer
-    is_ready = true            # 'is_ready' is implicitly declared as a boolean
+	message = "Welcome to Ryo!" # 'message' is implicitly declared as a string
+	count = 10                  # 'count' is implicitly declared as an integer
+	is_ready = true            # 'is_ready' is implicitly declared as a boolean
 
-    print(message)
-    print(count)
-    print(is_ready)
+	print(message)
+	print(count)
+	print(is_ready)
+```
+
+### Naming Conventions
+
+Ryo follows consistent naming conventions:
+
+| Convention | Used for | Examples |
+|---|---|---|
+| `snake_case` | Variables, functions, modules | `user_name`, `get_config`, `http_server` |
+| `PascalCase` | Structs, enums, traits, enum variants | `Temperature`, `TempScale`, `Iterator` |
+| Lowercase | Built-in types | `int`, `str`, `float`, `list`, `map` |
+
+```ryo
+struct UserProfile:       # PascalCase for types
+	display_name: str     # snake_case for fields
+
+fn get_user() -> UserProfile:  # snake_case for functions
+	user_count = 0             # snake_case for variables
+	return UserProfile(display_name="Alice")
 ```
 
 ### Data Types
@@ -374,12 +393,12 @@ Ryo uses `if` and `else` statements for conditional execution. Indentation defin
 
 ```ryo
 fn check_number(number: int):
-    if number > 0:
-        print("Number is positive")
-    elif number == 0: # 'elif' for "else if"
-        print("Number is zero")
-    else:
-        print("Number is negative")
+	if number > 0:
+		print("Number is positive")
+	elif number == 0: # 'elif' for "else if"
+		print("Number is zero")
+	else:
+		print("Number is negative")
 ```
 
 * **`elif`**: Ryo uses `elif` for "else if" conditions, similar to Python.
@@ -391,8 +410,8 @@ Ryo provides a `for` loop for iteration:
 
 ```ryo
 fn count_to(limit: int):
-    for i in range(0, limit): # range(start, end) generates numbers from start up to (but not including) end
-        print(i)
+	for i in range(0, limit): # range(start, end) generates numbers from start up to (but not including) end
+		print(i)
 ```
 
 * **`range(start, end)`**: This built-in function generates a sequence of numbers starting from `start` and going up to (but not including) `end`.
@@ -433,14 +452,14 @@ myapp/
 ```ryo
 # Public functions (visible to importers)
 pub fn add(a: int, b: int) -> int:
-    return a + b
+	return a + b
 
 pub fn multiply(a: int, b: int) -> int:
-    return a * b
+	return a * b
 
 # Private function (only visible within math module)
 fn validate(x: int) -> bool:
-    return x >= 0
+	return x >= 0
 ```
 
 **Step 3: Use the module** (`src/main.ryo`)
@@ -448,11 +467,11 @@ fn validate(x: int) -> bool:
 import math
 
 fn main():
-    result = math.add(5, 3)
-    print(f"5 + 3 = {result}")
+	result = math.add(5, 3)
+	print(f"5 + 3 = {result}")
 
-    product = math.multiply(4, 7)
-    print(f"4 × 7 = {product}")
+	product = math.multiply(4, 7)
+	print(f"4 × 7 = {product}")
 ```
 
 **Run it:**
@@ -477,19 +496,19 @@ src/
 **src/server/http.ryo:**
 ```ryo
 pub fn start():
-    print("Server starting...")
-    _bind_port()       # Call module-private function
-    routes.setup()     # Call function from routes.ryo
+	print("Server starting...")
+	_bind_port()       # Call module-private function
+	routes.setup()     # Call function from routes.ryo
 
 fn _bind_port():       # Module-private
-    print("Binding to port 8080")
+	print("Binding to port 8080")
 ```
 
 **src/server/routes.ryo:**
 ```ryo
 pub fn setup():
-    http._bind_port()  # ✓ Can access - same module!
-    print("Routes configured")
+	http._bind_port()  # ✓ Can access - same module!
+	print("Routes configured")
 ```
 
 **Key Point:** Files in the same directory can see each other's private items!
@@ -503,7 +522,7 @@ Visible to anyone who imports your module.
 
 ```ryo
 pub fn public_api():  # External code can use this
-    pass
+	pass
 ```
 
 #### **2. `package` - Package-Internal**
@@ -511,7 +530,7 @@ Visible to all modules in your project, but NOT to external projects.
 
 ```ryo
 package fn internal_helper():  # Only your project can use this
-    pass
+	pass
 ```
 
 **Use case:** Shared utilities between your modules
@@ -529,7 +548,7 @@ myapp/
 **src/internal/logger.ryo:**
 ```ryo
 package fn log(msg: str):  # All modules in myapp can use this
-    print(f"[LOG] {msg}")
+	print(f"[LOG] {msg}")
 ```
 
 **src/server/http.ryo:**
@@ -537,7 +556,7 @@ package fn log(msg: str):  # All modules in myapp can use this
 import internal.logger
 
 pub fn start():
-    logger.log("Server started")  # ✓ OK - same package
+	logger.log("Server started")  # ✓ OK - same package
 ```
 
 #### **3. No Keyword - Module-Private**
@@ -545,7 +564,7 @@ Only visible within the same module (directory).
 
 ```ryo
 fn _helper():  # Only files in this directory can use this
-    pass
+	pass
 ```
 
 **When to use each:**
@@ -568,7 +587,7 @@ src/
 **src/utils/core.ryo:**
 ```ryo
 pub fn hello():
-    print("Hello from utils!")
+	print("Hello from utils!")
 ```
 
 **src/utils/math/geometry.ryo:**
@@ -576,8 +595,8 @@ pub fn hello():
 import utils  # Must import parent explicitly!
 
 pub fn calculate():
-    utils.hello()  # Use parent function
-    return 42
+	utils.hello()  # Use parent function
+	return 42
 ```
 
 **src/main.ryo:**
@@ -586,8 +605,8 @@ import utils
 import utils.math.geometry
 
 fn main():
-    utils.hello()            # From utils/core.ryo
-    utils.math.geometry.calculate()  # From utils/math/geometry.ryo
+	utils.hello()            # From utils/core.ryo
+	utils.math.geometry.calculate()  # From utils/math/geometry.ryo
 ```
 
 **Key Point:** Child modules must import parent explicitly - no automatic access!
@@ -620,12 +639,12 @@ Circular dependencies between modules are **forbidden** (compile error):
 # user/user.ryo
 import post
 struct User:
-    posts: list[post.Post]
+	posts: list[post.Post]
 
 # post/post.ryo
 import user
 struct Post:
-    author: user.User  # ERROR: Circular dependency!
+	author: user.User  # ERROR: Circular dependency!
 ```
 
 **✓ Solutions:**
@@ -639,12 +658,12 @@ pub struct PostID(int)
 # user/user.ryo
 import types.ids
 struct User:
-    posts: list[ids.PostID]  # Use ID instead
+	posts: list[ids.PostID]  # Use ID instead
 
 # post/post.ryo
 import types.ids
 struct Post:
-    author_id: ids.UserID  # Use ID instead
+	author_id: ids.UserID  # Use ID instead
 ```
 
 **Solution 2: Merge modules**
@@ -652,7 +671,7 @@ struct Post:
 # domain/models.ryo
 pub struct User: ...
 pub struct Post:
-    author: User  # ✓ Same module!
+	author: User  # ✓ Same module!
 ```
 
 ### 3.8 Coming from Other Languages
@@ -697,7 +716,7 @@ pub struct Post:
    ```ryo
    # config/loader.ryo
    package fn load():  # Used by multiple modules, not public
-       pass
+	   pass
    ```
 
 5. **Organize by domain, not type**
@@ -722,7 +741,7 @@ mywebapp/
 **src/config/loader.ryo:**
 ```ryo
 package fn load_config() -> Config:  # Package-internal
-    return Config { port: 8080 }
+	return Config(port=8080)
 ```
 
 **src/database/connection.ryo:**
@@ -730,8 +749,8 @@ package fn load_config() -> Config:  # Package-internal
 import config.loader
 
 pub fn connect() -> Connection:
-    cfg = loader.load_config()  # ✓ Can use package items
-    return Connection.new(cfg)
+	cfg = loader.load_config()  # ✓ Can use package items
+	return Connection.new(cfg)
 ```
 
 **src/api/handlers.ryo:**
@@ -739,8 +758,8 @@ pub fn connect() -> Connection:
 import database.connection
 
 pub fn handle_request():
-    db = connection.connect()
-    # ... handle request
+	db = connection.connect()
+	# ... handle request
 ```
 
 **src/main.ryo:**
@@ -748,7 +767,7 @@ pub fn handle_request():
 import api.handlers
 
 fn main():
-    handlers.handle_request()
+	handlers.handle_request()
 ```
 
 ## 4. Error Handling
@@ -774,23 +793,23 @@ Single-variant errors make simple error cases concise:
 
 ```ryo
 fn fetch_resource(url: str) -> HttpError!str:
-    response = make_request(url)
-    if response.status != 200:
-        return HttpError{status: response.status, message: "Failed to fetch"}
-    return response.body
+	response = make_request(url)
+	if response.status != 200:
+		return HttpError(status=response.status, message="Failed to fetch")
+	return response.body
 
 fn find_user(id: int) -> NotFound!User:
-    for user in users:
-        if user.id == id:
-            return user
-    return NotFound("User not found")
+	for user in users:
+		if user.id == id:
+			return user
+	return NotFound("User not found")
 
 fn main():
-    # Handling single-variant error
-    user = find_user(42) catch |e|:
-        print(e.message())  # Prints: "User not found"
-        return
-    print(user.name)
+	# Handling single-variant error
+	user = find_user(42) catch |e|:
+		print(e.message())  # Prints: "User not found"
+		return
+	print(user.name)
 ```
 
 ### Grouping Related Errors with Modules
@@ -818,15 +837,15 @@ Use the `ErrorType!T` syntax to indicate a function can return an error or a val
 
 ```ryo
 fn divide(numerator: float, denominator: float) -> math.DivideByZero!float:
-    if denominator == 0.0:
-        return math.DivideByZero
-    return numerator / denominator
+	if denominator == 0.0:
+		return math.DivideByZero
+	return numerator / denominator
 
 fn parse_number(text: str) -> math.InvalidInput!float:
-    if text.is_empty():
-        return math.InvalidInput("Text cannot be empty")
-    # Actual parsing...
-    return float(text)
+	if text.is_empty():
+		return math.InvalidInput("Text cannot be empty")
+	# Actual parsing...
+	return float(text)
 ```
 
 ### Handling Errors with `catch`
@@ -835,27 +854,27 @@ Use `catch` for error handling with pattern matching. Error unions require exhau
 
 ```ryo
 fn main():
-    # Single error - must handle it
-    result = divide(10.0, 2.0) catch |e|:
-        match e:
-            math.DivideByZero:
-                print("Cannot divide by zero!")
-                return
+	# Single error - must handle it
+	result = divide(10.0, 2.0) catch |e|:
+		match e:
+			math.DivideByZero:
+				print("Cannot divide by zero!")
+				return
 
-    print(f"Division result: {result}")
+	print(f"Division result: {result}")
 
-    # Multiple errors - must handle all
-    result2 = complex_operation() catch |e|:
-        match e:
-            math.DivideByZero:
-                print("Cannot divide!")
-            math.InvalidInput(msg):
-                print(f"Invalid input: {msg}")
-            math.OverflowError:
-                print("Arithmetic overflow!")
-        return
+	# Multiple errors - must handle all
+	result2 = complex_operation() catch |e|:
+		match e:
+			math.DivideByZero:
+				print("Cannot divide!")
+			math.InvalidInput(msg):
+				print(f"Invalid input: {msg}")
+			math.OverflowError:
+				print("Arithmetic overflow!")
+		return
 
-    print(f"Complex result: {result2}")
+	print(f"Complex result: {result2}")
 ```
 
 ### Propagating Errors with `try`
@@ -865,9 +884,9 @@ Use `try` to propagate errors up the call stack. With `try`, errors are automati
 ```ryo
 # Simple case: same error type
 fn calculate() -> math.DivideByZero!float:
-    x = try divide(20.0, 4.0)
-    y = try divide(x, 2.0)
-    return y
+	x = try divide(20.0, 4.0)
+	y = try divide(x, 2.0)
+	return y
 
 # Composing different error types - automatic!
 
@@ -884,19 +903,19 @@ import io
 import parse
 
 fn load_and_parse(path: str) -> !str:
-    content = try read_file(path)      # Returns io.NotFound or io.PermissionDenied
-    parsed = try parse_json(content)   # Returns parse.InvalidFormat or parse.InvalidEncoding
-    return parsed
+	content = try read_file(path)      # Returns io.NotFound or io.PermissionDenied
+	parsed = try parse_json(content)   # Returns parse.InvalidFormat or parse.InvalidEncoding
+	return parsed
 # Compiler infers: (io.NotFound | io.PermissionDenied | parse.InvalidFormat | parse.InvalidEncoding)!str
 
 fn main():
-    result = calculate() catch |e|:
-        match e:
-            math.DivideByZero:
-                print("Cannot divide!")
-        return
+	result = calculate() catch |e|:
+		match e:
+			math.DivideByZero:
+				print("Cannot divide!")
+		return
 
-    print(f"Final result: {result}")
+	print(f"Final result: {result}")
 ```
 
 ### Error Union Types
@@ -906,19 +925,19 @@ When composing functions with different error types, Ryo automatically creates e
 ```ryo
 # Explicit error union
 fn complex_operation(x: float, y: float) -> (math.DivideByZero | validation.NegativeValue)!float:
-    if x < 0.0:
-        return validation.NegativeValue
-    return try divide(x, y)
+	if x < 0.0:
+		return validation.NegativeValue
+	return try divide(x, y)
 
 # Inferred error union from try expressions
 fn process_data(file_path: str) -> !Data:
-    # io errors from try read_file()
-    content = try read_file(file_path)
-    # parse errors from try parse()
-    parsed = try parse(content)
-    # math errors from try calculate()
-    result = try calculate(parsed.values)
-    return result
+	# io errors from try read_file()
+	content = try read_file(file_path)
+	# parse errors from try parse()
+	parsed = try parse(content)
+	# math errors from try calculate()
+	result = try calculate(parsed.values)
+	return result
 # Compiler automatically infers: (io.NotFound | io.PermissionDenied | parse.InvalidFormat | math.DivideByZero)!Data
 ```
 
@@ -930,9 +949,9 @@ All errors automatically implement a `.message()` method:
 error HttpError(status: int, message: str)
 
 result = fetch_resource(url) catch |e|:
-    # .message() returns the message field automatically
-    print(e.message())  # Prints the message from the error
-    return
+	# .message() returns the message field automatically
+	print(e.message())  # Prints the message from the error
+	return
 ```
 
 For simple message-only errors, the message is automatically available:
@@ -941,8 +960,8 @@ For simple message-only errors, the message is automatically available:
 error Timeout(str)
 
 result = try_with_timeout() catch |e|:
-    print(e.message())  # Automatically returns the string value
-    return
+	print(e.message())  # Automatically returns the string value
+	return
 ```
 
 ### Optional Values
@@ -951,23 +970,23 @@ Ryo also provides optional types (`?T`) for when a value may or may not be prese
 
 ```ryo
 fn find_user(users: list[User], id: int) -> ?User:
-    for user in users:
-        if user.id == id:
-            return user
-    return none  # No user found
+	for user in users:
+		if user.id == id:
+			return user
+	return none  # No user found
 
 fn main():
-    users = [User(id=1, name="Alice"), User(id=2, name="Bob")]
+	users = [User(id=1, name="Alice"), User(id=2, name="Bob")]
 
-    # Safe optional chaining
-    name = find_user(users, 1)?.name orelse "Unknown"
-    print(f"User name: {name}")
+	# Safe optional chaining
+	name = find_user(users, 1)?.name orelse "Unknown"
+	print(f"User name: {name}")
 
-    # Null check
-    if find_user(users, 3) != none:
-        print("User found!")
-    else:
-        print("User not found")
+	# Null check
+	if find_user(users, 3) != none:
+		print("User found!")
+	else:
+		print("User not found")
 ```
 
 ### Important: No Direct Unwrap
@@ -985,8 +1004,8 @@ name = user.name   # ERROR: user is ?User, can't access .name directly
 
 # ✅ CORRECT: Handle the error or optional value
 result = divide(10.0, 2.0) catch |e|:
-    handle_error(e)
-    return
+	handle_error(e)
+	return
 # Now result is definitely a float
 
 user = find_user(users, 1)
@@ -1053,11 +1072,11 @@ Once a package is installed, you can import and use it in your Ryo code:
 import pkg:http # External package (not local)
 
 fn main():
-    response = http.get("https://api.example.com/data")
-    if response.status == 200:
-        print(response.body)
-    else:
-        print(f"Error: {response.status}")
+	response = http.get("https://api.example.com/data")
+	if response.status == 200:
+		print(response.body)
+	else:
+		print(f"Error: {response.status}")
 ```
 
 ### Creating Your Own Packages
@@ -1104,16 +1123,16 @@ Ryo uses an ownership model inspired by Rust but simplified for better learnabil
 
 ```ryo
 fn create_and_use():
-    # 'message' owns this string data
-    message = "Hello, Ryo!"
+	# 'message' owns this string data
+	message = "Hello, Ryo!"
 
-    # The 'print' function borrows 'message' temporarily
-    print(message)
+	# The 'print' function borrows 'message' temporarily
+	print(message)
 
-    # 'message' is still valid here
-    print(f"Length: {len(message)}")
+	# 'message' is still valid here
+	print(f"Length: {len(message)}")
 
-    # When 'message' goes out of scope, its memory is automatically freed
+	# When 'message' goes out of scope, its memory is automatically freed
 ```
 
 ### Safe References
@@ -1122,13 +1141,13 @@ Ryo allows you to create references to data without taking ownership:
 
 ```ryo
 fn update_counter(counter: &mut int):
-    # We can modify the value that 'counter' refers to
-    counter += 1
+	# We can modify the value that 'counter' refers to
+	counter += 1
 
 fn main():
-    count = 0
-    update_counter(&mut count)
-    print(count)  # Output: 1
+	count = 0
+	update_counter(&mut count)
+	print(count)  # Output: 1
 ```
 
 In this example, `&mut int` denotes a mutable reference to an integer. The function can modify the original value, but doesn't own it.
@@ -1157,16 +1176,16 @@ See how Ryo compares when handling potential errors:
 error DivisionByZero
 
 fn divide(a: int, b: int) -> DivisionByZero!int:
-    if b == 0:
-        return DivisionByZero
-    return a / b
+	if b == 0:
+		return DivisionByZero
+	return a / b
 
 # Usage
 result = divide(10, 2) catch |e|:
-    match e:
-        DivisionByZero:
-            print("Error: Division by zero")
-    return
+	match e:
+		DivisionByZero:
+			print("Error: Division by zero")
+	return
 
 print(f"Result: {result}")
 ```
@@ -1227,20 +1246,20 @@ error NotFound(id: int)
 import user
 
 fn get_user(id: int) -> user.NotFound!User:
-    if id < 0:
-        # This error will capture: file, line, column, function name
-        return user.NotFound(id)
-    # ... fetch user ...
-    return User(...)
+	if id < 0:
+		# This error will capture: file, line, column, function name
+		return user.NotFound(id)
+	# ... fetch user ...
+	return User(...)
 
 fn main():
-    user = get_user(42) catch |e|:
-        # Access error message
-        print(f"Error: {e.message()}")
+	user = get_user(42) catch |e|:
+		# Access error message
+		print(f"Error: {e.message()}")
 
-        # Find where the error occurred
-        if loc = e.location():
-            print(f"Location: {loc.file}:{loc.line}:{loc.column} in {loc.function}")
+		# Find where the error occurred
+		if loc = e.location():
+			print(f"Location: {loc.file}:{loc.line}:{loc.column} in {loc.function}")
 ```
 
 ### Reading Panic Messages
@@ -1279,17 +1298,17 @@ Example:
 
 ```ryo
 fn validate_age(age: int):
-    if age < 0 or age > 150:
-        panic(f"Invalid age: {age}")  # This is frame 0
+	if age < 0 or age > 150:
+		panic(f"Invalid age: {age}")  # This is frame 0
 
 fn create_user(name: str, age: int) -> User:
-    validate_age(age)  # This is frame 1
-    return User(name=name, age=age)
+	validate_age(age)  # This is frame 1
+	return User(name=name, age=age)
 
 fn main():
-    # This is frame 2
-    user = create_user("Alice", -5)
-    # Panic occurs here!
+	# This is frame 2
+	user = create_user("Alice", -5)
+	# Panic occurs here!
 ```
 
 When this panics, the stack trace shows exactly where (-5 is invalid age) and how we got there (create_user called validate_age).
@@ -1300,16 +1319,16 @@ Ryo errors automatically capture debugging information. You can access it at run
 
 ```ryo
 result = risky_operation() catch |e|:
-    # Get where the error was created
-    if location = e.location():
-        print(f"Error at {location.file}:{location.line}")
-        print(f"In function: {location.function}")
+	# Get where the error was created
+	if location = e.location():
+		print(f"Error at {location.file}:{location.line}")
+		print(f"In function: {location.function}")
 
-    # Get the full call stack at time of error
-    if trace = e.stack_trace():
-        print("Stack frames:")
-        for frame in trace.frames:
-            print(f"  {frame.function} at {frame.file}:{frame.line}")
+	# Get the full call stack at time of error
+	if trace = e.stack_trace():
+		print("Stack frames:")
+		for frame in trace.frames:
+			print(f"  {frame.function} at {frame.file}:{frame.line}")
 ```
 
 ### Debugging Tips
@@ -1334,27 +1353,27 @@ error QueryFailed(sql: str, reason: str)
 import database
 
 fn query_users(age: int) -> database.QueryFailed!list[User]:
-    sql = f"SELECT * FROM users WHERE age > {age}"
-    result = try db.execute(sql)
-    # Error will show the SQL query, helping you debug
+	sql = f"SELECT * FROM users WHERE age > {age}"
+	result = try db.execute(sql)
+	# Error will show the SQL query, helping you debug
 
 ```
 
 **3. Print location for quick diagnosis:**
 ```ryo
 result = operation() catch |e|:
-    if loc = e.location():
-        # Go directly to the source code location
-        print(f"Fix it here: {loc.file}:{loc.line}")
+	if loc = e.location():
+		# Go directly to the source code location
+		print(f"Fix it here: {loc.file}:{loc.line}")
 ```
 
 **4. Avoid panics in production code:**
 ```ryo
 # ❌ Bad - panics are unrecoverable
 fn divide(a: float, b: float) -> float:
-    if b == 0:
-        panic("Cannot divide by zero!")  # Crashes entire program
-    a / b
+	if b == 0:
+		panic("Cannot divide by zero!")  # Crashes entire program
+	a / b
 
 # ✅ Better - use error types
 
@@ -1365,9 +1384,9 @@ error DivisionByZero
 import math
 
 fn divide(a: float, b: float) -> math.DivisionByZero!float:
-    if b == 0:
-        return math.DivisionByZero  # Caller can handle it
-    a / b
+	if b == 0:
+		return math.DivisionByZero  # Caller can handle it
+	a / b
 ```
 
 **5. Use environment variables to control stack trace detail:**
@@ -1387,7 +1406,7 @@ RYOLANG_BACKTRACE=0 ./my_program
 **Scenario 1: "Where did this error come from?"**
 ```ryo
 result = complex_operation() catch |e|:
-    loc = e.location()  # Points directly to the source
+	loc = e.location()  # Points directly to the source
 ```
 
 **Scenario 2: "Why did my program panic?"**
@@ -1398,9 +1417,9 @@ result = complex_operation() catch |e|:
 **Scenario 3: "How does the error propagate through my code?"**
 ```ryo
 result = complex_operation() catch |e|:
-    if trace = e.stack_trace():
-        for (i, frame) in enumerate(trace.frames):
-            print(f"{i}: {frame.function}")  # Shows the call path
+	if trace = e.stack_trace():
+		for (i, frame) in enumerate(trace.frames):
+			print(f"{i}: {frame.function}")  # Shows the call path
 ```
 
 ### Performance Note

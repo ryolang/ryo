@@ -41,7 +41,7 @@ package fn healthcheck() -> bool:
 fn _establish_connection(cfg: loader.Config) -> Connection:
 	# Implementation detail - only database module knows about this
 	_validate_connection(cfg)
-	return Connection(url: cfg.database_url, is_connected: true)
+	return Connection(url=cfg.database_url, is_connected=true)
 
 fn _validate_connection(cfg: loader.Config) -> bool:
 	# Can use config's package-internal validator

@@ -8,10 +8,10 @@ import fixed.models.ids
 pub struct User:
 	id: ids.UserID
 	name: str
-	post_ids: List[ids.PostID]  # Store POST IDs, not Post objects!
+	post_ids: list[ids.PostID]  # Store POST IDs, not Post objects!
 
 pub fn create_user(id: ids.UserID, name: str) -> User:
-	return User(id: id, name: name, post_ids: [])
+	return User(id=id, name=name, post_ids=[])
 
 pub fn add_post_id(user: mut User, post_id: ids.PostID):
 	user.post_ids.append(post_id)

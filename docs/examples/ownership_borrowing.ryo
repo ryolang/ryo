@@ -30,7 +30,7 @@ fn create_greeting(name: str, age: int) -> str:
 
 fn main():
 	# Create a person (owns the data)
-	mut alice = Person{name: "Alice", age: 25}
+	mut alice = Person(name="Alice", age=25)
 
 	# Implicit immutable borrow — can call this multiple times
 	greet_person(alice)

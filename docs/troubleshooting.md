@@ -104,28 +104,28 @@ Error: CodegenError("Unsupported target 'unknown-unknown-unknown': ...")
 2. **Check syntax rules:**
    - Variable declarations need `=`:
      ```ryo
-     # Wrong:
-     x 42
+	 # Wrong:
+	 x 42
 
-     # Right:
-     x = 42
-     ```
+	 # Right:
+	 x = 42
+	 ```
    - Type annotations use `:`:
      ```ryo
-     # Wrong:
-     x int = 42
+	 # Wrong:
+	 x int = 42
 
-     # Right:
-     x: int = 42
-     ```
+	 # Right:
+	 x: int = 42
+	 ```
    - Operators need spaces:
      ```ryo
-     # Wrong:
-     x=42
+	 # Wrong:
+	 x=42
 
-     # Right:
-     x = 42
-     ```
+	 # Right:
+	 x = 42
+	 ```
 
 3. **Check examples** in `examples/milestone3/` for correct syntax
 
@@ -242,9 +242,9 @@ Explicit exit code control via return statements:
 ```ryo
 # Planned syntax (NOT YET IMPLEMENTED)
 fn main() -> int:
-    if error_condition:
-        return 1    # Error
-    return 0        # Success
+	if error_condition:
+		return 1    # Error
+	return 0        # Success
 ```
 
 **If you need specific exit codes now:**
@@ -663,7 +663,7 @@ z = x + y  # Error: Variables not yet implemented
 
 ```ryo
 fn add(a: int, b: int) -> int:
-    return a + b  # Error: Functions not yet supported
+	return a + b  # Error: Functions not yet supported
 ```
 
 **Coming:** Milestone 4
@@ -680,7 +680,7 @@ name = "Alice"  # Error: String literals not yet supported
 
 ```ryo
 if x > 0:  # Error: if statements not yet supported
-    print("positive")
+	print("positive")
 ```
 
 **Coming:** Milestone 6

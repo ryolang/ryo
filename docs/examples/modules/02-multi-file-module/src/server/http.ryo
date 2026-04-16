@@ -21,7 +21,7 @@ fn _bind_port():
 # Module-private helper - only callable within the server module
 fn _get_config() -> Config:
 	# In a real app, this would load configuration
-	return Config(port: 8080, host: "0.0.0.0")
+	return Config(port=8080, host="0.0.0.0")
 
 struct Config:
 	port: int
