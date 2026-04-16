@@ -1,16 +1,18 @@
-For a language targeting **Web Backends** and **CLI Tools**, you have three glaring holes remaining after `sqlite`, `json`, and `uuid`.
+# Official Packages
 
-If you want developers to actually *ship* products with Ryo v0.2, you need to provide these three official packages as **Native Extensions** (wrapping Rust crates).
+For a language targeting **Web Backends** and **CLI Tools**, three critical gaps remain after `sqlite`, `json`, and `uuid`.
+
+For developers to actually *ship* products with Ryo v0.2, the following official packages are needed as **Native Extensions** (wrapping Rust crates).
 
 ---
 
 ### 1. The CLI Essential: `pkg:cli` (Argument Parsing)
-You cannot write a serious CLI tool by manually parsing `os.args()` (a list of strings). You need flags, help generation, and subcommands.
+Serious CLI tools cannot be built by manually parsing `os.args()` (a list of strings). Flags, help generation, and subcommands are required.
 
-*   **The Rust Backing:** **`clap`** (or `lexopt` for a lighter weight).
+*   **The Rust Backing:** **`clap`** (or `lexopt` for lighter weight).
 *   **Why `clap`?** It is the industry standard. It auto-generates beautiful `--help` messages and handles edge cases (`-xvf` expansion).
 *   **The Ryo DX:**
-    Instead of Rust's complex builder pattern, offer a declarative struct mapping (similar to how `serde` maps JSON).
+    Instead of Rust's complex builder pattern, a declarative struct mapping is offered (similar to how `serde` maps JSON).
 
     ```ryo
     import cli
@@ -23,7 +25,7 @@ You cannot write a serious CLI tool by manually parsing `os.args()` (a list of s
         path: str
 
     fn main():
-        # Magically parses os.args() and fills the struct
+        # Parses os.args() and fills the struct
         args = cli.parse[Args]() 
         print(f"Listening on {args.port}")
     ```
@@ -31,12 +33,12 @@ You cannot write a serious CLI tool by manually parsing `os.args()` (a list of s
 ---
 
 ### 2. The Backend Essential: `pkg:postgres`
-SQLite is great for dev, but "Real" backends use PostgreSQL. If Ryo launches without Postgres support, it will be dismissed as a toy by backend engineers.
+SQLite works for dev, but production backends use PostgreSQL. Without Postgres support at launch, Ryo risks being dismissed as a toy by backend engineers.
 
 *   **The Rust Backing:** **`rust-postgres`** (synchronous/blocking for v0.1/0.2).
-*   **Why?** It is pure Rust (easy to compile/link via Zig), fast, and secure.
+*   **Why?** Pure Rust (easy to compile/link via Zig), fast, and secure.
 *   **The Ryo DX:**
-    Reuse the exact same API design you built for `sqlite`. The user should be able to switch databases by changing the import and the connection string.
+    The API design should match the `sqlite` package. Switching databases should require only changing the import and connection string.
 
     ```ryo
     import postgres
@@ -49,7 +51,7 @@ SQLite is great for dev, but "Real" backends use PostgreSQL. If Ryo launches wit
 ---
 
 ### 3. The Modern Essential: `pkg:dotenv`
-In 2025, nobody hardcodes configuration. They use `.env` files and Environment Variables. This is a core part of the "12-Factor App" methodology for web services.
+In modern development, nobody hardcodes configuration. `.env` files and Environment Variables are standard, following the "12-Factor App" methodology for web services.
 
 *   **The Rust Backing:** **`dotenvy`**.
 *   **Why?** It loads a `.env` file into the process environment variables instantly on startup.
@@ -69,10 +71,10 @@ In 2025, nobody hardcodes configuration. They use `.env` files and Environment V
 ---
 
 ### 4. The "Nice to Have": `pkg:image`
-Since you are targeting **Data Processing**, users will expect to be able to resize an image, convert PNG to JPEG, or crop a thumbnail without needing Python/OpenCV.
+Since Ryo targets **Data Processing**, users will expect image operations (resize, convert PNG to JPEG, crop thumbnails) without needing Python/OpenCV.
 
 *   **The Rust Backing:** **`image`** (The Rust Image Project).
-*   **Why?** It is pure Rust (no external C lib dependencies like libpng/libjpeg), making it trivial to cross-compile via `ryo build`.
+*   **Why?** Pure Rust (no external C lib dependencies like libpng/libjpeg), making it trivial to cross-compile via `ryo build`.
 *   **The Ryo DX:**
     ```ryo
     import image
@@ -87,7 +89,7 @@ Since you are targeting **Data Processing**, users will expect to be able to res
 
 ### Summary of the "Official Suite"
 
-To launch a credible ecosystem, your **Official Packages** list (managed by the core team) should look like this:
+The **Official Packages** list (managed by the core team) for a credible ecosystem launch:
 
 | Package | Domain | Rust Backing | Priority |
 | :--- | :--- | :--- | :--- |
@@ -99,9 +101,4 @@ To launch a credible ecosystem, your **Official Packages** list (managed by the 
 | `pkg:image` | Data | `image` | Medium |
 | `pkg:zip` | Utils | `zip` | Low |
 
-**Strategic Note:** Do not put these in the Standard Library (`std`). Keep `std` small (I/O, FS, Net, Core). Put these in the registry. This allows you to update the Postgres driver version without forcing users to upgrade their Ryo Compiler.
-
-
----
-
-
+**Strategic Note:** These should not be placed in the Standard Library (`std`). Keeping `std` small (I/O, FS, Net, Core) and putting these in the registry allows updating the Postgres driver version without forcing users to upgrade their Ryo Compiler.

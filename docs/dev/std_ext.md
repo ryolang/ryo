@@ -1,6 +1,8 @@
-This is a curated list of "Best-in-Class" Rust crates that you should wrap to create a powerful, "Batteries-Included" Standard Library for Ryo.
+# Standard Library Extensions: Rust Crate Wrapping
 
-Since Ryo aims to be **General Purpose** (Web, CLI, Scripts), the standard library needs to handle JSON, HTTP, and Regex out of the box.
+A curated list of "Best-in-Class" Rust crates to wrap for a powerful, "Batteries-Included" Standard Library.
+
+Since Ryo targets **General Purpose** use (Web, CLI, Scripts), the standard library needs JSON, HTTP, and Regex support out of the box.
 
 ### 1. The Data Serialization Layer (`std.json`, `std.toml`)
 
@@ -11,7 +13,7 @@ Since Ryo aims to be **General Purpose** (Web, CLI, Scripts), the standard libra
     *   *Usage:* Implement `json.parse(str) -> !Value` and `json.stringify(Value) -> str`.
     *   *Why:* Fast, correct, and handles edge cases perfectly.
 *   **`basic-toml` (or `toml`):**
-    *   *Usage:* Essential because Ryo uses `ryo.toml`. You need to parse your own config files.
+    *   *Usage:* Essential because Ryo uses `ryo.toml`. Needed to parse config files.
     *   *Why:* `basic-toml` is a lighter dependency than the full `toml` crate, sufficient for 99% of config needs.
 
 ### 2. The Networking Layer (`std.net.http`)
@@ -20,10 +22,10 @@ Since Ryo aims to be **General Purpose** (Web, CLI, Scripts), the standard libra
 **The Strategy:** Start with a **Blocking Client** wrapped in `#[blocking]` so it can be offloaded to a thread pool later.
 
 *   **`ureq` (Recommended for v0.1):**
-    *   *Why:* Pure Rust, blocking I/O, minimal dependencies (no Tokio). It is extremely easy to wrap via FFI.
+    *   *Why:* Pure Rust, blocking I/O, minimal dependencies (no Tokio). Extremely easy to wrap via FFI.
     *   *Features:* HTTPS (via `rustls`), JSON support, simple API.
 *   **`reqwest` (blocking feature):**
-    *   *Why:* The heavy hitter. Support it later if `ureq` isn't enough. It brings in a lot of dependencies.
+    *   *Why:* The heavy hitter. Support it later if `ureq` proves insufficient. It brings in many dependencies.
 
 ### 3. Text Processing (`std.regex`)
 
@@ -33,8 +35,8 @@ Since Ryo aims to be **General Purpose** (Web, CLI, Scripts), the standard libra
     *   *Why:* The gold standard. Guaranteed O(N) time complexity (safe against ReDoS attacks).
     *   *Usage:* `regex.new(pattern).match(text)`.
 *   **`unicode-segmentation`:**
-    *   *Why:* You decided `str` is UTF-8. Users will ask: "How do I reverse a string with Emojis?"
-    *   *Usage:* `str.graphemes()` implementation. Do not implement this logic yourself; Unicode is a nightmare.
+    *   *Why:* Since `str` is UTF-8, users will need operations like "reverse a string with Emojis."
+    *   *Usage:* `str.graphemes()` implementation. Unicode is too complex to implement from scratch.
 
 ### 4. Time & Date (`std.time`)
 
@@ -65,7 +67,7 @@ Since Ryo aims to be **General Purpose** (Web, CLI, Scripts), the standard libra
 
 ### 7. The Implementation Plan (Architecture)
 
-You should bundle these as **Static Rust Libraries** linked into the runtime.
+These crates should be bundled as **Static Rust Libraries** linked into the runtime.
 
 #### Example: `std.json` Wrapper
 
@@ -110,4 +112,4 @@ pub fn parse(input: str) -> !JsonValue:
 | **`std.rand`** | `rand` | Secure defaults. |
 | **`std.simd`** | (Cranelift) | Use compiler intrinsics, not a crate. |
 
-This list gives Ryo a "Heavyweight" feel (feature-rich) with "Lightweight" implementation effort (wrapping existing code).
+This list provides a feature-rich standard library with lightweight implementation effort (wrapping existing code).

@@ -993,6 +993,8 @@ fn handle():
 *   **Drop order** is reverse declaration order within a scope.
 *   **Relation to Ownership:** The Move/Borrow model dictates *who* owns the value and *when* ownership ends. The `Drop` trait dictates *what happens* when ownership ends. They work together.
 
+*(Rationale: `drop` takes `self` by move rather than `&mut self` because under Ownership Lite the value is being destroyed — there is no reason to borrow something that ceases to exist. This is consistent with Rule 2 (parameters borrow implicitly); the compiler inserts the `drop` call at scope exit and the value is consumed.)*
+
 ### 5.5 `with` — Resource Lifetime Blocks
 
 For resources that need explicit lifetime boundaries — database connections, file handles, temporary buffers — Ryo provides `with` blocks. Identical to Python's `with` statement in syntax and intent, but backed by the ownership system and `Drop` trait rather than context managers.
@@ -2103,6 +2105,13 @@ select:
 	default:                           # Non-blocking: if nothing is ready
 		print("nothing ready")
 ```
+
+**`default` branch semantics:**
+
+*   `default` makes the `select` **non-blocking**: if no `case` is immediately ready, the `default` branch executes instead of suspending the current task.
+*   Without `default`, `select` **suspends** the current task until at least one `case` fires.
+*   `default` is **optional** — most `select` blocks should omit it; blocking until a case fires is the common and expected pattern.
+*   `default` is only valid inside `select` blocks; it is not a general-purpose keyword.
 
 #### 9.3.2 Task Grouping and Management
 

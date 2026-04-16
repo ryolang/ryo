@@ -1,26 +1,24 @@
-This is a classic language design dilemma: **How to allow dangerous things (which are necessary) without letting the average user shoot themselves in the foot.**
+# Unsafe Code Architecture
 
-Since Ryo is written in Rust, we can leverage the compiler to act as a strict **Gatekeeper**.
+The core design problem: **how to allow dangerous operations (which are necessary) without letting the average user cause memory safety violations.**
 
-We will solve this using a **Capability-Based System**. `unsafe` exists in the language syntax, but the compiler **bans it by default** unless the project explicitly declares itself as a "System Binding Package."
-
-Here is the architectural proposal:
+Ryo solves this with a **Capability-Based System**. The `unsafe` keyword exists in the language syntax, but the compiler **bans it by default** unless the project explicitly declares itself as a "System Binding Package."
 
 ---
 
 ### 1. The Architecture: "App" vs. "Binding" Packages
 
-We split the ecosystem into two tiers of users:
+The ecosystem is split into two tiers:
 
 1.  **Application Developers (99%):** Write web servers, CLI tools, scripts.
-    *   **Rule:** If they type `unsafe`, the compiler throws a **Hard Error**: *"Unsafe operations are forbidden in application code."*
+    *   **Rule:** If `unsafe` appears, the compiler throws a **Hard Error**: *"Unsafe operations are forbidden in application code."*
 2.  **Binding Maintainers (1%):** Write wrappers for C libraries (SQLite, TileLang, GTK).
-    *   **Rule:** They must explicitly opt-in via configuration.
+    *   **Rule:** Explicit opt-in via configuration is required.
 
-### 2. How to Implement it (The "Gatekeeper")
+### 2. Implementation: The "Gatekeeper"
 
 #### Step A: The Configuration (`ryo.toml`)
-In the package manifest, we add a specific flag that changes the compiler mode for that specific package.
+The package manifest contains a flag that changes the compiler mode for that specific package.
 
 **For a Normal App (User):**
 ```toml
@@ -39,7 +37,7 @@ kind = "system"  # <--- THE MAGIC SWITCH
 ```
 
 #### Step B: The Compiler Check (In Rust)
-In your Rust compiler (specifically in the `SemanticAnalyzer` or `Checker` pass), you add a simple check when traversing the AST.
+In the `SemanticAnalyzer` or `Checker` pass, a check is added when traversing the AST.
 
 ```rust
 // src/checker.rs
@@ -48,17 +46,17 @@ fn check_unsafe_block(&self, block: &UnsafeBlock, config: &PackageConfig) {
     if config.kind != PackageKind::System {
         self.errors.push(Error::new(
             block.span,
-            "Forbidden Unsafe: You cannot use 'unsafe' blocks in an Application package.",
-            "Hint: Use a pre-existing library or set 'kind = \"system\"' in ryo.toml if you are writing a C binding."
+            "Forbidden Unsafe: 'unsafe' blocks are not allowed in Application packages.",
+            "Hint: Use a pre-existing library or set 'kind = \"system\"' in ryo.toml for C bindings."
         ));
     }
     // If kind == System, allow it.
 }
 ```
 
-### 3. The `unsafe` Syntax (Hidden but Standard)
+### 3. The `unsafe` Syntax
 
-Even though normal users can't use it, you must define the syntax for the library authors. It should look familiar (Rust/Go style) but be distinct enough to warn the maintainer.
+Even though normal users cannot access it, the syntax must be defined for library authors. It follows a familiar style (Rust/Go) but is distinct enough to signal danger.
 
 ```ryo
 # src/lib.ryo in a 'system' package
@@ -84,16 +82,16 @@ impl Buffer:
             free(self.ptr)
 ```
 
-### 4. Why this solves the problem?
+### 4. Why This Works
 
-1.  **DX Protection:** A new user trying Ryo cannot accidentally write memory-unsafe code. The compiler stops them immediately.
-2.  **Ecosystem Clarity:** If a user sees a package with `kind = "system"`, they know: *"This package contains dangerous code and interacts with C."*
-3.  **No "Super-User" Syntax:** We don't need separate file extensions (`.ryo` vs `.ffi`). It's standard language syntax, just gated by project configuration.
-4.  **Reviewability:** When auditing dependencies, you only need to audit the packages marked `kind = "system"`. Everything else is guaranteed safe by the compiler.
+1.  **DX Protection:** A new user cannot accidentally write memory-unsafe code. The compiler stops them immediately.
+2.  **Ecosystem Clarity:** A package with `kind = "system"` signals: *"This package contains dangerous code and interacts with C."*
+3.  **No "Super-User" Syntax:** No separate file extensions (`.ryo` vs `.ffi`) are needed. It is standard language syntax, gated by project configuration.
+4.  **Reviewability:** When auditing dependencies, only packages marked `kind = "system"` need review. Everything else is guaranteed safe by the compiler.
 
 ### 5. Implementation Roadmap Update
 
-To support this, we need to tweak **Milestone 21** in the roadmap.
+This requires adjustments to **Milestone 21** in the roadmap.
 
 **Milestone 21: C ABI & The "System" Capability**
 *   **Task 1:** Add `kind` field to `ryo.toml` parser.
@@ -101,11 +99,12 @@ To support this, we need to tweak **Milestone 21** in the roadmap.
 *   **Task 3:** Implement the "Gatekeeper" pass in the compiler (Block `unsafe` usage if `kind != system`).
 *   **Task 4:** Implement `extern "C"` parsing (allowed only in system packages).
 
-### 6. What about the Standard Library?
+### 6. The Standard Library
+
 The Standard Library (`std`) is effectively the "Root System Package."
 *   It is written in Ryo.
 *   It is compiled with the "System" capability enabled.
 *   It internally uses `unsafe` to implement `File.open`, `Socket.connect`, etc.
 *   It exposes **Safe** structs (`File`, `Socket`) to the user.
 
-This proves the model works: The user uses `std` safely, never knowing it contains `unsafe` code internally.
+This proves the model works: the user interacts with `std` safely, never knowing it contains `unsafe` code internally.

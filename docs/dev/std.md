@@ -1,18 +1,18 @@
-Based on the "System Package" architecture and the need to validate the "Ownership Lite" model, the first Standard Library implementation should be **`std.io`** (Console Input/Output), backed by a hidden **`std.sys`** (C Bindings).
+# First Standard Library Module: `std.io`
 
-Here is why this is the correct starting point and how to implement it to validate your architecture.
+The first standard library implementation should be **`std.io`** (Console Input/Output), backed by a hidden **`std.sys`** (C Bindings). This choice validates the "System Package" architecture and the "Ownership Lite" model.
 
-### 1. The Choice: `std.io` (The Console)
+### 1. Why `std.io` First
 
-You should implement `std.io` first because it forces you to solve the **three hardest infrastructure problems** immediately, before the language gets complex:
+Implementing `std.io` first forces resolution of the **three hardest infrastructure problems** immediately, before the language grows complex:
 
-1.  **The Unsafe Boundary:** You must call C functions (`write`, `read`) safely.
-2.  **String Layout:** You must decide how `str` (Ryo) maps to `char*` (C).
+1.  **The Unsafe Boundary:** Calling C functions (`write`, `read`) safely.
+2.  **String Layout:** Deciding how `str` (Ryo) maps to `char*` (C).
 3.  **Error Handling:** I/O is the first place where `!T` (Error Unions) matters.
 
 ### 2. The Architecture (Layered Implementation)
 
-You will actually create **two** modules. This validates your `kind="system"` proposal from the previous discussion.
+Two modules are needed. This validates the `kind="system"` proposal.
 
 #### Layer 1: `std.sys` (The Hidden Foundation)
 *   **Location:** `src/std/sys.ryo`
@@ -33,7 +33,7 @@ package fn libc_free(ptr: *void):
     extern "C":
         fn free(ptr: *void)
 ```
-*Note: Use `package` visibility so only the Standard Library can see these.*
+*Note: `package` visibility restricts access to the Standard Library only.*
 
 #### Layer 2: `std.io` (The Safe Facade)
 *   **Location:** `src/std/io.ryo`
@@ -53,9 +53,6 @@ pub fn print(s: &str) -> WriteError!void:
     len = s.len()
     
     # 2. Call the system layer
-    # (Note: In a real implementation, this 'unsafe' block would live 
-    # inside a helper in std.sys to keep std.io clean, but for v0.1 
-    # we might allow std to use unsafe internally)
     unsafe:
         res = sys.libc_write(1, ptr, len) # 1 = stdout
     
@@ -70,27 +67,27 @@ pub fn println(s: &str) -> WriteError!void:
     return void
 ```
 
-### 3. Why this validates your Roadmap
+### 3. Validation
 
 Implementing just `print` and `println` proves that:
 
-1.  **Milestone 3 (CodeGen):** You can link against `libc`.
-2.  **Milestone 10 (Strings):** You have successfully defined the memory layout of `&str` (Fat Pointer) so that `s.ptr()` and `s.len()` work correctly.
-3.  **Milestone 21 (FFI Gatekeeper):** Your compiler correctly allows `extern "C"` in `std.sys` but would forbid it in a user's `main.ryo`.
+1.  **Milestone 3 (CodeGen):** The compiler can link against `libc`.
+2.  **Milestone 10 (Strings):** The memory layout of `&str` (Fat Pointer) is correctly defined so that `s.ptr()` and `s.len()` work.
+3.  **Milestone 21 (FFI Gatekeeper):** The compiler correctly allows `extern "C"` in `std.sys` but forbids it in a user's `main.ryo`.
 
 ### 4. The Next Step: `std.mem` (The Allocator)
 
-Once `std.io` works for *literals* (`print("hello")`), you immediately hit a wall: **You cannot print dynamic text** (`print("Hello " + name)`).
+Once `std.io` works for literals (`print("hello")`), a wall is immediately hit: **dynamic text cannot be printed** (`print("Hello " + name)`).
 
-This dictates the **Second** stdlib module: **`std.mem`**.
+This dictates the **second** stdlib module: **`std.mem`**.
 
 *   **Role:** Wraps `malloc` and `free`.
-*   **Enables:** The implementation of the owned `str` type (concatenation) and `list` (arrays).
-*   **Safety:** This is where you implement the **Concurrent Allocator** requirement (Milestone 30 prep) by linking `mimalloc` or just using thread-safe `libc malloc` initially.
+*   **Enables:** The owned `str` type (concatenation) and `list` (arrays).
+*   **Safety:** This is where the **Concurrent Allocator** requirement (Milestone 30 prep) is addressed by linking `mimalloc` or using thread-safe `libc malloc` initially.
 
 ### Summary
 1.  **First:** `std.sys` (Private, Unsafe C bindings).
 2.  **Second:** `std.io` (Public, Safe Console Output).
 3.  **Third:** `std.mem` (Public/Private, Allocator for Strings/Lists).
 
-This order gives you "Hello World" first (high morale), then immediately forces you to solve memory management (the core architecture).
+This order delivers "Hello World" first (high morale), then immediately forces resolution of memory management (the core architecture).

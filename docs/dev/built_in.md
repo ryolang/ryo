@@ -1,16 +1,16 @@
-For Ryo's "General Purpose" + "DX-First" goals, the distinction is critical.
+# Built-in vs Standard Library
 
-*   **Built-in:** Things the **Compiler** must know to generate machine code (Grammar, Primitives, Memory Layout).
-*   **Standard Library:** Things the **Runtime** provides (I/O, OS interaction, Complex logic).
+The distinction between built-in and standard library is critical for Ryo's "General Purpose" and "DX-First" goals.
 
-Since you are writing the Runtime in Rust, you should aim to keep the **Built-in set as small as possible** to keep the compiler simple, while making the **Standard Library feel "magic"** via the Prelude (auto-imports).
+*   **Built-in:** Elements the **compiler** must know to generate machine code (grammar, primitives, memory layout).
+*   **Standard Library:** Elements the **runtime** provides (I/O, OS interaction, complex logic).
 
-Here is the breakdown:
+The runtime is written in Rust. The **built-in set should remain as small as possible** to keep the compiler simple, while the **standard library should feel seamless** via the Prelude (auto-imports).
 
 ---
 
 ### 1. Built-in (The Compiler's Domain)
-These cannot be implemented in user code. The lexer/parser/codegen handles these directly.
+These cannot be implemented in user code. The lexer/parser/codegen handles them directly.
 
 #### A. Primitive Types
 The compiler maps these directly to CPU registers or Cranelift types.
@@ -26,9 +26,9 @@ The compiler needs these to run the Borrow Checker and Layout generation.
 *   `?T` (Optional/Nullable - Logic for `none` and `orelse` is hardcoded in codegen).
 
 #### C. "Magic" Structs (Language Lang Items)
-These are technically structs defined in the library, but the **Compiler knows their internal layout** to support literals.
-*   **`&str` (String Slice):** The compiler creates these when it sees a literal `"hello"`. It builds the fat pointer (ptr + len).
-*   **`Error`:** The compiler needs to generate the `!T` (Error Union) layout automatically.
+These are technically structs defined in the library, but the **compiler knows their internal layout** to support literals.
+*   **`&str` (String Slice):** The compiler creates these for string literals like `"hello"`, building the fat pointer (ptr + len).
+*   **`Error`:** The compiler generates the `!T` (Error Union) layout automatically.
 *   **`list` & `map` (v0.1 only):** Because generics are hardcoded in v0.1, the compiler treats `list[...]` syntax as a compiler intrinsic, not a user struct.
 
 ---
@@ -38,13 +38,13 @@ These are normal modules (written in Ryo or Rust-via-FFI).
 
 #### A. The "Core" Module (`std.core` / `std.mem`)
 Low-level machinery.
-*   **`struct str` (Owned String):** This is just a struct wrapping a pointer/len/cap. The compiler doesn't *need* to know it's special, except for the implicit coercion rule.
+*   **`struct str` (Owned String):** A struct wrapping a pointer/len/cap. The compiler does not need to know it is special, except for the implicit coercion rule.
 *   **`fn panic(msg)`:** Wraps the runtime's abort logic.
 *   **`trait Drop`:** Defined here, but the compiler looks for it to insert destructor calls.
 *   **`trait Iterator`:** Defined here, used by `for` loops.
 
 #### B. The "System" Module (`std.sys` - Hidden)
-The unsafe glue layer (as discussed previously).
+The unsafe glue layer.
 *   `libc_malloc`, `libc_write`, `libc_open`.
 
 #### C. The User-Facing Modules
@@ -58,18 +58,18 @@ The unsafe glue layer (as discussed previously).
 ---
 
 ### 3. The "Prelude" (The DX Bridge)
-To make Ryo feel like Python, you don't want users typing `import std.io` just to print.
-The **Prelude** is a set of items that are **automatically imported** into every file.
+To maintain Python-like ergonomics, users should not need `import std.io` just to print.
+The **Prelude** is a set of items **automatically imported** into every file.
 
-**What goes in the Prelude?**
+**Prelude contents:**
 1.  **Core Types:** `int`, `float`, `str`, `bool`, `list`, `map`, `void`.
 2.  **Core Functions:** `print`, `println`, `panic`, `assert`.
-3.  **Core Traits:** `Drop`, `Error` (so you can return `!T` without imports).
-4.  **Constructors:** `Some`, `None` (if you use enums for optionals, though Ryo uses `?T`).
+3.  **Core Traits:** `Drop`, `Error` (so `!T` works without imports).
+4.  **Constructors:** `Some`, `None` (if enums are used for optionals, though Ryo uses `?T`).
 
 ---
 
-### 4. Decision Matrix: Where does it go?
+### 4. Decision Matrix: Where Does It Go?
 
 Use this checklist when implementing a feature:
 
@@ -86,8 +86,8 @@ Use this checklist when implementing a feature:
 
 ### 5. Roadmap Adjustment
 
-For **Phase 1**, your goal is to implement the **Built-ins**.
-For **Phase 2**, your goal is to implement the **Stdlib** (using the Rust Runtime strategy).
+**Phase 1** covers implementing the **Built-ins**.
+**Phase 2** covers implementing the **Stdlib** (using the Rust Runtime strategy).
 
 **Example: The `list` implementation**
 1.  **Compiler (Built-in):** Parses `[1, 2, 3]`. Allocates memory for 3 integers. Generates a `list` struct.
