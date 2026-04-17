@@ -15,6 +15,7 @@ mod evaluator;
 mod hir;
 mod indent;
 mod lexer;
+mod lower;
 mod parser;
 
 // Constants for magic strings
