@@ -2236,6 +2236,172 @@ impl[T] Stack[T]:
 
 **Timeline:** v1.7 (18-24 months after v0.1.0)
 
+### Constrained Types & Distinct Types (Ada-Inspired Type Safety)
+**Goal:** Add range-bounded types and strong typedefs for compile-time constraint enforcement
+
+**Why Post-v0.1.0:**
+- Requires mature attribute system and type checker (Milestones 17, 26)
+- Builds on type conversion syntax (`TargetType(value)`) already in v0.1
+- Not essential for initial adoption (manual validation works)
+- Ada-inspired features benefit from community feedback on syntax
+
+**Features:**
+
+**1. Constrained Types (Range Types)**
+
+Define numeric types with compile-time and runtime bounds:
+
+```ryo
+type Port = int(1..65535)
+type Percentage = float(0.0..100.0)
+type HttpStatus = int(100..599)
+
+fn serve(port: Port):
+    bind(port)  # guaranteed valid
+
+fn main():
+    serve(Port(8080))              # compile-time check: ok
+    serve(Port(70000))             # compile-time error: out of range
+    p = Port(user_input)           # runtime check: panics if out of range
+    p = try Port.checked(input)    # safe: returns RangeError!Port
+```
+
+**Implementation Tasks:**
+1. **Type System:** Add `ConstrainedType` variant to type representation (base type + min + max)
+2. **Parser:** Parse `type Name = BaseType(min..max)` syntax (reuses range `..` operator)
+3. **Compile-Time Check:** When constructing from a literal, verify bounds during type checking
+4. **Runtime Check:** When constructing from a dynamic value, emit bounds check + panic/error
+5. **`.checked()` Method:** Generate a function that returns `RangeError!T` instead of panicking
+6. **Introspection:** Expose `.min` and `.max` as compile-time constants
+7. **Arithmetic:** Operations on constrained types produce the base type (explicit re-constraining required)
+
+**2. Distinct Types (Strong Typedefs)**
+
+Create new nominal types that share representation but prevent accidental mixing:
+
+```ryo
+type Meters = distinct float
+type Seconds = distinct float
+
+fn speed(distance: Meters, time: Seconds) -> float:
+    return float(distance) / float(time)
+
+d = Meters(100.0)
+t = Seconds(9.58)
+v = speed(d, t)        # ok
+v = speed(t, d)        # compile error: expected Meters, got Seconds
+```
+
+**Implementation Tasks:**
+1. **Type System:** Add `DistinctType` variant (wraps base type with new nominal identity)
+2. **Parser:** Parse `type Name = distinct BaseType` syntax
+3. **Type Checker:** Distinct types are incompatible with their base type and each other
+4. **Conversion:** Explicit `BaseType(distinct_val)` and `DistinctType(base_val)` required
+5. **Composition:** Allow `type Port = distinct int(1..65535)` (distinct + constrained)
+6. **Codegen:** Zero overhead — same representation as base type, all checks are compile-time
+
+**Effort:** ~3-4 weeks total (constrained: 2-3 weeks, distinct: 1 week)
+**Dependencies:** Type checker (Phase 3), type conversion syntax (v0.1)
+**Timeline:** v0.2 (early post-v0.1.0)
+
+### Contracts (`#[pre]`/`#[post]`)
+**Goal:** Add function precondition and postcondition attributes for enforced documentation
+
+**Why Post-v0.1.0:**
+- Requires attribute system (`#[...]` parsing and AST representation)
+- Requires functions, boolean expressions, `panic()` — all v0.1 features
+- Contracts are syntactic sugar over `if not: panic()`, so once prerequisites exist the implementation is small
+
+**Features:**
+
+```ryo
+#[pre(amount > 0)]
+#[pre(balance >= amount)]
+#[post(result.balance == balance - amount)]
+fn withdraw(balance: int, amount: int) -> BankError!Account:
+    if amount > balance:
+        return BankError("insufficient funds")
+    return Account(balance=balance - amount)
+
+#[pre(items.len() > 0)]
+fn average(items: list[float]) -> float:
+    return sum(items) / float(items.len())
+```
+
+**Implementation Tasks:**
+
+1. **Attribute Parsing (shared cost):**
+   - Extend lexer to distinguish `#[` from `#` comments
+   - Parse `#[name(expression)]` into attribute AST nodes
+   - Store `Vec<Attribute>` on function definitions
+   - *This infrastructure is shared with `#[test]`, `#[blocking]`, `#[named]`*
+
+2. **Precondition Injection:**
+   - For each `#[pre(expr)]`, insert `if not (expr): panic("precondition failed: {expr_text} at {function} ({file}:{line})")` at function entry
+   - Multiple `#[pre]` attributes checked in order
+
+3. **Postcondition Injection:**
+   - For each `#[post(expr)]`, rewrite every `return value` to:
+     - Store value in `__result` temporary
+     - Check `if not (expr_with_result_substituted): panic(...)`
+     - Return `__result`
+   - The identifier `result` in `#[post]` expressions refers to the return value
+   - For error union returns, postconditions only apply to the success path
+
+4. **Configuration:**
+   - `--contracts=enforce` (default): Emit all checks
+   - `--contracts=off`: Strip all contract checks (zero overhead)
+   - Profile-based configuration in `ryo.toml`
+
+5. **Testing:**
+   - Tests for precondition violations (should panic with clear message)
+   - Tests for postcondition violations
+   - Tests for multiple return points with postconditions
+   - Tests for error union functions (postcondition on success path only)
+   - Tests for `--contracts=off` (should not emit checks)
+
+**Visible Progress:** Functions declare their invariants as enforced documentation. Violations produce clear diagnostics.
+
+**Violation Output:**
+```
+ContractViolation: precondition failed: amount > 0
+  in function 'withdraw' at src/bank.ryo:3
+  contract defined at src/bank.ryo:1
+```
+
+**Effort:** ~1-2 weeks (once attribute system exists from `#[test]` milestone)
+**Dependencies:** Attribute system (Milestone 26), functions (M4), boolean expressions (M8), panic (M25)
+**Timeline:** v0.2 (ships alongside attribute system)
+
+**Hardest Part:** Handling `#[post]` with multiple return points — each `return` must be rewritten to check the postcondition before returning. This is a well-understood AST transformation but requires care.
+
+### Named Parameters (`#[named]`)
+**Goal:** Allow functions to require callers to use named arguments
+
+**Why Post-v0.1.0:**
+- Requires attribute system (shared with `#[test]`, `#[pre]`, `#[post]`)
+- Low priority — optional call-site ergonomics, not a safety feature
+
+**Features:**
+
+```ryo
+#[named]
+fn create_user(name: str, age: int, role: str):
+    # ...
+
+create_user(name="Alice", age=30, role="admin")   # ok
+create_user("Alice", 30, "admin")                   # compile error
+```
+
+**Implementation Tasks:**
+1. Parse `#[named]` attribute (reuses attribute system)
+2. At call sites for `#[named]` functions, verify all arguments are named
+3. Clear error message: "function 'create_user' requires named arguments"
+
+**Effort:** ~2-3 days (trivial once attribute system exists)
+**Dependencies:** Attribute system (Milestone 26)
+**Timeline:** v0.3
+
 ### Additional Post-v0.1.0 Features
 
 **Tooling & Developer Experience:**
@@ -2302,9 +2468,13 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 ✅ **Developer Experience:** Clear error messages with suggestions, comprehensive documentation
 
 **What v0.1.0 does NOT include** (deferred to Phase 5):
-- ❌ Task/Future runtime (v0.2+)
-- ❌ FFI/unsafe blocks (v0.3+)
-- ❌ Full generics system (v0.4+)
+- ❌ Constrained types / range types (v0.2)
+- ❌ Distinct types / strong typedefs (v0.2)
+- ❌ Contracts — `#[pre]`/`#[post]` (v0.2)
+- ❌ Task/Future runtime (v0.4+)
+- ❌ FFI/unsafe blocks (v0.2+)
+- ❌ Full generics system (v0.3+)
+- ❌ Named parameters — `#[named]` (v0.3)
 - ❌ LSP/advanced tooling (v0.2+)
 
 This foundation enables building **synchronous applications** including CLI tools, build systems, compilers, data processing pipelines, and game engines. Concurrency/FFI features will follow based on community needs.

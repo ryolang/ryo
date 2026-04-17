@@ -105,6 +105,22 @@ match value:
     Color.Red: print("red")
     Color.Green: print("green")
     Color.Blue: print("blue")
+
+# Constrained types (v0.2)
+type Port = int(1..65535)
+type Percentage = float(0.0..100.0)
+p = Port(8080)
+
+# Distinct types (v0.2)
+type Meters = distinct float
+type Seconds = distinct float
+d = Meters(100.0)
+
+# Contracts (v0.2)
+#[pre(x > 0)]
+#[post(result >= x)]
+fn double(x: int) -> int:
+    return x * 2
 ```
 
 ---

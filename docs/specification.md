@@ -86,8 +86,12 @@ This specification describes the full target design. Not all features are availa
 | Modules & packages | Yes | | | |
 | FFI, `unsafe`, `ryo-bindgen` | | Yes | | |
 | REPL (JIT) | | Yes | | |
+| Constrained types (range types) | | Yes | | |
+| Distinct types (strong typedefs) | | Yes | | |
+| Contracts (`#[pre]`/`#[post]`) | | Yes | | |
 | User-defined generics (monomorphization) | | | Yes | |
 | Dynamic dispatch (`dyn Trait`) | | | Yes | |
+| Named parameters (`#[named]`) | | | Yes | |
 | Concurrency runtime (task/future/channel) | | | | Yes |
 | `comptime` (compile-time execution) | | | | TBD |
 
@@ -823,6 +827,105 @@ This unified approach makes `ryo-bindgen` a cornerstone of Ryo's ecosystem, prov
 ### 4.12 Type Conversion Syntax
 *   Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
+### 4.13 Constrained Types (Range Types)
+
+> **Status: Planned for v0.2** — This section describes the target design for constrained types. Not available in v0.1.
+
+Constrained types attach compile-time and runtime bounds to numeric types, eliminating an entire class of validation bugs. Inspired by Ada's range types, adapted to Ryo's syntax and philosophy.
+
+*   **Syntax:** `type Name = BaseType(min..max)`
+
+    ```ryo
+    type Port = int(1..65535)
+    type Percentage = float(0.0..100.0)
+    type HttpStatus = int(100..599)
+    type Latitude = float(-90.0..90.0)
+    ```
+
+*   **Compile-Time Validation:** When a constrained type is constructed from a literal, the compiler checks bounds statically:
+
+    ```ryo
+    p = Port(8080)      # ok — checked at compile time
+    p = Port(70000)     # compile error: 70000 outside range 1..65535
+    ```
+
+*   **Runtime Validation:** When constructed from a dynamic value, bounds are checked at runtime:
+
+    ```ryo
+    fn serve(port: Port):
+        bind(port)  # guaranteed valid — no further checks needed
+
+    fn main():
+        user_input = parse_int(args[1])
+        p = Port(user_input)         # runtime check, panics if out of range
+    ```
+
+*   **Safe Runtime Validation:** Use `.checked()` to return an error instead of panicking:
+
+    ```ryo
+    p = try Port.checked(user_input)  # returns RangeError!Port
+    ```
+
+*   **Introspection:** Access type bounds at compile time:
+
+    ```ryo
+    Port.min   # 1
+    Port.max   # 65535
+    ```
+
+*   **Arithmetic Safety:** Operations on constrained types produce the base type. Re-constraining requires explicit construction:
+
+    ```ryo
+    a = Port(80)
+    b = a + 1          # type is int, not Port
+    c = Port(a + 1)    # runtime check: still in range?
+    ```
+
+*   *(Rationale: Python developers write `if port < 1 or port > 65535: raise ValueError(...)` constantly. Constrained types eliminate this pattern — define the constraint once in the type, enforce it everywhere automatically. Consistent with existing `TargetType(value)` conversion syntax. For the AI-writes, human-reviews workflow: the AI writes the constraint once, the compiler enforces it forever, and the human reviewer sees `port: Port` and knows it's valid without tracing validation logic.)*
+
+### 4.14 Distinct Types (Strong Typedefs)
+
+> **Status: Planned for v0.2** — This section describes the target design for distinct types. Not available in v0.1.
+
+Distinct types create new nominal types that share a representation with their base type but cannot be used interchangeably. This prevents unit-mismatch bugs at zero runtime cost.
+
+*   **Syntax:** `type Name = distinct BaseType`
+
+    ```ryo
+    type Meters = distinct float
+    type Seconds = distinct float
+    type Velocity = distinct float
+    ```
+
+*   **Type Safety:** Distinct types cannot be mixed in operations:
+
+    ```ryo
+    fn speed(distance: Meters, time: Seconds) -> Velocity:
+        return Velocity(float(distance) / float(time))
+
+    d = Meters(100.0)
+    t = Seconds(9.58)
+    v = speed(d, t)        # ok
+    v = speed(t, d)        # compile error: expected Meters, got Seconds
+    ```
+
+*   **Conversion:** Convert between distinct type and base type using function-call syntax:
+
+    ```ryo
+    m = Meters(42.0)       # float → Meters
+    raw = float(m)         # Meters → float (explicit unwrap)
+    ```
+
+*   **Composition with Constrained Types:** Distinct and constrained types can be combined:
+
+    ```ryo
+    type Port = distinct int(1..65535)
+    type UserId = distinct int
+    type Temperature = distinct float(-273.15..1000.0)
+    ```
+
+*   *(Rationale: The Mars Climate Orbiter was lost because of a unit-mismatch bug — meters vs. feet. Distinct types catch this class of error at compile time with zero runtime cost. The type has the same representation as its base, so there is no performance penalty. Combined with constrained types, this provides Ada-level type safety with Python-like syntax.)*
+
 
 ## 5. Memory Management: "Ownership Lite"
 
@@ -1148,6 +1251,27 @@ All four layers work together to deliver Ryo's promise: **memory safety that fee
 ### 6.1 Functions & Methods
 
 *   **Functions/Methods:** Standard definition/call. Return single value (can be tuple). Methods use `self` (implicit immutable borrow, consistent with Rule 2), `&mut self` (explicit mutable borrow), or `move self` (take ownership).
+
+### 6.1.1 Named Parameters (`#[named]`)
+
+> **Status: Planned for v0.3** — This feature is not available in v0.1 or v0.2.
+
+Functions can require callers to use named arguments by applying the `#[named]` attribute. This prevents argument-order bugs, especially for functions with multiple parameters of the same type.
+
+```ryo
+#[named]
+fn create_user(name: str, age: int, role: str):
+    # ...
+
+# Callers MUST use named arguments:
+create_user(name="Alice", age=30, role="admin")   # ok
+create_user("Alice", 30, "admin")                   # compile error: named arguments required
+```
+
+*   **Opt-in per function**: Only functions marked `#[named]` enforce this. Simple functions like `fn add(a: int, b: int)` don't need it.
+*   **Partial naming**: Without `#[named]`, callers can optionally use named arguments at any call site (as in Python). The attribute makes naming mandatory.
+
+*(Rationale: For the AI-writes, human-reviews workflow, named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature. Prevents the common bug of swapping arguments with the same type, e.g., `create_user("Alice", "admin", 30)` vs `create_user("Alice", 30, "admin")`.)*
 
 ### 6.2 Closures & Lambda Expressions
 
@@ -2008,6 +2132,136 @@ error-traces = "off"  # Zero overhead, manual logging required
 - Useful for CI/CD where you want concise logs
 
 *Rationale: Configuration respects DX-first philosophy while providing escape hatches for performance-critical code. Smart defaults mean most developers never need to configure anything.*
+
+### 7.11 Contracts (`#[pre]`/`#[post]`)
+
+> **Status: Planned for v0.2** — This section describes the target design for function contracts. Not available in v0.1.
+
+Contracts are compile-time-checked annotations that declare what a function expects (preconditions) and guarantees (postconditions). Inspired by Ada 2012's contract-based programming, adapted to Ryo's attribute system.
+
+#### **Syntax**
+
+Contracts use the existing `#[...]` attribute syntax with boolean expressions:
+
+```ryo
+#[pre(amount > 0)]
+#[pre(balance >= amount)]
+#[post(result.balance == balance - amount)]
+fn withdraw(balance: int, amount: int) -> BankError!Account:
+    if amount > balance:
+        return BankError("insufficient funds")
+    return Account(balance=balance - amount)
+```
+
+#### **Preconditions (`#[pre]`)**
+
+Preconditions are checked at function entry. A violation indicates a bug in the *caller*.
+
+```ryo
+#[pre(items.len() > 0)]
+fn average(items: list[float]) -> float:
+    return sum(items) / float(items.len())
+
+#[pre(index >= 0)]
+#[pre(index <= items.len())]
+fn insert_at(items: &mut list[int], index: int, value: int):
+    items.insert(index, value)
+```
+
+Multiple `#[pre]` attributes on the same function are checked in order. All must hold.
+
+#### **Postconditions (`#[post]`)**
+
+Postconditions are checked before every return point. A violation indicates a bug in the *function itself*. The special identifier `result` refers to the function's return value.
+
+```ryo
+#[post(result >= 0)]
+fn abs(x: int) -> int:
+    if x < 0:
+        return -x
+    return x
+
+#[post(result.len() == items.len())]
+fn sort(items: list[int]) -> list[int]:
+    # ... sorting logic ...
+```
+
+For functions returning error unions, `result` refers to the success value — postconditions are only checked on the success path.
+
+#### **Violation Behavior**
+
+When a contract is violated, the behavior depends on the build profile:
+
+```
+ContractViolation: precondition failed: amount > 0
+  in function 'withdraw' at src/bank.ryo:3
+  contract defined at src/bank.ryo:1
+```
+
+Violations call `panic()` with a descriptive message including the expression text, function name, and source location.
+
+#### **Configuration**
+
+Contracts are controlled by the `--contracts` compiler flag and build profiles:
+
+| Level | Behavior | Use Case |
+|-------|----------|----------|
+| `enforce` (default) | Check all contracts, panic on violation | Development, most production |
+| `off` | Strip all contract checks (zero overhead) | Performance-critical production |
+
+**Build-time control:**
+```bash
+ryo build                     # Default: enforce contracts
+ryo build --contracts=off     # Strip contracts for max performance
+```
+
+**Profile-based configuration:**
+```toml
+# ryo.toml
+[profile.dev]
+contracts = "enforce"     # Always check in development
+
+[profile.release]
+contracts = "enforce"     # Safe default for production
+
+[profile.production]
+contracts = "off"         # Strip for max performance if needed
+```
+
+#### **Implementation**
+
+Contracts are syntactic sugar over existing language features. The compiler transforms:
+
+```ryo
+#[pre(x > 0)]
+#[post(result > x)]
+fn double(x: int) -> int:
+    return x * 2
+```
+
+Into (conceptually):
+
+```ryo
+fn double(x: int) -> int:
+    if not (x > 0):
+        panic("precondition failed: x > 0 at double (src/math.ryo:1)")
+    __result = x * 2
+    if not (__result > x):
+        panic("postcondition failed: result > x at double (src/math.ryo:2)")
+    return __result
+```
+
+No new runtime, no new IR, no new type system concepts — contracts reuse `if`, `not`, `panic`, and string formatting.
+
+#### **Design Principles**
+
+*   Contracts are **runtime-checked assertions**, not formal verification proofs.
+*   Contracts use the same attribute system as `#[test]` and `#[blocking]` — no new syntax needed.
+*   **Smart defaults + escape hatches**: Enforce by default, strip when needed.
+*   Postconditions handle multiple return points — each `return` is rewritten to check the contract before returning.
+*   For the AI-writes, human-reviews workflow: the AI writes contracts as executable documentation, the compiler enforces them, and the human reviewer reads them as a formal specification of intent.
+
+*(Rationale: Ada 2012 proved that contracts dramatically improve code correctness with minimal implementation cost. In Ryo, contracts are syntactic sugar over `if not: panic()`, making them one of the cheapest features to implement once the attribute system exists. They serve as enforced documentation — more reliable than comments, less ceremonial than test cases for basic invariants.)*
 
 ## 8. Traits (Behavior)
 
@@ -3101,6 +3355,10 @@ Future features and extensions are listed in this section below.
 *   **WebAssembly Target Details** (ABI, JS interop bindings, WASI support).
 
 **Planned Future Extensions:**
+*   **Constrained Types** (Range types with compile-time/runtime bounds checking — see Section 4.13)
+*   **Distinct Types** (Strong typedefs for unit safety — see Section 4.14)
+*   **Contracts** (`#[pre]`/`#[post]` function contracts — see Section 7.11)
+*   **Named Parameters** (`#[named]` mandatory named arguments — see Section 6.1.1)
 *   **Compile-Time Execution** (`comptime` blocks and functions)
 *   **Foreign Function Interface & Unsafe Operations** (C FFI, raw pointers, unsafe blocks)
 *   **CSP Concurrency Extensions** (channels, select, spawn - optional)
