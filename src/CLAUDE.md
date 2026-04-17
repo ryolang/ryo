@@ -13,8 +13,22 @@ Apply the CRISP and SOLID patterns.
 
 **Compilation pipeline**:
 ```
-Source → Lexer → Parser → Codegen → Object File → Linker → Executable
+Source → Lexer → Indent Preprocessor → Parser → Lower (HIR) → Codegen → Object File → Linker → Executable
 ```
+
+**Source modules** (in `src/`):
+- `main.rs` — CLI definition and command dispatch
+- `lexer.rs` — Logos-based tokenizer
+- `indent.rs` — CPython-style Indent/Dedent token insertion
+- `parser.rs` — Chumsky-based parser producing AST
+- `ast.rs` — AST node definitions
+- `lower.rs` — AST → HIR lowering with scope resolution and type checking
+- `hir.rs` — High-level IR data structures (post-analysis, fully typed)
+- `builtins.rs` — Builtin function registry (print, future builtins)
+- `codegen.rs` — Cranelift IR generation from HIR
+- `errors.rs` — CompilerError type
+- `linker.rs` — Linker discovery and executable linking
+- `pipeline.rs` — Pipeline orchestration (lex, parse, lower, compile, run)
 
 ## Testing Strategy
 

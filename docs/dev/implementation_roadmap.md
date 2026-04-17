@@ -129,12 +129,12 @@ This roadmap outlines the planned development of the Ryo programming language co
 - AOT only (JIT not implemented, deferred to future milestone for REPL)
 - **Exit codes:** All programs exit with 0 (success) by default - explicit returns coming in Milestone 4
 - Object file and executable remain in current directory after execution
-- `ryo ir` command provides IR generation confirmation (full IR display requires deeper Cranelift integration)
+- `ryo ir` command now displays actual Cranelift IR (fixed in M4)
 
 
 **What's NOT Implemented (Deferred):**
 - ❌ JIT compilation (for REPL)
-- ❌ Direct IR display (technical limitation: would require pub access to Cranelift Context display)
+- ✅ Direct IR display → **Implemented in Milestone 4** via `compile_and_dump_ir()`
 - ✅ String support → **Implemented in Milestone 3.5**
 - ❌ Functions (beyond main)
 - ❌ Control flow
@@ -223,9 +223,13 @@ _ = print("Second\n")
 - Lexer: `Arrow` (`->`), `Newline`, synthetic `Indent`/`Dedent` tokens
 - AST: `StmtKind::FunctionDef`, `StmtKind::Return`, `StmtKind::ExprStmt`, `ExprKind::Ident`
 - Parser: function definitions (`fn name(params) -> type:`), return statements, expression statements, variable references
-- Codegen: two-pass compilation (declare-then-define) for forward references, Cranelift `Variable` storage for locals/params, user function calls
+- HIR layer (`src/hir.rs`, `src/lower.rs`): post-analysis IR with full type resolution, scope checking, and implicit main wrapping — analogous to Zig's AIR
+- Codegen: refactored to consume HIR (not AST), two-pass compilation (declare-then-define) for forward references, `FunctionContext` struct, Cranelift `Variable` storage for locals/params, user function calls
+- Builtin function registry (`src/builtins.rs`) for `print()` and future builtins
+- `ryo ir` command now displays actual Cranelift IR
+- `main.rs` split into focused modules: `errors.rs`, `linker.rs`, `pipeline.rs`
 - Backward compatibility: flat programs without `fn main()` are wrapped in a synthetic implicit main returning 0
-- 80 tests passing (49 unit + 31 integration)
+- 93 tests passing (62 unit + 31 integration)
 
 **Visible Progress:** Can compile and run programs with multiple functions. Programs can return explicit exit codes via `fn main() -> int`.
 

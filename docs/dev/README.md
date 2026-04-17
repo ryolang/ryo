@@ -10,7 +10,7 @@ This directory contains implementation notes, architectural decisions, and desig
 
 | File | Content | Next Action |
 |---|---|---|
-| [compilation_pipeline.md](compilation_pipeline.md) | 5-phase pipeline (lex → parse → codegen → link → execute) with Rust code examples | **Delete** when compiler source code is self-documenting with inline comments |
+| [compilation_pipeline.md](compilation_pipeline.md) | 6-phase pipeline (lex → parse → lower/HIR → codegen → link → execute) with Rust code examples | **Delete** when compiler source code is self-documenting with inline comments |
 | [token.rs.md](token.rs.md) | Lexer implementation guide using `logos` crate | **Delete** when lexer is stable — reference lives in source code |
 | [parser.rs.md](parser.rs.md) | Parser implementation guide using `chumsky` crate | **Delete** when parser is stable — reference lives in source code |
 | [project_structure.md](project_structure.md) | Rust workspace crate organization (ryo-core, ryo-parser, ryo-codegen, etc.) | **Delete** when workspace structure is stable — a top-level `ARCHITECTURE.md` or cargo workspace layout is sufficient |

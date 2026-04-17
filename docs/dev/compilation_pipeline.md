@@ -9,32 +9,34 @@ This document provides a detailed technical explanation of how Ryo compiles sour
 1. [Overview](#overview)
 2. [Phase 1: Lexical Analysis](#phase-1-lexical-analysis)
 3. [Phase 2: Syntax Analysis](#phase-2-syntax-analysis)
-4. [Phase 3: Code Generation](#phase-3-code-generation)
-5. [Phase 4: Linking](#phase-4-linking)
-6. [Phase 5: Execution](#phase-5-execution)
-7. [Design Decisions](#design-decisions)
-8. [Future Evolution](#future-evolution)
+4. [Phase 3: Lowering (AST → HIR)](#phase-3-lowering-ast--hir)
+5. [Phase 4: Code Generation](#phase-4-code-generation)
+6. [Phase 5: Linking](#phase-5-linking)
+7. [Phase 6: Execution](#phase-6-execution)
+8. [Design Decisions](#design-decisions)
+9. [Future Evolution](#future-evolution)
 
 ---
 
 ## Overview
 
-The Ryo compilation pipeline transforms source code through five distinct phases:
+The Ryo compilation pipeline transforms source code through six distinct phases:
 
 ```
-┌─────────────┐    ┌────────┐    ┌────────┐    ┌─────────┐    ┌────────┐    ┌────────────┐
-│ Source Code │ -> │ Lexer  │ -> │ Parser │ -> │ Codegen │ -> │ Linker │ -> │ Executable │
-│  (.ryo)     │    │(Tokens)│    │ (AST)  │    │  (.o)   │    │        │    │  (native)  │
-└─────────────┘    └────────┘    └────────┘    └─────────┘    └────────┘    └────────────┘
+┌─────────────┐    ┌────────┐    ┌────────┐    ┌─────────┐    ┌─────────┐    ┌────────┐    ┌────────────┐
+│ Source Code │ -> │ Lexer  │ -> │ Parser │ -> │ Lower   │ -> │ Codegen │ -> │ Linker │ -> │ Executable │
+│  (.ryo)     │    │(Tokens)│    │ (AST)  │    │ (HIR)   │    │  (.o)   │    │        │    │  (native)  │
+└─────────────┘    └────────┘    └────────┘    └─────────┘    └─────────┘    └────────┘    └────────────┘
 ```
 
 ### High-Level Flow
 
-1. **Source** → **Tokens** (`src/lexer.rs`)
+1. **Source** → **Tokens** (`src/lexer.rs` + `src/indent.rs`)
 2. **Tokens** → **AST** (`src/parser.rs`)
-3. **AST** → **Cranelift IR** → **Object File** (`src/codegen.rs`)
-4. **Object File** + **C Runtime** → **Executable** (`src/main.rs::link_executable`)
-5. **Execute** and capture exit code (`src/main.rs::execute_program`)
+3. **AST** → **HIR** (`src/lower.rs`) — scope resolution, type checking, implicit main wrapping
+4. **HIR** → **Cranelift IR** → **Object File** (`src/codegen.rs`)
+5. **Object File** + **C Runtime** → **Executable** (`src/linker.rs`)
+6. **Execute** and capture exit code (`src/pipeline.rs`)
 
 ---
 
@@ -104,9 +106,10 @@ These spans are crucial for error reporting in later phases.
 
 ### Code Reference
 
-- **Token definition:** `src/lexer.rs:8-45`
-- **Tests:** `src/lexer.rs:114-400`
-- **CLI integration:** `src/main.rs:119-133`
+- **Token definition:** `src/lexer.rs`
+- **Indent preprocessor:** `src/indent.rs` — inserts synthetic `Indent`/`Dedent` tokens
+- **Tests:** `src/lexer.rs` (unit tests), `src/indent.rs` (unit tests)
+- **CLI integration:** `src/pipeline.rs::lex_command`
 
 ---
 
@@ -140,9 +143,10 @@ where
 The parser handles:
 
 1. **Program** = Statement*
-2. **Statement** = VarDecl
-3. **VarDecl** = `[mut] ident [: type] = expression`
-4. **Expression** = Binary | Unary | Literal | `( Expression )`
+2. **Statement** = VarDecl | FunctionDef | Return | ExprStmt
+3. **FunctionDef** = `fn name(params) [-> type]: body`
+4. **VarDecl** = `[mut] ident [: type] = expression`
+5. **Expression** = Binary | Unary | Literal | Ident | Call | `( Expression )`
 
 ### Operator Precedence
 
@@ -183,6 +187,9 @@ pub struct Statement {
 
 pub enum StmtKind {
     VarDecl(VarDecl),
+    FunctionDef(FunctionDef),
+    Return(Option<Expression>),
+    ExprStmt(Expression),
 }
 
 pub struct VarDecl {
@@ -199,8 +206,10 @@ pub struct Expression {
 
 pub enum ExprKind {
     Literal(Literal),
+    Ident(String),
     BinaryOp(Box<Expression>, BinaryOperator, Box<Expression>),
     UnaryOp(UnaryOperator, Box<Expression>),
+    Call(String, Vec<Expression>),
 }
 ```
 
@@ -226,20 +235,99 @@ fn display_parse_errors(errs: &[Rich<'_, Token<'_>>], input: &str) {
 
 ### Code Reference
 
-- **Parser definition:** `src/parser.rs:11-160`
-- **AST types:** `src/ast.rs:1-243`
-- **Tests:** `src/parser.rs:161-400`
-- **Error display:** `src/main.rs:175-192`
+- **Parser definition:** `src/parser.rs`
+- **AST types:** `src/ast.rs`
+- **Tests:** `src/parser.rs` (unit tests)
+- **Error display:** `src/pipeline.rs::display_parse_errors`
 
 ---
 
-## Phase 3: Code Generation
+## Phase 3: Lowering (AST → HIR)
+
+**Module:** `src/lower.rs`, `src/hir.rs`
+**Function:** Transform the AST into a typed, analyzed High-level IR (HIR)
+
+This phase performs semantic analysis comparable to Zig's Sema pass. The HIR is a post-analysis IR where all types are resolved, scopes are checked, and the program structure is normalized.
+
+### HIR Data Structures
+
+Defined in `src/hir.rs`:
+
+```rust
+pub enum Type { Int, Str, Void }
+
+pub struct HirProgram { pub functions: Vec<HirFunction> }
+
+pub struct HirFunction {
+    pub name: String,
+    pub params: Vec<HirParam>,
+    pub return_type: Type,
+    pub body: Vec<HirStmt>,
+}
+
+pub enum HirStmt {
+    VarDecl { name: String, mutable: bool, ty: Type, initializer: HirExpr, span: Span },
+    Return(Option<HirExpr>, Span),
+    Expr(HirExpr, Span),
+}
+
+pub enum HirExprKind {
+    IntLiteral(isize),
+    StrLiteral(String),
+    Var(String),
+    BinaryOp(Box<HirExpr>, BinaryOp, Box<HirExpr>),
+    UnaryOp(UnaryOp, Box<HirExpr>),
+    Call(String, Vec<HirExpr>),
+}
+```
+
+### What Lowering Does
+
+1. **Scope resolution:** Uses a `Scope` struct with parent pointers for nested lookup
+2. **Type inference:** Resolves variable types from initializers and annotations
+3. **Implicit main wrapping:** Flat programs (no `fn main()`) get wrapped in a synthetic main returning 0
+4. **Function signature collection:** Two-pass approach — collect all signatures first, then lower bodies (enables forward references)
+5. **Builtin resolution:** Resolves builtin functions (e.g., `print`) via `src/builtins.rs` registry
+6. **Validation:** Rejects nested function definitions, top-level statements when explicit main exists
+
+### Example
+
+**Input AST** (from `x = 42`):
+```
+Program → [VarDecl { name: "x", initializer: Literal(42) }]
+```
+
+**Output HIR:**
+```
+HirProgram {
+    functions: [HirFunction {
+        name: "main",
+        params: [],
+        return_type: Int,
+        body: [
+            VarDecl { name: "x", ty: Int, initializer: IntLiteral(42) },
+            Return(Some(IntLiteral(0)))
+        ]
+    }]
+}
+```
+
+### Code Reference
+
+- **HIR types:** `src/hir.rs`
+- **Lowering pass:** `src/lower.rs`
+- **Builtin registry:** `src/builtins.rs`
+- **Tests:** `src/lower.rs` (13 unit tests)
+
+---
+
+## Phase 4: Code Generation
 
 **Module:** `src/codegen.rs`
 **Library:** [Cranelift](https://docs.rs/cranelift/) v0.125
-**Function:** Translate AST into native object files
+**Function:** Translate HIR into native object files via Cranelift IR
 
-This is the most complex phase. Let's break it down in detail.
+This phase takes the fully typed HIR and generates Cranelift IR instructions.
 
 ### Cranelift Overview
 
@@ -262,15 +350,32 @@ pub struct Codegen {
     builder_context: FunctionBuilderContext,
     ctx: codegen::Context,
     module: ObjectModule,
-    int_type: Type,
+    int_type: types::Type,
+    data_ctx: DataDescription,
+    string_data: HashMap<String, DataId>,
+    triple: Triple,
+}
+
+struct FunctionContext<'a> {
+    module: &'a mut ObjectModule,
+    data_ctx: &'a mut DataDescription,
+    string_data: &'a mut HashMap<String, DataId>,
+    int_type: types::Type,
+    triple: &'a Triple,
+    locals: &'a HashMap<String, Variable>,
+    func_ids: &'a HashMap<String, FuncId>,
 }
 ```
 
-**Fields:**
+**Codegen fields:**
 - `builder_context`: Reusable context for FunctionBuilder
 - `ctx`: Function compilation context (holds IR)
 - `module`: Object file builder
 - `int_type`: Target's pointer-sized integer (i32/i64)
+- `data_ctx` / `string_data`: String literal storage and deduplication
+- `triple`: Target triple for platform-specific codegen
+
+**FunctionContext** bundles per-function compilation state, passed to `eval_expr` to avoid excessive parameter counts.
 
 ### Step 1: Initialize Codegen
 
@@ -303,104 +408,79 @@ pub fn new(target_triple: Triple) -> Result<Self, String> {
 - **ObjectModule:** AOT compilation (vs JITModule for REPL)
 - **Int type:** Uses pointer size for integers (i64 on 64-bit systems)
 
-### Step 2: Compile Program
+### Step 2: Compile Program (Two-Pass)
+
+The compiler uses a two-pass approach to support forward references between functions:
 
 ```rust
-pub fn compile(&mut self, program: Program) -> Result<FuncId, String> {
-    // 1. Create function signature: () -> i64
-    let sig = {
-        let mut sig = self.module.make_signature();
-        sig.returns.push(AbiParam::new(self.int_type));  // Return exit code
-        sig
-    };
-
-    // 2. Declare 'main' function with export linkage
-    let func_id = self.module.declare_function("main", Linkage::Export, &sig)?;
-
-    // 3. Set function signature
-    self.ctx.func.signature = sig;
-
-    // 4. Generate IR for function body
-    {
-        let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
-        let int_type = self.int_type;
-
-        Self::translate(&mut builder, program, int_type)?;
-
-        builder.finalize();  // Validate and finalize function
+pub fn compile(&mut self, program: &HirProgram) -> Result<FuncId, String> {
+    // Pass 1: Declare all functions (signatures only)
+    let mut func_ids: HashMap<String, FuncId> = HashMap::new();
+    for func in &program.functions {
+        let sig = self.build_signature(func);
+        let linkage = if func.name == "main" { Linkage::Export } else { Linkage::Local };
+        let func_id = self.module.declare_function(&func.name, linkage, &sig)?;
+        func_ids.insert(func.name.clone(), func_id);
     }
 
-    // 5. Define function in module
-    self.module.define_function(func_id, &mut self.ctx)?;
+    // Pass 2: Compile function bodies
+    for func in &program.functions {
+        self.compile_function(func, &func_ids)?;
+    }
 
-    // 6. Clear context for next function
-    self.ctx.clear();
-
-    Ok(func_id)
+    func_ids.get("main").copied().ok_or_else(|| "No main function defined".into())
 }
 ```
 
-### Step 3: Translate AST to IR
+### Step 3: Compile Function Bodies
+
+Each function gets its own entry block, parameters are mapped to Cranelift `Variable`s, and statements are translated to IR:
 
 ```rust
-fn translate(builder: &mut FunctionBuilder, program: Program, int_type: Type) -> Result<(), String> {
-    // 1. Create entry block
+fn compile_function(&mut self, func: &HirFunction, func_ids: &HashMap<String, FuncId>) -> Result<Option<String>, String> {
+    // Create entry block and map parameters to variables
+    let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
     let entry_block = builder.create_block();
-    builder.switch_to_block(entry_block);
-    builder.seal_block(entry_block);  // No more predecessors
+    builder.append_block_params_for_function_params(entry_block);
 
-    // 2. Handle empty program
-    if program.statements.is_empty() {
-        let zero = builder.ins().iconst(int_type, 0);
-        builder.ins().return_(&[zero]);
-        return Ok(());
+    // Map each parameter to a Cranelift Variable
+    let mut locals: HashMap<String, Variable> = HashMap::new();
+    for (i, param) in func.params.iter().enumerate() {
+        let var = builder.declare_var(int_type);
+        builder.def_var(var, builder.block_params(entry_block)[i]);
+        locals.insert(param.name.clone(), var);
     }
 
-    // 3. Evaluate each statement, keep last value
-    let mut result_val = None;
-    for stmt in program.statements {
-        let val = Self::eval_expr(builder, &stmt.kind.as_var_decl().initializer, int_type)?;
-        result_val = Some(val);
+    // Translate each HirStmt
+    for stmt in &func.body {
+        match stmt {
+            HirStmt::VarDecl { name, initializer, .. } => { /* eval + store */ }
+            HirStmt::Return(Some(expr), _) => { /* eval + return */ }
+            HirStmt::Return(None, _) => { /* return void */ }
+            HirStmt::Expr(expr, _) => { /* eval for side effects */ }
+        }
     }
-
-    // 4. Return last value as exit code
-    let return_val = result_val.unwrap();
-    builder.ins().return_(&[return_val]);
-
-    Ok(())
+    builder.finalize();
 }
 ```
 
 ### Step 4: Evaluate Expressions
 
+`eval_expr` takes an HIR expression and a `FunctionContext` bundle:
+
 ```rust
-fn eval_expr(builder: &mut FunctionBuilder, expr: &Expression, int_type: Type) -> Result<Value, String> {
+fn eval_expr(
+    builder: &mut FunctionBuilder,
+    expr: &HirExpr,
+    ctx: &mut FunctionContext,
+) -> Result<Value, String> {
     match &expr.kind {
-        // Integer literal → iconst instruction
-        ExprKind::Literal(Literal::Int(val)) => {
-            Ok(builder.ins().iconst(int_type, *val as i64))
-        }
-
-        // Unary negation → ineg instruction
-        ExprKind::UnaryOp(UnaryOperator::Neg, sub_expr) => {
-            let sub_val = Self::eval_expr(builder, sub_expr, int_type)?;
-            Ok(builder.ins().ineg(sub_val))
-        }
-
-        // Binary operations
-        ExprKind::BinaryOp(lhs, op, rhs) => {
-            let lhs_val = Self::eval_expr(builder, lhs, int_type)?;
-            let rhs_val = Self::eval_expr(builder, rhs, int_type)?;
-
-            let result = match op {
-                BinaryOperator::Add => builder.ins().iadd(lhs_val, rhs_val),
-                BinaryOperator::Sub => builder.ins().isub(lhs_val, rhs_val),
-                BinaryOperator::Mul => builder.ins().imul(lhs_val, rhs_val),
-                BinaryOperator::Div => builder.ins().sdiv(lhs_val, rhs_val),  // Signed division
-            };
-
-            Ok(result)
-        }
+        HirExprKind::IntLiteral(val) => Ok(builder.ins().iconst(ctx.int_type, *val as i64)),
+        HirExprKind::StrLiteral(content) => { /* store string data, return pointer */ }
+        HirExprKind::Var(name) => Ok(builder.use_var(*ctx.locals.get(name)?)),
+        HirExprKind::UnaryOp(UnaryOp::Neg, sub) => { /* eval + ineg */ }
+        HirExprKind::BinaryOp(lhs, op, rhs) => { /* eval both + iadd/isub/imul/sdiv */ }
+        HirExprKind::Call(name, args) => { /* builtin or user function call */ }
     }
 }
 ```
@@ -458,20 +538,31 @@ Contains:
 - Relocation information
 - Metadata for linker
 
+### IR Inspection
+
+The `ryo ir` command displays the actual Cranelift IR generated for a program:
+
+```bash
+$ cargo run -- ir program.ryo
+```
+
+This is powered by `compile_and_dump_ir()`, which captures `format!("{}", self.ctx.func)` after `builder.finalize()`.
+
 ### Code Reference
 
-- **Codegen struct:** `src/codegen.rs:11-16`
-- **Initialization:** `src/codegen.rs:19-50`
-- **Compilation:** `src/codegen.rs:52-84`
-- **Translation:** `src/codegen.rs:86-114`
-- **Expression eval:** `src/codegen.rs:116-140`
-- **CLI integration:** `src/main.rs:215-240`
+- **Codegen struct:** `src/codegen.rs`
+- **FunctionContext:** `src/codegen.rs`
+- **Two-pass compile:** `src/codegen.rs::compile`
+- **IR dump:** `src/codegen.rs::compile_and_dump_ir`
+- **Expression eval:** `src/codegen.rs::eval_expr`
+- **Print builtin:** `src/codegen.rs::generate_print_call`
+- **CLI integration:** `src/pipeline.rs::compile_program`
 
 ---
 
-## Phase 4: Linking
+## Phase 5: Linking
 
-**Module:** `src/main.rs::link_executable`
+**Module:** `src/linker.rs`
 **Function:** Combine object file with C runtime to create executable
 
 ### Why Linking is Needed
@@ -599,14 +690,14 @@ zig cc -o first.exe first.obj
 
 ### Code Reference
 
-- **Linking function:** `src/main.rs:242-281`
-- **CLI integration:** `src/main.rs:215-240`
+- **Linking function:** `src/linker.rs::link_executable`
+- **CLI integration:** `src/pipeline.rs::compile_program`
 
 ---
 
-## Phase 5: Execution
+## Phase 6: Execution
 
-**Module:** `src/main.rs::execute_program`
+**Module:** `src/pipeline.rs::execute_program`
 **Function:** Run the compiled executable and capture exit code
 
 ### Execution Process
@@ -692,40 +783,38 @@ The compiled program's `main` function returns zero, the OS captures this return
 
 **Future:** Will move to `target/` directory like Cargo
 
-### No Variable Storage (Yet)
+### HIR as Intermediate Representation
 
-**Decision:** Variables are evaluated but not stored in memory
+**Decision:** Add an HIR layer between parsing and codegen (Zig-inspired)
 
 **Rationale:**
-- Milestone 3 goal: Demonstrate compilation, not variables
-- Simplifies codegen significantly
-- Variables don't need to interact yet
-- Will be addressed with functions (Milestone 4)
+- Separates analysis (type resolution, scope checking) from code generation
+- Codegen only sees fully typed, validated IR — no AST imports needed
+- Scope struct with parent pointers is ready for nested scopes (if/else, loops)
+- Spans preserved from AST for future error reporting in later passes
 
-**Current Limitation:**
-```ryo
-x = 10
-y = 20
-z = x + y  # Error: Can't reference x or y yet
-```
-
-Only the last expression value matters.
+**Comparison to Zig:** Ryo's HIR corresponds to Zig's AIR (post-analysis IR), and `lower.rs` corresponds to Zig's Sema pass.
 
 
 ## Completed Evolution
 
-### Milestone 4: Functions (✅ Complete)
+### Milestone 4: Functions & HIR (✅ Complete)
 
 **Implemented:**
 - Indent preprocessor (`src/indent.rs`): CPython-style `Indent`/`Dedent` token insertion
+- HIR layer (`src/hir.rs`, `src/lower.rs`): post-analysis IR with full type resolution, scope checking, and implicit main wrapping — analogous to Zig's AIR (the lowering pass is analogous to Zig's Sema)
 - Two-pass compilation: declare all functions first, then compile bodies (enables forward references)
 - Cranelift `Variable` abstraction for local variables and function parameters
 - User-defined function calls via `declare_func_in_func` + `call` instruction
 - `return` statements with expression values
 - Expression statements (bare function calls without assignment)
 - Backward compatibility: flat programs without `fn main()` wrapped in implicit main
+- Builtin function registry (`src/builtins.rs`) replacing scattered string matching
+- `FunctionContext` struct in codegen bundling per-function state
+- `ryo ir` command now displays actual Cranelift IR (not stub text)
+- `main.rs` split into focused modules: `errors.rs`, `linker.rs`, `pipeline.rs`
 
-**Pipeline change:** Source → Lexer → **Indent Preprocessor** → Parser → Codegen → Object File → Linker → Executable
+**Pipeline change:** Source → Lexer → **Indent Preprocessor** → Parser → **Lower (HIR)** → Codegen → Object File → Linker → Executable
 
 ## Future Evolution
 
@@ -781,7 +870,7 @@ cargo run -- lex program.ryo
 cargo run -- parse program.ryo
 ```
 
-### View IR Info
+### View Cranelift IR
 
 ```bash
 cargo run -- ir program.ryo

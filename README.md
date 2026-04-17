@@ -17,11 +17,11 @@ Build reliable and efficient **web backends, CLI tools, and scripts** with an ap
 > [!WARNING]
 > Ryo is currently in the **early stages of development** (pre-alpha). The language design is stabilizing, but the compiler is under active construction. It is **not yet ready for production use**. We welcome contributors!
 
-## Current Implementation Status (Milestone 3)
+## Current Implementation Status (Milestone 4)
 
 **✅ What's Working Now:**
 
-The Ryo compiler currently implements **Milestone 3: AOT Compilation**
+The Ryo compiler currently implements **Milestone 4: Functions, HIR, & AOT Compilation**
 
 **See the full roadmap:** [Implementation Roadmap](docs/implementation_roadmap.md)
 
@@ -139,7 +139,7 @@ cargo run -- run arithmetic.ryo
 # Or see the compilation stages
 cargo run -- lex arithmetic.ryo    # View tokens
 cargo run -- parse arithmetic.ryo  # View AST
-cargo run -- ir arithmetic.ryo     # View IR info
+cargo run -- ir arithmetic.ryo     # View Cranelift IR
 ```
 
 **More working examples:** See `examples/milestone3/` directory for additional programs you can compile and run today!
@@ -240,7 +240,7 @@ Please read our [Contributing Guide](CONTRIBUTING.md) and check out the [open is
 
 ### Implementation
 - **[Implementation Roadmap](docs/dev/implementation_roadmap.md)** - Development milestones and progress
-- **[Compilation Pipeline](docs/dev/compilation_pipeline.md)** - How the compiler works (Milestone 3)
+- **[Compilation Pipeline](docs/dev/compilation_pipeline.md)** - How the compiler works (6-phase pipeline with HIR)
 - **[CLAUDE.md](CLAUDE.md)** - Project context for AI assistants and contributors
 
 ### Examples
