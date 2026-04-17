@@ -39,6 +39,7 @@ fn get_output_filenames(input_file: &Path) -> (String, String) {
 enum CompilerError {
     IoError(std::io::Error),
     ParseError(String),
+    LowerError(String),
     CodegenError(String),
     LinkError(String),
     ExecutionError(String),
@@ -49,6 +50,7 @@ impl std::fmt::Display for CompilerError {
         match self {
             CompilerError::IoError(e) => write!(f, "IO error: {}", e),
             CompilerError::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            CompilerError::LowerError(msg) => write!(f, "Lower error: {}", msg),
             CompilerError::CodegenError(msg) => write!(f, "Codegen error: {}", msg),
             CompilerError::LinkError(msg) => write!(f, "Link error: {}", msg),
             CompilerError::ExecutionError(msg) => write!(f, "Execution error: {}", msg),
@@ -210,26 +212,21 @@ fn ir_command(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program);
     println!();
 
-    // Generate IR
-    generate_and_display_ir(&program)?;
+    let hir = lower::lower(&program).map_err(CompilerError::LowerError)?;
+    generate_and_display_ir(&hir)?;
 
     Ok(())
 }
 
-fn generate_and_display_ir(program: &ast::Program) -> Result<(), CompilerError> {
+fn generate_and_display_ir(hir: &hir::HirProgram) -> Result<(), CompilerError> {
     println!("[Cranelift IR]");
 
     let target = Triple::host();
     let target_str = target.to_string();
     let mut codegen = codegen::Codegen::new(target).map_err(CompilerError::CodegenError)?;
 
-    // Compile the program (this generates IR)
-    codegen
-        .compile(program.clone())
-        .map_err(CompilerError::CodegenError)?;
+    codegen.compile(hir).map_err(CompilerError::CodegenError)?;
 
-    // The generated IR is stored in the codegen's context
-    // Display it by showing compilation succeeded
     println!("IR generation successful");
     println!("Target: {}", target_str);
     println!("Module name: ryo_module");
@@ -242,24 +239,20 @@ fn generate_and_display_ir(program: &ast::Program) -> Result<(), CompilerError> 
 }
 
 fn run_file(file: &Path) -> Result<(), CompilerError> {
-    // Read source
     let input = read_source_file(file)?;
-
-    // Parse to AST
     let program = parse_source(&input)?;
 
-    // Display AST
     println!("[Input Source]");
     println!("{}", input);
     println!();
     display_ast(&program);
     println!();
 
-    // Compile to object file
-    let (obj_filename, exe_filename) = get_output_filenames(file);
-    compile_program(&program, &obj_filename, &exe_filename)?;
+    let hir = lower::lower(&program).map_err(CompilerError::LowerError)?;
 
-    // Execute
+    let (obj_filename, exe_filename) = get_output_filenames(file);
+    compile_program(&hir, &obj_filename, &exe_filename)?;
+
     let result = execute_program(&exe_filename)?;
     display_result(result);
 
@@ -267,7 +260,7 @@ fn run_file(file: &Path) -> Result<(), CompilerError> {
 }
 
 fn compile_program(
-    program: &ast::Program,
+    hir: &hir::HirProgram,
     obj_filename: &str,
     exe_filename: &str,
 ) -> Result<(), CompilerError> {
@@ -276,20 +269,14 @@ fn compile_program(
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new(target).map_err(CompilerError::CodegenError)?;
 
-    // Compile the program
-    codegen
-        .compile(program.clone())
-        .map_err(CompilerError::CodegenError)?;
+    codegen.compile(hir).map_err(CompilerError::CodegenError)?;
 
-    // Get object bytes
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
-    // Write object file
     fs::write(obj_filename, obj_bytes).map_err(CompilerError::from)?;
 
     println!("Generated object file: {}", obj_filename);
 
-    // Link the executable
     link_executable(obj_filename, exe_filename)?;
 
     Ok(())
