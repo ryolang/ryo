@@ -712,21 +712,22 @@ z = x + y  # Error: Can't reference x or y yet
 Only the last expression value matters.
 
 
+## Completed Evolution
+
+### Milestone 4: Functions (✅ Complete)
+
+**Implemented:**
+- Indent preprocessor (`src/indent.rs`): CPython-style `Indent`/`Dedent` token insertion
+- Two-pass compilation: declare all functions first, then compile bodies (enables forward references)
+- Cranelift `Variable` abstraction for local variables and function parameters
+- User-defined function calls via `declare_func_in_func` + `call` instruction
+- `return` statements with expression values
+- Expression statements (bare function calls without assignment)
+- Backward compatibility: flat programs without `fn main()` wrapped in implicit main
+
+**Pipeline change:** Source → Lexer → **Indent Preprocessor** → Parser → Codegen → Object File → Linker → Executable
+
 ## Future Evolution
-
-### Milestone 4: Functions
-
-**Additions:**
-- Function definitions and calls
-- Local variables (stack allocation)
-- Parameters and return values
-- Multiple functions per program
-
-**Codegen Changes:**
-- Multiple function compilation
-- Call instruction generation
-- Stack frame management
-- Proper `return` statements
 
 ### Milestone 5+: More Expressions
 

@@ -213,24 +213,19 @@ _ = print("Second\n")
 ## Phase 2: Essential Language Features
 
 ### Milestone 4: Functions & Calls
+
+**Status:** ✅ COMPLETE - User-defined functions with parameters, return values, and variable references implemented
+
 **Goal:** Define and call simple functions with integer arguments and return values
 
-**Tasks:**
-- **From M3.5**: Add expression statement support (bare expressions without assignment)
-  - Extend Parser: `StmtKind::ExprStmt` to allow `print("...")` without `_ =`
-  - Enable side-effect-only function calls as statements
-- Extend AST: `StmtKind::FunctionDef`, `ExprKind::Call` (already have Call from M3.5)
-- Add `fn` keyword parsing for function definitions
-- Parse function signatures: `fn func_name(arg: type) -> type:`
-- Parse function bodies with `return` statements
-- Parse function calls: `func_name(arg)` (already have syntax from M3.5)
-- Implement basic symbol table for function name resolution
-- Extend Codegen: Generate Cranelift IR for:
-  - Function definitions with parameters
-  - Function calls with argument passing (already support external calls from M3.5)
-  - Return statements
-- Add `fn main() -> int` support for explicit exit codes
-- Write tests for function definition and calls
+**What was implemented:**
+- CPython-style indent preprocessor (`src/indent.rs`) for tab-based indentation blocks
+- Lexer: `Arrow` (`->`), `Newline`, synthetic `Indent`/`Dedent` tokens
+- AST: `StmtKind::FunctionDef`, `StmtKind::Return`, `StmtKind::ExprStmt`, `ExprKind::Ident`
+- Parser: function definitions (`fn name(params) -> type:`), return statements, expression statements, variable references
+- Codegen: two-pass compilation (declare-then-define) for forward references, Cranelift `Variable` storage for locals/params, user function calls
+- Backward compatibility: flat programs without `fn main()` are wrapped in a synthetic implicit main returning 0
+- 80 tests passing (49 unit + 31 integration)
 
 **Visible Progress:** Can compile and run programs with multiple functions. Programs can return explicit exit codes via `fn main() -> int`.
 
@@ -246,8 +241,7 @@ fn main() -> int:
 ```
 
 **Implementation Notes:**
-- Start with single-argument functions, expand to multiple arguments
-- All functions are module-scoped (no nested functions yet)
+- All functions are module-scoped (no nested functions)
 - No function overloading (one function per name)
 - Dependencies: Milestone 3 (codegen foundation)
 
