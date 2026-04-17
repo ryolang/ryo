@@ -18,6 +18,16 @@ pub struct Codegen {
     triple: Triple,
 }
 
+struct FunctionContext<'a> {
+    module: &'a mut ObjectModule,
+    data_ctx: &'a mut DataDescription,
+    string_data: &'a mut HashMap<String, DataId>,
+    int_type: types::Type,
+    triple: &'a Triple,
+    locals: &'a HashMap<String, Variable>,
+    func_ids: &'a HashMap<String, FuncId>,
+}
+
 impl Codegen {
     pub fn new(target_triple: Triple) -> Result<Self, String> {
         let mut shared_builder = settings::builder();
@@ -126,33 +136,31 @@ impl Codegen {
                     HirStmt::VarDecl {
                         name, initializer, ..
                     } => {
-                        let val = Self::eval_expr(
-                            &mut builder,
-                            initializer,
-                            &mut self.module,
-                            &mut self.data_ctx,
-                            &mut self.string_data,
+                        let mut func_ctx = FunctionContext {
+                            module: &mut self.module,
+                            data_ctx: &mut self.data_ctx,
+                            string_data: &mut self.string_data,
                             int_type,
-                            &self.triple,
-                            &locals,
+                            triple: &self.triple,
+                            locals: &locals,
                             func_ids,
-                        )?;
+                        };
+                        let val = Self::eval_expr(&mut builder, initializer, &mut func_ctx)?;
                         let var = builder.declare_var(int_type);
                         builder.def_var(var, val);
                         locals.insert(name.clone(), var);
                     }
                     HirStmt::Return(Some(expr), _) => {
-                        let val = Self::eval_expr(
-                            &mut builder,
-                            expr,
-                            &mut self.module,
-                            &mut self.data_ctx,
-                            &mut self.string_data,
+                        let mut func_ctx = FunctionContext {
+                            module: &mut self.module,
+                            data_ctx: &mut self.data_ctx,
+                            string_data: &mut self.string_data,
                             int_type,
-                            &self.triple,
-                            &locals,
+                            triple: &self.triple,
+                            locals: &locals,
                             func_ids,
-                        )?;
+                        };
+                        let val = Self::eval_expr(&mut builder, expr, &mut func_ctx)?;
                         builder.ins().return_(&[val]);
                         has_return = true;
                     }
@@ -161,17 +169,16 @@ impl Codegen {
                         has_return = true;
                     }
                     HirStmt::Expr(expr, _) => {
-                        let _val = Self::eval_expr(
-                            &mut builder,
-                            expr,
-                            &mut self.module,
-                            &mut self.data_ctx,
-                            &mut self.string_data,
+                        let mut func_ctx = FunctionContext {
+                            module: &mut self.module,
+                            data_ctx: &mut self.data_ctx,
+                            string_data: &mut self.string_data,
                             int_type,
-                            &self.triple,
-                            &locals,
+                            triple: &self.triple,
+                            locals: &locals,
                             func_ids,
-                        )?;
+                        };
+                        let _val = Self::eval_expr(&mut builder, expr, &mut func_ctx)?;
                     }
                 }
             }
@@ -221,73 +228,38 @@ impl Codegen {
         Ok(data_id)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn eval_expr(
         builder: &mut FunctionBuilder,
         expr: &HirExpr,
-        module: &mut ObjectModule,
-        data_ctx: &mut DataDescription,
-        string_data: &mut HashMap<String, DataId>,
-        int_type: types::Type,
-        triple: &Triple,
-        locals: &HashMap<String, Variable>,
-        func_ids: &HashMap<String, FuncId>,
+        ctx: &mut FunctionContext,
     ) -> Result<Value, String> {
         match &expr.kind {
-            HirExprKind::IntLiteral(val) => Ok(builder.ins().iconst(int_type, *val as i64)),
+            HirExprKind::IntLiteral(val) => Ok(builder.ins().iconst(ctx.int_type, *val as i64)),
 
             HirExprKind::StrLiteral(content) => {
-                let data_id = Self::store_string(content, module, data_ctx, string_data)?;
-                let data_ref = module.declare_data_in_func(data_id, builder.func);
-                let ptr = builder.ins().global_value(int_type, data_ref);
+                let data_id =
+                    Self::store_string(content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+                let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+                let ptr = builder.ins().global_value(ctx.int_type, data_ref);
                 Ok(ptr)
             }
 
             HirExprKind::Var(name) => {
-                let var = locals
+                let var = ctx
+                    .locals
                     .get(name.as_str())
                     .ok_or_else(|| format!("Undefined variable: '{}'", name))?;
                 Ok(builder.use_var(*var))
             }
 
             HirExprKind::UnaryOp(UnaryOp::Neg, sub_expr) => {
-                let sub_val = Self::eval_expr(
-                    builder,
-                    sub_expr,
-                    module,
-                    data_ctx,
-                    string_data,
-                    int_type,
-                    triple,
-                    locals,
-                    func_ids,
-                )?;
+                let sub_val = Self::eval_expr(builder, sub_expr, ctx)?;
                 Ok(builder.ins().ineg(sub_val))
             }
 
             HirExprKind::BinaryOp(lhs, op, rhs) => {
-                let lhs_val = Self::eval_expr(
-                    builder,
-                    lhs,
-                    module,
-                    data_ctx,
-                    string_data,
-                    int_type,
-                    triple,
-                    locals,
-                    func_ids,
-                )?;
-                let rhs_val = Self::eval_expr(
-                    builder,
-                    rhs,
-                    module,
-                    data_ctx,
-                    string_data,
-                    int_type,
-                    triple,
-                    locals,
-                    func_ids,
-                )?;
+                let lhs_val = Self::eval_expr(builder, lhs, ctx)?;
+                let rhs_val = Self::eval_expr(builder, rhs, ctx)?;
 
                 let result = match op {
                     BinaryOp::Add => builder.ins().iadd(lhs_val, rhs_val),
@@ -301,39 +273,21 @@ impl Codegen {
 
             HirExprKind::Call(name, args) => {
                 if name == "print" {
-                    Self::generate_print_call(
-                        builder,
-                        args,
-                        module,
-                        data_ctx,
-                        string_data,
-                        int_type,
-                        triple,
-                    )?;
-                    Ok(builder.ins().iconst(int_type, 0))
-                } else if let Some(&callee_id) = func_ids.get(name.as_str()) {
+                    Self::generate_print_call(builder, args, ctx)?;
+                    Ok(builder.ins().iconst(ctx.int_type, 0))
+                } else if let Some(&callee_id) = ctx.func_ids.get(name.as_str()) {
                     let mut arg_values = Vec::new();
                     for arg in args {
-                        let val = Self::eval_expr(
-                            builder,
-                            arg,
-                            module,
-                            data_ctx,
-                            string_data,
-                            int_type,
-                            triple,
-                            locals,
-                            func_ids,
-                        )?;
+                        let val = Self::eval_expr(builder, arg, ctx)?;
                         arg_values.push(val);
                     }
 
-                    let callee_ref = module.declare_func_in_func(callee_id, builder.func);
+                    let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
                     let call = builder.ins().call(callee_ref, &arg_values);
                     let results = builder.inst_results(call);
 
                     if results.is_empty() {
-                        Ok(builder.ins().iconst(int_type, 0))
+                        Ok(builder.ins().iconst(ctx.int_type, 0))
                     } else {
                         Ok(results[0])
                     }
@@ -347,11 +301,7 @@ impl Codegen {
     fn generate_print_call(
         builder: &mut FunctionBuilder,
         args: &[HirExpr],
-        module: &mut ObjectModule,
-        data_ctx: &mut DataDescription,
-        string_data: &mut HashMap<String, DataId>,
-        int_type: types::Type,
-        triple: &Triple,
+        ctx: &mut FunctionContext,
     ) -> Result<(), String> {
         if args.len() != 1 {
             return Err(format!(
@@ -366,37 +316,41 @@ impl Codegen {
             _ => return Err("print() argument must be a string literal".to_string()),
         };
 
-        let data_id = Self::store_string(string_content, module, data_ctx, string_data)?;
-        let data_ref = module.declare_data_in_func(data_id, builder.func);
-        let string_ptr = builder.ins().global_value(int_type, data_ref);
+        let data_id =
+            Self::store_string(string_content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+        let string_ptr = builder.ins().global_value(ctx.int_type, data_ref);
 
-        let string_len = builder.ins().iconst(int_type, string_content.len() as i64);
-        let fd = builder.ins().iconst(int_type, 1);
+        let string_len = builder
+            .ins()
+            .iconst(ctx.int_type, string_content.len() as i64);
+        let fd = builder.ins().iconst(ctx.int_type, 1);
 
         use target_lexicon::OperatingSystem;
-        match triple.operating_system {
+        match ctx.triple.operating_system {
             OperatingSystem::Darwin { .. }
             | OperatingSystem::MacOSX { .. }
             | OperatingSystem::Linux => {}
             _ => {
                 return Err(format!(
                     "print() not yet supported on platform: {:?}",
-                    triple.operating_system
+                    ctx.triple.operating_system
                 ));
             }
         }
 
-        let mut write_sig = module.make_signature();
-        write_sig.params.push(AbiParam::new(int_type));
-        write_sig.params.push(AbiParam::new(int_type));
-        write_sig.params.push(AbiParam::new(int_type));
-        write_sig.returns.push(AbiParam::new(int_type));
+        let mut write_sig = ctx.module.make_signature();
+        write_sig.params.push(AbiParam::new(ctx.int_type));
+        write_sig.params.push(AbiParam::new(ctx.int_type));
+        write_sig.params.push(AbiParam::new(ctx.int_type));
+        write_sig.returns.push(AbiParam::new(ctx.int_type));
 
-        let write_func = module
+        let write_func = ctx
+            .module
             .declare_function("write", Linkage::Import, &write_sig)
             .map_err(|e| format!("Failed to declare write function: {}", e))?;
 
-        let write_ref = module.declare_func_in_func(write_func, builder.func);
+        let write_ref = ctx.module.declare_func_in_func(write_func, builder.func);
         let call_inst = builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
         let _bytes_written = builder.inst_results(call_inst)[0];
 
