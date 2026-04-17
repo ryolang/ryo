@@ -92,6 +92,8 @@ This specification describes the full target design. Not all features are availa
 | User-defined generics (monomorphization) | | | Yes | |
 | Dynamic dispatch (`dyn Trait`) | | | Yes | |
 | Named parameters (`#[named]`) | | | Yes | |
+| Cancellation errors (`Canceled`, `Timeout`) | | | | Yes |
+| Test timeouts (`#[test(timeout=5s)]`) | | | | Yes |
 | Concurrency runtime (task/future/channel) | | | | Yes |
 | `comptime` (compile-time execution) | | | | TBD |
 
@@ -2342,6 +2344,97 @@ The `future` type integrates seamlessly with Ryo's error system, using the corre
 	body: str = try fetch_future.await # .await unwraps the outer future, try unwraps the inner Error Union.
 	```
 
+#### 9.2.5 Cancellation Model
+
+Cancellation is a first-class concern in Ryo's concurrency model. A task can be cancelled by dropping its future, by `task.scope` cleanup, by `select` choosing a different branch, or by `task.timeout` expiring. Ryo defines clear semantics for what happens when a task is cancelled.
+
+**Built-in Cancellation Errors:**
+
+Ryo provides two built-in error types in `std.task` for cancellation and timeout:
+
+```ryo
+# Built-in in std/task/errors.ryo
+error Canceled
+error Timeout
+```
+
+These integrate with error unions like any other error type:
+
+```ryo
+import std.task
+
+fn fetch_with_timeout(url: str) -> (Canceled | Timeout | HttpError)!Data:
+    fut = task.run:
+        return try http.get(url)
+    return try task.timeout(5s, fut).await
+```
+
+**Cooperative Cancellation:**
+
+Cancellation in Ryo is **cooperative** — a cancelled task receives `Canceled` at its next **suspension point** (I/O operation, channel send/recv, `task.delay`, `.await`). Cancellation does not interrupt computation mid-execution.
+
+```ryo
+worker = task.run:
+    # Phase 1: pure computation — cannot be cancelled mid-way
+    result = expensive_calculation(data)
+
+    # Phase 2: this .await is a suspension point — Canceled delivered here
+    try save_to_db(result)
+
+    return result
+
+# Dropping the future requests cancellation
+# worker is dropped here — task receives Canceled at next suspension point
+```
+
+**Why cooperative:** Forceful cancellation (killing a task mid-computation) can corrupt data structures, leak resources, and produce impossible-to-debug state. Cooperative cancellation is the approach used by Go (`context.Canceled`), Kotlin coroutines, and Python asyncio — all proven at scale.
+
+**RAII Cleanup on Cancellation:**
+
+When a task is cancelled, all `Drop` implementations and `with` blocks still execute. Cancellation unwinds the task's stack in reverse order, just like a normal scope exit.
+
+```ryo
+worker = task.run:
+    with File.open("output.txt") as f:
+        with db_pool.acquire() as conn:
+            data = try conn.query("SELECT ...")
+            f.write(data)
+        # conn returned to pool — even if cancelled
+    # f closed — even if cancelled
+```
+
+This guarantee is essential: without it, cancellation would leak file handles, database connections, and mutex locks. The ownership model (Rules 5-6) ensures cleanup is always deterministic.
+
+**Cancellation Sources:**
+
+| Source | When | Error Delivered |
+| :--- | :--- | :--- |
+| Dropping a `future[T]` | Future goes out of scope | `Canceled` at next suspension |
+| `task.scope` exit | Any task in scope panics or scope exits | `Canceled` to all remaining tasks |
+| `select` | A different `case` wins | `Canceled` to losing operations |
+| `task.timeout(duration, fut)` | Duration expires | `Timeout` to the timed-out task |
+| `fut.cancel()` | Explicit cancellation call | `Canceled` at next suspension |
+
+**Handling Cancellation:**
+
+Cancelled tasks propagate `Canceled` through `try` like any other error. Callers can handle it explicitly or let it propagate:
+
+```ryo
+result = worker.await catch |e|:
+    match e:
+        task.Canceled:
+            log("Task was cancelled, using fallback")
+            return fallback_value
+        task.Timeout:
+            log("Task timed out after 5s")
+            return default_value
+        HttpError(status, msg):
+            log(f"HTTP {status}: {msg}")
+            return handle_http_error(status)
+```
+
+*(Rationale: Cancellation must integrate with Ryo's existing error union system — no special control flow, no new keywords. `Canceled` and `Timeout` are plain error types that compose with `try`/`catch`/`match`. Cooperative cancellation respects RAII cleanup, preventing resource leaks. This approach is simpler than Zig 0.16's three-strategy model (propagate/recancel/swapCancelProtection) while covering 99% of use cases for Ryo's target audience.)*
+
 ### 9.3 Concurrency Control Flow and Utilities
 
 #### 9.3.1 Non-Deterministic Waiting (`select`)
@@ -3175,8 +3268,9 @@ select:
 - `my_value` in the `tx.send()` case remains valid in outer scope if timeout hits
 - Operations are atomic regarding ownership
 - Unselected operations are cancelled without side effects
+- Losing operations receive `Canceled` at their next suspension point (see §9.2.5)
 
-*Rationale: Ensures ownership rules are preserved even with non-deterministic control flow. Prevents accidental data loss.*
+*Rationale: Ensures ownership rules are preserved even with non-deterministic control flow. Prevents accidental data loss. Cancellation is cooperative and RAII-safe — losing tasks clean up their resources before termination.*
 
 #### 14.5.6 Parallelism and Specification Updates
 
@@ -3288,8 +3382,9 @@ Even though Ryo does not use `async`/`await` syntax, these keywords are **reserv
 
 Concurrency is implemented in **Phase 5** (post-v0.1.0):
 - **Milestone 32:** Green threads runtime and ambient context
-- **Milestone 33:** Parallelism, sync primitives, and spec updates
-- **Milestone 34:** Data parallelism (`par_iter()`)
+- **Milestone 33:** Cancellation model (`Canceled`/`Timeout` errors, cooperative cancellation)
+- **Milestone 34:** Parallelism, sync primitives, and spec updates
+- **Milestone 35:** Data parallelism (`par_iter()`)
 
 *Rationale: Core language features and ownership model must stabilize before adding concurrency complexity.*
 
@@ -3298,6 +3393,23 @@ Concurrency is implemented in **Phase 5** (post-v0.1.0):
 Ryo includes a first-class testing framework.
 
 *   **Test Functions:** Marked with `#[test]`.
+*   **Test Timeouts:** Tests can specify a maximum execution duration to prevent hanging CI. A timed-out test panics with a clear message.
+    ```ryo
+	#[test]
+	fn test_fast():
+	    assert_eq(1 + 1, 2)
+
+	#[test(timeout=5s)]
+	fn test_with_timeout():
+	    data = fetch_slow_service()
+	    assert(data.is_valid())
+	```
+    A global default timeout can be configured in `ryo.toml`:
+    ```toml
+	[testing]
+	default-timeout = "30s"    # Applied to all tests without explicit timeout
+	```
+    Tests with an explicit `timeout` parameter override the global default. Tests without any timeout (and no global default) run without a time limit.
 *   **Benchmarks:** Marked with `#[bench]`.
 *   **Fixtures:** Use **RAII (Drop)** for setup/teardown.
     ```ryo
@@ -3359,6 +3471,8 @@ Future features and extensions are listed in this section below.
 *   **Distinct Types** (Strong typedefs for unit safety — see Section 4.14)
 *   **Contracts** (`#[pre]`/`#[post]` function contracts — see Section 7.11)
 *   **Named Parameters** (`#[named]` mandatory named arguments — see Section 6.1.1)
+*   **Cancellation Model** (Cooperative cancellation with `Canceled`/`Timeout` errors — see Section 9.2.5)
+*   **Test Timeouts** (`#[test(timeout=5s)]` for preventing hanging tests — see Section 15)
 *   **Compile-Time Execution** (`comptime` blocks and functions)
 *   **Foreign Function Interface & Unsafe Operations** (C FFI, raw pointers, unsafe blocks)
 *   **CSP Concurrency Extensions** (channels, select, spawn - optional)

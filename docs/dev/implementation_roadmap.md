@@ -1749,6 +1749,10 @@ note: run with `RYOLANG_BACKTRACE=1` for full backtrace
   - `assert_eq(a, b, message)`: Assert equality
   - `assert_ne(a, b, message)`: Assert inequality
   - `assert_error(result, message)`: Assert error returned
+- Add test timeouts:
+  - `#[test(timeout=5s)]` attribute parameter for per-test time limits
+  - Global `[testing] default-timeout` in `ryo.toml`
+  - Timed-out tests trigger `panic("test timed out after {duration}")` with clear diagnostics
 - Add benchmarking support:
   - `#[bench]` attribute for performance tests
   - `ryo bench` command to run benchmarks
@@ -2161,9 +2165,10 @@ fn main():
 
 **Implementation Phases:**
 1. **Milestone 32:** Green threads runtime, ambient context, basic task spawning
-2. **Milestone 33:** Parallelism, sync primitives (Mutex/RwLock), spec updates, work-stealing
-3. **Milestone 34:** Data parallelism (par_iter, fork-join)
-4. **Milestone 35 (optional):** Select statement and advanced cancellation
+2. **Milestone 33:** Cancellation model (`Canceled`/`Timeout` errors, cooperative cancellation, RAII cleanup on cancel)
+3. **Milestone 34:** Parallelism, sync primitives (Mutex/RwLock), spec updates, work-stealing
+4. **Milestone 35:** Data parallelism (par_iter, fork-join)
+5. **Milestone 36 (optional):** Select statement and advanced cancellation patterns
 
 **Timeline:** v1.5-1.6 (6-12 months after v0.1.0)
 
@@ -2374,6 +2379,76 @@ ContractViolation: precondition failed: amount > 0
 **Timeline:** v0.2 (ships alongside attribute system)
 
 **Hardest Part:** Handling `#[post]` with multiple return points — each `return` must be rewritten to check the postcondition before returning. This is a well-understood AST transformation but requires care.
+
+### Cancellation Model (`Canceled`/`Timeout` Errors)
+**Goal:** Define clear cancellation semantics for the concurrency runtime with built-in error types
+
+**Why Post-v0.1.0:**
+- Requires concurrency runtime (Milestone 32) to be functional
+- Requires error unions and error types (v0.1 features)
+- Cancellation semantics must be designed alongside green threads, not after
+
+**Features:**
+
+```ryo
+import std.task
+
+# Built-in error types
+error Canceled
+error Timeout
+
+# Cooperative cancellation — delivered at suspension points
+worker = task.run:
+    result = expensive_calculation(data)
+    try save_to_db(result)  # Canceled delivered here if task cancelled
+    return result
+
+# Timeout integration
+result = try task.timeout(5s, worker).await catch |e|:
+    match e:
+        task.Canceled:
+            log("Task cancelled")
+            return fallback
+        task.Timeout:
+            log("Task timed out")
+            return default
+```
+
+**Implementation Tasks:**
+
+1. **Built-in Error Types:**
+   - Define `Canceled` and `Timeout` as unit errors in `std.task`
+   - Ensure they compose with error unions (`(Canceled | Timeout | HttpError)!Data`)
+
+2. **Cooperative Cancellation Delivery:**
+   - At each suspension point (I/O, channel ops, `.await`, `task.delay`), check cancellation flag
+   - If cancelled, return `Canceled` error instead of performing the operation
+   - Pure computation is never interrupted — only suspension points check
+
+3. **RAII Cleanup on Cancellation:**
+   - When `Canceled` propagates up the stack, `Drop` implementations and `with` blocks execute normally
+   - Cancellation unwinds in reverse declaration order, same as normal scope exit
+   - Test: verify file handles, connections, and locks are released on cancel
+
+4. **Cancellation Sources:**
+   - Dropping a `future[T]` sets the cancellation flag on its associated task
+   - `task.scope` exit cancels all remaining child tasks
+   - `select` losing branches receive cancellation
+   - `task.timeout` sets cancellation flag when duration expires
+   - `fut.cancel()` explicit method sets flag immediately
+
+5. **Testing:**
+   - Test cancellation at various suspension points (I/O, channel, delay)
+   - Test RAII cleanup during cancellation (Drop runs, with blocks clean up)
+   - Test cancellation propagation through `try`
+   - Test `task.scope` cancels children when one panics
+   - Test `select` cancel safety (losing operations clean up)
+
+**Visible Progress:** Tasks cancel cooperatively with clear error types. Resources are always cleaned up. No leaked file handles, connections, or locks on cancellation.
+
+**Effort:** ~2-3 weeks (integrated with Milestone 32-33 runtime work)
+**Dependencies:** Concurrency runtime (Milestone 32), error unions (v0.1), Drop trait (Milestone 23)
+**Timeline:** v0.4+ (ships with concurrency runtime, Milestone 33)
 
 ### Named Parameters (`#[named]`)
 **Goal:** Allow functions to require callers to use named arguments
