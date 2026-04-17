@@ -302,9 +302,14 @@ impl Codegen {
             }
 
             HirExprKind::Call(name, args) => {
-                if name == "print" {
-                    Self::generate_print_call(builder, args, ctx)?;
-                    Ok(builder.ins().iconst(ctx.int_type, 0))
+                if crate::builtins::lookup(name).is_some() {
+                    match name.as_str() {
+                        "print" => {
+                            Self::generate_print_call(builder, args, ctx)?;
+                            Ok(builder.ins().iconst(ctx.int_type, 0))
+                        }
+                        _ => Err(format!("Builtin '{}' has no codegen implementation", name)),
+                    }
                 } else if let Some(&callee_id) = ctx.func_ids.get(name.as_str()) {
                     let mut arg_values = Vec::new();
                     for arg in args {

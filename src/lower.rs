@@ -260,8 +260,8 @@ fn lower_expr(
                 .map(|a| lower_expr(a, scope, signatures))
                 .collect::<Result<_, _>>()?;
 
-            let return_ty = if name == "print" {
-                Type::Int
+            let return_ty = if let Some(builtin) = crate::builtins::lookup(name) {
+                builtin.return_type
             } else {
                 signatures
                     .get(name.as_str())
