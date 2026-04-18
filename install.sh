@@ -3,7 +3,7 @@ set -e
 
 # Configuration
 REPO="ryolang/ryox"
-RELEASE_TAG="latest"
+RELEASE_TAG=""
 INSTALL_DIR="$HOME/.ryo/bin"
 BINARY_NAME="ryo"
 
@@ -54,7 +54,7 @@ show_help() {
     echo ""
     echo "Environment variables:"
     echo "  RYO_REPO       GitHub repository (default: ryolang/ryox)"
-    echo "  RYO_RELEASE    Release tag (default: latest)"
+    echo "  RYO_RELEASE    Release tag (default: most recent)"
     echo ""
     exit 0
 }
@@ -63,10 +63,21 @@ if [ "$HELP" = true ]; then
     show_help
 fi
 
+for cmd in curl jq tar; do
+    if ! command -v "$cmd" > /dev/null 2>&1; then
+        echo "${RED}Required command not found: $cmd${NC}" >&2
+        exit 1
+    fi
+done
+
 # Allow override via environment
 REPO="${RYO_REPO:-$REPO}"
 RELEASE_TAG="${RYO_RELEASE:-$RELEASE_TAG}"
-GITHUB_API="https://api.github.com/repos/${REPO}/releases/tags/${RELEASE_TAG}"
+if [ -n "$RELEASE_TAG" ]; then
+    GITHUB_API="https://api.github.com/repos/${REPO}/releases/tags/${RELEASE_TAG}"
+else
+    GITHUB_API="https://api.github.com/repos/${REPO}/releases?per_page=1"
+fi
 
 # Determine OS and architecture
 OS="$(uname -s)"
@@ -140,16 +151,18 @@ fi
 echo "${YELLOW}Fetching latest release...${NC}"
 RELEASE_JSON=$(curl -s "$GITHUB_API")
 
-# Check if release exists
+if [ -z "$RELEASE_TAG" ]; then
+    RELEASE_JSON=$(echo "$RELEASE_JSON" | jq '.[0] // empty')
+fi
+
 ACTUAL_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
-if [ "$ACTUAL_TAG" = "$RELEASE_TAG" ]; then
-    echo "${GREEN}Found release${NC}"
-else
-    echo "${RED}No release found for tag '${RELEASE_TAG}'${NC}" >&2
+if [ -z "$ACTUAL_TAG" ]; then
+    echo "${RED}No release found${NC}" >&2
     echo "Run the release workflow manually on GitHub first:" >&2
     echo "  https://github.com/${REPO}/actions/workflows/release.yml" >&2
     exit 1
 fi
+echo "${GREEN}Found release: ${ACTUAL_TAG}${NC}"
 
 ASSET_PATTERN="${TARGET}-[0-9a-f]\{7\}\.tar\.gz"
 ASSET_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"${ASSET_PATTERN}\")) | .browser_download_url" | head -1)

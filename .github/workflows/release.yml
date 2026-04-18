@@ -47,25 +47,11 @@ jobs:
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          HTTP_CODE=$(gh api "repos/${REPO}/releases/tags/latest" \
-            --silent --include 2>/dev/null | head -1 | awk '{print $2}') || true
-          RELEASE_JSON=$(gh api "repos/${REPO}/releases/tags/latest" 2>/dev/null || echo "")
-          if [[ "$HTTP_CODE" == "404" ]] || [[ -z "$RELEASE_JSON" ]]; then
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ -n "$HTTP_CODE" ]] && [[ "$HTTP_CODE" != "200" ]]; then
-            echo "::error::GitHub API returned unexpected status $HTTP_CODE"
-            exit 1
-          fi
-          MATCH_COUNT=$(echo "$RELEASE_JSON" | jq --arg hash "$SHORT_HASH" \
-            '[.assets[] | select(.name | contains($hash))] | length')
-          if [[ "$MATCH_COUNT" -ge 2 ]]; then
+          if gh release view "latest-${SHORT_HASH}" > /dev/null 2>&1; then
             echo "should_build=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping: commit $SHORT_HASH already has $MATCH_COUNT artifacts"
+            echo "Skipping: release latest-${SHORT_HASH} already exists"
           else
             echo "should_build=true" >> "$GITHUB_OUTPUT"
-            echo "Building: only $MATCH_COUNT of 2 artifacts found for $SHORT_HASH"
           fi
 
   build:
@@ -93,15 +79,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: Swatinem/rust-cache@v3
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-release-${{ matrix.target }}-
+          prefix-key: release
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
@@ -119,7 +99,7 @@ jobs:
           echo "ASSET_NAME=${ASSET_NAME}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ env.ASSET_NAME }}
@@ -134,16 +114,26 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
-      - name: Create or update release
+      - name: Delete previous releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for tag in $(gh release list --json tagName --jq '.[].tagName | select(startswith("latest-"))'); do
+            echo "Deleting release: $tag"
+            gh release delete "$tag" --yes --cleanup-tag
+          done
+
+      - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHORT_HASH: ${{ needs.check.outputs.short_hash }}
           REPO_NAME: ${{ github.repository }}
         run: |
+          TAG="latest-${SHORT_HASH}"
           NOTES="Latest build from \`main\` at ${SHORT_HASH}.
 
           Built: $(date -u '+%Y-%m-%d %H:%M UTC')
@@ -153,17 +143,11 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/${REPO_NAME}/main/install.sh | sh
           \`\`\`"
 
-          if gh release view latest > /dev/null 2>&1; then
-            gh release delete latest --yes --cleanup-tag
-          fi
-          gh release create latest --title "Latest Build" --prerelease --notes "$NOTES"
-
-      - name: Upload assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
           shopt -s globstar nullglob
+          ASSETS=()
           for asset in artifacts/**/*.tar.gz; do
-            echo "Uploading ${asset}..."
-            gh release upload latest "${asset}" --clobber
+            ASSETS+=("$asset")
           done
+
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --title "Latest Build" --prerelease --notes "$NOTES"
