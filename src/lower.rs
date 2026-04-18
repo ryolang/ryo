@@ -430,9 +430,10 @@ mod tests {
 
     #[test]
     fn lower_explicit_main_with_top_level_error() {
+        // Top-level statements (other than function definitions) are not allowed when main() exists
         let result = parse_and_lower("x = 42\n\nfn main() -> int:\n\treturn 0\n");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Top-level statements"));
+        assert!(result.unwrap_err().contains("Top-level statements are not allowed"));
     }
 
     #[test]

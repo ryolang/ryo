@@ -3,6 +3,18 @@ use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan};
 use crate::ast::*;
 use crate::lexer::Token;
 
+/// Helper: skip zero or more newline tokens
+fn skip_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token<'a>>>> + 'a
+where
+    I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
+{
+    select! { Token::Newline(_) => () }
+        .repeated()
+        .to(())
+}
+
+
+
 /// Unescape a string literal (handle \n, \t, \", \\, etc.)
 fn unescape_string(s: &str) -> String {
     let mut result = String::new();
@@ -33,13 +45,21 @@ fn unescape_string(s: &str) -> String {
 }
 
 /// Parse a complete Ryo program with multiple statements
+/// Statements must be separated by newlines (no two statements on same line)
 pub fn program_parser<'a, I>() -> impl Parser<'a, I, Program, extra::Err<Rich<'a, Token<'a>>>> + 'a
 where
     I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
-    statement_parser()
-        .repeated()
-        .collect::<Vec<_>>()
+    skip_newlines()
+        .ignore_then(
+            statement_parser()
+                .then(skip_newlines())
+                .repeated()
+                .collect::<Vec<_>>()
+                .map(|v| v.into_iter().map(|(s, _)| s).collect::<Vec<_>>())
+        )
+        .then_ignore(skip_newlines())
+        .then_ignore(end())
         .map_with(|statements, _e| {
             let span = if statements.is_empty() {
                 SimpleSpan::new((), 0..0)
@@ -50,10 +70,10 @@ where
             };
             Program { statements, span }
         })
-        .then_ignore(end())
 }
 
 /// Parse a statement that can appear inside a function body (no nested functions)
+/// Includes expression statements, return statements, and variable declarations
 fn body_statement_parser<'a, I>()
 -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token<'a>>>> + 'a
 where
@@ -79,8 +99,9 @@ where
     choice((return_stmt, var_decl, expr_stmt))
 }
 
-/// Parse a top-level statement (includes function definitions)
-fn statement_parser<'a, I>() -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token<'a>>>> + 'a
+/// Parse a top-level statement (no expression statements allowed at module level)
+/// Only function definitions and variable declarations are valid
+fn top_level_statement_parser<'a, I>() -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token<'a>>>> + 'a
 where
     I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -89,7 +110,20 @@ where
         kind: StmtKind::FunctionDef(func),
     });
 
-    choice((function_def, body_statement_parser()))
+    let var_decl = var_decl_parser().map_with(|kind, e| Statement {
+        span: e.span(),
+        kind: StmtKind::VarDecl(kind),
+    });
+
+    choice((function_def, var_decl))
+}
+
+/// Parse a top-level statement (includes function definitions)
+fn statement_parser<'a, I>() -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token<'a>>>> + 'a
+where
+    I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
+{
+    top_level_statement_parser()
 }
 
 /// Parse a function definition: fn name(params) [-> type]: INDENT body DEDENT
@@ -128,11 +162,16 @@ where
 
     let return_type = just(Token::Arrow).ignore_then(type_expr).or_not();
 
-    let body = body_statement_parser()
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .delimited_by(just(Token::Indent), just(Token::Dedent));
+    let body = skip_newlines()
+        .ignore_then(
+            body_statement_parser()
+                .then(skip_newlines())
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .map(|v| v.into_iter().map(|(s, _)| s).collect::<Vec<_>>())
+        )
+        .delimited_by(skip_newlines().ignore_then(just(Token::Indent)), just(Token::Dedent));
 
     just(Token::Fn)
         .ignore_then(ident)
@@ -303,17 +342,26 @@ mod tests {
 
     fn lex_and_parse(input: &str) -> Result<Program, Vec<Rich<'static, Token<'static>>>> {
         use crate::lexer::Token;
+        use crate::indent;
 
-        let tokens: Vec<_> = Token::lexer(input)
-            .filter_map(|result| result.ok())
-            .filter(|t| !matches!(t, Token::Newline(_)))
+        let raw_tokens: Vec<_> = Token::lexer(input)
+            .spanned()
+            .map(|(tok, span)| match tok {
+                Ok(tok) => (tok, span.into()),
+                Err(()) => (Token::Error, span.into()),
+            })
             .collect();
 
-        let static_tokens: Vec<Token<'static>> =
-            tokens.into_iter().map(|t| leak_token(t)).collect();
+        let tokens = indent::process(raw_tokens).map_err(|e| vec![Rich::custom(SimpleSpan::new((), 0..0), e)])?;
+
+        let static_tokens: Vec<(Token<'static>, SimpleSpan)> =
+            tokens.into_iter().map(|(t, s)| (leak_token(t), s)).collect();
+
+        let token_stream = Stream::from_iter(static_tokens)
+            .map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
 
         program_parser()
-            .parse(Stream::from_iter(static_tokens))
+            .parse(token_stream)
             .into_result()
             .map_err(|e| e.into_iter().map(|rich| rich.into_owned()).collect())
     }
@@ -503,5 +551,45 @@ mod tests {
         assert!(result.is_ok());
         let program = result.unwrap();
         assert_eq!(program.statements.len(), 0);
+    }
+
+    // Tests for newline-delimited statements (no two statements on same line)
+
+    #[test]
+    fn reject_two_expressions_same_line() {
+        let result = lex_and_parse("x 42");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_multiple_expressions_same_line() {
+        let result = lex_and_parse("x y 42");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn accept_statements_on_separate_lines() {
+        let result = lex_and_parse("x = 1\ny = 2");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().statements.len(), 2);
+    }
+
+    #[test]
+    fn accept_statement_with_no_trailing_newline() {
+        let result = lex_and_parse("x = 42");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn accept_statement_with_trailing_newline() {
+        let result = lex_and_parse("x = 42\n");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn accept_blank_lines_between_statements() {
+        let result = lex_and_parse("x = 1\n\ny = 2");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().statements.len(), 2);
     }
 }

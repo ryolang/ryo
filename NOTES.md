@@ -1,6 +1,5 @@
 # TODO
 
-- [ ] ryo run must not generate compilation files as other languages do: Zig, Go.
 - [ ] Iterators
 - [ ] Define Testing
 - [ ] https://ziglang.org/documentation/0.1.1/#case-study-printf

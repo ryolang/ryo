@@ -15,40 +15,30 @@ pub fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, String>
         if let Token::Newline(s) = tok {
             let whitespace = &s[1..]; // skip the '\n' character
 
-            // Skip blank lines: if next meaningful token is another Newline, skip this one
-            if i + 1 < tokens.len()
-                && let Token::Newline(_) = &tokens[i + 1].0
-            {
-                i += 1;
-                continue;
-            }
+            // Validate indentation for non-empty lines
+            if i + 1 < tokens.len() && !matches!(&tokens[i + 1].0, Token::Newline(_)) {
+                validate_indentation(whitespace)?;
+                let new_level = whitespace.chars().filter(|c| *c == '\t').count();
+                let current_level = *indent_stack.last().unwrap();
 
-            // Skip trailing newline at end of input (no tokens follow)
-            if i + 1 >= tokens.len() {
-                i += 1;
-                continue;
-            }
-
-            validate_indentation(whitespace)?;
-            let new_level = whitespace.chars().filter(|c| *c == '\t').count();
-            let current_level = *indent_stack.last().unwrap();
-
-            if new_level > current_level {
-                indent_stack.push(new_level);
-                result.push((Token::Indent, *span));
-            } else if new_level < current_level {
-                while *indent_stack.last().unwrap() > new_level {
-                    indent_stack.pop();
-                    result.push((Token::Dedent, *span));
-                }
-                if *indent_stack.last().unwrap() != new_level {
-                    return Err(format!(
-                        "Indentation error: dedent to level {} does not match any outer indentation level",
-                        new_level
-                    ));
+                if new_level > current_level {
+                    indent_stack.push(new_level);
+                    result.push((Token::Indent, *span));
+                } else if new_level < current_level {
+                    while *indent_stack.last().unwrap() > new_level {
+                        indent_stack.pop();
+                        result.push((Token::Dedent, *span));
+                    }
+                    if *indent_stack.last().unwrap() != new_level {
+                        return Err(format!(
+                            "Indentation error: dedent to level {} does not match any outer indentation level",
+                            new_level
+                        ));
+                    }
                 }
             }
-            // same level: no-op, just skip the newline
+            // Always push the newline token for the parser
+            result.push((Token::Newline(*s), *span));
         } else {
             result.push((tok.clone(), *span));
         }
@@ -183,10 +173,11 @@ mod tests {
     }
 
     #[test]
-    fn no_newline_tokens_in_output() {
+    fn newline_tokens_preserved() {
         let input = "fn foo():\n\treturn 1\n\nfn bar():\n\treturn 2";
         let raw = lex_raw(input);
         let processed = process(raw).unwrap();
-        assert!(!has_token(&processed, |t| matches!(t, Token::Newline(_))));
+        // Newlines are now preserved in output for the parser
+        assert!(has_token(&processed, |t| matches!(t, Token::Newline(_))));
     }
 }

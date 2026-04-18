@@ -1,0 +1,274 @@
+# trie.ryo
+# Trie (Prefix Tree) data structure implementation
+# Demonstrates Ryo's memory model: ownership, borrowing, transfer, and concurrency
+
+struct TrieNode:
+	children: map[str, TrieNode]
+	is_end_of_word: bool
+
+struct Trie:
+	root: TrieNode
+
+impl Trie:
+	fn create() -> Trie:
+		return Trie(root=TrieNode(children={}, is_end_of_word=false))
+
+	# Immutable operations - implicit borrow
+
+	fn search(self, word: str) -> bool:
+		mut node = self.root
+		for char in word:
+			if not node.children.contains(char):
+				return false
+			node = node.children[char]
+		return node.is_end_of_word
+
+	fn starts_with(self, prefix: str) -> bool:
+		mut node = self.root
+		for char in prefix:
+			if not node.children.contains(char):
+				return false
+			node = node.children[char]
+		return true
+
+	fn count_words(self) -> int:
+		return self.count_from_node(self.root)
+
+	fn count_from_node(self, node: TrieNode) -> int:
+		count = 1 if node.is_end_of_word else 0
+		for child in node.children.values():
+			count += self.count_from_node(child)
+		return count
+
+	fn collect_words(self) -> list[str]:
+		return self.collect_from_node(self.root, "")
+
+	fn collect_from_node(self, node: TrieNode, prefix: str) -> list[str]:
+		mut words = []
+		if node.is_end_of_word:
+			words.append(prefix)
+		for char, child in node.children:
+			words.extend(self.collect_from_node(child, prefix + char))
+		return words
+
+	fn words_with_prefix(self, prefix: str) -> list[str]:
+		mut node = self.root
+		for char in prefix:
+			if not node.children.contains(char):
+				return []
+			node = node.children[char]
+		return self.collect_from_node(node, prefix)
+
+	# Mutable operations - require &mut self
+
+	fn insert(&mut self, word: str):
+		mut node = self.root
+		for char in word:
+			if not node.children.contains(char):
+				node.children[char] = TrieNode(children={}, is_end_of_word=false)
+			node = node.children[char]
+		node.is_end_of_word = true
+
+	fn delete(&mut self, word: str) -> bool:
+		return self.delete_from_node(mut self.root, word, 0)
+
+	fn delete_from_node(mut self, mut node: TrieNode, word: str, index: int) -> bool:
+		if index == word.len():
+			if not node.is_end_of_word:
+				return false
+			node.is_end_of_word = false
+			return node.children.is_empty()
+
+		char = word[index]
+		if not node.children.contains(char):
+			return false
+
+		mut child = node.children[char]
+		if self.delete_from_node(mut child, word, index + 1):
+			node.children.delete(char)
+			return node.children.is_empty() and not node.is_end_of_word
+
+		return false
+
+	# Function taking ownership via move keyword (Rule 4)
+	fn consume(move self, word: str) -> list[str]:
+		self.insert(word)
+		return self.collect_words()
+
+
+fn main():
+	print("=== Memory Model Test: Trie ===\n")
+
+	# Test 1: Single owner
+	# Tests basic ownership - trie owns its root node, which owns children
+	# Validates that struct instantiation and field ownership work
+	print("Test 1: Single owner - basic ownership chain")
+	mut trie = Trie.create()
+	trie.insert("apple")
+	trie.insert("app")
+	print(f"  Words: {trie.collect_words()}")
+
+	# Test 2: Ownership transfer (implicit move)
+	# Tests that assignment transfers ownership without copying
+	# Demonstrates ownership transfer through simple assignment
+	print("\nTest 2: Ownership transfer - implicit move")
+	mut trie2 = trie
+	trie2.insert("application")
+	# trie is no longer valid (moved to trie2)
+	print(f"  Words in trie2: {trie2.collect_words()}")
+
+	# Test 3: Mutable borrow (&mut)
+	# Tests Rule 3: Mutable borrows require &mut in signature AND call site
+	# Demonstrates exclusive mutable access to modify trie state
+	print("\nTest 3: Mutable borrow - exclusive modification")
+	mut trie3 = Trie.create()
+	trie3.insert("banana")
+	trie3.insert("band")
+	trie3.delete("banana")
+	print(f"  After delete: {trie3.collect_words()}")
+
+	# Test 4: Immutable borrows (concurrent reads)
+	# Tests Rule 2: Function parameters are implicitly borrowed
+	# Demonstrates multiple simultaneous reads without &mut
+	print("\nTest 4: Immutable borrows - concurrent reads")
+	trie4 = Trie.create()
+	trie4.insert("cat")
+	trie4.insert("catalog")
+	# Multiple calls demonstrate borrowing works
+	found1 = trie4.search("cat")
+	found2 = trie4.search("catalog")
+	starts = trie4.starts_with("cat")
+	print(f"  'cat' found: {found1}")
+	print(f"  'catalog' found: {found2}")
+	print(f"  starts_with 'cat': {starts}")
+
+	# Test 5: collect_words returns owned list
+	# Tests that collect_from_node returns a new owned list (Rule 5: no borrow returns)
+	# Demonstrates ownership transfer of the result: each call returns independent data
+	print("\nTest 5: Return owned list - no side effects (Rule 5)")
+	trie5 = Trie.create()
+	trie5.insert("dog")
+	trie5.insert("door")
+	words = trie5.collect_words()
+	print(f"  Collected: {words}")
+	# words is an independent owned copy
+	trie5.insert("dove")
+	print(f"  After insert to trie5: {trie5.collect_words()}")
+	print(f"  Original 'words' unchanged: {words}")
+
+	# Test 6: Recursive ownership transfer
+	# Tests recursive ownership transfer through return values
+	# Each recursive call in collect_from_node returns its own owned list
+	print("\nTest 6: Recursive ownership - words_with_prefix")
+	trie6 = Trie.create()
+	trie6.insert("run")
+	trie6.insert("runner")
+	trie6.insert("running")
+	prefix_words = trie6.words_with_prefix("run")
+	print(f"  Prefix words: {prefix_words}")
+
+	# Test 7: Heap allocation test - deep trie
+	# Tests heap allocation for nested structs
+	# Validates that TrieNode children map owns its values on the heap
+	print("\nTest 7: Heap allocation - deep nesting")
+	mut trie7 = Trie.create()
+	mut word = "a"
+	for _ in 0..100:
+		trie7.insert(word)
+		word += "a"
+	print(f"  Deep trie word count: {trie7.count_words()}")
+	print(f"  First few words: {trie7.collect_words()[0..5]}")
+
+	# Test 8: Struct field ownership
+	# Tests that Trie owns its root, root owns its children map, map owns TrieNode values
+	# This creates a tree of owned objects
+	print("\nTest 8: Struct field ownership chain")
+	mut trie8 = Trie.create()
+	trie8.insert("ownership")
+	trie8.insert("owned")
+	trie8.insert("owner")
+	# The root TrieNode and all its children are owned by the Trie struct
+	all_words = trie8.collect_words()
+	print(f"  All owned words: {all_words}")
+
+	# Test 9: Explicit move keyword (Rule 4)
+	# Tests Rule 4: Move parameters use `move` keyword in signature
+	# Demonstrates explicit ownership transfer at call site
+	print("\nTest 9: Explicit move keyword - consume ownership")
+	mut trie9 = Trie.create()
+	trie9.insert("mobile")
+	trie9.insert("moment")
+	consumed_words = trie9.consume("move")
+	# trie9 is no longer valid (consumed by move)
+	print(f"  Consumed words: {consumed_words}")
+
+	# Test 10: shared[T] - reference-counted sharing
+	# Tests shared ownership via ARC (Atomic Reference Counting)
+	# Each clone creates a new reference to the same underlying data
+	print("\nTest 10: shared[T] - reference-counted sharing")
+	mut shared_trie = shared(Trie.create())
+	shared_trie.insert("shared")
+	shared_trie.insert("sharing")
+	# Clone the shared reference - both point to same data
+	shared_clone = shared_trie.clone()
+	shared_clone.insert("share")
+	print(f"  Shared trie words: {shared_trie.collect_words()}")
+	print(f"  Clone trie words: {shared_clone.collect_words()}")
+	print(f"  Same underlying data: {shared_trie.collect_words() == shared_clone.collect_words()}")
+
+	# Test 11: shared[mutex[T]] - thread-safe concurrent access
+	# Tests concurrent mutable access with mutex protection
+	# shared[mutex[Trie]] provides ARC + mutex for safe parallel access
+	print("\nTest 11: shared[mutex[T]] - concurrent thread-safe access")
+	concurrent_trie = shared(mutex(Trie.create()))
+
+	# Spawn multiple tasks that insert concurrently
+	mut futures = []
+	task_words = [["task", "thread"], ["async", "await"], ["future", "promise"], ["chan", "select"]]
+	for word_list in task_words:
+		# Each task gets its own shared reference
+		trie_ref = concurrent_trie.clone()
+		future = task.run fn():
+			for word in word_list:
+				# Lock mutex for exclusive access, then unlock automatically
+				mut guard = trie_ref.lock()
+				guard.insert(word)
+				print(f"    Task inserted: {word}")
+		futures.append(future)
+
+	# Wait for all tasks to complete
+	for fut in futures:
+		fut.await
+
+	# Verify all words were inserted correctly
+	print(f"  Total words after concurrent inserts: {concurrent_trie.lock().count_words()}")
+	print(f"  All words: {concurrent_trie.lock().collect_words()}")
+
+	# Test 12: Concurrent reads vs write
+	# Tests that reads and writes can happen concurrently with proper locking
+	print("\nTest 12: Concurrent reads and writes")
+	concurrent_trie2 = shared(mutex(Trie.create()))
+	concurrent_trie2.lock().insert("initial")
+
+	# Spawn a writer task
+	writer_future = task.run fn():
+		trie_ref = concurrent_trie2.clone()
+		mut guard = trie_ref.lock()
+		guard.insert("writer")
+
+	# Spawn reader tasks while writer is working
+	mut reader_futures = []
+	for i in 0..3:
+		reader_futures.append(task.run fn():
+			trie_ref = concurrent_trie2.clone()
+			guard = trie_ref.lock()
+			words = guard.collect_words()
+			print(f"    Reader {i} saw: {words}"))
+
+	writer_future.await
+	for fut in reader_futures:
+		fut.await
+
+	print(f"  Final words: {concurrent_trie2.lock().collect_words()}")
+
+	print("\n=== All Memory Model Tests Complete ===")
