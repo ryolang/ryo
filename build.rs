@@ -2,14 +2,28 @@ use std::env;
 
 fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
-    let short_hash = get_git_short_hash().unwrap_or_else(|| "unknown".to_string());
+    if let Some(git_ref) = resolve_git_ref() {
+        println!("cargo:rerun-if-changed={git_ref}");
+    }
     let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
-    let version = if short_hash == "unknown" {
-        pkg_version
-    } else {
-        format!("{} +g{}", pkg_version, short_hash)
+    let short_hash = get_git_short_hash();
+    let commit_date = get_git_commit_date();
+    let version = match (short_hash, commit_date) {
+        (Some(hash), Some(date)) => format!("{pkg_version}-dev ({hash} {date})"),
+        (Some(hash), None) => format!("{pkg_version}-dev ({hash})"),
+        _ => pkg_version,
     };
-    println!("cargo:rustc-env=RYO_VERSION={}", version);
+    println!("cargo:rustc-env=RYO_VERSION={version}");
+}
+
+fn resolve_git_ref() -> Option<String> {
+    let head = std::fs::read_to_string(".git/HEAD").ok()?;
+    let head = head.trim();
+    if let Some(refpath) = head.strip_prefix("ref: ") {
+        Some(format!(".git/{refpath}"))
+    } else {
+        None
+    }
 }
 
 fn get_git_short_hash() -> Option<String> {
@@ -21,6 +35,20 @@ fn get_git_short_hash() -> Option<String> {
         let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !hash.is_empty() {
             return Some(hash);
+        }
+    }
+    None
+}
+
+fn get_git_commit_date() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%cs"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let date = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !date.is_empty() {
+            return Some(date);
         }
     }
     None
