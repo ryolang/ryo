@@ -63,7 +63,7 @@ if [ "$HELP" = true ]; then
     show_help
 fi
 
-for cmd in curl jq tar; do
+for cmd in curl tar; do
     if ! command -v "$cmd" > /dev/null 2>&1; then
         echo "${RED}Required command not found: $cmd${NC}" >&2
         exit 1
@@ -73,11 +73,6 @@ done
 # Allow override via environment
 REPO="${RYO_REPO:-$REPO}"
 RELEASE_TAG="${RYO_RELEASE:-$RELEASE_TAG}"
-if [ -n "$RELEASE_TAG" ]; then
-    GITHUB_API="https://api.github.com/repos/${REPO}/releases/tags/${RELEASE_TAG}"
-else
-    GITHUB_API="https://api.github.com/repos/${REPO}/releases?per_page=1"
-fi
 
 # Determine OS and architecture
 OS="$(uname -s)"
@@ -149,32 +144,26 @@ if [ -f "$BINARY_PATH" ]; then
 fi
 
 echo "${YELLOW}Fetching latest release...${NC}"
-RELEASE_JSON=$(curl -s "$GITHUB_API")
 
-if [ -z "$RELEASE_TAG" ]; then
-    RELEASE_JSON=$(echo "$RELEASE_JSON" | jq '.[0] // empty')
+if [ -n "$RELEASE_TAG" ]; then
+    TAG="$RELEASE_TAG"
+else
+    TAG=$(curl -s "https://api.github.com/repos/${REPO}/releases" \
+        | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"tag_name": *"//;s/"//')
 fi
 
-ACTUAL_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
-if [ -z "$ACTUAL_TAG" ]; then
+if [ -z "$TAG" ]; then
     echo "${RED}No release found${NC}" >&2
     echo "Run the release workflow manually on GitHub first:" >&2
     echo "  https://github.com/${REPO}/actions/workflows/release.yml" >&2
     exit 1
 fi
-echo "${GREEN}Found release: ${ACTUAL_TAG}${NC}"
+echo "${GREEN}Found release: ${TAG}${NC}"
 
-ASSET_PATTERN="${TARGET}-[0-9a-f]\{7\}\.tar\.gz"
-ASSET_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"${ASSET_PATTERN}\")) | .browser_download_url" | head -1)
+HASH=$(echo "$TAG" | sed 's/^latest-//')
+ASSET_NAME="${TARGET}-${HASH}.tar.gz"
+ASSET_URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET_NAME}"
 
-if [ -z "$ASSET_URL" ]; then
-    echo "${RED}No matching asset found for ${TARGET}-*${NC}" >&2
-    echo "Available assets:" >&2
-    echo "$RELEASE_JSON" | jq -r '.assets[].name' >&2
-    exit 1
-fi
-
-ASSET_NAME=$(basename "$ASSET_URL")
 echo "${YELLOW}Found asset: $ASSET_NAME${NC}"
 
 TMP_DIR=$(mktemp -d)
@@ -194,6 +183,13 @@ curl -sL "$ASSET_URL" -o "$TMP_FILE" || {
     rm -rf "$TMP_DIR"
     exit 1
 }
+
+if [ ! -s "$TMP_FILE" ]; then
+    echo "${RED}Download failed — asset not found: $ASSET_NAME${NC}" >&2
+    echo "Check available releases at: https://github.com/${REPO}/releases" >&2
+    rm -rf "$TMP_DIR"
+    exit 1
+fi
 
 echo "${YELLOW}Extracting...${NC}"
 if ! tar xzf "$TMP_FILE" -C "$TMP_DIR"; then
