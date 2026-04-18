@@ -1,0 +1,121 @@
+name: Nightly Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force rebuild even if commit unchanged'
+        required: false
+        default: 'false'
+        type: boolean
+
+concurrency:
+  group: nightly-build
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check if build needed
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      short_hash: ${{ steps.info.outputs.short_hash }}
+      release_id: ${{ steps.check.outputs.release_id }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get commit info
+        id: info
+        run: |
+          SHORT_HASH=$(git rev-parse --short=7 HEAD)
+          echo "short_hash=${SHORT_HASH}" >> $GITHUB_OUTPUT
+
+      - name: Check existing nightly release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHORT_HASH="${{ steps.info.outputs.short_hash }}"
+          if [[ "${{ inputs.force }}" == "true" ]]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          RELEASE_JSON=$(gh api repos/${{ github.repository }}/releases/tags/nightly 2>/dev/null || echo "")
+          if [[ -z "$RELEASE_JSON" ]] || [[ "$RELEASE_JSON" == "" ]]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "release_id=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          RELEASE_ID=$(echo "$RELEASE_JSON" | jq -r '.id // empty')
+          echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
+          if echo "$RELEASE_JSON" | jq -e --arg hash "$SHORT_HASH" '.assets[] | select(.name | contains($hash)) | .name' > /dev/null 2>&1; then
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "Skipping: Commit $SHORT_HASH already built"
+          else
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    name: Build and upload
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: ryo-linux-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: ryo-macos-arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+
+      - name: Build release
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/ryo ${{ matrix.artifact_name }}
+          tar czf "${{ matrix.artifact_name }}.tar.gz" "${{ matrix.artifact_name }}"
+
+      - name: Get version info
+        id: version
+        run: |
+          echo "short_hash=${{ needs.check.outputs.short_hash }}" >> $GITHUB_OUTPUT
+          echo "version=$(./target/${{ matrix.target }}/release/ryo --version 2>/dev/null || echo 'unknown')" >> $GITHUB_OUTPUT
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSET_NAME="${{ matrix.artifact_name }}-${{ needs.check.outputs.short_hash }}.tar.gz"
+          TAR_FILE="${{ matrix.artifact_name }}.tar.gz"
+          RELEASE_ID="${{ needs.check.outputs.release_id }}"
+          if [[ -z "$RELEASE_ID" ]]; then
+            RELEASE_ID=$(gh api repos/${{ github.repository }}/releases --method POST \
+              -f "tag_name=nightly" \
+              -f "name=Nightly Build" \
+              -f "prerelease=true" \
+              -f "draft=false" \
+              --jq '.id')
+          fi
+          gh api repos/${{ github.repository }}/releases/${RELEASE_ID}/assets \
+            --method POST \
+            -H "Content-Type: application/octet-stream" \
+            --field "name=${ASSET_NAME}" \
+            --field "@=${TAR_FILE}"
+          echo "Uploaded ${ASSET_NAME} to nightly release"

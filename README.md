@@ -1,18 +1,30 @@
-![Ryo](./docs/assets/ryo.jpg)
-# Ryo Programming Language ⚡
+<img src="./docs/assets/ryo.png" alt="Ryo Logo" width="160" />
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/ryolang/ryox/ci.yml?branch=main&style=for-the-badge)](https://github.com/ryolang/ryox/actions)
-[![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
-[![Discord](https://img.shields.io/discord/your-discord-invite-code?label=discord&logo=discord&style=for-the-badge)](https://discord.gg/your-discord-invite-code)
+# Ryo Programming Language ⚡
 
 **Ryo /ˈraɪoʊ/: Productive, Safe, Fast.**
 
-Ryo is a new, statically-typed, compiled programming language designed for developers who love the **simplicity of Python** but need the **performance and memory safety** guarantees of languages like Rust or Go, without the steep learning curve.
+<div align="left">
+  <img src="https://img.shields.io/badge/status-pre--alpha-orange?style=for-the-badge" alt="Status">
+  <img src="https://img.shields.io/github/actions/workflow/status/ryolang/ryox/ci.yml?branch=main&style=for-the-badge" alt="Build">  
+  <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="License">
+</div>
 
-Build reliable and efficient **web backends, CLI tools, and scripts** with an approachable syntax, powerful compile-time checks, and a built in concurrency model. Ryo manages memory safely via ownership and borrowing (simplified, no manual lifetimes) **without a garbage collector**, ensuring predictable performance and eliminating entire classes of bugs.
+<br>
+
+**Ryo** is a statically-typed language designed for high **Developer Experience**. It combines the ergonomics of Python, the memory safety of Rust ("Ownership Lite"), and the concurrency model of Go.
+
+It targets web backends, CLI tools, and scripting/notebook environments via AOT and JIT compilation.
+
+## ⚡ Key Features
+
+*   **Pythonic Syntax:** Indentation-based, readable, and concise.
+*   **Ownership Lite:** No Garbage Collector. Memory safety via Mojo-style borrowing (functions borrow by default, assignments move).
+*   **Green Threads:** "Colorless" concurrency with a work-stealing scheduler. No `async`/`await` needed.
+*   **Rich Errors:** Zig-style Error Unions (`!T`) with payload data.
+*   **Fast:** Built on **Cranelift** for instant compile times and native performance.
 
 **This project contains the source code for the Ryo compiler, standard library, and tooling.**
-
 
 > [!WARNING]
 > Ryo is currently in the **early stages of development** (pre-alpha). The language design is stabilizing, but the compiler is under active construction. It is **not yet ready for production use**. We welcome contributors!
@@ -27,14 +39,23 @@ The Ryo compiler currently implements **Milestone 4: Functions, HIR, & AOT Compi
 
 **Try it now:** [Quick Start Guide](docs/quickstart.md) - Build and run your first Ryo program in 5 minutes!
 
-## Why Ryo?
+## Quick Installation (Nightly Builds)
 
-*   **🐍 Simple & Productive:** Write clear, readable code with a clean syntax inspired by Python (tabs, f-strings, tuples, built-in `print`). Reduce boilerplate and focus on your logic.
-*   **🛡️ Safe & Reliable:** Compile-time memory safety via "Ownership Lite" prevents dangling pointers, data races, and use-after-free errors without a GC. Explicit error handling with `error` types, `try`, and `catch` makes code robust. No null thanks to optional types (`?T` and `none`).
-*   **🚀 Fast & Efficient:** Compiled to native code using **Cranelift** for excellent performance. No garbage collection pauses mean predictable speed. Built it concurrency primitives for scalable applications with excellent Python developer ergonomics.
-*   **🧩 Modern Tooling:** Integrated package manager (`ryo`), fast compiler, interactive REPL (JIT), built-in testing framework.
-*   **✨ Compile-Time Power (`comptime`):** Run code at compile time for metaprogramming, configuration loading, and pre-computation without runtime cost or complex macros.
-*   **🧩 Pragmatic Interoperability:** Designed with C FFI for leveraging existing native code. (Future goals include exploring closer integration with ecosystems like Python).
+The easiest way to try Ryo is using our nightly builds:
+
+```bash
+# Download and run the installer
+curl -fsSL https://raw.githubusercontent.com/ryolang/ryox/main/install.sh | sh
+
+# Then add to your PATH
+export PATH="$HOME/.ryo/bin:$PATH"
+
+# Verify installation
+ryo --version
+```
+
+**Note:** Nightly builds are manually triggered and contain the latest features. They may be unstable. You can also build from source (below).
+
 
 ## Features Overview
 
@@ -83,6 +104,12 @@ As of 2026, most application code is written by AI agents and reviewed by humans
 Python-style syntax, clean error messages, and readable stack traces serve the human side. The AI handles the ceremony; the human benefits from the clarity.
 
 ## Quick Example
+
+```ryo
+fn main():
+	print("Hello World! Welcome to Ryo.)
+```
+
 
 > **Note:** This example shows Ryo's planned features. Most are not yet implemented.
 

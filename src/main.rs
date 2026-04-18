@@ -17,6 +17,7 @@ mod toolchain;
 #[derive(Parser)]
 #[command(name = "ryo")]
 #[command(about = "The Ryo programming language compiler")]
+#[command(version = env!("RYO_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
