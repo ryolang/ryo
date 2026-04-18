@@ -105,7 +105,7 @@ This roadmap outlines the planned development of the Ryo programming language co
 **Implementation Details:**
 - Full AOT compilation pipeline: Source → Lex → Parse → Codegen → Link → Execute
 - Generates position-independent code (PIC) for portability
-- Handles multiple statements (returns last expression value)
+- Handles multiple statements
 - Proper exit code handling (Unix: 0-255, but computed values can be any i64 that gets truncated)
 - Example files in `examples/milestone3/` demonstrating all features
 - All generated files (object files, executables) cleaned after execution
