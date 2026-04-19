@@ -2,7 +2,7 @@
 set -e
 
 # Configuration
-REPO="ryolang/ryox"
+REPO="ryolang/ryo"
 RELEASE_TAG=""
 INSTALL_DIR="$HOME/.ryo/bin"
 BINARY_NAME="ryo"
@@ -53,7 +53,7 @@ show_help() {
     echo "  --help, -h     Show this help message"
     echo ""
     echo "Environment variables:"
-    echo "  RYO_REPO       GitHub repository (default: ryolang/ryox)"
+    echo "  RYO_REPO       GitHub repository (default: ryolang/ryo)"
     echo "  RYO_RELEASE    Release tag (default: most recent)"
     echo ""
     exit 0

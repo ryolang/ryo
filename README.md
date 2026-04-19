@@ -6,7 +6,7 @@
 
 <div align="left">
   <img src="https://img.shields.io/badge/status-pre--alpha-orange?style=for-the-badge" alt="Status">
-  <img src="https://img.shields.io/github/actions/workflow/status/ryolang/ryox/ci.yml?branch=main&style=for-the-badge" alt="Build">  
+  <img src="https://img.shields.io/github/actions/workflow/status/ryolang/ryo/ci.yml?branch=main&style=for-the-badge" alt="Build">  
   <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="License">
 </div>
 
@@ -45,7 +45,7 @@ The easiest way to try Ryo is using our latest build:
 
 ```bash
 # Download and run the installer
-curl -fsSL https://raw.githubusercontent.com/ryolang/ryox/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh
 
 # Then add to your PATH
 export PATH="$HOME/.ryo/bin:$PATH"
@@ -54,7 +54,7 @@ export PATH="$HOME/.ryo/bin:$PATH"
 ryo --version
 
 # Update to the latest nightly
-curl -fsSL https://raw.githubusercontent.com/ryolang/ryox/main/install.sh | sh -s -- --force
+curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh -s -- --force
 ```
 
 **Note:** Nightly builds are manually triggered and contain the latest features. They may be unstable. You can also build from source (below).
@@ -188,8 +188,8 @@ Before building Ryo, you need:
 
 ```bash
 # Clone the repository
-git clone https://github.com/ryolang/ryox.git
-cd ryox
+git clone https://github.com/ryolang/ryo.git
+cd ryo
 
 # Build the compiler (debug mode for development)
 cargo build

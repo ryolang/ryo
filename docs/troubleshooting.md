@@ -147,13 +147,13 @@ Error: IoError(Os { code: 2, kind: NotFound, message: "No such file or directory
    # Absolute path (always works)
    cargo run -- run /full/path/to/program.ryo
 
-   # Relative path (from ryox directory)
+   # Relative path (from ryo directory)
    cargo run -- run examples/milestone3/simple.ryo
    ```
 
 3. **Check current directory:**
    ```bash
-   pwd  # Should be in ryox/
+   pwd  # Should be in ryo/
    ```
 
 ---
@@ -416,7 +416,7 @@ Ryo's managed Zig toolchain should handle this automatically. If the issue persi
 **Solution:**
 
 1. Add exception in antivirus for:
-   - `ryox` directory
+   - `ryo` directory
    - Generated `.exe` files
 2. Or temporarily disable real-time protection
 
@@ -577,7 +577,7 @@ Working examples help identify what's wrong with your code.
 ### 3. Search Issues
 
 Check if your issue is known:
-https://github.com/ryolang/ryox/issues
+https://github.com/ryolang/ryo/issues
 
 ### 4. File a Bug Report
 
@@ -703,4 +703,4 @@ x = try divide(10, 0)  # Error: try/errors not yet supported
 
 ---
 
-**Can't find your issue?** Check the [documentation index](index.md) or [file an issue](https://github.com/ryolang/ryox/issues/new) on GitHub.
+**Can't find your issue?** Check the [documentation index](index.md) or [file an issue](https://github.com/ryolang/ryo/issues/new) on GitHub.

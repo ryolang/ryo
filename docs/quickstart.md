@@ -13,7 +13,7 @@ Before you begin, make sure you have:
 
 2. **Ryo compiler** built
    ```bash
-   cd /path/to/ryox
+   cd /path/to/ryo
    cargo build --release
    ```
 
@@ -32,13 +32,13 @@ That's it! This program declares a variable `x` with the value 42.
 
 ### Step 2: Compile and Run
 
-From the ryox directory, run:
+From the ryo directory, run:
 
 ```bash
 cargo run -- run first.ryo
 ```
 
-> **Note:** `cargo run -- run` compiles the Ryo compiler from source, then runs your file. This is for working within the `ryox` repository. After installing Ryo (via `cargo install` or a package manager), you would use `ryo run first.ryo` instead — both do the same thing.
+> **Note:** `cargo run -- run` compiles the Ryo compiler from source, then runs your file. This is for working within the `ryo` repository. After installing Ryo (via `cargo install` or a package manager), you would use `ryo run first.ryo` instead — both do the same thing.
 
 ### Step 3: Understand the Output
 
@@ -211,7 +211,7 @@ ryo toolchain status     # Verify installation
 
 **Solution:**
 ```bash
-# Make sure you're in the ryox directory
+# Make sure you're in the ryo directory
 pwd
 
 # Use full path to file
