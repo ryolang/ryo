@@ -91,7 +91,7 @@ This specification describes the full target design. Not all features are availa
 | Contracts (`#[pre]`/`#[post]`) | | Yes | | |
 | User-defined generics (monomorphization) | | | Yes | |
 | Dynamic dispatch (`dyn Trait`) | | | Yes | |
-| Named parameters (`#[named]`) | | | Yes | |
+| Named parameters & default values | Yes | | | |
 | Cancellation errors (`Canceled`, `Timeout`) | | | | Yes |
 | Test timeouts (`#[test(timeout=5s)]`) | | | | Yes |
 | Concurrency runtime (task/future/channel) | | | | Yes |
@@ -1292,26 +1292,44 @@ All four layers work together to deliver Ryo's promise: **memory safety that fee
 
 *   **Functions/Methods:** Standard definition/call. Return single value (can be tuple). Methods use `self` (implicit immutable borrow, consistent with Rule 2), `&mut self` (explicit mutable borrow), or `move self` (take ownership).
 
-### 6.1.1 Named Parameters (`#[named]`)
+### 6.1.1 Named Parameters & Default Values
 
-> **Status: Planned for v0.3** — This feature is not available in v0.1 or v0.2.
-
-Functions can require callers to use named arguments by applying the `#[named]` attribute. This prevents argument-order bugs, especially for functions with multiple parameters of the same type.
+All function parameters are **keyword-only by default** — callers must use `name=value` syntax. The `_` prefix on a parameter opts it into **positional** calling, allowing callers to pass by position. Named arguments are always valid, even for `_` parameters.
 
 ```ryo
-#[named]
-fn create_user(name: str, age: int, role: str):
+# All params keyword-only by default
+fn create_user(name: str, age: int, role: str = "user"):
     # ...
 
-# Callers MUST use named arguments:
-create_user(name="Alice", age=30, role="admin")   # ok
-create_user("Alice", 30, "admin")                   # compile error: named arguments required
+create_user(name="Alice", age=30)              # ok — role defaults to "user"
+create_user(name="Alice", age=30, role="admin") # ok
+create_user("Alice", 30)                        # compile error: positional not allowed
+
+# _ opts into positional calling
+fn add(_ a: int, _ b: int) -> int:
+    return a + b
+
+add(1, 2)          # ok — positional allowed
+add(a=1, b=2)      # also ok — named always works
+
+# Mix: first param positional, rest keyword-only
+fn print(_ text: str, end: str = "\n"):
+    ...
+
+print("hello")              # ok — text positional, end defaults to "\n"
+print("hello", end="")      # ok — explicit end, no newline
+print("hello", "")          # compile error — end is keyword-only
 ```
 
-*   **Opt-in per function**: Only functions marked `#[named]` enforce this. Simple functions like `fn add(a: int, b: int)` don't need it.
-*   **Partial naming**: Without `#[named]`, callers can optionally use named arguments at any call site (as in Python). The attribute makes naming mandatory.
+**Rules:**
 
-*(Rationale: For the AI-writes, human-reviews workflow, named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature. Prevents the common bug of swapping arguments with the same type, e.g., `create_user("Alice", "admin", 30)` vs `create_user("Alice", 30, "admin")`.)*
+*   **Named by default**: All parameters require `name=value` at the call site unless marked with `_`.
+*   **`_` opts into positional**: `_ param: Type` allows callers to pass by position. Named calling still works.
+*   **Positional before named**: At the call site, positional arguments must come before any named arguments.
+*   **Default values**: Parameters with defaults must be trailing. Defaults are evaluated at each call site (not at definition time), and must be compile-time evaluable expressions (literals, constants, `comptime` calls).
+*   **No function overloading**: Each function name has one definition, so defaults never create ambiguity.
+
+*(Rationale: Inspired by Swift's proven calling convention. For the AI-writes, human-reviews workflow, named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature. Prevents the common bug of swapping arguments with the same type, e.g., `create_user("Alice", "admin", 30)` vs `create_user("Alice", 30, "admin")`. The `_` escape hatch keeps simple functions like `add(1, 2)` and `sqrt(16.0)` clean.)*
 
 ### 6.2 Closures & Lambda Expressions
 
@@ -3509,7 +3527,7 @@ Future features and extensions are listed in this section below.
 *   **Constrained Types** (Range types with compile-time/runtime bounds checking — see Section 4.13)
 *   **Distinct Types** (Strong typedefs for unit safety — see Section 4.14)
 *   **Contracts** (`#[pre]`/`#[post]` function contracts — see Section 7.11)
-*   **Named Parameters** (`#[named]` mandatory named arguments — see Section 6.1.1)
+*   **Named Parameters & Default Values** (Named-by-default calling convention with `_` positional opt-out — see Section 6.1.1)
 *   **Cancellation Model** (Cooperative cancellation with `Canceled`/`Timeout` errors — see Section 9.2.5)
 *   **Test Timeouts** (`#[test(timeout=5s)]` for preventing hanging tests — see Section 15)
 *   **Compile-Time Execution** (`comptime` blocks and functions)

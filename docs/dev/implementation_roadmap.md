@@ -790,6 +790,93 @@ fn main() -> int:
 - If expressions (returning values) deferred to later milestone
 - Dependencies: Milestone 7 (comparison operators)
 
+### Milestone 8.5: Default Parameters & Named Arguments
+**Goal:** Support default parameter values and named arguments for all functions (user-defined and builtins), with named-by-default calling convention
+
+**Status:** ⏳ Planned (depends on Milestone 8)
+
+**Calling Convention (Swift-style):**
+- All parameters are **keyword-only by default** — callers must use `name=value`
+- `_` before a parameter name opts it into **positional** — callers can pass by position
+- Named arguments always work, even for `_` params — `_` adds positional as an option, it doesn't remove named
+- Positional args must come before named args at the call site
+- This replaces the spec's `#[named]` attribute (Section 6.1.1) with a simpler, safer default
+
+**Tasks:**
+
+1. **Parser Extensions:**
+   - Parse `name=expr` in call argument lists (inside `()` = named arg, at statement level = assignment)
+   - Parse default values in function parameter definitions: `param: Type = default_expr`
+   - Parse `_` prefix on parameter names: `_ param: Type`
+
+2. **AST Extensions:**
+   - Add `default: Option<Expression>` and `positional: bool` to function parameter nodes
+   - Add `name: Option<String>` to call argument nodes to represent `CallArg { name, value }`
+
+3. **HIR/Lowering:**
+   - Validate: defaults must be trailing (no `fn f(a: int = 1, b: int)` — compile error)
+   - Validate: named args match parameter names
+   - Validate: positional args can only target `_`-marked params
+   - Validate: no positional args after named args at call site
+   - Insert default values for omitted arguments during lowering
+   - All calls arrive at codegen fully resolved
+
+4. **Codegen:**
+   - No structural changes needed if lowering inserts defaults
+   - All calls arrive at codegen fully resolved with all arguments filled in
+
+5. **Builtin Updates:**
+   - Update `BuiltinFunction` struct to include parameter metadata (names, types, defaults, positional flag)
+   - Builtins like `print` participate in the named/positional system
+
+6. **Testing:**
+   - Default values, named args, `_` positional params
+   - Mixing positional + named args
+   - Error cases: wrong name, positional for non-`_` param, positional after named, missing required arg, duplicate arg
+
+**Visible Progress:** Functions with defaults and named arguments work. Clear compile errors for argument misuse.
+
+**Example:**
+```ryo
+# All params keyword-only by default
+fn create_user(name: str, age: int, role: str = "user"):
+	...
+
+create_user(name="Alice", age=30)              # ok
+create_user(name="Alice", age=30, role="admin") # ok
+create_user("Alice", 30)                        # compile error
+
+# _ opts into positional
+fn add(_ a: int, _ b: int) -> int:
+	return a + b
+
+add(1, 2)          # ok
+add(a=1, b=2)      # also ok
+
+# Mix: first param positional, rest keyword-only
+fn print(_ text: str, end: str = "\n"):
+	...
+
+print("hello")              # ok — text positional, end defaults to "\n"
+print("hello", end="")      # ok — explicit end
+print("hello", "")          # compile error — end is keyword-only
+```
+
+**Design Decisions:**
+- **Named by default, `_` opts into positional** (Swift model) — replaces the spec's `#[named]` attribute with a simpler, safer default. Proven at scale by Swift for 10+ years
+- **Defaults evaluated at each call site** (Kotlin/Swift model), not at definition time — avoids Python's mutable default gotcha where `def f(x=[])` shares the list across calls
+- **Defaults must be compile-time evaluable expressions** (literals, constants, future `comptime` calls) — simplifies codegen, aligns with Zig philosophy
+- **Trailing position required** for params with defaults (like Python, Kotlin, C++)
+- **AI-era rationale:** Named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature
+
+**Implementation Notes:**
+- Struct literal syntax `Point(x=1, y=2)` and function named args `f(x=1)` use identical `name=value` grammar — the parser doesn't need to distinguish them at parse time, resolution happens during lowering
+- No function overloading in Ryo, so defaults don't create ambiguity
+- Languages analyzed: Go (no defaults — too limiting), Rust (no defaults — relies on builders/traits Ryo lacks), Python (`*` separator — good but `_` is cleaner), Swift (named by default — best fit for Ryo)
+- Dependencies: Milestone 8 (control flow for conditional default handling), Milestone 7 (comparison operators)
+
+**Unlocks:** Milestone 9 struct literals share `name=value` parsing infrastructure. Future `print(_ text: str, end: str = "\n")` API.
+
 ### Milestone 9: Structs
 **Goal:** Implement user-defined composite types with named fields
 
@@ -836,9 +923,9 @@ fn main() -> int:
 - Field order matters (affects memory layout)
 - No default values for fields (all must be initialized)
 - No methods yet (added in Milestone 18)
-- Parentheses with named arguments used for struct literals: `Point(x=1, y=2)`, consistent with language design
+- Parentheses with named arguments used for struct literals: `Point(x=1, y=2)`, reuses `name=value` parsing infrastructure from Milestone 8.5
 - Braces reserved exclusively for f-string interpolation
-- Dependencies: Milestone 4 (functions for passing structs)
+- Dependencies: Milestone 4 (functions for passing structs), Milestone 8.5 (named argument parsing)
 
 ### Milestone 10: Enums (Algebraic Data Types)
 **Goal:** Implement enums with variants (sum types / tagged unions)
