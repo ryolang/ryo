@@ -37,6 +37,8 @@ All Ryo code examples **must** use Python-style colons and indentation, **NOT** 
 ## Build & Test Commands
 
 ```bash
+cargo fmt --check                # Format check (CI enforces, -Dwarnings)
+cargo clippy --all-targets       # Lint (CI enforces, warnings are errors)
 cargo check                      # Check for errors
 cargo build [--release]          # Build debug or release
 cargo run -- run <file>          # JIT compile and execute

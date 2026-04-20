@@ -4,10 +4,12 @@ This guide is for agents extending the Ryo compiler. For language design, see `/
 
 ## Code Quality
 
-Always run before committing:
+Always run before committing (CI enforces these with `-Dwarnings`):
 ```bash
-cargo fmt && cargo clippy
+cargo fmt --check           # CI: must pass with no diffs
+cargo clippy --all-targets  # CI: warnings are errors
 ```
+Run `cargo fmt` (without `--check`) to auto-fix formatting.
 
 ## Compilation Pipeline
 
