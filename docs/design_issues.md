@@ -2,7 +2,7 @@
 
 This document identifies design inconsistencies, open questions, and recommendations for the Ryo language specification and roadmap. Issues are categorized by status.
 
-**Last updated:** After Ownership Lite rewrite (Section 5 of specification.md).
+**Last updated:** 2026-04-20 (full-tree consistency sweep after spec coherence plan).
 
 ---
 
