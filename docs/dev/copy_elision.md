@@ -36,10 +36,16 @@ fn origin() -> Point:
 When a caller passes a binding as the last use to a `move` parameter,
 the binding is not copied; the callee receives the original storage.
 
+The `move` annotation lives in the function **signature**, not at the
+call site — the caller writes a plain call and the compiler enforces
+the move (see spec Rule 4). Inside a function body, forwarding an
+already-moved parameter to another `move` parameter requires explicit
+`move` to signal the re-transfer.
+
 ```ryo
 fn consume(move s: str) -> int: ...
 s = build_string()
-n = consume(move s)    # G3: s's storage moves to consume's parameter
+n = consume(s)    # G3: s's storage moves to consume's parameter
 ```
 
 ### G4: Tail move-return chain

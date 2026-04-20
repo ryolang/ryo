@@ -45,8 +45,11 @@ to user code — `str` behaves identically in both representations.
 ## Copy-on-Write for Strings
 
 ### Guarantee
-Move of an immutable `str` does not copy the backing buffer. The
-buffer is shared via refcount until mutation.
+When a copy is required for an immutable `str` (e.g., an explicit
+`clone()` or a compiler-inserted copy on a path where elision does
+not apply), the backing buffer is not duplicated. Instead, the new
+value shares the existing buffer via refcount, deferring allocation
+until mutation.
 
 ### Applies to
 - `str` values exceeding the SSO threshold

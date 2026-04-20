@@ -1405,7 +1405,7 @@ are the tools in order of preference.
 1. **Return value optimization.** When a function returns a locally
    constructed owned value, the compiler writes that value directly
    into the caller's destination slot. No copy, no temporary.
-   *(See `docs/dev/copy_elision.md` for the exact rules.)*
+   *(See `dev/copy_elision.md` for the exact rules.)*
 
 2. **Move semantics cost a pointer move, not a data copy.** Owned
    types like `str` and `list[T]` are fat pointers (pointer + length
@@ -1454,11 +1454,12 @@ language features, but they affect real-world copy behavior:
 
 7. **Small-string optimization.** `str` values below a threshold are
    stored inline in the fat pointer, eliminating heap allocation
-   entirely for short strings. *(See `docs/dev/stdlib_optimizations.md`.)*
+   entirely for short strings. *(See `dev/stdlib_optimizations.md`.)*
 
-8. **Copy-on-write for immutable strings.** Immutable `str` values
-   can share backing buffers on move, deferring allocation until
-   mutation. *(See `docs/dev/stdlib_optimizations.md`.)*
+8. **Copy-on-write for immutable strings.** When a copy is required
+   for an immutable `str`, the backing buffer is shared via refcount
+   rather than duplicated, deferring allocation until mutation.
+   *(See `dev/stdlib_optimizations.md`.)*
 
 #### When to accept a clone
 
