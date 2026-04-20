@@ -968,7 +968,7 @@ Ryo's memory model is designed for one goal: **Rust-level safety without lifetim
 
 *   **No Garbage Collector.** Deterministic performance and resource management.
 *   **No Lifetime Annotations.** Borrows are scoped to function calls — the compiler always knows when they end.
-*   **Clone When Needed.** Returning owned values costs an allocation; the compiler can elide copies when it proves safety. For Ryo's target domains (web backends, CLI tools, scripts), this trade-off is invisible in practice.
+*   **Clone Only When Necessary.** Returning owned values uses NRVO — the compiler writes directly into the caller's slot. Moving owned values transfers a fat pointer, not the underlying data. Actual copies are rare, reserved for cases where the compiler cannot prove safety or the caller demands an independent value. See Section 5.9 for idiomatic copy-avoidance techniques.
 
 ### 5.1 Value Semantics (Copy) vs. Ownership Semantics (Move)
 
