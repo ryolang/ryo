@@ -128,7 +128,7 @@ fn main():
 **Migration Path:**
 - Familiar ownership concepts transfer directly
 - Simpler borrowing rules (no explicit lifetimes)
-- Similar performance characteristics
+- Good performance for I/O-bound workloads (more cloning than Rust)
 - Pattern matching works the same way
 
 ### Ryo vs Go
