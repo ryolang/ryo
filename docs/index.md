@@ -208,7 +208,7 @@ fn main():
 ### Simplicity vs. Expressiveness
 **Choice**: Simplified borrowing (no lifetimes) over maximum flexibility  
 **Rationale**: Covers 90% of use cases with 10% of Rust's complexity  
-**Escape hatch**: `Shared[T]` for complex ownership patterns
+**Escape hatch**: `Shared[T]` (comparable to Rust's Arc) for shared ownership patterns
 
 ### Safety vs. Control
 **Choice**: Safe by default, `unsafe` requires `kind = "system"` in `ryo.toml`  
