@@ -133,7 +133,7 @@ These have been addressed by the Ownership Lite rewrite (specification.md, Secti
     *   Rule 5: Functions cannot return borrows — always return owned values.
     *   Rule 6: Structs cannot contain references — fields are owned values, `Shared[T]`, or IDs.
     *   Section 5.7: Iterators are scope-locked views — cannot escape their block.
-*   **Trade-off acknowledged:** More cloning than Rust. Compiler applies copy elision where possible. Acceptable for Ryo's target domains.
+*   **Trade-off acknowledged:** Where Rust uses lifetime-annotated borrows for zero-copy returns, Ryo returns owned values — but NRVO and move semantics make most returns zero-cost (see spec Section 5.9). Actual clones are rare in practice.
 
 ### Iterator Invalidation — PARTIALLY RESOLVED
 

@@ -1386,7 +1386,7 @@ The Ryo Ownership Model is a four-layered system:
 └─────────────────────────────────────────────────────┘
 ```
 
-**The trade-off, stated honestly:** Ryo trades zero-copy flexibility for zero-annotation simplicity. Code that Rust would express as a returned `&str` slice, Ryo expresses as a cloned `str`. The compiler applies copy elision where it can. For shared-state scenarios, Ryo's `shared[mutex[T]]` is comparable in ceremony to Rust's `Arc<Mutex<T>>` — neither language makes concurrent mutation invisible. For web backends, CLI tools, and scripts, these costs are negligible. For performance-critical inner loops, `unsafe` blocks (restricted to system packages) provide an escape hatch to raw pointers.
+**The trade-off, stated honestly:** Ryo trades lifetime annotations for simplicity. Where Rust would return a borrowed `&str` slice tied to the caller's scope, Ryo returns an owned `str` — but most returns are free thanks to NRVO and move semantics (see Section 5.9). Actual clones are limited to cases where the caller genuinely needs an independent copy. For shared-state scenarios, Ryo's `shared[mutex[T]]` is comparable in ceremony to Rust's `Arc<Mutex<T>>` — neither language makes concurrent mutation invisible. For web backends, CLI tools, and scripts, these costs are negligible. For performance-critical inner loops, `unsafe` blocks (restricted to system packages) provide an escape hatch to raw pointers.
 
 All four layers work together to deliver Ryo's promise: **memory safety that feels like Python.**
 
@@ -1478,12 +1478,12 @@ before restructuring.
   Ownership Lite is to not have these. For shared access, use
   `shared[T]`; for in-place mutation, use `&mut`.
 
-*(Rationale: Ownership Lite's cost story is not "every return is a
-clone" — it is "every return is free unless you built something that
-genuinely needs to be independently owned." Most code falls into
-the free path. For the remainder, the techniques above cover every
-pattern Rust handles with lifetime-annotated borrows, without
-reintroducing lifetimes.)*
+*(Rationale: Most returns are free — NRVO writes directly into the
+caller's slot, and move semantics transfer a pointer, not data.
+Clones occur only when the caller genuinely needs an independent
+copy of shared data. The techniques above cover every pattern Rust
+handles with lifetime-annotated borrows, without reintroducing
+lifetimes.)*
 
 ## 6. Functions & Closures
 
