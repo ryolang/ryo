@@ -10,15 +10,6 @@ This document identifies design inconsistencies, open questions, and recommendat
 
 These require resolution before implementation reaches the affected milestone.
 
-### 1. The Logic Paradoxes (Roadmap Breakers)
-
-*   **The Mutability Ordering:** Milestone 20 (`&mut`) is scheduled *after* Milestone 22 (Collections) and M23 (Drop).
-    *   *Why it breaks:* You cannot implement `list.append(item)` or `drop(&mut self)` without mutable references defined first.
-    *   *The Fix:* Move **M20** to the start of Phase 3. New order: M15 → M16 → M17 → M18 → M19 → **M20** → M21 → M22 → M23.
-*   **The Ownership Gap (Closures):** Closures (M4.5) are planned before Basic Ownership (M15).
-    *   *Why it breaks:* You cannot implement "Move Capture" logic if the compiler doesn't know what a "Move" is yet.
-    *   *The Fix:* Defer Closure capture semantics to Phase 3. Parse closures in M4.5, implement capture analysis after M15.
-
 ### 2. The "Hardcoded Generics" Trap
 
 *   **The Smell:** Milestone 22 implements `list[int]` and `list[str]` as "hardcoded types" while pushing real generics to Phase 5 (post-v1.0).
@@ -115,6 +106,15 @@ These are underspecified aspects that will confuse developers if left undefined.
 
 ## Resolved Issues
 
+### The Logic Paradoxes (Roadmap Breakers) — RESOLVED
+
+*   **Was:** Two ordering paradoxes in the implementation roadmap:
+    1.  Milestone 20 (`&mut`) was scheduled *after* Milestone 22 (Collections) and M23 (Drop), but `list.append(item)` and `drop(&mut self)` require mutable references.
+    2.  Closures (M4.5) included capture analysis before Basic Ownership (M15), but "Move Capture" requires Move semantics.
+*   **Resolution:**
+    1.  M20 moved to after M19 in Phase 3. New order: M15 → M16 → M17 → M18 → M19 → M20 → M21 → M22 → M23.
+    2.  M4.5 split: closure syntax and parsing remain in M4.5; capture analysis (borrow/move rules for captured variables) deferred to new Milestone 15.5, after M15 defines Move semantics.
+
 These have been addressed by the Ownership Lite rewrite (specification.md, Section 5).
 
 ### Borrow/Move Inconsistency — RESOLVED
@@ -169,8 +169,8 @@ These have been addressed by the Ownership Lite rewrite (specification.md, Secti
 ## Immediate Action Plan
 
 ### Priority 1 (Roadmap Blockers)
-1.  Reorder Phase 3: put M20 (`&mut`) before M21/M22/M23.
-2.  Move Closure capture semantics (M4.5) to Phase 3.
+1.  ~~Reorder Phase 3: put M20 (`&mut`) before M21/M22/M23.~~ **Done.**
+2.  ~~Move Closure capture semantics (M4.5) to Phase 3.~~ **Done.**
 
 ### Priority 2 (Spec Completeness)
 3.  Add `never` type (`!`) to Section 4.
@@ -192,8 +192,8 @@ These have been addressed by the Ownership Lite rewrite (specification.md, Secti
 - [x] Define resource management pattern (`with ... as ...:`)
 - [x] Resolve string allocation ambiguity
 - [x] Define iterator safety model (scope-locked views + versioned iterators)
-- [ ] Reorder Phase 3 milestones
-- [ ] Move closure capture semantics to Phase 3
+- [x] Reorder Phase 3 milestones
+- [x] Move closure capture semantics to Phase 3
 - [ ] Add `never` type to spec
 - [ ] Standardize `main` return type
 - [ ] Define `mut x: T = val` as mandatory

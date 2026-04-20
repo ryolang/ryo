@@ -253,15 +253,14 @@ fn main() -> int:
 
 ### Milestone 4.5: Closures & Lambda Expressions
 
-**Goal:** Implement anonymous functions with ownership-aware capture semantics
+**Goal:** Implement anonymous functions with basic closure syntax
 
 **Status:** ⏳ Planned (depends on Milestone 4)
 
 **Tasks:**
 
 1. **Lexer/Parser Extensions:**
-   - Add `move` keyword to lexer (for explicit move capture)
-   - Extend AST: `ExprKind::Closure` with capture mode enum
+   - Extend AST: `ExprKind::Closure`
    - Parse single-line closures: `fn(args): expression`
    - Parse multi-line closures with colon-indentation:
      ```ryo
@@ -269,53 +268,24 @@ fn main() -> int:
 		 statement1
 		 statement2
 	 ```
-   - Parse move keyword: `move fn(args): ...`
    - Distinguish closure expression from regular function definition
 
-2. **Capture Analysis:**
-   - Implement variable usage tracking in closure body
-   - Determine which variables are captured from enclosing scope
-   - Infer capture mode:
-     - Default: immutable borrow
-     - Explicit: move (via `move fn` keyword)
-     - Inferred: mutable borrow (when closure mutates captured variable)
-   - Build capture environment data structure
-
-3. **Type System Extensions:**
-   - Define closure types: `Fn`, `FnMut`, `FnMove` (conceptual categories for type checking)
-   - Type-check captured variables against borrow rules
+2. **Type System Extensions:**
    - Type-check closure body
    - Support closures as function parameters: `fn process(f: fn(int) -> int)`
    - Type inference for closure parameters when context is clear
 
-4. **Semantic Analysis:**
-   - Check borrow rules for captures:
-     - Only one mutable borrow
-     - No simultaneous mutable + immutable borrows
-   - Verify moved variables are not used after move
-   - Validate closure call site matches closure signature
-   - Track closure lifetime (simplified, no explicit lifetime annotations)
-
-5. **Code Generation:**
-   - Generate IR for closure creation:
-     - Allocate closure environment (captured variables)
-     - Copy/move captured values into environment
-   - Generate IR for closure invocation:
-     - Pass environment as hidden parameter
-     - Access captured variables from environment
-   - Handle move semantics (invalidate original variables)
+3. **Code Generation:**
+   - Generate IR for closure creation (no capture environment yet)
+   - Generate IR for closure invocation
    - Optimize: inline closures when possible
 
-6. **Testing:**
-   - Unit tests for capture analysis
-   - Tests for borrow checking on captures
-   - Tests for move semantics
-   - Tests for mutable captures
+4. **Testing:**
+   - Tests for closure syntax parsing
    - Tests for closures as function parameters
-   - Integration tests with error handling
    - Integration tests with higher-order functions
 
-**Visible Progress:** Can pass functions as values, write callbacks, use higher-order functions like map/filter
+**Visible Progress:** Can pass functions as values, write callbacks, use higher-order functions
 
 **Example:**
 
@@ -331,53 +301,28 @@ validator = fn(x: int) -> bool:
 	return x % 2 == 0
 
 # Closure as parameter (higher-order function)
-fn filter(items: &[int], predicate: fn(int) -> bool) -> list[int]:
-	mut result = list[int]()
-	for item in items:
-		if predicate(item):
-			result.append(item)
-	return result
+fn apply(x: int, f: fn(int) -> int) -> int:
+	return f(x)
 
-evens = filter([1, 2, 3, 4, 5], validator)
-# evens = [2, 4]
-
-# Move capture
-name = "Alice"
-greeter = move fn(): f"Hello, {name}"
-# name is moved, cannot be used here
-print(greeter())  # "Hello, Alice"
-
-# Mutable capture
-mut counter = 0
-increment = fn():
-	counter += 1  # Inferred mutable capture
-	return counter
-
-print(increment())  # 1
-print(increment())  # 2
+result = apply(5, square)
+# result = 25
 ```
 
 **Implementation Notes:**
 
 - Closures are **first-class values** (can be passed, returned, stored)
-- Capture environment created at closure definition time
-- Borrow checker enforces capture rules (no runtime overhead)
-- Move semantics prevent accidental sharing in concurrent contexts
 - Multi-line closures use **tab-based indentation** (enforced)
-- Closure types (`Fn`, `FnMut`, `FnMove`) are compiler concepts, not full traits initially
+- Capture analysis deferred to Milestone 15.5 (requires Move semantics from M15)
 - No higher-kinded types or advanced trait bounds yet (deferred to generics milestone)
 
 **Performance Considerations:**
 
 - Closures that don't capture variables can be optimized to function pointers (zero overhead)
-- Small captured environments can be stack-allocated
 - Compiler can inline closures when beneficial
-- Move closures avoid reference counting overhead
 
 **Dependencies:**
 
 - Milestone 4 (Functions & Calls) - function implementation must be complete
-- Precedes Milestone 15 (Basic Ownership) - closures will work with simplified capture initially
 
 **Future Enhancements** (post-v0.1.0):
 
@@ -1259,6 +1204,100 @@ fn main() -> int:
 - https://www.modular.com/blog/mojo-vs-rust
 - https://docs.modular.com/mojo/manual/values/
 
+### Milestone 15.5: Closure Capture Analysis
+
+**Goal:** Implement ownership-aware capture semantics for closures
+
+**Status:** ⏳ Planned (depends on Milestone 15)
+
+**Tasks:**
+
+1. **Lexer/Parser Extensions:**
+   - Add `move` keyword to lexer (for explicit move capture)
+   - Extend `ExprKind::Closure` AST with capture mode enum
+   - Parse move keyword: `move fn(args): ...`
+
+2. **Capture Analysis:**
+   - Implement variable usage tracking in closure body
+   - Determine which variables are captured from enclosing scope
+   - Infer capture mode:
+     - Default: immutable borrow
+     - Explicit: move (via `move fn` keyword)
+     - Inferred: mutable borrow (when closure mutates captured variable)
+   - Build capture environment data structure
+
+3. **Type System Extensions:**
+   - Define closure types: `Fn`, `FnMut`, `FnMove` (conceptual categories for type checking)
+   - Type-check captured variables against borrow rules
+
+4. **Semantic Analysis:**
+   - Check borrow rules for captures:
+     - Only one mutable borrow
+     - No simultaneous mutable + immutable borrows
+   - Verify moved variables are not used after move
+   - Track closure lifetime (simplified, no explicit lifetime annotations)
+
+5. **Code Generation:**
+   - Generate IR for capture environment:
+     - Allocate closure environment (captured variables)
+     - Copy/move captured values into environment
+   - Pass environment as hidden parameter during invocation
+   - Access captured variables from environment
+   - Handle move semantics (invalidate original variables)
+
+6. **Testing:**
+   - Unit tests for capture analysis
+   - Tests for borrow checking on captures
+   - Tests for move semantics
+   - Tests for mutable captures
+   - Integration tests with error handling
+
+**Visible Progress:** Closures can capture variables from enclosing scope with ownership-safe semantics
+
+**Example:**
+
+```ryo
+# Move capture
+name = "Alice"
+greeter = move fn(): f"Hello, {name}"
+# name is moved, cannot be used here
+print(greeter())  # "Hello, Alice"
+
+# Mutable capture
+mut counter = 0
+increment = fn():
+	counter += 1  # Inferred mutable capture
+	return counter
+
+print(increment())  # 1
+print(increment())  # 2
+
+# Closure as parameter with captures
+fn filter(items: &[int], predicate: fn(int) -> bool) -> list[int]:
+	mut result = list[int]()
+	for item in items:
+		if predicate(item):
+			result.append(item)
+	return result
+
+evens = filter([1, 2, 3, 4, 5], fn(x: int): x % 2 == 0)
+# evens = [2, 4]
+```
+
+**Implementation Notes:**
+
+- Capture environment created at closure definition time
+- Borrow checker enforces capture rules (no runtime overhead)
+- Move semantics prevent accidental sharing in concurrent contexts
+- Closure types (`Fn`, `FnMut`, `FnMove`) are compiler concepts, not full traits initially
+- Small captured environments can be stack-allocated
+- Move closures avoid reference counting overhead
+
+**Dependencies:**
+
+- Milestone 4.5 (Closure syntax and basic parsing)
+- Milestone 15 (Basic Ownership & Move semantics — required for Move capture)
+
 ### Milestone 16: Optional Types (`?T`)
 **Goal:** Implement null-safe optional types with `?T`, `none`, and `orelse`
 
@@ -1462,166 +1501,6 @@ fn main() -> int:
 - Borrow checker uses basic scope-based analysis
 - Dependencies: Milestone 18 (methods with &self)
 
-### Milestone 21: Slices & String Slices
-**Goal:** Implement borrowed views into arrays and strings
-
-**Tasks:**
-- Add slice syntax to lexer/parser
-- Extend type system:
-  - `Type::Slice(Box<Type>)` for array slices `&[T]`
-  - `&str` as string slice (borrowed view)
-- Parse slice operations:
-  - Array slicing: `array[start:end]`
-  - Full slice: `array[:]`
-- Distinguish `str` (owned) from `&str` (borrowed):
-  - `str` is heap-allocated, owned, mutable
-  - `&str` is borrowed view, immutable
-- Extend Codegen: Generate IR for:
-  - Slice representation (pointer + length)
-  - Slice bounds checking
-  - String slice operations
-- Write tests for slices and string slices
-
-**Visible Progress:** Efficient string/array operations without copying
-
-**Example:**
-```ryo
-fn first_word(text: &str) -> &str:
-	for i in range(text.len()):
-		if text[i] == ' ':
-			return text[0:i]  # Return slice (no copy)
-	return text
-
-fn sum_slice(numbers: &[int]) -> int:
-	mut total = 0
-	for n in numbers:
-		total += n
-	return total
-
-fn main() -> int:
-	s = "hello world"
-	word = first_word(s)  # word is &str (view into s)
-	print(word)           # "hello"
-
-	nums = [1, 2, 3, 4, 5]
-	total = sum_slice(&nums[1:4])  # Pass slice [2, 3, 4]
-	print(total)  # 9
-	return 0
-```
-
-**Implementation Notes:**
-- Slices are **fat pointers** (pointer + length)
-- Bounds checking at runtime (panic on out-of-bounds)
-- String slices must be **UTF-8 valid** (checked at slice boundaries)
-- No mutable slices yet (added in M20)
-- Dependencies: Milestone 19 (borrows for slice references)
-
-### Milestone 22: Collections (List, Map)
-**Goal:** Implement `list[T]` and `map[K, V]` with hardcoded types
-
-**Tasks:**
-- Implement `list[int]` and `list[str]` as built-in types:
-  - Dynamic array with growth
-  - Methods: `append`, `len`, `get`, `remove`
-- Implement `map[str, int]` as built-in type:
-  - Hash table implementation
-  - Methods: `insert`, `get`, `remove`, `contains`
-- Add `for` loop support for collections:
-  ```ryo
-  for item in list:
-	  process(item)
-  ```
-- Extend Codegen: Generate IR for:
-  - Collection allocation/deallocation
-  - Dynamic resizing
-  - Iteration
-- Write tests for collections
-
-**Visible Progress:** Can use dynamic collections for real programs
-
-**Example:**
-```ryo
-fn main() -> int:
-	mut numbers = list[int]()
-	numbers.append(1)
-	numbers.append(2)
-	numbers.append(3)
-
-	mut sum = 0
-	for n in numbers:
-		sum += n
-	print(sum)  # 6
-
-	mut scores = map[str, int]()
-	scores.insert("Alice", 100)
-	scores.insert("Bob", 85)
-
-	alice_score = scores.get("Alice") orelse 0
-	print(alice_score)  # 100
-
-	return 0
-```
-
-**Implementation Notes:**
-- **Hardcoded types** initially: `list[int]`, `list[str]`, `map[str, int]`
-- Generics deferred to Phase 5 (post-v0.1.0)
-- Collections own their data (RAII cleanup in M23)
-- Iteration uses immutable borrows
-- Dependencies: Milestone 21 (slices for iteration)
-
-### Milestone 23: RAII & Drop Trait
-**Goal:** Implement automatic resource cleanup with Drop trait
-
-**Tasks:**
-- Add `Drop` trait to standard library:
-  ```ryo
-  trait Drop:
-	  fn drop(&mut self)
-  ```
-- Implement automatic drop calls:
-  - At end of scope
-  - On early returns
-  - On move (drop old value if reassigning)
-- Implement Drop for built-in types:
-  - `str`: Free heap memory
-  - `list[T]`: Free array and drop elements
-  - `map[K, V]`: Free table and drop entries
-- Extend Codegen: Generate IR for:
-  - Drop calls at scope exit
-  - Drop calls on early returns
-- Write tests for RAII and Drop
-
-**Visible Progress:** No memory leaks! Resources cleaned up automatically.
-
-**Example:**
-```ryo
-struct File:
-	handle: int  # File descriptor
-
-impl Drop for File:
-	fn drop(&mut self):
-		close_file(self.handle)  # FFI call
-
-fn process_file(path: &str):
-	file = open_file(path)  # File opened
-	# ... use file ...
-	# File automatically closed at end of scope (drop called)
-
-fn early_return():
-	file = open_file("data.txt")
-	if file.is_empty():
-		return  # File dropped here (drop called on early return)
-	# ... use file ...
-	# File dropped here (drop called at end of scope)
-```
-
-**Implementation Notes:**
-- Drop is **automatic** (compiler inserts calls)
-- Drop order: **reverse of declaration order** (like Rust)
-- User-defined Drop for custom resources
-- Prevents resource leaks (files, sockets, memory)
-- Dependencies: Milestone 17 (traits), Milestone 20 (mutable borrows for &mut self)
-
 ### Milestone 20: Mutable Borrows (`&mut T`)
 **Goal:** Implement mutable references with aliasing restrictions
 
@@ -1679,6 +1558,165 @@ fn main() -> int:
 - Explicit dereference `*x` for mutation in some cases (automatic for method calls)
 - Simplified borrow checker (no lifetimes like Rust)
 - Dependencies: Milestone 19 (immutable borrows provide foundation)
+
+### Milestone 21: Slices & String Slices
+**Goal:** Implement borrowed views into arrays and strings
+
+**Tasks:**
+- Add slice syntax to lexer/parser
+- Extend type system:
+  - `Type::Slice(Box<Type>)` for array slices `&[T]`
+  - `&str` as string slice (borrowed view)
+- Parse slice operations:
+  - Array slicing: `array[start:end]`
+  - Full slice: `array[:]`
+- Distinguish `str` (owned) from `&str` (borrowed):
+  - `str` is heap-allocated, owned, mutable
+  - `&str` is borrowed view, immutable
+- Extend Codegen: Generate IR for:
+  - Slice representation (pointer + length)
+  - Slice bounds checking
+  - String slice operations
+- Write tests for slices and string slices
+
+**Visible Progress:** Efficient string/array operations without copying
+
+**Example:**
+```ryo
+fn first_word(text: &str) -> &str:
+	for i in range(text.len()):
+		if text[i] == ' ':
+			return text[0:i]  # Return slice (no copy)
+	return text
+
+fn sum_slice(numbers: &[int]) -> int:
+	mut total = 0
+	for n in numbers:
+		total += n
+	return total
+
+fn main() -> int:
+	s = "hello world"
+	word = first_word(s)  # word is &str (view into s)
+	print(word)           # "hello"
+
+	nums = [1, 2, 3, 4, 5]
+	total = sum_slice(&nums[1:4])  # Pass slice [2, 3, 4]
+	print(total)  # 9
+	return 0
+```
+
+**Implementation Notes:**
+- Slices are **fat pointers** (pointer + length)
+- Bounds checking at runtime (panic on out-of-bounds)
+- String slices must be **UTF-8 valid** (checked at slice boundaries)
+- Dependencies: Milestone 19 (borrows for slice references), Milestone 20 (mutable borrows for `&mut [T]` slices)
+
+### Milestone 22: Collections (List, Map)
+**Goal:** Implement `list[T]` and `map[K, V]` with hardcoded types
+
+**Tasks:**
+- Implement `list[int]` and `list[str]` as built-in types:
+  - Dynamic array with growth
+  - Methods: `append`, `len`, `get`, `remove`
+- Implement `map[str, int]` as built-in type:
+  - Hash table implementation
+  - Methods: `insert`, `get`, `remove`, `contains`
+- Add `for` loop support for collections:
+  ```ryo
+  for item in list:
+	  process(item)
+  ```
+- Extend Codegen: Generate IR for:
+  - Collection allocation/deallocation
+  - Dynamic resizing
+  - Iteration
+- Write tests for collections
+
+**Visible Progress:** Can use dynamic collections for real programs
+
+**Example:**
+```ryo
+fn main() -> int:
+	mut numbers = list[int]()
+	numbers.append(1)
+	numbers.append(2)
+	numbers.append(3)
+
+	mut sum = 0
+	for n in numbers:
+		sum += n
+	print(sum)  # 6
+
+	mut scores = map[str, int]()
+	scores.insert("Alice", 100)
+	scores.insert("Bob", 85)
+
+	alice_score = scores.get("Alice") orelse 0
+	print(alice_score)  # 100
+
+	return 0
+```
+
+**Implementation Notes:**
+- **Hardcoded types** initially: `list[int]`, `list[str]`, `map[str, int]`
+- Generics deferred to Phase 5 (post-v0.1.0)
+- Collections own their data (RAII cleanup in M23)
+- Iteration uses immutable borrows
+- Dependencies: Milestone 20 (`&mut` for append/remove), Milestone 21 (slices for iteration)
+
+### Milestone 23: RAII & Drop Trait
+**Goal:** Implement automatic resource cleanup with Drop trait
+
+**Tasks:**
+- Add `Drop` trait to standard library:
+  ```ryo
+  trait Drop:
+	  fn drop(&mut self)
+  ```
+- Implement automatic drop calls:
+  - At end of scope
+  - On early returns
+  - On move (drop old value if reassigning)
+- Implement Drop for built-in types:
+  - `str`: Free heap memory
+  - `list[T]`: Free array and drop elements
+  - `map[K, V]`: Free table and drop entries
+- Extend Codegen: Generate IR for:
+  - Drop calls at scope exit
+  - Drop calls on early returns
+- Write tests for RAII and Drop
+
+**Visible Progress:** No memory leaks! Resources cleaned up automatically.
+
+**Example:**
+```ryo
+struct File:
+	handle: int  # File descriptor
+
+impl Drop for File:
+	fn drop(&mut self):
+		close_file(self.handle)  # FFI call
+
+fn process_file(path: &str):
+	file = open_file(path)  # File opened
+	# ... use file ...
+	# File automatically closed at end of scope (drop called)
+
+fn early_return():
+	file = open_file("data.txt")
+	if file.is_empty():
+		return  # File dropped here (drop called on early return)
+	# ... use file ...
+	# File dropped here (drop called at end of scope)
+```
+
+**Implementation Notes:**
+- Drop is **automatic** (compiler inserts calls)
+- Drop order: **reverse of declaration order** (like Rust)
+- User-defined Drop for custom resources
+- Prevents resource leaks (files, sockets, memory)
+- Dependencies: Milestone 17 (traits), Milestone 20 (mutable borrows for &mut self)
 
 ## Phase 4: Module System & Core Ecosystem
 
@@ -2649,8 +2687,8 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Realistic Estimates (2-4 weeks per milestone)
 
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
-**Phase 2 (M4-M14):** 12 milestones (includes M4.5 Closures) × 3 weeks avg = ~36 weeks (~9 months)
-**Phase 3 (M15-M23):** 9 milestones × 3 weeks avg = ~27 weeks (~7 months)
+**Phase 2 (M4-M14):** 12 milestones (includes M4.5 Closure Syntax) × 3 weeks avg = ~36 weeks (~9 months)
+**Phase 3 (M15-M23):** 10 milestones (includes M15.5 Closure Capture Analysis) × 3 weeks avg = ~30 weeks (~7.5 months)
 **Phase 4 (M24-M27):** 4 milestones × 4 weeks avg = ~16 weeks (~4 months)
 
 **Total Estimated Time:** 79 weeks (~20 months) from Phase 2 start to v0.1.0
@@ -2665,7 +2703,7 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Milestones by Complexity
 
 **Simple (2 weeks):** M4, M5, M6, M7, M12
-**Medium (3 weeks):** M8, M9, M10, M11, M13, M14, M15, M16, M17, M18, M19, M21, M22, M24, M25, M26
+**Medium (3 weeks):** M8, M9, M10, M11, M13, M14, M15, M15.5, M16, M17, M18, M19, M21, M22, M24, M25, M26
 **Complex (4-5 weeks):** M20, M23, M27
 
 This timeline is **realistic** based on compiler development best practices. Each milestone includes implementation, testing, documentation, and examples.
