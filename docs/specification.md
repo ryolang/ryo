@@ -60,7 +60,7 @@
 
 ## 1. Introduction & Vision
 
-*   **Vision:** Ryo is a statically-typed, compiled programming language designed to prioritize developer experience while maintaining memory safety and competitive performance. It aims to combine the compile-time memory safety guarantees inspired by Rust (simplified, without a garbage collector), the approachable syntax and developer experience reminiscent of Python, and familiar Task/Future/Channel concurrency patterns. Where trade-offs exist, Ryo explicitly chooses developer productivity and debugging capability over raw performance optimization.
+*   **Vision:** Ryo is a statically-typed, compiled programming language designed to prioritize developer experience while maintaining memory safety and native performance. It aims to combine the compile-time memory safety guarantees inspired by Rust (simplified, without a garbage collector), the approachable syntax and developer experience reminiscent of Python, and familiar Task/Future/Channel concurrency patterns. Where trade-offs exist, Ryo explicitly chooses developer productivity and debugging capability over raw performance optimization.
 
 *   **Target Domains:** Web Backend Development (API Servers, Microservices), CLI Tools, Network Services & Proxies, WebAssembly (Wasm) Applications & Libraries, Game Development (Tooling, Scripting, Core Logic), Data Processing & ETL Pipelines, and Higher-Level Embedded Systems.
 *   **Core Goals:**
@@ -3162,7 +3162,7 @@ fn main():
 
 ### 14.5 Concurrency Model
 
-Ryo's concurrency model is designed to provide **"colorless" functions** (no `async`/`await` keywords) with **pythonic simplicity** while maintaining memory safety and competitive performance. The design is heavily inspired by Go's green threads and Zig's 2025 I/O model.
+Ryo's concurrency model is designed to provide **"colorless" functions** (no `async`/`await` keywords) with **pythonic simplicity** while maintaining memory safety and native performance. The design is heavily inspired by Go's green threads and Zig's 2025 I/O model.
 
 #### 14.5.1 Implementation Strategy: Green Threads
 
@@ -3522,7 +3522,7 @@ Future features and extensions are listed in this section below.
 *   **Constrained Types** (Range types with compile-time/runtime bounds checking — see Section 4.13)
 *   **Distinct Types** (Strong typedefs for unit safety — see Section 4.14)
 *   **Contracts** (`#[pre]`/`#[post]` function contracts — see Section 7.11)
-*   **Named Parameters & Default Values** (Named-by-default calling convention with `_` positional opt-out — see Section 6.1.1)
+*   ~~**Named Parameters & Default Values**~~ — Implemented in v0.1 (see Section 6.1.1)
 *   **Cancellation Model** (Cooperative cancellation with `Canceled`/`Timeout` errors — see Section 9.2.5)
 *   **Test Timeouts** (`#[test(timeout=5s)]` for preventing hanging tests — see Section 15)
 *   **Compile-Time Execution** (`comptime` blocks and functions)

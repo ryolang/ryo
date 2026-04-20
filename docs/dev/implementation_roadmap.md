@@ -2677,7 +2677,7 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 - ❌ Task/Future runtime (v0.4+)
 - ❌ FFI/unsafe blocks (v0.2+)
 - ❌ Full generics system (v0.3+)
-- ❌ Named parameters — `#[named]` (v0.3)
+- ✅ Named parameters & default values (v0.1 — Milestone 8.5)
 - ❌ LSP/advanced tooling (v0.2+)
 
 This foundation enables building **synchronous applications** including CLI tools, build systems, compilers, data processing pipelines, and game engines. Concurrency/FFI features will follow based on community needs.

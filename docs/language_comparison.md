@@ -115,13 +115,13 @@ fn main() {
 
 **Ryo:**
 ```ryo
-fn process_data(data: &str) -> &str:
-	# No lifetime annotations needed - scope-based
+fn process_data(data: str) -> str:
+	# No lifetime annotations — implicit borrow, owned return
 	return data.trim()
 
 fn main():
 	input = "  hello  "
-	result = process_data(&input)
+	result = process_data(input)  # implicit borrow (Rule 2)
 	print(result)
 ```
 
