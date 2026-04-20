@@ -19,7 +19,8 @@ fn main() {
 fn resolve_git_ref() -> Option<String> {
     let head = std::fs::read_to_string(".git/HEAD").ok()?;
     let head = head.trim();
-    head.strip_prefix("ref: ").map(|refpath| format!(".git/{refpath}"))
+    head.strip_prefix("ref: ")
+        .map(|refpath| format!(".git/{refpath}"))
 }
 
 fn get_git_short_hash() -> Option<String> {
