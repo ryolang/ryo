@@ -1292,6 +1292,7 @@ evens = filter([1, 2, 3, 4, 5], fn(x: int): x % 2 == 0)
 - Closure types (`Fn`, `FnMut`, `FnMove`) are compiler concepts, not full traits initially
 - Small captured environments can be stack-allocated
 - Move closures avoid reference counting overhead
+- See [closure_representation.md](closure_representation.md) for memory layout and ABI details
 
 **Dependencies:**
 
@@ -1499,6 +1500,7 @@ fn main() -> int:
 - References are **non-nullable** (always point to valid data)
 - Lifetime tracking is **simplified** (no explicit lifetimes like Rust)
 - Borrow checker uses basic scope-based analysis
+- See [borrow_checker.md](borrow_checker.md) for the algorithm sketch
 - Dependencies: Milestone 18 (methods with &self)
 
 ### Milestone 20: Mutable Borrows (`&mut T`)
@@ -1557,6 +1559,7 @@ fn main() -> int:
 - Prevents data races at compile time
 - Explicit dereference `*x` for mutation in some cases (automatic for method calls)
 - Simplified borrow checker (no lifetimes like Rust)
+- See [borrow_checker.md](borrow_checker.md) for the algorithm sketch (edge cases in §5)
 - Dependencies: Milestone 19 (immutable borrows provide foundation)
 
 ### Milestone 21: Slices & String Slices
