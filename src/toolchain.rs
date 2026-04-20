@@ -43,7 +43,6 @@ fn toolchain_dir() -> Result<PathBuf, CompilerError> {
 fn zig_target() -> Result<&'static str, CompilerError> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok("aarch64-macos"),
-        ("macos", "x86_64") => Ok("x86_64-macos"),
         ("linux", "x86_64") => Ok("x86_64-linux"),
         ("linux", "aarch64") => Ok("aarch64-linux"),
         (os, arch) => Err(CompilerError::ToolchainError(format!(
@@ -119,15 +118,7 @@ mod tests {
     #[test]
     fn test_zig_target_valid() {
         let target = zig_target().unwrap();
-        assert!(
-            [
-                "aarch64-macos",
-                "x86_64-macos",
-                "x86_64-linux",
-                "aarch64-linux"
-            ]
-            .contains(&target)
-        );
+        assert!(["aarch64-macos", "x86_64-linux", "aarch64-linux"].contains(&target));
     }
 
     #[test]

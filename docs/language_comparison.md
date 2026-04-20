@@ -115,20 +115,20 @@ fn main() {
 
 **Ryo:**
 ```ryo
-fn process_data(data: &str) -> &str:
-	# No lifetime annotations needed - scope-based
+fn process_data(data: str) -> str:
+	# No lifetime annotations — implicit borrow, owned return
 	return data.trim()
 
 fn main():
 	input = "  hello  "
-	result = process_data(&input)
+	result = process_data(input)  # implicit borrow (Rule 2)
 	print(result)
 ```
 
 **Migration Path:**
 - Familiar ownership concepts transfer directly
 - Simpler borrowing rules (no explicit lifetimes)
-- Similar performance characteristics
+- Good performance for I/O-bound workloads (more cloning than Rust)
 - Pattern matching works the same way
 
 ### Ryo vs Go

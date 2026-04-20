@@ -26,13 +26,13 @@ fn main():
 if x > 0:
     print("positive")
 
-# Loops - three forms, no 'while' keyword
+# Loops - two for-loop forms and while
 for i in range(10):       # counted (range built-in, exclusive end)
     print(i)
 for item in items:        # iteration over collections
     print(item)
 mut n = 0
-for n < 10:               # condition-based (replaces while)
+while n < 10:             # condition-based loop
     n += 1
 ```
 

@@ -60,14 +60,14 @@
 
 ## 1. Introduction & Vision
 
-*   **Vision:** Ryo is a statically-typed, compiled programming language designed to prioritize developer experience while maintaining memory safety and competitive performance. It aims to combine the compile-time memory safety guarantees inspired by Rust (simplified, without a garbage collector), the approachable syntax and developer experience reminiscent of Python, and familiar Task/Future/Channel concurrency patterns. Where trade-offs exist, Ryo explicitly chooses developer productivity and debugging capability over raw performance optimization.
+*   **Vision:** Ryo is a statically-typed, compiled programming language designed to prioritize developer experience while maintaining memory safety and native performance. It aims to combine the compile-time memory safety guarantees inspired by Rust (simplified, without a garbage collector), the approachable syntax and developer experience reminiscent of Python, and familiar Task/Future/Channel concurrency patterns. Where trade-offs exist, Ryo explicitly chooses developer productivity and debugging capability over raw performance optimization.
 
 *   **Target Domains:** Web Backend Development (API Servers, Microservices), CLI Tools, Network Services & Proxies, WebAssembly (Wasm) Applications & Libraries, Game Development (Tooling, Scripting, Core Logic), Data Processing & ETL Pipelines, and Higher-Level Embedded Systems.
 *   **Core Goals:**
     *   **Python-like Ergonomics:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
     *   **Rust-like Safety (Simplified):** Memory safe by default via ownership and borrowing, without GC. Compile-time checks prevent dangling pointers, data races, use-after-free. Simplified borrowing model compared to Rust (no manual lifetimes).
     *   **Go-Inspired Simplicity:** Minimal keyword set, straightforward core concepts, avoid unnecessary feature creep. Focus on providing essential, orthogonal features. Simpler than Rust, more expressive than Go — the right trade-off for Ryo's target audience.
-    *   **Competitive Performance:** Compiled to efficient native code (or Wasm) via **Cranelift**. No GC pauses. Deterministic resource management. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
+    *   **Native Performance:** Compiled to native code (or Wasm) via **Cranelift**. No GC pauses. Deterministic resource management. Performance comparable to Go — faster than Python, Node.js, or Ruby. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
     *   **Effective Concurrency:** Simple and safe concurrency using Task/Future/Channel patterns with a concurrent runtime (planned).
     *   **Compile-Time Power:** Integrated compile-time function execution (`comptime`) for metaprogramming, configuration, and optimization (planned for future implementation).
     *.  **Excellent Tooling:** Provide a seamless experience out-of-the-box, including a fast compiler, integrated package manager, REPL, and testing framework.
@@ -91,7 +91,7 @@ This specification describes the full target design. Not all features are availa
 | Contracts (`#[pre]`/`#[post]`) | | Yes | | |
 | User-defined generics (monomorphization) | | | Yes | |
 | Dynamic dispatch (`dyn Trait`) | | | Yes | |
-| Named parameters (`#[named]`) | | | Yes | |
+| Named parameters & default values | Yes | | | |
 | Cancellation errors (`Canceled`, `Timeout`) | | | | Yes |
 | Test timeouts (`#[test(timeout=5s)]`) | | | | Yes |
 | Concurrency runtime (task/future/channel) | | | | Yes |
@@ -145,10 +145,10 @@ Ryo explicitly prioritizes **developer experience and debugging capability over 
 
 **Comparison to Other Languages:**
 
-- **Rust:** Optional stack traces (`RUST_BACKTRACE`), no overhead by default. Harder to debug but faster.
-- **Go:** Simple stack traces with lower overhead. Less detailed than Ryo.
-- **Zig:** Minimal runtime, opt-in stack traces. More control, less automation.
-- **Ryo:** Rich debugging by default, configurable. Best DX out-of-box, with escape hatches.
+- **Rust:** Zero-overhead tracing (opt-in via `RUST_BACKTRACE`). Fastest, but harder to debug by default.
+- **Go:** Built-in stack traces with moderate overhead. Simpler than Ryo, but less detailed.
+- **Zig:** Near-zero overhead with opt-in tracing. Maximum control, minimal automation.
+- **Ryo:** Rich debugging by default, trades performance for DX. Better out-of-box experience than Go, more overhead than Rust/Zig.
 
 *Rationale: Most applications spend more engineering time debugging than optimizing. Ryo chooses to save developer time at the cost of runtime performance, making it ideal for the 95% of applications where developer productivity matters more than the last 10% of performance.*
 
@@ -179,14 +179,7 @@ See Section 7.10 for complete configuration reference.
 
 ### 1.2 AI-Era Language Design
 
-As of 2026, the majority of application code is written by AI agents and reviewed, debugged, and maintained by both AI agents and human developers. Ryo's design acknowledges this shift and optimizes for this workflow.
-
-**The AI-Writes, Human-Reviews Model:**
-
-| Actor | Primary Activity | What They Need |
-|-------|-----------------|----------------|
-| **AI Agent** | Writing code, fixing bugs, refactoring | Strict rules, unambiguous semantics, predictable patterns |
-| **Human Developer** | Reviewing diffs, debugging production, understanding intent | Explicit code, readable patterns, clear error messages |
+Ryo assumes a workflow where AI agents write code and human developers review, debug, and maintain it. This design choice shapes several language features.
 
 **Design Implications:**
 
@@ -205,7 +198,7 @@ As of 2026, the majority of application code is written by AI agents and reviewe
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
 *   **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
     *   *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for user-defined types (structs, enums, traits) and enum variants. Built-in fundamental types (primitives and collections) use lowercase (e.g., `int`, `str`, `list`, `map`). *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
-*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `package`, `true`, `false`, `none`, `void`, `move`, `error`, `try`, `catch`, `orelse`, `select`, `case`, `default`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `as` and `let` are not keywords. `package` is an access modifier keyword added for package-internal visibility. `select`, `case`, and `default` are used for non-deterministic concurrent operations).
+*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `while`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `package`, `true`, `false`, `none`, `void`, `move`, `error`, `try`, `catch`, `orelse`, `select`, `case`, `default`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `as` and `let` are not keywords. `package` is an access modifier keyword added for package-internal visibility. `select`, `case`, and `default` are used for non-deterministic concurrent operations).
 *   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error union prefix (`!`), optional chaining (`?.`), range bounds (`..`, used in constrained types `int(1..65535)` — not used for iteration or slicing), slice (`:` inside `[]`, e.g., `s[1:4]`, `s[:4]`, `s[2:]` — Python/Go convention).
     *   **Important Note:** The `!` operator is used exclusively for error union type prefixes (`!T` = error or T, `ErrorType!T` = ErrorType or T). The `!` is NOT used for logical negation—use `not` instead (following Python convention). Similarly, `?` operator in type context (`?T`) denotes optional types, while `?.` is the optional chaining operator.
     *   `_` (Underscore): The underscore `_` is treated as a special identifier. When used in patterns (`match`, destructuring assignment), it signifies a wildcard or an intentionally ignored value; it does not bind to a variable.
@@ -289,11 +282,11 @@ As of 2026, the majority of application code is written by AI agents and reviewe
 		fn reset(&mut self): self.count = 0
 	```
 *   **Method Call:** `instance.method(args...)`. Field Access: `instance.field`.
-*   **Control Flow:** `if/elif/else`, three `for` loop forms:
+*   **Control Flow:** `if/elif/else`, two `for` loop forms and `while`:
     *   **Iteration:** `for item in iterable:` — iterate over collections
     *   **Counted:** `for i in range(start, end):` — counted iteration (exclusive end)
-    *   **Condition:** `for condition:` — repeat while condition is true (Ryo's replacement for `while`)
-    *   Ryo has no `while` keyword — `for condition:` serves this role. One keyword, fewer concepts.
+    *   **Condition:** `while condition:` — repeat while condition is true
+    *   **Infinite:** `while true:` — infinite loop (use `break` to exit)
 *   **Loop Semantics:**
     *   **Loop Variable Scope:** Loop variables are **block-scoped** — they exist only inside the loop body and are not accessible after the loop ends.
         ```ryo
@@ -301,14 +294,14 @@ As of 2026, the majority of application code is written by AI agents and reviewe
 		    print(i)      # ok
 		# print(i)        # compile error: `i` not in scope
 		```
-    *   **Loop Variable Mutability:** Loop variables are **immutable** (consistent with Ryo's default). In iteration loops, the variable is re-bound each iteration. For condition-based loops, use a separately declared `mut` variable.
+    *   **Loop Variable Mutability:** Loop variables are **immutable** (consistent with Ryo's default). In iteration loops, the variable is re-bound each iteration. For `while` loops, use a separately declared `mut` variable.
         ```ryo
 		for item in items:
 		    # item is immutable — cannot assign to item
 		    print(item)
 
 		mut counter = 0
-		for counter < 10:
+		while counter < 10:
 		    print(counter)
 		    counter += 1    # counter is mut, declared outside the loop
 		```
@@ -326,7 +319,7 @@ As of 2026, the majority of application code is written by AI agents and reviewe
 		```
         **Note:** The `..` operator is reserved for type bounds (`int(1..65535)`). Slicing uses `:` inside `[]` (`s[1:4]`). Iteration uses `range()`. Each operator has exactly one meaning.
     *   **`break`/`continue`:** Affect the **innermost** enclosing loop. Using `break` or `continue` outside a loop is a compile error. Labeled breaks are not supported in v0.1. Loops are statements, not expressions — `break` does not carry a value.
-    *   *(Rationale: Block-scoped loop variables prevent accidental use of stale state. Immutable loop variables are consistent with Ryo's default and eliminate a class of bugs. `range()` is the single mechanism for counted iteration — no operator alternative, no ambiguity. It follows Python conventions because that's the target audience. Each operator has exactly one purpose: `range()` for iteration, `:` for slicing, `..` for type bounds. One loop keyword (`for`) with three forms keeps the language simple — `while` is redundant when `for condition:` exists.)*
+    *   *(Rationale: Block-scoped loop variables prevent accidental use of stale state. Immutable loop variables are consistent with Ryo's default and eliminate a class of bugs. `range()` is the single mechanism for counted iteration — no operator alternative, no ambiguity. It follows Python conventions because that's the target audience. Each operator has exactly one purpose: `range()` for iteration, `:` for slicing, `..` for type bounds. `for` handles iteration and counting; `while` handles conditions. Each keyword has one clear purpose. `while true:` replaces a dedicated `loop` keyword — one keyword per concept, no more.)*
 
 *   **Pattern Matching:** `match expr: Pattern1: ... Pattern2(bind): ... Pattern3 { x, y }: ... _ : ...` (`_` for wildcard/default).
 
@@ -1219,6 +1212,8 @@ fn setup_server():
 
 *(Rationale: In Ryo's target domains, `shared[T]` is common in server code — shared DB pools, shared configuration, shared caches. It is not an "escape hatch" to be avoided; it is the idiomatic tool for shared state. The key is that it's explicit: the type signature tells the reviewer "this data is shared.")*
 
+**Cost clarification:** For read-only shared state, `shared[T]` is simpler than Rust's approach — no need for `Arc` wrappers when the data is immutable. However, for mutable shared state, `shared[mutex[T]]` has ceremony parity with Rust's `Arc<Mutex<T>>` — the difference is syntax (lowercase, no angle brackets), not conceptual complexity. The lock/unlock ceremony is identical.
+
 ### 5.7 Iterators and Views
 
 Iterators are the one place where a "borrowed view" must exist beyond a single function call — an iterator borrows from a collection for the duration of a loop. Ryo handles this with **scope-locked views**: views that the compiler guarantees cannot escape their enclosing block.
@@ -1282,7 +1277,7 @@ The Ryo Ownership Model is a four-layered system:
 └─────────────────────────────────────────────────────┘
 ```
 
-**The trade-off, stated honestly:** Ryo trades zero-copy flexibility for zero-annotation simplicity. Code that Rust would express as a returned `&str` slice, Ryo expresses as a cloned `str`. The compiler applies copy elision where it can. For web backends, CLI tools, and scripts, this cost is negligible. For performance-critical inner loops, `unsafe` blocks (restricted to system packages) provide an escape hatch to raw pointers.
+**The trade-off, stated honestly:** Ryo trades zero-copy flexibility for zero-annotation simplicity. Code that Rust would express as a returned `&str` slice, Ryo expresses as a cloned `str`. The compiler applies copy elision where it can. For shared-state scenarios, Ryo's `shared[mutex[T]]` is comparable in ceremony to Rust's `Arc<Mutex<T>>` — neither language makes concurrent mutation invisible. For web backends, CLI tools, and scripts, these costs are negligible. For performance-critical inner loops, `unsafe` blocks (restricted to system packages) provide an escape hatch to raw pointers.
 
 All four layers work together to deliver Ryo's promise: **memory safety that feels like Python.**
 
@@ -1292,26 +1287,44 @@ All four layers work together to deliver Ryo's promise: **memory safety that fee
 
 *   **Functions/Methods:** Standard definition/call. Return single value (can be tuple). Methods use `self` (implicit immutable borrow, consistent with Rule 2), `&mut self` (explicit mutable borrow), or `move self` (take ownership).
 
-### 6.1.1 Named Parameters (`#[named]`)
+### 6.1.1 Named Parameters & Default Values
 
-> **Status: Planned for v0.3** — This feature is not available in v0.1 or v0.2.
-
-Functions can require callers to use named arguments by applying the `#[named]` attribute. This prevents argument-order bugs, especially for functions with multiple parameters of the same type.
+All function parameters are **keyword-only by default** — callers must use `name=value` syntax. The `_` prefix on a parameter opts it into **positional** calling, allowing callers to pass by position. Named arguments are always valid, even for `_` parameters.
 
 ```ryo
-#[named]
-fn create_user(name: str, age: int, role: str):
+# All params keyword-only by default
+fn create_user(name: str, age: int, role: str = "user"):
     # ...
 
-# Callers MUST use named arguments:
-create_user(name="Alice", age=30, role="admin")   # ok
-create_user("Alice", 30, "admin")                   # compile error: named arguments required
+create_user(name="Alice", age=30)              # ok — role defaults to "user"
+create_user(name="Alice", age=30, role="admin") # ok
+create_user("Alice", 30)                        # compile error: positional not allowed
+
+# _ opts into positional calling
+fn add(_ a: int, _ b: int) -> int:
+    return a + b
+
+add(1, 2)          # ok — positional allowed
+add(a=1, b=2)      # also ok — named always works
+
+# Mix: first param positional, rest keyword-only
+fn print(_ text: str, end: str = "\n"):
+    ...
+
+print("hello")              # ok — text positional, end defaults to "\n"
+print("hello", end="")      # ok — explicit end, no newline
+print("hello", "")          # compile error — end is keyword-only
 ```
 
-*   **Opt-in per function**: Only functions marked `#[named]` enforce this. Simple functions like `fn add(a: int, b: int)` don't need it.
-*   **Partial naming**: Without `#[named]`, callers can optionally use named arguments at any call site (as in Python). The attribute makes naming mandatory.
+**Rules:**
 
-*(Rationale: For the AI-writes, human-reviews workflow, named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature. Prevents the common bug of swapping arguments with the same type, e.g., `create_user("Alice", "admin", 30)` vs `create_user("Alice", 30, "admin")`.)*
+*   **Named by default**: All parameters require `name=value` at the call site unless marked with `_`.
+*   **`_` opts into positional**: `_ param: Type` allows callers to pass by position. Named calling still works.
+*   **Positional before named**: At the call site, positional arguments must come before any named arguments.
+*   **Default values**: Parameters with defaults must be trailing. Defaults are evaluated at each call site (not at definition time), and must be compile-time evaluable expressions (literals, constants, `comptime` calls).
+*   **No function overloading**: Each function name has one definition, so defaults never create ambiguity.
+
+*(Rationale: Inspired by Swift's proven calling convention. For the AI-writes, human-reviews workflow, named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature. Prevents the common bug of swapping arguments with the same type, e.g., `create_user("Alice", "admin", 30)` vs `create_user("Alice", 30, "admin")`. The `_` escape hatch keeps simple functions like `add(1, 2)` and `sqrt(16.0)` clean.)*
 
 ### 6.2 Closures & Lambda Expressions
 
@@ -3149,7 +3162,7 @@ fn main():
 
 ### 14.5 Concurrency Model
 
-Ryo's concurrency model is designed to provide **"colorless" functions** (no `async`/`await` keywords) with **pythonic simplicity** while maintaining memory safety and competitive performance. The design is heavily inspired by Go's green threads and Zig's 2025 I/O model.
+Ryo's concurrency model is designed to provide **"colorless" functions** (no `async`/`await` keywords) with **pythonic simplicity** while maintaining memory safety and native performance. The design is heavily inspired by Go's green threads and Zig's 2025 I/O model.
 
 #### 14.5.1 Implementation Strategy: Green Threads
 
@@ -3497,8 +3510,8 @@ Future features and extensions are listed in this section below.
 **Current Specification Gaps:**
 *   **Formal Grammar (EBNF/BNF).**
 *   **Detailed Standard Library API Specification** (All function signatures, struct fields, detailed semantics).
-*   **Precise Borrow Checker Algorithm Specification** (Formal lifetime inference/validation rules, edge cases).
-*   **Precise Closure Representation/ABI** (Memory layout, FFI compatibility).
+*   **~~Precise Borrow Checker Algorithm Specification~~** — Draft sketch exists. Formal specification deferred to implementation phase.
+*   **~~Precise Closure Representation/ABI~~** — Draft exists. Full ABI specification deferred to v0.2+ FFI milestone.
 *   **Error Handling Details** (Standard `Error` trait? `From` trait for `?` conversions?).
 *   **Module System Edge Cases** (Detailed resolution rules, visibility across modules/packages).
 *   **Attributes:** Formal system for attributes like `#[test]`, `#[no_mangle]`, `#[repr(C)]`.
@@ -3509,7 +3522,7 @@ Future features and extensions are listed in this section below.
 *   **Constrained Types** (Range types with compile-time/runtime bounds checking — see Section 4.13)
 *   **Distinct Types** (Strong typedefs for unit safety — see Section 4.14)
 *   **Contracts** (`#[pre]`/`#[post]` function contracts — see Section 7.11)
-*   **Named Parameters** (`#[named]` mandatory named arguments — see Section 6.1.1)
+*   ~~**Named Parameters & Default Values**~~ — Implemented in v0.1 (see Section 6.1.1)
 *   **Cancellation Model** (Cooperative cancellation with `Canceled`/`Timeout` errors — see Section 9.2.5)
 *   **Test Timeouts** (`#[test(timeout=5s)]` for preventing hanging tests — see Section 15)
 *   **Compile-Time Execution** (`comptime` blocks and functions)

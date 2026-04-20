@@ -30,7 +30,7 @@ fn _compute_power(base: int, exp: int) -> int:
 
 	result = base
 	mut i = 1
-	for i < exp:
+	while i < exp:
 		result = multiply(result, base)  # Uses public function from basic.ryo
 		i += 1
 	return result

@@ -22,7 +22,7 @@ hide:
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat" alt="License">
 </p>
 
-**Ryo **/ˈraɪoʊ/** (Rye-oh) is a statically-typed, compiled programming language that prioritizes developer experience while maintaining memory safety and competitive performance.** It combines Python's approachable syntax, Rust's memory safety (simplified), and Go's concurrency patterns into a cohesive language designed for modern backend development, CLI tools, and notebooks development.
+**Ryo **/ˈraɪoʊ/** (Rye-oh) is a statically-typed, compiled programming language that prioritizes developer experience while maintaining memory safety and native performance.** It combines Python's approachable syntax, Rust's memory safety (simplified), and Go's concurrency patterns into a cohesive language designed for modern backend development, CLI tools, and notebooks development.
 
 **Design Philosophy**: Where trade-offs exist, Ryo explicitly chooses **developer productivity and debugging capability over raw performance optimization**. For example, Ryo includes automatic stack traces and rich error context (add some overhead) by default, with configuration options for performance-critical applications.
 
@@ -208,7 +208,7 @@ fn main():
 ### Simplicity vs. Expressiveness
 **Choice**: Simplified borrowing (no lifetimes) over maximum flexibility  
 **Rationale**: Covers 90% of use cases with 10% of Rust's complexity  
-**Escape hatch**: `Shared[T]` for complex ownership patterns
+**Escape hatch**: `Shared[T]` (comparable to Rust's Arc) for shared ownership patterns
 
 ### Safety vs. Control
 **Choice**: Safe by default, `unsafe` requires `kind = "system"` in `ryo.toml`  

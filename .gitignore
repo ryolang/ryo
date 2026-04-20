@@ -37,3 +37,6 @@ output_executable
 
 # Superpowers (agent-generated plans/specs)
 docs/superpowers/
+
+# Analysis memos (working documents, not deliverables)
+docs/analysis/
