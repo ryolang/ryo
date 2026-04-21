@@ -37,7 +37,7 @@ All Ryo code examples **must** use Python-style colons and indentation, **NOT** 
 ## Build & Test Commands
 
 ```bash
-cargo fmt --check                # Format check (CI enforces, -Dwarnings)
+cargo fmt                        # Auto-format (CI runs --check with -Dwarnings)
 cargo clippy --all-targets       # Lint (CI enforces, warnings are errors)
 cargo check                      # Check for errors
 cargo build [--release]          # Build debug or release
@@ -49,6 +49,12 @@ cargo run -- toolchain status    # Check Zig status
 ```
 
 **File extensions:** `.ryo` (source), `.md` (docs), `.rs` (Rust), `.o`/`.obj` (generated)
+
+---
+
+## CI
+
+GitHub Actions runs on pushes to `main` and PRs targeting `main`: `cargo fmt --check` with `-Dwarnings`, `cargo clippy --all-targets` (warnings are errors), and `cargo test` (Ubuntu + macOS). All three must pass for merge.
 
 ---
 

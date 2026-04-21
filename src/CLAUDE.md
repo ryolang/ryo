@@ -6,16 +6,25 @@ This guide is for agents extending the Ryo compiler. For language design, see `/
 
 Always run before committing (CI enforces these with `-Dwarnings`):
 ```bash
-cargo fmt --check           # CI: must pass with no diffs
-cargo clippy --all-targets  # CI: warnings are errors
+cargo fmt                   # Auto-format (CI runs --check)
+cargo clippy --all-targets  # Lint (CI: warnings are errors)
 ```
-Run `cargo fmt` (without `--check`) to auto-fix formatting.
+
+## Rust Patterns ([Microsoft Rust Guidelines](https://microsoft.github.io/rust-guidelines/agents/all.txt))
+
+- `// SAFETY:` comment on every `unsafe` block explaining soundness
+- `debug_assert!` for internal invariants — zero cost in release builds
+- Checked/saturating arithmetic for spans, offsets, indices — no silent overflow
+- `PathBuf`/`&Path` for file paths, not `String`/`&str`; short-lived borrows across passes
+- FFI: `#[repr(C)]` structs, no `String`/`Vec` across boundaries, safe wrappers for unsafe calls
 
 ## Compilation Pipeline
 
-```
+```text
 Source → Lexer → Indent Preprocessor → Parser → Lower (HIR) → Codegen → Linker → Executable
 ```
+
+**Key files:** `pipeline.rs` (orchestrates the full pipeline), `builtins.rs` (built-in functions like `print`), `errors.rs` (`CompilerError` enum and diagnostics), `toolchain.rs` (Zig linker download/management).
 
 ## Adding a New Language Feature
 
@@ -65,7 +74,8 @@ HirStmt::MyFeature(expr, _) => {
 ```
 
 ### 7. Add Test
-Add to `tests/integration_tests.rs` or inline `mod tests`.
+- **Integration tests** (`tests/integration_tests.rs`): end-to-end compilation and execution, error handling, CLI commands. Use when the test compiles and runs a `.ryo` file.
+- **Inline unit tests** (`mod tests` in each `.rs`): isolated module behavior — lexer tokens, parser output, lowering logic. Use when testing a single pipeline stage.
 
 ## Error Handling
 
@@ -81,11 +91,7 @@ cargo test -- --nocapture       # Show output
 
 ## Binary Inspection
 
-Verify codegen output (macOS/Linux):
-```bash
-objdump -d output.o  # disassembly
-nm output.o          # symbols
-```
+`objdump -d` / `otool -tV` (disassembly), `nm` (symbols), `xxd` (hex dump).
 
 ## Related Documentation
 
