@@ -249,88 +249,6 @@ fn main() -> int:
 - No function overloading (one function per name)
 - Dependencies: Milestone 3 (codegen foundation)
 
-**Next Milestone:** Closures and lambda expressions are implemented in **Milestone 4.5** to enable higher-order functions and callbacks.
-
-### Milestone 4.5: Closures & Lambda Expressions
-
-**Goal:** Implement anonymous functions with basic closure syntax
-
-**Status:** ⏳ Planned (depends on Milestone 4)
-
-**Tasks:**
-
-1. **Lexer/Parser Extensions:**
-   - Extend AST: `ExprKind::Closure`
-   - Parse single-line closures: `fn(args): expression`
-   - Parse multi-line closures with colon-indentation:
-     ```ryo
-	 fn(args):
-		 statement1
-		 statement2
-	 ```
-   - Distinguish closure expression from regular function definition
-
-2. **Type System Extensions:**
-   - Type-check closure body
-   - Support closures as function parameters: `fn process(f: fn(int) -> int)`
-   - Type inference for closure parameters when context is clear
-
-3. **Code Generation:**
-   - Generate IR for closure creation (no capture environment yet)
-   - Generate IR for closure invocation
-   - Optimize: inline closures when possible
-
-4. **Testing:**
-   - Tests for closure syntax parsing
-   - Tests for closures as function parameters
-   - Integration tests with higher-order functions
-
-**Visible Progress:** Can pass functions as values, write callbacks, use higher-order functions
-
-**Example:**
-
-```ryo
-# Single-line closure
-square = fn(x: int): x * x
-print(square(5))  # 25
-
-# Multi-line closure with complex logic
-validator = fn(x: int) -> bool:
-	if x < 0:
-		return false
-	return x % 2 == 0
-
-# Closure as parameter (higher-order function)
-fn apply(x: int, f: fn(int) -> int) -> int:
-	return f(x)
-
-result = apply(5, square)
-# result = 25
-```
-
-**Implementation Notes:**
-
-- Closures are **first-class values** (can be passed, returned, stored)
-- Multi-line closures use **tab-based indentation** (enforced)
-- Capture analysis deferred to Milestone 15.5 (requires Move semantics from M15)
-- No higher-kinded types or advanced trait bounds yet (deferred to generics milestone)
-
-**Performance Considerations:**
-
-- Closures that don't capture variables can be optimized to function pointers (zero overhead)
-- Compiler can inline closures when beneficial
-
-**Dependencies:**
-
-- Milestone 4 (Functions & Calls) - function implementation must be complete
-
-**Future Enhancements** (post-v0.1.0):
-
-- Closure traits (`Fn`, `FnMut`, `FnOnce`) as actual traits
-- Generic closures: `fn[T](x: T) -> T`
-- Closures for concurrent runtime
-- Closure optimization (devirtualization)
-
 ### Milestone 5: Module System (Design Phase) ✅ COMPLETE
 
 **Goal:** Design and document the module system for code organization and visibility control
@@ -822,6 +740,88 @@ print("hello", "")          # compile error — end is keyword-only
 
 **Unlocks:** Milestone 9 struct literals share `name=value` parsing infrastructure. Future `print(_ text: str, end: str = "\n")` API.
 
+### Milestone 8.6: Closures & Lambda Expressions
+
+**Goal:** Implement anonymous functions with basic closure syntax
+
+**Status:** ⏳ Planned (depends on Milestones 4, 7, 8)
+
+**Tasks:**
+
+1. **Lexer/Parser Extensions:**
+   - Extend AST: `ExprKind::Closure`
+   - Parse single-line closures: `fn(args): expression`
+   - Parse multi-line closures with colon-indentation:
+     ```ryo
+	 fn(args):
+		 statement1
+		 statement2
+	 ```
+   - Distinguish closure expression from regular function definition
+
+2. **Type System Extensions:**
+   - Type-check closure body
+   - Support closures as function parameters: `fn process(f: fn(int) -> int)`
+   - Type inference for closure parameters when context is clear
+
+3. **Code Generation:**
+   - Generate IR for closure creation (no capture environment yet)
+   - Generate IR for closure invocation
+   - Optimize: inline closures when possible
+
+4. **Testing:**
+   - Tests for closure syntax parsing
+   - Tests for closures as function parameters
+   - Integration tests with higher-order functions
+
+**Visible Progress:** Can pass functions as values, write callbacks, use higher-order functions
+
+**Example:**
+
+```ryo
+# Single-line closure
+square = fn(x: int): x * x
+print(square(5))  # 25
+
+# Multi-line closure with complex logic
+validator = fn(x: int) -> bool:
+	if x < 0:
+		return false
+	return x % 2 == 0
+
+# Closure as parameter (higher-order function)
+fn apply(x: int, f: fn(int) -> int) -> int:
+	return f(x)
+
+result = apply(5, square)
+# result = 25
+```
+
+**Implementation Notes:**
+
+- Closures are **first-class values** (can be passed, returned, stored)
+- Multi-line closures use **tab-based indentation** (enforced)
+- Capture analysis deferred to Milestone 15.5 (requires Move semantics from M15)
+- No higher-kinded types or advanced trait bounds yet (deferred to generics milestone)
+
+**Performance Considerations:**
+
+- Closures that don't capture variables can be optimized to function pointers (zero overhead)
+- Compiler can inline closures when beneficial
+
+**Dependencies:**
+
+- Milestone 4 (Functions & Calls) - function implementation must be complete
+- Milestone 7 (Extended Expressions) - comparison and modulo operators used in predicate closures
+- Milestone 8 (Control Flow & Booleans) - `if`/`else`, `bool`, `true`/`false` used in closure bodies
+
+**Future Enhancements** (post-v0.1.0):
+
+- Closure traits (`Fn`, `FnMut`, `FnOnce`) as actual traits
+- Generic closures: `fn[T](x: T) -> T`
+- Closures for concurrent runtime
+- Closure optimization (devirtualization)
+
 ### Milestone 9: Structs
 **Goal:** Implement user-defined composite types with named fields
 
@@ -867,7 +867,7 @@ fn main() -> int:
 - Structs are **moved by default** (ownership semantics)
 - Field order matters (affects memory layout)
 - No default values for fields (all must be initialized)
-- No methods yet (added in Milestone 18)
+- No methods yet (added in Milestone 17)
 - Parentheses with named arguments used for struct literals: `Point(x=1, y=2)`, reuses `name=value` parsing infrastructure from Milestone 8.5
 - Braces reserved exclusively for f-string interpolation
 - Dependencies: Milestone 4 (functions for passing structs), Milestone 8.5 (named argument parsing)
@@ -1296,7 +1296,7 @@ evens = filter([1, 2, 3, 4, 5], fn(x: int): x % 2 == 0)
 
 **Dependencies:**
 
-- Milestone 4.5 (Closure syntax and basic parsing)
+- Milestone 8.6 (Closure syntax and basic parsing)
 - Milestone 15 (Basic Ownership & Move semantics — required for Move capture)
 
 ### Milestone 16: Optional Types (`?T`)
@@ -1351,51 +1351,7 @@ fn main() -> int:
 - Chaining returns `?T` (must handle with `orelse` or check)
 - Dependencies: Milestone 10 (enums provide foundation for tagged unions)
 
-### Milestone 17: Traits
-**Goal:** Implement trait system for behavior abstraction
-
-**Tasks:**
-- Add `trait` keyword to lexer/parser
-- Extend AST: `StmtKind::TraitDef`
-- Parse trait definitions:
-  ```ryo
-  trait Drawable:
-	  fn draw(self)
-	  fn area(self) -> float
-  ```
-- Parse trait bounds in function signatures: `fn process[T: Drawable](obj: T)`
-- Extend type system:
-  - Track trait definitions
-  - Track trait implementations
-  - Check trait bounds
-- **Static dispatch only** (monomorphization, no dynamic dispatch yet)
-- Write tests for trait definition and bounds
-
-**Visible Progress:** Can define shared behavior across types
-
-**Example:**
-```ryo
-trait Printable:
-	fn to_string(self) -> str
-
-impl Printable for int:
-	fn to_string(self) -> str:
-		# Convert int to string
-		return int_to_str(self)
-
-impl Printable for User:
-	fn to_string(self) -> str:
-		return f"User({self.name})"
-```
-
-**Implementation Notes:**
-- Traits define **required methods** only
-- No associated types or constants yet (future milestone)
-- No default implementations yet (future milestone)
-- Static dispatch via monomorphization (like Rust)
-- Dependencies: Milestone 18 (methods needed for trait impl)
-
-### Milestone 18: Method Implementations
+### Milestone 17: Method Implementations
 **Goal:** Implement methods on types via `impl` blocks
 
 **Tasks:**
@@ -1446,6 +1402,50 @@ fn main() -> int:
 - Method call syntax: `obj.method()` desugars to `Type::method(obj)`
 - No method overloading (one method per name per type)
 - Dependencies: Milestone 15 (ownership for self parameter)
+
+### Milestone 18: Traits
+**Goal:** Implement trait system for behavior abstraction
+
+**Tasks:**
+- Add `trait` keyword to lexer/parser
+- Extend AST: `StmtKind::TraitDef`
+- Parse trait definitions:
+  ```ryo
+  trait Drawable:
+	  fn draw(self)
+	  fn area(self) -> float
+  ```
+- Parse trait bounds in function signatures: `fn process[T: Drawable](obj: T)`
+- Extend type system:
+  - Track trait definitions
+  - Track trait implementations
+  - Check trait bounds
+- **Static dispatch only** (monomorphization, no dynamic dispatch yet)
+- Write tests for trait definition and bounds
+
+**Visible Progress:** Can define shared behavior across types
+
+**Example:**
+```ryo
+trait Printable:
+	fn to_string(self) -> str
+
+impl Printable for int:
+	fn to_string(self) -> str:
+		# Convert int to string
+		return int_to_str(self)
+
+impl Printable for User:
+	fn to_string(self) -> str:
+		return f"User({self.name})"
+```
+
+**Implementation Notes:**
+- Traits define **required methods** only
+- No associated types or constants yet (future milestone)
+- No default implementations yet (future milestone)
+- Static dispatch via monomorphization (like Rust)
+- Dependencies: Milestone 17 (methods — impl blocks needed for trait implementations)
 
 ### Milestone 19: Immutable Borrows (`&T`)
 **Goal:** Implement immutable references to avoid unnecessary moves
@@ -1501,7 +1501,7 @@ fn main() -> int:
 - Lifetime tracking is **simplified** (no explicit lifetimes like Rust)
 - Borrow checker uses basic scope-based analysis
 - See [borrow_checker.md](borrow_checker.md) for the algorithm sketch
-- Dependencies: Milestone 18 (methods with &self)
+- Dependencies: Milestone 17 (methods with &self)
 
 ### Milestone 20: Mutable Borrows (`&mut T`)
 **Goal:** Implement mutable references with aliasing restrictions
@@ -1719,7 +1719,7 @@ fn early_return():
 - Drop order: **reverse of declaration order** (like Rust)
 - User-defined Drop for custom resources
 - Prevents resource leaks (files, sockets, memory)
-- Dependencies: Milestone 17 (traits), Milestone 20 (mutable borrows for &mut self)
+- Dependencies: Milestone 18 (traits), Milestone 20 (mutable borrows for &mut self)
 
 ## Phase 4: Module System & Core Ecosystem
 
@@ -2339,7 +2339,7 @@ fn main():
 **Why Post-v0.1.0:**
 - Hardcoded collections (Milestone 22) sufficient for v0.1.0
 - Generic implementation is complex (monomorphization, specialization)
-- Trait system must be mature and stable (Milestone 17)
+- Trait system must be mature and stable (Milestone 18)
 - Community feedback will inform design (variance, associated types, etc.)
 
 **Features:**
@@ -2731,11 +2731,11 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Realistic Estimates (2-4 weeks per milestone)
 
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
-**Phase 2 (M4-M14):** 12 milestones (includes M4.5 Closure Syntax) × 3 weeks avg = ~36 weeks (~9 months)
+**Phase 2 (M4-M14):** 13 milestones (includes M8.5 Default Params, M8.6 Closures & Lambdas) × 3 weeks avg = ~39 weeks (~10 months)
 **Phase 3 (M15-M23):** 10 milestones (includes M15.5 Closure Capture Analysis) × 3 weeks avg = ~30 weeks (~7.5 months)
-**Phase 4 (M24-M27):** 4 milestones × 4 weeks avg = ~16 weeks (~4 months)
+**Phase 4 (M24-M27):** 5 milestones (includes M26.5 Distribution & Installer) × 4 weeks avg = ~20 weeks (~5 months)
 
-**Total Estimated Time:** 79 weeks (~20 months) from Phase 2 start to v0.1.0
+**Total Estimated Time:** 89 weeks (~22 months) from Phase 2 start to v0.1.0
 
 ### Development Approach
 
@@ -2747,7 +2747,7 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Milestones by Complexity
 
 **Simple (2 weeks):** M4, M5, M6, M7, M12
-**Medium (3 weeks):** M8, M9, M10, M11, M13, M14, M15, M15.5, M16, M17, M18, M19, M21, M22, M24, M25, M26
+**Medium (3 weeks):** M8, M8.5, M8.6, M9, M10, M11, M13, M14, M15, M15.5, M16, M18, M17, M19, M21, M22, M24, M25, M26, M26.5
 **Complex (4-5 weeks):** M20, M23, M27
 
 This timeline is **realistic** based on compiler development best practices. Each milestone includes implementation, testing, documentation, and examples.

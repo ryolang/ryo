@@ -110,10 +110,10 @@ These are underspecified aspects that will confuse developers if left undefined.
 
 *   **Was:** Two ordering paradoxes in the implementation roadmap:
     1.  Milestone 20 (`&mut`) was scheduled *after* Milestone 22 (Collections) and M23 (Drop), but `list.append(item)` and `drop(&mut self)` require mutable references.
-    2.  Closures (M4.5) included capture analysis before Basic Ownership (M15), but "Move Capture" requires Move semantics.
+    2.  Closures (M4.5, now M8.6) included capture analysis before Basic Ownership (M15), but "Move Capture" requires Move semantics.
 *   **Resolution:**
     1.  M20 moved to after M19 in Phase 3. New order: M15 → M16 → M17 → M18 → M19 → M20 → M21 → M22 → M23.
-    2.  M4.5 split: closure syntax and parsing remain in M4.5; capture analysis (borrow/move rules for captured variables) deferred to new Milestone 15.5, after M15 defines Move semantics.
+    2.  M4.5 split: closure syntax and parsing remain in M4.5 (now M8.6); capture analysis (borrow/move rules for captured variables) deferred to new Milestone 15.5, after M15 defines Move semantics.
 
 These have been addressed by the Ownership Lite rewrite (specification.md, Section 5).
 
@@ -170,7 +170,7 @@ These have been addressed by the Ownership Lite rewrite (specification.md, Secti
 
 ### Priority 1 (Roadmap Blockers)
 1.  ~~Reorder Phase 3: put M20 (`&mut`) before M21/M22/M23.~~ **Done.**
-2.  ~~Move Closure capture semantics (M4.5) to Phase 3.~~ **Done.**
+2.  ~~Move Closure capture semantics (M4.5, now M8.6) to Phase 3.~~ **Done.**
 
 ### Priority 2 (Spec Completeness)
 3.  Add `never` type (`!`) to Section 4.
