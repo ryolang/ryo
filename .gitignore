@@ -40,3 +40,6 @@ docs/superpowers/
 
 # Analysis memos (working documents, not deliverables)
 docs/analysis/
+
+# Git worktrees (local isolated workspaces)
+.worktrees/
