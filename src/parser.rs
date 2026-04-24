@@ -251,6 +251,8 @@ where
                     let unescaped = unescape_string(unquoted);
                     ExprKind::Literal(Literal::Str(unescaped))
                 },
+                Token::True => ExprKind::Literal(Literal::Bool(true)),
+                Token::False => ExprKind::Literal(Literal::Bool(false)),
             }
             .map_with(|kind, e| Expression::new(kind, e.span()));
 
@@ -311,8 +313,8 @@ where
             },
         );
 
-        // Addition and subtraction (lower precedence)
-        term.clone().foldl(
+        // Addition and subtraction (lower precedence than multiplicative)
+        let additive = term.clone().foldl(
             choice((
                 just(Token::Add).to(BinaryOperator::Add),
                 just(Token::Sub).to(BinaryOperator::Sub),
@@ -327,7 +329,30 @@ where
                     SimpleSpan::new((), start..end),
                 )
             },
-        )
+        );
+
+        // Equality (non-associative, lowest precedence): at most one ==/!= per expression
+        additive
+            .clone()
+            .then(
+                choice((
+                    just(Token::EqEq).to(BinaryOperator::Eq),
+                    just(Token::NotEq).to(BinaryOperator::NotEq),
+                ))
+                .then(additive)
+                .or_not(),
+            )
+            .map(|(left, maybe_rhs)| match maybe_rhs {
+                None => left,
+                Some((op, right)) => {
+                    let start = left.span.start;
+                    let end = right.span.end;
+                    Expression::new(
+                        ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
+                        SimpleSpan::new((), start..end),
+                    )
+                }
+            })
     })
 }
 
@@ -594,5 +619,80 @@ mod tests {
         let result = lex_and_parse("x = 1\n\ny = 2");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().statements.len(), 2);
+    }
+
+    #[test]
+    fn parse_true_false_literals() {
+        let program = lex_and_parse("x = true\ny = false").unwrap();
+        assert_eq!(program.statements.len(), 2);
+
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::Literal(Literal::Bool(b)) => assert!(*b),
+                other => panic!("expected Bool literal, got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+
+        match &program.statements[1].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::Literal(Literal::Bool(b)) => assert!(!*b),
+                other => panic!("expected Bool literal, got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_equality_expression() {
+        let program = lex_and_parse("x = 1 == 2").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::BinaryOp(_, BinaryOperator::Eq, _) => {}
+                other => panic!("expected BinaryOp(Eq), got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_not_equal_expression() {
+        let program = lex_and_parse("x = 1 != 2").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::BinaryOp(_, BinaryOperator::NotEq, _) => {}
+                other => panic!("expected BinaryOp(NotEq), got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_equality_has_lower_precedence_than_addition() {
+        // a + b == c + d should parse as (a + b) == (c + d)
+        let program = lex_and_parse("x = a + b == c + d").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::BinaryOp(lhs, BinaryOperator::Eq, rhs) => {
+                    assert!(matches!(
+                        lhs.kind,
+                        ExprKind::BinaryOp(_, BinaryOperator::Add, _)
+                    ));
+                    assert!(matches!(
+                        rhs.kind,
+                        ExprKind::BinaryOp(_, BinaryOperator::Add, _)
+                    ));
+                }
+                other => panic!("expected top-level BinaryOp(Eq), got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_chained_equality_is_rejected() {
+        // a == b == c is a parse error (equality is non-associative)
+        let result = lex_and_parse("x = a == b == c");
+        assert!(result.is_err(), "expected parse error for chained ==");
     }
 }
