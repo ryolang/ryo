@@ -87,6 +87,7 @@ fn resolve_type(name: &str) -> Result<Type, String> {
     match name {
         "int" => Ok(Type::Int),
         "str" => Ok(Type::Str),
+        "bool" => Ok(Type::Bool),
         _ => Err(format!("Unknown type: '{}'", name)),
     }
 }
@@ -214,6 +215,11 @@ fn lower_expr(
             ty: Type::Str,
             span,
         }),
+        ast::ExprKind::Literal(ast::Literal::Bool(b)) => Ok(HirExpr {
+            kind: HirExprKind::BoolLiteral(*b),
+            ty: Type::Bool,
+            span,
+        }),
         ast::ExprKind::Ident(name) => {
             let ty = scope
                 .lookup(name.as_str())
@@ -227,15 +233,65 @@ fn lower_expr(
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
             let lhs = lower_expr(lhs, scope, signatures)?;
             let rhs = lower_expr(rhs, scope, signatures)?;
+
+            let op_str = match op {
+                ast::BinaryOperator::Add => "+",
+                ast::BinaryOperator::Sub => "-",
+                ast::BinaryOperator::Mul => "*",
+                ast::BinaryOperator::Div => "/",
+                ast::BinaryOperator::Eq => "==",
+                ast::BinaryOperator::NotEq => "!=",
+            };
+
+            if lhs.ty != rhs.ty {
+                return Err(format!(
+                    "type mismatch in '{}': left is '{}', right is '{}'",
+                    op_str, lhs.ty, rhs.ty
+                ));
+            }
+
+            let is_equality = matches!(op, ast::BinaryOperator::Eq | ast::BinaryOperator::NotEq);
+
+            let result_ty = if is_equality {
+                match lhs.ty {
+                    Type::Int | Type::Bool => Type::Bool,
+                    Type::Str => {
+                        return Err(format!(
+                            "equality operator '{}' not supported for type 'str' (yet)",
+                            op_str
+                        ));
+                    }
+                    Type::Void => {
+                        return Err(format!(
+                            "equality operator '{}' not supported for type 'void'",
+                            op_str
+                        ));
+                    }
+                }
+            } else {
+                match lhs.ty {
+                    Type::Int => Type::Int,
+                    _ => {
+                        return Err(format!(
+                            "arithmetic operator '{}' not supported for type '{}'",
+                            op_str, lhs.ty
+                        ));
+                    }
+                }
+            };
+
             let hir_op = match op {
                 ast::BinaryOperator::Add => BinaryOp::Add,
                 ast::BinaryOperator::Sub => BinaryOp::Sub,
                 ast::BinaryOperator::Mul => BinaryOp::Mul,
                 ast::BinaryOperator::Div => BinaryOp::Div,
+                ast::BinaryOperator::Eq => BinaryOp::Eq,
+                ast::BinaryOperator::NotEq => BinaryOp::NotEq,
             };
+
             Ok(HirExpr {
                 kind: HirExprKind::BinaryOp(Box::new(lhs), hir_op, Box::new(rhs)),
-                ty: Type::Int,
+                ty: result_ty,
                 span,
             })
         }
@@ -487,5 +543,91 @@ mod tests {
             }
             _ => panic!("Expected VarDecl"),
         }
+    }
+
+    #[test]
+    fn lower_bool_literal_true() {
+        let hir = parse_and_lower("x = true").unwrap();
+        let main = &hir.functions[0];
+        match &main.body[0] {
+            HirStmt::VarDecl {
+                ty, initializer, ..
+            } => {
+                assert_eq!(*ty, Type::Bool);
+                assert!(matches!(initializer.kind, HirExprKind::BoolLiteral(true)));
+                assert_eq!(initializer.ty, Type::Bool);
+            }
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lower_bool_literal_false() {
+        let hir = parse_and_lower("x = false").unwrap();
+        let main = &hir.functions[0];
+        match &main.body[0] {
+            HirStmt::VarDecl {
+                ty, initializer, ..
+            } => {
+                assert_eq!(*ty, Type::Bool);
+                assert!(matches!(initializer.kind, HirExprKind::BoolLiteral(false)));
+            }
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lower_int_equality_has_bool_type() {
+        let hir = parse_and_lower("x = 1 == 2").unwrap();
+        let main = &hir.functions[0];
+        match &main.body[0] {
+            HirStmt::VarDecl {
+                ty, initializer, ..
+            } => {
+                assert_eq!(*ty, Type::Bool);
+                assert_eq!(initializer.ty, Type::Bool);
+            }
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lower_bool_annotation_resolves() {
+        let hir = parse_and_lower("x: bool = true").unwrap();
+        let main = &hir.functions[0];
+        match &main.body[0] {
+            HirStmt::VarDecl { ty, .. } => assert_eq!(*ty, Type::Bool),
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lower_mixed_type_equality_errors() {
+        let err = parse_and_lower("x = 1 == true").unwrap_err();
+        assert!(
+            err.contains("type mismatch in '=='"),
+            "got unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn lower_string_equality_errors() {
+        let err = parse_and_lower("x = \"a\" == \"b\"").unwrap_err();
+        assert!(
+            err.contains("not supported for type 'str'") && err.contains("(yet)"),
+            "got unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn lower_bool_arithmetic_errors() {
+        let err = parse_and_lower("x = true + 1").unwrap_err();
+        assert!(
+            err.contains("type mismatch"),
+            "got unexpected error: {}",
+            err
+        );
     }
 }
