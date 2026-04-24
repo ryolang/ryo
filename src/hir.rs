@@ -8,6 +8,7 @@ pub enum Type {
     Int,
     Str,
     Void,
+    Bool,
 }
 
 impl fmt::Display for Type {
@@ -16,6 +17,7 @@ impl fmt::Display for Type {
             Type::Int => write!(f, "int"),
             Type::Str => write!(f, "str"),
             Type::Void => write!(f, "void"),
+            Type::Bool => write!(f, "bool"),
         }
     }
 }
@@ -65,6 +67,7 @@ pub struct HirExpr {
 pub enum HirExprKind {
     IntLiteral(isize),
     StrLiteral(String),
+    BoolLiteral(bool),
     Var(String),
     BinaryOp(Box<HirExpr>, BinaryOp, Box<HirExpr>),
     UnaryOp(UnaryOp, Box<HirExpr>),
@@ -77,9 +80,32 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Eq,
+    NotEq,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Neg,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_bool_displays_as_bool() {
+        assert_eq!(format!("{}", Type::Bool), "bool");
+    }
+
+    #[test]
+    fn bool_literal_kind_exists() {
+        let _e = HirExprKind::BoolLiteral(true);
+    }
+
+    #[test]
+    fn equality_binary_ops_exist() {
+        let _e = BinaryOp::Eq;
+        let _n = BinaryOp::NotEq;
+    }
 }
