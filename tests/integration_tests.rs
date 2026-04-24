@@ -631,3 +631,30 @@ fn test_parse_function_def() {
         stdout
     );
 }
+
+// ============================================================================
+// Milestone 6.5: Booleans & Equality
+// ============================================================================
+
+#[test]
+fn bool_program_compiles_and_runs() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main() -> int:\n\tflag = true\n\tsame = 1 == 1\n\tdiff = 1 != 1\n\tboth = flag == same\n\treturn 0\n";
+    let test_file = create_test_file(temp_dir.path(), "bool_test.ryo", code);
+
+    let output = run_ryo_command(&["run", "bool_test.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Result] => 0"),
+        "Should exit with code 0, got: {}",
+        stdout
+    );
+}

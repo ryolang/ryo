@@ -9,6 +9,21 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::HashMap;
 use target_lexicon::Triple;
 
+/// Map a HIR type to the corresponding Cranelift IR type.
+///
+/// `Type::Int` uses the target's pointer-sized integer (i64 on 64-bit).
+/// `Type::Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
+/// `Type::Str` is represented as a pointer (pointer-sized integer).
+/// `Type::Void` has no Cranelift representation and should not be mapped here.
+fn cranelift_type_for(ty: hir::Type, pointer_ty: types::Type) -> types::Type {
+    match ty {
+        hir::Type::Int => pointer_ty,
+        hir::Type::Str => pointer_ty,
+        hir::Type::Bool => types::I8,
+        hir::Type::Void => panic!("cranelift_type_for: void has no representation"),
+    }
+}
+
 pub struct Codegen<M: Module> {
     builder_context: FunctionBuilderContext,
     ctx: codegen::Context,
@@ -154,11 +169,13 @@ impl<M: Module> Codegen<M> {
 
     fn build_signature(&self, func: &HirFunction) -> Signature {
         let mut sig = self.module.make_signature();
-        for _ in &func.params {
-            sig.params.push(AbiParam::new(self.int_type));
+        for param in &func.params {
+            let cl_ty = cranelift_type_for(param.ty, self.int_type);
+            sig.params.push(AbiParam::new(cl_ty));
         }
         if func.return_type != hir::Type::Void {
-            sig.returns.push(AbiParam::new(self.int_type));
+            let cl_ty = cranelift_type_for(func.return_type, self.int_type);
+            sig.returns.push(AbiParam::new(cl_ty));
         }
         sig
     }
@@ -185,7 +202,8 @@ impl<M: Module> Codegen<M> {
             let mut locals: HashMap<String, Variable> = HashMap::new();
 
             for (i, param) in func.params.iter().enumerate() {
-                let var = builder.declare_var(int_type);
+                let cl_ty = cranelift_type_for(param.ty, int_type);
+                let var = builder.declare_var(cl_ty);
                 let param_val = builder.block_params(entry_block)[i];
                 builder.def_var(var, param_val);
                 locals.insert(param.name.clone(), var);
@@ -212,7 +230,8 @@ impl<M: Module> Codegen<M> {
                             func_ids,
                         };
                         let val = Self::eval_expr(&mut builder, initializer, &mut func_ctx)?;
-                        let var = builder.declare_var(int_type);
+                        let cl_ty = cranelift_type_for(initializer.ty, int_type);
+                        let var = builder.declare_var(cl_ty);
                         builder.def_var(var, val);
                         locals.insert(name.clone(), var);
                     }
@@ -304,6 +323,10 @@ impl<M: Module> Codegen<M> {
         match &expr.kind {
             HirExprKind::IntLiteral(val) => Ok(builder.ins().iconst(ctx.int_type, *val as i64)),
 
+            HirExprKind::BoolLiteral(val) => {
+                Ok(builder.ins().iconst(types::I8, if *val { 1 } else { 0 }))
+            }
+
             HirExprKind::StrLiteral(content) => {
                 let data_id =
                     Self::store_string(content, ctx.module, ctx.data_ctx, ctx.string_data)?;
@@ -334,6 +357,8 @@ impl<M: Module> Codegen<M> {
                     BinaryOp::Sub => builder.ins().isub(lhs_val, rhs_val),
                     BinaryOp::Mul => builder.ins().imul(lhs_val, rhs_val),
                     BinaryOp::Div => builder.ins().sdiv(lhs_val, rhs_val),
+                    BinaryOp::Eq => builder.ins().icmp(IntCC::Equal, lhs_val, rhs_val),
+                    BinaryOp::NotEq => builder.ins().icmp(IntCC::NotEqual, lhs_val, rhs_val),
                 };
 
                 Ok(result)
