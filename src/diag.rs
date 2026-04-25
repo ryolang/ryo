@@ -54,7 +54,7 @@ pub enum Severity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum DiagCode {
-    // --- ast_lower ---
+    // --- astgen ---
     UnknownType,
     NestedFunctionDef,
     TopLevelWithExplicitMain,

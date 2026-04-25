@@ -48,9 +48,15 @@ impl TypeId {
     /// Internal handle value. Exposed for ZIR/AIR encoding (Phase 3+)
     /// where instructions reference types as raw u32s alongside
     /// other ids in the `extra` arena.
-    #[allow(dead_code)]
     pub const fn raw(self) -> u32 {
         self.0
+    }
+
+    /// Reconstruct a `TypeId` from a raw `u32` previously produced by
+    /// [`Self::raw`]. Used by UIR/TIR decoders that pull packed
+    /// payloads back out of the `extra` arena.
+    pub const fn from_raw(raw: u32) -> Self {
+        TypeId(raw)
     }
 }
 
@@ -63,6 +69,13 @@ pub struct StringId(u32);
 impl StringId {
     pub const fn raw(self) -> u32 {
         self.0
+    }
+
+    /// Reconstruct a `StringId` from a raw `u32` previously produced
+    /// by [`Self::raw`]. Used by UIR/TIR decoders that pull packed
+    /// payloads back out of the `extra` arena.
+    pub const fn from_raw(raw: u32) -> Self {
+        StringId(raw)
     }
 }
 

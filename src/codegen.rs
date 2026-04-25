@@ -1,7 +1,27 @@
-use crate::hir::{
-    BinaryOp, HirExpr, HirExprKind, HirFunction, HirProgram, HirStmt, TypeId, UnaryOp,
-};
-use crate::types::{InternPool, StringId, TypeKind};
+//! Cranelift codegen over UIR.
+//!
+//! Codegen consumes the flat [`Uir`] produced by `astgen` plus
+//! the [`crate::sema::TypeTable`] produced by `sema`.
+//!
+//! Traversal is *index-driven* — every operand is reached through
+//! an [`InstRef`] into `uir.instructions`, never through a
+//! recursive descent over a tree-shaped node. Two recursions
+//! survive:
+//!
+//! 1. Materializing an instruction whose operands are themselves
+//!    instructions (e.g. `Add %3, %5` materializes `%3` and `%5`
+//!    first). Cranelift always needs nested values, so something
+//!    has to walk operands; doing it through the `InstRef` index
+//!    is the point.
+//! 2. The `eval_inst` memoization map (`HashMap<InstRef, Value>`)
+//!    so a shared sub-expression isn't re-emitted. UIR today is
+//!    tree-shaped (one parent per inst) so this is purely
+//!    defensive — but it's the right invariant before TIR / lazy
+//!    sema land. Zig calls the analogous mapping in `Air.zig`
+//!    "liveness"; we don't need full liveness yet.
+
+use crate::types::{InternPool, StringId, TypeId, TypeKind};
+use crate::uir::{FuncBody, InstData, InstRef, InstTag, Uir};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -11,7 +31,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::HashMap;
 use target_lexicon::Triple;
 
-/// Map a HIR type to the corresponding Cranelift IR type.
+/// Map a UIR/sema type to the corresponding Cranelift IR type.
 ///
 /// `Int` uses the target's pointer-sized integer (i64 on 64-bit).
 /// `Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
@@ -50,6 +70,10 @@ pub struct Codegen<M: Module> {
     triple: Triple,
 }
 
+/// Per-function emission state. Lives only for the duration of one
+/// `compile_function` call; reset between functions because
+/// Cranelift `Variable` ids and the `InstRef → Value` memo are both
+/// function-local.
 struct FunctionContext<'a, M: Module> {
     module: &'a mut M,
     data_ctx: &'a mut DataDescription,
@@ -57,8 +81,14 @@ struct FunctionContext<'a, M: Module> {
     int_type: types::Type,
     triple: &'a Triple,
     pool: &'a InternPool,
-    locals: &'a HashMap<StringId, Variable>,
+    uir: &'a Uir,
+    types: &'a [Option<TypeId>],
+    locals: HashMap<StringId, Variable>,
     func_ids: &'a HashMap<StringId, FuncId>,
+    /// `InstRef → Value` memo. Materializing the same instruction
+    /// twice in one function would either duplicate side effects
+    /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
+    inst_values: HashMap<InstRef, Value>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -136,25 +166,27 @@ impl Codegen<JITModule> {
 }
 
 impl<M: Module> Codegen<M> {
-    pub fn compile(&mut self, program: &HirProgram, pool: &InternPool) -> Result<FuncId, String> {
+    pub fn compile(
+        &mut self,
+        uir: &Uir,
+        types: &[Option<TypeId>],
+        pool: &InternPool,
+    ) -> Result<FuncId, String> {
         debug_assert!(
-            all_expr_types_resolved(program),
-            "codegen::compile requires sema to have filled all HirExpr.ty"
+            all_types_resolved(uir, types),
+            "codegen::compile requires sema to have filled the TypeTable"
         );
-        let func_ids = self.declare_all_functions(program, pool)?;
+        let func_ids = self.declare_all_functions(uir, pool)?;
 
-        for func in &program.functions {
-            self.compile_function(func, &func_ids, pool)?;
+        for body in &uir.func_bodies {
+            self.compile_function(body, uir, types, &func_ids, pool)?;
         }
 
-        // Resolve "main" through the pool. `ast_lower` always
-        // interns the string "main" (it does so explicitly when
-        // synthesising implicit-main and when checking for an
-        // explicit-main collision), so the read-only `find_str`
-        // probe is guaranteed to hit if the program declares one.
-        // This avoids both the previous `pool.str(f.name) == "main"`
-        // strcmp scan over every function and any need for `&mut
-        // pool` here.
+        // Resolve "main" through the pool. `astgen` always interns
+        // the string "main" (it does so explicitly when synthesising
+        // implicit-main and when checking for an explicit-main
+        // collision), so the read-only `find_str` probe is
+        // guaranteed to hit if the program declares one.
         let main_id = pool
             .find_str("main")
             .ok_or_else(|| "No main function defined".to_string())?;
@@ -166,18 +198,19 @@ impl<M: Module> Codegen<M> {
 
     pub fn compile_and_dump_ir(
         &mut self,
-        program: &HirProgram,
+        uir: &Uir,
+        types: &[Option<TypeId>],
         pool: &InternPool,
     ) -> Result<String, String> {
         debug_assert!(
-            all_expr_types_resolved(program),
-            "codegen::compile_and_dump_ir requires sema to have filled all HirExpr.ty"
+            all_types_resolved(uir, types),
+            "codegen::compile_and_dump_ir requires sema to have filled the TypeTable"
         );
-        let func_ids = self.declare_all_functions(program, pool)?;
+        let func_ids = self.declare_all_functions(uir, pool)?;
 
         let mut ir_output = String::new();
-        for func in &program.functions {
-            if let Some(ir) = self.compile_function(func, &func_ids, pool)? {
+        for body in &uir.func_bodies {
+            if let Some(ir) = self.compile_function(body, uir, types, &func_ids, pool)? {
                 ir_output.push_str(&ir);
                 ir_output.push('\n');
             }
@@ -188,13 +221,13 @@ impl<M: Module> Codegen<M> {
 
     fn declare_all_functions(
         &mut self,
-        program: &HirProgram,
+        uir: &Uir,
         pool: &InternPool,
     ) -> Result<HashMap<StringId, FuncId>, String> {
         let mut func_ids = HashMap::new();
-        for func in &program.functions {
-            let sig = self.build_signature(func, pool);
-            let name_str = pool.str(func.name);
+        for body in &uir.func_bodies {
+            let sig = self.build_signature(body, pool);
+            let name_str = pool.str(body.name);
             let linkage = if name_str == "main" {
                 Linkage::Export
             } else {
@@ -204,19 +237,19 @@ impl<M: Module> Codegen<M> {
                 .module
                 .declare_function(name_str, linkage, &sig)
                 .map_err(|e| format!("Failed to declare function '{}': {}", name_str, e))?;
-            func_ids.insert(func.name, func_id);
+            func_ids.insert(body.name, func_id);
         }
         Ok(func_ids)
     }
 
-    fn build_signature(&self, func: &HirFunction, pool: &InternPool) -> Signature {
+    fn build_signature(&self, body: &FuncBody, pool: &InternPool) -> Signature {
         let mut sig = self.module.make_signature();
-        for param in &func.params {
+        for param in &body.params {
             let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
             sig.params.push(AbiParam::new(cl_ty));
         }
-        if func.return_type != pool.void() {
-            let cl_ty = cranelift_type_for(func.return_type, pool, self.int_type);
+        if body.return_type != pool.void() {
+            let cl_ty = cranelift_type_for(body.return_type, pool, self.int_type);
             sig.returns.push(AbiParam::new(cl_ty));
         }
         sig
@@ -224,15 +257,17 @@ impl<M: Module> Codegen<M> {
 
     fn compile_function(
         &mut self,
-        func: &HirFunction,
+        body: &FuncBody,
+        uir: &Uir,
+        types: &[Option<TypeId>],
         func_ids: &HashMap<StringId, FuncId>,
         pool: &InternPool,
     ) -> Result<Option<String>, String> {
         let func_id = *func_ids
-            .get(&func.name)
-            .ok_or_else(|| format!("Function '{}' not declared", pool.str(func.name)))?;
+            .get(&body.name)
+            .ok_or_else(|| format!("Function '{}' not declared", pool.str(body.name)))?;
 
-        self.ctx.func.signature = self.build_signature(func, pool);
+        self.ctx.func.signature = self.build_signature(body, pool);
 
         {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
@@ -244,7 +279,7 @@ impl<M: Module> Codegen<M> {
             let int_type = self.int_type;
             let mut locals: HashMap<StringId, Variable> = HashMap::new();
 
-            for (i, param) in func.params.iter().enumerate() {
+            for (i, param) in body.params.iter().enumerate() {
                 let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                 let var = builder.declare_var(cl_ty);
                 let param_val = builder.block_params(entry_block)[i];
@@ -252,70 +287,30 @@ impl<M: Module> Codegen<M> {
                 locals.insert(param.name, var);
             }
 
-            let mut has_return = false;
+            let mut ctx: FunctionContext<'_, M> = FunctionContext {
+                module: &mut self.module,
+                data_ctx: &mut self.data_ctx,
+                string_data: &mut self.string_data,
+                int_type,
+                triple: &self.triple,
+                pool,
+                uir,
+                types,
+                locals,
+                func_ids,
+                inst_values: HashMap::new(),
+            };
 
-            for stmt in &func.body {
+            let mut has_return = false;
+            for stmt_ref in uir.body_stmts(body) {
                 if has_return {
                     break;
                 }
-
-                match stmt {
-                    HirStmt::VarDecl {
-                        name, initializer, ..
-                    } => {
-                        let mut func_ctx: FunctionContext<'_, M> = FunctionContext {
-                            module: &mut self.module,
-                            data_ctx: &mut self.data_ctx,
-                            string_data: &mut self.string_data,
-                            int_type,
-                            triple: &self.triple,
-                            pool,
-                            locals: &locals,
-                            func_ids,
-                        };
-                        let val = Self::eval_expr(&mut builder, initializer, &mut func_ctx)?;
-                        let cl_ty = cranelift_type_for(initializer.expect_ty(), pool, int_type);
-                        let var = builder.declare_var(cl_ty);
-                        builder.def_var(var, val);
-                        locals.insert(*name, var);
-                    }
-                    HirStmt::Return(Some(expr), _) => {
-                        let mut func_ctx: FunctionContext<'_, M> = FunctionContext {
-                            module: &mut self.module,
-                            data_ctx: &mut self.data_ctx,
-                            string_data: &mut self.string_data,
-                            int_type,
-                            triple: &self.triple,
-                            pool,
-                            locals: &locals,
-                            func_ids,
-                        };
-                        let val = Self::eval_expr(&mut builder, expr, &mut func_ctx)?;
-                        builder.ins().return_(&[val]);
-                        has_return = true;
-                    }
-                    HirStmt::Return(None, _) => {
-                        builder.ins().return_(&[]);
-                        has_return = true;
-                    }
-                    HirStmt::Expr(expr, _) => {
-                        let mut func_ctx: FunctionContext<'_, M> = FunctionContext {
-                            module: &mut self.module,
-                            data_ctx: &mut self.data_ctx,
-                            string_data: &mut self.string_data,
-                            int_type,
-                            triple: &self.triple,
-                            pool,
-                            locals: &locals,
-                            func_ids,
-                        };
-                        let _val = Self::eval_expr(&mut builder, expr, &mut func_ctx)?;
-                    }
-                }
+                has_return = Self::emit_stmt(&mut builder, &mut ctx, stmt_ref)?;
             }
 
             if !has_return {
-                if func.return_type != pool.void() {
+                if body.return_type != pool.void() {
                     let zero = builder.ins().iconst(int_type, 0);
                     builder.ins().return_(&[zero]);
                 } else {
@@ -330,135 +325,196 @@ impl<M: Module> Codegen<M> {
 
         self.module
             .define_function(func_id, &mut self.ctx)
-            .map_err(|e| format!("Failed to define function '{}': {}", pool.str(func.name), e))?;
+            .map_err(|e| format!("Failed to define function '{}': {}", pool.str(body.name), e))?;
 
         self.ctx.clear();
         Ok(Some(ir_text))
     }
 
-    fn store_string(
-        content_id: StringId,
-        content: &str,
-        module: &mut M,
-        data_ctx: &mut DataDescription,
-        string_data: &mut HashMap<StringId, DataId>,
-    ) -> Result<DataId, String> {
-        if let Some(&data_id) = string_data.get(&content_id) {
-            return Ok(data_id);
+    /// Emit a top-level statement instruction. Returns `true` iff
+    /// the statement was a terminator (Return / ReturnVoid) — the
+    /// caller stops the body walk on the first one.
+    fn emit_stmt(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: InstRef,
+    ) -> Result<bool, String> {
+        let inst = ctx.uir.inst(r);
+        match inst.tag {
+            InstTag::VarDecl => {
+                let view = ctx.uir.var_decl_view(r);
+                let val = Self::eval_inst(builder, ctx, view.initializer)?;
+                let init_ty = ctx.types[view.initializer.index()]
+                    .expect("sema must have typed the initializer");
+                let cl_ty = cranelift_type_for(init_ty, ctx.pool, ctx.int_type);
+                let var = builder.declare_var(cl_ty);
+                builder.def_var(var, val);
+                ctx.locals.insert(view.name, var);
+                Ok(false)
+            }
+            InstTag::Return => {
+                let operand = match inst.data {
+                    InstData::UnOp(o) => o,
+                    _ => unreachable!("Return must carry InstData::UnOp"),
+                };
+                let val = Self::eval_inst(builder, ctx, operand)?;
+                builder.ins().return_(&[val]);
+                Ok(true)
+            }
+            InstTag::ReturnVoid => {
+                builder.ins().return_(&[]);
+                Ok(true)
+            }
+            InstTag::ExprStmt => {
+                let operand = match inst.data {
+                    InstData::UnOp(o) => o,
+                    _ => unreachable!("ExprStmt must carry InstData::UnOp"),
+                };
+                let _ = Self::eval_inst(builder, ctx, operand)?;
+                Ok(false)
+            }
+            other => Err(format!(
+                "emit_stmt: instruction at %{} is not a statement (tag={:?})",
+                r.index(),
+                other
+            )),
         }
-
-        let data_id = module
-            .declare_anonymous_data(false, false)
-            .map_err(|e| format!("Failed to declare string data: {}", e))?;
-
-        data_ctx.clear();
-        data_ctx.define(content.as_bytes().into());
-
-        module
-            .define_data(data_id, data_ctx)
-            .map_err(|e| format!("Failed to define string data: {}", e))?;
-
-        string_data.insert(content_id, data_id);
-        Ok(data_id)
     }
 
-    fn eval_expr(
+    /// Materialize an instruction's value, recursively materializing
+    /// operand `InstRef`s as needed. Memoized: a second visit hands
+    /// back the cached `Value`.
+    fn eval_inst(
         builder: &mut FunctionBuilder,
-        expr: &HirExpr,
         ctx: &mut FunctionContext<'_, M>,
+        r: InstRef,
     ) -> Result<Value, String> {
-        match &expr.kind {
-            HirExprKind::IntLiteral(val) => Ok(builder.ins().iconst(ctx.int_type, *val)),
-
-            HirExprKind::BoolLiteral(val) => {
-                Ok(builder.ins().iconst(types::I8, if *val { 1 } else { 0 }))
-            }
-
-            HirExprKind::StrLiteral(id) => {
-                let content = ctx.pool.str(*id);
-                let data_id =
-                    Self::store_string(*id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
-                let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-                let ptr = builder.ins().global_value(ctx.int_type, data_ref);
-                Ok(ptr)
-            }
-
-            HirExprKind::Var(name) => {
-                let var = ctx
-                    .locals
-                    .get(name)
-                    .ok_or_else(|| format!("Undefined variable: '{}'", ctx.pool.str(*name)))?;
-                Ok(builder.use_var(*var))
-            }
-
-            HirExprKind::UnaryOp(UnaryOp::Neg, sub_expr) => {
-                let sub_val = Self::eval_expr(builder, sub_expr, ctx)?;
-                Ok(builder.ins().ineg(sub_val))
-            }
-
-            HirExprKind::BinaryOp(lhs, op, rhs) => {
-                let lhs_val = Self::eval_expr(builder, lhs, ctx)?;
-                let rhs_val = Self::eval_expr(builder, rhs, ctx)?;
-
-                let result = match op {
-                    BinaryOp::Add => builder.ins().iadd(lhs_val, rhs_val),
-                    BinaryOp::Sub => builder.ins().isub(lhs_val, rhs_val),
-                    BinaryOp::Mul => builder.ins().imul(lhs_val, rhs_val),
-                    BinaryOp::Div => builder.ins().sdiv(lhs_val, rhs_val),
-                    BinaryOp::Eq => builder.ins().icmp(IntCC::Equal, lhs_val, rhs_val),
-                    BinaryOp::NotEq => builder.ins().icmp(IntCC::NotEqual, lhs_val, rhs_val),
+        if let Some(&v) = ctx.inst_values.get(&r) {
+            return Ok(v);
+        }
+        let inst = ctx.uir.inst(r);
+        let value = match inst.tag {
+            InstTag::IntLiteral => match inst.data {
+                InstData::Int(v) => builder.ins().iconst(ctx.int_type, v),
+                _ => unreachable!("IntLiteral must carry InstData::Int"),
+            },
+            InstTag::BoolLiteral => match inst.data {
+                InstData::Bool(b) => builder.ins().iconst(types::I8, if b { 1 } else { 0 }),
+                _ => unreachable!("BoolLiteral must carry InstData::Bool"),
+            },
+            InstTag::StrLiteral => match inst.data {
+                InstData::Str(id) => emit_str_literal(builder, ctx, id)?,
+                _ => unreachable!("StrLiteral must carry InstData::Str"),
+            },
+            InstTag::Var => match inst.data {
+                InstData::Var(name) => {
+                    let var = ctx
+                        .locals
+                        .get(&name)
+                        .ok_or_else(|| format!("Undefined variable: '{}'", ctx.pool.str(name)))?;
+                    builder.use_var(*var)
+                }
+                _ => unreachable!("Var must carry InstData::Var"),
+            },
+            InstTag::Neg => match inst.data {
+                InstData::UnOp(operand) => {
+                    let v = Self::eval_inst(builder, ctx, operand)?;
+                    builder.ins().ineg(v)
+                }
+                _ => unreachable!("Neg must carry InstData::UnOp"),
+            },
+            InstTag::Add
+            | InstTag::Sub
+            | InstTag::Mul
+            | InstTag::Div
+            | InstTag::Eq
+            | InstTag::NotEq => {
+                let (lhs, rhs) = match inst.data {
+                    InstData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!("binary op must carry InstData::BinOp"),
                 };
-
-                Ok(result)
-            }
-
-            HirExprKind::Call(name, args) => {
-                let name_str = ctx.pool.str(*name);
-                if crate::builtins::lookup(name_str).is_some() {
-                    match name_str {
-                        "print" => {
-                            Self::generate_print_call(builder, args, ctx)?;
-                            Ok(builder.ins().iconst(ctx.int_type, 0))
-                        }
-                        _ => Err(format!(
-                            "Builtin '{}' has no codegen implementation",
-                            name_str
-                        )),
-                    }
-                } else if let Some(&callee_id) = ctx.func_ids.get(name) {
-                    let mut arg_values = Vec::new();
-                    for arg in args {
-                        let val = Self::eval_expr(builder, arg, ctx)?;
-                        arg_values.push(val);
-                    }
-
-                    let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
-                    let call = builder.ins().call(callee_ref, &arg_values);
-                    let results = builder.inst_results(call);
-
-                    if results.is_empty() {
-                        Ok(builder.ins().iconst(ctx.int_type, 0))
-                    } else {
-                        Ok(results[0])
-                    }
-                } else {
-                    Err(format!("Undefined function: '{}'", name_str))
+                let lv = Self::eval_inst(builder, ctx, lhs)?;
+                let rv = Self::eval_inst(builder, ctx, rhs)?;
+                match inst.tag {
+                    InstTag::Add => builder.ins().iadd(lv, rv),
+                    InstTag::Sub => builder.ins().isub(lv, rv),
+                    InstTag::Mul => builder.ins().imul(lv, rv),
+                    InstTag::Div => builder.ins().sdiv(lv, rv),
+                    InstTag::Eq => builder.ins().icmp(IntCC::Equal, lv, rv),
+                    InstTag::NotEq => builder.ins().icmp(IntCC::NotEqual, lv, rv),
+                    _ => unreachable!(),
                 }
             }
+            InstTag::Call => Self::emit_call(builder, ctx, r)?,
+            other => {
+                return Err(format!(
+                    "eval_inst: instruction at %{} is not a value (tag={:?})",
+                    r.index(),
+                    other
+                ));
+            }
+        };
+        ctx.inst_values.insert(r, value);
+        Ok(value)
+    }
+
+    fn emit_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: InstRef,
+    ) -> Result<Value, String> {
+        let view = ctx.uir.call_view(r);
+        let name_id = view.name;
+        let name_str = ctx.pool.str(name_id);
+        if crate::builtins::lookup(name_str).is_some() {
+            return match name_str {
+                "print" => {
+                    Self::generate_print_call(builder, ctx, &view.args)?;
+                    Ok(builder.ins().iconst(ctx.int_type, 0))
+                }
+                _ => Err(format!(
+                    "Builtin '{}' has no codegen implementation",
+                    name_str
+                )),
+            };
         }
+
+        let callee_id = *ctx
+            .func_ids
+            .get(&name_id)
+            .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
+
+        let mut arg_values = Vec::with_capacity(view.args.len());
+        for arg in &view.args {
+            arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
+        }
+
+        let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
+        let call = builder.ins().call(callee_ref, &arg_values);
+        let results = builder.inst_results(call);
+
+        Ok(if results.is_empty() {
+            // Void-returning callee: the surrounding expression
+            // still expects *some* value to plug into the memo
+            // table. Use a zero int as a benign placeholder; sema
+            // has already rejected programs that try to read it.
+            builder.ins().iconst(ctx.int_type, 0)
+        } else {
+            results[0]
+        })
     }
 
     fn generate_print_call(
         builder: &mut FunctionBuilder,
-        args: &[HirExpr],
         ctx: &mut FunctionContext<'_, M>,
+        args: &[InstRef],
     ) -> Result<(), String> {
         // Sema has already validated arity and the string-literal
         // constraint (see `sema::check_builtin_call`). The matches
         // below are therefore infallible.
         debug_assert_eq!(args.len(), 1, "sema should reject print() arity errors");
-        let string_id = match &args[0].kind {
-            HirExprKind::StrLiteral(id) => *id,
+        let string_id = match ctx.uir.inst(args[0]).data {
+            InstData::Str(id) => id,
             other => unreachable!(
                 "sema should reject non-literal print() args, got {:?}",
                 other
@@ -466,7 +522,7 @@ impl<M: Module> Codegen<M> {
         };
         let string_content = ctx.pool.str(string_id);
 
-        let data_id = Self::store_string(
+        let data_id = store_string(
             string_id,
             string_content,
             ctx.module,
@@ -513,33 +569,108 @@ impl<M: Module> Codegen<M> {
     }
 }
 
-/// Walks the HIR and asserts every expression has a resolved type.
-/// Used inside `debug_assert!` at codegen entry points; sema is
-/// expected to have filled all types before codegen runs.
-fn all_expr_types_resolved(program: &HirProgram) -> bool {
-    fn walk(e: &HirExpr) -> bool {
-        if e.ty.is_none() {
-            return false;
-        }
-        match &e.kind {
-            HirExprKind::BinaryOp(l, _, r) => walk(l) && walk(r),
-            HirExprKind::UnaryOp(_, s) => walk(s),
-            HirExprKind::Call(_, args) => args.iter().all(walk),
-            _ => true,
-        }
+/// Materialize a string literal pointer into the function. Pulled
+/// out of the `Codegen` impl so it can be called without juggling
+/// `&mut self` borrows alongside the `FunctionContext`'s mutable
+/// references to the same fields.
+fn emit_str_literal<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx: &mut FunctionContext<'_, M>,
+    id: StringId,
+) -> Result<Value, String> {
+    let content = ctx.pool.str(id);
+    let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+    let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+    Ok(builder.ins().global_value(ctx.int_type, data_ref))
+}
+
+fn store_string<M: Module>(
+    content_id: StringId,
+    content: &str,
+    module: &mut M,
+    data_ctx: &mut DataDescription,
+    string_data: &mut HashMap<StringId, DataId>,
+) -> Result<DataId, String> {
+    if let Some(&data_id) = string_data.get(&content_id) {
+        return Ok(data_id);
     }
-    for func in &program.functions {
-        for stmt in &func.body {
-            let ok = match stmt {
-                HirStmt::VarDecl { initializer, .. } => walk(initializer),
-                HirStmt::Return(Some(e), _) => walk(e),
-                HirStmt::Return(None, _) => true,
-                HirStmt::Expr(e, _) => walk(e),
-            };
-            if !ok {
+
+    let data_id = module
+        .declare_anonymous_data(false, false)
+        .map_err(|e| format!("Failed to declare string data: {}", e))?;
+
+    data_ctx.clear();
+    data_ctx.define(content.as_bytes().into());
+
+    module
+        .define_data(data_id, data_ctx)
+        .map_err(|e| format!("Failed to define string data: {}", e))?;
+
+    string_data.insert(content_id, data_id);
+    Ok(data_id)
+}
+
+/// Walks the UIR and asserts every reachable instruction has a
+/// resolved type. Used inside `debug_assert!` at codegen entry
+/// points; sema is expected to have filled the table before codegen
+/// runs.
+fn all_types_resolved(uir: &Uir, types: &[Option<TypeId>]) -> bool {
+    if types.len() != uir.instructions.len() {
+        return false;
+    }
+    // Slot 0 is the reserved sentinel; legitimately `None`.
+    let mut visited = vec![false; uir.instructions.len()];
+    for body in &uir.func_bodies {
+        for stmt_ref in uir.body_stmts(body) {
+            if !walk_typed(uir, types, stmt_ref, &mut visited) {
                 return false;
             }
         }
     }
     true
+}
+
+/// Recursive type-presence walk over operands, memoized in
+/// `visited` so a DAG-shaped UIR can't trigger exponential
+/// re-traversal. Today UIR is tree-shaped (one parent per inst) so
+/// the memo is purely defensive — but it's the right invariant
+/// before TIR / lazy sema land, and matches `Codegen::eval_inst`'s
+/// `inst_values` memo (Zig's `Air.Liveness` analogue in
+/// `src/Air.zig`).
+fn walk_typed(uir: &Uir, types: &[Option<TypeId>], r: InstRef, visited: &mut [bool]) -> bool {
+    if visited[r.index()] {
+        return true;
+    }
+    visited[r.index()] = true;
+    if types[r.index()].is_none() {
+        return false;
+    }
+    let inst = uir.inst(r);
+    match inst.data {
+        InstData::None
+        | InstData::Int(_)
+        | InstData::Str(_)
+        | InstData::Bool(_)
+        | InstData::Var(_) => true,
+        InstData::UnOp(o) => walk_typed(uir, types, o, visited),
+        InstData::BinOp { lhs, rhs } => {
+            walk_typed(uir, types, lhs, visited) && walk_typed(uir, types, rhs, visited)
+        }
+        InstData::Extra(_) => match inst.tag {
+            InstTag::Call => uir
+                .call_view(r)
+                .args
+                .iter()
+                .all(|a| walk_typed(uir, types, *a, visited)),
+            InstTag::VarDecl => walk_typed(uir, types, uir.var_decl_view(r).initializer, visited),
+            // Any newly-introduced `Extra`-bearing tag must wire
+            // its operand walking explicitly. Silently accepting
+            // "true" here would let codegen miss unresolved types
+            // in those operands.
+            other => unreachable!(
+                "walk_typed: Extra-bearing InstTag {:?} has no operand-walk arm",
+                other
+            ),
+        },
+    }
 }

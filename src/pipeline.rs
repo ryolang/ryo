@@ -1,14 +1,15 @@
 use crate::ast;
-use crate::ast_lower;
+use crate::astgen;
 use crate::codegen;
 use crate::diag::{Diag, DiagCode, DiagSink, Severity};
 use crate::errors::CompilerError;
-use crate::hir;
 use crate::lexer::{self, Token};
 use crate::linker;
 use crate::parser::program_parser;
 use crate::sema;
+use crate::sema::TypeTable;
 use crate::types::InternPool;
+use crate::uir::Uir;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::span::Span as _;
 use chumsky::{Parser, input::Stream, prelude::*};
@@ -233,41 +234,45 @@ pub(crate) fn ir_command(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program, &pool);
     println!();
 
-    let hir = lower_and_analyze(&program, &mut pool, &input, &name)?;
-    generate_and_display_ir(&hir, &pool)?;
+    let (uir, types) = lower_and_analyze(&program, &mut pool, &input, &name)?;
+    generate_and_display_ir(&uir, &types, &pool)?;
 
     Ok(())
 }
 
-/// Run the front-end (ast_lower + sema) and return a fully typed HIR
-/// alongside its `InternPool`. Centralized so the three driver
-/// commands (`ir`, `run`, `build`) stay in lockstep when future
-/// pre-codegen passes are added.
+/// Run the front-end (astgen + sema) and return the UIR plus the
+/// per-instruction `TypeTable` sema produced. Centralized so the
+/// three driver commands (`ir`, `run`, `build`) stay in lockstep
+/// when future pre-codegen passes are added.
 fn lower_and_analyze(
     program: &ast::Program,
     pool: &mut InternPool,
     input: &str,
     source_name: &str,
-) -> Result<hir::HirProgram, CompilerError> {
+) -> Result<(Uir, TypeTable), CompilerError> {
     let mut sink = DiagSink::new();
-    let mut hir = ast_lower::lower(program, pool, &mut sink);
-    // Run sema even if ast_lower emitted errors: the Error sentinel
+    let uir = astgen::generate(program, pool, &mut sink);
+    // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
-    sema::analyze(&mut hir, pool, &mut sink);
+    let types = sema::analyze(&uir, pool, &mut sink);
     if sink.has_errors() {
         let diags = sink.into_diags();
         render_diags(&diags, input, source_name);
         return Err(CompilerError::Diagnostics(diags));
     }
-    Ok(hir)
+    Ok((uir, types))
 }
 
-fn generate_and_display_ir(hir: &hir::HirProgram, pool: &InternPool) -> Result<(), CompilerError> {
+fn generate_and_display_ir(
+    uir: &Uir,
+    types: &TypeTable,
+    pool: &InternPool,
+) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     let ir = codegen
-        .compile_and_dump_ir(hir, pool)
+        .compile_and_dump_ir(uir, types, pool)
         .map_err(CompilerError::CodegenError)?;
 
     println!("[Cranelift IR]");
@@ -288,12 +293,12 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program, &pool);
     println!();
 
-    let hir = lower_and_analyze(&program, &mut pool, &input, &name)?;
+    let (uir, types) = lower_and_analyze(&program, &mut pool, &input, &name)?;
 
     println!("[Codegen]");
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
     let main_id = codegen
-        .compile(&hir, &pool)
+        .compile(&uir, &types, &pool)
         .map_err(CompilerError::CodegenError)?;
     let result = codegen
         .execute(main_id)
@@ -309,7 +314,7 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
     let name = source_name(file);
     let program = parse_source(&input, &mut pool, &name)?;
-    let hir = lower_and_analyze(&program, &mut pool, &input, &name)?;
+    let (uir, types) = lower_and_analyze(&program, &mut pool, &input, &name)?;
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 
@@ -317,7 +322,7 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     codegen
-        .compile(&hir, &pool)
+        .compile(&uir, &types, &pool)
         .map_err(CompilerError::CodegenError)?;
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
