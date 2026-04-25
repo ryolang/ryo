@@ -77,7 +77,10 @@ impl InternPool {
         match self.dedup.entry(k) {
             Entry::Occupied(e) => *e.get(),
             Entry::Vacant(e) => {
-                let id = TypeId(self.kinds.len() as u32);
+                let id = TypeId(
+                    u32::try_from(self.kinds.len())
+                        .expect("type pool overflow: more than u32::MAX types interned"),
+                );
                 self.kinds.push(e.key().clone());
                 e.insert(id);
                 id

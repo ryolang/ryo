@@ -125,12 +125,23 @@ pub(crate) fn ir_command(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program);
     println!();
 
-    let mut pool = InternPool::new();
-    let mut hir = ast_lower::lower(&program, &mut pool).map_err(CompilerError::LowerError)?;
-    sema::analyze(&mut hir, &mut pool).map_err(CompilerError::LowerError)?;
+    let (hir, pool) = lower_and_analyze(&program)?;
     generate_and_display_ir(&hir, &pool)?;
 
     Ok(())
+}
+
+/// Run the front-end (ast_lower + sema) and return a fully typed HIR
+/// alongside its `InternPool`. Centralized so the three driver
+/// commands (`ir`, `run`, `build`) stay in lockstep when future
+/// pre-codegen passes are added.
+fn lower_and_analyze(
+    program: &ast::Program,
+) -> Result<(hir::HirProgram, InternPool), CompilerError> {
+    let mut pool = InternPool::new();
+    let mut hir = ast_lower::lower(program, &mut pool).map_err(CompilerError::LowerError)?;
+    sema::analyze(&mut hir, &mut pool).map_err(CompilerError::SemaError)?;
+    Ok((hir, pool))
 }
 
 fn generate_and_display_ir(hir: &hir::HirProgram, pool: &InternPool) -> Result<(), CompilerError> {
@@ -156,9 +167,7 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program);
     println!();
 
-    let mut pool = InternPool::new();
-    let mut hir = ast_lower::lower(&program, &mut pool).map_err(CompilerError::LowerError)?;
-    sema::analyze(&mut hir, &mut pool).map_err(CompilerError::LowerError)?;
+    let (hir, pool) = lower_and_analyze(&program)?;
 
     println!("[Codegen]");
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
@@ -177,9 +186,7 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
 pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let program = parse_source(&input)?;
-    let mut pool = InternPool::new();
-    let mut hir = ast_lower::lower(&program, &mut pool).map_err(CompilerError::LowerError)?;
-    sema::analyze(&mut hir, &mut pool).map_err(CompilerError::LowerError)?;
+    let (hir, pool) = lower_and_analyze(&program)?;
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 

@@ -9,6 +9,7 @@ use crate::types::{InternPool, TypeKind};
 use std::collections::HashMap;
 
 struct FunctionSig {
+    params: Vec<TypeId>,
     return_type: TypeId,
 }
 
@@ -43,6 +44,7 @@ pub fn analyze(program: &mut HirProgram, pool: &mut InternPool) -> Result<(), St
         signatures.insert(
             func.name.clone(),
             FunctionSig {
+                params: func.params.iter().map(|p| p.ty).collect(),
                 return_type: func.return_type,
             },
         );
@@ -65,8 +67,9 @@ fn analyze_function(
         scope.insert(param.name.clone(), param.ty);
     }
 
+    let fn_return_type = func.return_type;
     for stmt in &mut func.body {
-        analyze_stmt(stmt, &mut scope, signatures, pool)?;
+        analyze_stmt(stmt, &mut scope, signatures, pool, fn_return_type)?;
     }
 
     Ok(())
@@ -77,6 +80,7 @@ fn analyze_stmt(
     scope: &mut Scope,
     signatures: &HashMap<String, FunctionSig>,
     pool: &mut InternPool,
+    fn_return_type: TypeId,
 ) -> Result<(), String> {
     match stmt {
         HirStmt::VarDecl {
@@ -86,14 +90,47 @@ fn analyze_stmt(
             ..
         } => {
             analyze_expr(initializer, scope, signatures, pool)?;
-            let resolved = ty.unwrap_or_else(|| initializer.expect_ty());
+            let inferred = initializer.expect_ty();
+            let resolved = match *ty {
+                Some(annotated) if annotated != inferred => {
+                    return Err(format!(
+                        "type mismatch: '{}' annotated '{}', initializer is '{}'",
+                        name,
+                        pool.display(annotated),
+                        pool.display(inferred),
+                    ));
+                }
+                Some(annotated) => annotated,
+                None => inferred,
+            };
             *ty = Some(resolved);
             scope.insert(name.clone(), resolved);
         }
         HirStmt::Return(Some(expr), _) => {
             analyze_expr(expr, scope, signatures, pool)?;
+            if fn_return_type == pool.void() {
+                return Err(format!(
+                    "cannot return a value from a function with return type 'void' (got '{}')",
+                    pool.display(expr.expect_ty()),
+                ));
+            }
+            let actual = expr.expect_ty();
+            if actual != fn_return_type {
+                return Err(format!(
+                    "return type mismatch: function expects '{}', got '{}'",
+                    pool.display(fn_return_type),
+                    pool.display(actual),
+                ));
+            }
         }
-        HirStmt::Return(None, _) => {}
+        HirStmt::Return(None, _) => {
+            if fn_return_type != pool.void() {
+                return Err(format!(
+                    "missing return value: function expects '{}'",
+                    pool.display(fn_return_type),
+                ));
+            }
+        }
         HirStmt::Expr(expr, _) => {
             analyze_expr(expr, scope, signatures, pool)?;
         }
@@ -160,6 +197,13 @@ fn analyze_expr(
         }
         HirExprKind::UnaryOp(UnaryOp::Neg, sub) => {
             analyze_expr(sub, scope, signatures, pool)?;
+            let sub_ty = sub.expect_ty();
+            if !matches!(pool.kind(sub_ty), TypeKind::Int) {
+                return Err(format!(
+                    "unary operator '-' not supported for type '{}'",
+                    pool.display(sub_ty),
+                ));
+            }
             pool.int()
         }
         HirExprKind::Call(name, args) => {
@@ -170,10 +214,30 @@ fn analyze_expr(
                 check_builtin_call(name, args)?;
                 builtin.return_type(pool)
             } else {
-                signatures
+                let sig = signatures
                     .get(name.as_str())
-                    .map(|sig| sig.return_type)
-                    .ok_or_else(|| format!("Undefined function: '{}'", name))?
+                    .ok_or_else(|| format!("Undefined function: '{}'", name))?;
+                if args.len() != sig.params.len() {
+                    return Err(format!(
+                        "call to '{}' has wrong arity: expected {} argument(s), got {}",
+                        name,
+                        sig.params.len(),
+                        args.len(),
+                    ));
+                }
+                for (idx, (arg, &expected)) in args.iter().zip(sig.params.iter()).enumerate() {
+                    let actual = arg.expect_ty();
+                    if actual != expected {
+                        return Err(format!(
+                            "call to '{}': argument {} has type '{}', expected '{}'",
+                            name,
+                            idx + 1,
+                            pool.display(actual),
+                            pool.display(expected),
+                        ));
+                    }
+                }
+                sig.return_type
             }
         }
     };
@@ -432,6 +496,77 @@ mod tests {
         assert!(
             err.contains("print() takes exactly 1 argument"),
             "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn return_type_mismatch_rejected() {
+        let err = run("fn main() -> int:\n\treturn \"hello\"\n").unwrap_err();
+        assert!(
+            err.contains("return type mismatch") && err.contains("'int'") && err.contains("'str'"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn missing_return_value_rejected() {
+        let err = run("fn f() -> int:\n\treturn\n\nfn main() -> int:\n\treturn 0\n").unwrap_err();
+        assert!(err.contains("missing return value"), "unexpected: {}", err);
+    }
+
+    #[test]
+    fn return_value_from_void_function_rejected() {
+        let err = run("fn g():\n\treturn 1\n\nfn main() -> int:\n\treturn 0\n").unwrap_err();
+        assert!(
+            err.contains("cannot return a value from a function with return type 'void'"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn call_arity_mismatch_rejected() {
+        let code = "fn add(a: int, b: int) -> int:\n\treturn a + b\n\nfn main() -> int:\n\treturn add(1, 2, 3)\n";
+        let err = run(code).unwrap_err();
+        assert!(
+            err.contains("wrong arity") && err.contains("expected 2") && err.contains("got 3"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn call_argument_type_mismatch_rejected() {
+        let code = "fn f(a: int) -> int:\n\treturn a\n\nfn main() -> int:\n\treturn f(true)\n";
+        let err = run(code).unwrap_err();
+        assert!(
+            err.contains("argument 1") && err.contains("'bool'") && err.contains("'int'"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn vardecl_annotation_initializer_mismatch_rejected() {
+        let err = run("x: int = \"hello\"").unwrap_err();
+        assert!(
+            err.contains("type mismatch")
+                && err.contains("'x'")
+                && err.contains("'int'")
+                && err.contains("'str'"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn neg_on_bool_rejected() {
+        let err = run("x = -true").unwrap_err();
+        assert!(
+            err.contains("unary operator '-'") && err.contains("'bool'"),
+            "unexpected: {}",
             err
         );
     }

@@ -37,12 +37,14 @@ pub fn lower(program: &ast::Program, pool: &mut InternPool) -> Result<HirProgram
     }
 
     let mut functions = Vec::new();
-
-    if has_explicit_main {
-        for func in &func_defs {
-            functions.push(lower_function_def(func, pool)?);
-        }
-    } else {
+    for func in &func_defs {
+        functions.push(lower_function_def(func, pool)?);
+    }
+    if !has_explicit_main {
+        // Synthesize an implicit `main` from top-level statements.
+        // User-defined helper functions still appear above; without
+        // this, calls to them in top-level code would dangle as
+        // "undefined function" errors in sema.
         functions.push(lower_implicit_main(&top_level, pool)?);
     }
 
@@ -345,6 +347,18 @@ mod tests {
     fn unknown_type_annotation_rejected() {
         let err = parse_and_lower("x: nope = 1").unwrap_err();
         assert!(err.contains("Unknown type"));
+    }
+
+    #[test]
+    fn helper_fn_with_top_level_lowers_both() {
+        // Regression: previously the implicit-main path discarded
+        // user-defined helper functions, leaving calls to them
+        // dangling in sema.
+        let (hir, _) =
+            parse_and_lower("fn helper() -> int:\n\treturn 42\n\nx = helper()\n").unwrap();
+        assert_eq!(hir.functions.len(), 2);
+        assert!(hir.functions.iter().any(|f| f.name == "helper"));
+        assert!(hir.functions.iter().any(|f| f.name == "main"));
     }
 
     #[test]
