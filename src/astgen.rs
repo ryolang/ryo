@@ -313,8 +313,8 @@ mod tests {
     #[test]
     fn astgen_produces_no_types() {
         // The whole point of UIR-as-input-to-sema: astgen attaches
-        // no types to instructions. The resolved-type table is
-        // sema's job (Phase 3 commit 3).
+        // no types to instructions; the resolved-type table is
+        // sema's job.
         let (uir, _) = parse_and_lower("x = 2 + 3 * 4\ny = x").unwrap();
         // No per-instruction `ty` slot exists on UIR; the test is
         // structural — every value-producing inst should have a

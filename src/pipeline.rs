@@ -251,12 +251,6 @@ fn lower_and_analyze(
     source_name: &str,
 ) -> Result<(Uir, TypeTable), CompilerError> {
     let mut sink = DiagSink::new();
-    // Phase 3 commit 4: astgen emits UIR; sema consumes UIR and
-    // returns a per-instruction `TypeTable`; codegen consumes
-    // both directly. The HIR layer is gone from the production
-    // pipeline; only the (now test-only) `uir_to_hir_typed` shim
-    // in astgen still uses it, and that disappears in commit 5
-    // alongside `src/hir.rs`.
     let uir = astgen::generate(program, pool, &mut sink);
     // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one

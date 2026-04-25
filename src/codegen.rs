@@ -1,8 +1,7 @@
 //! Cranelift codegen over UIR.
 //!
-//! Phase 3 commit 4: codegen consumes the flat [`Uir`] produced by
-//! `astgen` plus the [`crate::sema::TypeTable`] produced by `sema`. The HIR is
-//! gone from this module; commit 5 deletes `src/hir.rs` outright.
+//! Codegen consumes the flat [`Uir`] produced by `astgen` plus
+//! the [`crate::sema::TypeTable`] produced by `sema`.
 //!
 //! Traversal is *index-driven* — every operand is reached through
 //! an [`InstRef`] into `uir.instructions`, never through a
@@ -32,13 +31,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::HashMap;
 use target_lexicon::Triple;
 
-// Codegen takes the resolved-type side-table as `&[Option<TypeId>]`
-// (the borrowed view of [`crate::sema::TypeTable`]). The owned
-// alias lives in `sema` because that's where the table is built;
-// codegen only ever reads it.
-
 /// Map a UIR/sema type to the corresponding Cranelift IR type.
-///
 ///
 /// `Int` uses the target's pointer-sized integer (i64 on 64-bit).
 /// `Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).

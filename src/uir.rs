@@ -9,8 +9,7 @@
 //!
 //! UIR is the direct structural analogue of Zig's ZIR (`src/Zir.zig`):
 //! a flat instruction stream produced by `astgen` from the AST and
-//! consumed by `sema`. It replaces the tree-shaped HIR in use through
-//! Phase 2 of the pipeline alignment plan.
+//! consumed by `sema`.
 //!
 //! ## Storage shape
 //!
@@ -42,13 +41,6 @@
 //! via niche-filling. The 0 slot in `instructions` is reserved as a
 //! never-emitted sentinel so all valid refs are non-zero. This
 //! mirrors Zig's `Zir.Inst.Index` / `Zir.Inst.OptionalIndex` pair.
-//!
-//! ## What this commit covers
-//!
-//! Pure addition: no caller depends on UIR yet. `astgen` (rename of
-//! `ast_lower`) will populate it in commit 2; `sema` and `codegen`
-//! follow in commits 3 and 4. See `docs/dev/pipeline_alignment.md`
-//! Phase 3.
 
 use crate::types::{InternPool, StringId, TypeId};
 use chumsky::span::{SimpleSpan, Span as _};
@@ -117,10 +109,6 @@ pub struct ExtraRange {
 }
 
 impl ExtraRange {
-    pub fn empty() -> Self {
-        ExtraRange { offset: 0, len: 0 }
-    }
-
     pub fn as_range(self) -> std::ops::Range<usize> {
         let start = self.offset as usize;
         start..start + self.len as usize
@@ -330,8 +318,8 @@ pub mod var_decl_extra {
 
 // ---------- Builder ----------
 
-/// Mutable handle for emitting UIR. `astgen` (commit 2) is its only
-/// caller in production; tests use it directly.
+/// Mutable handle for emitting UIR. `astgen` is its only caller in
+/// production; tests use it directly.
 pub struct UirBuilder {
     uir: Uir,
 }
