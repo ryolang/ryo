@@ -4,8 +4,7 @@ use crate::codegen;
 use crate::diag::{Diag, DiagCode, DiagSink, Severity};
 use crate::errors::CompilerError;
 use crate::hir;
-use crate::indent;
-use crate::lexer::Token;
+use crate::lexer::{self, Token};
 use crate::linker;
 use crate::parser::program_parser;
 use crate::sema;
@@ -13,7 +12,6 @@ use crate::types::InternPool;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::span::Span as _;
 use chumsky::{Parser, input::Stream, prelude::*};
-use logos::Logos;
 use std::fs;
 use std::path::Path;
 use target_lexicon::Triple;
@@ -33,32 +31,49 @@ fn get_output_filenames(input_file: &Path) -> (String, String) {
 
 pub(crate) fn lex_command(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
-    display_tokens(&input, file);
-    Ok(())
+    display_tokens(&input, file)
 }
 
-fn display_tokens(input: &str, file: &Path) {
-    let token_iter = Token::lexer(input).spanned();
+fn display_tokens(input: &str, file: &Path) -> Result<(), CompilerError> {
+    let mut pool = InternPool::new();
+    let tokens = lexer::lex(input, &mut pool).map_err(|e| {
+        // Route lex failures through the same Diag pipeline as
+        // parse / sema errors so `ryo lex` matches the rest of the
+        // CLI's exit-code and rendering behaviour. Previously this
+        // path silently `eprintln!`d and returned `Ok(())`, which
+        // hid lex errors from CI.
+        let diag = Diag::error(e.span, DiagCode::ParseError, e.message);
+        let name = source_name(file);
+        render_diags(std::slice::from_ref(&diag), input, &name);
+        CompilerError::Diagnostics(vec![diag])
+    })?;
 
     println!("Token stream for '{}':", file.display());
     println!();
 
-    for (result, span) in token_iter {
-        match result {
-            Ok(token) => {
-                println!("{:?} @ {}..{}", token, span.start, span.end);
+    // Render identifier and string-literal payloads through the
+    // pool so the user sees the actual text rather than an opaque
+    // handle id. Other variants format normally via Debug.
+    for (tok, span) in &tokens {
+        match tok {
+            Token::Ident(id) => {
+                println!("Ident({:?}) @ {}..{}", pool.str(*id), span.start, span.end)
             }
-            Err(()) => {
-                println!("Error @ {}..{}", span.start, span.end);
+            Token::StrLit(id) => {
+                println!("StrLit({:?}) @ {}..{}", pool.str(*id), span.start, span.end)
             }
+            other => println!("{:?} @ {}..{}", other, span.start, span.end),
         }
     }
+    Ok(())
 }
 
 pub(crate) fn parse_command(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
-    let program = parse_source(&input, source_name(file))?;
-    display_ast(&program);
+    let mut pool = InternPool::new();
+    let name = source_name(file);
+    let program = parse_source(&input, &mut pool, &name)?;
+    display_ast(&program, &pool);
     Ok(())
 }
 
@@ -73,27 +88,20 @@ fn read_source_file(file: &Path) -> Result<String, CompilerError> {
     fs::read_to_string(file).map_err(CompilerError::from)
 }
 
-fn parse_source(input: &str, source_name: String) -> Result<ast::Program, CompilerError> {
-    let raw_tokens: Vec<_> = Token::lexer(input)
-        .spanned()
-        .map(|(tok, span)| match tok {
-            Ok(tok) => (tok, span.into()),
-            Err(()) => (Token::Error, span.into()),
-        })
-        .collect();
-
-    // TODO: have `indent::process` return a span/offset for the
-    // offending newline so we can point Ariadne at the exact line.
-    // For now, anchor on the last raw token's span (which is at
-    // least *near* where the indent went wrong) and fall back to
-    // 0..0 only for the empty-input case.
-    let fallback_span = raw_tokens
-        .last()
-        .map(|(_, s)| *s)
-        .unwrap_or_else(|| chumsky::span::SimpleSpan::new((), 0..0));
-    let tokens = indent::process(raw_tokens).map_err(|e| {
-        let diag = Diag::error(fallback_span, DiagCode::ParseError, e.to_string());
-        render_diags(std::slice::from_ref(&diag), input, &source_name);
+fn parse_source(
+    input: &str,
+    pool: &mut InternPool,
+    source_name: &str,
+) -> Result<ast::Program, CompilerError> {
+    // Phase 2's `lexer::lex` runs logos + indent processing + string
+    // and integer interning in a single pass and returns either the
+    // typed `Token` stream or a `LexError` carrying a span pointing
+    // at the offending byte range. Phase 1 wraps that as a single
+    // structured `Diag` so the same Ariadne renderer handles lex,
+    // parse, and middle-end diagnostics.
+    let tokens = lexer::lex(input, pool).map_err(|e| {
+        let diag = Diag::error(e.span, DiagCode::ParseError, e.message);
+        render_diags(std::slice::from_ref(&diag), input, source_name);
         CompilerError::Diagnostics(vec![diag])
     })?;
 
@@ -113,7 +121,7 @@ fn parse_source(input: &str, source_name: String) -> Result<ast::Program, Compil
                     )
                 })
                 .collect();
-            render_diags(&diags, input, &source_name);
+            render_diags(&diags, input, source_name);
             Err(CompilerError::Diagnostics(diags))
         }
     }
@@ -211,20 +219,21 @@ fn diag_code_str(code: DiagCode) -> &'static str {
     }
 }
 
-fn display_ast(program: &ast::Program) {
+fn display_ast(program: &ast::Program, pool: &InternPool) {
     println!("[AST]");
-    program.pretty_print();
+    program.pretty_print(pool);
 }
 
 pub(crate) fn ir_command(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
+    let mut pool = InternPool::new();
     let name = source_name(file);
-    let program = parse_source(&input, name.clone())?;
+    let program = parse_source(&input, &mut pool, &name)?;
 
-    display_ast(&program);
+    display_ast(&program, &pool);
     println!();
 
-    let (hir, pool) = lower_and_analyze(&program, &input, &name)?;
+    let hir = lower_and_analyze(&program, &mut pool, &input, &name)?;
     generate_and_display_ir(&hir, &pool)?;
 
     Ok(())
@@ -236,22 +245,22 @@ pub(crate) fn ir_command(file: &Path) -> Result<(), CompilerError> {
 /// pre-codegen passes are added.
 fn lower_and_analyze(
     program: &ast::Program,
+    pool: &mut InternPool,
     input: &str,
     source_name: &str,
-) -> Result<(hir::HirProgram, InternPool), CompilerError> {
-    let mut pool = InternPool::new();
+) -> Result<hir::HirProgram, CompilerError> {
     let mut sink = DiagSink::new();
-    let mut hir = ast_lower::lower(program, &mut pool, &mut sink);
+    let mut hir = ast_lower::lower(program, pool, &mut sink);
     // Run sema even if ast_lower emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
-    sema::analyze(&mut hir, &mut pool, &mut sink);
+    sema::analyze(&mut hir, pool, &mut sink);
     if sink.has_errors() {
         let diags = sink.into_diags();
         render_diags(&diags, input, source_name);
         return Err(CompilerError::Diagnostics(diags));
     }
-    Ok((hir, pool))
+    Ok(hir)
 }
 
 fn generate_and_display_ir(hir: &hir::HirProgram, pool: &InternPool) -> Result<(), CompilerError> {
@@ -269,16 +278,17 @@ fn generate_and_display_ir(hir: &hir::HirProgram, pool: &InternPool) -> Result<(
 
 pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
+    let mut pool = InternPool::new();
     let name = source_name(file);
-    let program = parse_source(&input, name.clone())?;
+    let program = parse_source(&input, &mut pool, &name)?;
 
     println!("[Input Source]");
     println!("{}", input);
     println!();
-    display_ast(&program);
+    display_ast(&program, &pool);
     println!();
 
-    let (hir, pool) = lower_and_analyze(&program, &input, &name)?;
+    let hir = lower_and_analyze(&program, &mut pool, &input, &name)?;
 
     println!("[Codegen]");
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
@@ -296,9 +306,10 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
 
 pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
+    let mut pool = InternPool::new();
     let name = source_name(file);
-    let program = parse_source(&input, name.clone())?;
-    let (hir, pool) = lower_and_analyze(&program, &input, &name)?;
+    let program = parse_source(&input, &mut pool, &name)?;
+    let hir = lower_and_analyze(&program, &mut pool, &input, &name)?;
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 

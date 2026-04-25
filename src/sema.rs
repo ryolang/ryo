@@ -2,11 +2,21 @@
 //!
 //! On entry, `HirExpr.ty` is `None` everywhere. On successful return,
 //! every `HirExpr.ty` is `Some(...)` and codegen can safely unwrap.
+//!
+//! Scopes and signatures are keyed on `StringId`, not `String`:
+//! identifiers are interned once at lex time and propagated as
+//! `Copy` handles all the way through codegen (Phase 2).
+//!
+//! Errors are accumulated through a `DiagSink` (Phase 1) so analysis
+//! can continue past the first problem and surface several in one
+//! run. A failed expression substitutes `pool.error_type()` for its
+//! result type and downstream checks treat that sentinel as
+//! compatible with anything via `InternPool::compatible`.
 
 use crate::builtins;
 use crate::diag::{Diag, DiagCode, DiagSink};
 use crate::hir::*;
-use crate::types::{InternPool, TypeKind};
+use crate::types::{InternPool, StringId, TypeKind};
 use std::collections::HashMap;
 
 struct FunctionSig {
@@ -16,7 +26,7 @@ struct FunctionSig {
 
 struct Scope<'a> {
     parent: Option<&'a Scope<'a>>,
-    bindings: HashMap<String, TypeId>,
+    bindings: HashMap<StringId, TypeId>,
 }
 
 impl<'a> Scope<'a> {
@@ -27,13 +37,13 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn insert(&mut self, name: String, ty: TypeId) {
+    fn insert(&mut self, name: StringId, ty: TypeId) {
         self.bindings.insert(name, ty);
     }
 
-    fn lookup(&self, name: &str) -> Option<TypeId> {
+    fn lookup(&self, name: StringId) -> Option<TypeId> {
         self.bindings
-            .get(name)
+            .get(&name)
             .copied()
             .or_else(|| self.parent?.lookup(name))
     }
@@ -48,10 +58,10 @@ impl<'a> Scope<'a> {
 /// `InternPool::compatible`). The driver consults
 /// `sink.has_errors()` to decide whether to proceed to codegen.
 pub fn analyze(program: &mut HirProgram, pool: &mut InternPool, sink: &mut DiagSink) {
-    let mut signatures: HashMap<String, FunctionSig> = HashMap::new();
+    let mut signatures: HashMap<StringId, FunctionSig> = HashMap::new();
     for func in &program.functions {
         signatures.insert(
-            func.name.clone(),
+            func.name,
             FunctionSig {
                 params: func.params.iter().map(|p| p.ty).collect(),
                 return_type: func.return_type,
@@ -66,13 +76,13 @@ pub fn analyze(program: &mut HirProgram, pool: &mut InternPool, sink: &mut DiagS
 
 fn analyze_function(
     func: &mut HirFunction,
-    signatures: &HashMap<String, FunctionSig>,
+    signatures: &HashMap<StringId, FunctionSig>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) {
     let mut scope = Scope::new();
     for param in &func.params {
-        scope.insert(param.name.clone(), param.ty);
+        scope.insert(param.name, param.ty);
     }
 
     let fn_return_type = func.return_type;
@@ -84,7 +94,7 @@ fn analyze_function(
 fn analyze_stmt(
     stmt: &mut HirStmt,
     scope: &mut Scope,
-    signatures: &HashMap<String, FunctionSig>,
+    signatures: &HashMap<StringId, FunctionSig>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     fn_return_type: TypeId,
@@ -111,7 +121,7 @@ fn analyze_stmt(
                         DiagCode::TypeMismatch,
                         format!(
                             "type mismatch: '{}' annotated '{}', initializer is '{}'",
-                            name,
+                            pool.str(*name),
                             pool.display(annotated),
                             pool.display(inferred),
                         ),
@@ -122,7 +132,7 @@ fn analyze_stmt(
                 None => inferred,
             };
             *ty = Some(resolved);
-            scope.insert(name.clone(), resolved);
+            scope.insert(*name, resolved);
         }
         HirStmt::Return(Some(expr), span) => {
             analyze_expr(expr, scope, signatures, pool, sink);
@@ -171,7 +181,7 @@ fn analyze_stmt(
 fn analyze_expr(
     expr: &mut HirExpr,
     scope: &Scope,
-    signatures: &HashMap<String, FunctionSig>,
+    signatures: &HashMap<StringId, FunctionSig>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) {
@@ -180,13 +190,13 @@ fn analyze_expr(
         HirExprKind::IntLiteral(_) => pool.int(),
         HirExprKind::StrLiteral(_) => pool.str_(),
         HirExprKind::BoolLiteral(_) => pool.bool_(),
-        HirExprKind::Var(name) => match scope.lookup(name.as_str()) {
+        HirExprKind::Var(name) => match scope.lookup(*name) {
             Some(t) => t,
             None => {
                 sink.emit(Diag::error(
                     span,
                     DiagCode::UndefinedVariable,
-                    format!("undefined variable: '{}'", name),
+                    format!("undefined variable: '{}'", pool.str(*name)),
                 ));
                 pool.error_type()
             }
@@ -231,13 +241,14 @@ fn analyze_expr(
                             ));
                             pool.error_type()
                         }
-                        TypeKind::Void => {
+                        TypeKind::Void | TypeKind::Tuple => {
                             sink.emit(Diag::error(
                                 span,
                                 DiagCode::UnsupportedOperator,
                                 format!(
-                                    "equality operator '{}' not supported for type 'void'",
+                                    "equality operator '{}' not supported for type '{}'",
                                     op,
+                                    pool.display(kind_ty),
                                 ),
                             ));
                             pool.error_type()
@@ -286,17 +297,23 @@ fn analyze_expr(
             for arg in args.iter_mut() {
                 analyze_expr(arg, scope, signatures, pool, sink);
             }
-            if let Some(builtin) = builtins::lookup(name) {
-                check_builtin_call(name, args, span, sink);
+            // Resolve the name once: a single `pool.str` call gives
+            // us the &str needed for both the builtin lookup and
+            // the diagnostic messages, while `name_id` keeps the
+            // signature-table lookup at a `StringId` (u32) compare.
+            let name_id = *name;
+            let name_str = pool.str(name_id);
+            if let Some(builtin) = builtins::lookup(name_str) {
+                check_builtin_call(name_str, args, span, sink);
                 builtin.return_type(pool)
-            } else if let Some(sig) = signatures.get(name.as_str()) {
+            } else if let Some(sig) = signatures.get(&name_id) {
                 if args.len() != sig.params.len() {
                     sink.emit(Diag::error(
                         span,
                         DiagCode::ArityMismatch,
                         format!(
                             "call to '{}' has wrong arity: expected {} argument(s), got {}",
-                            name,
+                            name_str,
                             sig.params.len(),
                             args.len(),
                         ),
@@ -310,7 +327,7 @@ fn analyze_expr(
                                 DiagCode::TypeMismatch,
                                 format!(
                                     "call to '{}': argument {} has type '{}', expected '{}'",
-                                    name,
+                                    name_str,
                                     idx + 1,
                                     pool.display(actual),
                                     pool.display(expected),
@@ -324,7 +341,7 @@ fn analyze_expr(
                 sink.emit(Diag::error(
                     span,
                     DiagCode::UndefinedFunction,
-                    format!("undefined function: '{}'", name),
+                    format!("undefined function: '{}'", name_str),
                 ));
                 pool.error_type()
             }
@@ -336,10 +353,8 @@ fn analyze_expr(
 /// Front-end validation for builtin calls.
 ///
 /// These checks are builtin-specific and temporary: once `print`
-/// moves to a runtime crate and is called through a normal signature
-/// (see ISSUES.md I-006), they go away. Keeping them here rather
-/// than in codegen means the user sees a source-level error at
-/// analysis time, before any IR is emitted.
+/// moves to a runtime crate and is called through a normal
+/// signature (see ISSUES.md I-006), they go away.
 fn check_builtin_call(name: &str, args: &[HirExpr], span: Span, sink: &mut DiagSink) {
     if name == "print" {
         if args.len() != 1 {
@@ -364,23 +379,14 @@ fn check_builtin_call(name: &str, args: &[HirExpr], span: Span, sink: &mut DiagS
 mod tests {
     use super::*;
     use crate::ast_lower;
-    use crate::indent;
-    use crate::lexer::Token;
+    use crate::lexer::lex;
     use crate::parser::program_parser;
     use chumsky::Parser;
     use chumsky::input::{Input, Stream};
-    use logos::Logos;
 
     fn run(input: &str) -> Result<(HirProgram, InternPool), Vec<Diag>> {
-        let raw_tokens: Vec<_> = Token::lexer(input)
-            .spanned()
-            .map(|(tok, span)| match tok {
-                Ok(tok) => (tok, span.into()),
-                Err(()) => (Token::Error, span.into()),
-            })
-            .collect();
-
-        let tokens = indent::process(raw_tokens).expect("indent ok");
+        let mut pool = InternPool::new();
+        let tokens = lex(input, &mut pool).expect("lex ok");
         let token_stream =
             Stream::from_iter(tokens).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
         let program = program_parser()
@@ -388,7 +394,6 @@ mod tests {
             .into_result()
             .expect("parse ok");
 
-        let mut pool = InternPool::new();
         let mut sink = DiagSink::new();
         let mut hir = ast_lower::lower(&program, &mut pool, &mut sink);
         if sink.has_errors() {
@@ -503,9 +508,7 @@ mod tests {
 
     #[test]
     fn sema_continues_past_first_error_and_collects_multiple() {
-        // Two independent undefined variables in one function: the
-        // pre-Diag implementation short-circuited on the first; with
-        // DiagSink both surface in a single run.
+        // Two independent undefined variables in one function.
         let diags = run("a = x\nb = y\n").unwrap_err();
         let undefs = diags
             .iter()
@@ -516,9 +519,6 @@ mod tests {
 
     #[test]
     fn unknown_type_does_not_cascade() {
-        // The type annotation fails to resolve (one diagnostic). The
-        // initializer is still int. With the Error sentinel + compat
-        // check, we should NOT also see a type-mismatch diagnostic.
         let diags = run("x: nope = 1").unwrap_err();
         assert!(any_code(&diags, DiagCode::UnknownType));
         assert!(
@@ -533,7 +533,11 @@ mod tests {
         let code =
             "fn double(x: int) -> int:\n\treturn x * 2\n\nfn main() -> int:\n\treturn double(3)\n";
         let (hir, pool) = run(code).unwrap();
-        let main = hir.functions.iter().find(|f| f.name == "main").unwrap();
+        let main = hir
+            .functions
+            .iter()
+            .find(|f| pool.str(f.name) == "main")
+            .unwrap();
         match &main.body[0] {
             HirStmt::Return(Some(e), _) => {
                 assert_eq!(e.expect_ty(), pool.int());
@@ -547,7 +551,11 @@ mod tests {
     fn void_function_signature() {
         let code = "fn greet():\n\tprint(\"hi\")\n\nfn main() -> int:\n\tgreet()\n\treturn 0\n";
         let (hir, pool) = run(code).unwrap();
-        let greet = hir.functions.iter().find(|f| f.name == "greet").unwrap();
+        let greet = hir
+            .functions
+            .iter()
+            .find(|f| pool.str(f.name) == "greet")
+            .unwrap();
         assert_eq!(greet.return_type, pool.void());
     }
 
@@ -604,9 +612,9 @@ mod tests {
 
     #[test]
     fn bool_arithmetic_same_type_rejected_as_unsupported_op() {
-        // Both operands are bool, so the compatibility check passes
-        // and we hit the non-equality arithmetic kind-check arm —
-        // which should fire UnsupportedOperator, not TypeMismatch.
+        // Both operands are bool: compatibility check passes,
+        // we hit the non-equality arithmetic kind-check arm — which
+        // should fire UnsupportedOperator, not TypeMismatch.
         let diags = run("x = true + false").unwrap_err();
         assert!(
             any_code(&diags, DiagCode::UnsupportedOperator),
