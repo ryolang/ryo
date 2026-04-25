@@ -773,23 +773,67 @@ fn ir_emit_default_is_ast_and_clif() {
 #[test]
 fn ir_emit_order_is_pipeline_not_flag() {
     // Section order must be AST → UIR → TIR → CLIF regardless of
-    // the order in which flags are listed. `--emit=clif,ast` and
-    // `--emit=ast,clif` must produce identical output.
+    // the order in which flags are listed. We exercise this two
+    // ways:
+    //   1. Two shuffled permutations of the full four-section list
+    //      must produce **byte-identical** output.
+    //   2. Within a single run, banners must appear in pipeline
+    //      order — ast_idx < uir_idx < tir_idx < clif_idx.
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "order.ryo", "x = 1\n");
 
-    let a = run_ryo_command(&["ir", "--emit=ast,clif", "order.ryo"], &test_file)
-        .expect("ryo ir --emit=ast,clif");
-    let b = run_ryo_command(&["ir", "--emit=clif,ast", "order.ryo"], &test_file)
-        .expect("ryo ir --emit=clif,ast");
-    assert!(a.status.success() && b.status.success());
-    assert_eq!(a.stdout, b.stdout, "flag order must not change output");
+    // A handful of deliberately-shuffled permutations. Not
+    // exhaustive (24 total) — a representative selection that
+    // covers each section appearing both first and last is enough
+    // to catch a regression that respects flag order.
+    let perms = [
+        "ast,uir,tir,clif",
+        "clif,tir,uir,ast",
+        "tir,ast,clif,uir",
+        "uir,clif,ast,tir",
+    ];
 
-    // And the actual pipeline order is preserved within each run.
-    let stdout = String::from_utf8_lossy(&a.stdout);
+    let outputs: Vec<_> = perms
+        .iter()
+        .map(|p| {
+            let arg = format!("--emit={}", p);
+            let out = run_ryo_command(&["ir", &arg, "order.ryo"], &test_file)
+                .unwrap_or_else(|e| panic!("ryo ir --emit={}: {}", p, e));
+            assert!(
+                out.status.success(),
+                "--emit={} failed: {}",
+                p,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out.stdout
+        })
+        .collect();
+
+    // (1) flag order must not change output.
+    for (i, perm) in perms.iter().enumerate().skip(1) {
+        assert_eq!(
+            outputs[0], outputs[i],
+            "--emit=ast,uir,tir,clif and --emit={} produced different output",
+            perm
+        );
+    }
+
+    // (2) banners appear in pipeline order within a run.
+    let stdout = String::from_utf8_lossy(&outputs[0]);
     let ast_idx = stdout.find("[AST]").expect("AST banner");
+    let uir_idx = stdout.find("[UIR]").expect("UIR banner");
+    let tir_idx = stdout.find("[TIR]").expect("TIR banner");
     let clif_idx = stdout.find("[Cranelift IR]").expect("CLIF banner");
-    assert!(ast_idx < clif_idx, "AST must come before CLIF: {}", stdout);
+    assert!(
+        ast_idx < uir_idx && uir_idx < tir_idx && tir_idx < clif_idx,
+        "sections out of pipeline order \
+         (ast={}, uir={}, tir={}, clif={}):\n{}",
+        ast_idx,
+        uir_idx,
+        tir_idx,
+        clif_idx,
+        stdout
+    );
 }
 
 #[test]

@@ -17,8 +17,9 @@
 //!   id per function body in `uir.func_bodies`).
 //! - The queue is seeded with every decl in source order. Popping
 //!   transitions a decl from `Unresolved` → `InProgress` → either
-//!   `Resolved(idx)` (TIR emitted at slot `idx` of the result vec)
-//!   or `Failed`.
+//!   `Resolved` (TIR landed in the corresponding slot of
+//!   `Sema::results`, which is parallel to `uir.func_bodies`) or
+//!   `Failed`.
 //! - Cycle detection is dormant for today's feature set — bodies
 //!   only depend on callee *signatures*, which are resolved eagerly
 //!   in a separate first pass — but [`Sema::require_decl`] hits
@@ -74,8 +75,9 @@ impl DeclId {
 ///
 /// - `Unresolved` — never visited; lazy.
 /// - `InProgress` — currently being analyzed; the cycle sentinel.
-/// - `Resolved(slot)` — TIR emitted at `slot` of the result vec
-///   (eager state for everything that follows).
+/// - `Resolved` — TIR landed in `Sema::results[decl.index()]`
+///   (eager state for everything that follows). The slot index
+///   is `DeclId.0` itself, so the variant carries no payload.
 /// - `Failed` — analysis bailed out; downstream callers should
 ///   suppress cascade errors but not stack-overflow trying to
 ///   resolve again.
@@ -83,7 +85,7 @@ impl DeclId {
 enum DeclState {
     Unresolved,
     InProgress,
-    Resolved(u32),
+    Resolved,
     /// Reserved: a decl whose resolution gave up. Today every
     /// body still emits a well-formed TIR (with `Unreachable` slots
     /// in place of failed expressions) so `Failed` is unreachable
@@ -258,7 +260,7 @@ impl<'a> Sema<'a> {
     /// compute.
     fn require_decl(&mut self, callee: DeclId, span: Span, name: StringId) -> bool {
         match self.decl_state[callee.index()] {
-            DeclState::Unresolved | DeclState::Resolved(_) => true,
+            DeclState::Unresolved | DeclState::Resolved => true,
             DeclState::Failed => true, // cascade-suppress; the original error is already in the sink
             DeclState::InProgress => {
                 self.sink.emit(Diag::error(
@@ -276,7 +278,7 @@ impl<'a> Sema<'a> {
 
     fn resolve_decl(&mut self, decl: DeclId) {
         match self.decl_state[decl.index()] {
-            DeclState::Resolved(_) | DeclState::Failed | DeclState::InProgress => return,
+            DeclState::Resolved | DeclState::Failed | DeclState::InProgress => return,
             DeclState::Unresolved => {}
         }
         self.decl_state[decl.index()] = DeclState::InProgress;
@@ -284,9 +286,8 @@ impl<'a> Sema<'a> {
         let body = &self.uir.func_bodies[decl.index()];
         let tir = analyze_function(self, body);
 
-        let slot = decl.index() as u32;
         self.results[decl.index()] = Some(tir);
-        self.decl_state[decl.index()] = DeclState::Resolved(slot);
+        self.decl_state[decl.index()] = DeclState::Resolved;
     }
 }
 
@@ -1139,6 +1140,23 @@ mod tests {
     /// appear in source. The risk register flagged worklist
     /// non-determinism; this test pins the seed-in-source-order
     /// invariant.
+    ///
+    /// Note on what the assertion below actually proves:
+    /// `run_with_errors` returns `sink.into_diags()`, which yields
+    /// diagnostics in **emission order** — the order in which
+    /// `DiagSink::emit` was called, not a sorted-by-span order.
+    /// Because `first` and `second` each emit exactly one
+    /// `UndefinedVariable` diag, the assertion
+    /// `undef[0].span.start < undef[1].span.start` is a proxy for
+    /// "`first` was resolved before `second`": the worklist popped
+    /// decls in source order, so the diag from the body at the
+    /// lower span fired first. If `DiagSink::into_diags` ever
+    /// starts sorting by span, this test would silently keep
+    /// passing while no longer testing resolution order — update
+    /// the assertion to inspect emission-side state if that
+    /// changes. (Pipeline-level rendering does sort by span via
+    /// `render_diags`, but that's a separate path; sema's tests
+    /// observe the unsorted sink directly.)
     #[test]
     fn diagnostics_ordered_by_decl_then_position() {
         let code = "fn first() -> int:\n\treturn missing_a\n\nfn second() -> int:\n\treturn missing_b\n\nfn main() -> int:\n\treturn 0\n";

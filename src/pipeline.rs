@@ -316,9 +316,8 @@ impl EmitSet {
             // flip to "all four" once the docs advertise it.
             return EmitSet {
                 ast: true,
-                uir: false,
-                tir: false,
                 clif: true,
+                ..Default::default()
             };
         }
         let mut s = EmitSet::default();
