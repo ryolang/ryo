@@ -1,26 +1,8 @@
 use chumsky::span::SimpleSpan;
-use std::fmt;
+
+pub use crate::types::TypeId;
 
 pub type Span = SimpleSpan;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Type {
-    Int,
-    Str,
-    Void,
-    Bool,
-}
-
-impl fmt::Display for Type {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Type::Int => write!(f, "int"),
-            Type::Str => write!(f, "str"),
-            Type::Void => write!(f, "void"),
-            Type::Bool => write!(f, "bool"),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct HirProgram {
@@ -31,14 +13,14 @@ pub struct HirProgram {
 pub struct HirFunction {
     pub name: String,
     pub params: Vec<HirParam>,
-    pub return_type: Type,
+    pub return_type: TypeId,
     pub body: Vec<HirStmt>,
 }
 
 #[derive(Debug, Clone)]
 pub struct HirParam {
     pub name: String,
-    pub ty: Type,
+    pub ty: TypeId,
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +29,7 @@ pub enum HirStmt {
     VarDecl {
         name: String,
         mutable: bool,
-        ty: Type,
+        ty: TypeId,
         initializer: HirExpr,
         span: Span,
     },
@@ -55,12 +37,24 @@ pub enum HirStmt {
     Expr(HirExpr, Span),
 }
 
+/// HIR expression.
+///
+/// `ty` is `None` immediately after `ast_lower::lower` and becomes
+/// `Some(...)` after `sema::analyze` succeeds. Codegen requires all
+/// expressions to carry a type and will assert on entry.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct HirExpr {
     pub kind: HirExprKind,
-    pub ty: Type,
+    pub ty: Option<TypeId>,
     pub span: Span,
+}
+
+impl HirExpr {
+    /// Returns the resolved type or panics if sema has not run.
+    pub fn expect_ty(&self) -> TypeId {
+        self.ty.expect("sema must run before codegen / ty access")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -92,11 +86,6 @@ pub enum UnaryOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn type_bool_displays_as_bool() {
-        assert_eq!(format!("{}", Type::Bool), "bool");
-    }
 
     #[test]
     fn bool_literal_kind_exists() {

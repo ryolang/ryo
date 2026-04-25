@@ -1,12 +1,14 @@
 use crate::ast;
+use crate::ast_lower;
 use crate::codegen;
 use crate::errors::CompilerError;
 use crate::hir;
 use crate::indent;
 use crate::lexer::Token;
 use crate::linker;
-use crate::lower;
 use crate::parser::program_parser;
+use crate::sema;
+use crate::types::InternPool;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::{Parser, input::Stream, prelude::*};
 use logos::Logos;
@@ -123,17 +125,19 @@ pub(crate) fn ir_command(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program);
     println!();
 
-    let hir = lower::lower(&program).map_err(CompilerError::LowerError)?;
-    generate_and_display_ir(&hir)?;
+    let mut pool = InternPool::new();
+    let mut hir = ast_lower::lower(&program, &mut pool).map_err(CompilerError::LowerError)?;
+    sema::analyze(&mut hir, &mut pool).map_err(CompilerError::LowerError)?;
+    generate_and_display_ir(&hir, &pool)?;
 
     Ok(())
 }
 
-fn generate_and_display_ir(hir: &hir::HirProgram) -> Result<(), CompilerError> {
+fn generate_and_display_ir(hir: &hir::HirProgram, pool: &InternPool) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     let ir = codegen
-        .compile_and_dump_ir(hir)
+        .compile_and_dump_ir(hir, pool)
         .map_err(CompilerError::CodegenError)?;
 
     println!("[Cranelift IR]");
@@ -152,11 +156,15 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program);
     println!();
 
-    let hir = lower::lower(&program).map_err(CompilerError::LowerError)?;
+    let mut pool = InternPool::new();
+    let mut hir = ast_lower::lower(&program, &mut pool).map_err(CompilerError::LowerError)?;
+    sema::analyze(&mut hir, &mut pool).map_err(CompilerError::LowerError)?;
 
     println!("[Codegen]");
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
-    let main_id = codegen.compile(&hir).map_err(CompilerError::CodegenError)?;
+    let main_id = codegen
+        .compile(&hir, &pool)
+        .map_err(CompilerError::CodegenError)?;
     let result = codegen
         .execute(main_id)
         .map_err(CompilerError::ExecutionError)?;
@@ -169,14 +177,18 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
 pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let program = parse_source(&input)?;
-    let hir = lower::lower(&program).map_err(CompilerError::LowerError)?;
+    let mut pool = InternPool::new();
+    let mut hir = ast_lower::lower(&program, &mut pool).map_err(CompilerError::LowerError)?;
+    sema::analyze(&mut hir, &mut pool).map_err(CompilerError::LowerError)?;
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 
     println!("[Codegen]");
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
-    codegen.compile(&hir).map_err(CompilerError::CodegenError)?;
+    codegen
+        .compile(&hir, &pool)
+        .map_err(CompilerError::CodegenError)?;
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
     fs::write(&obj_filename, obj_bytes).map_err(CompilerError::from)?;

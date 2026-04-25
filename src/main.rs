@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod ast;
+mod ast_lower;
 mod builtins;
 mod codegen;
 mod errors;
@@ -9,10 +10,11 @@ mod hir;
 mod indent;
 mod lexer;
 mod linker;
-mod lower;
 mod parser;
 mod pipeline;
+mod sema;
 mod toolchain;
+mod types;
 
 #[derive(Parser)]
 #[command(name = "ryo")]
