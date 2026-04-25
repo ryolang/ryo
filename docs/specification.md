@@ -1531,6 +1531,54 @@ print("hello", "")          # compile error — end is keyword-only
 
 *(Rationale: Inspired by Swift's proven calling convention. For the AI-writes, human-reviews workflow, named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature. Prevents the common bug of swapping arguments with the same type, e.g., `create_user("Alice", "admin", 30)` vs `create_user("Alice", 30, "admin")`. The `_` escape hatch keeps simple functions like `add(1, 2)` and `sqrt(16.0)` clean.)*
 
+### 6.1.2 No Variadic Parameters
+
+Ryo **does not support variadic parameters** (e.g. Python's `*args`/`**kwargs`, Go's `...T`, C's `...`). Every function has a fixed, fully-typed parameter list.
+
+```ryo
+# NOT allowed in Ryo
+fn log(*args): ...                    # compile error: variadic params not supported
+fn printf(fmt: str, ...): ...         # compile error: variadic params not supported
+
+# The Ryo way — pass a list, or use an f-string
+fn log(items: &list[str]): ...
+log(["user", "123", "login"])
+
+print(f"user={id} action={action}")    # f-strings replace print(a, b, c)
+```
+
+**Rationale:**
+
+*   **Conflicts with "Strict over convenient."** Variadics are pure call-site sugar. They save a pair of brackets (`[`, `]`) at the cost of a non-orthogonal parameter mode that interacts awkwardly with generics, traits, and the borrow checker.
+*   **No good answer in a statically-typed, no-GC language.** Homogeneous variadics (`*args: &T`) are equivalent to `args: &list[T]` with sugar. Heterogeneous variadics require either dynamic dispatch (`&dyn Display`, deferred — see `docs/dev/dyn_trait.md`), variadic generics (massive type-system complexity), or compile-time macros (Ryo has no macro system; `comptime` is not a macro). Each option violates "Simplicity First."
+*   **Hidden allocations conflict with Ownership Lite.** Any backing storage for `*args` either silently allocates a slice on every call (against "no hidden costs") or silently moves arguments (against Rule 2: parameters default to immutable borrow).
+*   **F-strings already cover the main use case.** `print(f"{a} {b} {c}")` is strictly more powerful than `print(a, b, c)`: it gives the caller control over spacing and formatting, is fully type-checked, and produces a single `&str` that downstream consumers (loggers, sinks) can handle uniformly.
+*   **List literals cover the rest.** `min([1, 2, 3, 4])`, `sum([1, 2, 3])`, `log(["a", "b"])` — one extra pair of brackets, zero new language features.
+*   **AI-era reviewability.** At a call site, `log(a, b, c, d)` hides the role of each argument; `log([a, b, c, d])` or `log(f"...")` makes the shape obvious to the human reviewer.
+
+**One narrow exception — C FFI.** Real C functions like `printf` are variadic at the ABI level. Ryo will permit `...` **only** in `extern "C"` declarations inside `unsafe` blocks (see Section 17). This is a calling-convention concession, not a Ryo language feature: regular `fn` definitions cannot use `...`.
+
+```ryo
+# Allowed only for C interop
+unsafe extern "C":
+    fn printf(fmt: *const char, ...) -> int
+```
+
+**Implication for `print` / `println`:** Both functions take exactly one `&str` argument and return `void`. They do not accept multiple values, formatting placeholders, or non-string types. To print non-string values, use an f-string, which calls the value's `Display` implementation at the interpolation site.
+
+```ryo
+# Signatures (in the implicit `core`/`builtin` module)
+fn print(_ s: &str)
+fn println(_ s: &str)
+
+# Usage
+print("hello\n")
+println("hello")                       # newline appended
+println(f"x = {x}, y = {y}")           # f-string handles formatting
+# println(x, y)                        # compile error: no variadic params
+# println(42)                          # compile error: expected &str, got int
+```
+
 ### 6.2 Closures & Lambda Expressions
 
 *   **Concept:** Closures are anonymous functions that can capture variables from their enclosing scope. They provide first-class function values, enabling higher-order functions, callbacks, and functional programming patterns.
@@ -3349,7 +3397,7 @@ fn main():
     *   **Ryo Standard Library (`std`):** High-level APIs written in Ryo, wrapping the runtime via internal FFI.
 *   **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
 *   **Core Packages (Initial):**
-    *   `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`, `range`), error and optional type support.
+    *   `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`, `range`), error and optional type support. **`print` and `println` accept exactly one `&str` argument** — there are no variadic forms (see Section 6.1.2). For non-string values, use an f-string: `println(f"x = {x}")`.
     *   `io`: Console (`readln`), Files (`File`), Buffering (functions return `IoError!T`), implements `Drop`.
     *   `string`: `&str` manipulation, parsing (functions return `ParseError!T`).
     *   `collections`: `list[T]`, `map[K, V]` types and methods.
@@ -3743,6 +3791,10 @@ Future features and extensions are listed in this section below.
 *   **Advanced Compile-Time Reflection** (Type introspection and code generation)
 *   **SIMD Support** (Vector operations)
 *   **Module System Extensions** (Conditional compilation)
+
+**Considered and Rejected:**
+*   **Variadic Parameters** (`*args`, `...T`) — Rejected. F-strings and list literals cover all use cases without adding a non-orthogonal parameter mode. C-ABI variadics are permitted only inside `unsafe extern "C"`. See Section 6.1.2 for full rationale.
+
 
 ## See Also
 
