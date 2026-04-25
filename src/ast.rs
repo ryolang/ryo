@@ -1,3 +1,11 @@
+//! Surface-syntax AST.
+//!
+//! Identifiers, type names, and string literals are stored as
+//! `StringId` handles into the compilation's `InternPool`. Pretty
+//! printing and Display impls accept a pool reference so they can
+//! resolve those handles back to source text.
+
+use crate::types::{InternPool, StringId};
 use chumsky::span::SimpleSpan;
 use std::fmt;
 
@@ -13,7 +21,7 @@ pub struct Program {
 }
 
 impl Program {
-    pub fn pretty_print(&self) {
+    pub fn pretty_print(&self, pool: &InternPool) {
         println!("Program ({}..{})", self.span.start, self.span.end);
         for (idx, stmt) in self.statements.iter().enumerate() {
             let is_last = idx == self.statements.len() - 1;
@@ -22,9 +30,9 @@ impl Program {
             stmt.pretty_print_inline();
             println!();
             if !is_last {
-                stmt.pretty_print_children("│   ");
+                stmt.pretty_print_children("│   ", pool);
             } else {
-                stmt.pretty_print_children("    ");
+                stmt.pretty_print_children("    ", pool);
             }
         }
     }
@@ -55,22 +63,22 @@ impl Statement {
         );
     }
 
-    fn pretty_print_children(&self, prefix: &str) {
+    fn pretty_print_children(&self, prefix: &str, pool: &InternPool) {
         match &self.kind {
-            StmtKind::VarDecl(decl) => {
-                decl.pretty_print(prefix);
-            }
+            StmtKind::VarDecl(decl) => decl.pretty_print(prefix, pool),
             StmtKind::FunctionDef(func) => {
-                println!("{}FunctionDef: {}", prefix, func.name);
+                println!("{}FunctionDef: {}", prefix, pool.str(func.name.name));
                 let inner = format!("{}  ", prefix);
                 for param in &func.params {
                     println!(
                         "{}├── param: {}: {}",
-                        inner, param.name, param.type_annotation
+                        inner,
+                        pool.str(param.name.name),
+                        pool.str(param.type_annotation.name),
                     );
                 }
                 if let Some(ret_ty) = &func.return_type {
-                    println!("{}├── returns: {}", inner, ret_ty);
+                    println!("{}├── returns: {}", inner, pool.str(ret_ty.name));
                 }
                 println!("{}└── body:", inner);
                 for stmt in &func.body {
@@ -81,12 +89,10 @@ impl Statement {
             }
             StmtKind::Return(expr) => {
                 if let Some(e) = expr {
-                    e.pretty_print(prefix);
+                    e.pretty_print(prefix, pool);
                 }
             }
-            StmtKind::ExprStmt(expr) => {
-                expr.pretty_print(prefix);
-            }
+            StmtKind::ExprStmt(expr) => expr.pretty_print(prefix, pool),
         }
     }
 }
@@ -94,64 +100,49 @@ impl Statement {
 /// The kind of statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StmtKind {
-    /// Variable declaration: [mut] name [: type] = expr
     VarDecl(VarDecl),
-    /// Function definition: fn name(params) [-> type]: body
     FunctionDef(FunctionDef),
-    /// Return statement: return [expr]
     Return(Option<Expression>),
-    /// Expression statement: expr (evaluated for side effects)
     ExprStmt(Expression),
 }
 
-/// A variable declaration statement.
-/// Syntax: `[mut] ident [: type] = expression`
-/// Examples:
-///   - `x = 42`
-///   - `x: int = 42`
-///   - `mut x = 42`
-///   - `mut counter: int = 0`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDecl {
-    pub mutable: bool,                     // true if 'mut' keyword was present
-    pub name: Ident,                       // variable name
-    pub type_annotation: Option<TypeExpr>, // optional explicit type
-    pub initializer: Expression,           // initial value expression
+    pub mutable: bool,
+    pub name: Ident,
+    pub type_annotation: Option<TypeExpr>,
+    pub initializer: Expression,
 }
 
 impl VarDecl {
-    fn pretty_print(&self, prefix: &str) {
+    fn pretty_print(&self, prefix: &str, pool: &InternPool) {
         println!("{}VarDecl", prefix);
         let new_prefix = format!("{}  ", prefix);
-
-        // Print mutable flag if true
         if self.mutable {
             println!("{}├── mutable: true", new_prefix);
         }
-
-        // Print name
         println!(
             "{}├── name: {} ({}..{})",
-            new_prefix, self.name.name, self.name.span.start, self.name.span.end
+            new_prefix,
+            pool.str(self.name.name),
+            self.name.span.start,
+            self.name.span.end
         );
-
-        // Print type annotation if present
         if let Some(ty) = &self.type_annotation {
             println!(
                 "{}├── type: {} ({}..{})",
-                new_prefix, ty.name, ty.span.start, ty.span.end
+                new_prefix,
+                pool.str(ty.name),
+                ty.span.start,
+                ty.span.end
             );
         }
-
-        // Print initializer
         println!("{}└── initializer:", new_prefix);
         self.initializer
-            .pretty_print(&format!("{}    ", new_prefix));
+            .pretty_print(&format!("{}    ", new_prefix), pool);
     }
 }
 
-/// A function definition.
-/// Syntax: `fn name(params) [-> type]: body`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDef {
     pub name: Ident,
@@ -160,8 +151,6 @@ pub struct FunctionDef {
     pub body: Vec<Statement>,
 }
 
-/// A function parameter.
-/// Syntax: `name: type`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     pub name: Ident,
@@ -173,42 +162,51 @@ pub struct Param {
 // Identifiers and Types
 // ============================================================================
 
-/// An identifier (variable or type name) with span information.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An identifier (variable / function / type name) with span info.
+///
+/// Storing a `StringId` rather than `String` keeps the AST `Copy`-ish
+/// for the name fields (the rest of the struct is small) and lets
+/// later passes compare identifiers without a string compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ident {
-    pub name: String,
+    pub name: StringId,
     pub span: SimpleSpan,
 }
 
 impl Ident {
-    pub fn new(name: String, span: SimpleSpan) -> Self {
+    pub fn new(name: StringId, span: SimpleSpan) -> Self {
         Ident { name, span }
     }
-}
 
-impl fmt::Display for Ident {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name)
+    /// Display adapter that resolves `name` through `pool`.
+    #[allow(dead_code)]
+    pub fn display<'a>(&'a self, pool: &'a InternPool) -> impl fmt::Display + 'a {
+        struct D<'a> {
+            pool: &'a InternPool,
+            id: StringId,
+        }
+        impl fmt::Display for D<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.pool.str(self.id))
+            }
+        }
+        D {
+            pool,
+            id: self.name,
+        }
     }
 }
 
-/// A type expression.
-/// Currently just a name like "int", "float", "str", etc.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A type expression. Currently just a name like `int`, `bool`, etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeExpr {
-    pub name: String,
+    pub name: StringId,
     pub span: SimpleSpan,
 }
 
 impl TypeExpr {
-    pub fn new(name: String, span: SimpleSpan) -> Self {
+    pub fn new(name: StringId, span: SimpleSpan) -> Self {
         TypeExpr { name, span }
-    }
-}
-
-impl fmt::Display for TypeExpr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name)
     }
 }
 
@@ -216,7 +214,6 @@ impl fmt::Display for TypeExpr {
 // Expressions
 // ============================================================================
 
-/// An expression with span information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expression {
     pub kind: ExprKind,
@@ -228,17 +225,17 @@ impl Expression {
         Expression { kind, span }
     }
 
-    fn pretty_print(&self, prefix: &str) {
+    fn pretty_print(&self, prefix: &str, pool: &InternPool) {
         let connector_name = match &self.kind {
             ExprKind::Literal(lit) => match lit {
                 Literal::Int(n) => format!("Literal(Int({}))", n),
-                Literal::Str(s) => format!("Literal(Str(\"{}\"))", s),
+                Literal::Str(s) => format!("Literal(Str(\"{}\"))", pool.str(*s)),
                 Literal::Bool(b) => format!("Literal(Bool({}))", b),
             },
-            ExprKind::Ident(name) => format!("Ident({})", name),
+            ExprKind::Ident(name) => format!("Ident({})", pool.str(*name)),
             ExprKind::BinaryOp(_, op, _) => format!("BinaryOp({})", op),
             ExprKind::UnaryOp(op, _) => format!("UnaryOp({})", op),
-            ExprKind::Call(name, _) => format!("Call({})", name),
+            ExprKind::Call(name, _) => format!("Call({})", pool.str(*name)),
         };
 
         println!(
@@ -248,52 +245,41 @@ impl Expression {
 
         let new_prefix = format!("{}  ", prefix);
         match &self.kind {
-            ExprKind::Literal(_) | ExprKind::Ident(_) => {} // Leaf nodes
+            ExprKind::Literal(_) | ExprKind::Ident(_) => {}
             ExprKind::BinaryOp(left, _op, right) => {
-                left.pretty_print(&format!("{}├── ", new_prefix));
-                right.pretty_print(&format!("{}└── ", new_prefix));
+                left.pretty_print(&format!("{}├── ", new_prefix), pool);
+                right.pretty_print(&format!("{}└── ", new_prefix), pool);
             }
             ExprKind::UnaryOp(_op, expr) => {
-                expr.pretty_print(&format!("{}└── ", new_prefix));
+                expr.pretty_print(&format!("{}└── ", new_prefix), pool);
             }
             ExprKind::Call(_name, args) => {
                 for (i, arg) in args.iter().enumerate() {
                     let is_last = i == args.len() - 1;
                     let prefix_char = if is_last { "└── " } else { "├── " };
-                    arg.pretty_print(&format!("{}{}", new_prefix, prefix_char));
+                    arg.pretty_print(&format!("{}{}", new_prefix, prefix_char), pool);
                 }
             }
         }
     }
 }
 
-/// The kind of expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprKind {
-    /// Literal value: integer, string, etc.
     Literal(Literal),
-    /// Variable reference: identifier name
-    Ident(String),
-    /// Binary operation: left op right
+    Ident(StringId),
     BinaryOp(Box<Expression>, BinaryOperator, Box<Expression>),
-    /// Unary operation: op expr
     UnaryOp(UnaryOperator, Box<Expression>),
-    /// Function call: function_name(arg1, arg2, ...)
-    Call(String, Vec<Expression>),
+    Call(StringId, Vec<Expression>),
 }
 
-/// Literal values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Literal {
-    /// Integer literal
-    Int(isize),
-    /// String literal
-    Str(String),
-    /// Boolean literal
+    Int(i64),
+    Str(StringId),
     Bool(bool),
 }
 
-/// Binary operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOperator {
     Add,
@@ -317,10 +303,9 @@ impl fmt::Display for BinaryOperator {
     }
 }
 
-/// Unary operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOperator {
-    Neg, // Negation: -expr
+    Neg,
 }
 
 impl fmt::Display for UnaryOperator {

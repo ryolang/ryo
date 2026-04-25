@@ -1,7 +1,7 @@
 use crate::hir::{
     BinaryOp, HirExpr, HirExprKind, HirFunction, HirProgram, HirStmt, TypeId, UnaryOp,
 };
-use crate::types::{InternPool, TypeKind};
+use crate::types::{InternPool, StringId, TypeKind};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -23,6 +23,17 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
         TypeKind::Str => pointer_ty,
         TypeKind::Bool => types::I8,
         TypeKind::Void => panic!("cranelift_type_for: void has no representation"),
+        TypeKind::Error => {
+            // Reaching codegen with the Error sentinel means sema
+            // accepted a program despite a resolution failure. The
+            // driver must short-circuit on `sink.has_errors()`.
+            panic!("cranelift_type_for: <error> sentinel reached codegen")
+        }
+        TypeKind::Tuple => {
+            // Tuple ABI is not implemented yet; the variant exists
+            // only to validate the InternPool's sidecar encoding.
+            unimplemented!("cranelift_type_for: tuple lowering")
+        }
     }
 }
 
@@ -32,18 +43,22 @@ pub struct Codegen<M: Module> {
     module: M,
     int_type: types::Type,
     data_ctx: DataDescription,
-    string_data: HashMap<String, DataId>,
+    /// Cache of `Cranelift DataId` per interned string content.
+    /// Keyed on `StringId` so duplicate string literals reuse the
+    /// same `.rodata` blob without an extra hash on the bytes.
+    string_data: HashMap<StringId, DataId>,
     triple: Triple,
 }
 
 struct FunctionContext<'a, M: Module> {
     module: &'a mut M,
     data_ctx: &'a mut DataDescription,
-    string_data: &'a mut HashMap<String, DataId>,
+    string_data: &'a mut HashMap<StringId, DataId>,
     int_type: types::Type,
     triple: &'a Triple,
-    locals: &'a HashMap<String, Variable>,
-    func_ids: &'a HashMap<String, FuncId>,
+    pool: &'a InternPool,
+    locals: &'a HashMap<StringId, Variable>,
+    func_ids: &'a HashMap<StringId, FuncId>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -132,9 +147,14 @@ impl<M: Module> Codegen<M> {
             self.compile_function(func, &func_ids, pool)?;
         }
 
-        func_ids
-            .get("main")
-            .copied()
+        // Resolve "main" through the pool. We can't intern here
+        // because pool is `&`; the front-end always interns "main"
+        // (ast_lower does it explicitly), so a `get` is enough.
+        program
+            .functions
+            .iter()
+            .find(|f| pool.str(f.name) == "main")
+            .and_then(|f| func_ids.get(&f.name).copied())
             .ok_or_else(|| "No main function defined".to_string())
     }
 
@@ -164,20 +184,21 @@ impl<M: Module> Codegen<M> {
         &mut self,
         program: &HirProgram,
         pool: &InternPool,
-    ) -> Result<HashMap<String, FuncId>, String> {
+    ) -> Result<HashMap<StringId, FuncId>, String> {
         let mut func_ids = HashMap::new();
         for func in &program.functions {
             let sig = self.build_signature(func, pool);
-            let linkage = if func.name == "main" {
+            let name_str = pool.str(func.name);
+            let linkage = if name_str == "main" {
                 Linkage::Export
             } else {
                 Linkage::Local
             };
             let func_id = self
                 .module
-                .declare_function(&func.name, linkage, &sig)
-                .map_err(|e| format!("Failed to declare function '{}': {}", func.name, e))?;
-            func_ids.insert(func.name.clone(), func_id);
+                .declare_function(name_str, linkage, &sig)
+                .map_err(|e| format!("Failed to declare function '{}': {}", name_str, e))?;
+            func_ids.insert(func.name, func_id);
         }
         Ok(func_ids)
     }
@@ -198,12 +219,12 @@ impl<M: Module> Codegen<M> {
     fn compile_function(
         &mut self,
         func: &HirFunction,
-        func_ids: &HashMap<String, FuncId>,
+        func_ids: &HashMap<StringId, FuncId>,
         pool: &InternPool,
     ) -> Result<Option<String>, String> {
         let func_id = *func_ids
             .get(&func.name)
-            .ok_or_else(|| format!("Function '{}' not declared", func.name))?;
+            .ok_or_else(|| format!("Function '{}' not declared", pool.str(func.name)))?;
 
         self.ctx.func.signature = self.build_signature(func, pool);
 
@@ -215,14 +236,14 @@ impl<M: Module> Codegen<M> {
             builder.seal_block(entry_block);
 
             let int_type = self.int_type;
-            let mut locals: HashMap<String, Variable> = HashMap::new();
+            let mut locals: HashMap<StringId, Variable> = HashMap::new();
 
             for (i, param) in func.params.iter().enumerate() {
                 let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                 let var = builder.declare_var(cl_ty);
                 let param_val = builder.block_params(entry_block)[i];
                 builder.def_var(var, param_val);
-                locals.insert(param.name.clone(), var);
+                locals.insert(param.name, var);
             }
 
             let mut has_return = false;
@@ -242,6 +263,7 @@ impl<M: Module> Codegen<M> {
                             string_data: &mut self.string_data,
                             int_type,
                             triple: &self.triple,
+                            pool,
                             locals: &locals,
                             func_ids,
                         };
@@ -249,7 +271,7 @@ impl<M: Module> Codegen<M> {
                         let cl_ty = cranelift_type_for(initializer.expect_ty(), pool, int_type);
                         let var = builder.declare_var(cl_ty);
                         builder.def_var(var, val);
-                        locals.insert(name.clone(), var);
+                        locals.insert(*name, var);
                     }
                     HirStmt::Return(Some(expr), _) => {
                         let mut func_ctx: FunctionContext<'_, M> = FunctionContext {
@@ -258,6 +280,7 @@ impl<M: Module> Codegen<M> {
                             string_data: &mut self.string_data,
                             int_type,
                             triple: &self.triple,
+                            pool,
                             locals: &locals,
                             func_ids,
                         };
@@ -276,6 +299,7 @@ impl<M: Module> Codegen<M> {
                             string_data: &mut self.string_data,
                             int_type,
                             triple: &self.triple,
+                            pool,
                             locals: &locals,
                             func_ids,
                         };
@@ -300,19 +324,20 @@ impl<M: Module> Codegen<M> {
 
         self.module
             .define_function(func_id, &mut self.ctx)
-            .map_err(|e| format!("Failed to define function '{}': {}", func.name, e))?;
+            .map_err(|e| format!("Failed to define function '{}': {}", pool.str(func.name), e))?;
 
         self.ctx.clear();
         Ok(Some(ir_text))
     }
 
     fn store_string(
+        content_id: StringId,
         content: &str,
         module: &mut M,
         data_ctx: &mut DataDescription,
-        string_data: &mut HashMap<String, DataId>,
+        string_data: &mut HashMap<StringId, DataId>,
     ) -> Result<DataId, String> {
-        if let Some(&data_id) = string_data.get(content) {
+        if let Some(&data_id) = string_data.get(&content_id) {
             return Ok(data_id);
         }
 
@@ -327,7 +352,7 @@ impl<M: Module> Codegen<M> {
             .define_data(data_id, data_ctx)
             .map_err(|e| format!("Failed to define string data: {}", e))?;
 
-        string_data.insert(content.to_string(), data_id);
+        string_data.insert(content_id, data_id);
         Ok(data_id)
     }
 
@@ -337,15 +362,16 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<Value, String> {
         match &expr.kind {
-            HirExprKind::IntLiteral(val) => Ok(builder.ins().iconst(ctx.int_type, *val as i64)),
+            HirExprKind::IntLiteral(val) => Ok(builder.ins().iconst(ctx.int_type, *val)),
 
             HirExprKind::BoolLiteral(val) => {
                 Ok(builder.ins().iconst(types::I8, if *val { 1 } else { 0 }))
             }
 
-            HirExprKind::StrLiteral(content) => {
+            HirExprKind::StrLiteral(id) => {
+                let content = ctx.pool.str(*id);
                 let data_id =
-                    Self::store_string(content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+                    Self::store_string(*id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
                 let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
                 let ptr = builder.ins().global_value(ctx.int_type, data_ref);
                 Ok(ptr)
@@ -354,8 +380,8 @@ impl<M: Module> Codegen<M> {
             HirExprKind::Var(name) => {
                 let var = ctx
                     .locals
-                    .get(name.as_str())
-                    .ok_or_else(|| format!("Undefined variable: '{}'", name))?;
+                    .get(name)
+                    .ok_or_else(|| format!("Undefined variable: '{}'", ctx.pool.str(*name)))?;
                 Ok(builder.use_var(*var))
             }
 
@@ -381,15 +407,19 @@ impl<M: Module> Codegen<M> {
             }
 
             HirExprKind::Call(name, args) => {
-                if crate::builtins::lookup(name).is_some() {
-                    match name.as_str() {
+                let name_str = ctx.pool.str(*name);
+                if crate::builtins::lookup(name_str).is_some() {
+                    match name_str {
                         "print" => {
                             Self::generate_print_call(builder, args, ctx)?;
                             Ok(builder.ins().iconst(ctx.int_type, 0))
                         }
-                        _ => Err(format!("Builtin '{}' has no codegen implementation", name)),
+                        _ => Err(format!(
+                            "Builtin '{}' has no codegen implementation",
+                            name_str
+                        )),
                     }
-                } else if let Some(&callee_id) = ctx.func_ids.get(name.as_str()) {
+                } else if let Some(&callee_id) = ctx.func_ids.get(name) {
                     let mut arg_values = Vec::new();
                     for arg in args {
                         let val = Self::eval_expr(builder, arg, ctx)?;
@@ -406,7 +436,7 @@ impl<M: Module> Codegen<M> {
                         Ok(results[0])
                     }
                 } else {
-                    Err(format!("Undefined function: '{}'", name))
+                    Err(format!("Undefined function: '{}'", name_str))
                 }
             }
         }
@@ -421,16 +451,22 @@ impl<M: Module> Codegen<M> {
         // constraint (see `sema::check_builtin_call`). The matches
         // below are therefore infallible.
         debug_assert_eq!(args.len(), 1, "sema should reject print() arity errors");
-        let string_content = match &args[0].kind {
-            HirExprKind::StrLiteral(content) => content,
+        let string_id = match &args[0].kind {
+            HirExprKind::StrLiteral(id) => *id,
             other => unreachable!(
                 "sema should reject non-literal print() args, got {:?}",
                 other
             ),
         };
+        let string_content = ctx.pool.str(string_id);
 
-        let data_id =
-            Self::store_string(string_content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+        let data_id = Self::store_string(
+            string_id,
+            string_content,
+            ctx.module,
+            ctx.data_ctx,
+            ctx.string_data,
+        )?;
         let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
         let string_ptr = builder.ins().global_value(ctx.int_type, data_ref);
 

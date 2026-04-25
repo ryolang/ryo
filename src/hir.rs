@@ -1,7 +1,17 @@
+//! High-level IR.
+//!
+//! Identifiers, function names, and string-literal payloads are
+//! `StringId` handles into the compilation's `InternPool`. Per-stage
+//! invariants:
+//!
+//! - On exit from `ast_lower`, every `HirExpr.ty` is `None`.
+//! - On exit from `sema::analyze`, every `HirExpr.ty` is `Some(...)`.
+//!   Codegen requires the latter and asserts on entry.
+
 use chumsky::span::SimpleSpan;
 use std::fmt;
 
-pub use crate::types::TypeId;
+pub use crate::types::{StringId, TypeId};
 
 pub type Span = SimpleSpan;
 
@@ -12,7 +22,7 @@ pub struct HirProgram {
 
 #[derive(Debug, Clone)]
 pub struct HirFunction {
-    pub name: String,
+    pub name: StringId,
     pub params: Vec<HirParam>,
     pub return_type: TypeId,
     pub body: Vec<HirStmt>,
@@ -20,7 +30,7 @@ pub struct HirFunction {
 
 #[derive(Debug, Clone)]
 pub struct HirParam {
-    pub name: String,
+    pub name: StringId,
     pub ty: TypeId,
 }
 
@@ -28,12 +38,10 @@ pub struct HirParam {
 #[allow(dead_code)]
 pub enum HirStmt {
     VarDecl {
-        name: String,
+        name: StringId,
         mutable: bool,
-        /// `None` after `ast_lower` when there is no type annotation;
-        /// sema replaces it with `Some(inferred_from_initializer)`.
-        /// When the source has an annotation, `ast_lower` stores it
-        /// eagerly as `Some(annotated)` so sema can cross-check.
+        /// `None` after `ast_lower` when there is no annotation.
+        /// Sema replaces it with `Some(inferred_from_initializer)`.
         ty: Option<TypeId>,
         initializer: HirExpr,
         span: Span,
@@ -42,11 +50,6 @@ pub enum HirStmt {
     Expr(HirExpr, Span),
 }
 
-/// HIR expression.
-///
-/// `ty` is `None` immediately after `ast_lower::lower` and becomes
-/// `Some(...)` after `sema::analyze` succeeds. Codegen requires all
-/// expressions to carry a type and will assert on entry.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct HirExpr {
@@ -64,13 +67,14 @@ impl HirExpr {
 
 #[derive(Debug, Clone)]
 pub enum HirExprKind {
-    IntLiteral(isize),
-    StrLiteral(String),
+    IntLiteral(i64),
+    /// Decoded string-literal contents, interned as a `StringId`.
+    StrLiteral(StringId),
     BoolLiteral(bool),
-    Var(String),
+    Var(StringId),
     BinaryOp(Box<HirExpr>, BinaryOp, Box<HirExpr>),
     UnaryOp(UnaryOp, Box<HirExpr>),
-    Call(String, Vec<HirExpr>),
+    Call(StringId, Vec<HirExpr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

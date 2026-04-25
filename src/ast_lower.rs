@@ -1,18 +1,16 @@
 //! AST → HIR structural translation.
 //!
-//! This module performs pure structural translation from AST to HIR.
-//! It does *not* build scopes, resolve identifier types, check arity,
-//! or infer expression types. Every `HirExpr` produced here has
-//! `ty = None`; `sema::analyze` fills them in.
+//! Pure structural translation. Resolves syntactic type annotations
+//! (`int`/`bool`/`str`) to `TypeId` because those come from
+//! `TypeExpr` nodes and have no useful "no types yet" representation.
+//! Every other expression's `ty` is left `None` for `sema` to fill.
 //!
-//! The only type work done here is resolving syntactic type
-//! annotations on parameters, return types, and variable declarations
-//! (e.g. `"int"` → `pool.int()`), because those come from `TypeExpr`
-//! nodes and cannot meaningfully exist in a "no types yet" state.
+//! Identifier names come pre-interned as `StringId` from the parser,
+//! so this stage is allocation-light: it copies handles around.
 
 use crate::ast;
 use crate::hir::*;
-use crate::types::InternPool;
+use crate::types::{InternPool, StringId};
 use chumsky::span::{SimpleSpan, Span as _};
 
 fn synthetic_span() -> Span {
@@ -23,6 +21,8 @@ pub fn lower(program: &ast::Program, pool: &mut InternPool) -> Result<HirProgram
     let mut func_defs: Vec<&ast::FunctionDef> = Vec::new();
     let mut top_level: Vec<&ast::Statement> = Vec::new();
 
+    let main_id = pool.intern_str("main");
+
     for stmt in &program.statements {
         match &stmt.kind {
             ast::StmtKind::FunctionDef(f) => func_defs.push(f),
@@ -30,7 +30,7 @@ pub fn lower(program: &ast::Program, pool: &mut InternPool) -> Result<HirProgram
         }
     }
 
-    let has_explicit_main = func_defs.iter().any(|f| f.name.name == "main");
+    let has_explicit_main = func_defs.iter().any(|f| f.name.name == main_id);
 
     if has_explicit_main && !top_level.is_empty() {
         return Err("Top-level statements are not allowed when fn main() is defined".to_string());
@@ -41,31 +41,27 @@ pub fn lower(program: &ast::Program, pool: &mut InternPool) -> Result<HirProgram
         functions.push(lower_function_def(func, pool)?);
     }
     if !has_explicit_main {
-        // Synthesize an implicit `main` from top-level statements.
-        // User-defined helper functions still appear above; without
-        // this, calls to them in top-level code would dangle as
-        // "undefined function" errors in sema.
-        functions.push(lower_implicit_main(&top_level, pool)?);
+        functions.push(lower_implicit_main(&top_level, main_id, pool)?);
     }
 
     Ok(HirProgram { functions })
 }
 
-fn resolve_type(name: &str, pool: &InternPool) -> Result<TypeId, String> {
-    match name {
+fn resolve_type(name: StringId, pool: &InternPool) -> Result<TypeId, String> {
+    match pool.str(name) {
         "int" => Ok(pool.int()),
         "str" => Ok(pool.str_()),
         "bool" => Ok(pool.bool_()),
-        _ => Err(format!("Unknown type: '{}'", name)),
+        other => Err(format!("Unknown type: '{}'", other)),
     }
 }
 
 fn lower_implicit_main(
     stmts: &[&ast::Statement],
+    main_id: StringId,
     pool: &mut InternPool,
 ) -> Result<HirFunction, String> {
     let mut body = Vec::new();
-
     for stmt in stmts {
         lower_stmt(stmt, pool, &mut body)?;
     }
@@ -81,7 +77,7 @@ fn lower_implicit_main(
     ));
 
     Ok(HirFunction {
-        name: "main".to_string(),
+        name: main_id,
         params: vec![],
         return_type: int_ty,
         body,
@@ -97,14 +93,14 @@ fn lower_function_def(
         .iter()
         .map(|p| {
             Ok(HirParam {
-                name: p.name.name.clone(),
-                ty: resolve_type(&p.type_annotation.name, pool)?,
+                name: p.name.name,
+                ty: resolve_type(p.type_annotation.name, pool)?,
             })
         })
         .collect::<Result<_, String>>()?;
 
     let return_type = match &func.return_type {
-        Some(ty) => resolve_type(&ty.name, pool)?,
+        Some(ty) => resolve_type(ty.name, pool)?,
         None => pool.void(),
     };
 
@@ -114,7 +110,7 @@ fn lower_function_def(
     }
 
     Ok(HirFunction {
-        name: func.name.name.clone(),
+        name: func.name.name,
         params,
         return_type,
         body,
@@ -130,11 +126,11 @@ fn lower_stmt(
         ast::StmtKind::VarDecl(decl) => {
             let initializer = lower_expr(&decl.initializer);
             let ty = match &decl.type_annotation {
-                Some(ann) => Some(resolve_type(&ann.name, pool)?),
+                Some(ann) => Some(resolve_type(ann.name, pool)?),
                 None => None,
             };
             out.push(HirStmt::VarDecl {
-                name: decl.name.name.clone(),
+                name: decl.name.name,
                 mutable: decl.mutable,
                 ty,
                 initializer,
@@ -142,15 +138,13 @@ fn lower_stmt(
             });
         }
         ast::StmtKind::Return(Some(expr)) => {
-            let hir_expr = lower_expr(expr);
-            out.push(HirStmt::Return(Some(hir_expr), stmt.span));
+            out.push(HirStmt::Return(Some(lower_expr(expr)), stmt.span));
         }
         ast::StmtKind::Return(None) => {
             out.push(HirStmt::Return(None, stmt.span));
         }
         ast::StmtKind::ExprStmt(expr) => {
-            let hir_expr = lower_expr(expr);
-            out.push(HirStmt::Expr(hir_expr, stmt.span));
+            out.push(HirStmt::Expr(lower_expr(expr), stmt.span));
         }
         ast::StmtKind::FunctionDef(_) => {
             return Err("Nested function definitions are not supported".to_string());
@@ -163,12 +157,10 @@ fn lower_expr(expr: &ast::Expression) -> HirExpr {
     let span = expr.span;
     let kind = match &expr.kind {
         ast::ExprKind::Literal(ast::Literal::Int(n)) => HirExprKind::IntLiteral(*n),
-        ast::ExprKind::Literal(ast::Literal::Str(s)) => HirExprKind::StrLiteral(s.clone()),
+        ast::ExprKind::Literal(ast::Literal::Str(id)) => HirExprKind::StrLiteral(*id),
         ast::ExprKind::Literal(ast::Literal::Bool(b)) => HirExprKind::BoolLiteral(*b),
-        ast::ExprKind::Ident(name) => HirExprKind::Var(name.clone()),
+        ast::ExprKind::Ident(id) => HirExprKind::Var(*id),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
-            let lhs = lower_expr(lhs);
-            let rhs = lower_expr(rhs);
             let hir_op = match op {
                 ast::BinaryOperator::Add => BinaryOp::Add,
                 ast::BinaryOperator::Sub => BinaryOp::Sub,
@@ -177,15 +169,13 @@ fn lower_expr(expr: &ast::Expression) -> HirExpr {
                 ast::BinaryOperator::Eq => BinaryOp::Eq,
                 ast::BinaryOperator::NotEq => BinaryOp::NotEq,
             };
-            HirExprKind::BinaryOp(Box::new(lhs), hir_op, Box::new(rhs))
+            HirExprKind::BinaryOp(Box::new(lower_expr(lhs)), hir_op, Box::new(lower_expr(rhs)))
         }
         ast::ExprKind::UnaryOp(ast::UnaryOperator::Neg, sub) => {
-            let sub = lower_expr(sub);
-            HirExprKind::UnaryOp(UnaryOp::Neg, Box::new(sub))
+            HirExprKind::UnaryOp(UnaryOp::Neg, Box::new(lower_expr(sub)))
         }
         ast::ExprKind::Call(name, args) => {
-            let lowered_args: Vec<HirExpr> = args.iter().map(lower_expr).collect();
-            HirExprKind::Call(name.clone(), lowered_args)
+            HirExprKind::Call(*name, args.iter().map(lower_expr).collect())
         }
     };
     HirExpr {
@@ -198,32 +188,20 @@ fn lower_expr(expr: &ast::Expression) -> HirExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indent;
-    use crate::lexer::Token;
+    use crate::lexer::lex;
     use crate::parser::program_parser;
     use chumsky::Parser;
     use chumsky::input::{Input, Stream};
-    use logos::Logos;
 
     fn parse_and_lower(input: &str) -> Result<(HirProgram, InternPool), String> {
-        let raw_tokens: Vec<_> = Token::lexer(input)
-            .spanned()
-            .map(|(tok, span)| match tok {
-                Ok(tok) => (tok, span.into()),
-                Err(()) => (Token::Error, span.into()),
-            })
-            .collect();
-
-        let tokens = indent::process(raw_tokens)?;
+        let mut pool = InternPool::new();
+        let tokens = lex(input, &mut pool).map_err(|e| e.message)?;
         let token_stream =
             Stream::from_iter(tokens).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
-
         let program = program_parser()
             .parse(token_stream)
             .into_result()
             .map_err(|errs| format!("Parse errors: {:?}", errs))?;
-
-        let mut pool = InternPool::new();
         let hir = lower(&program, &mut pool)?;
         Ok((hir, pool))
     }
@@ -232,9 +210,7 @@ mod tests {
         for func in &hir.functions {
             for stmt in &func.body {
                 match stmt {
-                    HirStmt::VarDecl { initializer, .. } => {
-                        walk_unresolved(initializer);
-                    }
+                    HirStmt::VarDecl { initializer, .. } => walk_unresolved(initializer),
                     HirStmt::Return(Some(e), _) => walk_unresolved(e),
                     HirStmt::Return(None, _) => {}
                     HirStmt::Expr(e, _) => walk_unresolved(e),
@@ -244,11 +220,7 @@ mod tests {
     }
 
     fn walk_unresolved(e: &HirExpr) {
-        assert!(
-            e.ty.is_none(),
-            "ast_lower must leave HirExpr.ty = None, got {:?}",
-            e.ty
-        );
+        assert!(e.ty.is_none(), "ast_lower must leave HirExpr.ty = None");
         match &e.kind {
             HirExprKind::BinaryOp(l, _, r) => {
                 walk_unresolved(l);
@@ -268,23 +240,20 @@ mod tests {
 
     #[test]
     fn structural_shape_flat_integer_variable() {
-        let (hir, _) = parse_and_lower("x = 42").unwrap();
+        let (hir, pool) = parse_and_lower("x = 42").unwrap();
         assert_eq!(hir.functions.len(), 1);
         let main = &hir.functions[0];
-        assert_eq!(main.name, "main");
+        assert_eq!(pool.str(main.name), "main");
         assert_eq!(main.params.len(), 0);
-        assert_eq!(main.body.len(), 2); // var decl + synthetic return
+        assert_eq!(main.body.len(), 2);
         match &main.body[0] {
             HirStmt::VarDecl { name, mutable, .. } => {
-                assert_eq!(name, "x");
+                assert_eq!(pool.str(*name), "x");
                 assert!(!mutable);
             }
             _ => panic!("Expected VarDecl"),
         }
-        match &main.body[1] {
-            HirStmt::Return(Some(_), _) => {}
-            _ => panic!("Expected synthetic Return(0)"),
-        }
+        assert!(matches!(main.body[1], HirStmt::Return(Some(_), _)));
     }
 
     #[test]
@@ -302,12 +271,10 @@ mod tests {
         let (hir, _) = parse_and_lower("x = 2 + 3 * 4").unwrap();
         let main = &hir.functions[0];
         match &main.body[0] {
-            HirStmt::VarDecl { initializer, .. } => {
-                assert!(matches!(
-                    initializer.kind,
-                    HirExprKind::BinaryOp(_, BinaryOp::Add, _)
-                ));
-            }
+            HirStmt::VarDecl { initializer, .. } => assert!(matches!(
+                initializer.kind,
+                HirExprKind::BinaryOp(_, BinaryOp::Add, _)
+            )),
             _ => panic!("Expected VarDecl"),
         }
     }
@@ -317,12 +284,10 @@ mod tests {
         let (hir, _) = parse_and_lower("x = -42").unwrap();
         let main = &hir.functions[0];
         match &main.body[0] {
-            HirStmt::VarDecl { initializer, .. } => {
-                assert!(matches!(
-                    initializer.kind,
-                    HirExprKind::UnaryOp(UnaryOp::Neg, _)
-                ));
-            }
+            HirStmt::VarDecl { initializer, .. } => assert!(matches!(
+                initializer.kind,
+                HirExprKind::UnaryOp(UnaryOp::Neg, _)
+            )),
             _ => panic!("Expected VarDecl"),
         }
     }
@@ -335,10 +300,10 @@ mod tests {
 
     #[test]
     fn explicit_main_structural() {
-        let (hir, _) = parse_and_lower("fn main() -> int:\n\treturn 0\n").unwrap();
+        let (hir, pool) = parse_and_lower("fn main() -> int:\n\treturn 0\n").unwrap();
         assert_eq!(hir.functions.len(), 1);
         let main = &hir.functions[0];
-        assert_eq!(main.name, "main");
+        assert_eq!(pool.str(main.name), "main");
         assert_eq!(main.body.len(), 1);
         assert!(matches!(main.body[0], HirStmt::Return(Some(_), _)));
     }
@@ -351,25 +316,26 @@ mod tests {
 
     #[test]
     fn helper_fn_with_top_level_lowers_both() {
-        // Regression: previously the implicit-main path discarded
-        // user-defined helper functions, leaving calls to them
-        // dangling in sema.
-        let (hir, _) =
+        let (hir, pool) =
             parse_and_lower("fn helper() -> int:\n\treturn 42\n\nx = helper()\n").unwrap();
         assert_eq!(hir.functions.len(), 2);
-        assert!(hir.functions.iter().any(|f| f.name == "helper"));
-        assert!(hir.functions.iter().any(|f| f.name == "main"));
+        assert!(hir.functions.iter().any(|f| pool.str(f.name) == "helper"));
+        assert!(hir.functions.iter().any(|f| pool.str(f.name) == "main"));
     }
 
     #[test]
     fn two_functions_structural() {
         let code =
             "fn add(a: int, b: int) -> int:\n\treturn a + b\n\nfn main() -> int:\n\treturn 0\n";
-        let (hir, _) = parse_and_lower(code).unwrap();
+        let (hir, pool) = parse_and_lower(code).unwrap();
         assert_eq!(hir.functions.len(), 2);
-        let add = hir.functions.iter().find(|f| f.name == "add").unwrap();
+        let add = hir
+            .functions
+            .iter()
+            .find(|f| pool.str(f.name) == "add")
+            .unwrap();
         assert_eq!(add.params.len(), 2);
-        assert_eq!(add.params[0].name, "a");
-        assert_eq!(add.params[1].name, "b");
+        assert_eq!(pool.str(add.params[0].name), "a");
+        assert_eq!(pool.str(add.params[1].name), "b");
     }
 }

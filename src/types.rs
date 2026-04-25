@@ -1,116 +1,296 @@
-//! Interned type system for the middle-end.
+//! Interned type and string pool, modelled on Zig's `InternPool.zig`.
 //!
-//! `TypeId` is a `Copy` handle into an `InternPool` that owns the
-//! canonical `TypeKind` for each distinct type in the program.
+//! Storage shape:
+//! - `items: Vec<Item>` — fixed-size `(tag, data)` pairs, one per
+//!   interned type. `data` is either an inline payload (no payload
+//!   for primitives, type id otherwise) or an index into `extra`.
+//! - `extra: Vec<u32>` — variable-size payloads (tuple element
+//!   lists, future function signatures). Dedup hashes the *content*
+//!   of the extra range, not a Rust enum value, so adding a new
+//!   variable-payload variant doesn't pay a clone-per-intern cost.
+//! - `string_bytes: Vec<u8>` + `strings: Vec<(u32, u32)>` — a single
+//!   byte arena holds every interned identifier and string literal,
+//!   with `(offset, len)` pairs keyed by `StringId`. This is what
+//!   lets later phases drop `&'a str` slices from `Token` and
+//!   shrink HIR's `String` count.
 //!
-//! The HIR and later stages store `TypeId` values; `TypeKind` is only
-//! inspected via `InternPool::kind` when the shape of the type matters
-//! (e.g. when lowering to Cranelift or formatting diagnostics).
+//! Primitive types live at fixed item indices (0..=4), populated by
+//! `new()`. The `const fn` accessors (`void`, `bool_`, `int`, ...)
+//! return those indices without consulting the dedup table — hot
+//! paths never hash.
 //!
-//! Only primitive variants of `TypeKind` are constructed today. The
-//! commented-out variants are reserved so that adding structs, enums,
-//! tuples, `?T`, `!T`, or function types later is a pure additive
-//! change to this module instead of another rewrite of every consumer.
+//! `TypeId` stays a plain `Copy` newtype rather than an `enum(u32)`
+//! with named primitive variants. The doc's risk register flagged
+//! that the typed-enum encoding fights Rust's borrow checker; the
+//! newtype keeps every other payoff and we can revisit if the
+//! exhaustiveness loss bites later.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fmt;
 
+// ---------- TypeId ----------
+
 /// A compact, copyable handle to an interned type.
+///
+/// Primitive ids are stable: `TypeId(0..=4)` are `void`, `bool`,
+/// `int`, `str`, `error`. Use the `const fn` accessors on
+/// `InternPool` instead of constructing these directly.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(u32);
 
-/// Canonical structural description of a type.
+impl TypeId {
+    /// Internal handle value. Exposed for ZIR/AIR encoding (Phase 3+)
+    /// where instructions reference types as raw u32s alongside
+    /// other ids in the `extra` arena.
+    #[allow(dead_code)]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+// ---------- StringId ----------
+
+/// Handle to an interned UTF-8 byte sequence in the InternPool.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct StringId(u32);
+
+impl StringId {
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+// ---------- Internal storage ----------
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[repr(u8)]
+enum Tag {
+    Void,
+    Bool,
+    Int,
+    Str,
+    Error,
+    /// Variable payload: `data` is the index into `extra` of an
+    /// `(n_elems: u32, elem_0: u32, ..., elem_{n-1}: u32)` block.
+    Tuple,
+    // Reserved for later phases — not constructed today:
+    //   Func, Struct, Enum, Option, ErrorUnion.
+    // Adding any of those is a new `Tag` variant and a new arm in
+    // `kind`/`Display`; storage shape is already in place.
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Item {
+    tag: Tag,
+    /// For primitives, ignored. For Tuple, an index into `extra`.
+    data: u32,
+}
+
+// Stable indices for primitive types. `new()` interns them in this
+// order so the `const fn` accessors below can return them directly.
+const ID_VOID: u32 = 0;
+const ID_BOOL: u32 = 1;
+const ID_INT: u32 = 2;
+const ID_STR: u32 = 3;
+const ID_ERROR: u32 = 4;
+
+// ---------- Public TypeKind facade ----------
+
+/// Payload-free kind discriminator.
 ///
-/// Currently only primitive variants are constructed. Reserved variants
-/// (documented below) are intentionally left out rather than stubbed so
-/// that exhaustiveness checks catch every consumer when a new variant
-/// is added:
-///
-/// - `Struct(StructId)`
-/// - `Enum(EnumId)`
-/// - `Tuple(Box<[TypeId]>)`
-/// - `Option(TypeId)`
-/// - `ErrorUnion { ok: TypeId, err: ErrSetId }`
-/// - `Func { params: Box<[TypeId]>, ret: TypeId }`
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// Variable-payload variants (Tuple) carry no inline data here;
+/// callers fetch element lists via `InternPool::tuple_elements`.
+/// This shape mirrors Zig's `Type.Tag` and keeps the `kind` accessor
+/// allocation-free.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum TypeKind {
     Void,
     Bool,
-    /// Machine-word signed integer; width parameterization is deferred.
+    /// Machine-word signed integer; width parameterization deferred.
     Int,
     /// Placeholder; the slice ABI is a separate change.
     Str,
+    /// Resolution-failure sentinel. Sema substitutes this for any
+    /// expression whose type can't be determined so downstream
+    /// checks don't cascade. See `InternPool::compatible`.
+    Error,
+    /// Variable-arity tuple. Reserved variant proving the
+    /// sidecar-`extra` encoding works; not currently constructible
+    /// from user syntax.
+    Tuple,
 }
 
-/// Canonical type pool. One long-lived instance per compile, threaded
-/// explicitly through the pipeline — no globals, no thread-locals.
+// ---------- Pool ----------
+
 #[derive(Debug)]
 pub struct InternPool {
-    kinds: Vec<TypeKind>,
-    dedup: HashMap<TypeKind, TypeId>,
-    // Cached primitive ids (populated in `new`) so hot paths never hash.
-    void: TypeId,
-    bool_: TypeId,
-    int: TypeId,
-    str_: TypeId,
+    items: Vec<Item>,
+    extra: Vec<u32>,
+    type_dedup: HashMap<TypeKey, TypeId>,
+
+    string_bytes: Vec<u8>,
+    /// `(offset, len)` into `string_bytes`, indexed by `StringId`.
+    strings: Vec<(u32, u32)>,
+    string_dedup: HashMap<String, StringId>,
+}
+
+/// Dedup key for variable-payload types. Primitives don't appear
+/// here — they live at fixed item indices and are looked up
+/// directly. Keying on the `extra` content (rather than on a
+/// `Box<[TypeId]>`) avoids per-intern allocations.
+#[derive(PartialEq, Eq, Hash, Debug)]
+enum TypeKey {
+    Tuple(Vec<TypeId>),
 }
 
 impl InternPool {
     pub fn new() -> Self {
         let mut pool = Self {
-            kinds: Vec::with_capacity(4),
-            dedup: HashMap::new(),
-            void: TypeId(0),
-            bool_: TypeId(0),
-            int: TypeId(0),
-            str_: TypeId(0),
+            items: Vec::with_capacity(8),
+            extra: Vec::new(),
+            type_dedup: HashMap::new(),
+            string_bytes: Vec::new(),
+            strings: Vec::new(),
+            string_dedup: HashMap::new(),
         };
-        pool.void = pool.intern(TypeKind::Void);
-        pool.bool_ = pool.intern(TypeKind::Bool);
-        pool.int = pool.intern(TypeKind::Int);
-        pool.str_ = pool.intern(TypeKind::Str);
+        // Order matters: must match ID_VOID..ID_ERROR.
+        pool.items.push(Item {
+            tag: Tag::Void,
+            data: 0,
+        });
+        pool.items.push(Item {
+            tag: Tag::Bool,
+            data: 0,
+        });
+        pool.items.push(Item {
+            tag: Tag::Int,
+            data: 0,
+        });
+        pool.items.push(Item {
+            tag: Tag::Str,
+            data: 0,
+        });
+        pool.items.push(Item {
+            tag: Tag::Error,
+            data: 0,
+        });
+        debug_assert!(pool.items.len() == (ID_ERROR + 1) as usize);
         pool
     }
 
-    pub fn intern(&mut self, k: TypeKind) -> TypeId {
-        match self.dedup.entry(k) {
-            Entry::Occupied(e) => *e.get(),
-            Entry::Vacant(e) => {
-                let id = TypeId(
-                    u32::try_from(self.kinds.len())
-                        .expect("type pool overflow: more than u32::MAX types interned"),
-                );
-                self.kinds.push(e.key().clone());
-                e.insert(id);
-                id
-            }
+    // ----- Type accessors -----
+
+    pub fn kind(&self, id: TypeId) -> TypeKind {
+        match self.items[id.0 as usize].tag {
+            Tag::Void => TypeKind::Void,
+            Tag::Bool => TypeKind::Bool,
+            Tag::Int => TypeKind::Int,
+            Tag::Str => TypeKind::Str,
+            Tag::Error => TypeKind::Error,
+            Tag::Tuple => TypeKind::Tuple,
         }
     }
 
-    pub fn kind(&self, id: TypeId) -> &TypeKind {
-        &self.kinds[id.0 as usize]
+    pub const fn void(&self) -> TypeId {
+        TypeId(ID_VOID)
+    }
+    pub const fn bool_(&self) -> TypeId {
+        TypeId(ID_BOOL)
+    }
+    pub const fn int(&self) -> TypeId {
+        TypeId(ID_INT)
+    }
+    pub const fn str_(&self) -> TypeId {
+        TypeId(ID_STR)
+    }
+    pub const fn error_type(&self) -> TypeId {
+        TypeId(ID_ERROR)
+    }
+
+    pub fn is_error(&self, id: TypeId) -> bool {
+        id.0 == ID_ERROR
+    }
+
+    /// Compatibility predicate that absorbs the `Error` sentinel.
+    /// Used anywhere sema would otherwise emit a type-mismatch.
+    pub fn compatible(&self, a: TypeId, b: TypeId) -> bool {
+        a == b || self.is_error(a) || self.is_error(b)
+    }
+
+    /// Intern a tuple type. Dedups on element-id sequence.
+    #[allow(dead_code)]
+    pub fn tuple(&mut self, elems: &[TypeId]) -> TypeId {
+        let key = TypeKey::Tuple(elems.to_vec());
+        if let Some(&id) = self.type_dedup.get(&key) {
+            return id;
+        }
+        let extra_idx = u32::try_from(self.extra.len())
+            .expect("extra arena overflow: more than u32::MAX u32 entries");
+        self.extra.push(elems.len() as u32);
+        for e in elems {
+            self.extra.push(e.0);
+        }
+        let id = TypeId(
+            u32::try_from(self.items.len())
+                .expect("type pool overflow: more than u32::MAX types interned"),
+        );
+        self.items.push(Item {
+            tag: Tag::Tuple,
+            data: extra_idx,
+        });
+        self.type_dedup.insert(key, id);
+        id
+    }
+
+    /// Copy out a tuple type's element list.
+    ///
+    /// Returns by value rather than by `&[TypeId]` because element
+    /// ids are stored as raw `u32`s in the `extra` arena;
+    /// reinterpreting that as `&[TypeId]` would require
+    /// `repr(transparent)` plus unsafe transmute, and tuple codegen
+    /// isn't on the hot path yet. Revisit when it is.
+    #[allow(dead_code)]
+    pub fn tuple_elements_vec(&self, id: TypeId) -> Vec<TypeId> {
+        let item = self.items[id.0 as usize];
+        debug_assert!(matches!(item.tag, Tag::Tuple));
+        let start = item.data as usize;
+        let n = self.extra[start] as usize;
+        self.extra[start + 1..start + 1 + n]
+            .iter()
+            .map(|&r| TypeId(r))
+            .collect()
+    }
+
+    // ----- String interning -----
+
+    pub fn intern_str(&mut self, s: &str) -> StringId {
+        if let Some(&id) = self.string_dedup.get(s) {
+            return id;
+        }
+        let offset = u32::try_from(self.string_bytes.len())
+            .expect("string arena overflow: more than u32::MAX bytes");
+        let len = u32::try_from(s.len()).expect("string too large: more than u32::MAX bytes");
+        self.string_bytes.extend_from_slice(s.as_bytes());
+        let id = StringId(
+            u32::try_from(self.strings.len())
+                .expect("string table overflow: more than u32::MAX strings interned"),
+        );
+        self.strings.push((offset, len));
+        self.string_dedup.insert(s.to_string(), id);
+        id
+    }
+
+    pub fn str(&self, id: StringId) -> &str {
+        let (offset, len) = self.strings[id.0 as usize];
+        let bytes = &self.string_bytes[offset as usize..(offset + len) as usize];
+        // SAFETY: `intern_str` only ever pushes valid UTF-8 from
+        // `&str::as_bytes`, and the arena is append-only.
+        unsafe { std::str::from_utf8_unchecked(bytes) }
     }
 
     /// Returns a `Display` adapter that renders `id` using `self`.
-    ///
-    /// `TypeId` deliberately does not implement `Display` on its own,
-    /// so callers cannot accidentally stringify an id without the pool.
     pub fn display(&self, id: TypeId) -> DisplayType<'_> {
         DisplayType { pool: self, id }
-    }
-
-    pub fn void(&self) -> TypeId {
-        self.void
-    }
-    pub fn bool_(&self) -> TypeId {
-        self.bool_
-    }
-    pub fn int(&self) -> TypeId {
-        self.int
-    }
-    pub fn str_(&self) -> TypeId {
-        self.str_
     }
 }
 
@@ -132,6 +312,18 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::Bool => write!(f, "bool"),
             TypeKind::Int => write!(f, "int"),
             TypeKind::Str => write!(f, "str"),
+            TypeKind::Error => write!(f, "<error>"),
+            TypeKind::Tuple => {
+                let elems = self.pool.tuple_elements_vec(self.id);
+                write!(f, "(")?;
+                for (i, e) in elems.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", self.pool.display(*e))?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -141,45 +333,94 @@ mod tests {
     use super::*;
 
     #[test]
-    fn intern_returns_same_id_for_same_kind() {
-        let mut pool = InternPool::new();
-        let a = pool.intern(TypeKind::Int);
-        let b = pool.intern(TypeKind::Int);
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn primitives_have_stable_ids() {
         let pool = InternPool::new();
         assert_ne!(pool.void(), pool.bool_());
         assert_ne!(pool.int(), pool.str_());
-        assert_ne!(pool.void(), pool.int());
+        assert_ne!(pool.void(), pool.error_type());
     }
 
     #[test]
-    fn primitive_accessors_match_interning() {
-        let mut pool = InternPool::new();
-        assert_eq!(pool.void(), pool.intern(TypeKind::Void));
-        assert_eq!(pool.bool_(), pool.intern(TypeKind::Bool));
-        assert_eq!(pool.int(), pool.intern(TypeKind::Int));
-        assert_eq!(pool.str_(), pool.intern(TypeKind::Str));
+    fn primitive_kind_lookup_matches() {
+        let pool = InternPool::new();
+        assert_eq!(pool.kind(pool.int()), TypeKind::Int);
+        assert_eq!(pool.kind(pool.bool_()), TypeKind::Bool);
+        assert_eq!(pool.kind(pool.str_()), TypeKind::Str);
+        assert_eq!(pool.kind(pool.void()), TypeKind::Void);
+        assert_eq!(pool.kind(pool.error_type()), TypeKind::Error);
     }
 
     #[test]
-    fn display_round_trips() {
+    fn display_round_trips_primitives() {
         let pool = InternPool::new();
         assert_eq!(format!("{}", pool.display(pool.int())), "int");
         assert_eq!(format!("{}", pool.display(pool.str_())), "str");
         assert_eq!(format!("{}", pool.display(pool.void())), "void");
         assert_eq!(format!("{}", pool.display(pool.bool_())), "bool");
+        assert_eq!(format!("{}", pool.display(pool.error_type())), "<error>");
     }
 
     #[test]
-    fn kind_lookup_matches_insertion() {
+    fn compatible_absorbs_error_sentinel() {
         let pool = InternPool::new();
-        assert_eq!(pool.kind(pool.int()), &TypeKind::Int);
-        assert_eq!(pool.kind(pool.bool_()), &TypeKind::Bool);
-        assert_eq!(pool.kind(pool.str_()), &TypeKind::Str);
-        assert_eq!(pool.kind(pool.void()), &TypeKind::Void);
+        assert!(pool.compatible(pool.int(), pool.int()));
+        assert!(!pool.compatible(pool.int(), pool.bool_()));
+        assert!(pool.compatible(pool.int(), pool.error_type()));
+        assert!(pool.compatible(pool.error_type(), pool.bool_()));
+    }
+
+    #[test]
+    fn tuple_dedups_and_round_trips() {
+        let mut pool = InternPool::new();
+        let a = pool.tuple(&[pool.int(), pool.int()]);
+        let b = pool.tuple(&[pool.int(), pool.int()]);
+        assert_eq!(a, b);
+        assert_eq!(pool.kind(a), TypeKind::Tuple);
+        assert_eq!(pool.tuple_elements_vec(a), vec![pool.int(), pool.int()]);
+        // Different element list -> distinct id.
+        let c = pool.tuple(&[pool.int(), pool.bool_()]);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn one_thousand_duplicate_tuples_share_a_single_id() {
+        // Phase 2 exit criterion: dedup-on-content keeps storage flat.
+        let mut pool = InternPool::new();
+        let first = pool.tuple(&[pool.int(), pool.int(), pool.int()]);
+        let extra_len_after_first = pool.extra.len();
+        for _ in 0..1000 {
+            let id = pool.tuple(&[pool.int(), pool.int(), pool.int()]);
+            assert_eq!(id, first);
+        }
+        // Extra arena did not grow after the first insertion.
+        assert_eq!(pool.extra.len(), extra_len_after_first);
+    }
+
+    #[test]
+    fn tuple_display_formats_recursively() {
+        let mut pool = InternPool::new();
+        let id = pool.tuple(&[pool.int(), pool.bool_()]);
+        assert_eq!(format!("{}", pool.display(id)), "(int, bool)");
+    }
+
+    #[test]
+    fn intern_str_dedups() {
+        let mut pool = InternPool::new();
+        let a = pool.intern_str("hello");
+        let b = pool.intern_str("hello");
+        assert_eq!(a, b);
+        let c = pool.intern_str("world");
+        assert_ne!(a, c);
+        assert_eq!(pool.str(a), "hello");
+        assert_eq!(pool.str(c), "world");
+    }
+
+    #[test]
+    fn intern_str_handles_empty_and_unicode() {
+        let mut pool = InternPool::new();
+        let e = pool.intern_str("");
+        let u = pool.intern_str("ηλο 🌍");
+        assert_eq!(pool.str(e), "");
+        assert_eq!(pool.str(u), "ηλο 🌍");
     }
 }

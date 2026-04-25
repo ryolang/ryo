@@ -42,10 +42,10 @@ Compiler issues identified during source review. Each entry is independently act
 - Mixes runtime concerns into the compiler.
 **Resolution:** Move `print` to a runtime crate (`ryort` or similar) compiled to an object file and linked in via `zig cc`. Codegen emits a normal call; `sema::check_builtin_call` goes away.
 
-### I-008 — `Token<'a>` borrowed from source string complicates threading
-**Files:** `src/lexer.rs` (`leak_token`)
-**Summary:** Tokens hold `&'a str` slices into the source. To support tests that need `Token<'static>`, `lexer::leak_token` uses `Box::leak`. This is `#[cfg(test)]`-only, but it is a smell: any future pass that needs to retain tokens beyond parse time will fight the lifetime.
-**Resolution:** Consider interning identifiers and string literals (e.g., `lasso` or a hand-rolled `SymbolId`) so tokens become `Copy` and `'static`-friendly.
+### I-008 — `Token<'a>` borrowed from source string complicates threading — RESOLVED
+**Files:** `src/lexer.rs`
+**Summary:** Tokens used to hold `&'a str` slices into the source, requiring `lexer::leak_token` to lift them to `'static` for tests.
+**Resolution:** Phase 2 of `docs/dev/pipeline_alignment.md` interned identifiers and string literals through `InternPool::intern_str` and made `Token` a `Copy`, lifetime-free enum carrying `StringId` / `i64` payloads. The borrowed `RawToken<'a>` form is now private to `src/lexer.rs` and `leak_token` is gone.
 
 ### I-009 — `FunctionContext` rebuilt per HIR statement
 **Files:** `src/codegen.rs` (`compile_function`)

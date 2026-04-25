@@ -38,14 +38,18 @@ fn test_lex_command_integration() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Verify token output contains expected tokens
+    // Verify token output contains expected tokens.
+    // The lex driver renders ident/string-literal payloads through
+    // the InternPool (Phase 2), so we see the original text;
+    // integer literals are parsed at lex time so they print as
+    // typed values rather than as the source slice.
     assert!(stdout.contains("Ident(\"x\")"), "Missing x identifier");
     assert!(stdout.contains("Assign"), "Missing Assign token");
-    assert!(stdout.contains("Int(\"1\")"), "Missing Int(1) token");
+    assert!(stdout.contains("IntLit(1)"), "Missing IntLit(1) token");
     assert!(stdout.contains("Add"), "Missing Add token");
-    assert!(stdout.contains("Int(\"2\")"), "Missing Int(2) token");
+    assert!(stdout.contains("IntLit(2)"), "Missing IntLit(2) token");
     assert!(stdout.contains("Mul"), "Missing Mul token");
-    assert!(stdout.contains("Int(\"3\")"), "Missing Int(3) token");
+    assert!(stdout.contains("IntLit(3)"), "Missing IntLit(3) token");
 
     // Verify no output files are created for lex command (lex doesn't generate files)
     assert!(

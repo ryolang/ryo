@@ -3,15 +3,13 @@ use crate::ast_lower;
 use crate::codegen;
 use crate::errors::CompilerError;
 use crate::hir;
-use crate::indent;
-use crate::lexer::Token;
+use crate::lexer::{self, Token};
 use crate::linker;
 use crate::parser::program_parser;
 use crate::sema;
 use crate::types::InternPool;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::{Parser, input::Stream, prelude::*};
-use logos::Logos;
 use std::fs;
 use std::path::Path;
 use target_lexicon::Triple;
@@ -39,27 +37,39 @@ pub(crate) fn lex_command(file: &Path) -> Result<(), CompilerError> {
 }
 
 fn display_tokens(input: &str, file: &Path) {
-    let token_iter = Token::lexer(input).spanned();
+    let mut pool = InternPool::new();
+    let tokens = match lexer::lex(input, &mut pool) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Lex error: {}", e.message);
+            return;
+        }
+    };
 
     println!("Token stream for '{}':", file.display());
     println!();
 
-    for (result, span) in token_iter {
-        match result {
-            Ok(token) => {
-                println!("{:?} @ {}..{}", token, span.start, span.end);
+    // Render identifier and string-literal payloads through the
+    // pool so the user sees the actual text rather than an opaque
+    // handle id. Other variants format normally via Debug.
+    for (tok, span) in &tokens {
+        match tok {
+            Token::Ident(id) => {
+                println!("Ident({:?}) @ {}..{}", pool.str(*id), span.start, span.end)
             }
-            Err(()) => {
-                println!("Error @ {}..{}", span.start, span.end);
+            Token::StrLit(id) => {
+                println!("StrLit({:?}) @ {}..{}", pool.str(*id), span.start, span.end)
             }
+            other => println!("{:?} @ {}..{}", other, span.start, span.end),
         }
     }
 }
 
 pub(crate) fn parse_command(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
-    let program = parse_source(&input)?;
-    display_ast(&program);
+    let mut pool = InternPool::new();
+    let program = parse_source(&input, &mut pool)?;
+    display_ast(&program, &pool);
     Ok(())
 }
 
@@ -67,17 +77,9 @@ fn read_source_file(file: &Path) -> Result<String, CompilerError> {
     fs::read_to_string(file).map_err(CompilerError::from)
 }
 
-fn parse_source(input: &str) -> Result<ast::Program, CompilerError> {
-    let raw_tokens: Vec<_> = Token::lexer(input)
-        .spanned()
-        .map(|(tok, span)| match tok {
-            Ok(tok) => (tok, span.into()),
-            Err(()) => (Token::Error, span.into()),
-        })
-        .collect();
-
-    let tokens =
-        indent::process(raw_tokens).map_err(|e| CompilerError::ParseError(e.to_string()))?;
+fn parse_source(input: &str, pool: &mut InternPool) -> Result<ast::Program, CompilerError> {
+    let tokens = lexer::lex(input, pool)
+        .map_err(|e| CompilerError::ParseError(format!("lex error: {}", e.message)))?;
 
     let token_stream =
         Stream::from_iter(tokens).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
@@ -93,7 +95,7 @@ fn parse_source(input: &str) -> Result<ast::Program, CompilerError> {
     }
 }
 
-fn display_parse_errors(errs: &[Rich<'_, Token<'_>>], input: &str) {
+fn display_parse_errors(errs: &[Rich<'_, Token>], input: &str) {
     let source = Source::from(input);
     for err in errs {
         Report::build(
@@ -113,19 +115,20 @@ fn display_parse_errors(errs: &[Rich<'_, Token<'_>>], input: &str) {
     }
 }
 
-fn display_ast(program: &ast::Program) {
+fn display_ast(program: &ast::Program, pool: &InternPool) {
     println!("[AST]");
-    program.pretty_print();
+    program.pretty_print(pool);
 }
 
 pub(crate) fn ir_command(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
-    let program = parse_source(&input)?;
+    let mut pool = InternPool::new();
+    let program = parse_source(&input, &mut pool)?;
 
-    display_ast(&program);
+    display_ast(&program, &pool);
     println!();
 
-    let (hir, pool) = lower_and_analyze(&program)?;
+    let hir = lower_and_analyze(&program, &mut pool)?;
     generate_and_display_ir(&hir, &pool)?;
 
     Ok(())
@@ -137,11 +140,11 @@ pub(crate) fn ir_command(file: &Path) -> Result<(), CompilerError> {
 /// pre-codegen passes are added.
 fn lower_and_analyze(
     program: &ast::Program,
-) -> Result<(hir::HirProgram, InternPool), CompilerError> {
-    let mut pool = InternPool::new();
-    let mut hir = ast_lower::lower(program, &mut pool).map_err(CompilerError::LowerError)?;
-    sema::analyze(&mut hir, &mut pool).map_err(CompilerError::SemaError)?;
-    Ok((hir, pool))
+    pool: &mut InternPool,
+) -> Result<hir::HirProgram, CompilerError> {
+    let mut hir = ast_lower::lower(program, pool).map_err(CompilerError::LowerError)?;
+    sema::analyze(&mut hir, pool).map_err(CompilerError::SemaError)?;
+    Ok(hir)
 }
 
 fn generate_and_display_ir(hir: &hir::HirProgram, pool: &InternPool) -> Result<(), CompilerError> {
@@ -159,15 +162,16 @@ fn generate_and_display_ir(hir: &hir::HirProgram, pool: &InternPool) -> Result<(
 
 pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
-    let program = parse_source(&input)?;
+    let mut pool = InternPool::new();
+    let program = parse_source(&input, &mut pool)?;
 
     println!("[Input Source]");
     println!("{}", input);
     println!();
-    display_ast(&program);
+    display_ast(&program, &pool);
     println!();
 
-    let (hir, pool) = lower_and_analyze(&program)?;
+    let hir = lower_and_analyze(&program, &mut pool)?;
 
     println!("[Codegen]");
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
@@ -185,8 +189,9 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
 
 pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
-    let program = parse_source(&input)?;
-    let (hir, pool) = lower_and_analyze(&program)?;
+    let mut pool = InternPool::new();
+    let program = parse_source(&input, &mut pool)?;
+    let hir = lower_and_analyze(&program, &mut pool)?;
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 
