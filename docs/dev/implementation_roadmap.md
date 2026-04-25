@@ -622,7 +622,7 @@ remainder = a % b     # 1
 - Float arithmetic uses IEEE 754 semantics
 - Integer division truncates toward zero
 - Type errors are clear and localized (bidirectional type checking)
-- Dependencies: Milestone 4 (functions for testing), Milestone 6.5 (bool type)
+- Dependencies: Milestone 4 (functions for testing), Milestone 6.5 (provides bool type and `==`/`!=` semantics)
 
 ### Milestone 8: Control Flow & Booleans
 **Goal:** Implement `if/else` statements, `for` loops, and boolean logic
