@@ -6,8 +6,13 @@
 //!   for primitives, type id otherwise) or an index into `extra`.
 //! - `extra: Vec<u32>` — variable-size payloads (tuple element
 //!   lists, future function signatures). Dedup hashes the *content*
-//!   of the extra range, not a Rust enum value, so adding a new
-//!   variable-payload variant doesn't pay a clone-per-intern cost.
+//!   of the extra range via `hashbrown::HashTable`, not a cloned
+//!   `Box<[TypeId]>` — so adding a new variable-payload variant
+//!   doesn't pay a clone-per-intern cost.
+//! - String dedup uses the same `HashTable<StringId>` shape: the
+//!   table stores only the handle and probes via the arena view of
+//!   the bytes, so we don't carry the bytes a second time as owned
+//!   `String` keys.
 //! - `string_bytes: Vec<u8>` + `strings: Vec<(u32, u32)>` — a single
 //!   byte arena holds every interned identifier and string literal,
 //!   with `(offset, len)` pairs keyed by `StringId`. This is what
@@ -25,8 +30,9 @@
 //! newtype keeps every other payoff and we can revisit if the
 //! exhaustiveness loss bites later.
 
-use std::collections::HashMap;
+use hashbrown::{DefaultHashBuilder, HashTable};
 use std::fmt;
+use std::hash::{BuildHasher, Hasher};
 
 // ---------- TypeId ----------
 
@@ -125,41 +131,107 @@ pub enum TypeKind {
 
 // ---------- Pool ----------
 
+/// Interned types and strings, modelled on Zig's `InternPool.zig`.
+///
+/// Both dedup tables are `hashbrown::HashTable<Handle>` rather than
+/// `HashMap<Key, Handle>` — they store only the handle (`TypeId` /
+/// `StringId`) and recover the key bytes from the arena (`extra`,
+/// `string_bytes`) on probe. This lets `intern_str` and `tuple`
+/// look up by `&str` / `&[TypeId]` without allocating a Vec or
+/// String on every call.
 #[derive(Debug)]
 pub struct InternPool {
     items: Vec<Item>,
     extra: Vec<u32>,
-    type_dedup: HashMap<TypeKey, TypeId>,
+    /// Dedup for variable-payload types. Stores `TypeId`s; equality
+    /// and hash are computed by reading the matching slice out of
+    /// `extra` (see `tuple_eq` / `tuple_hash`).
+    type_dedup: HashTable<TypeId>,
 
     string_bytes: Vec<u8>,
     /// `(offset, len)` into `string_bytes`, indexed by `StringId`.
     strings: Vec<(u32, u32)>,
-    /// Dedup table for `intern_str`. Stores the bytes a second time
-    /// as `String` keys: a known cost (≈ `string_bytes.len()`) we
-    /// accept on stable Rust because `HashMap::raw_entry_mut` (which
-    /// would let us key on `StringId` while hashing/comparing via
-    /// the arena view of `string_bytes`) is still nightly-only.
-    /// TODO: drop the duplicate keys once `raw_entry_mut` stabilises
-    /// or once we take a direct `hashbrown` dependency.
-    string_dedup: HashMap<String, StringId>,
+    /// Dedup for interned strings. Stores `StringId`s; equality and
+    /// hash are computed by reading the matching byte range out of
+    /// `string_bytes`.
+    string_dedup: HashTable<StringId>,
+
+    /// Single shared `BuildHasher` so probe-time and resize-time
+    /// hashes match. `DefaultHashBuilder` is hashbrown's default
+    /// (foldhash); fine for a compiler with no DoS surface.
+    hasher: DefaultHashBuilder,
 }
 
-/// Dedup key for variable-payload types. Primitives don't appear
-/// here — they live at fixed item indices and are looked up
-/// directly.
+fn hash_bytes(hasher: &DefaultHashBuilder, bytes: &[u8]) -> u64 {
+    hasher.hash_one(bytes)
+}
+
+fn hash_typeids(hasher: &DefaultHashBuilder, ids: &[TypeId]) -> u64 {
+    // Hash the underlying u32 sequence directly so the same hash
+    // is reachable from a `&[TypeId]` query and from rehashing
+    // a `&[u32]` slice read out of `extra` during table resize.
+    let mut h = hasher.build_hasher();
+    for id in ids {
+        h.write_u32(id.0);
+    }
+    h.finish()
+}
+
+/// Read a tuple `TypeId`'s element slice out of `extra`.
 ///
-/// `Vec<TypeId>` here means `tuple()` allocates a fresh `Vec` on
-/// every probe (the `to_vec()` call) before the dedup table is
-/// consulted. That's a per-call alloc the original comment
-/// understated. The fix is the same nightly-`raw_entry`/`hashbrown`
-/// shape needed for `string_dedup`: a borrow-keyed lookup that can
-/// hash and compare a `&[TypeId]` slice directly. Until then,
-/// tuple types are interned only from sema's reserved arms (no
-/// user syntax constructs them yet) so the per-call alloc is paid
-/// at most a handful of times across a compile.
-#[derive(PartialEq, Eq, Hash, Debug)]
-enum TypeKey {
-    Tuple(Vec<TypeId>),
+/// Returns `None` if `id` does not point at a `Tag::Tuple` item;
+/// callers in the dedup-probe path use `None` as "not equal".
+fn tuple_extra_slice<'a>(items: &[Item], extra: &'a [u32], id: TypeId) -> Option<&'a [u32]> {
+    let item = items[id.0 as usize];
+    if !matches!(item.tag, Tag::Tuple) {
+        return None;
+    }
+    let start = item.data as usize;
+    let n = extra[start] as usize;
+    Some(&extra[start + 1..start + 1 + n])
+}
+
+fn tuple_eq(items: &[Item], extra: &[u32], candidate: TypeId, query: &[TypeId]) -> bool {
+    let Some(stored) = tuple_extra_slice(items, extra, candidate) else {
+        return false;
+    };
+    if stored.len() != query.len() {
+        return false;
+    }
+    stored.iter().zip(query).all(|(&raw, q)| raw == q.0)
+}
+
+fn tuple_hash(
+    items: &[Item],
+    extra: &[u32],
+    hasher: &DefaultHashBuilder,
+    candidate: TypeId,
+) -> u64 {
+    let stored =
+        tuple_extra_slice(items, extra, candidate).expect("non-tuple in tuple dedup table");
+    let mut h = hasher.build_hasher();
+    for raw in stored {
+        h.write_u32(*raw);
+    }
+    h.finish()
+}
+
+fn str_bytes<'a>(strings: &[(u32, u32)], string_bytes: &'a [u8], id: StringId) -> &'a [u8] {
+    let (offset, len) = strings[id.0 as usize];
+    &string_bytes[offset as usize..(offset + len) as usize]
+}
+
+fn str_eq(strings: &[(u32, u32)], string_bytes: &[u8], candidate: StringId, query: &[u8]) -> bool {
+    str_bytes(strings, string_bytes, candidate) == query
+}
+
+fn str_hash(
+    strings: &[(u32, u32)],
+    string_bytes: &[u8],
+    hasher: &DefaultHashBuilder,
+    candidate: StringId,
+) -> u64 {
+    hash_bytes(hasher, str_bytes(strings, string_bytes, candidate))
 }
 
 impl InternPool {
@@ -167,10 +239,11 @@ impl InternPool {
         let mut pool = Self {
             items: Vec::with_capacity(8),
             extra: Vec::new(),
-            type_dedup: HashMap::new(),
+            type_dedup: HashTable::new(),
             string_bytes: Vec::new(),
             strings: Vec::new(),
-            string_dedup: HashMap::new(),
+            string_dedup: HashTable::new(),
+            hasher: DefaultHashBuilder::default(),
         };
         // Order matters: must match ID_VOID..ID_ERROR.
         pool.items.push(Item {
@@ -236,13 +309,26 @@ impl InternPool {
         a == b || self.is_error(a) || self.is_error(b)
     }
 
-    /// Intern a tuple type. Dedups on element-id sequence.
+    /// Intern a tuple type. Dedups on element-id sequence with no
+    /// per-call key allocation: the probe hashes `elems` directly
+    /// and compares it against each candidate's slice in `extra`.
     #[allow(dead_code)]
     pub fn tuple(&mut self, elems: &[TypeId]) -> TypeId {
-        let key = TypeKey::Tuple(elems.to_vec());
-        if let Some(&id) = self.type_dedup.get(&key) {
+        let hash = hash_typeids(&self.hasher, elems);
+
+        // Probe path: fully immutable. Borrow `items` and `extra`
+        // through `self` for the closure.
+        let items = &self.items;
+        let extra = &self.extra;
+        if let Some(&id) = self
+            .type_dedup
+            .find(hash, |&candidate| tuple_eq(items, extra, candidate, elems))
+        {
             return id;
         }
+
+        // Insert path: append the payload to `extra`, allocate a
+        // fresh `TypeId`, then register it with the dedup table.
         let extra_idx = u32::try_from(self.extra.len())
             .expect("extra arena overflow: more than u32::MAX u32 entries");
         self.extra.push(elems.len() as u32);
@@ -257,7 +343,16 @@ impl InternPool {
             tag: Tag::Tuple,
             data: extra_idx,
         });
-        self.type_dedup.insert(key, id);
+
+        // Disjoint-field reborrows so the resize-time hasher
+        // closure can read `items`/`extra` while `type_dedup` is
+        // mutably borrowed.
+        let items = &self.items;
+        let extra = &self.extra;
+        let hasher = &self.hasher;
+        self.type_dedup.insert_unique(hash, id, |&candidate| {
+            tuple_hash(items, extra, hasher, candidate)
+        });
         id
     }
 
@@ -265,15 +360,11 @@ impl InternPool {
     ///
     /// Returns by value rather than by `&[TypeId]` because element
     /// ids are stored as raw `u32`s in the `extra` arena;
-    /// reinterpreting that as `&[TypeId]` would require
-    /// `repr(transparent)` on `TypeId` plus an unsafe transmute.
-    ///
-    /// TODO: when tuple codegen lands and this becomes a hot path,
-    /// flip `TypeId` to `#[repr(transparent)]` over `u32`, expose a
-    /// zero-copy `tuple_elements(id) -> &[TypeId]` view alongside
-    /// this copying accessor, and migrate non-perf-critical
-    /// callers to it. The unit-test footprint that relies on this
-    /// helper is small enough to update in lockstep.
+    /// reinterpreting that as `&[TypeId]` requires
+    /// `#[repr(transparent)]` on `TypeId` plus an unsafe transmute.
+    /// Only used today by `Display` for diagnostic formatting and
+    /// by tests, neither of which is hot. Tracked as a follow-up
+    /// in ISSUES.md if it ever shows up in a profile.
     #[allow(dead_code)]
     pub fn tuple_elements_vec(&self, id: TypeId) -> Vec<TypeId> {
         let item = self.items[id.0 as usize];
@@ -295,13 +386,28 @@ impl InternPool {
     /// resolve a known name like `"main"` against the pool without
     /// taking `&mut`.
     pub fn find_str(&self, s: &str) -> Option<StringId> {
-        self.string_dedup.get(s).copied()
+        let hash = hash_bytes(&self.hasher, s.as_bytes());
+        self.string_dedup
+            .find(hash, |&candidate| {
+                str_eq(&self.strings, &self.string_bytes, candidate, s.as_bytes())
+            })
+            .copied()
     }
 
     pub fn intern_str(&mut self, s: &str) -> StringId {
-        if let Some(&id) = self.string_dedup.get(s) {
+        let hash = hash_bytes(&self.hasher, s.as_bytes());
+
+        // Probe path: hash `s` directly and compare against each
+        // candidate's bytes in `string_bytes`. No String alloc.
+        let strings = &self.strings;
+        let string_bytes = &self.string_bytes;
+        if let Some(&id) = self.string_dedup.find(hash, |&candidate| {
+            str_eq(strings, string_bytes, candidate, s.as_bytes())
+        }) {
             return id;
         }
+
+        // Insert path.
         let offset = u32::try_from(self.string_bytes.len())
             .expect("string arena overflow: more than u32::MAX bytes");
         let len = u32::try_from(s.len()).expect("string too large: more than u32::MAX bytes");
@@ -311,7 +417,13 @@ impl InternPool {
                 .expect("string table overflow: more than u32::MAX strings interned"),
         );
         self.strings.push((offset, len));
-        self.string_dedup.insert(s.to_string(), id);
+
+        let strings = &self.strings;
+        let string_bytes = &self.string_bytes;
+        let hasher = &self.hasher;
+        self.string_dedup.insert_unique(hash, id, |&candidate| {
+            str_hash(strings, string_bytes, hasher, candidate)
+        });
         id
     }
 
@@ -419,16 +531,23 @@ mod tests {
 
     #[test]
     fn one_thousand_duplicate_tuples_share_a_single_id() {
-        // Phase 2 exit criterion: dedup-on-content keeps storage flat.
+        // Phase 2 exit criterion: dedup-on-content keeps storage
+        // flat. With the `HashTable<TypeId>` shape there is also no
+        // per-call key allocation — the probe hashes the slice
+        // directly — so neither `extra` nor `items` nor the dedup
+        // table grow after the first insert.
         let mut pool = InternPool::new();
         let first = pool.tuple(&[pool.int(), pool.int(), pool.int()]);
-        let extra_len_after_first = pool.extra.len();
+        let extra_len = pool.extra.len();
+        let items_len = pool.items.len();
+        let table_len = pool.type_dedup.len();
         for _ in 0..1000 {
             let id = pool.tuple(&[pool.int(), pool.int(), pool.int()]);
             assert_eq!(id, first);
         }
-        // Extra arena did not grow after the first insertion.
-        assert_eq!(pool.extra.len(), extra_len_after_first);
+        assert_eq!(pool.extra.len(), extra_len);
+        assert_eq!(pool.items.len(), items_len);
+        assert_eq!(pool.type_dedup.len(), table_len);
     }
 
     #[test]
@@ -457,6 +576,39 @@ mod tests {
         let u = pool.intern_str("ηλο 🌍");
         assert_eq!(pool.str(e), "");
         assert_eq!(pool.str(u), "ηλο 🌍");
+    }
+
+    #[test]
+    fn intern_str_does_not_duplicate_bytes() {
+        // The dedup table stores `StringId` handles, not owned
+        // `String` keys, so the byte content lives exactly once —
+        // in `string_bytes`. Asserts the storage shape: after
+        // interning N distinct strings, `string_bytes.len()` is
+        // the sum of their byte lengths and nothing else.
+        let mut pool = InternPool::new();
+        let inputs = ["alpha", "beta", "gamma", "δελτα"];
+        for s in &inputs {
+            pool.intern_str(s);
+        }
+        let expected: usize = inputs.iter().map(|s| s.len()).sum();
+        assert_eq!(pool.string_bytes.len(), expected);
+        assert_eq!(pool.string_dedup.len(), inputs.len());
+    }
+
+    #[test]
+    fn intern_str_repeated_does_not_grow_arena() {
+        // Probe path: repeated `intern_str` of the same string
+        // returns the same `StringId` and doesn't append to the
+        // arena. Mirrors the 1000-tuple test on the string side.
+        let mut pool = InternPool::new();
+        let first = pool.intern_str("identifier");
+        let bytes_len = pool.string_bytes.len();
+        let table_len = pool.string_dedup.len();
+        for _ in 0..1000 {
+            assert_eq!(pool.intern_str("identifier"), first);
+        }
+        assert_eq!(pool.string_bytes.len(), bytes_len);
+        assert_eq!(pool.string_dedup.len(), table_len);
     }
 
     #[test]

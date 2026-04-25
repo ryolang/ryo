@@ -2,6 +2,8 @@
 
 Compiler issues identified during source review. Each entry is independently actionable; severity reflects impact on correctness, future feature work, or code health — not user impact today (the compiler is pre-alpha).
 
+Resolved entries are removed (not kept around as a changelog). Look at `git log` if you need history.
+
 ---
 
 ## Severity Legend
@@ -42,11 +44,6 @@ Compiler issues identified during source review. Each entry is independently act
 - Mixes runtime concerns into the compiler.
 **Resolution:** Move `print` to a runtime crate (`ryort` or similar) compiled to an object file and linked in via `zig cc`. Codegen emits a normal call; `sema::check_builtin_call` goes away.
 
-### I-008 — `Token<'a>` borrowed from source string complicates threading — RESOLVED
-**Files:** `src/lexer.rs`
-**Summary:** Tokens used to hold `&'a str` slices into the source, requiring `lexer::leak_token` to lift them to `'static` for tests.
-**Resolution:** Phase 2 of `docs/dev/pipeline_alignment.md` interned identifiers and string literals through `InternPool::intern_str` and made `Token` a `Copy`, lifetime-free enum carrying `StringId` / `i64` payloads. The borrowed `RawToken<'a>` form is now private to `src/lexer.rs` and `leak_token` is gone.
-
 ### I-009 — `FunctionContext` rebuilt per HIR statement
 **Files:** `src/codegen.rs` (`compile_function`)
 **Summary:** A fresh `FunctionContext` struct is constructed for every `HirStmt` inside the loop. Harmless functionally but noisy and obscures intent.
@@ -56,6 +53,26 @@ Compiler issues identified during source review. Each entry is independently act
 **Files:** `src/codegen.rs` (`generate_print_call`)
 **Summary:** The result of the `write` syscall is fetched and ignored. A short write or `EINTR` will silently truncate output. Acceptable for a bootstrap, but should be documented or fixed when `print` moves to the runtime (I-006).
 **Resolution:** Tracked under I-006.
+
+### I-014 — Lexer errors bypass `DiagSink`
+**Files:** `src/lexer.rs` (`LexError`), `src/pipeline.rs` (`parse_source`, `display_tokens`)
+**Summary:** Phase 1 of `docs/dev/pipeline_alignment.md` routes parse / ast_lower / sema errors through a `DiagSink` so analysis can continue past the first failure. The lexer was on a parallel branch at the time and still uses a single-shot `Result<_, LexError>`. The driver wraps a `LexError` into a one-element `Vec<Diag>` at the boundary, but problems like "invalid integer literal" or "unknown escape sequence" can't co-surface with a sema error in the same run.
+**Resolution:** Thread `&mut DiagSink` into `lexer::lex` and `intern_token`. Replace the early return on the first lex error with `sink.emit(...)` followed by a recovery token (e.g. `Token::Error` for the bad span) so the parser still sees a well-formed stream. Eliminate `LexError` once the migration is complete.
+
+### I-015 — Unknown escape sequences silently preserved
+**Files:** `src/lexer.rs` (`unescape`)
+**Summary:** When `unescape` encounters `\q` (or any other character not in the small known table) it preserves the backslash and the character verbatim instead of reporting a diagnostic. The user gets no feedback that the escape sequence is unrecognised, and the runtime string contains the literal `\q` bytes. Tracked as a TODO at the function definition.
+**Resolution:** Folded in with I-014: once `lexer::lex` has a `&mut DiagSink`, the `Some(c)` arm of `unescape` emits a structured `Diag::error(span, DiagCode::UnknownEscape, …)` and proceeds with the raw character (or skips both bytes — TBD by spec discussion).
+
+### I-016 — Indent processor errors carry no span
+**Files:** `src/indent.rs` (`process`), `src/lexer.rs` (`lex` fallback)
+**Summary:** `indent::process` returns `Result<_, String>` with a free-form message and no source location. The driver currently fakes a span by reusing the last raw token's span. That's "near" the offending newline but not on it; for "spaces are not allowed" / "dedent doesn't match an outer level" the user wants the squiggle on the indentation itself.
+**Resolution:** Have `indent::process` return a richer error type carrying the offending span (the `Newline(s)` token whose whitespace failed validation, or the `Dedent` insertion point) and propagate it into `LexError.span`. The TODO at the lexer fallback covers this from the consumer side.
+
+### I-017 — `i64::MIN` integer literal is unrepresentable
+**Files:** `src/lexer.rs` (`RawToken::Int` arm)
+**Summary:** Integer literals are parsed as `i64` at lex time, then sign is applied later via the unary `-` operator. That makes `-9_223_372_036_854_775_808` (i.e. `i64::MIN`) unspellable: the positive form `9_223_372_036_854_775_808` overflows `i64`. Hits the negation-overflow corner Rust itself fixed via `IntLit` / `IntLitMin` token-level distinction.
+**Resolution:** Either parse as `u64` and resolve negation+overflow at sema time, or add an `IntLitMin` token variant that the parser recognises only as the operand of unary `-`. Coordinate with the broader numeric-tower design before picking either.
 
 ---
 
@@ -76,9 +93,20 @@ Compiler issues identified during source review. Each entry is independently act
 **Summary:** `lex`, `parse`, `ir` are separate subcommands. Each stage already exists and is wired up; users would benefit from a single `ryo build --emit=tokens|ast|hir|clif|obj` surface (mirroring `zig build-exe -femit-…`).
 **Resolution:** Unify under one subcommand with an `--emit` flag. Keep current subcommands as deprecated aliases for one release.
 
+### I-018 — `TypeId` is a newtype, not a typed enum
+**Files:** `src/types.rs` (`TypeId`)
+**Summary:** Phase 2 §2.2 of `docs/dev/pipeline_alignment.md` originally called for `TypeId` to become an `enum { Void = 0, Bool = 1, ..., Error = 4, Dynamic(NonZeroU32) }` so primitive matches are exhaustive at compile time and the `pool.int()` accessor disappears. The risk register allowed a fallback to a plain `Copy` newtype if the enum encoding fights the borrow checker, which is what we shipped. Cost: the `TypeKind::Tuple` arm we added in `cranelift_type_for` and a couple of sema sites are not statically guaranteed to be covered when a new primitive lands.
+**Resolution:** Re-attempt the enum encoding using `repr(u32)` + `Dynamic(NonZeroU32)` once the borrow-checker pain points (mostly around `pool.kind` returning a value that contains a `TypeId`) are characterised. Low priority — the matches we have today still go through `TypeKind`, which *is* exhaustive, so the gap is small.
+
+### I-019 — `tuple_elements_vec` allocates a `Vec` per call
+**Files:** `src/types.rs` (`tuple_elements_vec`)
+**Summary:** The accessor copies the element-id slice out of `extra` rather than returning a borrowed view, because `TypeId` is not `#[repr(transparent)]` over `u32` and the unsafe transmute to `&[TypeId]` would be UB without it. Today the function is called only by `Display` for diagnostics and by tests; not a hot path.
+**Resolution:** Tag `TypeId` with `#[repr(transparent)]` and expose `tuple_elements(id) -> &[TypeId]` alongside the copying accessor. Migrate non-perf-critical callers to it lazily. Defer until tuple codegen lands and the accessor shows up in a profile.
+
 ---
 
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
+- Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)

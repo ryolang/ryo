@@ -963,6 +963,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-object",
  "dirs",
+ "hashbrown 0.15.5",
  "logos",
  "tar",
  "target-lexicon",
