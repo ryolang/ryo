@@ -66,6 +66,14 @@ pub enum DiagCode {
     ArityMismatch,
     BuiltinArgKind,
     UnsupportedOperator,
+    /// A declaration's resolution requires its own resolution to be
+    /// already complete — e.g. a chain of decls whose types depend
+    /// transitively on themselves. Today this is an infrastructure-
+    /// only signal (mutual recursion through *bodies* doesn't
+    /// trigger it because signatures resolve eagerly), but the
+    /// worklist driver in Phase 5 catches the case so future
+    /// comptime / inferred-return-type work doesn't stack-overflow.
+    CycleInResolution,
 
     // --- parser ---
     ParseError,

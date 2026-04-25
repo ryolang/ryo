@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 mod ast;
@@ -39,10 +39,19 @@ enum Commands {
         /// Input file to parse
         file: PathBuf,
     },
-    /// Generate and display Cranelift IR for a Ryo program
+    /// Inspect intermediate representations of a Ryo program.
+    ///
+    /// `--emit` selects which IR sections to print. Sections always
+    /// appear in pipeline order (AST → UIR → TIR → CLIF) regardless
+    /// of the order given on the command line. With no flag the
+    /// command preserves its pre-Phase-5 behaviour: AST + Cranelift
+    /// IR.
     Ir {
         /// Input file to generate IR for
         file: PathBuf,
+        /// Comma-separated list of IRs to dump: ast, uir, tir, clif.
+        #[arg(long, value_delimiter = ',', value_enum)]
+        emit: Vec<EmitKind>,
     },
     /// Compile and run a Ryo program (JIT)
     Run {
@@ -61,6 +70,19 @@ enum Commands {
     },
 }
 
+/// Which IR section(s) `ryo ir --emit=...` should print.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum EmitKind {
+    /// Pretty-printed AST (parser output).
+    Ast,
+    /// Untyped IR (astgen output, Zig-style ZIR analogue).
+    Uir,
+    /// Typed IR (sema output, Zig-style AIR analogue).
+    Tir,
+    /// Cranelift IR (codegen output).
+    Clif,
+}
+
 #[derive(Subcommand)]
 enum ToolchainAction {
     /// Download and install the Zig linker
@@ -75,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Lex { file } => pipeline::lex_command(&file)?,
         Commands::Parse { file } => pipeline::parse_command(&file)?,
-        Commands::Ir { file } => pipeline::ir_command(&file)?,
+        Commands::Ir { file, emit } => pipeline::ir_command(&file, &emit)?,
         Commands::Run { file } => pipeline::run_file(&file)?,
         Commands::Build { file } => pipeline::build_file(&file)?,
         Commands::Toolchain { action } => match action {

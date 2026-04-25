@@ -2,19 +2,37 @@
 //!
 //! Sema consumes the flat [`Uir`] produced by `astgen` and emits one
 //! [`Tir`] per function body, fully typed. Codegen consumes the
-//! resulting `&[Tir]` directly — there is no intermediate
-//! tree-shaped IR and no per-program side-table any more.
+//! resulting `&[Tir]` directly.
 //!
-//! ## Why a translator, not a mutator
+//! ## Phase 5 — worklist driver
 //!
-//! The Phase-3 interim shape mutated a sidecar `Vec<Option<TypeId>>`
-//! indexed by [`InstRef`]. That kept Sema small at the cost of (a)
-//! making "type" a partial function over UIR (some entries `None`
-//! forever) and (b) giving generics / inline expansion nowhere to
-//! put extra typed copies of a body. Phase 4 (this file) replaces
-//! both: a fresh, dense [`Tir`] per body, and "make N typed copies
-//! from one untyped body" becomes idiomatic — that's the prereq for
-//! comptime + monomorphization in Phase 5.
+//! Earlier phases ran sema as a top-down recursion: collect every
+//! signature, then walk every body in source order. That worked
+//! because today's language has no construct (inferred return
+//! types, comptime, generics) that makes one body's analysis
+//! depend on another body's analysis. Phase 5 keeps the same
+//! observable behaviour but reframes the driver as a worklist:
+//!
+//! - [`Sema`] owns a [`DeclState`] table indexed by [`DeclId`] (one
+//!   id per function body in `uir.func_bodies`).
+//! - The queue is seeded with every decl in source order. Popping
+//!   transitions a decl from `Unresolved` → `InProgress` → either
+//!   `Resolved` (TIR landed in the corresponding slot of
+//!   `Sema::results`, which is parallel to `uir.func_bodies`) or
+//!   `Failed`.
+//! - Cycle detection is dormant for today's feature set — bodies
+//!   only depend on callee *signatures*, which are resolved eagerly
+//!   in a separate first pass — but [`Sema::require_decl`] hits
+//!   `DeclState::InProgress` and emits a [`DiagCode::CycleInResolution`]
+//!   diagnostic the moment future work (inferred return types,
+//!   comptime evaluation) makes a body depend on another body
+//!   mid-analysis. That's the prerequisite Phase 5 was for; the
+//!   features ride on top.
+//!
+//! Tests at the bottom of this file include a
+//! `cfg(any())`-gated block of comptime / generics smoke tests
+//! — infrastructure-only stubs per pipeline_alignment.md §5.3
+//! commit 5.
 //!
 //! ## Error handling
 //!
@@ -32,7 +50,51 @@ use crate::diag::{Diag, DiagCode, DiagSink};
 use crate::tir::{Tir, TirBuilder, TirParam, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
 use crate::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+// ---------- Decl table ----------
+
+/// Index into `uir.func_bodies`. One [`DeclId`] per function the
+/// driver may need to resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeclId(u32);
+
+impl DeclId {
+    fn from_index(idx: usize) -> Self {
+        DeclId(u32::try_from(idx).expect("DeclId index out of range"))
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Tri-state resolution status for a single declaration.
+///
+/// Mirrors Zig's `Module.semaDecl` state machine:
+///
+/// - `Unresolved` — never visited; lazy.
+/// - `InProgress` — currently being analyzed; the cycle sentinel.
+/// - `Resolved` — TIR landed in `Sema::results[decl.index()]`
+///   (eager state for everything that follows). The slot index
+///   is `DeclId.0` itself, so the variant carries no payload.
+/// - `Failed` — analysis bailed out; downstream callers should
+///   suppress cascade errors but not stack-overflow trying to
+///   resolve again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclState {
+    Unresolved,
+    InProgress,
+    Resolved,
+    /// Reserved: a decl whose resolution gave up. Today every
+    /// body still emits a well-formed TIR (with `Unreachable` slots
+    /// in place of failed expressions) so `Failed` is unreachable
+    /// from sources — §4.5 exit criterion. Comptime / inferred
+    /// returns are the first features that can transition a decl
+    /// into this state.
+    #[allow(dead_code)]
+    Failed,
+}
 
 struct FunctionSig {
     params: Vec<TypeId>,
@@ -64,42 +126,174 @@ impl<'a> Scope<'a> {
     }
 }
 
+// ---------- Public entrypoint ----------
+
 /// Analyze `uir` and emit one [`Tir`] per function body.
 ///
-/// Diagnostics are accumulated into `sink`. Even when errors are
-/// emitted, every function still produces a well-formed `Tir` so
-/// later passes (and `--emit=tir`) have something to inspect; the
-/// driver consults `sink.has_errors()` before handing the result to
-/// codegen.
+/// Thin wrapper around [`Sema::run`] kept as the stable façade
+/// callers (the pipeline driver, tests) use. Equivalent to
+/// `Sema::run(uir, pool, sink)` but spelled the way it always was.
 pub fn analyze(uir: &Uir, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<Tir> {
-    // Function signatures resolve eagerly so out-of-order definitions
-    // and recursive calls type-check without a worklist. Phase 5
-    // replaces this two-pass shape with the lazy driver.
-    let mut signatures: HashMap<StringId, FunctionSig> = HashMap::new();
-    for body in &uir.func_bodies {
-        signatures.insert(
-            body.name,
-            FunctionSig {
-                params: body.params.iter().map(|p| p.ty).collect(),
-                return_type: body.return_type,
-            },
-        );
-    }
-
-    let mut tirs = Vec::with_capacity(uir.func_bodies.len());
-    for body in &uir.func_bodies {
-        tirs.push(analyze_function(uir, body, &signatures, pool, sink));
-    }
-    tirs
+    Sema::run(uir, pool, sink)
 }
 
-fn analyze_function(
-    uir: &Uir,
-    body: &FuncBody,
-    signatures: &HashMap<StringId, FunctionSig>,
-    pool: &mut InternPool,
-    sink: &mut DiagSink,
-) -> Tir {
+// ---------- Sema driver ----------
+
+/// Worklist-driven sema state. Lives only for the duration of one
+/// `Sema::run` call.
+pub struct Sema<'a> {
+    uir: &'a Uir,
+    pool: &'a mut InternPool,
+    sink: &'a mut DiagSink,
+    /// Resolution status, parallel to `uir.func_bodies`.
+    decl_state: Vec<DeclState>,
+    /// Decls pending analysis.
+    queue: VecDeque<DeclId>,
+    /// Function name → decl id. Built once at the top of `run` and
+    /// shared with `check_call`. A duplicate definition keeps the
+    /// first one seen; sema doesn't currently report redefinitions
+    /// (handled at a future astgen pass).
+    name_to_decl: HashMap<StringId, DeclId>,
+    /// Eagerly-resolved signatures, keyed by name. Out-of-order
+    /// definitions and recursive / mutually-recursive calls
+    /// type-check because callee signatures land here in a single
+    /// pass before any body is analyzed.
+    signatures: HashMap<StringId, FunctionSig>,
+    /// Per-decl emitted TIR slot. Filled as decls transition to
+    /// `Resolved`. Result extraction drains this in source order.
+    results: Vec<Option<Tir>>,
+}
+
+impl<'a> Sema<'a> {
+    /// Drive sema to fixpoint and return one [`Tir`] per UIR
+    /// function body, in source order.
+    pub fn run(uir: &'a Uir, pool: &'a mut InternPool, sink: &'a mut DiagSink) -> Vec<Tir> {
+        let mut sema = Sema::new(uir, pool, sink);
+        sema.resolve_signatures();
+        sema.seed_worklist();
+        sema.drive();
+        sema.collect_results()
+    }
+
+    fn new(uir: &'a Uir, pool: &'a mut InternPool, sink: &'a mut DiagSink) -> Self {
+        let n = uir.func_bodies.len();
+        let mut name_to_decl = HashMap::with_capacity(n);
+        for (i, body) in uir.func_bodies.iter().enumerate() {
+            // First definition wins on duplicates; the second-and-
+            // beyond will type-check against the first, which keeps
+            // the pipeline robust until a dedicated redefinition
+            // pass lands.
+            name_to_decl
+                .entry(body.name)
+                .or_insert(DeclId::from_index(i));
+        }
+        let mut results = Vec::with_capacity(n);
+        for _ in 0..n {
+            results.push(None);
+        }
+        Sema {
+            uir,
+            pool,
+            sink,
+            decl_state: vec![DeclState::Unresolved; n],
+            queue: VecDeque::with_capacity(n),
+            name_to_decl,
+            signatures: HashMap::with_capacity(n),
+            results,
+        }
+    }
+
+    /// Eagerly populate the signatures table.
+    ///
+    /// Today every signature is fully spelled in source — there is
+    /// no inferred-return-type form — so this is a single linear
+    /// scan. When inferred returns / generics arrive this becomes
+    /// a per-decl "ensure signature resolved" call driven by the
+    /// worklist; the rest of the driver doesn't need to know.
+    fn resolve_signatures(&mut self) {
+        for body in &self.uir.func_bodies {
+            self.signatures.insert(
+                body.name,
+                FunctionSig {
+                    params: body.params.iter().map(|p| p.ty).collect(),
+                    return_type: body.return_type,
+                },
+            );
+        }
+    }
+
+    /// Seed the worklist with every decl in source order.
+    ///
+    /// Source order is the stable visit order called for in the risk
+    /// register ("Worklist driver introduces non-determinism in
+    /// error order"). Diagnostics within one body remain ordered by
+    /// the body's own walk; across bodies, errors come out in
+    /// declaration order.
+    fn seed_worklist(&mut self) {
+        for i in 0..self.uir.func_bodies.len() {
+            self.queue.push_back(DeclId::from_index(i));
+        }
+    }
+
+    fn drive(&mut self) {
+        while let Some(decl) = self.queue.pop_front() {
+            self.resolve_decl(decl);
+        }
+    }
+
+    /// Pull every resolved TIR out of the per-decl slots, in source
+    /// (decl-id) order. Decls that ended in `Failed` produce no
+    /// `Tir`; their diagnostics already live in the sink.
+    fn collect_results(self) -> Vec<Tir> {
+        self.results.into_iter().flatten().collect()
+    }
+
+    /// Ensure a callee's analysis state is consistent with its use
+    /// from the currently-analyzing body. Today this only matters
+    /// for cycle detection: callee *signatures* are eagerly
+    /// resolved, so the check is "is this decl currently
+    /// `InProgress`?" — which is the cycle sentinel.
+    ///
+    /// Returns `false` and emits a [`DiagCode::CycleInResolution`]
+    /// diagnostic when a cycle is detected. The caller should fall
+    /// back to the error type for whatever it was trying to
+    /// compute.
+    fn require_decl(&mut self, callee: DeclId, span: Span, name: StringId) -> bool {
+        match self.decl_state[callee.index()] {
+            DeclState::Unresolved | DeclState::Resolved => true,
+            DeclState::Failed => true, // cascade-suppress; the original error is already in the sink
+            DeclState::InProgress => {
+                self.sink.emit(Diag::error(
+                    span,
+                    DiagCode::CycleInResolution,
+                    format!(
+                        "cyclic dependency while resolving '{}'",
+                        self.pool.str(name),
+                    ),
+                ));
+                false
+            }
+        }
+    }
+
+    fn resolve_decl(&mut self, decl: DeclId) {
+        match self.decl_state[decl.index()] {
+            DeclState::Resolved | DeclState::Failed | DeclState::InProgress => return,
+            DeclState::Unresolved => {}
+        }
+        self.decl_state[decl.index()] = DeclState::InProgress;
+
+        let body = &self.uir.func_bodies[decl.index()];
+        let tir = analyze_function(self, body);
+
+        self.results[decl.index()] = Some(tir);
+        self.decl_state[decl.index()] = DeclState::Resolved;
+    }
+}
+
+// ---------- Per-function analysis ----------
+
+fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     let mut scope = Scope::new();
     for param in &body.params {
         scope.insert(param.name, param.ty);
@@ -118,20 +312,16 @@ fn analyze_function(
     let mut fcx = FuncCtx {
         builder: TirBuilder::new(body.name, params, body.return_type, body.span),
         // Mapping from UIR `InstRef` to the TIR ref Sema emitted for
-        // it inside *this* function. Kept around so a UIR inst that
-        // gets visited twice (e.g. a future SSA-shaped UIR with
-        // shared sub-expressions) is translated exactly once. UIR is
-        // tree-shaped today so this is defensive — but it's the
-        // right invariant before Phase 5 lazy sema lands.
-        inst_map: vec![None; uir.instructions.len()],
+        // it inside *this* function. UIR is tree-shaped today so
+        // this is defensive — but it's the right invariant before
+        // future SSA-shaped UIR with shared sub-expressions.
+        inst_map: vec![None; sema.uir.instructions.len()],
         return_type: body.return_type,
     };
 
-    let mut stmt_refs: Vec<TirRef> = Vec::with_capacity(uir.body_stmts(body).len());
-    for stmt_ref in uir.body_stmts(body) {
-        stmt_refs.push(analyze_stmt(
-            uir, stmt_ref, &mut fcx, &mut scope, signatures, pool, sink,
-        ));
+    let mut stmt_refs: Vec<TirRef> = Vec::with_capacity(sema.uir.body_stmts(body).len());
+    for stmt_ref in sema.uir.body_stmts(body) {
+        stmt_refs.push(analyze_stmt(sema, &mut fcx, &mut scope, stmt_ref));
     }
 
     fcx.builder.finish(&stmt_refs)
@@ -146,24 +336,15 @@ struct FuncCtx {
     return_type: TypeId,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn analyze_stmt(
-    uir: &Uir,
-    r: InstRef,
-    fcx: &mut FuncCtx,
-    scope: &mut Scope,
-    signatures: &HashMap<StringId, FunctionSig>,
-    pool: &mut InternPool,
-    sink: &mut DiagSink,
-) -> TirRef {
-    let inst = uir.inst(r);
-    let span = uir.span(r);
+fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: InstRef) -> TirRef {
+    let inst = sema.uir.inst(r);
+    let span = sema.uir.span(r);
     match inst.tag {
         InstTag::VarDecl => {
-            let view = uir.var_decl_view(r);
-            let init_tir = analyze_expr(uir, view.initializer, fcx, scope, signatures, pool, sink);
+            let view = sema.uir.var_decl_view(r);
+            let init_tir = analyze_expr(sema, fcx, scope, view.initializer);
             let inferred = fcx.builder.ty_of(init_tir);
-            let resolved = resolve_var_decl_type(&view, inferred, uir, pool, sink);
+            let resolved = resolve_var_decl_type(&view, inferred, sema);
             scope.insert(view.name, resolved);
             fcx.builder
                 .var_decl(view.name, view.mutable, resolved, init_tir, span)
@@ -173,54 +354,54 @@ fn analyze_stmt(
                 InstData::UnOp(o) => o,
                 _ => unreachable!("Return must carry InstData::UnOp"),
             };
-            let val_tir = analyze_expr(uir, operand, fcx, scope, signatures, pool, sink);
+            let val_tir = analyze_expr(sema, fcx, scope, operand);
             let actual = fcx.builder.ty_of(val_tir);
-            if fcx.return_type == pool.void() {
-                if !pool.is_error(actual) {
-                    sink.emit(Diag::error(
+            if fcx.return_type == sema.pool.void() {
+                if !sema.pool.is_error(actual) {
+                    sema.sink.emit(Diag::error(
                         span,
                         DiagCode::TypeMismatch,
                         format!(
                             "cannot return a value from a function with return type 'void' (got '{}')",
-                            pool.display(actual),
+                            sema.pool.display(actual),
                         ),
                     ));
                 }
-            } else if !pool.compatible(actual, fcx.return_type) {
-                sink.emit(Diag::error(
+            } else if !sema.pool.compatible(actual, fcx.return_type) {
+                sema.sink.emit(Diag::error(
                     span,
                     DiagCode::TypeMismatch,
                     format!(
                         "return type mismatch: function expects '{}', got '{}'",
-                        pool.display(fcx.return_type),
-                        pool.display(actual),
+                        sema.pool.display(fcx.return_type),
+                        sema.pool.display(actual),
                     ),
                 ));
             }
             fcx.builder
-                .unary(TirTag::Return, pool.void(), val_tir, span)
+                .unary(TirTag::Return, sema.pool.void(), val_tir, span)
         }
         InstTag::ReturnVoid => {
-            if fcx.return_type != pool.void() && !pool.is_error(fcx.return_type) {
-                sink.emit(Diag::error(
+            if fcx.return_type != sema.pool.void() && !sema.pool.is_error(fcx.return_type) {
+                sema.sink.emit(Diag::error(
                     span,
                     DiagCode::TypeMismatch,
                     format!(
                         "missing return value: function expects '{}'",
-                        pool.display(fcx.return_type),
+                        sema.pool.display(fcx.return_type),
                     ),
                 ));
             }
-            fcx.builder.return_void(pool.void(), span)
+            fcx.builder.return_void(sema.pool.void(), span)
         }
         InstTag::ExprStmt => {
             let operand = match inst.data {
                 InstData::UnOp(o) => o,
                 _ => unreachable!("ExprStmt must carry InstData::UnOp"),
             };
-            let val_tir = analyze_expr(uir, operand, fcx, scope, signatures, pool, sink);
+            let val_tir = analyze_expr(sema, fcx, scope, operand);
             fcx.builder
-                .unary(TirTag::ExprStmt, pool.void(), val_tir, span)
+                .unary(TirTag::ExprStmt, sema.pool.void(), val_tir, span)
         }
         other => panic!(
             "analyze_stmt: instruction at %{} is not a statement (tag={:?})",
@@ -230,28 +411,22 @@ fn analyze_stmt(
     }
 }
 
-fn resolve_var_decl_type(
-    view: &VarDeclView,
-    inferred: TypeId,
-    uir: &Uir,
-    pool: &InternPool,
-    sink: &mut DiagSink,
-) -> TypeId {
+fn resolve_var_decl_type(view: &VarDeclView, inferred: TypeId, sema: &mut Sema<'_>) -> TypeId {
     match view.ty {
-        Some(annotated) if !pool.compatible(annotated, inferred) => {
+        Some(annotated) if !sema.pool.compatible(annotated, inferred) => {
             // Anchor the squiggle on the offending value (the
             // initializer) rather than on the whole `[mut] name [:
             // type] = expr` decl span — the type came from the
             // annotation but the *mismatch* is the initializer's
             // fault.
-            sink.emit(Diag::error(
-                uir.span(view.initializer),
+            sema.sink.emit(Diag::error(
+                sema.uir.span(view.initializer),
                 DiagCode::TypeMismatch,
                 format!(
                     "type mismatch: '{}' annotated '{}', initializer is '{}'",
-                    pool.str(view.name),
-                    pool.display(annotated),
-                    pool.display(inferred),
+                    sema.pool.str(view.name),
+                    sema.pool.display(annotated),
+                    sema.pool.display(inferred),
                 ),
             ));
             annotated
@@ -261,33 +436,24 @@ fn resolve_var_decl_type(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn analyze_expr(
-    uir: &Uir,
-    r: InstRef,
-    fcx: &mut FuncCtx,
-    scope: &Scope,
-    signatures: &HashMap<StringId, FunctionSig>,
-    pool: &mut InternPool,
-    sink: &mut DiagSink,
-) -> TirRef {
+fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRef) -> TirRef {
     if let Some(t) = fcx.inst_map[r.index()] {
         return t;
     }
 
-    let inst = uir.inst(r);
-    let span = uir.span(r);
+    let inst = sema.uir.inst(r);
+    let span = sema.uir.span(r);
     let emitted = match inst.tag {
         InstTag::IntLiteral => match inst.data {
-            InstData::Int(v) => fcx.builder.int_const(v, pool.int(), span),
+            InstData::Int(v) => fcx.builder.int_const(v, sema.pool.int(), span),
             _ => unreachable!("IntLiteral must carry InstData::Int"),
         },
         InstTag::StrLiteral => match inst.data {
-            InstData::Str(s) => fcx.builder.str_const(s, pool.str_(), span),
+            InstData::Str(s) => fcx.builder.str_const(s, sema.pool.str_(), span),
             _ => unreachable!("StrLiteral must carry InstData::Str"),
         },
         InstTag::BoolLiteral => match inst.data {
-            InstData::Bool(b) => fcx.builder.bool_const(b, pool.bool_(), span),
+            InstData::Bool(b) => fcx.builder.bool_const(b, sema.pool.bool_(), span),
             _ => unreachable!("BoolLiteral must carry InstData::Bool"),
         },
         InstTag::Var => {
@@ -298,12 +464,12 @@ fn analyze_expr(
             match scope.lookup(name) {
                 Some(t) => fcx.builder.var(name, t, span),
                 None => {
-                    sink.emit(Diag::error(
+                    sema.sink.emit(Diag::error(
                         span,
                         DiagCode::UndefinedVariable,
-                        format!("undefined variable: '{}'", pool.str(name)),
+                        format!("undefined variable: '{}'", sema.pool.str(name)),
                     ));
-                    fcx.builder.unreachable(pool.error_type(), span)
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
             }
         }
@@ -317,46 +483,46 @@ fn analyze_expr(
                 InstData::BinOp { lhs, rhs } => (lhs, rhs),
                 _ => unreachable!("binary op must carry InstData::BinOp"),
             };
-            let l = analyze_expr(uir, lhs, fcx, scope, signatures, pool, sink);
-            let r2 = analyze_expr(uir, rhs, fcx, scope, signatures, pool, sink);
+            let l = analyze_expr(sema, fcx, scope, lhs);
+            let r2 = analyze_expr(sema, fcx, scope, rhs);
             let lhs_ty = fcx.builder.ty_of(l);
             let rhs_ty = fcx.builder.ty_of(r2);
-            check_binary_op(inst.tag, lhs_ty, rhs_ty, l, r2, span, fcx, pool, sink)
+            check_binary_op(sema, fcx, inst.tag, lhs_ty, rhs_ty, l, r2, span)
         }
         InstTag::Neg => {
             let operand = match inst.data {
                 InstData::UnOp(o) => o,
                 _ => unreachable!("Neg must carry InstData::UnOp"),
             };
-            let sub = analyze_expr(uir, operand, fcx, scope, signatures, pool, sink);
+            let sub = analyze_expr(sema, fcx, scope, operand);
             let sub_ty = fcx.builder.ty_of(sub);
-            match pool.kind(sub_ty) {
-                TypeKind::Int => fcx.builder.unary(TirTag::INeg, pool.int(), sub, span),
-                TypeKind::Error => fcx.builder.unreachable(pool.error_type(), span),
+            match sema.pool.kind(sub_ty) {
+                TypeKind::Int => fcx.builder.unary(TirTag::INeg, sema.pool.int(), sub, span),
+                TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
                 _ => {
-                    sink.emit(Diag::error(
+                    sema.sink.emit(Diag::error(
                         span,
                         DiagCode::UnsupportedOperator,
                         format!(
                             "unary operator '-' not supported for type '{}'",
-                            pool.display(sub_ty),
+                            sema.pool.display(sub_ty),
                         ),
                     ));
-                    fcx.builder.unreachable(pool.error_type(), span)
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
             }
         }
         InstTag::Call => {
-            let view = uir.call_view(r);
+            let view = sema.uir.call_view(r);
             // Translate args first (in source order) to fix their
             // TIR refs and types, *then* validate against the
             // signature so per-argument diagnostics carry the right
             // span and the call still emits a well-formed TIR Call.
             let mut arg_tirs = Vec::with_capacity(view.args.len());
             for a in &view.args {
-                arg_tirs.push(analyze_expr(uir, *a, fcx, scope, signatures, pool, sink));
+                arg_tirs.push(analyze_expr(sema, fcx, scope, *a));
             }
-            check_call(uir, &view, &arg_tirs, span, fcx, signatures, pool, sink)
+            check_call(sema, fcx, &view, &arg_tirs, span)
         }
         other => panic!(
             "analyze_expr: instruction at %{} is not an expression (tag={:?})",
@@ -371,48 +537,48 @@ fn analyze_expr(
 
 #[allow(clippy::too_many_arguments)]
 fn check_binary_op(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
     tag: InstTag,
     lhs_ty: TypeId,
     rhs_ty: TypeId,
     lhs: TirRef,
     rhs: TirRef,
     span: Span,
-    fcx: &mut FuncCtx,
-    pool: &mut InternPool,
-    sink: &mut DiagSink,
 ) -> TirRef {
-    if !pool.compatible(lhs_ty, rhs_ty) {
-        sink.emit(Diag::error(
+    if !sema.pool.compatible(lhs_ty, rhs_ty) {
+        sema.sink.emit(Diag::error(
             span,
             DiagCode::TypeMismatch,
             format!(
                 "type mismatch in '{}': left is '{}', right is '{}'",
                 bin_op_symbol(tag),
-                pool.display(lhs_ty),
-                pool.display(rhs_ty),
+                sema.pool.display(lhs_ty),
+                sema.pool.display(rhs_ty),
             ),
         ));
-        return fcx.builder.unreachable(pool.error_type(), span);
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    let kind_ty = if pool.is_error(lhs_ty) {
+    let kind_ty = if sema.pool.is_error(lhs_ty) {
         rhs_ty
     } else {
         lhs_ty
     };
     let is_equality = matches!(tag, InstTag::Eq | InstTag::NotEq);
     if is_equality {
-        match pool.kind(kind_ty) {
+        match sema.pool.kind(kind_ty) {
             TypeKind::Int | TypeKind::Bool => {
                 let tir_tag = match tag {
                     InstTag::Eq => TirTag::ICmpEq,
                     InstTag::NotEq => TirTag::ICmpNe,
                     _ => unreachable!(),
                 };
-                fcx.builder.binary(tir_tag, pool.bool_(), lhs, rhs, span)
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
-            TypeKind::Error => fcx.builder.unreachable(pool.error_type(), span),
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             TypeKind::Str => {
-                sink.emit(Diag::error(
+                sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
                     format!(
@@ -420,23 +586,23 @@ fn check_binary_op(
                         bin_op_symbol(tag),
                     ),
                 ));
-                fcx.builder.unreachable(pool.error_type(), span)
+                fcx.builder.unreachable(sema.pool.error_type(), span)
             }
             TypeKind::Void | TypeKind::Tuple => {
-                sink.emit(Diag::error(
+                sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
                     format!(
                         "equality operator '{}' not supported for type '{}'",
                         bin_op_symbol(tag),
-                        pool.display(kind_ty),
+                        sema.pool.display(kind_ty),
                     ),
                 ));
-                fcx.builder.unreachable(pool.error_type(), span)
+                fcx.builder.unreachable(sema.pool.error_type(), span)
             }
         }
     } else {
-        match pool.kind(kind_ty) {
+        match sema.pool.kind(kind_ty) {
             TypeKind::Int => {
                 let tir_tag = match tag {
                     InstTag::Add => TirTag::IAdd,
@@ -445,90 +611,110 @@ fn check_binary_op(
                     InstTag::Div => TirTag::ISDiv,
                     _ => unreachable!(),
                 };
-                fcx.builder.binary(tir_tag, pool.int(), lhs, rhs, span)
+                fcx.builder.binary(tir_tag, sema.pool.int(), lhs, rhs, span)
             }
-            TypeKind::Error => fcx.builder.unreachable(pool.error_type(), span),
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             _ => {
-                sink.emit(Diag::error(
+                sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
                     format!(
                         "arithmetic operator '{}' not supported for type '{}'",
                         bin_op_symbol(tag),
-                        pool.display(kind_ty),
+                        sema.pool.display(kind_ty),
                     ),
                 ));
-                fcx.builder.unreachable(pool.error_type(), span)
+                fcx.builder.unreachable(sema.pool.error_type(), span)
             }
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_call(
-    uir: &Uir,
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
     view: &CallView,
     arg_tirs: &[TirRef],
     span: Span,
-    fcx: &mut FuncCtx,
-    signatures: &HashMap<StringId, FunctionSig>,
-    pool: &mut InternPool,
-    sink: &mut DiagSink,
 ) -> TirRef {
     let name_id = view.name;
-    let name_str = pool.str(name_id);
 
-    if let Some(builtin) = builtins::lookup(name_str) {
-        let ret_ty = builtin.return_type(pool);
-        check_builtin_call(name_str, uir, &view.args, span, sink);
+    // Builtins short-circuit: they're not in `signatures` /
+    // `name_to_decl`, so signature resolution and the worklist
+    // never see them.
+    if let Some(builtin) = builtins::lookup(sema.pool.str(name_id)) {
+        let ret_ty = builtin.return_type(sema.pool);
+        check_builtin_call(sema, view, span);
         return fcx.builder.call(name_id, arg_tirs, ret_ty, span);
     }
 
-    let Some(sig) = signatures.get(&name_id) else {
-        sink.emit(Diag::error(
-            span,
-            DiagCode::UndefinedFunction,
-            format!("undefined function: '{}'", name_str),
-        ));
-        return fcx.builder.unreachable(pool.error_type(), span);
+    // Demand the callee. With eagerly-resolved signatures this is
+    // a check that the decl exists *and* is not currently
+    // `InProgress` (cycle). Today the latter is unreachable —
+    // bodies don't depend on bodies — but the call sits here so
+    // future inferred-return-type / comptime work picks up cycle
+    // detection for free.
+    let callee = match sema.name_to_decl.get(&name_id).copied() {
+        Some(d) => d,
+        None => {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::UndefinedFunction,
+                format!("undefined function: '{}'", sema.pool.str(name_id)),
+            ));
+            return fcx.builder.unreachable(sema.pool.error_type(), span);
+        }
     };
+    if !sema.require_decl(callee, span, name_id) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
 
-    if view.args.len() != sig.params.len() {
-        sink.emit(Diag::error(
+    let sig = sema
+        .signatures
+        .get(&name_id)
+        .expect("signature must be present once decl exists");
+
+    // Snapshot the parts of `sig` we need so we can release the
+    // borrow on `sema` before emitting per-argument diagnostics.
+    let expected: Vec<TypeId> = sig.params.clone();
+    let return_type = sig.return_type;
+
+    if view.args.len() != expected.len() {
+        sema.sink.emit(Diag::error(
             span,
             DiagCode::ArityMismatch,
             format!(
                 "call to '{}' has wrong arity: expected {} argument(s), got {}",
-                name_str,
-                sig.params.len(),
+                sema.pool.str(name_id),
+                expected.len(),
                 view.args.len(),
             ),
         ));
     } else {
-        for (idx, ((arg_uir, arg_tir), &expected)) in view
+        for (idx, ((arg_uir, arg_tir), &exp_ty)) in view
             .args
             .iter()
             .zip(arg_tirs.iter())
-            .zip(sig.params.iter())
+            .zip(expected.iter())
             .enumerate()
         {
             let actual = fcx.builder.ty_of(*arg_tir);
-            if !pool.compatible(actual, expected) {
-                sink.emit(Diag::error(
-                    uir.span(*arg_uir),
+            if !sema.pool.compatible(actual, exp_ty) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(*arg_uir),
                     DiagCode::TypeMismatch,
                     format!(
                         "call to '{}': argument {} has type '{}', expected '{}'",
-                        name_str,
+                        sema.pool.str(name_id),
                         idx + 1,
-                        pool.display(actual),
-                        pool.display(expected),
+                        sema.pool.display(actual),
+                        sema.pool.display(exp_ty),
                     ),
                 ));
             }
         }
     }
-    fcx.builder.call(name_id, arg_tirs, sig.return_type, span)
+    fcx.builder.call(name_id, arg_tirs, return_type, span)
 }
 
 /// Front-end validation for builtin calls.
@@ -536,19 +722,19 @@ fn check_call(
 /// These checks are builtin-specific and temporary: once `print`
 /// moves to a runtime crate and is called through a normal
 /// signature (see ISSUES.md I-006), they go away.
-fn check_builtin_call(name: &str, uir: &Uir, args: &[InstRef], span: Span, sink: &mut DiagSink) {
-    if name == "print" {
-        if args.len() != 1 {
-            sink.emit(Diag::error(
+fn check_builtin_call(sema: &mut Sema<'_>, view: &CallView, span: Span) {
+    if sema.pool.str(view.name) == "print" {
+        if view.args.len() != 1 {
+            sema.sink.emit(Diag::error(
                 span,
                 DiagCode::ArityMismatch,
-                format!("print() takes exactly 1 argument, got {}", args.len()),
+                format!("print() takes exactly 1 argument, got {}", view.args.len()),
             ));
             return;
         }
-        if !matches!(uir.inst(args[0]).tag, InstTag::StrLiteral) {
-            sink.emit(Diag::error(
-                uir.span(args[0]),
+        if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
+            sema.sink.emit(Diag::error(
+                sema.uir.span(view.args[0]),
                 DiagCode::BuiltinArgKind,
                 "print() argument must be a string literal",
             ));
@@ -577,6 +763,11 @@ mod tests {
     use crate::tir::{Tir, TirData};
     use chumsky::Parser;
     use chumsky::input::{Input, Stream};
+    use chumsky::span::{SimpleSpan, Span as _};
+
+    fn sp() -> Span {
+        SimpleSpan::new((), 0..0)
+    }
 
     type RunOk = (Vec<Tir>, InternPool);
 
@@ -879,5 +1070,139 @@ mod tests {
             }
         }
         assert!(saw_unreachable, "expected an Unreachable instruction");
+    }
+
+    // ---------- Phase 5: worklist driver ----------
+
+    /// §5.4 exit criterion: source order doesn't matter for type
+    /// resolution. A caller defined *before* its callee still
+    /// type-checks, because signatures are eagerly resolved before
+    /// any body is walked.
+    #[test]
+    fn forward_reference_resolves() {
+        let code =
+            "fn main() -> int:\n\treturn helper(2)\n\nfn helper(x: int) -> int:\n\treturn x + 1\n";
+        let (tirs, pool) = run(code).unwrap();
+        // Both decls produced TIR.
+        assert_eq!(tirs.len(), 2);
+        // Source order is preserved in the result vec.
+        assert_eq!(pool.str(tirs[0].name), "main");
+        assert_eq!(pool.str(tirs[1].name), "helper");
+    }
+
+    /// §5.4: mutual recursion with explicit return types is *not* a
+    /// cycle — bodies depend only on callee signatures, which
+    /// resolve eagerly. The previous recursive driver also handled
+    /// this; the worklist version mustn't regress it (and mustn't
+    /// stack-overflow trying).
+    #[test]
+    fn mutual_recursion_does_not_trigger_cycle() {
+        let code = "fn a() -> int:\n\treturn b()\n\nfn b() -> int:\n\treturn a()\n\nfn main() -> int:\n\treturn a()\n";
+        let (tirs, _diags, _pool) = run_with_errors(code);
+        assert_eq!(tirs.len(), 3);
+    }
+
+    /// Direct unit test of the cycle sentinel: bypass the public
+    /// driver, drive `require_decl` against an `InProgress` slot
+    /// directly. This is the substrate the comptime / inferred-
+    /// return-type milestones will lean on; today the path is
+    /// unreachable through source code.
+    #[test]
+    fn require_decl_reports_cycle_when_in_progress() {
+        // Build a minimal valid UIR with one function so Sema::new
+        // is happy.
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let main_id = pool.intern_str("main");
+
+        let mut b = crate::uir::UirBuilder::new();
+        let zero = b.int_literal(0, sp());
+        let ret = b.unary(InstTag::Return, zero, sp());
+        b.add_function(main_id, vec![], pool.int(), &[ret], sp());
+        let uir = b.finish();
+
+        let mut sema = Sema::new(&uir, &mut pool, &mut sink);
+        sema.resolve_signatures();
+        // Pretend we're mid-resolving `main`.
+        sema.decl_state[0] = DeclState::InProgress;
+        let ok = sema.require_decl(DeclId::from_index(0), sp(), main_id);
+        assert!(!ok, "require_decl must reject an InProgress decl");
+        let diags = sink.into_diags();
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::CycleInResolution),
+            "got: {:#?}",
+            diags
+        );
+    }
+
+    /// Source-order stability: when sema emits errors from multiple
+    /// functions, the diagnostic order matches the order the decls
+    /// appear in source. The risk register flagged worklist
+    /// non-determinism; this test pins the seed-in-source-order
+    /// invariant.
+    ///
+    /// Note on what the assertion below actually proves:
+    /// `run_with_errors` returns `sink.into_diags()`, which yields
+    /// diagnostics in **emission order** — the order in which
+    /// `DiagSink::emit` was called, not a sorted-by-span order.
+    /// Because `first` and `second` each emit exactly one
+    /// `UndefinedVariable` diag, the assertion
+    /// `undef[0].span.start < undef[1].span.start` is a proxy for
+    /// "`first` was resolved before `second`": the worklist popped
+    /// decls in source order, so the diag from the body at the
+    /// lower span fired first. If `DiagSink::into_diags` ever
+    /// starts sorting by span, this test would silently keep
+    /// passing while no longer testing resolution order — update
+    /// the assertion to inspect emission-side state if that
+    /// changes. (Pipeline-level rendering does sort by span via
+    /// `render_diags`, but that's a separate path; sema's tests
+    /// observe the unsorted sink directly.)
+    #[test]
+    fn diagnostics_ordered_by_decl_then_position() {
+        let code = "fn first() -> int:\n\treturn missing_a\n\nfn second() -> int:\n\treturn missing_b\n\nfn main() -> int:\n\treturn 0\n";
+        let (_tirs, diags, _pool) = run_with_errors(code);
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == DiagCode::UndefinedVariable)
+            .collect();
+        assert_eq!(undef.len(), 2, "got: {:#?}", diags);
+        // `first` is at a lower span start than `second`, so its
+        // diagnostic must come out first.
+        assert!(undef[0].span.start < undef[1].span.start);
+    }
+
+    // ---------- Substrate stubs for comptime / generics ----------
+    //
+    // Per pipeline_alignment.md §5.3 commit 5, these are
+    // `cfg(any())`-gated ("never compiled") infrastructure tests.
+    // They exist as named hooks so the comptime / generics
+    // milestones land as concrete test bodies — no follow-on
+    // refactor needed to make space for them. `cfg(any())` is the
+    // idiomatic Rust spelling of the doc's `cfg(unimplemented)`.
+    #[cfg(any())]
+    mod future {
+        use super::*;
+
+        #[test]
+        fn comptime_block_evaluates_to_value() {
+            // `comptime { 1 + 2 }` → Sema must evaluate, not emit
+            // TIR; result interned as a value, substituted at use.
+            unimplemented!("comptime — requires Phase 5 evaluator on top of the worklist");
+        }
+
+        #[test]
+        fn generic_call_triggers_monomorphization() {
+            // `fn id[T](x: T) -> T: return x` + `id(42)` + `id(true)`
+            // → two TIRs from one UIR body, keyed on (DeclId,
+            // [TypeId]).
+            unimplemented!("generics — requires monomorphization on top of the worklist");
+        }
+
+        #[test]
+        fn comptime_cycle_reports_diagnostic() {
+            // A comptime block whose evaluation requires its own
+            // result must emit `DiagCode::CycleInResolution`.
+            unimplemented!("comptime cycle — exercises require_decl through a body-body edge");
+        }
     }
 }
