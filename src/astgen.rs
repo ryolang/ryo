@@ -273,26 +273,42 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
 // ---------- Temporary UIR → HIR shim ----------
 //
 // Reconstructs the legacy tree-shaped `HirProgram` from a freshly
-// emitted `Uir`. Exists only to keep `sema` and `codegen` working
-// while commits 3 and 4 swap them over to UIR/TIR. Deleted in
-// commit 5 alongside `src/hir.rs`.
+// emitted `Uir` plus a sema-produced `types` side-table indexed by
+// [`InstRef`]. Exists only to keep `codegen` working while commit
+// 4 swaps it over to UIR/TIR. Deleted in commit 5 alongside
+// `src/hir.rs`.
+//
+// Astgen unit tests pass an all-`None` table to inspect the
+// untyped-by-construction shape; the pipeline driver passes the
+// real table from `sema::analyze`.
 //
 // This is not a fast path — it allocates a fresh `HirExpr`/`HirStmt`
 // tree for every function. That's fine: nothing about Phase 3's
 // bottleneck profile depends on this code surviving.
 
-/// Rebuild a `HirProgram` from a `Uir`. Pure: no diagnostics, no
-/// pool mutation.
-pub fn uir_to_hir(uir: &Uir) -> hir::HirProgram {
+/// Rebuild a `HirProgram` from `uir` plus a `types` side-table
+/// produced by `sema::analyze`. `types[r.index()]` is the resolved
+/// type of the instruction at [`InstRef`] `r`; entries of `None`
+/// flow through to `HirExpr.ty = None` (used by astgen tests to
+/// assert astgen alone leaves expressions untyped).
+///
+/// `VarDecl.ty` reads `types[var_decl_inst.index()]` (which sema
+/// fills with the post-annotation/inference resolved type). Other
+/// `HirExpr.ty` slots read `types[expr_inst.index()]`.
+pub fn uir_to_hir_typed(uir: &Uir, types: &[Option<TypeId>]) -> hir::HirProgram {
+    uir_to_hir_with_types(uir, types)
+}
+
+fn uir_to_hir_with_types(uir: &Uir, types: &[Option<TypeId>]) -> hir::HirProgram {
     let functions = uir
         .func_bodies
         .iter()
-        .map(|fb| body_to_hir(uir, fb))
+        .map(|fb| body_to_hir(uir, fb, types))
         .collect();
     hir::HirProgram { functions }
 }
 
-fn body_to_hir(uir: &Uir, body: &FuncBody) -> hir::HirFunction {
+fn body_to_hir(uir: &Uir, body: &FuncBody, types: &[Option<TypeId>]) -> hir::HirFunction {
     let params = body
         .params
         .iter()
@@ -304,7 +320,7 @@ fn body_to_hir(uir: &Uir, body: &FuncBody) -> hir::HirFunction {
     let stmts = uir
         .body_stmts(body)
         .into_iter()
-        .map(|r| stmt_to_hir(uir, r))
+        .map(|r| stmt_to_hir(uir, r, types))
         .collect();
     hir::HirFunction {
         name: body.name,
@@ -314,26 +330,32 @@ fn body_to_hir(uir: &Uir, body: &FuncBody) -> hir::HirFunction {
     }
 }
 
-fn stmt_to_hir(uir: &Uir, r: InstRef) -> hir::HirStmt {
+fn stmt_to_hir(uir: &Uir, r: InstRef, types: &[Option<TypeId>]) -> hir::HirStmt {
     let inst = uir.inst(r);
     let span = uir.span(r);
     match (inst.tag, inst.data) {
         (InstTag::VarDecl, InstData::Extra(_)) => {
             let view = uir.var_decl_view(r);
+            // Prefer the sema-resolved type stored in the
+            // side-table at the VarDecl's own slot (which reconciles
+            // annotation vs. inference). When the table entry is
+            // `None` (astgen-only test path), fall back to whatever
+            // was annotated in source — there's nothing else to use.
+            let ty = types.get(r.index()).copied().flatten().or(view.ty);
             hir::HirStmt::VarDecl {
                 name: view.name,
                 mutable: view.mutable,
-                ty: view.ty,
-                initializer: expr_to_hir(uir, view.initializer),
+                ty,
+                initializer: expr_to_hir(uir, view.initializer, types),
                 span,
             }
         }
         (InstTag::Return, InstData::UnOp(operand)) => {
-            hir::HirStmt::Return(Some(expr_to_hir(uir, operand)), span)
+            hir::HirStmt::Return(Some(expr_to_hir(uir, operand, types)), span)
         }
         (InstTag::ReturnVoid, _) => hir::HirStmt::Return(None, span),
         (InstTag::ExprStmt, InstData::UnOp(operand)) => {
-            hir::HirStmt::Expr(expr_to_hir(uir, operand), span)
+            hir::HirStmt::Expr(expr_to_hir(uir, operand, types), span)
         }
         (tag, data) => panic!(
             "uir_to_hir: instruction at %{} is not a statement (tag={:?}, data={:?})",
@@ -344,7 +366,7 @@ fn stmt_to_hir(uir: &Uir, r: InstRef) -> hir::HirStmt {
     }
 }
 
-fn expr_to_hir(uir: &Uir, r: InstRef) -> hir::HirExpr {
+fn expr_to_hir(uir: &Uir, r: InstRef, types: &[Option<TypeId>]) -> hir::HirExpr {
     let inst = uir.inst(r);
     let span = uir.span(r);
     let kind = match (inst.tag, inst.data) {
@@ -352,9 +374,10 @@ fn expr_to_hir(uir: &Uir, r: InstRef) -> hir::HirExpr {
         (InstTag::StrLiteral, InstData::Str(s)) => hir::HirExprKind::StrLiteral(s),
         (InstTag::BoolLiteral, InstData::Bool(v)) => hir::HirExprKind::BoolLiteral(v),
         (InstTag::Var, InstData::Var(s)) => hir::HirExprKind::Var(s),
-        (InstTag::Neg, InstData::UnOp(operand)) => {
-            hir::HirExprKind::UnaryOp(hir::UnaryOp::Neg, Box::new(expr_to_hir(uir, operand)))
-        }
+        (InstTag::Neg, InstData::UnOp(operand)) => hir::HirExprKind::UnaryOp(
+            hir::UnaryOp::Neg,
+            Box::new(expr_to_hir(uir, operand, types)),
+        ),
         (op, InstData::BinOp { lhs, rhs })
             if matches!(
                 op,
@@ -376,16 +399,19 @@ fn expr_to_hir(uir: &Uir, r: InstRef) -> hir::HirExpr {
                 _ => unreachable!(),
             };
             hir::HirExprKind::BinaryOp(
-                Box::new(expr_to_hir(uir, lhs)),
+                Box::new(expr_to_hir(uir, lhs, types)),
                 hir_op,
-                Box::new(expr_to_hir(uir, rhs)),
+                Box::new(expr_to_hir(uir, rhs, types)),
             )
         }
         (InstTag::Call, InstData::Extra(_)) => {
             let view = uir.call_view(r);
             hir::HirExprKind::Call(
                 view.name,
-                view.args.into_iter().map(|a| expr_to_hir(uir, a)).collect(),
+                view.args
+                    .into_iter()
+                    .map(|a| expr_to_hir(uir, a, types))
+                    .collect(),
             )
         }
         (tag, data) => panic!(
@@ -395,11 +421,8 @@ fn expr_to_hir(uir: &Uir, r: InstRef) -> hir::HirExpr {
             data
         ),
     };
-    hir::HirExpr {
-        kind,
-        ty: None,
-        span,
-    }
+    let ty = types.get(r.index()).copied().flatten();
+    hir::HirExpr { kind, ty, span }
 }
 
 // Suppress unused-warnings for `uir`-internal items the shim doesn't
@@ -436,7 +459,12 @@ mod tests {
         if sink.has_errors() {
             return Err(sink.into_diags());
         }
-        let hir = uir_to_hir(&uir);
+        // Empty types table — astgen tests assert that astgen alone
+        // leaves every expression's `ty` unresolved. Sema fills the
+        // table in production; see sema's tests for the typed shim
+        // exercising real type resolution.
+        let types: Vec<Option<TypeId>> = vec![None; uir.instructions.len()];
+        let hir = uir_to_hir_typed(&uir, &types);
         Ok((hir, pool))
     }
 

@@ -250,22 +250,23 @@ fn lower_and_analyze(
     source_name: &str,
 ) -> Result<hir::HirProgram, CompilerError> {
     let mut sink = DiagSink::new();
-    // Phase 3 commit 2: astgen emits the canonical UIR. Sema and
-    // codegen still drive HIR, so we reconstruct one through the
-    // (temporary) `uir_to_hir` shim. The shim disappears once sema
-    // (commit 3) and codegen (commit 4) consume UIR/TIR directly.
+    // Phase 3 commit 3: astgen emits UIR; sema consumes UIR and
+    // returns a per-instruction `TypeTable`. Codegen still drives
+    // HIR, so the typed shim `uir_to_hir_typed` reconstructs an
+    // equivalent typed tree from `(uir, types)`. Both the shim and
+    // the HIR layer disappear in commit 4 (codegen-on-UIR) and
+    // commit 5 (delete `hir.rs`).
     let uir = astgen::generate(program, pool, &mut sink);
-    let mut hir = astgen::uir_to_hir(&uir);
     // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
-    sema::analyze(&mut hir, pool, &mut sink);
+    let types = sema::analyze(&uir, pool, &mut sink);
     if sink.has_errors() {
         let diags = sink.into_diags();
         render_diags(&diags, input, source_name);
         return Err(CompilerError::Diagnostics(diags));
     }
-    Ok(hir)
+    Ok(astgen::uir_to_hir_typed(&uir, &types))
 }
 
 fn generate_and_display_ir(hir: &hir::HirProgram, pool: &InternPool) -> Result<(), CompilerError> {
