@@ -7,6 +7,11 @@ mod builtins;
 mod codegen;
 mod diag;
 mod errors;
+// HIR survives in the tree only as a test-time inspection target for
+// astgen / sema unit tests through `astgen::uir_to_hir_typed`. The
+// production pipeline (astgen → sema → codegen) is fully UIR-driven
+// after Phase 3 commit 4. Commit 5 deletes the module outright.
+#[cfg(test)]
 mod hir;
 mod indent;
 mod lexer;

@@ -1,5 +1,4 @@
-use crate::hir::TypeId;
-use crate::types::InternPool;
+use crate::types::{InternPool, TypeId};
 
 pub struct BuiltinFunction {
     pub name: &'static str,

@@ -1,3 +1,10 @@
+// HIR is a test-only inspection target after Phase 3 commit 4: only
+// astgen / sema unit tests reconstruct it via
+// `astgen::uir_to_hir_typed`. The dead-code lint flags fields the
+// tests destructure with `..` rather than bind — those reads don't
+// register. Allow until commit 5 deletes this file outright.
+#![allow(dead_code)]
+
 //! High-level IR.
 //!
 //! Identifiers, function names, and string-literal payloads are

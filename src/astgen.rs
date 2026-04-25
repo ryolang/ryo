@@ -23,10 +23,12 @@
 
 use crate::ast;
 use crate::diag::{Diag, DiagCode, DiagSink};
-use crate::hir;
 use crate::types::{InternPool, StringId, TypeId};
-use crate::uir::{
-    self, ExtraRange, FuncBody, Inst, InstData, InstRef, InstTag, Uir, UirBuilder, UirParam,
+use crate::uir::{InstRef, InstTag, Uir, UirBuilder, UirParam};
+#[cfg(test)]
+use crate::{
+    hir,
+    uir::{FuncBody, InstData},
 };
 use chumsky::span::{SimpleSpan, Span as _};
 
@@ -270,21 +272,18 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
     }
 }
 
-// ---------- Temporary UIR → HIR shim ----------
+// ---------- Temporary UIR → HIR shim (test-only) ----------
 //
 // Reconstructs the legacy tree-shaped `HirProgram` from a freshly
 // emitted `Uir` plus a sema-produced `types` side-table indexed by
-// [`InstRef`]. Exists only to keep `codegen` working while commit
-// 4 swaps it over to UIR/TIR. Deleted in commit 5 alongside
-// `src/hir.rs`.
-//
-// Astgen unit tests pass an all-`None` table to inspect the
-// untyped-by-construction shape; the pipeline driver passes the
-// real table from `sema::analyze`.
+// [`InstRef`]. Production codegen consumes UIR + the side-table
+// directly (Phase 3 commit 4); this shim survives only so astgen
+// and sema unit tests can keep matching against `HirStmt` /
+// `HirExpr` shapes while the cutover settles. Commit 5 deletes
+// the entire shim along with `src/hir.rs`.
 //
 // This is not a fast path — it allocates a fresh `HirExpr`/`HirStmt`
-// tree for every function. That's fine: nothing about Phase 3's
-// bottleneck profile depends on this code surviving.
+// tree for every function. That's fine: tests aren't hot.
 
 /// Rebuild a `HirProgram` from `uir` plus a `types` side-table
 /// produced by `sema::analyze`. `types[r.index()]` is the resolved
@@ -295,10 +294,12 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
 /// `VarDecl.ty` reads `types[var_decl_inst.index()]` (which sema
 /// fills with the post-annotation/inference resolved type). Other
 /// `HirExpr.ty` slots read `types[expr_inst.index()]`.
+#[cfg(test)]
 pub fn uir_to_hir_typed(uir: &Uir, types: &[Option<TypeId>]) -> hir::HirProgram {
     uir_to_hir_with_types(uir, types)
 }
 
+#[cfg(test)]
 fn uir_to_hir_with_types(uir: &Uir, types: &[Option<TypeId>]) -> hir::HirProgram {
     let functions = uir
         .func_bodies
@@ -308,6 +309,7 @@ fn uir_to_hir_with_types(uir: &Uir, types: &[Option<TypeId>]) -> hir::HirProgram
     hir::HirProgram { functions }
 }
 
+#[cfg(test)]
 fn body_to_hir(uir: &Uir, body: &FuncBody, types: &[Option<TypeId>]) -> hir::HirFunction {
     let params = body
         .params
@@ -330,6 +332,7 @@ fn body_to_hir(uir: &Uir, body: &FuncBody, types: &[Option<TypeId>]) -> hir::Hir
     }
 }
 
+#[cfg(test)]
 fn stmt_to_hir(uir: &Uir, r: InstRef, types: &[Option<TypeId>]) -> hir::HirStmt {
     let inst = uir.inst(r);
     let span = uir.span(r);
@@ -366,6 +369,7 @@ fn stmt_to_hir(uir: &Uir, r: InstRef, types: &[Option<TypeId>]) -> hir::HirStmt 
     }
 }
 
+#[cfg(test)]
 fn expr_to_hir(uir: &Uir, r: InstRef, types: &[Option<TypeId>]) -> hir::HirExpr {
     let inst = uir.inst(r);
     let span = uir.span(r);
@@ -424,12 +428,6 @@ fn expr_to_hir(uir: &Uir, r: InstRef, types: &[Option<TypeId>]) -> hir::HirExpr 
     let ty = types.get(r.index()).copied().flatten();
     hir::HirExpr { kind, ty, span }
 }
-
-// Suppress unused-warnings for `uir`-internal items the shim doesn't
-// touch directly. Keeping the imports above means once commit 3
-// drops the shim, the rest of the file is already UIR-shaped.
-#[allow(dead_code)]
-fn _phantom_uir_use(_: &Uir, _: &Inst, _: &ExtraRange, _: &uir::CallView) {}
 
 #[cfg(test)]
 mod tests {
