@@ -9,6 +9,7 @@
 //! so this stage is allocation-light: it copies handles around.
 
 use crate::ast;
+use crate::diag::{Diag, DiagCode, DiagSink};
 use crate::hir::*;
 use crate::types::{InternPool, StringId};
 use chumsky::span::{SimpleSpan, Span as _};
@@ -17,7 +18,13 @@ fn synthetic_span() -> Span {
     SimpleSpan::new((), 0..0)
 }
 
-pub fn lower(program: &ast::Program, pool: &mut InternPool) -> Result<HirProgram, String> {
+/// Lower an AST `Program` to HIR, accumulating diagnostics in `sink`.
+///
+/// Returns the lowered HIR even on error (using `pool.error_type()`
+/// for any annotation that failed to resolve) so subsequent passes
+/// can keep type-checking and surface their own diagnostics. The
+/// driver decides whether to proceed based on `sink.has_errors()`.
+pub fn lower(program: &ast::Program, pool: &mut InternPool, sink: &mut DiagSink) -> HirProgram {
     let mut func_defs: Vec<&ast::FunctionDef> = Vec::new();
     let mut top_level: Vec<&ast::Statement> = Vec::new();
 
@@ -33,26 +40,47 @@ pub fn lower(program: &ast::Program, pool: &mut InternPool) -> Result<HirProgram
     let has_explicit_main = func_defs.iter().any(|f| f.name.name == main_id);
 
     if has_explicit_main && !top_level.is_empty() {
-        return Err("Top-level statements are not allowed when fn main() is defined".to_string());
+        // Anchor the diagnostic on the first stray top-level stmt;
+        // pointing at "the program" with a 0..0 span is useless in
+        // a renderer.
+        let span = top_level[0].span;
+        sink.emit(Diag::error(
+            span,
+            DiagCode::TopLevelWithExplicitMain,
+            "top-level statements are not allowed when fn main() is defined",
+        ));
+        // Fall through and lower anyway; sema can still report
+        // problems inside `main`.
     }
 
     let mut functions = Vec::new();
     for func in &func_defs {
-        functions.push(lower_function_def(func, pool)?);
+        functions.push(lower_function_def(func, pool, sink));
     }
     if !has_explicit_main {
-        functions.push(lower_implicit_main(&top_level, main_id, pool)?);
+        // Synthesize an implicit `main` from top-level statements.
+        // User-defined helper functions still appear above;
+        // without this, calls to them in top-level code would
+        // dangle as "undefined function" errors in sema.
+        functions.push(lower_implicit_main(&top_level, main_id, pool, sink));
     }
 
-    Ok(HirProgram { functions })
+    HirProgram { functions }
 }
 
-fn resolve_type(name: StringId, pool: &InternPool) -> Result<TypeId, String> {
+fn resolve_type(name: StringId, span: Span, pool: &InternPool, sink: &mut DiagSink) -> TypeId {
     match pool.str(name) {
-        "int" => Ok(pool.int()),
-        "str" => Ok(pool.str_()),
-        "bool" => Ok(pool.bool_()),
-        other => Err(format!("Unknown type: '{}'", other)),
+        "int" => pool.int(),
+        "str" => pool.str_(),
+        "bool" => pool.bool_(),
+        other => {
+            sink.emit(Diag::error(
+                span,
+                DiagCode::UnknownType,
+                format!("unknown type: '{}'", other),
+            ));
+            pool.error_type()
+        }
     }
 }
 
@@ -60,10 +88,11 @@ fn lower_implicit_main(
     stmts: &[&ast::Statement],
     main_id: StringId,
     pool: &mut InternPool,
-) -> Result<HirFunction, String> {
+    sink: &mut DiagSink,
+) -> HirFunction {
     let mut body = Vec::new();
     for stmt in stmts {
-        lower_stmt(stmt, pool, &mut body)?;
+        lower_stmt(stmt, pool, sink, &mut body);
     }
 
     let int_ty = pool.int();
@@ -76,59 +105,59 @@ fn lower_implicit_main(
         synthetic_span(),
     ));
 
-    Ok(HirFunction {
+    HirFunction {
         name: main_id,
         params: vec![],
         return_type: int_ty,
         body,
-    })
+    }
 }
 
 fn lower_function_def(
     func: &ast::FunctionDef,
     pool: &mut InternPool,
-) -> Result<HirFunction, String> {
+    sink: &mut DiagSink,
+) -> HirFunction {
     let params: Vec<HirParam> = func
         .params
         .iter()
-        .map(|p| {
-            Ok(HirParam {
-                name: p.name.name,
-                ty: resolve_type(p.type_annotation.name, pool)?,
-            })
+        .map(|p| HirParam {
+            name: p.name.name,
+            ty: resolve_type(p.type_annotation.name, p.type_annotation.span, pool, sink),
         })
-        .collect::<Result<_, String>>()?;
+        .collect();
 
     let return_type = match &func.return_type {
-        Some(ty) => resolve_type(ty.name, pool)?,
+        Some(ty) => resolve_type(ty.name, ty.span, pool, sink),
         None => pool.void(),
     };
 
     let mut body = Vec::new();
     for stmt in &func.body {
-        lower_stmt(stmt, pool, &mut body)?;
+        lower_stmt(stmt, pool, sink, &mut body);
     }
 
-    Ok(HirFunction {
+    HirFunction {
         name: func.name.name,
         params,
         return_type,
         body,
-    })
+    }
 }
 
 fn lower_stmt(
     stmt: &ast::Statement,
     pool: &mut InternPool,
+    sink: &mut DiagSink,
     out: &mut Vec<HirStmt>,
-) -> Result<(), String> {
+) {
     match &stmt.kind {
         ast::StmtKind::VarDecl(decl) => {
             let initializer = lower_expr(&decl.initializer);
-            let ty = match &decl.type_annotation {
-                Some(ann) => Some(resolve_type(ann.name, pool)?),
-                None => None,
-            };
+            let ty = decl
+                .type_annotation
+                .as_ref()
+                .map(|ann| resolve_type(ann.name, ann.span, pool, sink));
             out.push(HirStmt::VarDecl {
                 name: decl.name.name,
                 mutable: decl.mutable,
@@ -147,10 +176,13 @@ fn lower_stmt(
             out.push(HirStmt::Expr(lower_expr(expr), stmt.span));
         }
         ast::StmtKind::FunctionDef(_) => {
-            return Err("Nested function definitions are not supported".to_string());
+            sink.emit(Diag::error(
+                stmt.span,
+                DiagCode::NestedFunctionDef,
+                "nested function definitions are not supported",
+            ));
         }
     }
-    Ok(())
 }
 
 fn lower_expr(expr: &ast::Expression) -> HirExpr {
@@ -193,17 +225,27 @@ mod tests {
     use chumsky::Parser;
     use chumsky::input::{Input, Stream};
 
-    fn parse_and_lower(input: &str) -> Result<(HirProgram, InternPool), String> {
+    fn parse_and_lower(input: &str) -> Result<(HirProgram, InternPool), Vec<Diag>> {
+        // Phase-2 lex pipeline: logos + indent + intern in one
+        // pass; identifiers come back as `StringId`. Phase-1
+        // diagnostics are still threaded through `DiagSink` so
+        // ast_lower can keep going past errors.
         let mut pool = InternPool::new();
-        let tokens = lex(input, &mut pool).map_err(|e| e.message)?;
+        let tokens = lex(input, &mut pool).expect("lex ok");
         let token_stream =
             Stream::from_iter(tokens).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
         let program = program_parser()
             .parse(token_stream)
             .into_result()
-            .map_err(|errs| format!("Parse errors: {:?}", errs))?;
-        let hir = lower(&program, &mut pool)?;
-        Ok((hir, pool))
+            .expect("parse ok");
+
+        let mut sink = DiagSink::new();
+        let hir = lower(&program, &mut pool, &mut sink);
+        if sink.has_errors() {
+            Err(sink.into_diags())
+        } else {
+            Ok((hir, pool))
+        }
     }
 
     fn assert_all_expr_types_unresolved(hir: &HirProgram) {
@@ -294,8 +336,12 @@ mod tests {
 
     #[test]
     fn explicit_main_with_top_level_error() {
-        let err = parse_and_lower("x = 42\n\nfn main() -> int:\n\treturn 0\n").unwrap_err();
-        assert!(err.contains("Top-level statements are not allowed"));
+        let diags = parse_and_lower("x = 42\n\nfn main() -> int:\n\treturn 0\n").unwrap_err();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == DiagCode::TopLevelWithExplicitMain)
+        );
     }
 
     #[test]
@@ -310,8 +356,8 @@ mod tests {
 
     #[test]
     fn unknown_type_annotation_rejected() {
-        let err = parse_and_lower("x: nope = 1").unwrap_err();
-        assert!(err.contains("Unknown type"));
+        let diags = parse_and_lower("x: nope = 1").unwrap_err();
+        assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod ast;
 mod ast_lower;
 mod builtins;
 mod codegen;
+mod diag;
 mod errors;
 mod hir;
 mod indent;

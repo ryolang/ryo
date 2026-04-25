@@ -5,9 +5,16 @@
 //!
 //! Scopes and signatures are keyed on `StringId`, not `String`:
 //! identifiers are interned once at lex time and propagated as
-//! `Copy` handles all the way through codegen.
+//! `Copy` handles all the way through codegen (Phase 2).
+//!
+//! Errors are accumulated through a `DiagSink` (Phase 1) so analysis
+//! can continue past the first problem and surface several in one
+//! run. A failed expression substitutes `pool.error_type()` for its
+//! result type and downstream checks treat that sentinel as
+//! compatible with anything via `InternPool::compatible`.
 
 use crate::builtins;
+use crate::diag::{Diag, DiagCode, DiagSink};
 use crate::hir::*;
 use crate::types::{InternPool, StringId, TypeKind};
 use std::collections::HashMap;
@@ -42,7 +49,15 @@ impl<'a> Scope<'a> {
     }
 }
 
-pub fn analyze(program: &mut HirProgram, pool: &mut InternPool) -> Result<(), String> {
+/// Analyze `program`, threading types onto every `HirExpr` and
+/// emitting diagnostics into `sink` for any problem found.
+///
+/// Sema continues past errors: a single bad expression substitutes
+/// `pool.error_type()` for its result type and downstream checks
+/// treat that sentinel as compatible with anything (see
+/// `InternPool::compatible`). The driver consults
+/// `sink.has_errors()` to decide whether to proceed to codegen.
+pub fn analyze(program: &mut HirProgram, pool: &mut InternPool, sink: &mut DiagSink) {
     let mut signatures: HashMap<StringId, FunctionSig> = HashMap::new();
     for func in &program.functions {
         signatures.insert(
@@ -55,17 +70,16 @@ pub fn analyze(program: &mut HirProgram, pool: &mut InternPool) -> Result<(), St
     }
 
     for func in &mut program.functions {
-        analyze_function(func, &signatures, pool)?;
+        analyze_function(func, &signatures, pool, sink);
     }
-
-    Ok(())
 }
 
 fn analyze_function(
     func: &mut HirFunction,
     signatures: &HashMap<StringId, FunctionSig>,
     pool: &mut InternPool,
-) -> Result<(), String> {
+    sink: &mut DiagSink,
+) {
     let mut scope = Scope::new();
     for param in &func.params {
         scope.insert(param.name, param.ty);
@@ -73,10 +87,8 @@ fn analyze_function(
 
     let fn_return_type = func.return_type;
     for stmt in &mut func.body {
-        analyze_stmt(stmt, &mut scope, signatures, pool, fn_return_type)?;
+        analyze_stmt(stmt, &mut scope, signatures, pool, sink, fn_return_type);
     }
-
-    Ok(())
 }
 
 fn analyze_stmt(
@@ -84,25 +96,37 @@ fn analyze_stmt(
     scope: &mut Scope,
     signatures: &HashMap<StringId, FunctionSig>,
     pool: &mut InternPool,
+    sink: &mut DiagSink,
     fn_return_type: TypeId,
-) -> Result<(), String> {
+) {
     match stmt {
         HirStmt::VarDecl {
             name,
             ty,
             initializer,
-            ..
+            span: _,
+            mutable: _,
         } => {
-            analyze_expr(initializer, scope, signatures, pool)?;
+            analyze_expr(initializer, scope, signatures, pool, sink);
             let inferred = initializer.expect_ty();
             let resolved = match *ty {
                 Some(annotated) if !pool.compatible(annotated, inferred) => {
-                    return Err(format!(
-                        "type mismatch: '{}' annotated '{}', initializer is '{}'",
-                        pool.str(*name),
-                        pool.display(annotated),
-                        pool.display(inferred),
+                    // Anchor the squiggle on the offending value
+                    // (the initializer) rather than on the whole
+                    // `[mut] name [: type] = expr` decl span — the
+                    // type came from the annotation but the
+                    // *mismatch* is the initializer's fault.
+                    sink.emit(Diag::error(
+                        initializer.span,
+                        DiagCode::TypeMismatch,
+                        format!(
+                            "type mismatch: '{}' annotated '{}', initializer is '{}'",
+                            pool.str(*name),
+                            pool.display(annotated),
+                            pool.display(inferred),
+                        ),
                     ));
+                    annotated
                 }
                 Some(annotated) => annotated,
                 None => inferred,
@@ -110,36 +134,48 @@ fn analyze_stmt(
             *ty = Some(resolved);
             scope.insert(*name, resolved);
         }
-        HirStmt::Return(Some(expr), _) => {
-            analyze_expr(expr, scope, signatures, pool)?;
-            if fn_return_type == pool.void() {
-                return Err(format!(
-                    "cannot return a value from a function with return type 'void' (got '{}')",
-                    pool.display(expr.expect_ty()),
-                ));
-            }
+        HirStmt::Return(Some(expr), span) => {
+            analyze_expr(expr, scope, signatures, pool, sink);
             let actual = expr.expect_ty();
-            if !pool.compatible(actual, fn_return_type) {
-                return Err(format!(
-                    "return type mismatch: function expects '{}', got '{}'",
-                    pool.display(fn_return_type),
-                    pool.display(actual),
+            if fn_return_type == pool.void() {
+                if !pool.is_error(actual) {
+                    sink.emit(Diag::error(
+                        *span,
+                        DiagCode::TypeMismatch,
+                        format!(
+                            "cannot return a value from a function with return type 'void' (got '{}')",
+                            pool.display(actual),
+                        ),
+                    ));
+                }
+            } else if !pool.compatible(actual, fn_return_type) {
+                sink.emit(Diag::error(
+                    *span,
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "return type mismatch: function expects '{}', got '{}'",
+                        pool.display(fn_return_type),
+                        pool.display(actual),
+                    ),
                 ));
             }
         }
-        HirStmt::Return(None, _) => {
-            if fn_return_type != pool.void() {
-                return Err(format!(
-                    "missing return value: function expects '{}'",
-                    pool.display(fn_return_type),
+        HirStmt::Return(None, span) => {
+            if fn_return_type != pool.void() && !pool.is_error(fn_return_type) {
+                sink.emit(Diag::error(
+                    *span,
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "missing return value: function expects '{}'",
+                        pool.display(fn_return_type),
+                    ),
                 ));
             }
         }
         HirStmt::Expr(expr, _) => {
-            analyze_expr(expr, scope, signatures, pool)?;
+            analyze_expr(expr, scope, signatures, pool, sink);
         }
     }
-    Ok(())
 }
 
 fn analyze_expr(
@@ -147,134 +183,191 @@ fn analyze_expr(
     scope: &Scope,
     signatures: &HashMap<StringId, FunctionSig>,
     pool: &mut InternPool,
-) -> Result<(), String> {
+    sink: &mut DiagSink,
+) {
+    let span = expr.span;
     let ty = match &mut expr.kind {
         HirExprKind::IntLiteral(_) => pool.int(),
         HirExprKind::StrLiteral(_) => pool.str_(),
         HirExprKind::BoolLiteral(_) => pool.bool_(),
-        HirExprKind::Var(name) => scope
-            .lookup(*name)
-            .ok_or_else(|| format!("Undefined variable: '{}'", pool.str(*name)))?,
+        HirExprKind::Var(name) => match scope.lookup(*name) {
+            Some(t) => t,
+            None => {
+                sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedVariable,
+                    format!("undefined variable: '{}'", pool.str(*name)),
+                ));
+                pool.error_type()
+            }
+        },
         HirExprKind::BinaryOp(lhs, op, rhs) => {
-            analyze_expr(lhs, scope, signatures, pool)?;
-            analyze_expr(rhs, scope, signatures, pool)?;
+            analyze_expr(lhs, scope, signatures, pool, sink);
+            analyze_expr(rhs, scope, signatures, pool, sink);
             let lhs_ty = lhs.expect_ty();
             let rhs_ty = rhs.expect_ty();
             if !pool.compatible(lhs_ty, rhs_ty) {
-                return Err(format!(
-                    "type mismatch in '{}': left is '{}', right is '{}'",
-                    op,
-                    pool.display(lhs_ty),
-                    pool.display(rhs_ty),
+                sink.emit(Diag::error(
+                    span,
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "type mismatch in '{}': left is '{}', right is '{}'",
+                        op,
+                        pool.display(lhs_ty),
+                        pool.display(rhs_ty),
+                    ),
                 ));
-            }
-
-            let kind_ty = if pool.is_error(lhs_ty) {
-                rhs_ty
+                pool.error_type()
             } else {
-                lhs_ty
-            };
-            let is_equality = matches!(op, BinaryOp::Eq | BinaryOp::NotEq);
-            if is_equality {
-                match pool.kind(kind_ty) {
-                    TypeKind::Int | TypeKind::Bool => pool.bool_(),
-                    TypeKind::Error => pool.error_type(),
-                    TypeKind::Str => {
-                        return Err(format!(
-                            "equality operator '{}' not supported for type 'str' (yet)",
-                            op,
-                        ));
+                // Pick the non-error operand for the kind check, if any.
+                let kind_ty = if pool.is_error(lhs_ty) {
+                    rhs_ty
+                } else {
+                    lhs_ty
+                };
+                let is_equality = matches!(op, BinaryOp::Eq | BinaryOp::NotEq);
+                if is_equality {
+                    match pool.kind(kind_ty) {
+                        TypeKind::Int | TypeKind::Bool => pool.bool_(),
+                        TypeKind::Error => pool.error_type(),
+                        TypeKind::Str => {
+                            sink.emit(Diag::error(
+                                span,
+                                DiagCode::UnsupportedOperator,
+                                format!(
+                                    "equality operator '{}' not supported for type 'str' (yet)",
+                                    op,
+                                ),
+                            ));
+                            pool.error_type()
+                        }
+                        TypeKind::Void | TypeKind::Tuple => {
+                            sink.emit(Diag::error(
+                                span,
+                                DiagCode::UnsupportedOperator,
+                                format!(
+                                    "equality operator '{}' not supported for type '{}'",
+                                    op,
+                                    pool.display(kind_ty),
+                                ),
+                            ));
+                            pool.error_type()
+                        }
                     }
-                    TypeKind::Void | TypeKind::Tuple => {
-                        return Err(format!(
-                            "equality operator '{}' not supported for type '{}'",
-                            op,
-                            pool.display(kind_ty),
-                        ));
-                    }
-                }
-            } else {
-                match pool.kind(kind_ty) {
-                    TypeKind::Int => pool.int(),
-                    TypeKind::Error => pool.error_type(),
-                    _ => {
-                        return Err(format!(
-                            "arithmetic operator '{}' not supported for type '{}'",
-                            op,
-                            pool.display(kind_ty),
-                        ));
+                } else {
+                    match pool.kind(kind_ty) {
+                        TypeKind::Int => pool.int(),
+                        TypeKind::Error => pool.error_type(),
+                        _ => {
+                            sink.emit(Diag::error(
+                                span,
+                                DiagCode::UnsupportedOperator,
+                                format!(
+                                    "arithmetic operator '{}' not supported for type '{}'",
+                                    op,
+                                    pool.display(kind_ty),
+                                ),
+                            ));
+                            pool.error_type()
+                        }
                     }
                 }
             }
         }
         HirExprKind::UnaryOp(UnaryOp::Neg, sub) => {
-            analyze_expr(sub, scope, signatures, pool)?;
+            analyze_expr(sub, scope, signatures, pool, sink);
             let sub_ty = sub.expect_ty();
             match pool.kind(sub_ty) {
                 TypeKind::Int => pool.int(),
                 TypeKind::Error => pool.error_type(),
                 _ => {
-                    return Err(format!(
-                        "unary operator '-' not supported for type '{}'",
-                        pool.display(sub_ty),
+                    sink.emit(Diag::error(
+                        span,
+                        DiagCode::UnsupportedOperator,
+                        format!(
+                            "unary operator '-' not supported for type '{}'",
+                            pool.display(sub_ty),
+                        ),
                     ));
+                    pool.error_type()
                 }
             }
         }
         HirExprKind::Call(name, args) => {
             for arg in args.iter_mut() {
-                analyze_expr(arg, scope, signatures, pool)?;
+                analyze_expr(arg, scope, signatures, pool, sink);
             }
             let name_str = pool.str(*name);
             if let Some(builtin) = builtins::lookup(name_str) {
-                check_builtin_call(name_str, args)?;
+                check_builtin_call(name_str, args, span, sink);
                 builtin.return_type(pool)
             } else if let Some(sig) = signatures.get(name) {
                 if args.len() != sig.params.len() {
-                    return Err(format!(
-                        "call to '{}' has wrong arity: expected {} argument(s), got {}",
-                        pool.str(*name),
-                        sig.params.len(),
-                        args.len(),
-                    ));
-                }
-                for (idx, (arg, &expected)) in args.iter().zip(sig.params.iter()).enumerate() {
-                    let actual = arg.expect_ty();
-                    if !pool.compatible(actual, expected) {
-                        return Err(format!(
-                            "call to '{}': argument {} has type '{}', expected '{}'",
+                    sink.emit(Diag::error(
+                        span,
+                        DiagCode::ArityMismatch,
+                        format!(
+                            "call to '{}' has wrong arity: expected {} argument(s), got {}",
                             pool.str(*name),
-                            idx + 1,
-                            pool.display(actual),
-                            pool.display(expected),
-                        ));
+                            sig.params.len(),
+                            args.len(),
+                        ),
+                    ));
+                } else {
+                    for (idx, (arg, &expected)) in args.iter().zip(sig.params.iter()).enumerate() {
+                        let actual = arg.expect_ty();
+                        if !pool.compatible(actual, expected) {
+                            sink.emit(Diag::error(
+                                arg.span,
+                                DiagCode::TypeMismatch,
+                                format!(
+                                    "call to '{}': argument {} has type '{}', expected '{}'",
+                                    pool.str(*name),
+                                    idx + 1,
+                                    pool.display(actual),
+                                    pool.display(expected),
+                                ),
+                            ));
+                        }
                     }
                 }
                 sig.return_type
             } else {
-                return Err(format!("Undefined function: '{}'", pool.str(*name)));
+                sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedFunction,
+                    format!("undefined function: '{}'", pool.str(*name)),
+                ));
+                pool.error_type()
             }
         }
     };
     expr.ty = Some(ty);
-    Ok(())
 }
 
-/// Front-end validation for builtin calls. These checks go away once
-/// `print` moves to a runtime crate (ISSUES.md I-006).
-fn check_builtin_call(name: &str, args: &[HirExpr]) -> Result<(), String> {
+/// Front-end validation for builtin calls.
+///
+/// These checks are builtin-specific and temporary: once `print`
+/// moves to a runtime crate and is called through a normal
+/// signature (see ISSUES.md I-006), they go away.
+fn check_builtin_call(name: &str, args: &[HirExpr], span: Span, sink: &mut DiagSink) {
     if name == "print" {
         if args.len() != 1 {
-            return Err(format!(
-                "print() takes exactly 1 argument, got {}",
-                args.len()
+            sink.emit(Diag::error(
+                span,
+                DiagCode::ArityMismatch,
+                format!("print() takes exactly 1 argument, got {}", args.len()),
             ));
+            return;
         }
         if !matches!(args[0].kind, HirExprKind::StrLiteral(_)) {
-            return Err("print() argument must be a string literal".to_string());
+            sink.emit(Diag::error(
+                args[0].span,
+                DiagCode::BuiltinArgKind,
+                "print() argument must be a string literal",
+            ));
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -286,18 +379,35 @@ mod tests {
     use chumsky::Parser;
     use chumsky::input::{Input, Stream};
 
-    fn run(input: &str) -> Result<(HirProgram, InternPool), String> {
+    fn run(input: &str) -> Result<(HirProgram, InternPool), Vec<Diag>> {
         let mut pool = InternPool::new();
-        let tokens = lex(input, &mut pool).map_err(|e| e.message)?;
+        let tokens = lex(input, &mut pool).expect("lex ok");
         let token_stream =
             Stream::from_iter(tokens).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
         let program = program_parser()
             .parse(token_stream)
             .into_result()
-            .map_err(|errs| format!("Parse errors: {:?}", errs))?;
-        let mut hir = ast_lower::lower(&program, &mut pool)?;
-        analyze(&mut hir, &mut pool)?;
-        Ok((hir, pool))
+            .expect("parse ok");
+
+        let mut sink = DiagSink::new();
+        let mut hir = ast_lower::lower(&program, &mut pool, &mut sink);
+        if sink.has_errors() {
+            return Err(sink.into_diags());
+        }
+        analyze(&mut hir, &mut pool, &mut sink);
+        if sink.has_errors() {
+            Err(sink.into_diags())
+        } else {
+            Ok((hir, pool))
+        }
+    }
+
+    fn first_msg(diags: &[Diag]) -> &str {
+        &diags[0].message
+    }
+
+    fn any_code(diags: &[Diag], code: DiagCode) -> bool {
+        diags.iter().any(|d| d.code == code)
     }
 
     fn assert_all_expr_types_resolved(hir: &HirProgram) {
@@ -381,14 +491,36 @@ mod tests {
 
     #[test]
     fn undefined_variable_rejected() {
-        let err = run("x = y").unwrap_err();
-        assert!(err.contains("Undefined variable"));
+        let diags = run("x = y").unwrap_err();
+        assert!(any_code(&diags, DiagCode::UndefinedVariable));
     }
 
     #[test]
     fn undefined_function_rejected() {
-        let err = run("x = not_a_fn()").unwrap_err();
-        assert!(err.contains("Undefined function"));
+        let diags = run("x = not_a_fn()").unwrap_err();
+        assert!(any_code(&diags, DiagCode::UndefinedFunction));
+    }
+
+    #[test]
+    fn sema_continues_past_first_error_and_collects_multiple() {
+        // Two independent undefined variables in one function.
+        let diags = run("a = x\nb = y\n").unwrap_err();
+        let undefs = diags
+            .iter()
+            .filter(|d| d.code == DiagCode::UndefinedVariable)
+            .count();
+        assert_eq!(undefs, 2, "got: {:#?}", diags);
+    }
+
+    #[test]
+    fn unknown_type_does_not_cascade() {
+        let diags = run("x: nope = 1").unwrap_err();
+        assert!(any_code(&diags, DiagCode::UnknownType));
+        assert!(
+            !any_code(&diags, DiagCode::TypeMismatch),
+            "unexpected cascade: {:#?}",
+            diags
+        );
     }
 
     #[test]
@@ -452,20 +584,43 @@ mod tests {
 
     #[test]
     fn mixed_type_equality_rejected() {
-        let err = run("x = 1 == true").unwrap_err();
-        assert!(err.contains("type mismatch in '=='"));
+        let diags = run("x = 1 == true").unwrap_err();
+        assert!(any_code(&diags, DiagCode::TypeMismatch));
+        assert!(first_msg(&diags).contains("type mismatch in '=='"));
     }
 
     #[test]
     fn string_equality_rejected() {
-        let err = run("x = \"a\" == \"b\"").unwrap_err();
-        assert!(err.contains("not supported for type 'str'") && err.contains("(yet)"));
+        let diags = run("x = \"a\" == \"b\"").unwrap_err();
+        assert!(any_code(&diags, DiagCode::UnsupportedOperator));
+        assert!(
+            first_msg(&diags).contains("not supported for type 'str'")
+                && first_msg(&diags).contains("(yet)")
+        );
     }
 
     #[test]
     fn bool_arithmetic_rejected() {
-        let err = run("x = true + 1").unwrap_err();
-        assert!(err.contains("type mismatch"));
+        let diags = run("x = true + 1").unwrap_err();
+        assert!(any_code(&diags, DiagCode::TypeMismatch));
+    }
+
+    #[test]
+    fn bool_arithmetic_same_type_rejected_as_unsupported_op() {
+        // Both operands are bool: compatibility check passes,
+        // we hit the non-equality arithmetic kind-check arm — which
+        // should fire UnsupportedOperator, not TypeMismatch.
+        let diags = run("x = true + false").unwrap_err();
+        assert!(
+            any_code(&diags, DiagCode::UnsupportedOperator),
+            "expected UnsupportedOperator, got: {:#?}",
+            diags
+        );
+        assert!(
+            !any_code(&diags, DiagCode::TypeMismatch),
+            "unexpected TypeMismatch: {:#?}",
+            diags
+        );
     }
 
     #[test]
@@ -484,65 +639,76 @@ mod tests {
 
     #[test]
     fn print_with_non_literal_rejected_in_sema() {
-        let err = run("x = \"hi\"\n_ = print(x)").unwrap_err();
-        assert!(err.contains("print() argument must be a string literal"));
+        let diags = run("x = \"hi\"\n_ = print(x)").unwrap_err();
+        assert!(any_code(&diags, DiagCode::BuiltinArgKind));
     }
 
     #[test]
     fn print_arity_rejected_in_sema() {
-        let err = run("_ = print(\"a\", \"b\")").unwrap_err();
-        assert!(err.contains("print() takes exactly 1 argument"));
+        let diags = run("_ = print(\"a\", \"b\")").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ArityMismatch));
     }
 
     #[test]
     fn return_type_mismatch_rejected() {
-        let err = run("fn main() -> int:\n\treturn \"hello\"\n").unwrap_err();
-        assert!(
-            err.contains("return type mismatch") && err.contains("'int'") && err.contains("'str'")
-        );
+        let diags = run("fn main() -> int:\n\treturn \"hello\"\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::TypeMismatch));
+        let m = first_msg(&diags);
+        assert!(m.contains("return type mismatch") && m.contains("'int'") && m.contains("'str'"));
     }
 
     #[test]
     fn missing_return_value_rejected() {
-        let err = run("fn f() -> int:\n\treturn\n\nfn main() -> int:\n\treturn 0\n").unwrap_err();
-        assert!(err.contains("missing return value"));
+        let diags = run("fn f() -> int:\n\treturn\n\nfn main() -> int:\n\treturn 0\n").unwrap_err();
+        assert!(first_msg(&diags).contains("missing return value"));
     }
 
     #[test]
     fn return_value_from_void_function_rejected() {
-        let err = run("fn g():\n\treturn 1\n\nfn main() -> int:\n\treturn 0\n").unwrap_err();
-        assert!(err.contains("cannot return a value from a function with return type 'void'"));
+        let diags = run("fn g():\n\treturn 1\n\nfn main() -> int:\n\treturn 0\n").unwrap_err();
+        assert!(
+            first_msg(&diags)
+                .contains("cannot return a value from a function with return type 'void'")
+        );
     }
 
     #[test]
     fn call_arity_mismatch_rejected() {
         let code = "fn add(a: int, b: int) -> int:\n\treturn a + b\n\nfn main() -> int:\n\treturn add(1, 2, 3)\n";
-        let err = run(code).unwrap_err();
-        assert!(err.contains("wrong arity") && err.contains("expected 2") && err.contains("got 3"));
+        let diags = run(code).unwrap_err();
+        assert!(any_code(&diags, DiagCode::ArityMismatch));
+        let m = first_msg(&diags);
+        assert!(m.contains("wrong arity") && m.contains("expected 2") && m.contains("got 3"));
     }
 
     #[test]
     fn call_argument_type_mismatch_rejected() {
         let code = "fn f(a: int) -> int:\n\treturn a\n\nfn main() -> int:\n\treturn f(true)\n";
-        let err = run(code).unwrap_err();
-        assert!(err.contains("argument 1") && err.contains("'bool'") && err.contains("'int'"));
+        let diags = run(code).unwrap_err();
+        assert!(any_code(&diags, DiagCode::TypeMismatch));
+        let m = first_msg(&diags);
+        assert!(m.contains("argument 1") && m.contains("'bool'") && m.contains("'int'"));
     }
 
     #[test]
     fn vardecl_annotation_initializer_mismatch_rejected() {
-        let err = run("x: int = \"hello\"").unwrap_err();
+        let diags = run("x: int = \"hello\"").unwrap_err();
+        assert!(any_code(&diags, DiagCode::TypeMismatch));
+        let m = first_msg(&diags);
         assert!(
-            err.contains("type mismatch")
-                && err.contains("'x'")
-                && err.contains("'int'")
-                && err.contains("'str'")
+            m.contains("type mismatch")
+                && m.contains("'x'")
+                && m.contains("'int'")
+                && m.contains("'str'")
         );
     }
 
     #[test]
     fn neg_on_bool_rejected() {
-        let err = run("x = -true").unwrap_err();
-        assert!(err.contains("unary operator '-'") && err.contains("'bool'"));
+        let diags = run("x = -true").unwrap_err();
+        assert!(any_code(&diags, DiagCode::UnsupportedOperator));
+        let m = first_msg(&diags);
+        assert!(m.contains("unary operator '-'") && m.contains("'bool'"));
     }
 
     #[test]

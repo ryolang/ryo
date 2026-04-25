@@ -110,9 +110,12 @@ pub enum TypeKind {
     Int,
     /// Placeholder; the slice ABI is a separate change.
     Str,
-    /// Resolution-failure sentinel. Sema substitutes this for any
-    /// expression whose type can't be determined so downstream
-    /// checks don't cascade. See `InternPool::compatible`.
+    /// Sentinel for resolution failure. Sema substitutes this in for
+    /// any expression whose type could not be determined (unknown
+    /// variable, unknown type annotation, etc.) so that downstream
+    /// checks keep running without cascading. Type comparisons treat
+    /// `Error` as compatible with anything; see
+    /// [`InternPool::is_error`] / [`InternPool::compatible`].
     Error,
     /// Variable-arity tuple. Reserved variant proving the
     /// sidecar-`extra` encoding works; not currently constructible
@@ -422,5 +425,49 @@ mod tests {
         let u = pool.intern_str("ηλο 🌍");
         assert_eq!(pool.str(e), "");
         assert_eq!(pool.str(u), "ηλο 🌍");
+    }
+
+    #[test]
+    fn error_type_is_distinct_from_primitives() {
+        let pool = InternPool::new();
+        let err = pool.error_type();
+        assert_ne!(err, pool.void());
+        assert_ne!(err, pool.bool_());
+        assert_ne!(err, pool.int());
+        assert_ne!(err, pool.str_());
+        // Stable across repeated calls.
+        assert_eq!(err, pool.error_type());
+    }
+
+    #[test]
+    fn is_error_only_true_for_error_sentinel() {
+        let pool = InternPool::new();
+        assert!(pool.is_error(pool.error_type()));
+        assert!(!pool.is_error(pool.int()));
+        assert!(!pool.is_error(pool.bool_()));
+        assert!(!pool.is_error(pool.void()));
+        assert!(!pool.is_error(pool.str_()));
+    }
+
+    #[test]
+    fn compatible_is_reflexive_and_distinguishes_primitives() {
+        let pool = InternPool::new();
+        assert!(pool.compatible(pool.int(), pool.int()));
+        assert!(pool.compatible(pool.bool_(), pool.bool_()));
+        assert!(!pool.compatible(pool.int(), pool.bool_()));
+        assert!(!pool.compatible(pool.str_(), pool.int()));
+    }
+
+    #[test]
+    fn compatible_absorbs_error_sentinel_in_either_position() {
+        let pool = InternPool::new();
+        let err = pool.error_type();
+        // Symmetry: Error compatible with every primitive on both sides.
+        for &t in &[pool.int(), pool.bool_(), pool.str_(), pool.void()] {
+            assert!(pool.compatible(err, t), "Error vs {:?}", pool.kind(t));
+            assert!(pool.compatible(t, err), "{:?} vs Error", pool.kind(t));
+        }
+        // Error vs Error is also compatible (trivially via reflexivity).
+        assert!(pool.compatible(err, err));
     }
 }
