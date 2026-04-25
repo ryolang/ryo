@@ -41,6 +41,13 @@ pub enum TypeKind {
     Int,
     /// Placeholder; the slice ABI is a separate change.
     Str,
+    /// Sentinel for resolution failure. Sema substitutes this in for
+    /// any expression whose type could not be determined (unknown
+    /// variable, unknown type annotation, etc.) so that downstream
+    /// checks keep running without cascading. Type comparisons treat
+    /// `Error` as compatible with anything; see
+    /// [`InternPool::is_error`] / [`InternPool::compatible`].
+    Error,
 }
 
 /// Canonical type pool. One long-lived instance per compile, threaded
@@ -54,6 +61,7 @@ pub struct InternPool {
     bool_: TypeId,
     int: TypeId,
     str_: TypeId,
+    error: TypeId,
 }
 
 impl InternPool {
@@ -65,11 +73,13 @@ impl InternPool {
             bool_: TypeId(0),
             int: TypeId(0),
             str_: TypeId(0),
+            error: TypeId(0),
         };
         pool.void = pool.intern(TypeKind::Void);
         pool.bool_ = pool.intern(TypeKind::Bool);
         pool.int = pool.intern(TypeKind::Int);
         pool.str_ = pool.intern(TypeKind::Str);
+        pool.error = pool.intern(TypeKind::Error);
         pool
     }
 
@@ -112,6 +122,25 @@ impl InternPool {
     pub fn str_(&self) -> TypeId {
         self.str_
     }
+    /// Sentinel returned when type resolution fails. See
+    /// [`TypeKind::Error`] for semantics.
+    pub fn error_type(&self) -> TypeId {
+        self.error
+    }
+
+    /// Whether `id` is the resolution-failure sentinel.
+    pub fn is_error(&self, id: TypeId) -> bool {
+        id == self.error
+    }
+
+    /// Compatibility predicate that absorbs the `Error` sentinel.
+    ///
+    /// Sema uses this anywhere it would otherwise emit a
+    /// type-mismatch diagnostic, so a single failure upstream
+    /// doesn't cascade into a wave of follow-on errors.
+    pub fn compatible(&self, a: TypeId, b: TypeId) -> bool {
+        a == b || self.is_error(a) || self.is_error(b)
+    }
 }
 
 impl Default for InternPool {
@@ -132,6 +161,7 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::Bool => write!(f, "bool"),
             TypeKind::Int => write!(f, "int"),
             TypeKind::Str => write!(f, "str"),
+            TypeKind::Error => write!(f, "<error>"),
         }
     }
 }
@@ -181,5 +211,49 @@ mod tests {
         assert_eq!(pool.kind(pool.bool_()), &TypeKind::Bool);
         assert_eq!(pool.kind(pool.str_()), &TypeKind::Str);
         assert_eq!(pool.kind(pool.void()), &TypeKind::Void);
+    }
+
+    #[test]
+    fn error_type_is_distinct_from_primitives() {
+        let pool = InternPool::new();
+        let err = pool.error_type();
+        assert_ne!(err, pool.void());
+        assert_ne!(err, pool.bool_());
+        assert_ne!(err, pool.int());
+        assert_ne!(err, pool.str_());
+        // Stable across repeated calls.
+        assert_eq!(err, pool.error_type());
+    }
+
+    #[test]
+    fn is_error_only_true_for_error_sentinel() {
+        let pool = InternPool::new();
+        assert!(pool.is_error(pool.error_type()));
+        assert!(!pool.is_error(pool.int()));
+        assert!(!pool.is_error(pool.bool_()));
+        assert!(!pool.is_error(pool.void()));
+        assert!(!pool.is_error(pool.str_()));
+    }
+
+    #[test]
+    fn compatible_is_reflexive_and_distinguishes_primitives() {
+        let pool = InternPool::new();
+        assert!(pool.compatible(pool.int(), pool.int()));
+        assert!(pool.compatible(pool.bool_(), pool.bool_()));
+        assert!(!pool.compatible(pool.int(), pool.bool_()));
+        assert!(!pool.compatible(pool.str_(), pool.int()));
+    }
+
+    #[test]
+    fn compatible_absorbs_error_sentinel_in_either_position() {
+        let pool = InternPool::new();
+        let err = pool.error_type();
+        // Symmetry: Error compatible with every primitive on both sides.
+        for &t in &[pool.int(), pool.bool_(), pool.str_(), pool.void()] {
+            assert!(pool.compatible(err, t), "Error vs {:?}", pool.kind(t));
+            assert!(pool.compatible(t, err), "{:?} vs Error", pool.kind(t));
+        }
+        // Error vs Error is also compatible (trivially via reflexivity).
+        assert!(pool.compatible(err, err));
     }
 }

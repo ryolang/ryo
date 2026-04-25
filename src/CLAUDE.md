@@ -79,7 +79,7 @@ HirStmt::MyFeature(expr, _) => {
 
 ## Error Handling
 
-`CompilerError` enum propagates errors: `IoError`, `ParseError`, `LowerError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`. Convert with `.map_err(CompilerError::ParseError)`.
+Middle-end stages emit structured `Diag` values (see `src/diag.rs`). `ast_lower` and `sema` accumulate diagnostics through a `DiagSink` so analysis can continue past the first error; `parse_source` builds `Diag` values directly from `chumsky::error::Rich` and renders them inline (no sink — the parser stops at the first round of errors anyway). All three converge on the same Ariadne-backed `render_diags` and surface as a single `CompilerError::Diagnostics(Vec<Diag>)` from the passes that use the sink (and from `parse_source` when parsing fails). Other stages still use string-typed `CompilerError` variants: `IoError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`.
 
 ## Testing
 

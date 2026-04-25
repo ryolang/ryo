@@ -23,6 +23,13 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
         TypeKind::Str => pointer_ty,
         TypeKind::Bool => types::I8,
         TypeKind::Void => panic!("cranelift_type_for: void has no representation"),
+        TypeKind::Error => {
+            // Reaching codegen with an Error sentinel means sema
+            // accepted the program despite a resolution failure.
+            // That's a compiler bug: the driver must short-circuit
+            // on `sink.has_errors()`.
+            panic!("cranelift_type_for: <error> sentinel reached codegen")
+        }
     }
 }
 
