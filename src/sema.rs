@@ -167,6 +167,7 @@ fn analyze_expr(
                 analyze_expr(arg, scope, signatures, pool)?;
             }
             if let Some(builtin) = builtins::lookup(name) {
+                check_builtin_call(name, args)?;
                 builtin.return_type(pool)
             } else {
                 signatures
@@ -178,6 +179,31 @@ fn analyze_expr(
     };
     expr.ty = Some(ty);
     Ok(())
+}
+
+/// Front-end validation for builtin calls.
+///
+/// These checks are builtin-specific and temporary: once `print`
+/// moves to a runtime crate and is called through a normal signature
+/// (see ISSUES.md I-006), they go away. Keeping them here rather
+/// than in codegen means the user sees a source-level error at
+/// analysis time, before any IR is emitted.
+fn check_builtin_call(name: &str, args: &[HirExpr]) -> Result<(), String> {
+    match name {
+        "print" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "print() takes exactly 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            if !matches!(args[0].kind, HirExprKind::StrLiteral(_)) {
+                return Err("print() argument must be a string literal".to_string());
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -386,6 +412,28 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn print_with_non_literal_rejected_in_sema() {
+        // Previously this error surfaced from codegen (I-014). After
+        // the sema extraction it is caught at analysis time.
+        let err = run("x = \"hi\"\n_ = print(x)").unwrap_err();
+        assert!(
+            err.contains("print() argument must be a string literal"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn print_arity_rejected_in_sema() {
+        let err = run("_ = print(\"a\", \"b\")").unwrap_err();
+        assert!(
+            err.contains("print() takes exactly 1 argument"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]

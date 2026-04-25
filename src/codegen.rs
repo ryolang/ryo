@@ -417,17 +417,16 @@ impl<M: Module> Codegen<M> {
         args: &[HirExpr],
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<(), String> {
-        if args.len() != 1 {
-            return Err(format!(
-                "print() takes exactly 1 argument, got {}",
-                args.len()
-            ));
-        }
-
-        let arg = &args[0];
-        let string_content = match &arg.kind {
+        // Sema has already validated arity and the string-literal
+        // constraint (see `sema::check_builtin_call`). The matches
+        // below are therefore infallible.
+        debug_assert_eq!(args.len(), 1, "sema should reject print() arity errors");
+        let string_content = match &args[0].kind {
             HirExprKind::StrLiteral(content) => content,
-            _ => return Err("print() argument must be a string literal".to_string()),
+            other => unreachable!(
+                "sema should reject non-literal print() args, got {:?}",
+                other
+            ),
         };
 
         let data_id =
