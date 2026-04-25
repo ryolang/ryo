@@ -662,3 +662,176 @@ fn bool_program_compiles_and_runs() {
         stdout
     );
 }
+
+// ---------- ryo ir --emit=... ----------
+//
+// Exit-criteria coverage for pipeline_alignment.md §3.6 / §4.5:
+// `Uir::dump` and `Tir::dump` reachable from the CLI, distinct
+// listings, deterministic ordering.
+
+#[test]
+fn ir_emit_uir_dumps_flat_listing() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), "uir.ryo", "x = 1 + 2\n");
+
+    let output = run_ryo_command(&["ir", "--emit=uir", "uir.ryo"], &test_file)
+        .expect("Failed to run ryo ir --emit=uir");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("[UIR]"), "missing [UIR] banner: {}", stdout);
+    assert!(
+        stdout.contains("fn main() -> int"),
+        "missing fn header: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("= int 1"),
+        "missing int literal listing: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("= add %"),
+        "missing add listing: {}",
+        stdout
+    );
+    // UIR must not include typed listings.
+    assert!(
+        !stdout.contains("[TIR]"),
+        "TIR leaked into UIR-only run: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("iadd"),
+        "TIR-spelled op leaked: {}",
+        stdout
+    );
+}
+
+#[test]
+fn ir_emit_tir_dumps_typed_listing() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), "tir.ryo", "x = 1 + 2\n");
+
+    let output = run_ryo_command(&["ir", "--emit=tir", "tir.ryo"], &test_file)
+        .expect("Failed to run ryo ir --emit=tir");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("[TIR]"), "missing [TIR] banner: {}", stdout);
+    assert!(
+        stdout.contains(": int ="),
+        "missing typed slot rendering: {}",
+        stdout
+    );
+    assert!(stdout.contains("iadd %"), "missing typed add: {}", stdout);
+    // TIR-only run must not print UIR's untyped spelling.
+    assert!(!stdout.contains("[UIR]"), "UIR banner leaked: {}", stdout);
+}
+
+#[test]
+fn ir_emit_default_is_ast_and_clif() {
+    // Bare `ryo ir <file>` preserves the pre-Phase-5 default of
+    // AST + Cranelift IR so existing scripts keep working.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), "default.ryo", "x = 42\n");
+
+    let output = run_ryo_command(&["ir", "default.ryo"], &test_file).expect("Failed to run ryo ir");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("[AST]"), "missing [AST]: {}", stdout);
+    assert!(
+        stdout.contains("[Cranelift IR]"),
+        "missing CLIF: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("[UIR]"),
+        "UIR leaked into default: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("[TIR]"),
+        "TIR leaked into default: {}",
+        stdout
+    );
+}
+
+#[test]
+fn ir_emit_order_is_pipeline_not_flag() {
+    // Section order must be AST → UIR → TIR → CLIF regardless of
+    // the order in which flags are listed. `--emit=clif,ast` and
+    // `--emit=ast,clif` must produce identical output.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), "order.ryo", "x = 1\n");
+
+    let a = run_ryo_command(&["ir", "--emit=ast,clif", "order.ryo"], &test_file)
+        .expect("ryo ir --emit=ast,clif");
+    let b = run_ryo_command(&["ir", "--emit=clif,ast", "order.ryo"], &test_file)
+        .expect("ryo ir --emit=clif,ast");
+    assert!(a.status.success() && b.status.success());
+    assert_eq!(a.stdout, b.stdout, "flag order must not change output");
+
+    // And the actual pipeline order is preserved within each run.
+    let stdout = String::from_utf8_lossy(&a.stdout);
+    let ast_idx = stdout.find("[AST]").expect("AST banner");
+    let clif_idx = stdout.find("[Cranelift IR]").expect("CLIF banner");
+    assert!(ast_idx < clif_idx, "AST must come before CLIF: {}", stdout);
+}
+
+#[test]
+fn ir_emit_uir_with_sema_error_still_prints_uir() {
+    // A type-error fixture: `--emit=uir` should print the UIR
+    // (astgen succeeded) and exit 0 — sema is never run, so its
+    // diagnostics never fire.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), "bad.ryo", "x = -true\n");
+
+    let output = run_ryo_command(&["ir", "--emit=uir", "bad.ryo"], &test_file)
+        .expect("ryo ir --emit=uir on bad source");
+    assert!(
+        output.status.success(),
+        "UIR-only run should not run sema; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[UIR]"), "missing UIR: {}", stdout);
+    assert!(stdout.contains("= neg %"), "missing neg op: {}", stdout);
+}
+
+#[test]
+fn ir_emit_tir_prints_partial_tir_with_unreachable_on_sema_error() {
+    // §4.5: sema emits `Unreachable` in place of failed expressions
+    // and keeps going. `--emit=tir` deliberately renders that
+    // partial TIR — the whole point of the flag is debugging sema.
+    // Driver still exits non-zero because the sink has errors.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), "partial.ryo", "x = -true\n");
+
+    let output = run_ryo_command(&["ir", "--emit=tir", "partial.ryo"], &test_file)
+        .expect("ryo ir --emit=tir on bad source");
+    assert!(
+        !output.status.success(),
+        "should exit non-zero on sema error"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[TIR]"), "TIR banner missing: {}", stdout);
+    assert!(
+        stdout.contains("unreachable"),
+        "Unreachable not rendered: {}",
+        stdout
+    );
+}

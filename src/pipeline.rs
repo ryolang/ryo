@@ -1,3 +1,4 @@
+use crate::EmitKind;
 use crate::ast;
 use crate::astgen;
 use crate::codegen;
@@ -7,8 +8,9 @@ use crate::lexer::{self, Token};
 use crate::linker;
 use crate::parser::program_parser;
 use crate::sema;
-use crate::tir::Tir;
+use crate::tir::{self, Tir};
 use crate::types::InternPool;
+use crate::uir::Uir;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::span::Span as _;
 use chumsky::{Parser, input::Stream, prelude::*};
@@ -225,25 +227,141 @@ fn display_ast(program: &ast::Program, pool: &InternPool) {
     program.pretty_print(pool);
 }
 
-pub(crate) fn ir_command(file: &Path) -> Result<(), CompilerError> {
+/// Drive `ryo ir` with the requested set of IR sections.
+///
+/// `emit` is the user-supplied `--emit=<kind>[,<kind>...]` list.
+/// Empty means "use the legacy default" (`Ast` + `Clif`) so
+/// existing scripts that just call `ryo ir <file>` keep their
+/// output.
+///
+/// Sections are normalized into pipeline order before printing
+/// (AST → UIR → TIR → CLIF) so flag order is irrelevant. Stages
+/// run only as far as the deepest requested section requires; an
+/// `--emit=uir` invocation never reaches sema.
+pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
-    let mut pool = InternPool::new();
     let name = source_name(file);
+    let mut pool = InternPool::new();
+
+    let want = EmitSet::from_args(emit);
     let program = parse_source(&input, &mut pool, &name)?;
 
-    display_ast(&program, &pool);
-    println!();
+    if want.ast {
+        display_ast(&program, &pool);
+        println!();
+    }
 
-    let tirs = lower_and_analyze(&program, &mut pool, &input, &name)?;
-    generate_and_display_ir(&tirs, &pool)?;
+    // UIR / TIR / CLIF gating. We always *run* astgen if any of
+    // those is asked for; sema only if TIR or CLIF; codegen only
+    // if CLIF. Each stage's print is independent.
+    let need_uir = want.uir || want.tir || want.clif;
+    if !need_uir {
+        return Ok(());
+    }
 
-    Ok(())
+    let mut sink = DiagSink::new();
+    let uir = astgen::generate(&program, &mut pool, &mut sink);
+
+    if want.uir {
+        display_uir(&uir, &pool);
+        println!();
+    }
+
+    if !(want.tir || want.clif) {
+        // UIR-only run. Surface astgen diagnostics now, with a
+        // non-zero exit if anything fired.
+        return finish_with_diags(sink, &input, &name);
+    }
+
+    // For TIR / CLIF we also run sema. Per the §4.5 design, sema
+    // returns a well-formed TIR even with errors (Unreachable
+    // slots), and `--emit=tir` deliberately prints that partial
+    // TIR — the whole point of the flag is debugging sema.
+    let tirs = sema::analyze(&uir, &mut pool, &mut sink);
+
+    if want.tir {
+        display_tir(&tirs, &pool);
+        println!();
+    }
+
+    if want.clif {
+        // Codegen asserts no Unreachable instructions. If sema
+        // failed, surface the diagnostics and abort — we cannot
+        // produce a meaningful CLIF dump from a broken TIR.
+        if sink.has_errors() {
+            return finish_with_diags(sink, &input, &name);
+        }
+        generate_and_display_ir(&tirs, &pool)?;
+    }
+
+    finish_with_diags(sink, &input, &name)
+}
+
+/// Resolve `--emit` flag values into a normalized set. Membership
+/// is what governs printing; the source order on the command line
+/// is intentionally discarded.
+#[derive(Debug, Clone, Copy, Default)]
+struct EmitSet {
+    ast: bool,
+    uir: bool,
+    tir: bool,
+    clif: bool,
+}
+
+impl EmitSet {
+    fn from_args(emit: &[EmitKind]) -> Self {
+        if emit.is_empty() {
+            // Legacy default: AST + Cranelift IR. Anyone who wants
+            // UIR / TIR opts in explicitly via `--emit=...`. We can
+            // flip to "all four" once the docs advertise it.
+            return EmitSet {
+                ast: true,
+                uir: false,
+                tir: false,
+                clif: true,
+            };
+        }
+        let mut s = EmitSet::default();
+        for k in emit {
+            match k {
+                EmitKind::Ast => s.ast = true,
+                EmitKind::Uir => s.uir = true,
+                EmitKind::Tir => s.tir = true,
+                EmitKind::Clif => s.clif = true,
+            }
+        }
+        s
+    }
+}
+
+/// Render any pending diagnostics and translate them into a
+/// `CompilerError::Diagnostics` (or `Ok(())` if the sink is
+/// clean). Centralized so every `ryo ir` exit path uses the same
+/// rendering plumbing.
+fn finish_with_diags(sink: DiagSink, input: &str, source_name: &str) -> Result<(), CompilerError> {
+    if sink.has_errors() {
+        let diags = sink.into_diags();
+        render_diags(&diags, input, source_name);
+        Err(CompilerError::Diagnostics(diags))
+    } else {
+        Ok(())
+    }
+}
+
+fn display_uir(uir: &Uir, pool: &InternPool) {
+    println!("[UIR]");
+    print!("{}", uir.dump(pool));
+}
+
+fn display_tir(tirs: &[Tir], pool: &InternPool) {
+    println!("[TIR]");
+    print!("{}", tir::dump(tirs, pool));
 }
 
 /// Run the front-end (astgen + sema) and return the typed TIR
-/// per-function. Centralized so the three driver commands (`ir`,
-/// `run`, `build`) stay in lockstep when future pre-codegen passes
-/// are added.
+/// per-function. Used by `run` and `build` (which require a clean
+/// front-end before codegen). `ryo ir` does its own staging so it
+/// can print partial UIR / TIR after a failure.
 fn lower_and_analyze(
     program: &ast::Program,
     pool: &mut InternPool,
