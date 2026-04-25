@@ -1,5 +1,7 @@
-use crate::hir;
-use crate::hir::{BinaryOp, HirExpr, HirExprKind, HirFunction, HirProgram, HirStmt, UnaryOp};
+use crate::hir::{
+    BinaryOp, HirExpr, HirExprKind, HirFunction, HirProgram, HirStmt, TypeId, UnaryOp,
+};
+use crate::types::{InternPool, TypeKind};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -11,16 +13,16 @@ use target_lexicon::Triple;
 
 /// Map a HIR type to the corresponding Cranelift IR type.
 ///
-/// `Type::Int` uses the target's pointer-sized integer (i64 on 64-bit).
-/// `Type::Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
-/// `Type::Str` is represented as a pointer (pointer-sized integer).
-/// `Type::Void` has no Cranelift representation and should not be mapped here.
-fn cranelift_type_for(ty: hir::Type, pointer_ty: types::Type) -> types::Type {
-    match ty {
-        hir::Type::Int => pointer_ty,
-        hir::Type::Str => pointer_ty,
-        hir::Type::Bool => types::I8,
-        hir::Type::Void => panic!("cranelift_type_for: void has no representation"),
+/// `Int` uses the target's pointer-sized integer (i64 on 64-bit).
+/// `Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
+/// `Str` is represented as a pointer (pointer-sized integer).
+/// `Void` has no Cranelift representation and should not be mapped here.
+fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) -> types::Type {
+    match pool.kind(ty) {
+        TypeKind::Int => pointer_ty,
+        TypeKind::Str => pointer_ty,
+        TypeKind::Bool => types::I8,
+        TypeKind::Void => panic!("cranelift_type_for: void has no representation"),
     }
 }
 
@@ -119,11 +121,15 @@ impl Codegen<JITModule> {
 }
 
 impl<M: Module> Codegen<M> {
-    pub fn compile(&mut self, program: &HirProgram) -> Result<FuncId, String> {
-        let func_ids = self.declare_all_functions(program)?;
+    pub fn compile(&mut self, program: &HirProgram, pool: &InternPool) -> Result<FuncId, String> {
+        debug_assert!(
+            all_expr_types_resolved(program),
+            "codegen::compile requires sema to have filled all HirExpr.ty"
+        );
+        let func_ids = self.declare_all_functions(program, pool)?;
 
         for func in &program.functions {
-            self.compile_function(func, &func_ids)?;
+            self.compile_function(func, &func_ids, pool)?;
         }
 
         func_ids
@@ -132,12 +138,20 @@ impl<M: Module> Codegen<M> {
             .ok_or_else(|| "No main function defined".to_string())
     }
 
-    pub fn compile_and_dump_ir(&mut self, program: &HirProgram) -> Result<String, String> {
-        let func_ids = self.declare_all_functions(program)?;
+    pub fn compile_and_dump_ir(
+        &mut self,
+        program: &HirProgram,
+        pool: &InternPool,
+    ) -> Result<String, String> {
+        debug_assert!(
+            all_expr_types_resolved(program),
+            "codegen::compile_and_dump_ir requires sema to have filled all HirExpr.ty"
+        );
+        let func_ids = self.declare_all_functions(program, pool)?;
 
         let mut ir_output = String::new();
         for func in &program.functions {
-            if let Some(ir) = self.compile_function(func, &func_ids)? {
+            if let Some(ir) = self.compile_function(func, &func_ids, pool)? {
                 ir_output.push_str(&ir);
                 ir_output.push('\n');
             }
@@ -149,10 +163,11 @@ impl<M: Module> Codegen<M> {
     fn declare_all_functions(
         &mut self,
         program: &HirProgram,
+        pool: &InternPool,
     ) -> Result<HashMap<String, FuncId>, String> {
         let mut func_ids = HashMap::new();
         for func in &program.functions {
-            let sig = self.build_signature(func);
+            let sig = self.build_signature(func, pool);
             let linkage = if func.name == "main" {
                 Linkage::Export
             } else {
@@ -167,14 +182,14 @@ impl<M: Module> Codegen<M> {
         Ok(func_ids)
     }
 
-    fn build_signature(&self, func: &HirFunction) -> Signature {
+    fn build_signature(&self, func: &HirFunction, pool: &InternPool) -> Signature {
         let mut sig = self.module.make_signature();
         for param in &func.params {
-            let cl_ty = cranelift_type_for(param.ty, self.int_type);
+            let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
             sig.params.push(AbiParam::new(cl_ty));
         }
-        if func.return_type != hir::Type::Void {
-            let cl_ty = cranelift_type_for(func.return_type, self.int_type);
+        if func.return_type != pool.void() {
+            let cl_ty = cranelift_type_for(func.return_type, pool, self.int_type);
             sig.returns.push(AbiParam::new(cl_ty));
         }
         sig
@@ -184,12 +199,13 @@ impl<M: Module> Codegen<M> {
         &mut self,
         func: &HirFunction,
         func_ids: &HashMap<String, FuncId>,
+        pool: &InternPool,
     ) -> Result<Option<String>, String> {
         let func_id = *func_ids
             .get(&func.name)
             .ok_or_else(|| format!("Function '{}' not declared", func.name))?;
 
-        self.ctx.func.signature = self.build_signature(func);
+        self.ctx.func.signature = self.build_signature(func, pool);
 
         {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
@@ -202,7 +218,7 @@ impl<M: Module> Codegen<M> {
             let mut locals: HashMap<String, Variable> = HashMap::new();
 
             for (i, param) in func.params.iter().enumerate() {
-                let cl_ty = cranelift_type_for(param.ty, int_type);
+                let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                 let var = builder.declare_var(cl_ty);
                 let param_val = builder.block_params(entry_block)[i];
                 builder.def_var(var, param_val);
@@ -230,7 +246,7 @@ impl<M: Module> Codegen<M> {
                             func_ids,
                         };
                         let val = Self::eval_expr(&mut builder, initializer, &mut func_ctx)?;
-                        let cl_ty = cranelift_type_for(initializer.ty, int_type);
+                        let cl_ty = cranelift_type_for(initializer.expect_ty(), pool, int_type);
                         let var = builder.declare_var(cl_ty);
                         builder.def_var(var, val);
                         locals.insert(name.clone(), var);
@@ -269,7 +285,7 @@ impl<M: Module> Codegen<M> {
             }
 
             if !has_return {
-                if func.return_type != hir::Type::Void {
+                if func.return_type != pool.void() {
                     let zero = builder.ins().iconst(int_type, 0);
                     builder.ins().return_(&[zero]);
                 } else {
@@ -401,17 +417,16 @@ impl<M: Module> Codegen<M> {
         args: &[HirExpr],
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<(), String> {
-        if args.len() != 1 {
-            return Err(format!(
-                "print() takes exactly 1 argument, got {}",
-                args.len()
-            ));
-        }
-
-        let arg = &args[0];
-        let string_content = match &arg.kind {
+        // Sema has already validated arity and the string-literal
+        // constraint (see `sema::check_builtin_call`). The matches
+        // below are therefore infallible.
+        debug_assert_eq!(args.len(), 1, "sema should reject print() arity errors");
+        let string_content = match &args[0].kind {
             HirExprKind::StrLiteral(content) => content,
-            _ => return Err("print() argument must be a string literal".to_string()),
+            other => unreachable!(
+                "sema should reject non-literal print() args, got {:?}",
+                other
+            ),
         };
 
         let data_id =
@@ -454,4 +469,35 @@ impl<M: Module> Codegen<M> {
 
         Ok(())
     }
+}
+
+/// Walks the HIR and asserts every expression has a resolved type.
+/// Used inside `debug_assert!` at codegen entry points; sema is
+/// expected to have filled all types before codegen runs.
+fn all_expr_types_resolved(program: &HirProgram) -> bool {
+    fn walk(e: &HirExpr) -> bool {
+        if e.ty.is_none() {
+            return false;
+        }
+        match &e.kind {
+            HirExprKind::BinaryOp(l, _, r) => walk(l) && walk(r),
+            HirExprKind::UnaryOp(_, s) => walk(s),
+            HirExprKind::Call(_, args) => args.iter().all(walk),
+            _ => true,
+        }
+    }
+    for func in &program.functions {
+        for stmt in &func.body {
+            let ok = match stmt {
+                HirStmt::VarDecl { initializer, .. } => walk(initializer),
+                HirStmt::Return(Some(e), _) => walk(e),
+                HirStmt::Return(None, _) => true,
+                HirStmt::Expr(e, _) => walk(e),
+            };
+            if !ok {
+                return false;
+            }
+        }
+    }
+    true
 }
