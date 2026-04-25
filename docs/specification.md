@@ -330,13 +330,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
     *   See Section 6.2 for complete closure specification including capture semantics and examples.
 *   **Tuple Destructuring:** `(a, b) = my_tuple`.
 *   **Type Conversion Syntax:** Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
-*   **Operators & Expressions:**
-    *   **Arithmetic:** `+`, `-`, `*`, `/` (integer division for `int`), `%` (modulo).
-    *   **Equality:** `==` (equal), `!=` (not equal). Both operands must have the same type. In v0.1, equality is defined on `int` and `bool`. String equality is planned but not yet available. Equality operators return `bool`. Equality does **not** chain: `a == b == c` is a syntax error.
-    *   **Ordering Comparisons:** `<`, `>`, `<=`, `>=` (defined on numeric types, return `bool`). Planned for a future milestone.
-    *   **Logical:** `and`, `or`, `not` (short-circuiting for `and`/`or`).
-    *   **Assignment:** `=` (binding), `+=`, `-=`, `*=`, `/=`, `%=` (compound assignment).
-    *   *(Rationale: Explicit equality with no implicit coercion prevents subtle bugs. Non-chaining equality avoids ambiguous expressions. Each operator has one clear meaning).*
+*   **Equality Operators:** `==` (equal), `!=` (not equal). Both operands must have the same type. Equality operators return `bool`. Equality does **not** chain: `a == b == c` is a syntax error. *(Rationale: Explicit equality with no implicit coercion prevents subtle bugs; non-chaining equality avoids ambiguous expressions).*
 
 ## 4. Types
 
@@ -349,7 +343,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 
 *   `int`: Defaults to `i64` (64-bit signed integer). *(Rationale: Consistent behavior across platforms, unlike C's `long` or Rust's `isize` default).*
 *   `float`: Defaults to `float64` (64-bit IEEE 754 float).
-*   `bool`: Boolean type with two values: `true` and `false`. Produced by equality (`==`, `!=`) and comparison (`<`, `>`, `<=`, `>=`) operators. No implicit conversion to or from `int`. *(Rationale: Explicit boolean semantics prevent common bugs from implicit truthy/falsy conversions, following Zig's design philosophy).*
+*   `bool`: Boolean type with two values: `true` and `false`. Produced by equality operators (`==`, `!=`). No implicit conversion to or from `int`. *(Rationale: Explicit boolean semantics prevent common bugs from implicit truthy/falsy conversions, following Zig's design philosophy).*
 *   `str`: Owned, heap-allocated, UTF-8 string. Can grow and shrink dynamically when bound to a `mut` variable. *(Rationale: Provides a primary, easy-to-use string type. Mutability controlled by binding aligns with general variable mutability).*
 *   `char`: Unicode Scalar Value. Literal: `'a'`.
 *   `void`: Unit type. Represents a value with no data. Used for functions that return no meaningful value. *(Rationale: Provides explicit way to represent "no return value" concept, common in many programming languages for side-effecting functions)*.
