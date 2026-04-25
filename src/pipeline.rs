@@ -211,6 +211,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::ArityMismatch => "E0013",
         DiagCode::BuiltinArgKind => "E0014",
         DiagCode::UnsupportedOperator => "E0015",
+        DiagCode::CycleInResolution => "E0016",
         DiagCode::ParseError => "E0100",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::ConstEvalFailure => "E0200",
