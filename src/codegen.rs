@@ -1,27 +1,29 @@
-//! Cranelift codegen over UIR.
+//! Cranelift codegen over TIR.
 //!
-//! Codegen consumes the flat [`Uir`] produced by `astgen` plus
-//! the [`crate::sema::TypeTable`] produced by `sema`.
+//! Codegen consumes the typed instruction streams produced by
+//! `sema` (one [`Tir`] per function body) and lowers them to
+//! Cranelift IR. There is no [`crate::uir::Uir`] import here:
+//! every operand is already typed, every variable already
+//! resolved.
 //!
-//! Traversal is *index-driven* — every operand is reached through
-//! an [`InstRef`] into `uir.instructions`, never through a
-//! recursive descent over a tree-shaped node. Two recursions
-//! survive:
+//! Traversal is *index-driven* — operands are reached through
+//! [`TirRef`] indices into the current `Tir`'s `instructions`,
+//! never through a recursive descent over a tree-shaped node.
+//! Two recursions survive:
 //!
 //! 1. Materializing an instruction whose operands are themselves
-//!    instructions (e.g. `Add %3, %5` materializes `%3` and `%5`
-//!    first). Cranelift always needs nested values, so something
-//!    has to walk operands; doing it through the `InstRef` index
-//!    is the point.
-//! 2. The `eval_inst` memoization map (`HashMap<InstRef, Value>`)
-//!    so a shared sub-expression isn't re-emitted. UIR today is
+//!    instructions (e.g. `IAdd %3, %5` materializes `%3` and `%5`
+//!    first). Cranelift always needs nested values; doing it
+//!    through `TirRef` indexing is the point.
+//! 2. The `eval_inst` memoization map (`HashMap<TirRef, Value>`)
+//!    so a shared sub-expression isn't re-emitted. TIR today is
 //!    tree-shaped (one parent per inst) so this is purely
-//!    defensive — but it's the right invariant before TIR / lazy
-//!    sema land. Zig calls the analogous mapping in `Air.zig`
-//!    "liveness"; we don't need full liveness yet.
+//!    defensive — but it's the right invariant before lazy sema
+//!    / inline expansion lands. Zig calls the analogous mapping
+//!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
+use crate::tir::{Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
-use crate::uir::{FuncBody, InstData, InstRef, InstTag, Uir};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -31,7 +33,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::HashMap;
 use target_lexicon::Triple;
 
-/// Map a UIR/sema type to the corresponding Cranelift IR type.
+/// Map a TIR type to the corresponding Cranelift IR type.
 ///
 /// `Int` uses the target's pointer-sized integer (i64 on 64-bit).
 /// `Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
@@ -72,8 +74,9 @@ pub struct Codegen<M: Module> {
 
 /// Per-function emission state. Lives only for the duration of one
 /// `compile_function` call; reset between functions because
-/// Cranelift `Variable` ids and the `InstRef → Value` memo are both
-/// function-local.
+/// Cranelift `Variable` ids and the `TirRef → Value` memo are both
+/// function-local — and because `TirRef` itself is scoped to a
+/// single `Tir`.
 struct FunctionContext<'a, M: Module> {
     module: &'a mut M,
     data_ctx: &'a mut DataDescription,
@@ -81,14 +84,13 @@ struct FunctionContext<'a, M: Module> {
     int_type: types::Type,
     triple: &'a Triple,
     pool: &'a InternPool,
-    uir: &'a Uir,
-    types: &'a [Option<TypeId>],
+    tir: &'a Tir,
     locals: HashMap<StringId, Variable>,
     func_ids: &'a HashMap<StringId, FuncId>,
-    /// `InstRef → Value` memo. Materializing the same instruction
+    /// `TirRef → Value` memo. Materializing the same instruction
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
-    inst_values: HashMap<InstRef, Value>,
+    inst_values: HashMap<TirRef, Value>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -166,20 +168,15 @@ impl Codegen<JITModule> {
 }
 
 impl<M: Module> Codegen<M> {
-    pub fn compile(
-        &mut self,
-        uir: &Uir,
-        types: &[Option<TypeId>],
-        pool: &InternPool,
-    ) -> Result<FuncId, String> {
+    pub fn compile(&mut self, tirs: &[Tir], pool: &InternPool) -> Result<FuncId, String> {
         debug_assert!(
-            all_types_resolved(uir, types),
-            "codegen::compile requires sema to have filled the TypeTable"
+            no_unreachable_in(tirs),
+            "codegen::compile requires sema to have produced TIR with no Unreachable instructions"
         );
-        let func_ids = self.declare_all_functions(uir, pool)?;
+        let func_ids = self.declare_all_functions(tirs, pool)?;
 
-        for body in &uir.func_bodies {
-            self.compile_function(body, uir, types, &func_ids, pool)?;
+        for tir in tirs {
+            self.compile_function(tir, &func_ids, pool)?;
         }
 
         // Resolve "main" through the pool. `astgen` always interns
@@ -198,19 +195,18 @@ impl<M: Module> Codegen<M> {
 
     pub fn compile_and_dump_ir(
         &mut self,
-        uir: &Uir,
-        types: &[Option<TypeId>],
+        tirs: &[Tir],
         pool: &InternPool,
     ) -> Result<String, String> {
         debug_assert!(
-            all_types_resolved(uir, types),
-            "codegen::compile_and_dump_ir requires sema to have filled the TypeTable"
+            no_unreachable_in(tirs),
+            "codegen::compile_and_dump_ir requires sema to have produced TIR with no Unreachable instructions"
         );
-        let func_ids = self.declare_all_functions(uir, pool)?;
+        let func_ids = self.declare_all_functions(tirs, pool)?;
 
         let mut ir_output = String::new();
-        for body in &uir.func_bodies {
-            if let Some(ir) = self.compile_function(body, uir, types, &func_ids, pool)? {
+        for tir in tirs {
+            if let Some(ir) = self.compile_function(tir, &func_ids, pool)? {
                 ir_output.push_str(&ir);
                 ir_output.push('\n');
             }
@@ -221,13 +217,13 @@ impl<M: Module> Codegen<M> {
 
     fn declare_all_functions(
         &mut self,
-        uir: &Uir,
+        tirs: &[Tir],
         pool: &InternPool,
     ) -> Result<HashMap<StringId, FuncId>, String> {
         let mut func_ids = HashMap::new();
-        for body in &uir.func_bodies {
-            let sig = self.build_signature(body, pool);
-            let name_str = pool.str(body.name);
+        for tir in tirs {
+            let sig = self.build_signature(tir, pool);
+            let name_str = pool.str(tir.name);
             let linkage = if name_str == "main" {
                 Linkage::Export
             } else {
@@ -237,19 +233,19 @@ impl<M: Module> Codegen<M> {
                 .module
                 .declare_function(name_str, linkage, &sig)
                 .map_err(|e| format!("Failed to declare function '{}': {}", name_str, e))?;
-            func_ids.insert(body.name, func_id);
+            func_ids.insert(tir.name, func_id);
         }
         Ok(func_ids)
     }
 
-    fn build_signature(&self, body: &FuncBody, pool: &InternPool) -> Signature {
+    fn build_signature(&self, tir: &Tir, pool: &InternPool) -> Signature {
         let mut sig = self.module.make_signature();
-        for param in &body.params {
+        for param in &tir.params {
             let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
             sig.params.push(AbiParam::new(cl_ty));
         }
-        if body.return_type != pool.void() {
-            let cl_ty = cranelift_type_for(body.return_type, pool, self.int_type);
+        if tir.return_type != pool.void() {
+            let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
             sig.returns.push(AbiParam::new(cl_ty));
         }
         sig
@@ -257,17 +253,15 @@ impl<M: Module> Codegen<M> {
 
     fn compile_function(
         &mut self,
-        body: &FuncBody,
-        uir: &Uir,
-        types: &[Option<TypeId>],
+        tir: &Tir,
         func_ids: &HashMap<StringId, FuncId>,
         pool: &InternPool,
     ) -> Result<Option<String>, String> {
         let func_id = *func_ids
-            .get(&body.name)
-            .ok_or_else(|| format!("Function '{}' not declared", pool.str(body.name)))?;
+            .get(&tir.name)
+            .ok_or_else(|| format!("Function '{}' not declared", pool.str(tir.name)))?;
 
-        self.ctx.func.signature = self.build_signature(body, pool);
+        self.ctx.func.signature = self.build_signature(tir, pool);
 
         {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
@@ -279,7 +273,7 @@ impl<M: Module> Codegen<M> {
             let int_type = self.int_type;
             let mut locals: HashMap<StringId, Variable> = HashMap::new();
 
-            for (i, param) in body.params.iter().enumerate() {
+            for (i, param) in tir.params.iter().enumerate() {
                 let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                 let var = builder.declare_var(cl_ty);
                 let param_val = builder.block_params(entry_block)[i];
@@ -294,15 +288,14 @@ impl<M: Module> Codegen<M> {
                 int_type,
                 triple: &self.triple,
                 pool,
-                uir,
-                types,
+                tir,
                 locals,
                 func_ids,
                 inst_values: HashMap::new(),
             };
 
             let mut has_return = false;
-            for stmt_ref in uir.body_stmts(body) {
+            for stmt_ref in tir.body_stmts() {
                 if has_return {
                     break;
                 }
@@ -310,7 +303,7 @@ impl<M: Module> Codegen<M> {
             }
 
             if !has_return {
-                if body.return_type != pool.void() {
+                if tir.return_type != pool.void() {
                     let zero = builder.ins().iconst(int_type, 0);
                     builder.ins().return_(&[zero]);
                 } else {
@@ -325,7 +318,7 @@ impl<M: Module> Codegen<M> {
 
         self.module
             .define_function(func_id, &mut self.ctx)
-            .map_err(|e| format!("Failed to define function '{}': {}", pool.str(body.name), e))?;
+            .map_err(|e| format!("Failed to define function '{}': {}", pool.str(tir.name), e))?;
 
         self.ctx.clear();
         Ok(Some(ir_text))
@@ -337,38 +330,38 @@ impl<M: Module> Codegen<M> {
     fn emit_stmt(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        r: InstRef,
+        r: TirRef,
     ) -> Result<bool, String> {
-        let inst = ctx.uir.inst(r);
+        let inst = ctx.tir.inst(r);
         match inst.tag {
-            InstTag::VarDecl => {
-                let view = ctx.uir.var_decl_view(r);
+            TirTag::VarDecl => {
+                let view = ctx.tir.var_decl_view(r);
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
-                let init_ty = ctx.types[view.initializer.index()]
-                    .expect("sema must have typed the initializer");
-                let cl_ty = cranelift_type_for(init_ty, ctx.pool, ctx.int_type);
+                // The variable's resolved type lives in the VarDecl
+                // inst's `ty` slot directly — no side-table lookup.
+                let cl_ty = cranelift_type_for(inst.ty, ctx.pool, ctx.int_type);
                 let var = builder.declare_var(cl_ty);
                 builder.def_var(var, val);
                 ctx.locals.insert(view.name, var);
                 Ok(false)
             }
-            InstTag::Return => {
+            TirTag::Return => {
                 let operand = match inst.data {
-                    InstData::UnOp(o) => o,
-                    _ => unreachable!("Return must carry InstData::UnOp"),
+                    TirData::UnOp(o) => o,
+                    _ => unreachable!("Return must carry TirData::UnOp"),
                 };
                 let val = Self::eval_inst(builder, ctx, operand)?;
                 builder.ins().return_(&[val]);
                 Ok(true)
             }
-            InstTag::ReturnVoid => {
+            TirTag::ReturnVoid => {
                 builder.ins().return_(&[]);
                 Ok(true)
             }
-            InstTag::ExprStmt => {
+            TirTag::ExprStmt => {
                 let operand = match inst.data {
-                    InstData::UnOp(o) => o,
-                    _ => unreachable!("ExprStmt must carry InstData::UnOp"),
+                    TirData::UnOp(o) => o,
+                    _ => unreachable!("ExprStmt must carry TirData::UnOp"),
                 };
                 let _ = Self::eval_inst(builder, ctx, operand)?;
                 Ok(false)
@@ -382,70 +375,75 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Materialize an instruction's value, recursively materializing
-    /// operand `InstRef`s as needed. Memoized: a second visit hands
+    /// operand `TirRef`s as needed. Memoized: a second visit hands
     /// back the cached `Value`.
     fn eval_inst(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        r: InstRef,
+        r: TirRef,
     ) -> Result<Value, String> {
         if let Some(&v) = ctx.inst_values.get(&r) {
             return Ok(v);
         }
-        let inst = ctx.uir.inst(r);
+        let inst = ctx.tir.inst(r);
         let value = match inst.tag {
-            InstTag::IntLiteral => match inst.data {
-                InstData::Int(v) => builder.ins().iconst(ctx.int_type, v),
-                _ => unreachable!("IntLiteral must carry InstData::Int"),
+            TirTag::IntConst => match inst.data {
+                TirData::Int(v) => builder.ins().iconst(ctx.int_type, v),
+                _ => unreachable!("IntConst must carry TirData::Int"),
             },
-            InstTag::BoolLiteral => match inst.data {
-                InstData::Bool(b) => builder.ins().iconst(types::I8, if b { 1 } else { 0 }),
-                _ => unreachable!("BoolLiteral must carry InstData::Bool"),
+            TirTag::BoolConst => match inst.data {
+                TirData::Bool(b) => builder.ins().iconst(types::I8, if b { 1 } else { 0 }),
+                _ => unreachable!("BoolConst must carry TirData::Bool"),
             },
-            InstTag::StrLiteral => match inst.data {
-                InstData::Str(id) => emit_str_literal(builder, ctx, id)?,
-                _ => unreachable!("StrLiteral must carry InstData::Str"),
+            TirTag::StrConst => match inst.data {
+                TirData::Str(id) => emit_str_literal(builder, ctx, id)?,
+                _ => unreachable!("StrConst must carry TirData::Str"),
             },
-            InstTag::Var => match inst.data {
-                InstData::Var(name) => {
+            TirTag::Var => match inst.data {
+                TirData::Var(name) => {
                     let var = ctx
                         .locals
                         .get(&name)
                         .ok_or_else(|| format!("Undefined variable: '{}'", ctx.pool.str(name)))?;
                     builder.use_var(*var)
                 }
-                _ => unreachable!("Var must carry InstData::Var"),
+                _ => unreachable!("Var must carry TirData::Var"),
             },
-            InstTag::Neg => match inst.data {
-                InstData::UnOp(operand) => {
+            TirTag::INeg => match inst.data {
+                TirData::UnOp(operand) => {
                     let v = Self::eval_inst(builder, ctx, operand)?;
                     builder.ins().ineg(v)
                 }
-                _ => unreachable!("Neg must carry InstData::UnOp"),
+                _ => unreachable!("INeg must carry TirData::UnOp"),
             },
-            InstTag::Add
-            | InstTag::Sub
-            | InstTag::Mul
-            | InstTag::Div
-            | InstTag::Eq
-            | InstTag::NotEq => {
+            TirTag::IAdd
+            | TirTag::ISub
+            | TirTag::IMul
+            | TirTag::ISDiv
+            | TirTag::ICmpEq
+            | TirTag::ICmpNe => {
                 let (lhs, rhs) = match inst.data {
-                    InstData::BinOp { lhs, rhs } => (lhs, rhs),
-                    _ => unreachable!("binary op must carry InstData::BinOp"),
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!("binary op must carry TirData::BinOp"),
                 };
                 let lv = Self::eval_inst(builder, ctx, lhs)?;
                 let rv = Self::eval_inst(builder, ctx, rhs)?;
                 match inst.tag {
-                    InstTag::Add => builder.ins().iadd(lv, rv),
-                    InstTag::Sub => builder.ins().isub(lv, rv),
-                    InstTag::Mul => builder.ins().imul(lv, rv),
-                    InstTag::Div => builder.ins().sdiv(lv, rv),
-                    InstTag::Eq => builder.ins().icmp(IntCC::Equal, lv, rv),
-                    InstTag::NotEq => builder.ins().icmp(IntCC::NotEqual, lv, rv),
+                    TirTag::IAdd => builder.ins().iadd(lv, rv),
+                    TirTag::ISub => builder.ins().isub(lv, rv),
+                    TirTag::IMul => builder.ins().imul(lv, rv),
+                    TirTag::ISDiv => builder.ins().sdiv(lv, rv),
+                    TirTag::ICmpEq => builder.ins().icmp(IntCC::Equal, lv, rv),
+                    TirTag::ICmpNe => builder.ins().icmp(IntCC::NotEqual, lv, rv),
                     _ => unreachable!(),
                 }
             }
-            InstTag::Call => Self::emit_call(builder, ctx, r)?,
+            TirTag::Call => Self::emit_call(builder, ctx, r)?,
+            TirTag::Unreachable => {
+                return Err(
+                    "codegen reached an Unreachable TIR inst — sema must have errored".to_string(),
+                );
+            }
             other => {
                 return Err(format!(
                     "eval_inst: instruction at %{} is not a value (tag={:?})",
@@ -461,9 +459,9 @@ impl<M: Module> Codegen<M> {
     fn emit_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        r: InstRef,
+        r: TirRef,
     ) -> Result<Value, String> {
-        let view = ctx.uir.call_view(r);
+        let view = ctx.tir.call_view(r);
         let name_id = view.name;
         let name_str = ctx.pool.str(name_id);
         if crate::builtins::lookup(name_str).is_some() {
@@ -507,14 +505,14 @@ impl<M: Module> Codegen<M> {
     fn generate_print_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        args: &[InstRef],
+        args: &[TirRef],
     ) -> Result<(), String> {
         // Sema has already validated arity and the string-literal
         // constraint (see `sema::check_builtin_call`). The matches
         // below are therefore infallible.
         debug_assert_eq!(args.len(), 1, "sema should reject print() arity errors");
-        let string_id = match ctx.uir.inst(args[0]).data {
-            InstData::Str(id) => id,
+        let string_id = match ctx.tir.inst(args[0]).data {
+            TirData::Str(id) => id,
             other => unreachable!(
                 "sema should reject non-literal print() args, got {:?}",
                 other
@@ -610,67 +608,20 @@ fn store_string<M: Module>(
     Ok(data_id)
 }
 
-/// Walks the UIR and asserts every reachable instruction has a
-/// resolved type. Used inside `debug_assert!` at codegen entry
-/// points; sema is expected to have filled the table before codegen
-/// runs.
-fn all_types_resolved(uir: &Uir, types: &[Option<TypeId>]) -> bool {
-    if types.len() != uir.instructions.len() {
-        return false;
-    }
-    // Slot 0 is the reserved sentinel; legitimately `None`.
-    let mut visited = vec![false; uir.instructions.len()];
-    for body in &uir.func_bodies {
-        for stmt_ref in uir.body_stmts(body) {
-            if !walk_typed(uir, types, stmt_ref, &mut visited) {
+/// Walk every TIR body and assert no `Unreachable` instruction is
+/// reachable. Used inside `debug_assert!` at codegen entry points;
+/// the driver short-circuits on `sink.has_errors()` long before we
+/// get here, so any `Unreachable` past that gate is a sema bug.
+fn no_unreachable_in(tirs: &[Tir]) -> bool {
+    for tir in tirs {
+        // Slot 0 is the reserved sentinel and intentionally has
+        // tag = Unreachable in the builder; it is *never* part of a
+        // body. Skip it.
+        for idx in 1..tir.instructions.len() {
+            if matches!(tir.instructions[idx].tag, TirTag::Unreachable) {
                 return false;
             }
         }
     }
     true
-}
-
-/// Recursive type-presence walk over operands, memoized in
-/// `visited` so a DAG-shaped UIR can't trigger exponential
-/// re-traversal. Today UIR is tree-shaped (one parent per inst) so
-/// the memo is purely defensive — but it's the right invariant
-/// before TIR / lazy sema land, and matches `Codegen::eval_inst`'s
-/// `inst_values` memo (Zig's `Air.Liveness` analogue in
-/// `src/Air.zig`).
-fn walk_typed(uir: &Uir, types: &[Option<TypeId>], r: InstRef, visited: &mut [bool]) -> bool {
-    if visited[r.index()] {
-        return true;
-    }
-    visited[r.index()] = true;
-    if types[r.index()].is_none() {
-        return false;
-    }
-    let inst = uir.inst(r);
-    match inst.data {
-        InstData::None
-        | InstData::Int(_)
-        | InstData::Str(_)
-        | InstData::Bool(_)
-        | InstData::Var(_) => true,
-        InstData::UnOp(o) => walk_typed(uir, types, o, visited),
-        InstData::BinOp { lhs, rhs } => {
-            walk_typed(uir, types, lhs, visited) && walk_typed(uir, types, rhs, visited)
-        }
-        InstData::Extra(_) => match inst.tag {
-            InstTag::Call => uir
-                .call_view(r)
-                .args
-                .iter()
-                .all(|a| walk_typed(uir, types, *a, visited)),
-            InstTag::VarDecl => walk_typed(uir, types, uir.var_decl_view(r).initializer, visited),
-            // Any newly-introduced `Extra`-bearing tag must wire
-            // its operand walking explicitly. Silently accepting
-            // "true" here would let codegen miss unresolved types
-            // in those operands.
-            other => unreachable!(
-                "walk_typed: Extra-bearing InstTag {:?} has no operand-walk arm",
-                other
-            ),
-        },
-    }
 }
