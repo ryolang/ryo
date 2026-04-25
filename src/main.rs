@@ -13,6 +13,7 @@ mod linker;
 mod parser;
 mod pipeline;
 mod sema;
+mod tir;
 mod toolchain;
 mod types;
 mod uir;

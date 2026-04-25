@@ -7,9 +7,8 @@ use crate::lexer::{self, Token};
 use crate::linker;
 use crate::parser::program_parser;
 use crate::sema;
-use crate::sema::TypeTable;
+use crate::tir::Tir;
 use crate::types::InternPool;
-use crate::uir::Uir;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::span::Span as _;
 use chumsky::{Parser, input::Stream, prelude::*};
@@ -234,45 +233,41 @@ pub(crate) fn ir_command(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program, &pool);
     println!();
 
-    let (uir, types) = lower_and_analyze(&program, &mut pool, &input, &name)?;
-    generate_and_display_ir(&uir, &types, &pool)?;
+    let tirs = lower_and_analyze(&program, &mut pool, &input, &name)?;
+    generate_and_display_ir(&tirs, &pool)?;
 
     Ok(())
 }
 
-/// Run the front-end (astgen + sema) and return the UIR plus the
-/// per-instruction `TypeTable` sema produced. Centralized so the
-/// three driver commands (`ir`, `run`, `build`) stay in lockstep
-/// when future pre-codegen passes are added.
+/// Run the front-end (astgen + sema) and return the typed TIR
+/// per-function. Centralized so the three driver commands (`ir`,
+/// `run`, `build`) stay in lockstep when future pre-codegen passes
+/// are added.
 fn lower_and_analyze(
     program: &ast::Program,
     pool: &mut InternPool,
     input: &str,
     source_name: &str,
-) -> Result<(Uir, TypeTable), CompilerError> {
+) -> Result<Vec<Tir>, CompilerError> {
     let mut sink = DiagSink::new();
     let uir = astgen::generate(program, pool, &mut sink);
     // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
-    let types = sema::analyze(&uir, pool, &mut sink);
+    let tirs = sema::analyze(&uir, pool, &mut sink);
     if sink.has_errors() {
         let diags = sink.into_diags();
         render_diags(&diags, input, source_name);
         return Err(CompilerError::Diagnostics(diags));
     }
-    Ok((uir, types))
+    Ok(tirs)
 }
 
-fn generate_and_display_ir(
-    uir: &Uir,
-    types: &TypeTable,
-    pool: &InternPool,
-) -> Result<(), CompilerError> {
+fn generate_and_display_ir(tirs: &[Tir], pool: &InternPool) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     let ir = codegen
-        .compile_and_dump_ir(uir, types, pool)
+        .compile_and_dump_ir(tirs, pool)
         .map_err(CompilerError::CodegenError)?;
 
     println!("[Cranelift IR]");
@@ -293,12 +288,12 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program, &pool);
     println!();
 
-    let (uir, types) = lower_and_analyze(&program, &mut pool, &input, &name)?;
+    let tirs = lower_and_analyze(&program, &mut pool, &input, &name)?;
 
     println!("[Codegen]");
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
     let main_id = codegen
-        .compile(&uir, &types, &pool)
+        .compile(&tirs, &pool)
         .map_err(CompilerError::CodegenError)?;
     let result = codegen
         .execute(main_id)
@@ -314,7 +309,7 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
     let name = source_name(file);
     let program = parse_source(&input, &mut pool, &name)?;
-    let (uir, types) = lower_and_analyze(&program, &mut pool, &input, &name)?;
+    let tirs = lower_and_analyze(&program, &mut pool, &input, &name)?;
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 
@@ -322,7 +317,7 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     codegen
-        .compile(&uir, &types, &pool)
+        .compile(&tirs, &pool)
         .map_err(CompilerError::CodegenError)?;
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
