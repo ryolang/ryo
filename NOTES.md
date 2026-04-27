@@ -69,3 +69,6 @@
 
 **Community Resources**:
 - [Mojo Dojo](https://mojodojo.dev/)
+
+**Color palette**:
+- [Color Hunt](https://colorhunt.co/palette/ffd400ffc300ff8c00ff5f00)

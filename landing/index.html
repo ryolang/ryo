@@ -3,7 +3,7 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Ryo Language</title>
+        <title>Ryo Programming Language</title>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link
@@ -15,7 +15,9 @@
             // Apply theme before paint to avoid flash
             (function () {
                 const saved = localStorage.getItem("theme");
-                const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+                const prefersDark = window.matchMedia(
+                    "(prefers-color-scheme: dark)",
+                ).matches;
                 if (saved === "dark" || (!saved && prefersDark)) {
                     document.documentElement.classList.add("dark");
                 }
@@ -28,7 +30,12 @@
             <div class="nav-inner">
                 <div class="brand">
                     <div class="brand-logo" aria-hidden="true">
-                        <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                            width="20"
+                            height="20"
+                        >
                             <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
                         </svg>
                     </div>
@@ -46,7 +53,11 @@
                 </div>
 
                 <div class="nav-actions">
-                    <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">
+                    <button
+                        id="theme-toggle"
+                        class="icon-btn"
+                        aria-label="Toggle theme"
+                    >
                         <svg
                             class="icon-moon"
                             viewBox="0 0 24 24"
@@ -58,7 +69,9 @@
                             width="20"
                             height="20"
                         >
-                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                            <path
+                                d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+                            />
                         </svg>
                         <svg
                             class="icon-sun"
@@ -86,14 +99,23 @@
                         rel="noopener noreferrer"
                     >
                         <span class="gh-star-left">
-                            <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                            <svg
+                                viewBox="0 0 24 24"
+                                fill="currentColor"
+                                width="16"
+                                height="16"
+                            >
                                 <path
                                     d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.36-3.87-1.36-.52-1.31-1.27-1.66-1.27-1.66-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.96.1-.74.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.18a10.96 10.96 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.58.23 2.75.11 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.4-5.25 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.21.66.8.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"
                                 />
                             </svg>
                             <span class="hide-sm">Star</span>
                         </span>
-                        <span class="gh-star-count" id="gh-star-count" hidden></span>
+                        <span
+                            class="gh-star-count"
+                            id="gh-star-count"
+                            hidden
+                        ></span>
                     </a>
 
                     <a
@@ -124,13 +146,16 @@
                         <h1 class="hero-title">
                             Productive syntax.<br />
                             Fearless safety.<br />
-                            <span class="text-gradient-primary">Bare-metal speed.</span>
+                            <span class="text-gradient-primary"
+                                >Bare-metal speed.</span
+                            >
                         </h1>
 
                         <p class="hero-sub">
-                            Ryo /ˈraɪoʊ/ is a statically-typed language designed for high Developer
-                            Experience. It combines the ergonomics of Python, the memory safety of
-                            Rust ("Ownership Lite"), and the concurrency model of Go.
+                            Ryo /ˈraɪoʊ/ is a statically-typed language designed
+                            for high Developer Experience. It combines the
+                            ergonomics of Python, the memory safety of Rust
+                            ("Ownership Lite"), and the concurrency model of Go.
                         </p>
 
                         <div class="cta-row">
@@ -161,7 +186,12 @@
                                 rel="noopener noreferrer"
                                 class="btn btn-secondary"
                             >
-                                <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                                <svg
+                                    viewBox="0 0 24 24"
+                                    fill="currentColor"
+                                    width="20"
+                                    height="20"
+                                >
                                     <path
                                         d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.36-3.87-1.36-.52-1.31-1.27-1.66-1.27-1.66-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.96.1-.74.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.18a10.96 10.96 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.58.23 2.75.11 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.4-5.25 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.21.66.8.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"
                                     />
@@ -174,8 +204,8 @@
                             <div class="install-text">
                                 <span
                                     >$ curl -fsSL
-                                    https://raw.githubusercontent.com/ryolang/ryo/main/install.sh |
-                                    sh</span
+                                    https://raw.githubusercontent.com/ryolang/ryo/main/install.sh
+                                    | sh</span
                                 >
                             </div>
                             <button
@@ -194,8 +224,16 @@
                                     width="16"
                                     height="16"
                                 >
-                                    <rect x="9" y="9" width="13" height="13" rx="2" />
-                                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                    <rect
+                                        x="9"
+                                        y="9"
+                                        width="13"
+                                        height="13"
+                                        rx="2"
+                                    />
+                                    <path
+                                        d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+                                    />
                                 </svg>
                                 <svg
                                     class="icon-check"
@@ -242,7 +280,13 @@
                                         width="16"
                                         height="16"
                                     >
-                                        <rect x="9" y="9" width="13" height="13" rx="2" />
+                                        <rect
+                                            x="9"
+                                            y="9"
+                                            width="13"
+                                            height="13"
+                                            rx="2"
+                                        />
                                         <path
                                             d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
                                         />
@@ -263,21 +307,31 @@
                                 </button>
                             </div>
                             <div class="code-body">
-<pre id="ryo-code"><code><span class="kw">fn</span> <span class="fn">greet</span>(name: <span class="ty">&amp;str</span>) -&gt; <span class="ty">str</span>:
-	<span class="ctl">return</span> <span class="str">f"Hello, </span>{name}<span class="str">! Welcome to Ryo."</span>
+                                <pre
+                                    id="ryo-code"
+                                ><code><span class="cmt"># Errors as values · optionals · safe by default</span>
+
+<span class="kw">error</span> <span class="ty">NotFound</span>
+
+<span class="kw">fn</span> <span class="fn">find_user</span>(id: <span class="ty">int</span>) -&gt; <span class="ty">NotFound!str</span>:
+	<span class="ctl">if</span> id == <span class="num">0</span>:
+		<span class="ctl">return</span> <span class="ty">NotFound</span>
+	<span class="ctl">return</span> <span class="str">f"user_</span>{id}<span class="str">"</span>
 
 <span class="kw">fn</span> <span class="fn">main</span>():
-	<span class="cmt"># Immutability by default (no let keyword)</span>
-	message = <span class="fn">greet</span>(<span class="str">"World"</span>)
-	<span class="fn">print</span>(message)
+	<span class="cmt"># Immutable by default — no `let` keyword</span>
+	greeting = <span class="str">"Welcome to Ryo"</span>
 
-	<span class="cmt"># Mutability requires 'mut'</span>
-	<span class="ctl">mut</span> counter = <span class="num">0</span>
-	counter += <span class="num">1</span>
+	<span class="cmt"># Optionals — no null pointer exceptions</span>
+	maybe: <span class="ty">?str</span> = <span class="str">"Alice"</span>
+	name = maybe <span class="ctl">orelse</span> <span class="str">"guest"</span>
 
-	<span class="cmt"># Safety without garbage collection</span>
-	user: <span class="ty">?str</span> = <span class="str">"Alice"</span>
-	len = user<span class="ctl">?.</span>len() <span class="ctl">orelse</span> <span class="num">0</span>
+	<span class="cmt"># Explicit, type-safe error handling</span>
+	user = <span class="fn">find_user</span>(<span class="num">42</span>) <span class="ctl">catch</span> |err|:
+		<span class="ctl">match</span> err:
+			<span class="ty">NotFound</span>: <span class="str">"unknown"</span>
+
+	<span class="fn">print</span>(<span class="str">f"</span>{greeting}<span class="str">, </span>{name}<span class="str"> → </span>{user}<span class="str">"</span>)
 </code></pre>
                             </div>
                             <div class="code-footer">
@@ -285,14 +339,18 @@
                                     <span class="prompt">$</span>
                                     <span
                                         >ryo run main.ryo
-                                        <span class="dim"># JIT execution</span></span
+                                        <span class="dim"
+                                            ># JIT execution</span
+                                        ></span
                                     >
                                 </div>
                                 <div class="code-footer-line">
                                     <span class="prompt">$</span>
                                     <span
                                         >ryo build main.ryo &amp;&amp; ./main
-                                        <span class="dim"># AOT compilation</span></span
+                                        <span class="dim"
+                                            ># AOT compilation</span
+                                        ></span
                                     >
                                 </div>
                             </div>
@@ -304,13 +362,40 @@
             <!-- Inspirations -->
             <section class="inspirations">
                 <div class="inspirations-inner">
-                    <p class="inspirations-label">Built with ideas from the best</p>
+                    <p class="inspirations-label">
+                        Built with ideas from the best
+                    </p>
                     <ul class="chip-row" aria-label="Language inspirations">
-                        <li class="chip"><span class="chip-emoji" aria-hidden="true">🐍</span> Python</li>
-                        <li class="chip"><span class="chip-emoji" aria-hidden="true">🦀</span> Rust</li>
-                        <li class="chip"><span class="chip-emoji" aria-hidden="true">🔥</span> Mojo</li>
-                        <li class="chip"><span class="chip-emoji" aria-hidden="true">🐹</span> Go</li>
-                        <li class="chip"><span class="chip-emoji" aria-hidden="true">⚡</span> Zig</li>
+                        <li class="chip">
+                            <span class="chip-emoji" aria-hidden="true"
+                                >🐍</span
+                            >
+                            Python
+                        </li>
+                        <li class="chip">
+                            <span class="chip-emoji" aria-hidden="true"
+                                >🦀</span
+                            >
+                            Rust
+                        </li>
+                        <li class="chip">
+                            <span class="chip-emoji" aria-hidden="true"
+                                >🔥</span
+                            >
+                            Mojo
+                        </li>
+                        <li class="chip">
+                            <span class="chip-emoji" aria-hidden="true"
+                                >🐹</span
+                            >
+                            Go
+                        </li>
+                        <li class="chip">
+                            <span class="chip-emoji" aria-hidden="true"
+                                >⚡</span
+                            >
+                            Zig
+                        </li>
                     </ul>
                 </div>
             </section>
@@ -321,8 +406,9 @@
                     <div class="section-head">
                         <h2>Designed for the AI Era</h2>
                         <p>
-                            A small set of orthogonal primitives with consistent behavior. Readable
-                            by default, explicit where you need to see intent.
+                            A small set of orthogonal primitives with consistent
+                            behavior. Readable by default, explicit where you
+                            need to see intent.
                         </p>
                     </div>
 
@@ -339,13 +425,15 @@
                                     width="24"
                                     height="24"
                                 >
-                                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                                    <polygon
+                                        points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"
+                                    />
                                 </svg>
                             </div>
                             <h3>Pythonic Syntax</h3>
                             <p>
-                                Indentation-based, readable, and concise syntax that avoids
-                                extensive boilerplate.
+                                Indentation-based, readable, and concise syntax
+                                that avoids extensive boilerplate.
                             </p>
                         </article>
                         <article class="feature-card">
@@ -363,14 +451,17 @@
                                     <path
                                         d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"
                                     />
-                                    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                                    <polyline
+                                        points="3.27 6.96 12 12.01 20.73 6.96"
+                                    />
                                     <line x1="12" y1="22.08" x2="12" y2="12" />
                                 </svg>
                             </div>
                             <h3>Ownership Lite</h3>
                             <p>
-                                Memory safety without the garbage collector. Functions borrow by
-                                default and assignments move.
+                                Memory safety without the garbage collector.
+                                Functions borrow by default and assignments
+                                move.
                             </p>
                         </article>
                         <article class="feature-card">
@@ -391,8 +482,9 @@
                             </div>
                             <h3>Rich Errors</h3>
                             <p>
-                                Zig-style Error Unions (!T) with exhaustive pattern matching by
-                                default and clear propagation.
+                                Zig-style Error Unions (!T) with exhaustive
+                                pattern matching by default and clear
+                                propagation.
                             </p>
                         </article>
                         <article class="feature-card">
@@ -413,8 +505,8 @@
                             </div>
                             <h3>Green Threads</h3>
                             <p>
-                                Colorless concurrency with a work-stealing scheduler. No
-                                async/await function coloring.
+                                Colorless concurrency with a work-stealing
+                                scheduler. No async/await function coloring.
                             </p>
                         </article>
                     </div>
@@ -425,10 +517,14 @@
             <section class="cta bg-grid">
                 <div class="cta-glow"></div>
                 <div class="cta-inner">
-                    <h2>Ready to write <span class="text-gradient-primary">safe software</span>?</h2>
+                    <h2>
+                        Ready to write
+                        <span class="text-gradient-primary">safe software</span
+                        >?
+                    </h2>
                     <p>
-                        Join the early community of developers and language enthusiasts building the
-                        software of tomorrow.
+                        Join the early community of developers and language
+                        enthusiasts building the software of tomorrow.
                     </p>
                     <a
                         href="https://github.com/ryolang/ryo/blob/main/docs/index.md"
@@ -459,7 +555,12 @@
             <div class="footer-inner">
                 <div class="brand">
                     <div class="brand-logo brand-logo-sm" aria-hidden="true">
-                        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                            width="14"
+                            height="14"
+                        >
                             <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
                         </svg>
                     </div>
