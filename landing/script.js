@@ -22,13 +22,36 @@
     const countEl = document.getElementById("gh-star-count");
     if (!countEl) return;
 
+    const CACHE_KEY = "gh-star-count";
+    const CACHE_TTL_MS = 60 * 60 * 1000; // 1h — avoids the 60/hr anon API limit
+    const format = (n) => (n > 999 ? (n / 1000).toFixed(1) + "k" : String(n));
+    const render = (n) => {
+        countEl.textContent = format(n);
+        countEl.hidden = false;
+    };
+
+    try {
+        const raw = localStorage.getItem(CACHE_KEY);
+        if (raw) {
+            const { n, t } = JSON.parse(raw);
+            if (typeof n === "number" && Date.now() - t < CACHE_TTL_MS) {
+                render(n);
+                return;
+            }
+        }
+    } catch {}
+
     fetch("https://api.github.com/repos/ryolang/ryo")
         .then((res) => res.json())
         .then((data) => {
             if (typeof data.stargazers_count === "number") {
-                const n = data.stargazers_count;
-                countEl.textContent = n > 999 ? (n / 1000).toFixed(1) + "k" : String(n);
-                countEl.hidden = false;
+                render(data.stargazers_count);
+                try {
+                    localStorage.setItem(
+                        CACHE_KEY,
+                        JSON.stringify({ n: data.stargazers_count, t: Date.now() }),
+                    );
+                } catch {}
             }
         })
         .catch((err) => console.error(err));

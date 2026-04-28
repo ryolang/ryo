@@ -2,7 +2,7 @@
 
 # Ryo Programming Language ⚡
 
-**Ryo /ˈraɪoʊ/: Productive, Safe, Fast.**
+**Ryo /ˈraɪoʊ/ — Looks like Python. Runs like Rust. Quacks like Ryduck.**
 
 <div align="left">
   <img src="https://img.shields.io/badge/status-pre--alpha-orange?style=for-the-badge" alt="Status">

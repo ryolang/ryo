@@ -3,7 +3,45 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Ryo Programming Language</title>
+        <title>Ryo — Productive, Safe, Fast Programming Language</title>
+        <meta
+            name="description"
+            content="Looks like Python. Runs like Rust. Quacks like Ryduck. Ryo is a statically-typed, compiled language combining the ergonomics of Python, the memory safety of Rust (Ownership Lite), and the concurrency model of Go."
+        />
+        <meta name="theme-color" content="#FFC300" media="(prefers-color-scheme: light)" />
+        <meta name="theme-color" content="#0B0B0F" media="(prefers-color-scheme: dark)" />
+
+        <!-- Canonical -->
+        <link rel="canonical" href="https://ryolang.org/" />
+
+        <!-- Favicons -->
+        <link rel="icon" type="image/svg+xml" href="/ryo.svg" />
+        <link rel="icon" type="image/png" href="/ryo.png" />
+        <link rel="apple-touch-icon" href="/ryo.png" />
+
+        <!-- Open Graph -->
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="Ryo" />
+        <meta property="og:url" content="https://ryolang.org/" />
+        <meta property="og:title" content="Ryo — Productive, Safe, Fast Programming Language" />
+        <meta
+            property="og:description"
+            content="Looks like Python. Runs like Rust. Quacks like Ryduck. A statically-typed, compiled language with Python's ergonomics, Rust's safety, and Go's concurrency."
+        />
+        <meta property="og:image" content="https://ryolang.org/og-image.jpg" />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+        <meta property="og:image:alt" content="Ryduck, the Ryo mascot, next to the Ryo wordmark with the tagline 'Productive · Safe · Fast'" />
+
+        <!-- Twitter -->
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content="Ryo — Productive, Safe, Fast Programming Language" />
+        <meta
+            name="twitter:description"
+            content="Looks like Python. Runs like Rust. Quacks like Ryduck. A statically-typed, compiled language with Python's ergonomics, Rust's safety, and Go's concurrency."
+        />
+        <meta name="twitter:image" content="https://ryolang.org/og-image.jpg" />
+
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link
@@ -118,14 +156,6 @@
                         ></span>
                     </a>
 
-                    <a
-                        href="https://github.com/ryolang/ryo/blob/main/docs/index.md"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        class="btn btn-invert hide-sm"
-                    >
-                        Get Started
-                    </a>
                 </div>
             </div>
         </nav>
@@ -152,10 +182,11 @@
                         </h1>
 
                         <p class="hero-sub">
+                            <strong class="hero-tagline">Looks like Python. Runs like Rust. Quacks like Ryduck.</strong>
                             Ryo /ˈraɪoʊ/ is a statically-typed language designed
-                            for high Developer Experience. It combines the
-                            ergonomics of Python, the memory safety of Rust
-                            ("Ownership Lite"), and the concurrency model of Go.
+                            for high Developer Experience &mdash; the ergonomics
+                            of Python, the memory safety of Rust ("Ownership
+                            Lite"), and the concurrency model of Go.
                         </p>
 
                         <div class="cta-row">
@@ -516,12 +547,29 @@
             <!-- CTA -->
             <section class="cta bg-grid">
                 <div class="cta-glow"></div>
-                <div class="cta-inner">
+                <div class="cta-inner cta-inner--mascot">
+                    <picture>
+                        <source srcset="ryduck.webp" type="image/webp" />
+                        <img
+                            class="ryduck-mascot"
+                            src="ryduck.png"
+                            alt=""
+                            role="presentation"
+                            width="240"
+                            height="282"
+                            loading="lazy"
+                            decoding="async"
+                        />
+                    </picture>
+                    <div class="cta-content">
                     <h2>
                         Ready to write
                         <span class="text-gradient-primary">safe software</span
                         >?
                     </h2>
+                    <p class="cta-greeting">
+                        Say hi to <strong>Ryduck</strong>, our mascot.
+                    </p>
                     <p>
                         Join the early community of developers and language
                         enthusiasts building the software of tomorrow.
@@ -547,6 +595,7 @@
                             <polyline points="12 5 19 12 12 19" />
                         </svg>
                     </a>
+                    </div>
                 </div>
             </section>
         </main>
