@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Ryo — OG Image</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap"
+    rel="stylesheet"
+/>
+<style>
+    :root {
+        --color-primary-400: #ffd400;
+        --color-primary-500: #ffc300;
+        --color-primary-600: #ff8c00;
+        --bg-base: #fcfbf6;
+        --bg-elevated: #ffffff;
+        --border-subtle: #ebe8df;
+        --text-base: #0f172a;
+        --text-muted: #475569;
+        --grid-line: rgba(0, 0, 0, 0.04);
+        --code-header-bg: #f8fafc;
+        --code-tab-bg: #ffffff;
+        --syn-kw: #cf222e;
+        --syn-fn: #8250df;
+        --syn-ctl: #0550ae;
+        --syn-str: #0a3069;
+        --syn-cmt: #6e7781;
+        --syn-num: #0a7c2f;
+        --syn-ty: #953800;
+        --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+        --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+        --font-display: "Space Grotesk", "Inter", sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 1200px; height: 630px; overflow: hidden; }
+    body {
+        background: var(--bg-base);
+        color: var(--text-base);
+        font-family: var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+        position: relative;
+    }
+    .grid-bg {
+        position: absolute;
+        inset: 0;
+        background-image:
+            linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+            linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+        background-size: 40px 40px;
+        -webkit-mask-image: radial-gradient(ellipse 70% 60% at 30% 40%, #000 60%, transparent 110%);
+        mask-image: radial-gradient(ellipse 70% 60% at 30% 40%, #000 60%, transparent 110%);
+    }
+    .orb {
+        position: absolute;
+        border-radius: 9999px;
+        filter: blur(90px);
+        pointer-events: none;
+    }
+    .orb-1 {
+        top: -120px; left: -80px;
+        width: 520px; height: 520px;
+        background: rgba(255, 195, 0, 0.22);
+    }
+    .orb-2 {
+        bottom: -160px; right: -80px;
+        width: 480px; height: 480px;
+        background: rgba(255, 140, 0, 0.14);
+    }
+    .wrap {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        padding: 64px 72px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 56px;
+        align-items: center;
+    }
+    .left { display: flex; flex-direction: column; gap: 24px; }
+    .brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+    }
+    .brand-logo {
+        display: flex;
+        align-items: center;
+    }
+    .brand-logo img {
+        height: 42px;
+        width: auto;
+    }
+    .brand-name {
+        font-family: var(--font-display);
+        font-weight: 700;
+        font-size: 48px;
+        letter-spacing: -0.03em;
+        line-height: 1;
+    }
+    .headline {
+        font-family: var(--font-display);
+        font-weight: 700;
+        font-size: 68px;
+        line-height: 1.04;
+        letter-spacing: -0.028em;
+    }
+    .headline .accent {
+        background-clip: text;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        color: transparent;
+        background-image: linear-gradient(135deg, var(--color-primary-400) 0%, var(--color-primary-600) 100%);
+    }
+    .sub {
+        font-size: 22px;
+        line-height: 1.45;
+        color: var(--text-muted);
+        max-width: 480px;
+    }
+    .meta-row {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        margin-top: 8px;
+    }
+    .url {
+        font-family: var(--font-mono);
+        font-size: 18px;
+        color: var(--text-muted);
+    }
+    .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 16px;
+        border-radius: 9999px;
+        border: 1px solid rgba(255, 195, 0, 0.4);
+        background: rgba(255, 195, 0, 0.1);
+        color: #92400e;
+        font-size: 15px;
+        font-weight: 600;
+    }
+    .chip-dot {
+        width: 8px; height: 8px;
+        border-radius: 9999px;
+        background: var(--color-primary-500);
+    }
+
+    /* Code window */
+    .code-window-wrap { position: relative; }
+    .code-glow {
+        position: absolute;
+        inset: -2px;
+        background: linear-gradient(to top right, rgba(255,195,0,0.35), rgba(252,211,77,0.15));
+        border-radius: 18px;
+        filter: blur(10px);
+        opacity: 0.5;
+    }
+    .code-window {
+        position: relative;
+        border-radius: 14px;
+        overflow: hidden;
+        border: 1px solid var(--border-subtle);
+        background: var(--bg-elevated);
+        box-shadow: 0 30px 50px -12px rgba(15, 23, 42, 0.18);
+    }
+    .code-header {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--border-subtle);
+        background: var(--code-header-bg);
+    }
+    .dots { display: flex; gap: 8px; }
+    .dot {
+        width: 13px; height: 13px;
+        border-radius: 9999px;
+    }
+    .dot-r { background: #f87171; }
+    .dot-y { background: #facc15; }
+    .dot-g { background: #4ade80; }
+    .filename {
+        font-family: var(--font-mono);
+        font-size: 14px;
+        padding: 5px 12px;
+        border-radius: 6px;
+        background: var(--code-tab-bg);
+        border: 1px solid var(--border-subtle);
+    }
+    .code-body {
+        padding: 22px 24px;
+        font-family: var(--font-mono);
+        font-size: 18px;
+        line-height: 1.65;
+    }
+    .code-body pre { margin: 0; tab-size: 4; -moz-tab-size: 4; white-space: pre; }
+    .kw  { color: var(--syn-kw); }
+    .ty  { color: var(--syn-ty); }
+    .num { color: var(--syn-num); }
+    .fn  { color: var(--syn-fn); }
+    .ctl { color: var(--syn-ctl); }
+    .str { color: var(--syn-str); }
+    .cmt { color: var(--syn-cmt); }
+
+    /* Mascot accent */
+    .mascot {
+        position: absolute;
+        right: 48px;
+        bottom: 28px;
+        width: 110px;
+        height: auto;
+        filter: drop-shadow(0 10px 20px rgba(15, 23, 42, 0.18));
+        pointer-events: none;
+    }
+</style>
+</head>
+<body>
+    <div class="grid-bg"></div>
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+
+    <div class="wrap">
+        <div class="left">
+            <div class="brand">
+                <div class="brand-logo">
+                    <img src="ryo.svg" alt="" width="56" height="56" />
+                </div>
+                <span class="brand-name">ryo</span>
+            </div>
+
+            <div class="chip">
+                <span class="chip-dot"></span>
+                Pre-alpha &middot; Statically typed &middot; Compiled
+            </div>
+
+            <h1 class="headline">
+                Looks like Python.<br />
+                Runs like <span class="accent">Rust</span>.
+            </h1>
+
+            <p class="sub">
+                Python ergonomics, Rust-grade memory safety, Go-style concurrency &mdash; in one compiled language.
+            </p>
+
+            <div class="meta-row">
+                <span class="url">ryolang.org</span>
+            </div>
+        </div>
+
+        <div class="code-window-wrap">
+            <div class="code-glow"></div>
+            <div class="code-window">
+                <div class="code-header">
+                    <div class="dots">
+                        <span class="dot dot-r"></span>
+                        <span class="dot dot-y"></span>
+                        <span class="dot dot-g"></span>
+                    </div>
+                    <span class="filename">main.ryo</span>
+                </div>
+                <div class="code-body">
+<pre><code><span class="cmt"># Errors as values, safe by default</span>
+<span class="kw">error</span> <span class="ty">NotFound</span>
+
+<span class="kw">fn</span> <span class="fn">find_user</span>(id: <span class="ty">int</span>) -&gt; <span class="ty">NotFound!str</span>:
+	<span class="ctl">if</span> id == <span class="num">0</span>:
+		<span class="ctl">return</span> <span class="ty">NotFound</span>
+	<span class="ctl">return</span> <span class="str">f"user_</span>{id}<span class="str">"</span>
+</code></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <img class="mascot" src="ryduck.png" alt="" aria-hidden="true" />
+</body>
+</html>

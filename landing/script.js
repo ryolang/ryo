@@ -4,9 +4,12 @@
     const btn = document.getElementById("theme-toggle");
     if (!btn) return;
 
+    btn.setAttribute("aria-pressed", String(root.classList.contains("dark")));
+
     btn.addEventListener("click", () => {
         const isDark = root.classList.toggle("dark");
         localStorage.setItem("theme", isDark ? "dark" : "light");
+        btn.setAttribute("aria-pressed", String(isDark));
     });
 
     // Follow system theme if user hasn't explicitly chosen
@@ -14,6 +17,7 @@
     mq.addEventListener("change", (e) => {
         if (localStorage.getItem("theme")) return;
         root.classList.toggle("dark", e.matches);
+        btn.setAttribute("aria-pressed", String(e.matches));
     });
 })();
 
@@ -22,16 +26,48 @@
     const countEl = document.getElementById("gh-star-count");
     if (!countEl) return;
 
+    const CACHE_KEY = "gh-star-count";
+    const CACHE_TTL_MS = 60 * 60 * 1000; // 1h — avoids the 60/hr anon API limit
+    const format = (n) => (n > 999 ? (n / 1000).toFixed(1) + "k" : String(n));
+    const render = (n) => {
+        countEl.textContent = format(n);
+        countEl.hidden = false;
+    };
+
+    let stale = null;
+    try {
+        const raw = localStorage.getItem(CACHE_KEY);
+        if (raw) {
+            const { n, t } = JSON.parse(raw);
+            if (typeof n === "number") {
+                if (Date.now() - t < CACHE_TTL_MS) {
+                    render(n);
+                    return;
+                }
+                stale = n;
+                render(n);
+            }
+        }
+    } catch {}
+
     fetch("https://api.github.com/repos/ryolang/ryo")
         .then((res) => res.json())
         .then((data) => {
             if (typeof data.stargazers_count === "number") {
-                const n = data.stargazers_count;
-                countEl.textContent = n > 999 ? (n / 1000).toFixed(1) + "k" : String(n);
-                countEl.hidden = false;
+                render(data.stargazers_count);
+                try {
+                    localStorage.setItem(
+                        CACHE_KEY,
+                        JSON.stringify({ n: data.stargazers_count, t: Date.now() }),
+                    );
+                } catch {}
+            } else if (stale !== null) {
+                render(stale);
             }
         })
-        .catch((err) => console.error(err));
+        .catch(() => {
+            if (stale !== null) render(stale);
+        });
 })();
 
 // ----- Copy buttons -----

@@ -1,3 +1,5 @@
+**Status:** Implementation (v0.0.x–v0.1)
+
 # Ryo Implementation Roadmap
 
 This roadmap outlines the planned development of the Ryo programming language compiler and runtime. Each milestone focuses on delivering specific, tangible capabilities while building toward a complete language implementation.
@@ -12,9 +14,19 @@ This roadmap outlines the planned development of the Ryo programming language co
 * **Simplicity First:** Implement the simplest version that meets the immediate goal
 * **Quality of Life:** Include documentation, basic error reporting, and simple tooling
 
+## Alpha Scope (v0.0.x)
+
+Alpha is a **delivery slice** within v0.1.0, not a separate language. It targets the smallest subset of features that makes the language usable for external evaluation.
+
+**Acceptance criterion:** the code snippet on `landing/index.html` compiles and runs.
+
+Milestones included in the alpha slice are tagged `[alpha]` in their headings below. Some milestones are **partial** for alpha (only a subset of their tasks ships in `0.0.1-alpha.1`); those are tagged `[alpha: partial]` and the alpha-required subset is listed in [alpha_scope.md](alpha_scope.md).
+
+Full alpha definition, litmus test, non-goals, release tagging, and gating test programs: see [docs/dev/alpha_scope.md](alpha_scope.md).
+
 ## Phase 1: Core Foundation
 
-### Milestone 1: Setup & Lexer Basics ✅ COMPLETE
+### Milestone 1: Setup & Lexer Basics [alpha] ✅ COMPLETE
 
 **Goal:** Parse basic Ryo syntax into tokens
 
@@ -39,7 +51,7 @@ This roadmap outlines the planned development of the Ryo programming language co
 - CLI tested with realistic Ryo code samples
 - **Design Decision:** Struct literals use parentheses with named arguments `Point(x=1, y=2)`, not braces. Curly braces are reserved exclusively for f-string interpolation (e.g., `f"Hello {name}"`) which will be implemented in later milestones.
 
-### Milestone 2: Parser & AST Basics ✅ COMPLETE
+### Milestone 2: Parser & AST Basics [alpha] ✅ COMPLETE
 
 **Goal:** Parse simple variable declarations and integer literals into an Abstract Syntax Tree
 
@@ -80,7 +92,7 @@ This roadmap outlines the planned development of the Ryo programming language co
 - Supports both explicit type annotations and implicit type inference
 - Expression initializers support full arithmetic expressions
 
-### Milestone 3: "Hello, Exit Code!" (Cranelift Integration) ✅ COMPLETE
+### Milestone 3: "Hello, Exit Code!" (Cranelift Integration) [alpha] ✅ COMPLETE
 
 **Goal:** Compile minimal Ryo program to native code that returns an exit code
 
@@ -140,7 +152,7 @@ This roadmap outlines the planned development of the Ryo programming language co
 - ❌ Control flow
 - ❌ Error handling
 
-### Milestone 3.5: "Hello, World!" (String Literals & Print) ✅ COMPLETE
+### Milestone 3.5: "Hello, World!" (String Literals & Print) [alpha] ✅ COMPLETE
 
 **Goal:** Add string literals and print() function for debugging and visible output
 
@@ -212,7 +224,7 @@ _ = print("Second\n")
 
 ## Phase 2: Essential Language Features
 
-### Milestone 4: Functions & Calls
+### Milestone 4: Functions & Calls [alpha]
 
 **Status:** ✅ COMPLETE - User-defined functions with parameters, return values, and variable references implemented
 
@@ -427,7 +439,7 @@ Milestone 6 (Implementation) is scheduled at the **start of Phase 4** — after 
 
 > **Note:** Milestone 6 (Module System Implementation) is documented at the **start of Phase 4**, after the core language is complete. The design landed in M5 (above), but implementation waits until all language features are in place so modules don't have to be revised as new constructs arrive.
 
-### Milestone 6.5: Booleans & Equality
+### Milestone 6.5: Booleans & Equality [alpha]
 **Goal:** Add `bool` primitive type and equality operators as a precondition for M7 and M8.
 
 **Status:** ✅ COMPLETE — `bool` type, `true`/`false` literals, and `==`/`!=` operators implemented end-to-end.
@@ -463,7 +475,7 @@ fn main() -> int:
 Note: Zig pipeline alignment implemented here.
 ---
 
-### Milestone 7: Expressions & Operators (Extended)
+### Milestone 7: Expressions & Operators (Extended) [alpha]
 **Goal:** Support float type and extended operators
 
 **Tasks:**
@@ -506,7 +518,7 @@ remainder = a % b     # 1
 Note: Review [Project Structure](project_structure) and make the first split before M8
 ---
 
-### Milestone 8: Control Flow & Booleans
+### Milestone 8: Control Flow & Booleans [alpha]
 **Goal:** Implement `if/else` statements, `for` loops, and boolean logic
 
 **Tasks:**
@@ -567,7 +579,7 @@ fn main() -> int:
 - If expressions (returning values) deferred to later milestone
 - Dependencies: Milestone 7 (ordering comparisons), Milestone 6.5 (bool type and equality)
 
-### Milestone 8.1: Heap-Allocated `str` Type & Move Semantics
+### Milestone 8.1: Heap-Allocated `str` Type & Move Semantics [alpha]
 **Goal:** Promote string literals from read-only data to a real heap-allocated `str` type, and introduce the ownership-tracking pass that catches use-after-move on named bindings. Borrows (`&T`/`&mut T`) and string slices (`&str`) follow in M8.2–M8.4.
 
 **Status:** ⏳ Planned
@@ -621,7 +633,7 @@ fn main() -> int:
 - Allocator failure surfaces as a panic in v0.1; allocation-fallible APIs ship alongside error unions (M13).
 - Dependencies: Milestone 8 (control flow blocks shape the dataflow regions the move tracker walks).
 
-### Milestone 8.2: Immutable Borrows (`&T`)
+### Milestone 8.2: Immutable Borrows (`&T`) [alpha]
 **Goal:** Add immutable references and the corresponding borrow-checking rules, building on M8.1's move tracker.
 
 **Status:** ⏳ Planned
@@ -660,7 +672,7 @@ fn main() -> int:
 - Many borrows are **implicit** at call sites once method receivers (M17) ship
 - Dependencies: Milestone 8.1 (move tracker provides the dataflow infrastructure)
 
-### Milestone 8.3: Mutable Borrows (`&mut T`)
+### Milestone 8.3: Mutable Borrows (`&mut T`) [alpha]
 **Goal:** Add mutable references with aliasing exclusion, completing the v0.1 borrow checker.
 
 **Status:** ⏳ Planned
@@ -702,7 +714,7 @@ fn main() -> int:
 - Edge cases (reborrowing, two-phase borrows) documented in [borrow_checker.md](borrow_checker.md) §5
 - Dependencies: Milestone 8.2 (immutable borrows establish the reference machinery)
 
-### Milestone 8.4: String Slices (`&str`)
+### Milestone 8.4: String Slices (`&str`) [alpha]
 **Goal:** Borrowed views into `str` — zero-copy substrings and string parameters.
 
 **Status:** ⏳ Planned
@@ -920,7 +932,7 @@ fn main() -> int:
 - Tuples are **moved** like structs (ownership)
 - Dependencies: Milestone 9 (structs provide foundation)
 
-### Milestone 11: Enums (Algebraic Data Types)
+### Milestone 11: Enums (Algebraic Data Types) [alpha]
 **Goal:** Implement enums with variants (sum types / tagged unions)
 
 **Tasks:**
@@ -968,7 +980,7 @@ fn divide(a: int, b: int) -> Result:
 - String type used for the example above is available since Milestone 8.1
 - Dependencies: Milestone 9 (structs provide foundation for variant data), Milestone 10 (tuples share the variant-payload codegen path)
 
-### Milestone 12: Pattern Matching
+### Milestone 12: Pattern Matching [alpha]
 **Goal:** Implement exhaustive pattern matching on enums and literals
 
 **Tasks:**
@@ -1020,7 +1032,7 @@ fn describe_color(color: Color) -> str:
 - Nested patterns deferred to later milestone
 - Dependencies: Milestone 11 (enums to match on)
 
-### Milestone 13: Error Types & Unions
+### Milestone 13: Error Types & Unions [alpha]
 **Goal:** Implement error types, error unions, and the error trait
 
 **Tasks:**
@@ -1095,7 +1107,7 @@ fn main() -> int:
 >
 > Closure capture analysis (originally Milestone 15.5) is **deferred to v0.2** — see Phase 5: Closures & Lambda Expressions.
 
-### Milestone 16: Optional Types (`?T`)
+### Milestone 16: Optional Types (`?T`) [alpha]
 **Goal:** Implement null-safe optional types with `?T`, `none`, and `orelse`
 
 **Tasks:**
@@ -1437,7 +1449,7 @@ fn main() -> int:
 
 **Future Enhancements** (see proposals.md): re-exports `pub use`, glob imports `import utils.*`, conditional compilation `#[cfg(...)]`, workspace support.
 
-### Milestone 24: Standard Library Core
+### Milestone 24: Standard Library Core [alpha: partial]
 **Goal:** Implement essential standard library modules
 
 **Tasks:**
@@ -1514,7 +1526,7 @@ fn main() -> int:
 - Platform-specific code isolated to `os` module
 - Dependencies: Milestone 6 (modules for stdlib organization)
 
-### Milestone 25: Panic & Debugging Support
+### Milestone 25: Panic & Debugging Support [alpha: partial]
 **Goal:** Implement panic mechanism and debugging features
 
 **Tasks:**
@@ -1656,7 +1668,7 @@ Test result: ok. 2 passed; 0 failed
 - Generated docs include trait implementations, method signatures
 - Dependencies: Milestone 25 (assert functions)
 
-### Milestone 26.5: Distribution & Installer
+### Milestone 26.5: Distribution & Installer [alpha: partial]
 **Goal:** Zero-friction installation and distribution for v0.1.0 release
 
 **Tasks:**
@@ -1759,6 +1771,33 @@ ryo upgrade
   - Release notes and changelog
   - Binary distributions (Linux, macOS, Windows)
   - Installation script (`curl ... | sh`)
+
+Acceptance criteria, this code must run well with version v0.1
+```ryo
+# Errors as values · optionals · safe by default
+
+error NotFound
+
+fn find_user(id: int) -> NotFound!str:
+	if id == 0:
+		return NotFound
+	return f"user_{id}"
+
+fn main():
+	# Immutable by default — no `let` keyword
+	greeting = "Welcome to Ryo"
+
+	# Optionals — no null pointer exceptions
+	maybe: ?str = "Alice"
+	name = maybe orelse "guest"
+
+	# Explicit, type-safe error handling
+	user = find_user(42) catch |err|:
+		match err:
+			NotFound: "unknown"
+
+	print(f"{greeting}, {name} → {user}")
+```
 
 **Visible Progress:** Ryo v0.1.0 is production-ready!
 
@@ -2767,3 +2806,9 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 o
 5. Iterate on Phase 5 features based on real-world needs
 
 **Join us in building Ryo!** See [CONTRIBUTING.md](../CONTRIBUTING.md) for how to get involved.
+
+## References
+
+- Spec: `docs/specification.md` — canonical language specification; this roadmap schedules its delivery
+- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [middle_end_refactor.md](middle_end_refactor.md) — implementation plans linked from milestones
+- Milestone: alpha milestones tagged `[alpha]` inline; see [alpha_scope.md](alpha_scope.md) for the alpha delivery slice
