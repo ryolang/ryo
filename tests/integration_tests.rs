@@ -663,6 +663,55 @@ fn bool_program_compiles_and_runs() {
     );
 }
 
+// ============================================================================
+// Milestone 7: Float, Ordering, Modulo
+// ============================================================================
+
+#[test]
+fn float_program_compiles_and_runs() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main() -> int:\n\tx: float = 3.5\n\ty: float = 2.5\n\tavg = x + y / 2.0\n\tcmp = x > y\n\treturn 0\n";
+    let test_file = create_test_file(temp_dir.path(), "float_test.ryo", code);
+
+    let output = run_ryo_command(&["run", "float_test.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Result] => 0"),
+        "Should exit with code 0, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn integer_division_and_modulo_compile_and_run() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // 10 / 3 = 3, 10 % 3 = 1; we return the remainder.
+    let code = "fn main() -> int:\n\ta = 10\n\tb = 3\n\tq = a / b\n\tr = a % b\n\tcmp = q < a\n\treturn r\n";
+    let test_file = create_test_file(temp_dir.path(), "int_div_mod.ryo", code);
+
+    let output = run_ryo_command(&["run", "int_div_mod.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Result] => 1"),
+        "Should exit with code 1, got: {}",
+        stdout
+    );
+}
+
 // ---------- ryo ir --emit=... ----------
 //
 // Exit-criteria coverage for pipeline_alignment.md §3.6 / §4.5:

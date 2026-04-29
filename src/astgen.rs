@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn lower_float_literal() {
-        let (uir, pool) = parse_and_lower("x = 3.14").unwrap();
+        let (uir, pool) = parse_and_lower("x = 1.5").unwrap();
         let main = body_named(&uir, &pool, "main");
         let stmts = uir.body_stmts(main);
         let v = uir.var_decl_view(stmts[0]);
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn lower_float_type_annotation() {
-        let result = parse_and_lower("x: float = 3.14");
+        let result = parse_and_lower("x: float = 1.5");
         assert!(result.is_ok(), "unexpected diagnostics: {:?}", result.err());
     }
 

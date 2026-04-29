@@ -1322,7 +1322,7 @@ mod tests {
 
     #[test]
     fn sema_float_literal_has_float_type() {
-        let (tirs, pool) = run("x = 3.14").unwrap();
+        let (tirs, pool) = run("x = 1.5").unwrap();
         let main = tir_named(&tirs, &pool, "main");
         let v = main.var_decl_view(stmt_at(main, 0));
         let init = main.inst(v.initializer);

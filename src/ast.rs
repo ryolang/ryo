@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn literal_float_variant_exists() {
-        let _f = Literal::Float(3.14);
+        let _f = Literal::Float(1.5);
     }
 
     #[test]
