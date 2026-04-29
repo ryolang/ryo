@@ -872,7 +872,7 @@ mod tests {
     use crate::parser::program_parser;
     use crate::tir::{Tir, TirData};
     use chumsky::Parser;
-    use chumsky::input::{Input, Stream};
+    use chumsky::input::Input;
     use chumsky::span::{SimpleSpan, Span as _};
 
     fn sp() -> Span {
@@ -887,8 +887,7 @@ mod tests {
     fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
         let mut pool = InternPool::new();
         let tokens = lex(input, &mut pool).expect("lex ok");
-        let token_stream =
-            Stream::from_iter(tokens).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
+        let token_stream = tokens[..].split_token_span((0..input.len()).into());
         let program = program_parser()
             .parse(token_stream)
             .into_result()
@@ -911,8 +910,7 @@ mod tests {
     fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
         let mut pool = InternPool::new();
         let tokens = lex(input, &mut pool).expect("lex ok");
-        let token_stream =
-            Stream::from_iter(tokens).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
+        let token_stream = tokens[..].split_token_span((0..input.len()).into());
         let program = program_parser()
             .parse(token_stream)
             .into_result()

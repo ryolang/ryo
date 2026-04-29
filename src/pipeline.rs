@@ -13,7 +13,7 @@ use crate::types::InternPool;
 use crate::uir::Uir;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::span::Span as _;
-use chumsky::{Parser, input::Stream, prelude::*};
+use chumsky::{Parser, prelude::*};
 use std::fs;
 use std::path::Path;
 use target_lexicon::Triple;
@@ -107,8 +107,10 @@ fn parse_source(
         CompilerError::Diagnostics(vec![diag])
     })?;
 
-    let token_stream =
-        Stream::from_iter(tokens).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
+    // chumsky 0.12 added `Input::split_token_span`, which collapses the previous
+    // `Stream::from_iter(...).map(eoi, |(t, s)| (t, s))` boilerplate that we used to
+    // pull `(Token, Span)` slices into a parser-friendly shape.
+    let token_stream = tokens[..].split_token_span((0..input.len()).into());
 
     match program_parser().parse(token_stream).into_result() {
         Ok(program) => Ok(program),

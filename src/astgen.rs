@@ -281,7 +281,7 @@ mod tests {
     use crate::parser::program_parser;
     use crate::uir::InstData;
     use chumsky::Parser;
-    use chumsky::input::{Input, Stream};
+    use chumsky::input::Input;
 
     fn parse_and_lower(input: &str) -> Result<(Uir, InternPool), Vec<Diag>> {
         // Phase-2 lex pipeline: logos + indent + intern in one
@@ -290,8 +290,7 @@ mod tests {
         // astgen can keep going past errors.
         let mut pool = InternPool::new();
         let tokens = lex(input, &mut pool).expect("lex ok");
-        let token_stream =
-            Stream::from_iter(tokens).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
+        let token_stream = tokens[..].split_token_span((0..input.len()).into());
         let program = program_parser()
             .parse(token_stream)
             .into_result()
