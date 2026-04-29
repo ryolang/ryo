@@ -19,8 +19,9 @@
 //!   lets later phases drop `&'a str` slices from `Token` and
 //!   shrink HIR's `String` count.
 //!
-//! Primitive types live at fixed item indices (0..=4), populated by
-//! `new()`. The `const fn` accessors (`void`, `bool_`, `int`, ...)
+//! Primitive types live at fixed item indices (0..=5), populated by
+//! `new()`. The slot order is `void, bool, int, str, float, error`.
+//! The `const fn` accessors (`void`, `bool_`, `int`, ...)
 //! return those indices without consulting the dedup table — hot
 //! paths never hash.
 //!
@@ -38,9 +39,11 @@ use std::hash::{BuildHasher, Hasher};
 
 /// A compact, copyable handle to an interned type.
 ///
-/// Primitive ids are stable: `TypeId(0..=4)` are `void`, `bool`,
-/// `int`, `str`, `error`. Use the `const fn` accessors on
-/// `InternPool` instead of constructing these directly.
+/// Primitive ids are stable: `TypeId(0..=5)` are `void`, `bool`,
+/// `int`, `str`, `float`, `error` (in that order; the constants
+/// `ID_VOID`..`ID_ERROR` below are the source of truth). Use the
+/// `const fn` accessors on `InternPool` instead of constructing
+/// these directly.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(u32);
 
@@ -508,8 +511,14 @@ mod tests {
     #[test]
     fn float_primitive_has_stable_id() {
         let pool = InternPool::new();
+        // Stability contract: `float` is at slot 4, `error` at 5.
+        assert_eq!(pool.float().raw(), 4);
+        assert_eq!(pool.error_type().raw(), 5);
+        // Distinctness from peer primitives.
         assert_ne!(pool.float(), pool.int());
         assert_ne!(pool.float(), pool.bool_());
+        assert_ne!(pool.float(), pool.error_type());
+        // Kind dispatch routes through `Tag::Float`.
         assert_eq!(pool.kind(pool.float()), TypeKind::Float);
     }
 

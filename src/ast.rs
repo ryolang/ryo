@@ -348,8 +348,11 @@ mod tests {
     }
 
     #[test]
-    fn literal_float_variant_exists() {
-        let _f = Literal::Float(1.5);
+    fn literal_float_variant_round_trips_payload() {
+        match Literal::Float(1.5) {
+            Literal::Float(v) => assert_eq!(v, 1.5),
+            other => panic!("expected Literal::Float, got {:?}", other),
+        }
     }
 
     #[test]

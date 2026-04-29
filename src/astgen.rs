@@ -331,8 +331,15 @@ mod tests {
 
     #[test]
     fn lower_float_type_annotation() {
-        let result = parse_and_lower("x: float = 1.5");
-        assert!(result.is_ok(), "unexpected diagnostics: {:?}", result.err());
+        let (uir, pool) = parse_and_lower("x: float = 1.5")
+            .expect("`: float` annotation should resolve without diagnostics");
+        let main = body_named(&uir, &pool, "main");
+        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        assert_eq!(
+            v.ty,
+            Some(pool.float()),
+            "`: float` annotation must resolve to pool.float()"
+        );
     }
 
     #[test]

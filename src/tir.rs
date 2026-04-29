@@ -737,11 +737,25 @@ mod tests {
         let mut pool = InternPool::new();
         let main = pool.intern_str("main");
         let mut b = TirBuilder::new(main, vec![], pool.int(), sp());
-        let lit1 = b.float_const(1.5, pool.float(), sp());
-        let lit2 = b.float_const(2.5, pool.float(), sp());
-        let _ = b.binary(TirTag::FAdd, pool.float(), lit1, lit2, sp());
-        let _ = b.binary(TirTag::ICmpLt, pool.bool_(), lit1, lit2, sp());
-        let _ = b.binary(TirTag::IMod, pool.int(), lit1, lit2, sp());
+
+        // Float operands feed the float ops; integer operands feed
+        // the integer ops. The TIR builder doesn't enforce operand
+        // shape (sema does), but mirroring real usage keeps the
+        // test honest.
+        let lit_f1 = b.float_const(1.5, pool.float(), sp());
+        let lit_f2 = b.float_const(2.5, pool.float(), sp());
+        let lit_i1 = b.int_const(1, pool.int(), sp());
+        let lit_i2 = b.int_const(2, pool.int(), sp());
+
+        let fadd = b.binary(TirTag::FAdd, pool.float(), lit_f1, lit_f2, sp());
+        let icmp_lt = b.binary(TirTag::ICmpLt, pool.bool_(), lit_i1, lit_i2, sp());
+        let imod = b.binary(TirTag::IMod, pool.int(), lit_i1, lit_i2, sp());
+
+        // Result types match the operator category: float arithmetic
+        // stays float, ordering produces bool, integer modulo stays int.
+        assert_eq!(b.ty_of(fadd), pool.float());
+        assert_eq!(b.ty_of(icmp_lt), pool.bool_());
+        assert_eq!(b.ty_of(imod), pool.int());
     }
 
     #[test]
