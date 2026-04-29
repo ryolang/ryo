@@ -1,13 +1,12 @@
-<img src="./docs/assets/ryo.png" alt="Ryo Logo" width="160" />
-
-# Ryo Programming Language ⚡
-
-**Ryo /ˈraɪoʊ/ — Looks like Python. Runs like Rust. Quacks like Ryduck.**
-
-<div align="left">
-  <img src="https://img.shields.io/badge/status-pre--alpha-orange?style=for-the-badge" alt="Status">
-  <img src="https://img.shields.io/github/actions/workflow/status/ryolang/ryo/ci.yml?branch=main&style=for-the-badge" alt="Build">  
-  <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="License">
+<div align="center">
+  <img src="./docs/assets/ryo.svg" alt="Ryo Logo" width="120" />
+  <h1>Ryo Programming Language</h1>
+  <p><strong>Ryo /ˈraɪoʊ/ — Looks like Python. Runs like Rust. Quacks like Ryduck.</strong></p>
+  <p>
+    <img src="https://img.shields.io/badge/status-pre--alpha-orange?style=for-the-badge" alt="Status">
+    <img src="https://img.shields.io/github/actions/workflow/status/ryolang/ryo/ci.yml?branch=main&style=for-the-badge" alt="Build">
+    <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="License">
+  </p>
 </div>
 
 <br>

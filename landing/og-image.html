@@ -30,7 +30,7 @@
         --syn-num: #0a7c2f;
         --syn-ty: #953800;
         --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-        --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+        --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
         --font-display: "Space Grotesk", "Inter", sans-serif;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -85,14 +85,12 @@
         gap: 14px;
     }
     .brand-logo {
-        width: 56px; height: 56px;
-        border-radius: 12px;
-        background: var(--color-primary-500);
-        color: #422a04;
         display: flex;
         align-items: center;
-        justify-content: center;
-        box-shadow: 0 6px 18px -4px rgba(255, 140, 0, 0.45);
+    }
+    .brand-logo img {
+        height: 42px;
+        width: auto;
     }
     .brand-name {
         font-family: var(--font-display);
@@ -228,9 +226,7 @@
         <div class="left">
             <div class="brand">
                 <div class="brand-logo">
-                    <svg viewBox="0 0 24 24" fill="currentColor" width="32" height="32">
-                        <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
-                    </svg>
+                    <img src="ryo.svg" alt="" width="56" height="56" />
                 </div>
                 <span class="brand-name">ryo</span>
             </div>
