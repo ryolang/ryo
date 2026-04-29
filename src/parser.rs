@@ -323,13 +323,12 @@ mod tests {
     use crate::lexer::lex;
     use crate::types::InternPool;
     use chumsky::Parser;
-    use chumsky::input::Stream;
+    use chumsky::input::Input;
 
     fn lex_and_parse(input: &str) -> Result<(Program, InternPool), Vec<Rich<'static, Token>>> {
         let mut pool = InternPool::new();
         let tokens = lex(input, &mut pool).map_err(|e| vec![Rich::custom(e.span, e.message)])?;
-        let token_stream =
-            Stream::from_iter(tokens).map((0..input.len()).into(), |(t, s): (_, _)| (t, s));
+        let token_stream = tokens[..].split_token_span((0..input.len()).into());
 
         let program = program_parser()
             .parse(token_stream)
