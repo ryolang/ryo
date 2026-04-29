@@ -515,7 +515,6 @@ remainder = a % b     # 1
 - Type errors are clear and localized (bidirectional type checking); no implicit `int` ↔ `float` coercion.
 - Float literal grammar is restricted to `[0-9]+\.[0-9]+` for now — no bare `.5`, no `5.`, no exponent form, no underscores.
 - Dependencies: Milestone 4 (functions for testing), Milestone 6.5 (provides bool type and `==`/`!=` semantics).
-- Design notes: [docs/superpowers/specs/2026-04-29-milestone-7-float-and-extended-ops-design.md](../superpowers/specs/2026-04-29-milestone-7-float-and-extended-ops-design.md).
 
 ---
 Note: Review [Project Structure](project_structure) and make the first split before M8
