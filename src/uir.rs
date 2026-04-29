@@ -127,6 +127,7 @@ impl ExtraRange {
 pub enum InstTag {
     // Literals — terminal, no operands.
     IntLiteral,
+    FloatLiteral,
     StrLiteral,
     BoolLiteral,
 
@@ -139,8 +140,13 @@ pub enum InstTag {
     Sub,
     Mul,
     Div,
+    Mod,
     Eq,
     NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
 
     // Unary. Operand in `data.un_op`.
     Neg,
@@ -182,6 +188,7 @@ pub enum InstData {
     /// No operands (used by [`InstTag::ReturnVoid`]).
     None,
     Int(i64),
+    Float(f64),
     Str(StringId),
     Bool(bool),
     /// Identifier name for [`InstTag::Var`].
@@ -350,6 +357,10 @@ impl UirBuilder {
         self.push(InstTag::IntLiteral, InstData::Int(value), span)
     }
 
+    pub fn float_literal(&mut self, value: f64, span: Span) -> InstRef {
+        self.push(InstTag::FloatLiteral, InstData::Float(value), span)
+    }
+
     pub fn str_literal(&mut self, value: StringId, span: Span) -> InstRef {
         self.push(InstTag::StrLiteral, InstData::Str(value), span)
     }
@@ -377,8 +388,13 @@ impl UirBuilder {
                 | InstTag::Sub
                 | InstTag::Mul
                 | InstTag::Div
+                | InstTag::Mod
                 | InstTag::Eq
                 | InstTag::NotEq
+                | InstTag::Lt
+                | InstTag::Gt
+                | InstTag::LtEq
+                | InstTag::GtEq
         ));
         self.push(tag, InstData::BinOp { lhs, rhs }, span)
     }
@@ -610,6 +626,7 @@ fn write_inst(
     write!(f, "  %{} = ", r.index())?;
     match (inst.tag, inst.data) {
         (InstTag::IntLiteral, InstData::Int(v)) => writeln!(f, "int {}", v),
+        (InstTag::FloatLiteral, InstData::Float(v)) => writeln!(f, "float {}", v),
         (InstTag::StrLiteral, InstData::Str(s)) => writeln!(f, "str {:?}", pool.str(s)),
         (InstTag::BoolLiteral, InstData::Bool(b)) => writeln!(f, "bool {}", b),
         (InstTag::Var, InstData::Var(s)) => writeln!(f, "var {}", pool.str(s)),
@@ -660,8 +677,13 @@ fn bin_op_name(t: InstTag) -> &'static str {
         InstTag::Sub => "sub",
         InstTag::Mul => "mul",
         InstTag::Div => "div",
+        InstTag::Mod => "mod",
         InstTag::Eq => "icmp_eq",
         InstTag::NotEq => "icmp_ne",
+        InstTag::Lt => "icmp_lt",
+        InstTag::Gt => "icmp_gt",
+        InstTag::LtEq => "icmp_le",
+        InstTag::GtEq => "icmp_ge",
         _ => "?bin",
     }
 }
@@ -764,6 +786,27 @@ mod tests {
         let v2 = uir.var_decl_view(inferred);
         assert!(v2.mutable);
         assert_eq!(v2.ty, None);
+    }
+
+    #[test]
+    fn float_literal_round_trips() {
+        let mut b = UirBuilder::new();
+        let r = b.float_literal(2.5, sp());
+        let inst = &b.uir.instructions[r.index()];
+        assert!(matches!(inst.tag, InstTag::FloatLiteral));
+        match inst.data {
+            InstData::Float(v) => assert!((v - 2.5).abs() < 1e-12),
+            _ => panic!("expected InstData::Float"),
+        }
+    }
+
+    #[test]
+    fn binary_accepts_ordering_and_modulo() {
+        let mut b = UirBuilder::new();
+        let l = b.int_literal(1, sp());
+        let r = b.int_literal(2, sp());
+        let _ = b.binary(InstTag::Lt, l, r, sp());
+        let _ = b.binary(InstTag::Mod, l, r, sp());
     }
 
     #[test]
