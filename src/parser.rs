@@ -18,18 +18,35 @@ where
     select! { Token::Newline => () }.repeated().to(())
 }
 
+/// Helper: require at least one newline. Used between consecutive
+/// statements so two statements on the same line are a parse error
+/// (matters now that bare expression statements are allowed at the
+/// top level — without this, `x 42` would silently parse as two
+/// separate expression statements).
+fn require_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    select! { Token::Newline => () }
+        .repeated()
+        .at_least(1)
+        .to(())
+}
+
 /// Parse a complete Ryo program with multiple statements.
 pub fn program_parser<'a, I>() -> impl Parser<'a, I, Program, extra::Err<Rich<'a, Token>>> + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
+    // Statements are newline-separated. Leading/trailing newlines
+    // are tolerated; consecutive statements must have at least one
+    // newline between them.
     skip_newlines()
         .ignore_then(
             statement_parser()
-                .then(skip_newlines())
-                .repeated()
-                .collect::<Vec<_>>()
-                .map(|v| v.into_iter().map(|(s, _)| s).collect::<Vec<_>>()),
+                .separated_by(require_newlines())
+                .allow_trailing()
+                .collect::<Vec<_>>(),
         )
         .then_ignore(skip_newlines())
         .then_ignore(end())
@@ -86,7 +103,16 @@ where
         kind: StmtKind::VarDecl(kind),
     });
 
-    choice((function_def, var_decl))
+    // Bare expression statements at top level (e.g. `print("hi")`)
+    // get wrapped into the synthesized implicit-main body by
+    // astgen. This is what makes Pythonic flat scripts feel
+    // natural — no `_ = ...` binding required.
+    let expr_stmt = expression_parser().map_with(|expr, e| Statement {
+        span: e.span(),
+        kind: StmtKind::ExprStmt(expr),
+    });
+
+    choice((function_def, var_decl, expr_stmt))
 }
 
 fn statement_parser<'a, I>() -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + 'a

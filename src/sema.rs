@@ -344,6 +344,22 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             let view = sema.uir.var_decl_view(r);
             let init_tir = analyze_expr(sema, fcx, scope, view.initializer);
             let inferred = fcx.builder.ty_of(init_tir);
+            // A void value (e.g. `x = print(...)`) cannot be bound
+            // to a name. Reject and recover with the error sentinel
+            // so downstream uses don't cascade.
+            let inferred = if inferred == sema.pool.void() {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.initializer),
+                    DiagCode::VoidValueInExpression,
+                    format!(
+                        "cannot bind '{}' to a 'void' value: the right-hand side has no value",
+                        sema.pool.str(view.name),
+                    ),
+                ));
+                sema.pool.error_type()
+            } else {
+                inferred
+            };
             let resolved = resolve_var_decl_type(&view, inferred, sema);
             scope.insert(view.name, resolved);
             fcx.builder
@@ -945,7 +961,8 @@ mod tests {
     fn fills_types_on_flat_integer_var() {
         let (tirs, pool) = run("x = 42").unwrap();
         let main = tir_named(&tirs, &pool, "main");
-        assert_eq!(main.return_type, pool.int());
+        // Implicit-main is now void; the var-decl itself is still int.
+        assert_eq!(main.return_type, pool.void());
         let var_decl = stmt_at(main, 0);
         assert_eq!(main.inst(var_decl).ty, pool.int());
     }
@@ -1018,35 +1035,51 @@ mod tests {
 
     #[test]
     fn function_call_return_type_resolved() {
-        let code =
-            "fn double(x: int) -> int:\n\treturn x * 2\n\nfn main() -> int:\n\treturn double(3)\n";
+        let code = "fn double(x: int) -> int:\n\treturn x * 2\n\nfn main():\n\tn = double(3)\n";
         let (tirs, pool) = run(code).unwrap();
         let main = tir_named(&tirs, &pool, "main");
-        let ret = stmt_at(main, 0);
-        let operand = match main.inst(ret).data {
-            TirData::UnOp(o) => o,
-            other => panic!("expected Return UnOp, got {:?}", other),
-        };
-        assert_eq!(main.inst(operand).ty, pool.int());
-        assert!(matches!(main.inst(operand).tag, TirTag::Call));
+        let var = stmt_at(main, 0);
+        let view = main.var_decl_view(var);
+        let init = main.inst(view.initializer);
+        assert_eq!(init.ty, pool.int());
+        assert!(matches!(init.tag, TirTag::Call));
     }
 
     #[test]
     fn void_function_signature() {
-        let (tirs, pool) =
-            run("fn greet():\n\tprint(\"hi\")\n\nfn main() -> int:\n\tgreet()\n\treturn 0\n")
-                .unwrap();
+        let (tirs, pool) = run("fn greet():\n\tprint(\"hi\")\n\nfn main():\n\tgreet()\n").unwrap();
         let greet = tir_named(&tirs, &pool, "greet");
         assert_eq!(greet.return_type, pool.void());
+        let main = tir_named(&tirs, &pool, "main");
+        assert_eq!(main.return_type, pool.void());
     }
 
     #[test]
-    fn print_call_has_int_type() {
-        let (tirs, pool) = run("msg = print(\"Hello\\n\")").unwrap();
+    fn print_call_has_void_type() {
+        // `print(...)` as a bare expression statement is the
+        // canonical M8a form. The Call instruction itself is
+        // typed `void` since print returns no value.
+        let (tirs, pool) = run("print(\"Hello\\n\")").unwrap();
         let main = &tirs[0];
-        let v = main.var_decl_view(stmt_at(main, 0));
-        assert_eq!(main.inst(stmt_at(main, 0)).ty, pool.int());
-        assert_eq!(main.inst(v.initializer).ty, pool.int());
+        let stmt_ref = stmt_at(main, 0);
+        let stmt = main.inst(stmt_ref);
+        assert!(matches!(stmt.tag, TirTag::ExprStmt));
+        let call_ref = match stmt.data {
+            TirData::UnOp(o) => o,
+            other => panic!("expected ExprStmt UnOp, got {:?}", other),
+        };
+        let call = main.inst(call_ref);
+        assert!(matches!(call.tag, TirTag::Call));
+        assert_eq!(call.ty, pool.void());
+    }
+
+    #[test]
+    fn binding_to_void_value_rejected() {
+        // The pre-M8a `_ = print(...)` / `msg = print(...)`
+        // workarounds are now compile errors: a void value can't
+        // be bound to a name.
+        let diags = run("msg = print(\"Hello\")").unwrap_err();
+        assert!(any_code(&diags, DiagCode::VoidValueInExpression));
     }
 
     #[test]
@@ -1095,34 +1128,63 @@ mod tests {
 
     #[test]
     fn print_with_non_literal_rejected_in_sema() {
-        let diags = run("x = \"hi\"\n_ = print(x)").unwrap_err();
+        let diags = run("x = \"hi\"\nprint(x)").unwrap_err();
         assert!(any_code(&diags, DiagCode::BuiltinArgKind));
     }
 
     #[test]
     fn print_arity_rejected_in_sema() {
-        let diags = run("_ = print(\"a\", \"b\")").unwrap_err();
+        let diags = run("print(\"a\", \"b\")").unwrap_err();
         assert!(any_code(&diags, DiagCode::ArityMismatch));
     }
 
     #[test]
     fn return_type_mismatch_rejected() {
-        let diags = run("fn main() -> int:\n\treturn \"hello\"\n").unwrap_err();
+        let diags = run("fn answer() -> int:\n\treturn \"hello\"\n").unwrap_err();
         assert!(any_code(&diags, DiagCode::TypeMismatch));
     }
 
     #[test]
     fn call_arity_mismatch_rejected() {
-        let code = "fn add(a: int, b: int) -> int:\n\treturn a + b\n\nfn main() -> int:\n\treturn add(1, 2, 3)\n";
+        let code =
+            "fn add(a: int, b: int) -> int:\n\treturn a + b\n\nfn main():\n\tx = add(1, 2, 3)\n";
         let diags = run(code).unwrap_err();
         assert!(any_code(&diags, DiagCode::ArityMismatch));
     }
 
     #[test]
     fn call_argument_type_mismatch_rejected() {
-        let code = "fn f(a: int) -> int:\n\treturn a\n\nfn main() -> int:\n\treturn f(true)\n";
+        let code = "fn f(a: int) -> int:\n\treturn a\n\nfn main():\n\tx = f(true)\n";
         let diags = run(code).unwrap_err();
         assert!(any_code(&diags, DiagCode::TypeMismatch));
+    }
+
+    #[test]
+    fn main_with_return_type_rejected() {
+        let diags = run("fn main() -> int:\n\treturn 0\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::MainSignature));
+    }
+
+    #[test]
+    fn main_with_params_rejected() {
+        let diags = run("fn main(x: int):\n\tprint(\"hi\")\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::MainSignature));
+    }
+
+    #[test]
+    fn return_value_in_void_function_rejected() {
+        let diags = run("fn greet():\n\treturn 1\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::TypeMismatch));
+    }
+
+    #[test]
+    fn bare_return_in_void_function_accepted() {
+        let (_tirs, _pool) = run("fn greet():\n\treturn\n").unwrap();
+    }
+
+    #[test]
+    fn void_function_without_explicit_return_accepted() {
+        let (_tirs, _pool) = run("fn greet():\n\tprint(\"hi\")\n").unwrap();
     }
 
     #[test]
@@ -1157,9 +1219,9 @@ mod tests {
     /// one diagnostic in the sink.
     #[test]
     fn type_error_emits_unreachable_and_keeps_going() {
-        // `-true` is the sole error; the `42` return after it should
+        // `-true` is the sole error; the print after it should
         // still appear in the function's TIR body.
-        let src = "fn main() -> int:\n\tx = -true\n\treturn 42\n";
+        let src = "fn main():\n\tx = -true\n\tprint(\"after\")\n";
         let (tirs, diags, _pool) = run_with_errors(src);
         assert_eq!(diags.len(), 1, "got: {:#?}", diags);
         assert_eq!(diags[0].code, DiagCode::UnsupportedOperator);
@@ -1188,8 +1250,7 @@ mod tests {
     /// any body is walked.
     #[test]
     fn forward_reference_resolves() {
-        let code =
-            "fn main() -> int:\n\treturn helper(2)\n\nfn helper(x: int) -> int:\n\treturn x + 1\n";
+        let code = "fn main():\n\tn = helper(2)\n\nfn helper(x: int) -> int:\n\treturn x + 1\n";
         let (tirs, pool) = run(code).unwrap();
         // Both decls produced TIR.
         assert_eq!(tirs.len(), 2);
@@ -1205,7 +1266,7 @@ mod tests {
     /// stack-overflow trying).
     #[test]
     fn mutual_recursion_does_not_trigger_cycle() {
-        let code = "fn a() -> int:\n\treturn b()\n\nfn b() -> int:\n\treturn a()\n\nfn main() -> int:\n\treturn a()\n";
+        let code = "fn a() -> int:\n\treturn b()\n\nfn b() -> int:\n\treturn a()\n\nfn main():\n\tx = a()\n";
         let (tirs, _diags, _pool) = run_with_errors(code);
         assert_eq!(tirs.len(), 3);
     }
@@ -1267,7 +1328,7 @@ mod tests {
     /// observe the unsorted sink directly.)
     #[test]
     fn diagnostics_ordered_by_decl_then_position() {
-        let code = "fn first() -> int:\n\treturn missing_a\n\nfn second() -> int:\n\treturn missing_b\n\nfn main() -> int:\n\treturn 0\n";
+        let code = "fn first() -> int:\n\treturn missing_a\n\nfn second() -> int:\n\treturn missing_b\n\nfn main():\n\tprint(\"go\")\n";
         let (_tirs, diags, _pool) = run_with_errors(code);
         let undef: Vec<_> = diags
             .iter()

@@ -8,20 +8,20 @@ pub struct BuiltinFunction {
 
 #[derive(Copy, Clone)]
 enum BuiltinReturn {
-    Int,
+    Void,
 }
 
 impl BuiltinFunction {
     pub fn return_type(&self, pool: &InternPool) -> TypeId {
         match self.return_ty {
-            BuiltinReturn::Int => pool.int(),
+            BuiltinReturn::Void => pool.void(),
         }
     }
 }
 
 pub const BUILTINS: &[BuiltinFunction] = &[BuiltinFunction {
     name: "print",
-    return_ty: BuiltinReturn::Int,
+    return_ty: BuiltinReturn::Void,
 }];
 
 pub fn lookup(name: &str) -> Option<&'static BuiltinFunction> {

@@ -143,17 +143,18 @@ fn gen_implicit_main(
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) {
+    // Synthesize `fn main():` (void return). Codegen falls through
+    // to an implicit `ret_void` if no explicit return is emitted —
+    // we deliberately do *not* push a synthetic Return here so the
+    // body shape matches an explicit `fn main():` written by the
+    // user.
     let mut body_stmts: Vec<InstRef> = Vec::new();
     for stmt in stmts {
         gen_stmt(b, stmt, prims, pool, sink, &mut body_stmts);
     }
 
-    let zero = b.int_literal(0, synthetic_span());
-    let ret = b.unary(InstTag::Return, zero, synthetic_span());
-    body_stmts.push(ret);
-
-    let int_ty = pool.int();
-    b.add_function(main_id, vec![], int_ty, &body_stmts, synthetic_span());
+    let void_ty = pool.void();
+    b.add_function(main_id, vec![], void_ty, &body_stmts, synthetic_span());
 }
 
 fn gen_function_def(
@@ -183,6 +184,28 @@ fn gen_function_def(
         Some(ty) => resolve_type(ty.name, ty.span, prims, pool, sink),
         None => pool.void(),
     };
+
+    // `fn main()` must be `fn main():` — no args, no return type.
+    // Non-zero exit codes go through the future `exit(code)`
+    // builtin (M24); main is always void in v0.1 and the C-ABI
+    // shim emitted by codegen returns 0 to the OS.
+    let main_id = pool.find_str("main");
+    if Some(func.name.name) == main_id {
+        if !func.params.is_empty() {
+            sink.emit(Diag::error(
+                func.name.span,
+                DiagCode::MainSignature,
+                "fn main() must take no arguments",
+            ));
+        }
+        if let Some(ret) = &func.return_type {
+            sink.emit(Diag::error(
+                ret.span,
+                DiagCode::MainSignature,
+                "fn main() must have no return type (use exit(code) for non-zero exit codes)",
+            ));
+        }
+    }
 
     let mut body_stmts: Vec<InstRef> = Vec::new();
     for stmt in &func.body {
@@ -377,18 +400,18 @@ mod tests {
         assert_eq!(uir.func_bodies.len(), 1);
         let main = body_named(&uir, &pool, "main");
         assert_eq!(main.params.len(), 0);
+        // Implicit-main is now void; codegen falls through to an
+        // implicit `return 0` for the C-ABI shim, so the synthetic
+        // Return is no longer materialised in the UIR body.
+        assert_eq!(main.return_type, pool.void());
 
         let stmts = uir.body_stmts(main);
-        assert_eq!(stmts.len(), 2);
+        assert_eq!(stmts.len(), 1);
 
-        // First statement is a VarDecl for `x = 42`.
         let v = uir.var_decl_view(stmts[0]);
         assert_eq!(pool.str(v.name), "x");
         assert!(!v.mutable);
         assert!(matches!(uir.inst(v.initializer).tag, InstTag::IntLiteral));
-
-        // Second statement is the implicit-main `return 0`.
-        assert!(matches!(uir.inst(stmts[1]).tag, InstTag::Return));
     }
 
     #[test]
@@ -415,7 +438,7 @@ mod tests {
 
     #[test]
     fn explicit_main_with_top_level_error() {
-        let diags = parse_and_lower("x = 42\n\nfn main() -> int:\n\treturn 0\n").unwrap_err();
+        let diags = parse_and_lower("x = 42\n\nfn main():\n\tprint(\"hi\")\n").unwrap_err();
         assert!(
             diags
                 .iter()
@@ -425,12 +448,25 @@ mod tests {
 
     #[test]
     fn explicit_main_structural() {
-        let (uir, pool) = parse_and_lower("fn main() -> int:\n\treturn 0\n").unwrap();
+        let (uir, pool) = parse_and_lower("fn main():\n\tprint(\"hi\")\n").unwrap();
         assert_eq!(uir.func_bodies.len(), 1);
         let main = body_named(&uir, &pool, "main");
+        assert_eq!(main.return_type, pool.void());
         let stmts = uir.body_stmts(main);
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(uir.inst(stmts[0]).tag, InstTag::Return));
+        assert!(matches!(uir.inst(stmts[0]).tag, InstTag::ExprStmt));
+    }
+
+    #[test]
+    fn main_with_return_type_emits_diag() {
+        let diags = parse_and_lower("fn main() -> int:\n\treturn 0\n").unwrap_err();
+        assert!(diags.iter().any(|d| d.code == DiagCode::MainSignature));
+    }
+
+    #[test]
+    fn main_with_params_emits_diag() {
+        let diags = parse_and_lower("fn main(x: int):\n\tprint(\"hi\")\n").unwrap_err();
+        assert!(diags.iter().any(|d| d.code == DiagCode::MainSignature));
     }
 
     #[test]
@@ -451,7 +487,7 @@ mod tests {
     #[test]
     fn two_functions_structural() {
         let code =
-            "fn add(a: int, b: int) -> int:\n\treturn a + b\n\nfn main() -> int:\n\treturn 0\n";
+            "fn add(a: int, b: int) -> int:\n\treturn a + b\n\nfn main():\n\tprint(\"hi\")\n";
         let (uir, pool) = parse_and_lower(code).unwrap();
         assert_eq!(uir.func_bodies.len(), 2);
         let add = body_named(&uir, &pool, "add");
