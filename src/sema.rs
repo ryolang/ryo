@@ -581,10 +581,6 @@ fn check_binary_op(
     let is_modulo = matches!(tag, InstTag::Mod);
     let kind = sema.pool.kind(kind_ty);
 
-    if matches!(kind, TypeKind::Error) {
-        return fcx.builder.unreachable(sema.pool.error_type(), span);
-    }
-
     if is_equality {
         match kind {
             TypeKind::Int | TypeKind::Bool => {
@@ -605,6 +601,7 @@ fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             TypeKind::Str => {
                 sema.sink.emit(Diag::error(
                     span,
@@ -628,7 +625,6 @@ fn check_binary_op(
                 ));
                 fcx.builder.unreachable(sema.pool.error_type(), span)
             }
-            TypeKind::Error => unreachable!("handled above"),
         }
     } else if is_ordering {
         match kind {
@@ -677,13 +673,14 @@ fn check_binary_op(
                 ));
                 fcx.builder.unreachable(sema.pool.error_type(), span)
             }
-            TypeKind::Error => unreachable!("handled above"),
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
         }
     } else if is_modulo {
         match kind {
             TypeKind::Int => fcx
                 .builder
                 .binary(TirTag::IMod, sema.pool.int(), lhs, rhs, span),
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             _ => {
                 sema.sink.emit(Diag::error(
                     span,
@@ -721,6 +718,7 @@ fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.float(), lhs, rhs, span)
             }
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             _ => {
                 sema.sink.emit(Diag::error(
                     span,

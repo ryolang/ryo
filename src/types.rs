@@ -112,7 +112,6 @@ const ID_VOID: u32 = 0;
 const ID_BOOL: u32 = 1;
 const ID_INT: u32 = 2;
 const ID_STR: u32 = 3;
-#[allow(dead_code)]
 const ID_FLOAT: u32 = 4;
 const ID_ERROR: u32 = 5;
 
@@ -318,7 +317,6 @@ impl InternPool {
     pub const fn str_(&self) -> TypeId {
         TypeId(ID_STR)
     }
-    #[allow(dead_code)]
     pub const fn float(&self) -> TypeId {
         TypeId(ID_FLOAT)
     }
