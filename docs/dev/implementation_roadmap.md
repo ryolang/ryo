@@ -2,6 +2,54 @@
 
 # Ryo Implementation Roadmap
 
+## Milestone Index
+
+Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone's section below for details.
+
+### Phase 1: Core Foundation
+- [x] [Milestone 1 — Setup & Lexer Basics [alpha]](#milestone-1-setup--lexer-basics-alpha--complete)
+- [x] [Milestone 2 — Parser & AST Basics [alpha]](#milestone-2-parser--ast-basics-alpha--complete)
+- [x] [Milestone 3 — "Hello, Exit Code!" (Cranelift Integration) [alpha]](#milestone-3-hello-exit-code-cranelift-integration-alpha--complete)
+- [x] [Milestone 3.5 — "Hello, World!" (String Literals & Print) [alpha]](#milestone-35-hello-world-string-literals--print-alpha--complete)
+
+### Phase 2: Essential Language Features
+- [x] [Milestone 4 — Functions & Calls [alpha]](#milestone-4-functions--calls-alpha)
+- [x] [Milestone 5 — Module System (Design Phase)](#milestone-5-module-system-design-phase--complete)
+- [x] [Milestone 6.5 — Booleans & Equality [alpha]](#milestone-65-booleans--equality-alpha)
+- [x] [Milestone 7 — Expressions & Operators (Extended) [alpha]](#milestone-7-expressions--operators-extended-alpha)
+- [ ] [Milestone 8 — Control Flow & Booleans [alpha]](#milestone-8-control-flow--booleans-alpha)
+- [ ] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha)
+- [ ] [Milestone 8.2 — Immutable Borrows (`&T`) [alpha]](#milestone-82-immutable-borrows-t-alpha)
+- [ ] [Milestone 8.3 — Mutable Borrows (`&mut T`) [alpha]](#milestone-83-mutable-borrows-mut-t-alpha)
+- [ ] [Milestone 8.4 — String Slices (`&str`) [alpha]](#milestone-84-string-slices-str-alpha)
+- [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
+- [ ] [Milestone 9 — Structs](#milestone-9-structs)
+- [ ] [Milestone 10 — Tuples](#milestone-10-tuples)
+- [ ] [Milestone 11 — Enums (Algebraic Data Types) [alpha]](#milestone-11-enums-algebraic-data-types-alpha)
+- [ ] [Milestone 12 — Pattern Matching [alpha]](#milestone-12-pattern-matching-alpha)
+- [ ] [Milestone 13 — Error Types & Unions [alpha]](#milestone-13-error-types--unions-alpha)
+
+### Phase 3: Type System & Memory Safety
+- [ ] [Milestone 16 — Optional Types (`?T`) [alpha]](#milestone-16-optional-types-t-alpha)
+- [ ] [Milestone 17 — Method Implementations](#milestone-17-method-implementations)
+- [ ] [Milestone 21 — Array Slices (`&[T]`)](#milestone-21-array-slices-t)
+- [ ] [Milestone 22 — Collections (List, Map)](#milestone-22-collections-list-map)
+- [ ] [Milestone 23 — RAII & Drop (Compiler Intrinsic)](#milestone-23-raii--drop-compiler-intrinsic)
+
+### Phase 4: Module System & Core Ecosystem
+- [ ] [Milestone 6 — Module System (Implementation)](#milestone-6-module-system-implementation)
+- [ ] [Milestone 24 — Standard Library Core [alpha: partial]](#milestone-24-standard-library-core-alpha-partial)
+- [ ] [Milestone 25 — Panic & Debugging Support [alpha: partial]](#milestone-25-panic--debugging-support-alpha-partial)
+- [ ] [Milestone 26 — Testing Framework & Documentation](#milestone-26-testing-framework--documentation)
+- [ ] [Milestone 26.5 — Distribution & Installer [alpha: partial]](#milestone-265-distribution--installer-alpha-partial)
+- [ ] [Milestone 27 — Core Language Complete & v0.1.0 Prep](#milestone-27-core-language-complete--v010-prep)
+
+### Phase 5: Post-v0.1.0 Extensions (v0.2+)
+Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Try/Catch, F-strings, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, etc.).
+
+---
+
+
 This roadmap outlines the planned development of the Ryo programming language compiler and runtime. Each milestone focuses on delivering specific, tangible capabilities while building toward a complete language implementation.
 
 **Development Timeline:** Each milestone is designed for approximately 2-4 weeks of development (assuming ~8 hours/week), but timelines should remain flexible to ensure quality over speed.
