@@ -109,6 +109,7 @@ impl ExtraRange {
 pub enum TirTag {
     // Constants — terminal, no operands.
     IntConst,
+    FloatConst,
     BoolConst,
     StrConst,
 
@@ -125,8 +126,25 @@ pub enum TirTag {
     ISub,
     IMul,
     ISDiv,
+    IMod,
     ICmpEq,
     ICmpNe,
+    ICmpLt,
+    ICmpLe,
+    ICmpGt,
+    ICmpGe,
+
+    // Float arithmetic / comparison.
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+    FCmpEq,
+    FCmpNe,
+    FCmpLt,
+    FCmpLe,
+    FCmpGt,
+    FCmpGe,
 
     /// Integer negation. Operand in `TirData::UnOp`.
     INeg,
@@ -168,6 +186,7 @@ pub enum TirTag {
 pub enum TirData {
     None,
     Int(i64),
+    Float(f64),
     Str(StringId),
     Bool(bool),
     Var(StringId),
@@ -322,6 +341,10 @@ impl TirBuilder {
         self.push(TirTag::IntConst, ty, TirData::Int(value), span)
     }
 
+    pub fn float_const(&mut self, value: f64, ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::FloatConst, ty, TirData::Float(value), span)
+    }
+
     pub fn bool_const(&mut self, value: bool, ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::BoolConst, ty, TirData::Bool(value), span)
     }
@@ -356,8 +379,23 @@ impl TirBuilder {
                 | TirTag::ISub
                 | TirTag::IMul
                 | TirTag::ISDiv
+                | TirTag::IMod
                 | TirTag::ICmpEq
                 | TirTag::ICmpNe
+                | TirTag::ICmpLt
+                | TirTag::ICmpLe
+                | TirTag::ICmpGt
+                | TirTag::ICmpGe
+                | TirTag::FAdd
+                | TirTag::FSub
+                | TirTag::FMul
+                | TirTag::FDiv
+                | TirTag::FCmpEq
+                | TirTag::FCmpNe
+                | TirTag::FCmpLt
+                | TirTag::FCmpLe
+                | TirTag::FCmpGt
+                | TirTag::FCmpGe
         ));
         self.push(tag, ty, TirData::BinOp { lhs, rhs }, span)
     }
@@ -545,6 +583,7 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
     write!(f, "  %{} : {} = ", r.index(), pool.display(inst.ty))?;
     match (inst.tag, inst.data) {
         (TirTag::IntConst, TirData::Int(v)) => writeln!(f, "iconst {}", v),
+        (TirTag::FloatConst, TirData::Float(v)) => writeln!(f, "fconst {}", v),
         (TirTag::BoolConst, TirData::Bool(b)) => writeln!(f, "bconst {}", b),
         (TirTag::StrConst, TirData::Str(s)) => writeln!(f, "sconst {:?}", pool.str(s)),
         (TirTag::Var, TirData::Var(s)) => writeln!(f, "var {}", pool.str(s)),
@@ -586,8 +625,23 @@ fn bin_op_name(t: TirTag) -> &'static str {
         TirTag::ISub => "isub",
         TirTag::IMul => "imul",
         TirTag::ISDiv => "isdiv",
+        TirTag::IMod => "imod",
         TirTag::ICmpEq => "icmp_eq",
         TirTag::ICmpNe => "icmp_ne",
+        TirTag::ICmpLt => "icmp_lt",
+        TirTag::ICmpLe => "icmp_le",
+        TirTag::ICmpGt => "icmp_gt",
+        TirTag::ICmpGe => "icmp_ge",
+        TirTag::FAdd => "fadd",
+        TirTag::FSub => "fsub",
+        TirTag::FMul => "fmul",
+        TirTag::FDiv => "fdiv",
+        TirTag::FCmpEq => "fcmp_eq",
+        TirTag::FCmpNe => "fcmp_ne",
+        TirTag::FCmpLt => "fcmp_lt",
+        TirTag::FCmpLe => "fcmp_le",
+        TirTag::FCmpGt => "fcmp_gt",
+        TirTag::FCmpGe => "fcmp_ge",
         _ => "?bin",
     }
 }
@@ -676,6 +730,18 @@ mod tests {
         assert!(v.mutable);
         assert_eq!(v.initializer, init);
         assert_eq!(tir.inst(decl).ty, int_ty);
+    }
+
+    #[test]
+    fn float_const_and_fadd_round_trip() {
+        let mut pool = InternPool::new();
+        let main = pool.intern_str("main");
+        let mut b = TirBuilder::new(main, vec![], pool.int(), sp());
+        let lit1 = b.float_const(1.5, pool.float(), sp());
+        let lit2 = b.float_const(2.5, pool.float(), sp());
+        let _ = b.binary(TirTag::FAdd, pool.float(), lit1, lit2, sp());
+        let _ = b.binary(TirTag::ICmpLt, pool.bool_(), lit1, lit2, sp());
+        let _ = b.binary(TirTag::IMod, pool.int(), lit1, lit2, sp());
     }
 
     #[test]
