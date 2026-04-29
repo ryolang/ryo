@@ -476,7 +476,6 @@ For one implementer, including review cycles. Phases 1 and 2 can run in parallel
 
 - Spec: §4 (Types), §10 (Compile-time evaluation — when written) — the type and comptime systems this work enables.
 - Dev: [middle_end_refactor.md](middle_end_refactor.md) — the predecessor plan this builds on; [compilation_pipeline.md](compilation_pipeline.md), [parser.rs.md](parser.rs.md).
-- Milestone: Phases 3–5 of this plan prerequisite *Compile-time Execution (comptime)* and *Full Generics System* (v0.2+) in [implementation_roadmap.md](implementation_roadmap.md)
-- Roadmap: prerequisite for *Compile-time Execution (comptime)* and *Full Generics System* in [implementation_roadmap.md](implementation_roadmap.md) (Phase 5, post-v0.1.0).
+- Milestone/Roadmap: Phases 3–5 prerequisite *Compile-time Execution (comptime)* and *Full Generics System* in [implementation_roadmap.md](implementation_roadmap.md) (Phase 5, v0.2+).
 - Issues: [../../ISSUES.md](../../ISSUES.md) — Phases 1, 2, 3 collectively close I-008 (token lifetime), and Phase 4 makes I-006 (print to runtime) a one-day follow-up.
 - Inspiration: Zig's `src/InternPool.zig` (sidecar `extra` array, named primitive indices, single pool for types/strings/values), `src/AstGen.zig` → `src/Sema.zig` separation, `src/Zir.zig` and `src/Air.zig` shapes, `src/Module.zig`'s decl worklist.

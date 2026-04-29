@@ -4,9 +4,12 @@
     const btn = document.getElementById("theme-toggle");
     if (!btn) return;
 
+    btn.setAttribute("aria-pressed", String(root.classList.contains("dark")));
+
     btn.addEventListener("click", () => {
         const isDark = root.classList.toggle("dark");
         localStorage.setItem("theme", isDark ? "dark" : "light");
+        btn.setAttribute("aria-pressed", String(isDark));
     });
 
     // Follow system theme if user hasn't explicitly chosen
@@ -14,6 +17,7 @@
     mq.addEventListener("change", (e) => {
         if (localStorage.getItem("theme")) return;
         root.classList.toggle("dark", e.matches);
+        btn.setAttribute("aria-pressed", String(e.matches));
     });
 })();
 
@@ -41,6 +45,7 @@
                     return;
                 }
                 stale = n;
+                render(n);
             }
         }
     } catch {}
