@@ -42,6 +42,7 @@ struct Primitives {
     int: StringId,
     str_: StringId,
     bool_: StringId,
+    float: StringId,
 }
 
 impl Primitives {
@@ -50,6 +51,7 @@ impl Primitives {
             int: pool.intern_str("int"),
             str_: pool.intern_str("str"),
             bool_: pool.intern_str("bool"),
+            float: pool.intern_str("float"),
         }
     }
 }
@@ -119,6 +121,8 @@ fn resolve_type(
         pool.str_()
     } else if name == prims.bool_ {
         pool.bool_()
+    } else if name == prims.float {
+        pool.float()
     } else {
         // Only resolve the &str on the unhappy path; the common
         // primitive path stays a pure `StringId` compare.
@@ -239,6 +243,7 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
         ast::ExprKind::Literal(ast::Literal::Int(n)) => b.int_literal(*n, span),
         ast::ExprKind::Literal(ast::Literal::Str(id)) => b.str_literal(*id, span),
         ast::ExprKind::Literal(ast::Literal::Bool(v)) => b.bool_literal(*v, span),
+        ast::ExprKind::Literal(ast::Literal::Float(v)) => b.float_literal(*v, span),
         ast::ExprKind::Ident(id) => b.var_ref(*id, span),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
             let l = gen_expr(b, lhs);
@@ -250,6 +255,11 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
                 ast::BinaryOperator::Div => InstTag::Div,
                 ast::BinaryOperator::Eq => InstTag::Eq,
                 ast::BinaryOperator::NotEq => InstTag::NotEq,
+                ast::BinaryOperator::Lt => InstTag::Lt,
+                ast::BinaryOperator::Gt => InstTag::Gt,
+                ast::BinaryOperator::LtEq => InstTag::LtEq,
+                ast::BinaryOperator::GtEq => InstTag::GtEq,
+                ast::BinaryOperator::Mod => InstTag::Mod,
             };
             b.binary(tag, l, r, span)
         }
@@ -308,6 +318,39 @@ mod tests {
     /// Top-level statement at index `i` in `body`'s execution order.
     fn stmt_at(uir: &Uir, body: &crate::uir::FuncBody, i: usize) -> InstRef {
         uir.body_stmts(body)[i]
+    }
+
+    #[test]
+    fn lower_float_literal() {
+        let (uir, pool) = parse_and_lower("x = 1.5").unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let stmts = uir.body_stmts(main);
+        let v = uir.var_decl_view(stmts[0]);
+        assert!(matches!(uir.inst(v.initializer).tag, InstTag::FloatLiteral));
+    }
+
+    #[test]
+    fn lower_float_type_annotation() {
+        let (uir, pool) = parse_and_lower("x: float = 1.5")
+            .expect("`: float` annotation should resolve without diagnostics");
+        let main = body_named(&uir, &pool, "main");
+        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        assert_eq!(
+            v.ty,
+            Some(pool.float()),
+            "`: float` annotation must resolve to pool.float()"
+        );
+    }
+
+    #[test]
+    fn lower_ordering_and_modulo_ops() {
+        let (uir, pool) = parse_and_lower("x = 1 < 2\ny = 1 % 2").unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let stmts = uir.body_stmts(main);
+        let lt = uir.var_decl_view(stmts[0]);
+        assert!(matches!(uir.inst(lt.initializer).tag, InstTag::Lt));
+        let m = uir.var_decl_view(stmts[1]);
+        assert!(matches!(uir.inst(m.initializer).tag, InstTag::Mod));
     }
 
     #[test]

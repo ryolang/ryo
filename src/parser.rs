@@ -191,6 +191,7 @@ where
         let atom = {
             let literal = select! {
                 Token::IntLit(n) => ExprKind::Literal(Literal::Int(n)),
+                Token::FloatLit(bits) => ExprKind::Literal(Literal::Float(f64::from_bits(bits))),
                 Token::StrLit(id) => ExprKind::Literal(Literal::Str(id)),
                 Token::True => ExprKind::Literal(Literal::Bool(true)),
                 Token::False => ExprKind::Literal(Literal::Bool(false)),
@@ -234,6 +235,7 @@ where
             choice((
                 just(Token::Mul).to(BinaryOperator::Mul),
                 just(Token::Div).to(BinaryOperator::Div),
+                just(Token::Percent).to(BinaryOperator::Mod),
             ))
             .then(unary)
             .repeated(),
@@ -264,15 +266,40 @@ where
             },
         );
 
+        // Ordering (non-associative) sits between additive and equality.
+        let ordering = additive
+            .clone()
+            .then(
+                choice((
+                    just(Token::LtEq).to(BinaryOperator::LtEq),
+                    just(Token::GtEq).to(BinaryOperator::GtEq),
+                    just(Token::Lt).to(BinaryOperator::Lt),
+                    just(Token::Gt).to(BinaryOperator::Gt),
+                ))
+                .then(additive)
+                .or_not(),
+            )
+            .map(|(left, maybe_rhs)| match maybe_rhs {
+                None => left,
+                Some((op, right)) => {
+                    let start = left.span.start;
+                    let end = right.span.end;
+                    Expression::new(
+                        ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
+                        SimpleSpan::new((), start..end),
+                    )
+                }
+            });
+
         // Equality is non-associative, lowest precedence.
-        additive
+        ordering
             .clone()
             .then(
                 choice((
                     just(Token::EqEq).to(BinaryOperator::Eq),
                     just(Token::NotEq).to(BinaryOperator::NotEq),
                 ))
-                .then(additive)
+                .then(ordering)
                 .or_not(),
             )
             .map(|(left, maybe_rhs)| match maybe_rhs {
@@ -554,6 +581,101 @@ mod tests {
             },
             other => panic!("expected VarDecl, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_float_literal() {
+        let (program, _) = lex_and_parse("x = 2.5").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::Literal(Literal::Float(v)) => assert!((*v - 2.5).abs() < 1e-12),
+                other => panic!("expected Float literal, got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_ordering_operators() {
+        for (src, expected_op) in &[
+            ("x = a < b", BinaryOperator::Lt),
+            ("x = a > b", BinaryOperator::Gt),
+            ("x = a <= b", BinaryOperator::LtEq),
+            ("x = a >= b", BinaryOperator::GtEq),
+        ] {
+            let (program, _) = lex_and_parse(src).unwrap();
+            match &program.statements[0].kind {
+                StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                    ExprKind::BinaryOp(_, op, _) => assert_eq!(op, expected_op),
+                    other => panic!("expected BinaryOp, got {:?}", other),
+                },
+                other => panic!("expected VarDecl, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_modulo_at_multiplicative_precedence() {
+        let (program, _) = lex_and_parse("x = a + b % c").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::BinaryOp(_, BinaryOperator::Add, rhs) => {
+                    assert!(matches!(
+                        rhs.kind,
+                        ExprKind::BinaryOp(_, BinaryOperator::Mod, _)
+                    ));
+                }
+                other => panic!("expected top-level BinaryOp(Add), got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_ordering_below_additive_precedence() {
+        let (program, _) = lex_and_parse("x = a + b < c + d").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::BinaryOp(lhs, BinaryOperator::Lt, rhs) => {
+                    assert!(matches!(
+                        lhs.kind,
+                        ExprKind::BinaryOp(_, BinaryOperator::Add, _)
+                    ));
+                    assert!(matches!(
+                        rhs.kind,
+                        ExprKind::BinaryOp(_, BinaryOperator::Add, _)
+                    ));
+                }
+                other => panic!("expected top-level BinaryOp(Lt), got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_equality_below_ordering_precedence() {
+        let (program, _) = lex_and_parse("x = a < b == c < d").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::BinaryOp(lhs, BinaryOperator::Eq, rhs) => {
+                    assert!(matches!(
+                        lhs.kind,
+                        ExprKind::BinaryOp(_, BinaryOperator::Lt, _)
+                    ));
+                    assert!(matches!(
+                        rhs.kind,
+                        ExprKind::BinaryOp(_, BinaryOperator::Lt, _)
+                    ));
+                }
+                other => panic!("expected top-level BinaryOp(Eq), got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_chained_ordering_is_rejected() {
+        assert!(lex_and_parse("x = a < b < c").is_err());
     }
 
     #[test]

@@ -33,6 +33,10 @@ pub enum Token {
 
     // Literals (already parsed / interned).
     IntLit(i64),
+    /// IEEE-754 `f64` literal stored as its bit pattern so `Token`
+    /// can keep `Eq + Hash`. Decoded with `f64::from_bits` by
+    /// downstream consumers (parser/astgen).
+    FloatLit(u64),
     StrLit(StringId),
 
     // Keywords.
@@ -56,8 +60,13 @@ pub enum Token {
     Sub,
     Mul,
     Div,
+    Percent,
     EqEq,
     NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
     Assign,
     Colon,
 
@@ -84,6 +93,7 @@ impl fmt::Display for Token {
         match self {
             Self::Error => write!(f, "<error>"),
             Self::IntLit(n) => write!(f, "{}", n),
+            Self::FloatLit(bits) => write!(f, "{}", f64::from_bits(*bits)),
             Self::StrLit(id) => write!(f, "<str#{}>", id.raw()),
             Self::Fn => write!(f, "fn"),
             Self::If => write!(f, "if"),
@@ -101,8 +111,13 @@ impl fmt::Display for Token {
             Self::Sub => write!(f, "-"),
             Self::Mul => write!(f, "*"),
             Self::Div => write!(f, "/"),
+            Self::Percent => write!(f, "%"),
             Self::EqEq => write!(f, "=="),
             Self::NotEq => write!(f, "!="),
+            Self::Lt => write!(f, "<"),
+            Self::Gt => write!(f, ">"),
+            Self::LtEq => write!(f, "<="),
+            Self::GtEq => write!(f, ">="),
             Self::Assign => write!(f, "="),
             Self::Colon => write!(f, ":"),
             Self::LParen => write!(f, "("),
@@ -125,6 +140,10 @@ impl fmt::Display for Token {
 pub(crate) enum RawToken<'a> {
     Error,
 
+    // Float regex is declared *before* the int regex purely for
+    // readability; logos picks the longest match regardless.
+    #[regex(r"[0-9]+\.[0-9]+")]
+    Float(&'a str),
     #[regex(r"[0-9]+")]
     Int(&'a str),
     #[regex(r#""([^"\\]|\\.)*""#)]
@@ -164,10 +183,20 @@ pub(crate) enum RawToken<'a> {
     Mul,
     #[token("/")]
     Div,
+    #[token("%")]
+    Percent,
     #[token("==")]
     EqEq,
     #[token("!=")]
     NotEq,
+    #[token("<=")]
+    LtEq,
+    #[token(">=")]
+    GtEq,
+    #[token("<")]
+    Lt,
+    #[token(">")]
+    Gt,
     #[token("=")]
     Assign,
     #[token(":")]
@@ -300,6 +329,15 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         // late-negation (or add an `IntLitMin` token variant) so
         // the literal can be spelled. Tracked alongside the
         // numeric-tower work in the roadmap.
+        RawToken::Float(s) => match s.parse::<f64>() {
+            Ok(n) => Token::FloatLit(n.to_bits()),
+            Err(_) => {
+                return Err(LexError {
+                    span,
+                    message: format!("invalid float literal: '{}'", s),
+                });
+            }
+        },
         RawToken::Int(s) => match s.parse::<i64>() {
             Ok(n) => Token::IntLit(n),
             Err(_) => {
@@ -336,8 +374,13 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::Sub => Token::Sub,
         RawToken::Mul => Token::Mul,
         RawToken::Div => Token::Div,
+        RawToken::Percent => Token::Percent,
         RawToken::EqEq => Token::EqEq,
         RawToken::NotEq => Token::NotEq,
+        RawToken::Lt => Token::Lt,
+        RawToken::Gt => Token::Gt,
+        RawToken::LtEq => Token::LtEq,
+        RawToken::GtEq => Token::GtEq,
         RawToken::Assign => Token::Assign,
         RawToken::Colon => Token::Colon,
 
@@ -463,6 +506,45 @@ mod tests {
         let mut pool = InternPool::new();
         let res = lex("99999999999999999999", &mut pool);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn lex_float_literal() {
+        let (toks, _) = lex_strings("2.5");
+        assert_eq!(toks.len(), 1);
+        match toks[0] {
+            Token::FloatLit(bits) => {
+                assert!((f64::from_bits(bits) - 2.5).abs() < 1e-12);
+            }
+            ref t => panic!("expected FloatLit, got {:?}", t),
+        }
+    }
+
+    #[test]
+    fn lex_float_does_not_swallow_int() {
+        let (toks, _) = lex_strings("3 14");
+        assert_eq!(toks, vec![Token::IntLit(3), Token::IntLit(14)]);
+    }
+
+    #[test]
+    fn lex_ordering_tokens() {
+        let (toks, _) = lex_strings("< > <= >=");
+        assert_eq!(toks, vec![Token::Lt, Token::Gt, Token::LtEq, Token::GtEq]);
+    }
+
+    #[test]
+    fn lex_modulo_token() {
+        let (toks, _) = lex_strings("a % b");
+        assert_eq!(toks.len(), 3);
+        assert_eq!(toks[1], Token::Percent);
+    }
+
+    #[test]
+    fn lex_lt_vs_lteq() {
+        let (toks, _) = lex_strings("a <= b < c");
+        assert_eq!(toks.len(), 5);
+        assert_eq!(toks[1], Token::LtEq);
+        assert_eq!(toks[3], Token::Lt);
     }
 
     #[test]

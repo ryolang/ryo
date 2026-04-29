@@ -456,6 +456,10 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
             InstData::Bool(b) => fcx.builder.bool_const(b, sema.pool.bool_(), span),
             _ => unreachable!("BoolLiteral must carry InstData::Bool"),
         },
+        InstTag::FloatLiteral => match inst.data {
+            InstData::Float(v) => fcx.builder.float_const(v, sema.pool.float(), span),
+            _ => unreachable!("FloatLiteral must carry InstData::Float"),
+        },
         InstTag::Var => {
             let name = match inst.data {
                 InstData::Var(s) => s,
@@ -477,8 +481,13 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
         | InstTag::Sub
         | InstTag::Mul
         | InstTag::Div
+        | InstTag::Mod
         | InstTag::Eq
-        | InstTag::NotEq => {
+        | InstTag::NotEq
+        | InstTag::Lt
+        | InstTag::Gt
+        | InstTag::LtEq
+        | InstTag::GtEq => {
             let (lhs, rhs) = match inst.data {
                 InstData::BinOp { lhs, rhs } => (lhs, rhs),
                 _ => unreachable!("binary op must carry InstData::BinOp"),
@@ -565,12 +574,28 @@ fn check_binary_op(
         lhs_ty
     };
     let is_equality = matches!(tag, InstTag::Eq | InstTag::NotEq);
+    let is_ordering = matches!(
+        tag,
+        InstTag::Lt | InstTag::Gt | InstTag::LtEq | InstTag::GtEq
+    );
+    let is_modulo = matches!(tag, InstTag::Mod);
+    let kind = sema.pool.kind(kind_ty);
+
     if is_equality {
-        match sema.pool.kind(kind_ty) {
+        match kind {
             TypeKind::Int | TypeKind::Bool => {
                 let tir_tag = match tag {
                     InstTag::Eq => TirTag::ICmpEq,
                     InstTag::NotEq => TirTag::ICmpNe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+            }
+            TypeKind::Float => {
+                let tir_tag = match tag {
+                    InstTag::Eq => TirTag::FCmpEq,
+                    InstTag::NotEq => TirTag::FCmpNe,
                     _ => unreachable!(),
                 };
                 fcx.builder
@@ -601,8 +626,77 @@ fn check_binary_op(
                 fcx.builder.unreachable(sema.pool.error_type(), span)
             }
         }
+    } else if is_ordering {
+        match kind {
+            TypeKind::Int => {
+                let tir_tag = match tag {
+                    InstTag::Lt => TirTag::ICmpLt,
+                    InstTag::LtEq => TirTag::ICmpLe,
+                    InstTag::Gt => TirTag::ICmpGt,
+                    InstTag::GtEq => TirTag::ICmpGe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+            }
+            TypeKind::Float => {
+                let tir_tag = match tag {
+                    InstTag::Lt => TirTag::FCmpLt,
+                    InstTag::LtEq => TirTag::FCmpLe,
+                    InstTag::Gt => TirTag::FCmpGt,
+                    InstTag::GtEq => TirTag::FCmpGe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+            }
+            TypeKind::Str => {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UnsupportedOperator,
+                    format!(
+                        "ordering operator '{}' not supported for type 'str' (yet)",
+                        bin_op_symbol(tag),
+                    ),
+                ));
+                fcx.builder.unreachable(sema.pool.error_type(), span)
+            }
+            TypeKind::Bool | TypeKind::Void | TypeKind::Tuple => {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UnsupportedOperator,
+                    format!(
+                        "ordering operator '{}' not supported for type '{}'",
+                        bin_op_symbol(tag),
+                        sema.pool.display(kind_ty),
+                    ),
+                ));
+                fcx.builder.unreachable(sema.pool.error_type(), span)
+            }
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
+        }
+    } else if is_modulo {
+        match kind {
+            TypeKind::Int => fcx
+                .builder
+                .binary(TirTag::IMod, sema.pool.int(), lhs, rhs, span),
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
+            _ => {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UnsupportedOperator,
+                    format!(
+                        "modulo operator '{}' not supported for type '{}'",
+                        bin_op_symbol(tag),
+                        sema.pool.display(kind_ty),
+                    ),
+                ));
+                fcx.builder.unreachable(sema.pool.error_type(), span)
+            }
+        }
     } else {
-        match sema.pool.kind(kind_ty) {
+        // Arithmetic: +, -, *, /
+        match kind {
             TypeKind::Int => {
                 let tir_tag = match tag {
                     InstTag::Add => TirTag::IAdd,
@@ -612,6 +706,17 @@ fn check_binary_op(
                     _ => unreachable!(),
                 };
                 fcx.builder.binary(tir_tag, sema.pool.int(), lhs, rhs, span)
+            }
+            TypeKind::Float => {
+                let tir_tag = match tag {
+                    InstTag::Add => TirTag::FAdd,
+                    InstTag::Sub => TirTag::FSub,
+                    InstTag::Mul => TirTag::FMul,
+                    InstTag::Div => TirTag::FDiv,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.float(), lhs, rhs, span)
             }
             TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             _ => {
@@ -748,8 +853,13 @@ fn bin_op_symbol(tag: InstTag) -> &'static str {
         InstTag::Sub => "-",
         InstTag::Mul => "*",
         InstTag::Div => "/",
+        InstTag::Mod => "%",
         InstTag::Eq => "==",
         InstTag::NotEq => "!=",
+        InstTag::Lt => "<",
+        InstTag::Gt => ">",
+        InstTag::LtEq => "<=",
+        InstTag::GtEq => ">=",
         _ => "?",
     }
 }
@@ -1204,5 +1314,102 @@ mod tests {
             // result must emit `DiagCode::CycleInResolution`.
             unimplemented!("comptime cycle — exercises require_decl through a body-body edge");
         }
+    }
+
+    // ---- M7: float / ordering / modulo ----
+
+    #[test]
+    fn sema_float_literal_has_float_type() {
+        let (tirs, pool) = run("x = 1.5").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let v = main.var_decl_view(stmt_at(main, 0));
+        let init = main.inst(v.initializer);
+        assert!(matches!(init.tag, TirTag::FloatConst));
+        assert_eq!(init.ty, pool.float());
+    }
+
+    #[test]
+    fn sema_float_arithmetic_lowers_to_fadd() {
+        let (tirs, pool) = run("x: float = 1.0\ny = x + 2.5").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let v = main.var_decl_view(stmt_at(main, 1));
+        let init = main.inst(v.initializer);
+        assert!(matches!(init.tag, TirTag::FAdd));
+        assert_eq!(init.ty, pool.float());
+    }
+
+    #[test]
+    fn sema_int_division_and_modulo_stay_int() {
+        let (tirs, pool) = run("a = 10\nb = 3\nq = a / b\nr = a % b").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let q = main.var_decl_view(stmt_at(main, 2));
+        let r = main.var_decl_view(stmt_at(main, 3));
+        let q_init = main.inst(q.initializer);
+        let r_init = main.inst(r.initializer);
+        assert!(matches!(q_init.tag, TirTag::ISDiv));
+        assert!(matches!(r_init.tag, TirTag::IMod));
+        assert_eq!(q_init.ty, pool.int());
+        assert_eq!(r_init.ty, pool.int());
+    }
+
+    #[test]
+    fn sema_ordering_returns_bool() {
+        let (tirs, pool) = run("x = 1 < 2").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let v = main.var_decl_view(stmt_at(main, 0));
+        let init = main.inst(v.initializer);
+        assert!(matches!(init.tag, TirTag::ICmpLt));
+        assert_eq!(init.ty, pool.bool_());
+    }
+
+    #[test]
+    fn sema_float_ordering_lowers_to_fcmp() {
+        let (tirs, pool) = run("x = 1.0 <= 2.0").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let v = main.var_decl_view(stmt_at(main, 0));
+        assert!(matches!(main.inst(v.initializer).tag, TirTag::FCmpLe));
+    }
+
+    #[test]
+    fn sema_mixed_int_float_arithmetic_errors() {
+        let (_tirs, diags, _pool) = run_with_errors("x = 1 + 2.0");
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::TypeMismatch
+                && d.message.contains("'+'")
+                && d.message.contains("int")
+                && d.message.contains("float")),
+            "diags: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn sema_mixed_int_float_ordering_errors() {
+        let (_tirs, diags, _pool) = run_with_errors("x = 1 < 2.0");
+        assert!(any_code(&diags, DiagCode::TypeMismatch));
+    }
+
+    #[test]
+    fn sema_modulo_on_float_errors() {
+        let (_tirs, diags, _pool) = run_with_errors("x = 1.0 % 2.0");
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::UnsupportedOperator
+                && d.message.contains("'%'")
+                && d.message.contains("float")),
+            "diags: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn sema_ordering_on_bool_errors() {
+        let (_tirs, diags, _pool) = run_with_errors("x = true < false");
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::UnsupportedOperator
+                && d.message.contains("'<'")
+                && d.message.contains("bool")),
+            "diags: {:?}",
+            diags
+        );
     }
 }

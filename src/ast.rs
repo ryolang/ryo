@@ -14,7 +14,7 @@ use std::fmt;
 // ============================================================================
 
 /// A complete Ryo program consisting of multiple statements.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub statements: Vec<Statement>,
     pub span: SimpleSpan,
@@ -43,7 +43,7 @@ impl Program {
 // ============================================================================
 
 /// A single statement in a program.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
     pub kind: StmtKind,
     pub span: SimpleSpan,
@@ -98,7 +98,7 @@ impl Statement {
 }
 
 /// The kind of statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
     VarDecl(VarDecl),
     FunctionDef(FunctionDef),
@@ -106,7 +106,7 @@ pub enum StmtKind {
     ExprStmt(Expression),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VarDecl {
     pub mutable: bool,
     pub name: Ident,
@@ -143,7 +143,7 @@ impl VarDecl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDef {
     pub name: Ident,
     pub params: Vec<Param>,
@@ -214,7 +214,7 @@ impl TypeExpr {
 // Expressions
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Expression {
     pub kind: ExprKind,
     pub span: SimpleSpan,
@@ -231,6 +231,7 @@ impl Expression {
                 Literal::Int(n) => format!("Literal(Int({}))", n),
                 Literal::Str(s) => format!("Literal(Str(\"{}\"))", pool.str(*s)),
                 Literal::Bool(b) => format!("Literal(Bool({}))", b),
+                Literal::Float(v) => format!("Literal(Float({}))", v),
             },
             ExprKind::Ident(name) => format!("Ident({})", pool.str(*name)),
             ExprKind::BinaryOp(_, op, _) => format!("BinaryOp({})", op),
@@ -264,7 +265,7 @@ impl Expression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Literal(Literal),
     Ident(StringId),
@@ -273,11 +274,12 @@ pub enum ExprKind {
     Call(StringId, Vec<Expression>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Literal {
     Int(i64),
     Str(StringId),
     Bool(bool),
+    Float(f64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,8 +288,13 @@ pub enum BinaryOperator {
     Sub,
     Mul,
     Div,
+    Mod,
     Eq,
     NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
 }
 
 impl fmt::Display for BinaryOperator {
@@ -297,8 +304,13 @@ impl fmt::Display for BinaryOperator {
             BinaryOperator::Sub => write!(f, "-"),
             BinaryOperator::Mul => write!(f, "*"),
             BinaryOperator::Div => write!(f, "/"),
+            BinaryOperator::Mod => write!(f, "%"),
             BinaryOperator::Eq => write!(f, "=="),
             BinaryOperator::NotEq => write!(f, "!="),
+            BinaryOperator::Lt => write!(f, "<"),
+            BinaryOperator::Gt => write!(f, ">"),
+            BinaryOperator::LtEq => write!(f, "<="),
+            BinaryOperator::GtEq => write!(f, ">="),
         }
     }
 }
@@ -324,6 +336,23 @@ mod tests {
     fn binary_operator_display_for_equality() {
         assert_eq!(format!("{}", BinaryOperator::Eq), "==");
         assert_eq!(format!("{}", BinaryOperator::NotEq), "!=");
+    }
+
+    #[test]
+    fn binary_operator_display_for_ordering_and_modulo() {
+        assert_eq!(format!("{}", BinaryOperator::Lt), "<");
+        assert_eq!(format!("{}", BinaryOperator::Gt), ">");
+        assert_eq!(format!("{}", BinaryOperator::LtEq), "<=");
+        assert_eq!(format!("{}", BinaryOperator::GtEq), ">=");
+        assert_eq!(format!("{}", BinaryOperator::Mod), "%");
+    }
+
+    #[test]
+    fn literal_float_variant_round_trips_payload() {
+        match Literal::Float(1.5) {
+            Literal::Float(v) => assert_eq!(v, 1.5),
+            other => panic!("expected Literal::Float, got {:?}", other),
+        }
     }
 
     #[test]

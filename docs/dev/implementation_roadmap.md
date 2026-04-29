@@ -478,23 +478,22 @@ Note: Zig pipeline alignment implemented here.
 ### Milestone 7: Expressions & Operators (Extended) [alpha]
 **Goal:** Support float type and extended operators
 
-**Tasks:**
-- Add `float` type to lexer/parser/AST
-- Extend type system to handle `int` (defaults to `i64`) and `float` separately
-- Add float literal parsing: `3.14`, `2.5`
-- Add ordering comparison operators: `<`, `>`, `<=`, `>=` (`==` and `!=` added in M6.5)
-- Add division operator (`/`) with integer division semantics
-- Add modulo operator (`%`)
-- Implement basic type checking:
-  - Cannot mix `int` and `float` in operations without explicit conversion
-  - Ordering comparisons return `bool` (`bool` added in M6.5)
-- Extend Codegen: Generate IR for:
-  - Float arithmetic operations
-  - Comparison operations
-  - Type conversions (if needed)
-- Write tests for float operations and comparisons
+**Status:** ✅ COMPLETE — `float` primitive, float literals, ordering operators, and `%` implemented end-to-end through the lexer → parser → UIR → sema → TIR → Cranelift pipeline.
 
-**Visible Progress:** Can use floats and compare values. Clear type error messages when mixing types.
+**What was implemented:**
+- Added `Tag::Float` / `TypeKind::Float` / `pool.float()` (stable `ID_FLOAT` slot) to the InternPool
+- Lexer: `FloatLit(u64)` (bit pattern of `f64`), `Lt` / `Gt` / `LtEq` / `GtEq` / `Percent` tokens; float regex `[0-9]+\.[0-9]+` ahead of integer regex
+- AST: `Literal::Float(f64)` (drops `Eq` from `Literal`); `BinaryOperator::{Lt, Gt, LtEq, GtEq, Mod}`
+- Parser: float literal in atom `select!`; new non-associative ordering layer between additive and equality; `%` at multiplicative precedence; chained ordering (`a < b < c`) is a parse error, matching equality
+- UIR: `InstTag::{FloatLiteral, Lt, Gt, LtEq, GtEq, Mod}`, `InstData::Float(f64)`, `float_literal` builder; `binary` whitelist extended
+- astgen: `Primitives` now interns `float`; `resolve_type` resolves `: float`; new AST nodes lower to UIR
+- TIR: `TirTag::{FloatConst, FAdd, FSub, FMul, FDiv, IMod, ICmpLt, ICmpLe, ICmpGt, ICmpGe, FCmpEq, FCmpNe, FCmpLt, FCmpLe, FCmpGt, FCmpGe}`, `TirData::Float(f64)`, `float_const` builder
+- Sema: same-type rule for arithmetic / ordering / equality; ordering returns `bool`; `int` lowers to `I*`, `float` lowers to `F*`; `%` accepts only `int`; ordering on `bool` / `str` and modulo on `float` produce localized diagnostics
+- Codegen: `cranelift_type_for(Float) = F64`; emits `f64const`, `fadd`/`fsub`/`fmul`/`fdiv`, `srem` for `IMod`, signed `icmp` for int ordering, ordered `fcmp` (`FloatCC::{LessThan, LessThanOrEqual, GreaterThan, GreaterThanOrEqual, Equal, NotEqual}`) for float comparisons
+- Unit tests across lexer, parser, AST, UIR, astgen, TIR, sema, codegen layers
+- Two integration tests verifying float and integer-modulo programs compile and run with the expected exit codes
+
+**Visible Progress:** Programs can declare `float` variables, compute float arithmetic, compare values with `<` / `>` / `<=` / `>=`, and take integer remainders with `%`. Mixed-type expressions are rejected with clear diagnostics. Float observability beyond exit codes (e.g. `print(float)`) lands with later stdlib work.
 
 **Example:**
 ```ryo
@@ -504,15 +503,18 @@ pi_approx = x + y / 2.0
 
 a = 10
 b = 3
-quotient = a / b      # 3 (integer division)
+quotient = a / b      # 3 (integer division, truncates toward zero)
 remainder = a % b     # 1
 ```
 
 **Implementation Notes:**
-- Float arithmetic uses IEEE 754 semantics
-- Integer division truncates toward zero
-- Type errors are clear and localized (bidirectional type checking)
-- Dependencies: Milestone 4 (functions for testing), Milestone 6.5 (provides bool type and `==`/`!=` semantics)
+- Float arithmetic uses IEEE 754 semantics; division by zero produces `inf` / `nan`, no runtime check.
+- Integer division (`/`) is `sdiv` (truncates toward zero); integer modulo (`%`) is `srem` (sign of dividend).
+- Float `%` is rejected at sema time; revisited in a later milestone.
+- Float ordering uses ordered `fcmp` — NaN compares unequal, matching Rust's `PartialOrd<f64>`.
+- Type errors are clear and localized (bidirectional type checking); no implicit `int` ↔ `float` coercion.
+- Float literal grammar is restricted to `[0-9]+\.[0-9]+` for now — no bare `.5`, no `5.`, no exponent form, no underscores.
+- Dependencies: Milestone 4 (functions for testing), Milestone 6.5 (provides bool type and `==`/`!=` semantics).
 
 ---
 Note: Review [Project Structure](project_structure) and make the first split before M8

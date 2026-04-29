@@ -19,8 +19,9 @@
 //!   lets later phases drop `&'a str` slices from `Token` and
 //!   shrink HIR's `String` count.
 //!
-//! Primitive types live at fixed item indices (0..=4), populated by
-//! `new()`. The `const fn` accessors (`void`, `bool_`, `int`, ...)
+//! Primitive types live at fixed item indices (0..=5), populated by
+//! `new()`. The slot order is `void, bool, int, str, float, error`.
+//! The `const fn` accessors (`void`, `bool_`, `int`, ...)
 //! return those indices without consulting the dedup table — hot
 //! paths never hash.
 //!
@@ -38,9 +39,11 @@ use std::hash::{BuildHasher, Hasher};
 
 /// A compact, copyable handle to an interned type.
 ///
-/// Primitive ids are stable: `TypeId(0..=4)` are `void`, `bool`,
-/// `int`, `str`, `error`. Use the `const fn` accessors on
-/// `InternPool` instead of constructing these directly.
+/// Primitive ids are stable: `TypeId(0..=5)` are `void`, `bool`,
+/// `int`, `str`, `float`, `error` (in that order; the constants
+/// `ID_VOID`..`ID_ERROR` below are the source of truth). Use the
+/// `const fn` accessors on `InternPool` instead of constructing
+/// these directly.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(u32);
 
@@ -88,6 +91,7 @@ enum Tag {
     Bool,
     Int,
     Str,
+    Float,
     Error,
     /// Variable payload: `data` is the index into `extra` of an
     /// `(n_elems: u32, elem_0: u32, ..., elem_{n-1}: u32)` block.
@@ -111,7 +115,8 @@ const ID_VOID: u32 = 0;
 const ID_BOOL: u32 = 1;
 const ID_INT: u32 = 2;
 const ID_STR: u32 = 3;
-const ID_ERROR: u32 = 4;
+const ID_FLOAT: u32 = 4;
+const ID_ERROR: u32 = 5;
 
 // ---------- Public TypeKind facade ----------
 
@@ -129,6 +134,8 @@ pub enum TypeKind {
     Int,
     /// Placeholder; the slice ABI is a separate change.
     Str,
+    /// IEEE-754 double-precision float (`f64`).
+    Float,
     /// Sentinel for resolution failure. Sema substitutes this in for
     /// any expression whose type could not be determined (unknown
     /// variable, unknown type annotation, etc.) so that downstream
@@ -276,6 +283,10 @@ impl InternPool {
             data: 0,
         });
         pool.items.push(Item {
+            tag: Tag::Float,
+            data: 0,
+        });
+        pool.items.push(Item {
             tag: Tag::Error,
             data: 0,
         });
@@ -291,6 +302,7 @@ impl InternPool {
             Tag::Bool => TypeKind::Bool,
             Tag::Int => TypeKind::Int,
             Tag::Str => TypeKind::Str,
+            Tag::Float => TypeKind::Float,
             Tag::Error => TypeKind::Error,
             Tag::Tuple => TypeKind::Tuple,
         }
@@ -307,6 +319,9 @@ impl InternPool {
     }
     pub const fn str_(&self) -> TypeId {
         TypeId(ID_STR)
+    }
+    pub const fn float(&self) -> TypeId {
+        TypeId(ID_FLOAT)
     }
     pub const fn error_type(&self) -> TypeId {
         TypeId(ID_ERROR)
@@ -472,6 +487,7 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::Bool => write!(f, "bool"),
             TypeKind::Int => write!(f, "int"),
             TypeKind::Str => write!(f, "str"),
+            TypeKind::Float => write!(f, "float"),
             TypeKind::Error => write!(f, "<error>"),
             TypeKind::Tuple => {
                 let elems = self.pool.tuple_elements_vec(self.id);
@@ -491,6 +507,34 @@ impl fmt::Display for DisplayType<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn float_primitive_has_stable_id() {
+        let pool = InternPool::new();
+        // Stability contract: `float` is at slot 4, `error` at 5.
+        assert_eq!(pool.float().raw(), 4);
+        assert_eq!(pool.error_type().raw(), 5);
+        // Distinctness from peer primitives.
+        assert_ne!(pool.float(), pool.int());
+        assert_ne!(pool.float(), pool.bool_());
+        assert_ne!(pool.float(), pool.error_type());
+        // Kind dispatch routes through `Tag::Float`.
+        assert_eq!(pool.kind(pool.float()), TypeKind::Float);
+    }
+
+    #[test]
+    fn float_displays_as_float() {
+        let pool = InternPool::new();
+        assert_eq!(format!("{}", pool.display(pool.float())), "float");
+    }
+
+    #[test]
+    fn float_not_compatible_with_int() {
+        let pool = InternPool::new();
+        assert!(!pool.compatible(pool.float(), pool.int()));
+        assert!(pool.compatible(pool.float(), pool.float()));
+        assert!(pool.compatible(pool.float(), pool.error_type()));
+    }
 
     #[test]
     fn primitives_have_stable_ids() {

@@ -1,0 +1,20 @@
+# Minimal float + ordering + modulo example (M7).
+#
+# Observable behavior beyond the exit code arrives once
+# `print(float)` and `if` land in M8 / future stdlib milestones.
+# For now the program returns `10 % 3 == 1`, which the matching
+# integration test in `tests/integration_tests.rs` asserts.
+
+fn main() -> int:
+	x: float = 3.14
+	y: float = 2.71
+	pi_approx = x + y / 2.0   # float arithmetic
+	cmp = x > y               # ordering on float, result is bool
+
+	a = 10
+	b = 3
+	quotient = a / b          # 3 (integer division, truncates toward zero)
+	remainder = a % b         # 1 (signed remainder, sign of dividend)
+	in_range = quotient < a   # ordering on int, result is bool
+
+	return remainder

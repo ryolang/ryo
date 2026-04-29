@@ -120,6 +120,43 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** `==` / `!=` on `str` is rejected with `"not supported for type 'str' (yet)"`. Blocked on I-004: with strings represented as bare pointers, there is no length to compare against. Fixing this requires the fat-pointer ABI from I-004 plus a `memcmp` libcall (or an inlined byte-compare loop) at codegen.
 **Resolution:** After I-004 lands the `(*u8, usize)` slice ABI, implement `==`/`!=` in codegen as length-check + `memcmp`. Sema just needs the rejection removed.
 
+### I-023 — Integer division / modulo by zero is undefined behavior at codegen
+**Files:** `src/codegen.rs` (`TirTag::ISDiv`, `TirTag::IMod` arms), `src/sema.rs` (`check_binary_op`)
+**Summary:** `a / 0` and `a % 0` lower directly to Cranelift `sdiv` / `srem` with no guard. Cranelift treats both as UB; the resulting native instruction (`idiv` on x86-64, `sdiv` on aarch64) traps or returns garbage depending on target. Sema does not constant-fold a known-zero divisor either. M6.5 had the same gap for `/`; M7 added `%` on the same footing.
+**Resolution:** When safety checks land (alongside or after M8), insert a runtime check at codegen: emit a compare-against-zero, branch to a trap / panic block on hit. Optionally constant-fold the obvious `x / 0` / `x % 0` cases at sema and emit a diagnostic. Coordinate with the eventual panic / safe-mode design so the trap path has somewhere to go.
+
+## 🟢 Cleanup
+
+### I-024 — Single `float` type, no `float32` / `float64` distinction
+**Files:** `src/types.rs` (`Tag::Float`, `TypeKind::Float`), `src/codegen.rs` (`cranelift_type_for`)
+**Summary:** M7 ships one float type (`float`), lowered to Cranelift `F64`. Matches today's `int` (one width, machine-word). Users who need 32-bit floats for memory, GPU work, or C interop have no surface syntax to ask for one.
+**Resolution:** Add `Tag::Float32` alongside the existing `Tag::Float` (which becomes `Float64` semantically), expose `: float32` / `: float64` annotations, and pick one as the default for unannotated `1.5`-style literals. Coordinate with the broader numeric-tower design (sized integers, `usize` / `isize`) so the widening story is consistent across types.
+
+### I-025 — No implicit `int` ↔ `float` promotion or conversion functions
+**Files:** `src/sema.rs` (`check_binary_op` mixed-type branch)
+**Summary:** `1 + 2.0` is a hard `TypeMismatch` error; users must spell every conversion explicitly, but there are no conversion intrinsics yet either — `int(x)` and `float(x)` don't exist. The result is that mixed numeric arithmetic is currently *unspellable*. Acceptable today (no programs need it), but blocks any real numeric workload.
+**Resolution:** Land conversion intrinsics first (`int(float) -> int`, `float(int) -> float`, with Cranelift `fcvt_to_sint_sat` / `fcvt_from_sint`). Decide at that point whether to keep mixed arithmetic as an error (Zig stance) or introduce limited widening (e.g. `int + float -> float` only when the int is a literal, Swift stance). Both are coherent; pick one and document.
+
+### I-026 — Float modulo (`%` on `float`) rejected
+**Files:** `src/sema.rs` (`check_binary_op` is_modulo branch)
+**Summary:** `1.0 % 2.0` produces `"modulo operator '%' not supported for type 'float'"`. The plan deferred this because `fmod` has surprising semantics on negatives and on NaN, and there is no concrete user demand yet.
+**Resolution:** When a real use case appears, decide between `libm::fmod` (C / IEEE remainder semantics) and a `frem`-style "sign of dividend" lowering, then add a `TirTag::FMod` and route `% on float` through it in sema. Document the chosen semantics in `docs/specification.md` before implementing.
+
+### I-027 — Restricted float literal grammar
+**Files:** `src/lexer.rs` (`RawToken::Float` regex `[0-9]+\.[0-9]+`)
+**Summary:** Float literals must have digits on both sides of the dot. None of `.5`, `5.`, `1e10`, `1.5e-3`, `1_000_000.0` parse. Sufficient for M7's example programs but obviously incomplete.
+**Resolution:** Extend the regex to cover `[0-9]+(_[0-9]+)*(\.[0-9]+(_[0-9]+)*)?([eE][+-]?[0-9]+)?` (or break it into named sub-patterns). Mirror the same underscore + exponent treatment for integer literals at the same time so the two grammars stay parallel. Watch out for ambiguities with method-call syntax (`5.bit_count()`) once methods land.
+
+### I-028 — No `print(float)` (or `print` on anything but a `str` literal)
+**Files:** `src/builtins.rs`, `src/sema.rs` (`check_builtin_call`), `src/codegen.rs` (`generate_print_call`)
+**Summary:** Float arithmetic has no observability beyond the program exit code. `print` is hard-wired to take a *string literal* (see I-006). Inspecting a float at runtime requires either a formatter (`f"{x:.2}"`) or polymorphic `print`, neither of which exists.
+**Resolution:** Tracked under I-006 (move `print` to a runtime crate). The float-specific piece lands when the runtime crate gains `print_f64` (or a polymorphic dispatch) and the sema-side argument-kind whitelist accepts non-`StrLiteral` `float` arguments.
+
+### I-029 — AST loses `Eq` because `Literal::Float` carries an `f64`
+**Files:** `src/ast.rs` (`Literal`, `Expression`, `Statement`, `Program`, `StmtKind`, `ExprKind`, `VarDecl`, `FunctionDef`)
+**Summary:** `Literal::Float(f64)` cannot derive `Eq` (NaN ≠ NaN), and `Eq` derivation propagates up the containment chain, so every AST struct that transitively holds a `Literal` had to drop the `Eq` derive. No consumer hashes or `Eq`-compares AST nodes today, so the change is currently invisible.
+**Resolution:** If a future pass needs `HashMap<Expression, _>` or similar, introduce a `FloatBits(u64)` newtype that derives `Eq + Hash` on the bit pattern and *also* implements `PartialEq` with IEEE semantics. Wrap `f64` inside `Literal::Float` with it. Until then, leave the derives off.
+
 ---
 
 ## Cross-References

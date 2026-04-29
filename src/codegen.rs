@@ -44,6 +44,7 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
         TypeKind::Int => pointer_ty,
         TypeKind::Str => pointer_ty,
         TypeKind::Bool => types::I8,
+        TypeKind::Float => types::F64,
         TypeKind::Void => panic!("cranelift_type_for: void has no representation"),
         TypeKind::Error => {
             // Reaching codegen with the Error sentinel means sema
@@ -393,6 +394,10 @@ impl<M: Module> Codegen<M> {
                 TirData::Bool(b) => builder.ins().iconst(types::I8, if b { 1 } else { 0 }),
                 _ => unreachable!("BoolConst must carry TirData::Bool"),
             },
+            TirTag::FloatConst => match inst.data {
+                TirData::Float(v) => builder.ins().f64const(v),
+                _ => unreachable!("FloatConst must carry TirData::Float"),
+            },
             TirTag::StrConst => match inst.data {
                 TirData::Str(id) => emit_str_literal(builder, ctx, id)?,
                 _ => unreachable!("StrConst must carry TirData::Str"),
@@ -418,8 +423,23 @@ impl<M: Module> Codegen<M> {
             | TirTag::ISub
             | TirTag::IMul
             | TirTag::ISDiv
+            | TirTag::IMod
             | TirTag::ICmpEq
-            | TirTag::ICmpNe => {
+            | TirTag::ICmpNe
+            | TirTag::ICmpLt
+            | TirTag::ICmpLe
+            | TirTag::ICmpGt
+            | TirTag::ICmpGe
+            | TirTag::FAdd
+            | TirTag::FSub
+            | TirTag::FMul
+            | TirTag::FDiv
+            | TirTag::FCmpEq
+            | TirTag::FCmpNe
+            | TirTag::FCmpLt
+            | TirTag::FCmpLe
+            | TirTag::FCmpGt
+            | TirTag::FCmpGe => {
                 let (lhs, rhs) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!("binary op must carry TirData::BinOp"),
@@ -431,8 +451,23 @@ impl<M: Module> Codegen<M> {
                     TirTag::ISub => builder.ins().isub(lv, rv),
                     TirTag::IMul => builder.ins().imul(lv, rv),
                     TirTag::ISDiv => builder.ins().sdiv(lv, rv),
+                    TirTag::IMod => builder.ins().srem(lv, rv),
                     TirTag::ICmpEq => builder.ins().icmp(IntCC::Equal, lv, rv),
                     TirTag::ICmpNe => builder.ins().icmp(IntCC::NotEqual, lv, rv),
+                    TirTag::ICmpLt => builder.ins().icmp(IntCC::SignedLessThan, lv, rv),
+                    TirTag::ICmpLe => builder.ins().icmp(IntCC::SignedLessThanOrEqual, lv, rv),
+                    TirTag::ICmpGt => builder.ins().icmp(IntCC::SignedGreaterThan, lv, rv),
+                    TirTag::ICmpGe => builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, lv, rv),
+                    TirTag::FAdd => builder.ins().fadd(lv, rv),
+                    TirTag::FSub => builder.ins().fsub(lv, rv),
+                    TirTag::FMul => builder.ins().fmul(lv, rv),
+                    TirTag::FDiv => builder.ins().fdiv(lv, rv),
+                    TirTag::FCmpEq => builder.ins().fcmp(FloatCC::Equal, lv, rv),
+                    TirTag::FCmpNe => builder.ins().fcmp(FloatCC::NotEqual, lv, rv),
+                    TirTag::FCmpLt => builder.ins().fcmp(FloatCC::LessThan, lv, rv),
+                    TirTag::FCmpLe => builder.ins().fcmp(FloatCC::LessThanOrEqual, lv, rv),
+                    TirTag::FCmpGt => builder.ins().fcmp(FloatCC::GreaterThan, lv, rv),
+                    TirTag::FCmpGe => builder.ins().fcmp(FloatCC::GreaterThanOrEqual, lv, rv),
                     _ => unreachable!(),
                 }
             }
