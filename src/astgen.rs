@@ -239,6 +239,9 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
         ast::ExprKind::Literal(ast::Literal::Int(n)) => b.int_literal(*n, span),
         ast::ExprKind::Literal(ast::Literal::Str(id)) => b.str_literal(*id, span),
         ast::ExprKind::Literal(ast::Literal::Bool(v)) => b.bool_literal(*v, span),
+        ast::ExprKind::Literal(ast::Literal::Float(_)) => {
+            unimplemented!("M7 Task 6: float literal lowering")
+        }
         ast::ExprKind::Ident(id) => b.var_ref(*id, span),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
             let l = gen_expr(b, lhs);
@@ -250,6 +253,13 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
                 ast::BinaryOperator::Div => InstTag::Div,
                 ast::BinaryOperator::Eq => InstTag::Eq,
                 ast::BinaryOperator::NotEq => InstTag::NotEq,
+                ast::BinaryOperator::Mod
+                | ast::BinaryOperator::Lt
+                | ast::BinaryOperator::Gt
+                | ast::BinaryOperator::LtEq
+                | ast::BinaryOperator::GtEq => {
+                    unimplemented!("M7 Task 6: ordering and modulo lowering")
+                }
             };
             b.binary(tag, l, r, span)
         }
