@@ -30,13 +30,17 @@
         countEl.hidden = false;
     };
 
+    let stale = null;
     try {
         const raw = localStorage.getItem(CACHE_KEY);
         if (raw) {
             const { n, t } = JSON.parse(raw);
-            if (typeof n === "number" && Date.now() - t < CACHE_TTL_MS) {
-                render(n);
-                return;
+            if (typeof n === "number") {
+                if (Date.now() - t < CACHE_TTL_MS) {
+                    render(n);
+                    return;
+                }
+                stale = n;
             }
         }
     } catch {}
@@ -52,9 +56,13 @@
                         JSON.stringify({ n: data.stargazers_count, t: Date.now() }),
                     );
                 } catch {}
+            } else if (stale !== null) {
+                render(stale);
             }
         })
-        .catch((err) => console.error(err));
+        .catch(() => {
+            if (stale !== null) render(stale);
+        });
 })();
 
 // ----- Copy buttons -----

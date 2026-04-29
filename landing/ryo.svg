@@ -1,5 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Ryo">
-	<title>Ryo</title>
-	<rect width="24" height="24" rx="4" fill="#ffc300"/>
-	<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" fill="#422a04"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+<!-- SVG created with Arrow, by QuiverAI (https://quiver.ai) -->
+  <style type="text/css">.cls-0 {fill:url(#SVGID_1_);}
+.cls-1 {fill:#F6A22E;}
+.cls-2 {fill:#F37924;}
+.cls-3 {fill:#F07726;}</style>
+  <linearGradient id="SVGID_1_" x1="59.46" x2="78.07" y1="7.252" y2="56.31" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#FACD24" offset=".3147"/>
+    <stop stop-color="#F37924" offset=".9997"/>
+  </linearGradient>
+  <path class="cls-0" d="m93.2 40h-19l16.5-34.7c0.7-1.7-0.3-3.3-2.1-3.3h-26.7c-1.2 0-2.3 0.7-3 2.3l-19.6 49.5c-0.6 1.6 0.5 3.1 2 3.1h17.6l-14.6 38.3c-0.9 2.5 1.9 4.4 3.7 2.3l46.6-53.6c1.4-1.6 0.6-3.7-1.4-3.9z"/>
+  <path class="cls-1" d="m46.8 17.7 2.8-7.1h-19.1c-1.4 0-3.1 1.5-3.1 2.9v0.9c0 1.4 1.3 3.3 3.3 3.3h16.1z"/>
+  <path class="cls-1" d="m18.2 10.6h-4.6c-1.6 0-3.2 1.4-3.2 3.1v0.7c0 1.3 1 3.2 3.3 3.2h4.5c1.9 0 3.3-1.6 3.3-3.2v-0.6c0-1.5-1.3-3.2-3.3-3.2z"/>
+  <path class="cls-2" d="m11.9 25h-4.3c-1.5 0-3 1.4-3 3.1v0.5c0 1.4 1.1 3.1 3.1 3.1h4.3c1.7 0 3.2-1.3 3.2-3.1v-0.4c0-1.5-1.2-3.2-3.3-3.2z"/>
+  <path class="cls-3" d="m41.3 31.7 2.8-6.7h-20.1c-1.6 0-3.3 1.3-3.4 3.1v0.5c0 1.5 1.3 3.1 3.3 3.2l17.4-0.1z"/>
+  <path class="cls-3" d="m35.8 46.8 2.7-7.1h-15.2c-1.4 0-3.3 1-3.6 2.9v0.9c0 1.6 1.2 3.2 3.4 3.3h12.7z"/>
 </svg>

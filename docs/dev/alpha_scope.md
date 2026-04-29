@@ -46,7 +46,7 @@ fn main():
 ```
 
 **Expected output:**
-```
+```text
 Welcome to Ryo, Alice → user_42
 ```
 
@@ -194,5 +194,6 @@ This is achievable. The scope is deliberately narrow precisely because shipping 
 
 - Spec: `docs/specification.md` §1.1 (Feature Availability table — alpha is a strict subset of the v0.1 column)
 - Spec: `docs/specification.md` §4.8 (Optional Types), §4.9 (Error Types) — both required for the litmus test
-- Roadmap: `docs/dev/implementation_roadmap.md` — full milestone list; alpha milestones tagged `[alpha]`
+- Dev: `docs/dev/implementation_roadmap.md` — full milestone list; alpha milestones tagged `[alpha]`
+- Milestone: `docs/dev/implementation_roadmap.md` — alpha milestones tagged `[alpha]`
 - Landing: `landing/index.html` — source of the litmus test snippet

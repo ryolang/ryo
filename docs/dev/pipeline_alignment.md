@@ -1,6 +1,6 @@
 **Status:** Design (v0.2+)
 
-# Pipeline Alignment with Zig: UIR/TIR Split, Deeper InternPool, Structured Diagnostics
+# Pipeline Alignment with Zig: UIR/TIR Split, Deeper InternPool, Structured Diagnostics (Draft — v0.2+)
 
 A multi-phase plan that closes the gaps between Ryo's current middle-end and the Zig-style pipeline it was modelled after. Each phase is independently mergeable and pays off on its own; together they put the foundation in place for the language features queued in the roadmap that the current shape can't comfortably absorb — most importantly **compile-time execution (comptime)**, **generics with monomorphization**, and **inline expansion of closures**.
 
@@ -244,7 +244,7 @@ pub enum InstTag {
     Add, Sub, Mul, Div, Eq, NotEq, Neg,
     Call,
     Return, ReturnVoid,
-    VarDecl, // declaration with optional annotation, both as TypeId::None when absent
+    VarDecl, // declaration with optional annotation; absent annotations use Option<TypeId> = None
     // Reserved: If, Loop, Break, Continue, Block — for control flow milestone.
     // Reserved: ComptimeBlock, Decl — for comptime milestone.
 }
@@ -331,6 +331,7 @@ pub enum TirTag {
     Load, Store,
     Call, Ret, RetVoid,
     Br, CondBr, Block,                  // reserved for control flow
+    Unreachable,                        // emitted by Sema at error recovery points
 }
 ```
 
@@ -475,6 +476,7 @@ For one implementer, including review cycles. Phases 1 and 2 can run in parallel
 
 - Spec: §4 (Types), §10 (Compile-time evaluation — when written) — the type and comptime systems this work enables.
 - Dev: [middle_end_refactor.md](middle_end_refactor.md) — the predecessor plan this builds on; [compilation_pipeline.md](compilation_pipeline.md), [parser.rs.md](parser.rs.md).
+- Milestone: Phases 3–5 of this plan prerequisite *Compile-time Execution (comptime)* and *Full Generics System* (v0.2+) in [implementation_roadmap.md](implementation_roadmap.md)
 - Roadmap: prerequisite for *Compile-time Execution (comptime)* and *Full Generics System* in [implementation_roadmap.md](implementation_roadmap.md) (Phase 5, post-v0.1.0).
 - Issues: [../../ISSUES.md](../../ISSUES.md) — Phases 1, 2, 3 collectively close I-008 (token lifetime), and Phase 4 makes I-006 (print to runtime) a one-day follow-up.
 - Inspiration: Zig's `src/InternPool.zig` (sidecar `extra` array, named primitive indices, single pool for types/strings/values), `src/AstGen.zig` → `src/Sema.zig` separation, `src/Zir.zig` and `src/Air.zig` shapes, `src/Module.zig`'s decl worklist.

@@ -1,3 +1,5 @@
+**Status:** Implementation (v0.0.x–v0.1)
+
 # Ryo Implementation Roadmap
 
 This roadmap outlines the planned development of the Ryo programming language compiler and runtime. Each milestone focuses on delivering specific, tangible capabilities while building toward a complete language implementation.
@@ -2804,3 +2806,9 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 o
 5. Iterate on Phase 5 features based on real-world needs
 
 **Join us in building Ryo!** See [CONTRIBUTING.md](../CONTRIBUTING.md) for how to get involved.
+
+## References
+
+- Spec: `docs/specification.md` — canonical language specification; this roadmap schedules its delivery
+- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [middle_end_refactor.md](middle_end_refactor.md) — implementation plans linked from milestones
+- Milestone: alpha milestones tagged `[alpha]` inline; see [alpha_scope.md](alpha_scope.md) for the alpha delivery slice
