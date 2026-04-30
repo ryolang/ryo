@@ -17,7 +17,10 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 5 — Module System (Design Phase)](#milestone-5-module-system-design-phase--complete)
 - [x] [Milestone 6.5 — Booleans & Equality [alpha]](#milestone-65-booleans--equality-alpha)
 - [x] [Milestone 7 — Expressions & Operators (Extended) [alpha]](#milestone-7-expressions--operators-extended-alpha)
-- [ ] [Milestone 8 — Control Flow & Booleans [alpha]](#milestone-8-control-flow--booleans-alpha)
+- [ ] [Milestone 8 — Control Flow & Booleans [alpha]](#milestone-8-control-flow--booleans-alpha) *(split into 8a / 8b / 8c)*
+  - [x] [Milestone 8a — Void Type & `main()` Signature [alpha]](#milestone-8a-void-type--main-signature-alpha)
+  - [ ] [Milestone 8b — Conditionals & Logical Operators [alpha]](#milestone-8b-conditionals--logical-operators-alpha)
+  - [ ] [Milestone 8c — Loops & Loop Control [alpha]](#milestone-8c-loops--loop-control-alpha)
 - [ ] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha)
 - [ ] [Milestone 8.2 — Immutable Borrows (`&T`) [alpha]](#milestone-82-immutable-borrows-t-alpha)
 - [ ] [Milestone 8.3 — Mutable Borrows (`&mut T`) [alpha]](#milestone-83-mutable-borrows-mut-t-alpha)
@@ -569,65 +572,207 @@ Note: Review [Project Structure](project_structure) and make the first split bef
 ---
 
 ### Milestone 8: Control Flow & Booleans [alpha]
-**Goal:** Implement `if/else` statements, `for` loops, and boolean logic
 
-**Tasks:**
-- **From M3.5**: Implement void/unit type (for functions with no return value)
-  - Add `void` type to type system as the unit type
-  - Update `print()` signature from placeholder `int` to proper `void`
-  - Type checker prevents using void values in expressions
-  - Enable functions with no return: `fn do_something() -> void:`
-- (`bool` type and `true`/`false` literals already exist from M6.5)
-- Add logical operators: `and`, `or`, `not`
-- Extend Parser/AST:
-  - `StmtKind::IfStmt` with optional `else` branch
-  - `StmtKind::ForLoop`
-  - `StmtKind::Break`, `StmtKind::Continue`
-  - Boolean expressions in conditions
-- Extend Codegen: Generate Cranelift IR for:
-  - Conditional branching (if/else)
-  - Loop constructs (for)
-  - Break/continue statements
-  - Boolean operations (and/or/not with short-circuiting)
-- Write tests for control flow and boolean logic
-- func main must have no arguments and no return values (as GO) 
+**Status:** ⏳ Planned — split into three sub-milestones (**8a → 8b → 8c**) to keep each PR reviewable and to land foundational changes (void, `main()` shape) before introducing basic-block emission.
 
-**Visible Progress:** Can write programs with conditionals and loops
+**Aggregate Goal:** Implement `if/else` statements, `while` / `for` loops, boolean logic with short-circuit evaluation, and the `void` unit type. After 8c lands, programs can branch, loop, and call void-returning functions like `print` without the `_ = ...` workaround.
+
+**Why split:**
+- 8a is a small, mechanical change (type system + signature) that unblocks proper `print` typing and the new `main` shape — no Cranelift block emission yet.
+- 8b introduces basic-block emission for the first time (conditional branches and short-circuit logical operators share the same lowering pattern, so they ship together).
+- 8c reuses 8b's block-emission machinery for loops and adds break/continue control-flow targets.
+
+**Cross-cutting tasks (already absorbed into 8a–8c):**
+- (`bool` type, `true`/`false`, and `==`/`!=` already exist from M6.5; ordering operators from M7.)
+- If *expressions* (returning values) remain deferred to a later milestone — only if *statements* ship here.
+- No labeled break/continue in v0.1.
+- Dependencies: Milestone 7 (ordering comparisons), Milestone 6.5 (bool type and equality), Milestone 4 (function/return lowering).
+
+---
+
+### Milestone 8a: Void Type & `main()` Signature [alpha]
+**Goal:** Introduce the `void` unit type and align `fn main()` with the Go-style "no args, no return" signature, before any control-flow work begins.
+
+**Status:** ✅ COMPLETE
+
+**What was implemented:**
+- `print()` builtin signature changed from placeholder `int` to `void` (`src/builtins.rs`).
+- New diagnostic codes `MainSignature` (E0004) and `VoidValueInExpression` (E0017).
+- Astgen rejects `fn main(...)` with parameters or a return type — emits `MainSignature` with the migration hint to use the future `exit(code)` builtin.
+- Implicit-main (top-level statement programs) now lowers to `fn main()` returning `void`; the synthetic `return 0` in UIR is gone — codegen falls through to the C-ABI shim.
+- Top-level expression statements are now allowed in the parser, so `print("hi")` is a valid Pythonic top-level program. The `_ = print(...)` workaround is dropped from sema tests.
+- Statements at the program level must be newline-separated (new `require_newlines` separator in `program_parser`), since bare expression statements would otherwise let `x 42` parse as two statements.
+- Sema rejects binding a `void` value to a name (`msg = print(...)` → `VoidValueInExpression`). Existing rules already cover `return <expr>` in void functions, void in arithmetic/equality operands, and void as a non-void argument.
+- Codegen treats `main` as a C-ABI `int main()` shim regardless of Ryo's view: when Ryo's `main` is void, the emitted Cranelift function still returns `int 0` (matches `zig cc` crt0 expectations and the JIT `fn() -> isize` trampoline).
+- Bare `return` inside a void function (incl. `main`) now lowers cleanly: in `main`, codegen returns `iconst 0` to satisfy the C ABI; in other void functions, it returns no value.
+- Tests updated: integration tests dropped exit-code-via-`return N` assertions (those return with M24's `exit(code)` builtin); they now verify compilation + `[Result] => 0`. New tests cover `fn main() -> int` rejected, `fn main(x: int)` rejected, void-binding rejected, void return-value rejected, bare `return` accepted, void function without explicit return accepted.
+- 158 unit tests + 41 integration tests passing; `cargo fmt` clean; `cargo clippy --all-targets` clean.
+
+**Visible Progress:** `print("hello")` is a plain top-level statement. `fn main():` is the canonical entry point. Explicit `fn main() -> int` is a clear compile error.
+
+**Deferred to later milestones (as planned):**
+- `exit(code)` builtin for non-zero exit codes — lands with stdlib core (M24).
+- Conditional-branch lowering and `if/else` (M8b) — needed before non-trivial void-function control flow patterns can be expressed.
+- Loop control (M8c).
+
+**Original task list (delivered):**
+- **Void type (carryover from M3.5):**
+  - Add `Type::Void` (unit type) to the type system / InternPool
+  - Update `print()` builtin signature: return type `int` placeholder → `void`
+  - Type checker rejects using a `void` value in an expression position (e.g. `x = print("...")`, `return print(...)`, `print(...) + 1`) with a clear diagnostic
+  - Allow functions to declare `-> void` and to omit a trailing `return` (lowering inserts an implicit return)
+  - Allow bare `return` (no value) inside `void` functions; reject bare `return` in non-void functions; reject `return <expr>` in void functions
+  - Remove the `_ = print("...")` workaround from examples and tests; `print("...")` as an expression statement is now the canonical form
+- **`main()` signature change (Go-style):**
+  - `fn main()` must take **no arguments** and have **no return type** (implicit `void`)
+  - Explicit `fn main() -> int` becomes a compile error with a migration hint ("use `exit(code)` from stdlib once available, or omit the return type")
+  - Update the synthetic-main wrapper in lowering: implicit-main programs lower to `fn main()` returning void; the runtime entry point exits with status 0 on normal completion
+  - Update the codegen / linker shim that bridges Ryo `main` to the C `_start` / `main` ABI (it now always returns 0 to the OS unless a future `exit()` builtin is called)
+- **Tests:**
+  - Unit tests: void in expression position rejected; bare `return` rules; `-> void` parses and lowers; `print("...")` as expression statement type-checks
+  - Integration tests: update every existing `fn main() -> int: ... return 0` test to the new signature; verify exit code 0 is observed by the OS
+  - Migration test: `fn main() -> int` now produces the expected error
 
 **Example:**
 ```ryo
-fn is_positive(x: int) -> bool:
-	if x > 0:
-		return true
-	else:
-		return false
+fn greet(name: str) -> void:
+	print("hello")           # expression statement, no `_ =` needed
+	# implicit return at end of void function
 
-fn print_if_even(n: int) -> void:  # void return type
-	if n % 2 == 0:
-		print("Even number")
-	# No return statement needed for void
-
-fn main() -> int:
-	mut counter = 0
-	while counter < 10:
-		print_if_even(counter)
-		counter += 1
-	return 0
+fn main():                  # no args, no return type (Go-style)
+	greet("world")
 ```
 
 **Implementation Notes:**
-- Short-circuit evaluation for `and`/`or` (don't evaluate right side if not needed)
-- **Two `for` loop forms and `while`:**
-  - `for item in iterable:` — iteration over collections
-  - `for i in range(start, end):` — counted iteration (`range()` is the only mechanism, no `..` for iteration)
-  - `while condition:` — condition-based loop
-- **Loop variables are block-scoped** — not accessible after the loop ends
-- **Loop variables are immutable** — consistent with Ryo's default. While loops use externally declared `mut` variables
-- **`range()` is a built-in function** (like `print`). Only mechanism for counted iteration. Exclusive end.
-- **Operator separation:** `range()` for iteration, `:` for slicing (`s[1:4]`), `..` for type bounds only (`int(1..65535)`)
-- Break/continue affect **innermost loop only**. No labeled breaks in v0.1
-- If expressions (returning values) deferred to later milestone
-- Dependencies: Milestone 7 (ordering comparisons), Milestone 6.5 (bool type and equality)
+- This milestone introduces **no new control flow** — the goal is to land the type-system and ABI changes in isolation so 8b's block-emission work has a clean baseline.
+- A future `exit(code: int)` builtin (M24, stdlib core) replaces the old `return <code>` pattern from `main`.
+- Dependencies: Milestone 4 (function lowering, return statements), Milestone 6.5 (bool/equality already done).
+
+---
+
+### Milestone 8b: Conditionals & Logical Operators [alpha]
+**Goal:** Implement `if` / `elif` / `else` statements and the `and` / `or` / `not` logical operators with short-circuit evaluation. This is the first milestone to emit multiple Cranelift basic blocks per function.
+
+**Status:** ⏳ Planned
+
+**Tasks:**
+- **Lexer:** add keyword tokens `and`, `or`, `not`, `elif` (`if`, `else` already exist).
+- **AST:**
+  - `StmtKind::IfStmt { cond, then_block, elif_branches, else_block }` (or equivalent normalized form where `elif` desugars to nested `else: if`)
+  - `BinaryOperator::And`, `BinaryOperator::Or`, `UnaryOperator::Not`
+- **Parser:**
+  - `if <expr>:` block, optional `elif <expr>:` blocks, optional `else:` block — all using the existing indent/dedent machinery
+  - Operator precedence: `not` (unary, tighter than `and`); `and` tighter than `or`; the whole logical layer sits below equality (`==`, `!=`)
+  - Conditions must be `bool` (no truthy-coercion of `int` / `str` — Zig-style)
+- **HIR / Sema:**
+  - Type-check: condition expressions must be `Type::Bool`; `and`/`or` operands must both be `Type::Bool` and the result is `Type::Bool`; `not` operand must be `Type::Bool`
+  - Block scoping: variables declared inside an if/elif/else branch are not visible after the branch ends
+  - Return-flow analysis: if every branch (including `else`) of an `if` chain returns, the chain itself counts as returning — required so non-void functions can satisfy "all paths return" using `if/else` only
+- **Codegen (Cranelift):**
+  - Emit `brif` to two successor blocks for `if`; chain `elif` as nested branches; merge into a join block when control falls through
+  - Short-circuit `and`: evaluate LHS in the current block, branch on it; only evaluate RHS in the "true" successor; merge into a block phi-ing in the bool result
+  - Short-circuit `or`: symmetric to `and` (only evaluate RHS in the "false" successor)
+  - `not` lowers to `bxor` with `1` (or `icmp eq, 0`) on the `i8` bool
+- **Tests:**
+  - Parser: precedence (`a or b and c` ≡ `a or (b and c)`), `not` chaining, `elif` chains, condition-must-be-bool errors
+  - Sema: rejecting non-bool conditions and operands, scoping of branch-local bindings, return-flow analysis
+  - Codegen integration: classic `is_positive`, `max(a, b)`, `fizzbuzz`-style nested `if/elif/else`, short-circuit observability (RHS with side effect only runs when needed — once `print` side effects suffice this is testable end-to-end)
+
+**Visible Progress:** Conditional logic works end-to-end. Programs can branch on bool expressions, chain `elif`, and use `and`/`or`/`not` with proper short-circuiting.
+
+**Example:**
+```ryo
+fn classify(n: int) -> int:
+	if n < 0:
+		return -1
+	elif n == 0:
+		return 0
+	else:
+		return 1
+
+fn in_range(x: int, lo: int, hi: int) -> bool:
+	return x >= lo and x <= hi   # short-circuits on first false
+
+fn main():
+	if in_range(5, 0, 10) and not (5 == 0):
+		print("ok")
+```
+
+**Implementation Notes:**
+- Short-circuit `and`/`or` and `if/else` share the same block-emission infrastructure — implementing them together avoids building it twice.
+- `if` is a **statement** in this milestone; `if`-as-expression is deferred.
+- Dependencies: Milestone 8a (void type, so void-returning branches type-check cleanly), Milestone 7 (ordering comparisons in conditions), Milestone 6.5 (bool/equality).
+
+---
+
+### Milestone 8c: Loops & Loop Control [alpha]
+**Goal:** Implement `while` loops, counted `for i in range(...)` loops, and `break` / `continue`. This completes the v0.1 control-flow surface.
+
+**Status:** ⏳ Planned
+
+**Tasks:**
+- **Lexer:** add keyword tokens `while`, `for`, `in`, `break`, `continue`.
+- **AST:**
+  - `StmtKind::WhileLoop { cond, body }`
+  - `StmtKind::ForRange { var, start, end, body }` — restricted form for counted iteration
+  - `StmtKind::Break`, `StmtKind::Continue`
+- **Parser:**
+  - `while <expr>:` block
+  - `for <ident> in range(<expr>):` and `for <ident> in range(<start>, <end>):` — parser recognizes the two `range(...)` arities specifically; calling `range` outside a `for` header is a compile error in v0.1 (it is a loop construct, not a first-class iterator)
+  - `break` / `continue` parse as bare statements
+  - General `for <ident> in <iterable>:` over collections is **deferred** to M22 (Collections) — until lists exist there is nothing else to iterate over
+- **`range()` builtin (loop-header-only in v0.1):**
+  - `range(end)` → `0..end` exclusive
+  - `range(start, end)` → `start..end` exclusive
+  - Both args must be `int`; result is the loop-header's iteration domain (no first-class range value yet)
+- **HIR / Sema:**
+  - `while` condition must be `Type::Bool`
+  - `for` loop variable is **immutable** and **block-scoped** to the loop body (consistent with Ryo's default; not visible after the loop)
+  - `while` loops can mutate externally declared `mut` variables (this is the canonical pattern)
+  - `break` / `continue` only legal inside a loop body (innermost loop) — error at sema time otherwise
+  - Loops never count as "definitely returns" for return-flow analysis (the body might execute zero times)
+- **Codegen (Cranelift):**
+  - `while`: header block (eval cond + `brif`), body block (jump back to header), exit block
+  - `for i in range(s, e)`: lower to a desugared `while` with a hidden `i` slot initialized to `s`, condition `i < e`, increment `i += 1` at the end of the body — but the loop variable itself is exposed to the body as immutable
+  - `break` → unconditional jump to the innermost loop's exit block; `continue` → unconditional jump to the innermost loop's header (or increment block, for `for`)
+  - Maintain a loop-context stack in codegen so nested loops route `break`/`continue` to the correct block
+- **Tests:**
+  - Parser: `while`, both `range` arities, `break`/`continue` parsing, `for x in foo()` rejected with a clear "only `range(...)` is supported in v0.1" error
+  - Sema: `break`/`continue` outside a loop rejected; loop variable immutability enforced; loop variable not visible after the loop
+  - Codegen integration: counter loops, nested loops with `break`/`continue` targeting the inner loop, `while` with mutable counter, early-exit search pattern
+
+**Visible Progress:** Programs can loop. Combined with 8a + 8b, the v0.1 imperative core is complete.
+
+**Example:**
+```ryo
+fn count_down():
+	mut n = 10
+	while n > 0:
+		print("tick")
+		n = n - 1
+
+fn first_multiple_of_3(limit: int) -> int:
+	for i in range(limit):
+		if i > 0 and i % 3 == 0:
+			return i
+	return -1
+
+fn main():
+	count_down()
+	for i in range(1, 5):
+		if i == 3:
+			continue
+		if i == 4:
+			break
+		print("step")
+```
+
+**Implementation Notes:**
+- `for item in iterable:` over collections is deferred to **M22** — the design is reserved but cannot be implemented until lists/maps exist.
+- `range()` is parser-recognized in the `for` header only; it is **not** a first-class value in v0.1 (no `r = range(10)` binding). This keeps the implementation simple and avoids committing to an iterator protocol before traits land in v0.2.
+- **Operator separation reminder:** `range()` is for iteration, `:` is for slicing (`s[1:4]`, M8.4), `..` is reserved for type bounds only (`int(1..65535)`).
+- `break`/`continue` affect the **innermost loop only**. No labeled breaks in v0.1.
+- Dependencies: Milestone 8b (block-emission infrastructure, branch lowering), Milestone 7 (ordering comparisons in loop conditions and `range` bounds).
 
 ### Milestone 8.1: Heap-Allocated `str` Type & Move Semantics [alpha]
 **Goal:** Promote string literals from read-only data to a real heap-allocated `str` type, and introduce the ownership-tracking pass that catches use-after-move on named bindings. Borrows (`&T`/`&mut T`) and string slices (`&str`) follow in M8.2–M8.4.

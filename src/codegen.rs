@@ -243,7 +243,15 @@ impl<M: Module> Codegen<M> {
             let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
             sig.params.push(AbiParam::new(cl_ty));
         }
-        if tir.return_type != pool.void() {
+        // C-ABI shim for `main`: Ryo's `fn main()` is void, but the
+        // host C runtime (crt0 via zig cc, or our JIT trampoline)
+        // calls `main` as `int main()`. Always emit an int-returning
+        // signature for `main`; `compile_function` falls through to
+        // an explicit `return 0` when Ryo's return type is void.
+        let is_main = pool.str(tir.name) == "main";
+        if is_main {
+            sig.returns.push(AbiParam::new(self.int_type));
+        } else if tir.return_type != pool.void() {
             let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
             sig.returns.push(AbiParam::new(cl_ty));
         }
@@ -302,7 +310,13 @@ impl<M: Module> Codegen<M> {
             }
 
             if !has_return {
-                if tir.return_type != pool.void() {
+                let is_main = pool.str(tir.name) == "main";
+                if is_main || tir.return_type != pool.void() {
+                    // `main` always returns int 0 to the OS even
+                    // when Ryo declares it void; non-main
+                    // non-void functions also fall through to a
+                    // zero return today (sema accepts missing
+                    // returns; control-flow analysis lands in M8b).
                     let zero = builder.ins().iconst(int_type, 0);
                     builder.ins().return_(&[zero]);
                 } else {
@@ -354,7 +368,15 @@ impl<M: Module> Codegen<M> {
                 Ok(true)
             }
             TirTag::ReturnVoid => {
-                builder.ins().return_(&[]);
+                // Bare `return` in a void function. If this is
+                // `main`, the C ABI demands an int return value.
+                let is_main = ctx.pool.str(ctx.tir.name) == "main";
+                if is_main {
+                    let zero = builder.ins().iconst(ctx.int_type, 0);
+                    builder.ins().return_(&[zero]);
+                } else {
+                    builder.ins().return_(&[]);
+                }
                 Ok(true)
             }
             TirTag::ExprStmt => {

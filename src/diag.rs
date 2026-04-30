@@ -58,6 +58,10 @@ pub enum DiagCode {
     UnknownType,
     NestedFunctionDef,
     TopLevelWithExplicitMain,
+    /// `fn main()` declared with parameters or a return type.
+    /// `main` must be `fn main():` (no args, no return).
+    /// Use the future `exit(code)` builtin for non-zero exit codes.
+    MainSignature,
 
     // --- sema ---
     UndefinedVariable,
@@ -66,6 +70,11 @@ pub enum DiagCode {
     ArityMismatch,
     BuiltinArgKind,
     UnsupportedOperator,
+    /// A `void` value (e.g. the result of a void-returning call
+    /// like `print(...)`) appeared in an expression position that
+    /// requires a real value (var decl initializer, return
+    /// expression, operand of an arithmetic/equality/etc op).
+    VoidValueInExpression,
     /// A declaration's resolution requires its own resolution to be
     /// already complete — e.g. a chain of decls whose types depend
     /// transitively on themselves. Today this is an infrastructure-
