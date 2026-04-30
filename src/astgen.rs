@@ -257,6 +257,9 @@ fn gen_stmt(
                 "nested function definitions are not supported",
             ));
         }
+        ast::StmtKind::IfStmt(_) => {
+            todo!("IfStmt lowering not implemented yet")
+        }
     }
 }
 
@@ -283,12 +286,18 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
                 ast::BinaryOperator::LtEq => InstTag::LtEq,
                 ast::BinaryOperator::GtEq => InstTag::GtEq,
                 ast::BinaryOperator::Mod => InstTag::Mod,
+                ast::BinaryOperator::And => todo!("And operator not implemented yet"),
+                ast::BinaryOperator::Or => todo!("Or operator not implemented yet"),
             };
             b.binary(tag, l, r, span)
         }
-        ast::ExprKind::UnaryOp(ast::UnaryOperator::Neg, sub) => {
+        ast::ExprKind::UnaryOp(op, sub) => {
             let s = gen_expr(b, sub);
-            b.unary(InstTag::Neg, s, span)
+            let tag = match op {
+                ast::UnaryOperator::Neg => InstTag::Neg,
+                ast::UnaryOperator::Not => todo!("Not operator not implemented yet"),
+            };
+            b.unary(tag, s, span)
         }
         ast::ExprKind::Call(name, args) => {
             let arg_refs: Vec<InstRef> = args.iter().map(|a| gen_expr(b, a)).collect();

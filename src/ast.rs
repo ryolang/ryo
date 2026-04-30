@@ -56,6 +56,7 @@ impl Statement {
             StmtKind::FunctionDef(_) => "FunctionDef",
             StmtKind::Return(_) => "Return",
             StmtKind::ExprStmt(_) => "ExprStmt",
+            StmtKind::IfStmt(_) => "IfStmt",
         };
         print!(
             "Statement [{}] ({}..{})",
@@ -93,6 +94,9 @@ impl Statement {
                 }
             }
             StmtKind::ExprStmt(expr) => expr.pretty_print(prefix, pool),
+            StmtKind::IfStmt(_if_stmt) => {
+                println!("{}IfStmt", prefix);
+            }
         }
     }
 }
@@ -104,6 +108,22 @@ pub enum StmtKind {
     FunctionDef(FunctionDef),
     Return(Option<Expression>),
     ExprStmt(Expression),
+    #[allow(dead_code)]
+    IfStmt(IfStmt),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IfStmt {
+    pub cond: Expression,
+    pub then_block: Vec<Statement>,
+    pub elif_branches: Vec<ElifBranch>,
+    pub else_block: Option<Vec<Statement>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElifBranch {
+    pub cond: Expression,
+    pub block: Vec<Statement>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -295,6 +315,10 @@ pub enum BinaryOperator {
     Gt,
     LtEq,
     GtEq,
+    #[allow(dead_code)]
+    And,
+    #[allow(dead_code)]
+    Or,
 }
 
 impl fmt::Display for BinaryOperator {
@@ -311,6 +335,8 @@ impl fmt::Display for BinaryOperator {
             BinaryOperator::Gt => write!(f, ">"),
             BinaryOperator::LtEq => write!(f, "<="),
             BinaryOperator::GtEq => write!(f, ">="),
+            BinaryOperator::And => write!(f, "and"),
+            BinaryOperator::Or => write!(f, "or"),
         }
     }
 }
@@ -318,12 +344,15 @@ impl fmt::Display for BinaryOperator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOperator {
     Neg,
+    #[allow(dead_code)]
+    Not,
 }
 
 impl fmt::Display for UnaryOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             UnaryOperator::Neg => write!(f, "-"),
+            UnaryOperator::Not => write!(f, "not"),
         }
     }
 }
@@ -359,5 +388,16 @@ mod tests {
     fn literal_bool_variants_exist() {
         let _t = Literal::Bool(true);
         let _f = Literal::Bool(false);
+    }
+
+    #[test]
+    fn binary_operator_display_for_logical() {
+        assert_eq!(format!("{}", BinaryOperator::And), "and");
+        assert_eq!(format!("{}", BinaryOperator::Or), "or");
+    }
+
+    #[test]
+    fn unary_operator_display_for_not() {
+        assert_eq!(format!("{}", UnaryOperator::Not), "not");
     }
 }
