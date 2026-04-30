@@ -16,18 +16,8 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 
 ## 🔴 Blocking
 
-### I-003 — No control flow in the compiler
-**Files:** `src/lexer.rs`, `src/parser.rs`, `src/hir.rs`, `src/codegen.rs`
-**Summary:** `if`/`else`/`match` are lexed as keywords but have no parser, no HIR variants, and no codegen support (no block branching or phi handling). This is the single largest blocker for advancing past Milestone 4.
-**Resolution:** Add `HirStmt::If` / `HirExpr::If` (block-expression form), parser productions, and Cranelift multi-block emission.
-
-### I-020 — `inst_values` memoizer will break under multi-block control flow
-**Files:** `src/codegen.rs` (`inst_values: HashMap<InstRef, Value>`)
-**Summary:** Codegen lazily memoizes Cranelift `Value`s keyed by `InstRef`. This is sound today because every function has a single `entry_block` and UIR is tree-shaped. Once `if`/`loop` (I-003) introduce multiple basic blocks, an `InstRef` evaluated in one block and re-used from another will trigger Cranelift dominator errors: the memoized `Value` was emitted into a block that does not dominate the consumer.
-**Resolution:** Before control flow lands, switch to per-block eager evaluation (likely via a TIR pass that anchors each instruction to its parent block, as gestured at in the docs). Drop the cross-block memoization, or scope it to the current block only and re-materialize / phi-merge across block boundaries.
-
 ### I-004 — String type is a raw pointer with no length
-**Files:** `src/codegen.rs` (`HirExprKind::StrLiteral`, `generate_print_call`)
+**Files:** `src/codegen.rs` (`generate_print_call`)
 **Summary:** `StrLiteral` codegen returns a bare `global_value` pointer. There is no length, no slice ABI, no ownership metadata. `print()` works only on string literals because it grabs the length from the AST node, not from the runtime value. Any non-literal string operation will require a fat-pointer (`*u8, usize`) ABI decision.
 **Resolution:** Design and implement a string slice ABI before adding string operations. Reference: Zig's `[]const u8`.
 
@@ -36,8 +26,8 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 ## 🟡 Correctness / Hygiene
 
 ### I-005 — `mut` is parsed but never enforced
-**Files:** `src/hir.rs` (`HirStmt::VarDecl.mutable`), `src/sema.rs`
-**Summary:** `HirStmt::VarDecl` carries `mutable: bool`, but no pass reads it. The README advertises immutable-by-default semantics. Reassignment isn't parsed yet, so the bug is latent — but the invariant should be checked in sema as soon as assignment lands.
+**Files:** `src/uir.rs` (`VarDecl`), `src/sema.rs`
+**Summary:** `VarDecl` carries `mutable: bool`, but no pass reads it. The README advertises immutable-by-default semantics. Reassignment isn't parsed yet, so the bug is latent — but the invariant should be checked in sema as soon as assignment lands.
 **Resolution:** When assignment is added to the parser, sema must reject reassignment to non-`mut` bindings.
 
 ### I-006 — `print` is special-cased in codegen
@@ -48,11 +38,6 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 - Already stubbed out on Windows (`return Err(...)`).
 - Mixes runtime concerns into the compiler.
 **Resolution:** Move `print` to a runtime crate (`ryort` or similar) compiled to an object file and linked in via `zig cc`. Codegen emits a normal call; `sema::check_builtin_call` goes away.
-
-### I-009 — `FunctionContext` rebuilt per HIR statement
-**Files:** `src/codegen.rs` (`compile_function`)
-**Summary:** A fresh `FunctionContext` struct is constructed for every `HirStmt` inside the loop. Harmless functionally but noisy and obscures intent.
-**Resolution:** Lift the `FunctionContext` above the loop, or restructure so `eval_expr` takes `&mut self` directly. Mostly a borrow-checker exercise.
 
 ### I-010 — Unused `_bytes_written` from `write(2)` call
 **Files:** `src/codegen.rs` (`generate_print_call`)
@@ -78,6 +63,26 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Files:** `src/lexer.rs` (`RawToken::Int` arm)
 **Summary:** Integer literals are parsed as `i64` at lex time, then sign is applied later via the unary `-` operator. That makes `-9_223_372_036_854_775_808` (i.e. `i64::MIN`) unspellable: the positive form `9_223_372_036_854_775_808` overflows `i64`. Hits the negation-overflow corner Rust itself fixed via `IntLit` / `IntLitMin` token-level distinction.
 **Resolution:** Either parse as `u64` and resolve negation+overflow at sema time, or add an `IntLitMin` token variant that the parser recognises only as the operand of unary `-`. Coordinate with the broader numeric-tower design before picking either.
+
+### I-020 — `inst_values` memoizer is cross-block
+**Files:** `src/codegen.rs` (`inst_values: HashMap<TirRef, Value>`)
+**Summary:** Codegen lazily memoizes Cranelift `Value`s keyed by `TirRef` in a single flat HashMap shared across all basic blocks within a function. This is sound today because: (a) TIR instructions are unique per use (no shared sub-expressions), (b) BoolAnd/BoolOr use block params (phi nodes) so the memoized result is the merge-block param which dominates downstream uses, and (c) IfStmt is statement-level so no values flow out of branches. However, if future features introduce expression-level if (ternary) or shared sub-expressions across blocks, the memoizer will produce Cranelift dominator errors.
+**Resolution:** Scope the memoizer to per-block when expression-level control flow lands. For now the cross-block cache is correct given the TIR invariants.
+
+### I-031 — No return-flow analysis for if/elif/else
+**Files:** `src/sema.rs`, `src/codegen.rs`
+**Summary:** Sema does not track whether all paths through an if/elif/else return a value. The codegen `emit_stmt` returns `all_branches_return` correctly, but sema has no equivalent — a function with `if/else` where all branches return still gets a "missing return" warning from the implicit `ReturnVoid` appended by the codegen fallthrough path. Currently papered over because void-returning `main` doesn't need a return, and non-void functions with complete coverage happen to work because codegen skips the merge block when all branches return.
+**Resolution:** Add `block_definitely_returns` analysis in sema so that functions with exhaustive if/else returns don't get spurious diagnostics. This becomes necessary when `while` loops and `match` land.
+
+### I-032 — IfStmt is statement-only, no expression-level conditional
+**Files:** `src/ast.rs`, `src/parser.rs`, `src/sema.rs`, `src/codegen.rs`
+**Summary:** `if`/`elif`/`else` is a statement (`StmtKind::IfStmt`), not an expression. There is no way to write `x = if cond: a else: b` (ternary/conditional expression). The spec envisions `if` as an expression in certain contexts. Current codegen emits void for IfStmt and uses no phi-merge for values across branches.
+**Resolution:** Add `ExprKind::IfExpr` when the spec finalizes expression-if syntax. Codegen would use block params (like BoolAnd/BoolOr already do) to merge values at the join point. Requires I-020 attention for memoizer correctness.
+
+### I-033 — Variables declared inside if/elif/else branches are not visible after the statement
+**Files:** `src/sema.rs` (`analyze_block`)
+**Summary:** Each branch of an if/elif/else creates a child scope. Variables declared inside a branch are dropped when the branch scope ends. There is no "variable promotion" — even if all branches declare `x: int`, `x` is not available after the if statement. This is the correct scoping semantics for now, but may surprise users expecting Python-style scoping where if-branches don't create a new scope.
+**Resolution:** This is intentional for M8b. If user feedback requests Python-style flat scoping, revisit as a language design decision (requires approval per CLAUDE.md escalation rules).
 
 ---
 
@@ -108,8 +113,6 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** The accessor copies the element-id slice out of `extra` rather than returning a borrowed view, because `TypeId` is not `#[repr(transparent)]` over `u32` and the unsafe transmute to `&[TypeId]` would be UB without it. Today the function is called only by `Display` for diagnostics and by tests; not a hot path.
 **Resolution:** Tag `TypeId` with `#[repr(transparent)]` and expose `tuple_elements(id) -> &[TypeId]` alongside the copying accessor. Migrate non-perf-critical callers to it lazily. Defer until tuple codegen lands and the accessor shows up in a profile.
 
----
-
 ### I-021 — `bool` lowered as `types::I8` will mis-ABI across FFI boundaries
 **Files:** `src/codegen.rs` (`cranelift_type_for`)
 **Summary:** `TypeKind::Bool` maps to Cranelift `I8`. Fine for internal logic, but C ABIs typically pass `_Bool` zero/sign-extended to a full register (often i32 on SysV, register-width on Win64). Passing or returning our raw `I8` across an FFI call would leave the upper bits undefined from the callee's perspective.
@@ -122,10 +125,8 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 
 ### I-023 — Integer division / modulo by zero is undefined behavior at codegen
 **Files:** `src/codegen.rs` (`TirTag::ISDiv`, `TirTag::IMod` arms), `src/sema.rs` (`check_binary_op`)
-**Summary:** `a / 0` and `a % 0` lower directly to Cranelift `sdiv` / `srem` with no guard. Cranelift treats both as UB; the resulting native instruction (`idiv` on x86-64, `sdiv` on aarch64) traps or returns garbage depending on target. Sema does not constant-fold a known-zero divisor either. M6.5 had the same gap for `/`; M7 added `%` on the same footing.
-**Resolution:** When safety checks land (alongside or after M8), insert a runtime check at codegen: emit a compare-against-zero, branch to a trap / panic block on hit. Optionally constant-fold the obvious `x / 0` / `x % 0` cases at sema and emit a diagnostic. Coordinate with the eventual panic / safe-mode design so the trap path has somewhere to go.
-
-## 🟢 Cleanup
+**Summary:** `a / 0` and `a % 0` lower directly to Cranelift `sdiv` / `srem` with no guard. Cranelift treats both as UB; the resulting native instruction (`idiv` on x86-64, `sdiv` on aarch64) traps or returns garbage depending on target. Sema does not constant-fold a known-zero divisor either.
+**Resolution:** When safety checks land, insert a runtime check at codegen: emit a compare-against-zero, branch to a trap / panic block on hit. Optionally constant-fold the obvious `x / 0` / `x % 0` cases at sema and emit a diagnostic. Coordinate with the eventual panic / safe-mode design so the trap path has somewhere to go.
 
 ### I-024 — Single `float` type, no `float32` / `float64` distinction
 **Files:** `src/types.rs` (`Tag::Float`, `TypeKind::Float`), `src/codegen.rs` (`cranelift_type_for`)
