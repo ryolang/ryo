@@ -1,54 +1,54 @@
 # Example demonstrating error handling and various language features
 
 module math:
-    error DivisionError(detail: str)
+	error DivisionError(detail: str)
 
 struct MyCustomError:
-    detail: str
-    line_n: int
+	detail: str
+	line_n: int
 
 impl MyCustomError:
-    fn display(self) -> str:
-        return f"{self.detail} on {self.line_n}"
+	fn display(self) -> str:
+		return f"{self.detail} on {self.line_n}"
 
 # Division function that can fail with DivisionError
 fn div(x: int, y: int) -> math.DivisionError!int:
-    if y == 0:
-        return math.DivisionError("division by zero")
-    else:
-        return x / y
+	if y == 0:
+		return math.DivisionError("division by zero")
+	else:
+		return x / y
 
 # Simple addition
 fn sum(x: int, y: int) -> int:
-    return x + y
+	return x + y
 
 # Function that always returns an error
 fn do_empty_error() -> math.DivisionError!():
-    return math.DivisionError("Always return an error")
+	return math.DivisionError("Always return an error")
 
 # Function that calls do_empty_error and propagates errors with try
 fn do_result() -> math.DivisionError!int:
-    try do_empty_error()
-    return 42
+	try do_empty_error()
+	return 42
 
 fn main():
-    x = 1  # type inference: int, x is immutable
-    y = 2
+	x = 1  # type inference: int, x is immutable
+	y = 2
 
-    z = sum(x, y)
+	z = sum(x, y)
 
-    # Error handling with catch block
-    result = do_result() catch |e|:
-        print(f"Got an Error: {e.detail}")
-        return 0
+	# Error handling with catch block
+	result = do_result() catch |e|:
+		print(f"Got an Error: {e.detail}")
+		return 0
 
-    # Lists
-    el = [1, 2, 3]  # type inferred as List[int]
-    is_empty = el == []
+	# Lists
+	el = [1, 2, 3]  # type inferred as List[int]
+	is_empty = el == []
 
-    # Match expression
-    value = 5
-    match value:
-        1: print("one")
-        5: print("five")
-        _: print("other")
+	# Match expression
+	value = 5
+	match value:
+		1: print("one")
+		5: print("five")
+		_: print("other")

@@ -2,11 +2,11 @@
 # this is a comment
 
 fn sum(x:int, y:int) -> int:
-    return x + y
+	return x + y
 
 fn main():
-    x = 1  # Immutable int (type inferred)
-    y = 2  # Immutable int (type inferred)
+	x = 1  # Immutable int (type inferred)
+	y = 2  # Immutable int (type inferred)
 
-    z = sum(x,y)  # Immutable int (type inferred)
-    print(f"z: {z}")
+	z = sum(x,y)  # Immutable int (type inferred)
+	print(f"z: {z}")

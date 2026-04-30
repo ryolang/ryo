@@ -3,25 +3,24 @@
 # fibonacci is a function that returns a closure
 # The returned function maintains state between calls
 fn fibonacci() -> fn() -> int:
-    # Tuple unpacking to initialize two variables
-    # Note: This syntax may require full language implementation
-    a, b = 0, 1
+	# Tuple unpacking to initialize two variables
+	# Note: This syntax may require full language implementation
+	a, b = 0, 1
 
-    return fn() -> int:
-        if a == 0:
-            # Initialize the first two Fibonacci numbers
-            a, b = 0, 1
-        else:
-            # Update to the next Fibonacci number
-            # Uses tuple unpacking for simultaneous assignment
-            a, b = b, a + b
-        return a
+	return fn() -> int:
+		if a == 0:
+			# Initialize the first two Fibonacci numbers
+			a, b = 0, 1
+		else:
+			# Update to the next Fibonacci number
+			# Uses tuple unpacking for simultaneous assignment
+			a, b = b, a + b
+		return a
 
 fn main():
-    # Get the fibonacci generator closure
-    f = fibonacci()
+	# Get the fibonacci generator closure
+	f = fibonacci()
 
-    # Generate first 10 fibonacci numbers
-    for i in range(0, 10):
-        print(f())
-
+	# Generate first 10 fibonacci numbers
+	for i in range(0, 10):
+		print(f())

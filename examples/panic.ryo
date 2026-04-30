@@ -1,4 +1,4 @@
 # panic.ryo
 
-fn main() -> void:
-    crash = 1/0
+fn main():
+	crash = 1/0
