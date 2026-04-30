@@ -633,8 +633,6 @@ Note: Review [Project Structure](project_structure) and make the first split bef
   - Integration tests: update every existing `fn main() -> int: ... return 0` test to the new signature; verify exit code 0 is observed by the OS
   - Migration test: `fn main() -> int` now produces the expected error
 
-**Visible Progress:** `print("hello")` works as a plain statement. `fn main():` with no body return is the canonical entry point.
-
 **Example:**
 ```ryo
 fn greet(name: str) -> void:
