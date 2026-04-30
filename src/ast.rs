@@ -108,7 +108,6 @@ pub enum StmtKind {
     FunctionDef(FunctionDef),
     Return(Option<Expression>),
     ExprStmt(Expression),
-    #[allow(dead_code)]
     IfStmt(IfStmt),
 }
 
@@ -315,9 +314,7 @@ pub enum BinaryOperator {
     Gt,
     LtEq,
     GtEq,
-    #[allow(dead_code)]
     And,
-    #[allow(dead_code)]
     Or,
 }
 
@@ -344,7 +341,6 @@ impl fmt::Display for BinaryOperator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOperator {
     Neg,
-    #[allow(dead_code)]
     Not,
 }
 

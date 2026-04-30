@@ -42,6 +42,7 @@ pub enum Token {
     // Keywords.
     Fn,
     If,
+    Elif,
     Else,
     Return,
     Mut,
@@ -100,6 +101,7 @@ impl fmt::Display for Token {
             Self::StrLit(id) => write!(f, "<str#{}>", id.raw()),
             Self::Fn => write!(f, "fn"),
             Self::If => write!(f, "if"),
+            Self::Elif => write!(f, "elif"),
             Self::Else => write!(f, "else"),
             Self::Return => write!(f, "return"),
             Self::Mut => write!(f, "mut"),
@@ -159,6 +161,8 @@ pub(crate) enum RawToken<'a> {
     Fn,
     #[token("if")]
     If,
+    #[token("elif")]
+    Elif,
     #[token("else")]
     Else,
     #[token("return")]
@@ -372,6 +376,7 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
 
         RawToken::Fn => Token::Fn,
         RawToken::If => Token::If,
+        RawToken::Elif => Token::Elif,
         RawToken::Else => Token::Else,
         RawToken::Return => Token::Return,
         RawToken::Mut => Token::Mut,

@@ -11,7 +11,7 @@ use crate::ast::*;
 use crate::lexer::Token;
 
 /// Helper: skip zero or more newline tokens.
-fn skip_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + 'a
+fn skip_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -62,29 +62,91 @@ where
         })
 }
 
-/// Statements valid inside a function body.
-fn body_statement_parser<'a, I>() -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + 'a
+/// Parse an indented block of one or more statements.
+fn indented_block<'a, I>(
+    stmt: impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a,
+) -> impl Parser<'a, I, Vec<Statement>, extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    let return_stmt = just(Token::Return)
-        .ignore_then(expression_parser().or_not())
-        .map_with(|expr, e| Statement {
+    skip_newlines()
+        .ignore_then(
+            stmt.then_ignore(skip_newlines())
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .delimited_by(
+            skip_newlines().ignore_then(just(Token::Indent)),
+            just(Token::Dedent),
+        )
+}
+
+/// Statements valid inside a function body.
+fn body_statement_parser<'a, I>(
+) -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    recursive(|body_stmt| {
+        let return_stmt = just(Token::Return)
+            .ignore_then(expression_parser().or_not())
+            .map_with(|expr, e| Statement {
+                span: e.span(),
+                kind: StmtKind::Return(expr),
+            });
+
+        let var_decl = var_decl_parser().map_with(|kind, e| Statement {
             span: e.span(),
-            kind: StmtKind::Return(expr),
+            kind: StmtKind::VarDecl(kind),
         });
 
-    let var_decl = var_decl_parser().map_with(|kind, e| Statement {
-        span: e.span(),
-        kind: StmtKind::VarDecl(kind),
-    });
+        let if_stmt = if_stmt_parser(body_stmt).map_with(|if_s, e| Statement {
+            span: e.span(),
+            kind: StmtKind::IfStmt(if_s),
+        });
 
-    let expr_stmt = expression_parser().map_with(|expr, e| Statement {
-        span: e.span(),
-        kind: StmtKind::ExprStmt(expr),
-    });
+        let expr_stmt = expression_parser().map_with(|expr, e| Statement {
+            span: e.span(),
+            kind: StmtKind::ExprStmt(expr),
+        });
 
-    choice((return_stmt, var_decl, expr_stmt))
+        choice((return_stmt, var_decl, if_stmt, expr_stmt))
+    })
+}
+
+fn if_stmt_parser<'a, I>(
+    body_stmt: impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a,
+) -> impl Parser<'a, I, IfStmt, extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let block = indented_block(body_stmt);
+
+    let elif_branch = skip_newlines()
+        .ignore_then(just(Token::Elif))
+        .ignore_then(expression_parser())
+        .then_ignore(just(Token::Colon))
+        .then(block.clone())
+        .map(|(cond, block)| ElifBranch { cond, block });
+
+    let else_block = skip_newlines()
+        .ignore_then(just(Token::Else))
+        .ignore_then(just(Token::Colon))
+        .ignore_then(block.clone());
+
+    just(Token::If)
+        .ignore_then(expression_parser())
+        .then_ignore(just(Token::Colon))
+        .then(block)
+        .then(elif_branch.repeated().collect::<Vec<_>>())
+        .then(else_block.or_not())
+        .map(|(((cond, then_block), elif_branches), else_block)| IfStmt {
+            cond,
+            then_block,
+            elif_branches,
+            else_block,
+        })
 }
 
 /// Top-level statements: only function defs and var decls.
@@ -150,19 +212,7 @@ where
 
     let return_type = just(Token::Arrow).ignore_then(type_expr).or_not();
 
-    let body = skip_newlines()
-        .ignore_then(
-            body_statement_parser()
-                .then(skip_newlines())
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .map(|v| v.into_iter().map(|(s, _)| s).collect::<Vec<_>>()),
-        )
-        .delimited_by(
-            skip_newlines().ignore_then(just(Token::Indent)),
-            just(Token::Dedent),
-        );
+    let body = indented_block(body_statement_parser());
 
     just(Token::Fn)
         .ignore_then(ident)
@@ -178,7 +228,7 @@ where
         })
 }
 
-fn var_decl_parser<'a, I>() -> impl Parser<'a, I, VarDecl, extra::Err<Rich<'a, Token>>> + 'a
+fn var_decl_parser<'a, I>() -> impl Parser<'a, I, VarDecl, extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -209,7 +259,8 @@ where
         )
 }
 
-fn expression_parser<'a, I>() -> impl Parser<'a, I, Expression, extra::Err<Rich<'a, Token>>> + 'a
+fn expression_parser<'a, I>(
+) -> impl Parser<'a, I, Expression, extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -857,6 +908,87 @@ mod tests {
                 other => panic!("expected outer Not, got {:?}", other),
             },
             other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_simple_if() {
+        let input = "fn main():\n\tif true:\n\t\tx = 1\n";
+        let (program, _) = lex_and_parse(input).unwrap();
+        match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => {
+                assert_eq!(f.body.len(), 1);
+                assert!(matches!(f.body[0].kind, StmtKind::IfStmt(_)));
+            }
+            other => panic!("expected FunctionDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_if_else() {
+        let input = "fn main():\n\tif true:\n\t\tx = 1\n\telse:\n\t\tx = 2\n";
+        let (program, _) = lex_and_parse(input).unwrap();
+        match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => match &f.body[0].kind {
+                StmtKind::IfStmt(if_stmt) => {
+                    assert!(if_stmt.else_block.is_some());
+                    assert!(if_stmt.elif_branches.is_empty());
+                }
+                other => panic!("expected IfStmt, got {:?}", other),
+            },
+            other => panic!("expected FunctionDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_if_elif_else() {
+        let input =
+            "fn main():\n\tif true:\n\t\tx = 1\n\telif false:\n\t\tx = 2\n\telse:\n\t\tx = 3\n";
+        let (program, _) = lex_and_parse(input).unwrap();
+        match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => match &f.body[0].kind {
+                StmtKind::IfStmt(if_stmt) => {
+                    assert_eq!(if_stmt.elif_branches.len(), 1);
+                    assert!(if_stmt.else_block.is_some());
+                }
+                other => panic!("expected IfStmt, got {:?}", other),
+            },
+            other => panic!("expected FunctionDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_multiple_elif() {
+        let input = "fn main():\n\tif true:\n\t\tx = 1\n\telif false:\n\t\tx = 2\n\telif true:\n\t\tx = 3\n\telse:\n\t\tx = 4\n";
+        let (program, _) = lex_and_parse(input).unwrap();
+        match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => match &f.body[0].kind {
+                StmtKind::IfStmt(if_stmt) => {
+                    assert_eq!(if_stmt.elif_branches.len(), 2);
+                    assert!(if_stmt.else_block.is_some());
+                }
+                other => panic!("expected IfStmt, got {:?}", other),
+            },
+            other => panic!("expected FunctionDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_if_without_else() {
+        let input = "fn main():\n\tif true:\n\t\tx = 1\n\tprint(\"done\")\n";
+        let (program, _) = lex_and_parse(input).unwrap();
+        match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => {
+                assert_eq!(f.body.len(), 2);
+                match &f.body[0].kind {
+                    StmtKind::IfStmt(if_stmt) => {
+                        assert!(if_stmt.else_block.is_none());
+                        assert!(if_stmt.elif_branches.is_empty());
+                    }
+                    other => panic!("expected IfStmt, got {:?}", other),
+                }
+            }
+            other => panic!("expected FunctionDef, got {:?}", other),
         }
     }
 
