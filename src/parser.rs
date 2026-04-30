@@ -242,15 +242,20 @@ where
             call.or(ident_expr).or(literal).or(parenthesized)
         };
 
-        let unary = just(Token::Sub)
+        let unary_op = choice((
+            just(Token::Sub).to(UnaryOperator::Neg),
+            just(Token::Not).to(UnaryOperator::Not),
+        ));
+
+        let unary = unary_op
             .repeated()
             .collect::<Vec<_>>()
             .then(atom)
-            .map_with(|(negs, expr), e| {
+            .map_with(|(ops, expr), e| {
                 let mut result = expr;
-                for _ in negs {
+                for op in ops.into_iter().rev() {
                     result = Expression::new(
-                        ExprKind::UnaryOp(UnaryOperator::Neg, Box::new(result)),
+                        ExprKind::UnaryOp(op, Box::new(result)),
                         e.span(),
                     );
                 }
@@ -269,7 +274,7 @@ where
                 let start = left.span.start;
                 let end = right.span.end;
                 Expression::new(
-                    ExprKind::BinaryOp(Box::new(left.clone()), op, Box::new(right.clone())),
+                    ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
                     SimpleSpan::new((), start..end),
                 )
             },
@@ -286,7 +291,7 @@ where
                 let start = left.span.start;
                 let end = right.span.end;
                 Expression::new(
-                    ExprKind::BinaryOp(Box::new(left.clone()), op, Box::new(right.clone())),
+                    ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
                     SimpleSpan::new((), start..end),
                 )
             },
@@ -317,8 +322,8 @@ where
                 }
             });
 
-        // Equality is non-associative, lowest precedence.
-        ordering
+        // Equality is non-associative.
+        let equality = ordering
             .clone()
             .then(
                 choice((
@@ -338,7 +343,39 @@ where
                         SimpleSpan::new((), start..end),
                     )
                 }
-            })
+            });
+
+        // Logical AND binds tighter than OR, below equality.
+        let logical_and = equality.clone().foldl(
+            just(Token::And)
+                .to(BinaryOperator::And)
+                .then(equality)
+                .repeated(),
+            |left, (op, right)| {
+                let start = left.span.start;
+                let end = right.span.end;
+                Expression::new(
+                    ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
+                    SimpleSpan::new((), start..end),
+                )
+            },
+        );
+
+        // Logical OR is the lowest precedence.
+        logical_and.clone().foldl(
+            just(Token::Or)
+                .to(BinaryOperator::Or)
+                .then(logical_and)
+                .repeated(),
+            |left, (op, right)| {
+                let start = left.span.start;
+                let end = right.span.end;
+                Expression::new(
+                    ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
+                    SimpleSpan::new((), start..end),
+                )
+            },
+        )
     })
 }
 
@@ -741,5 +778,101 @@ mod tests {
         assert_eq!(parse_str_literal(r#"x = "\\""#), "\\");
         assert_eq!(parse_str_literal(r#"x = "\"""#), "\"");
         assert_eq!(parse_str_literal("x = \"\\0\""), "\0");
+    }
+
+    #[test]
+    fn parse_and_operator() {
+        let (program, _) = lex_and_parse("x = true and false").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => assert!(matches!(
+                decl.initializer.kind,
+                ExprKind::BinaryOp(_, BinaryOperator::And, _)
+            )),
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_or_operator() {
+        let (program, _) = lex_and_parse("x = true or false").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => assert!(matches!(
+                decl.initializer.kind,
+                ExprKind::BinaryOp(_, BinaryOperator::Or, _)
+            )),
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_not_operator() {
+        let (program, _) = lex_and_parse("x = not true").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => assert!(matches!(
+                decl.initializer.kind,
+                ExprKind::UnaryOp(UnaryOperator::Not, _)
+            )),
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_and_binds_tighter_than_or() {
+        // a or b and c  =>  a or (b and c)
+        let (program, _) = lex_and_parse("x = true or false and true").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::BinaryOp(_, BinaryOperator::Or, rhs) => {
+                    assert!(matches!(rhs.kind, ExprKind::BinaryOp(_, BinaryOperator::And, _)));
+                }
+                other => panic!("expected top-level Or, got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_not_binds_tighter_than_and() {
+        // not a and b  =>  (not a) and b
+        let (program, _) = lex_and_parse("x = not true and false").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::BinaryOp(lhs, BinaryOperator::And, _) => {
+                    assert!(matches!(lhs.kind, ExprKind::UnaryOp(UnaryOperator::Not, _)));
+                }
+                other => panic!("expected top-level And, got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_not_not_chains() {
+        let (program, _) = lex_and_parse("x = not not true").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::UnaryOp(UnaryOperator::Not, inner) => {
+                    assert!(matches!(inner.kind, ExprKind::UnaryOp(UnaryOperator::Not, _)));
+                }
+                other => panic!("expected outer Not, got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_logical_below_equality() {
+        // a == b and c == d  =>  (a == b) and (c == d)
+        let (program, _) = lex_and_parse("x = 1 == 2 and 3 == 4").unwrap();
+        match &program.statements[0].kind {
+            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
+                ExprKind::BinaryOp(lhs, BinaryOperator::And, rhs) => {
+                    assert!(matches!(lhs.kind, ExprKind::BinaryOp(_, BinaryOperator::Eq, _)));
+                    assert!(matches!(rhs.kind, ExprKind::BinaryOp(_, BinaryOperator::Eq, _)));
+                }
+                other => panic!("expected top-level And, got {:?}", other),
+            },
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
     }
 }
