@@ -83,8 +83,8 @@ where
 }
 
 /// Statements valid inside a function body.
-fn body_statement_parser<'a, I>(
-) -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn body_statement_parser<'a, I>()
+-> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -259,8 +259,8 @@ where
         )
 }
 
-fn expression_parser<'a, I>(
-) -> impl Parser<'a, I, Expression, extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn expression_parser<'a, I>()
+-> impl Parser<'a, I, Expression, extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -298,20 +298,18 @@ where
             just(Token::Not).to(UnaryOperator::Not),
         ));
 
-        let unary = unary_op
-            .repeated()
-            .collect::<Vec<_>>()
-            .then(atom)
-            .map_with(|(ops, expr), e| {
-                let mut result = expr;
-                for op in ops.into_iter().rev() {
-                    result = Expression::new(
-                        ExprKind::UnaryOp(op, Box::new(result)),
-                        e.span(),
-                    );
-                }
-                result
-            });
+        let unary =
+            unary_op
+                .repeated()
+                .collect::<Vec<_>>()
+                .then(atom)
+                .map_with(|(ops, expr), e| {
+                    let mut result = expr;
+                    for op in ops.into_iter().rev() {
+                        result = Expression::new(ExprKind::UnaryOp(op, Box::new(result)), e.span());
+                    }
+                    result
+                });
 
         let term = unary.clone().foldl(
             choice((
@@ -874,7 +872,10 @@ mod tests {
         match &program.statements[0].kind {
             StmtKind::VarDecl(decl) => match &decl.initializer.kind {
                 ExprKind::BinaryOp(_, BinaryOperator::Or, rhs) => {
-                    assert!(matches!(rhs.kind, ExprKind::BinaryOp(_, BinaryOperator::And, _)));
+                    assert!(matches!(
+                        rhs.kind,
+                        ExprKind::BinaryOp(_, BinaryOperator::And, _)
+                    ));
                 }
                 other => panic!("expected top-level Or, got {:?}", other),
             },
@@ -903,7 +904,10 @@ mod tests {
         match &program.statements[0].kind {
             StmtKind::VarDecl(decl) => match &decl.initializer.kind {
                 ExprKind::UnaryOp(UnaryOperator::Not, inner) => {
-                    assert!(matches!(inner.kind, ExprKind::UnaryOp(UnaryOperator::Not, _)));
+                    assert!(matches!(
+                        inner.kind,
+                        ExprKind::UnaryOp(UnaryOperator::Not, _)
+                    ));
                 }
                 other => panic!("expected outer Not, got {:?}", other),
             },
@@ -999,8 +1003,14 @@ mod tests {
         match &program.statements[0].kind {
             StmtKind::VarDecl(decl) => match &decl.initializer.kind {
                 ExprKind::BinaryOp(lhs, BinaryOperator::And, rhs) => {
-                    assert!(matches!(lhs.kind, ExprKind::BinaryOp(_, BinaryOperator::Eq, _)));
-                    assert!(matches!(rhs.kind, ExprKind::BinaryOp(_, BinaryOperator::Eq, _)));
+                    assert!(matches!(
+                        lhs.kind,
+                        ExprKind::BinaryOp(_, BinaryOperator::Eq, _)
+                    ));
+                    assert!(matches!(
+                        rhs.kind,
+                        ExprKind::BinaryOp(_, BinaryOperator::Eq, _)
+                    ));
                 }
                 other => panic!("expected top-level And, got {:?}", other),
             },

@@ -516,14 +516,9 @@ impl UirBuilder {
         else_stmts: Option<&[InstRef]>,
         span: Span,
     ) -> InstRef {
-        let elif_words: usize = elif_branches
-            .iter()
-            .map(|(_, body)| 2 + body.len())
-            .sum();
-        let total = 1
-            + 1 + then_stmts.len()
-            + 1 + elif_words
-            + 1 + else_stmts.map_or(0, |s| 1 + s.len());
+        let elif_words: usize = elif_branches.iter().map(|(_, body)| 2 + body.len()).sum();
+        let total =
+            1 + 1 + then_stmts.len() + 1 + elif_words + 1 + else_stmts.map_or(0, |s| 1 + s.len());
         self.uir.extra.reserve(total);
 
         let offset = self.extra_offset();

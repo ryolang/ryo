@@ -488,14 +488,9 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        let elif_words: usize = elif_branches
-            .iter()
-            .map(|(_, body)| 2 + body.len())
-            .sum();
-        let total = 1
-            + 1 + then_stmts.len()
-            + 1 + elif_words
-            + 1 + else_stmts.map_or(0, |s| 1 + s.len());
+        let elif_words: usize = elif_branches.iter().map(|(_, body)| 2 + body.len()).sum();
+        let total =
+            1 + 1 + then_stmts.len() + 1 + elif_words + 1 + else_stmts.map_or(0, |s| 1 + s.len());
         self.extra.reserve(total);
 
         let offset = self.extra_offset();
@@ -920,14 +915,7 @@ mod tests {
         let s2 = b.int_const(2, int_ty, sp());
         let else_ret = b.unary(TirTag::Return, pool.void(), s2, sp());
 
-        let if_ref = b.if_stmt(
-            cond,
-            &[then_ret],
-            &[],
-            Some(&[else_ret]),
-            pool.void(),
-            sp(),
-        );
+        let if_ref = b.if_stmt(cond, &[then_ret], &[], Some(&[else_ret]), pool.void(), sp());
 
         let tir = b.finish(&[if_ref]);
         let view = tir.if_stmt_view(if_ref);
