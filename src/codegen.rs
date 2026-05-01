@@ -347,6 +347,17 @@ impl<M: Module> Codegen<M> {
         Ok(returns)
     }
 
+    fn emit_scoped_body(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        stmts: &[TirRef],
+    ) -> Result<bool, String> {
+        let saved_locals = ctx.locals.clone();
+        let returns = Self::emit_body(builder, ctx, stmts)?;
+        ctx.locals = saved_locals;
+        Ok(returns)
+    }
+
     /// Emit a top-level statement instruction. Returns `true` iff
     /// the statement was a terminator (Return / ReturnVoid) — the
     /// caller stops the body walk on the first one.
@@ -427,7 +438,7 @@ impl<M: Module> Codegen<M> {
 
                 builder.seal_block(then_block);
                 builder.switch_to_block(then_block);
-                let then_returns = Self::emit_body(builder, ctx, &view.then_stmts)?;
+                let then_returns = Self::emit_scoped_body(builder, ctx, &view.then_stmts)?;
                 if !then_returns {
                     builder.ins().jump(merge_block, &[]);
                 }
@@ -453,7 +464,7 @@ impl<M: Module> Codegen<M> {
 
                     builder.seal_block(elif_body_block);
                     builder.switch_to_block(elif_body_block);
-                    let elif_returns = Self::emit_body(builder, ctx, &elif.body)?;
+                    let elif_returns = Self::emit_scoped_body(builder, ctx, &elif.body)?;
                     if !elif_returns {
                         builder.ins().jump(merge_block, &[]);
                     }
@@ -463,7 +474,7 @@ impl<M: Module> Codegen<M> {
                 if let Some(else_stmts) = &view.else_stmts {
                     builder.seal_block(else_or_merge);
                     builder.switch_to_block(else_or_merge);
-                    let else_returns = Self::emit_body(builder, ctx, else_stmts)?;
+                    let else_returns = Self::emit_scoped_body(builder, ctx, else_stmts)?;
                     if !else_returns {
                         builder.ins().jump(merge_block, &[]);
                     }
