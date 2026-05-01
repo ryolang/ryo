@@ -54,7 +54,7 @@ cargo run -- toolchain status    # Check Zig status
 
 ## CI
 
-GitHub Actions runs on pushes to `main` and PRs targeting `main`: `cargo fmt --check` with `-Dwarnings`, `cargo clippy --all-targets` (warnings are errors), and `cargo test` (Ubuntu + macOS). All three must pass for merge.
+GitHub Actions runs on pushes to `main` and PRs targeting `main`: `cargo fmt --check` with `-Dwarnings`, `cargo clippy --all-targets` (warnings are errors), and `cargo test` (Ubuntu x64, Ubuntu ARM64, macOS). All three must pass for merge.
 
 ---
 

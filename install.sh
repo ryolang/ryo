@@ -112,9 +112,11 @@ if [ "$PLATFORM" = "macos" ] && [ "$ARCH_NAME" = "arm64" ]; then
     TARGET="ryo-macos-arm64"
 elif [ "$PLATFORM" = "linux" ] && [ "$ARCH_NAME" = "x64" ]; then
     TARGET="ryo-linux-x64"
+elif [ "$PLATFORM" = "linux" ] && [ "$ARCH_NAME" = "arm64" ]; then
+    TARGET="ryo-linux-arm64"
 else
     echo "${RED}No build available for ${PLATFORM}-${ARCH_NAME}${NC}" >&2
-    echo "Supported platforms: Linux (x64), macOS (ARM64/Apple Silicon)" >&2
+    echo "Supported platforms: Linux (x64, ARM64), macOS (ARM64/Apple Silicon)" >&2
     exit 1
 fi
 
