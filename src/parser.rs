@@ -23,7 +23,7 @@ where
 /// (matters now that bare expression statements are allowed at the
 /// top level — without this, `x 42` would silently parse as two
 /// separate expression statements).
-fn require_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + 'a
+fn require_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -71,9 +71,9 @@ where
 {
     skip_newlines()
         .ignore_then(
-            stmt.then_ignore(skip_newlines())
-                .repeated()
+            stmt.separated_by(require_newlines())
                 .at_least(1)
+                .allow_trailing()
                 .collect::<Vec<_>>(),
         )
         .delimited_by(
