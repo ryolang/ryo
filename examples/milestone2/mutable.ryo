@@ -1,3 +1,0 @@
-# Mutable variable declarations
-mut x = 42
-mut counter: int = 0

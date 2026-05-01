@@ -28,13 +28,22 @@ It targets web backends, CLI tools, and scripting/notebook environments via AOT 
 > [!WARNING]
 > Ryo is currently in the **early stages of development** (pre-alpha). The language design is stabilizing, but the compiler is under active construction. It is **not yet ready for production use**. We welcome contributors!
 
-## Current Implementation Status (Milestone 4)
+## Current Implementation Status (Milestone 8b)
 
 **✅ What's Working Now:**
 
-The Ryo compiler currently implements **Milestone 4: Functions, HIR, & AOT Compilation**
+The Ryo compiler currently implements through **Milestone 8b: Conditionals & Logical Operators**:
 
-**See the full roadmap:** [Implementation Roadmap](docs/implementation_roadmap.md)
+- **Types:** `int`, `float`, `bool`, `str` (literals)
+- **Operators:** arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), unary negation (`-`)
+- **Variables:** immutable by default, `mut` keyword, type annotations, type inference
+- **Functions:** definitions with parameters and return types, calls, forward references, recursion
+- **Control flow:** `if`/`elif`/`else` with block scoping, short-circuit `and`/`or`
+- **Builtins:** `print()` for string literals
+- **Compilation:** AOT (native binary) and JIT execution via Cranelift backend
+- **Tooling:** `ryo run`, `ryo build`, `ryo lex`, `ryo parse`, `ryo ir --emit=uir|tir|clif`
+
+**See the full roadmap:** [Implementation Roadmap](docs/dev/implementation_roadmap.md)
 
 **Try it now:** [Quick Start Guide](docs/quickstart.md) - Build and run your first Ryo program in 5 minutes!
 
@@ -52,11 +61,11 @@ export PATH="$HOME/.ryo/bin:$PATH"
 # Verify installation
 ryo --version
 
-# Update to the latest nightly
+# Update to the latest dev
 curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh -s -- --force
 ```
 
-**Note:** Nightly builds are manually triggered and contain the latest features. They may be unstable. You can also build from source (below).
+**Note:** Dev builds are manually triggered and contain the latest features. They may be unstable. You can also build from source (below).
 
 
 ## Features Overview
@@ -109,69 +118,44 @@ Python-style syntax, clean error messages, and readable stack traces serve the h
 
 ```ryo
 fn main():
-	print("Hello World! Welcome to Ryo.)
+	print("Hello, World!\n")
 ```
 
-
-> **Note:** This example shows Ryo's planned features. Most are not yet implemented.
+A more complete example showing conditionals and functions:
 
 ```ryo
-# src/main.ryo - Design example showing future features
+fn classify(n: int) -> int:
+	if n < 0:
+		return -1
+	elif n == 0:
+		return 0
+	else:
+		return 1
 
-fn greet(name: &str) -> str:
-	return f"Hello, {name}! Welcome to Ryo."
+fn in_range(x: int, lo: int, hi: int) -> bool:
+	return x >= lo and x <= hi
 
 fn main():
-	# Variables are immutable by default (no 'let' keyword)
-	message = greet("World")  # Type inferred: str
-	print(message)
-
-	# Mutable variables use 'mut'
-	mut counter = 0  # Type inferred: int
-	counter += 1
-
-	# Safe collections
-	numbers = [1, 2, 3, 4, 5]
-	print(f"Numbers: {numbers}")
-
-	# Memory safe - optional types prevent null pointer exceptions!
-	user: ?str = "Alice"
-
-	# Safe optional chaining
-	message = user?.len() orelse 0
-	print(f"User message length: {message}")
-
-	# Safe error handling
-	print(process_user(user))
+	c = classify(5)
+	if in_range(c, 0, 1):
+		print("positive\n")
 ```
 
-
-```ryo
-# src/process/errors.ryo
-error InvalidUser
-```
-
-```ryo
-# src/main.ryo
-import process
-
-fn process_user(user: ?str) -> process.InvalidUser!str:
-	name = user orelse return process.InvalidUser
-	return f"Processing user: {name}"
-```
+> **Note:** Many features in the language spec (generics, error unions, closures, concurrency) are not yet implemented. See the roadmap for what's planned.
 
 ```bash
 # Compile and run
-cargo run -- run arithmetic.ryo
-# Output: [Result] => 0
+cargo run -- run examples/classify.ryo
 
 # Or see the compilation stages
-cargo run -- lex arithmetic.ryo    # View tokens
-cargo run -- parse arithmetic.ryo  # View AST
-cargo run -- ir arithmetic.ryo     # View Cranelift IR
+cargo run -- lex examples/hello.ryo        # View tokens
+cargo run -- parse examples/hello.ryo      # View AST
+cargo run -- ir --emit=uir examples/hello.ryo  # View untyped IR
+cargo run -- ir --emit=tir examples/hello.ryo  # View typed IR
+cargo run -- ir examples/hello.ryo         # View AST + Cranelift IR
 ```
 
-**More working examples:** See `examples/milestone3/` directory for additional programs you can compile and run today!
+**More working examples:** See the `examples/` directory for programs you can compile and run today.
 
 ## Getting Started & Installation
 
@@ -205,27 +189,16 @@ cargo run -- --version
 Create a simple Ryo program:
 
 ```bash
-# Create a file called first.ryo
-echo "x = 42" > first.ryo
+# Create a file called hello.ryo
+echo 'print("Hello, Ryo!\n")' > hello.ryo
 
 # Compile and run
-cargo run -- run first.ryo
+cargo run -- run hello.ryo
 ```
 
-You should see output like:
+You should see the AST, codegen output, then:
 ```
-[Input Source]
-x = 42
-
-[AST]
-Program (0..6)
-└── Statement [VarDecl] (0..6)
-    VarDecl
-      ├── name: x (0..1)
-      └── initializer:
-          Literal(Int(42)) (4..6)
-
-[Codegen]
+Hello, Ryo!
 [Result] => 0
 ```
 
@@ -234,7 +207,7 @@ Program (0..6)
 - **[Quick Start Guide](docs/quickstart.md)** - Complete hands-on tutorial (5 minutes)
 - **[Getting Started](docs/getting_started.md)** - Language introduction and concepts
 - **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions
-- **[Examples](examples/milestone3/)** - Working code examples you can run today
+- **[Examples](examples/)** - Working code examples you can run today
 
 **Note:** Advanced features like project creation (`ryo new`), package management, and REPL are planned for future milestones.
 
@@ -288,11 +261,11 @@ Please read our [Contributing Guide](CONTRIBUTING.md) and check out the [open is
 
 ### Implementation
 - **[Implementation Roadmap](docs/dev/implementation_roadmap.md)** - Development milestones and progress
-- **[Compilation Pipeline](docs/dev/compilation_pipeline.md)** - How the compiler works (6-phase pipeline with HIR)
+- **[Compilation Pipeline](docs/dev/compilation_pipeline.md)** - How the compiler works (Lexer → Parser → AstGen → UIR → Sema → TIR → Codegen)
 - **[CLAUDE.md](CLAUDE.md)** - Project context for AI assistants and contributors
 
 ### Examples
-- **[Milestone 3 Examples](examples/milestone3/)** - Working code you can compile and run today
+- **[Working Examples](examples/)** - Programs you can compile and run today (functions, conditionals, logical operators)
 
 *More documentation will be added as the project progresses. See the [docs/](docs/) directory for all available documentation.*
 

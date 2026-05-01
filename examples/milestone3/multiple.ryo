@@ -1,6 +1,0 @@
-# Milestone 3: Multiple statements example
-# Demonstrates that programs can have multiple statements
-# Flat programs exit with code 0 (success)
-x = 10
-y = 20
-z = 30

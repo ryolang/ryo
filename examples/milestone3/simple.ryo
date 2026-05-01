@@ -1,3 +1,0 @@
-# Milestone 3: Simple exit code example
-# This demonstrates the most basic usage - returning a constant exit code
-x = 42
