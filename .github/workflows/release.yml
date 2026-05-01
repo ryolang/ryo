@@ -116,7 +116,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Delete previous nightly releases
+      - name: Delete previous dev releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
