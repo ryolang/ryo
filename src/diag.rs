@@ -75,6 +75,9 @@ pub enum DiagCode {
     /// requires a real value (var decl initializer, return
     /// expression, operand of an arithmetic/equality/etc op).
     VoidValueInExpression,
+    /// An `if` or `elif` condition expression evaluated to a non-bool
+    /// type. Ryo requires conditions to be `bool` (no truthy coercion).
+    ConditionNotBool,
     /// A declaration's resolution requires its own resolution to be
     /// already complete — e.g. a chain of decls whose types depend
     /// transitively on themselves. Today this is an infrastructure-

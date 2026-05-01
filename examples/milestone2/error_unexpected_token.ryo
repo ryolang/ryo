@@ -1,3 +1,0 @@
-# Error example: unexpected token in expression
-# @ is not a valid token and causes parse error
-x = 42 @ invalid

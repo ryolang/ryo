@@ -217,6 +217,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::BuiltinArgKind => "E0014",
         DiagCode::UnsupportedOperator => "E0015",
         DiagCode::VoidValueInExpression => "E0017",
+        DiagCode::ConditionNotBool => "E0018",
         DiagCode::CycleInResolution => "E0016",
         DiagCode::ParseError => "E0100",
         DiagCode::TooManyDiagnostics => "E0101",

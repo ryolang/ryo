@@ -419,11 +419,72 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             fcx.builder
                 .unary(TirTag::ExprStmt, sema.pool.void(), val_tir, span)
         }
+        InstTag::IfStmt => {
+            let view = sema.uir.if_stmt_view(r);
+
+            let cond_tir = analyze_expr(sema, fcx, scope, view.cond);
+            check_condition_bool(sema, fcx, cond_tir, view.cond);
+
+            let then_tirs = analyze_block(sema, fcx, scope, &view.then_stmts);
+
+            let mut elif_tirs = Vec::with_capacity(view.elif_branches.len());
+            for elif in &view.elif_branches {
+                let elif_cond_tir = analyze_expr(sema, fcx, scope, elif.cond);
+                check_condition_bool(sema, fcx, elif_cond_tir, elif.cond);
+                let elif_body_tirs = analyze_block(sema, fcx, scope, &elif.body);
+                elif_tirs.push((elif_cond_tir, elif_body_tirs));
+            }
+
+            let else_tirs = view
+                .else_stmts
+                .as_ref()
+                .map(|stmts| analyze_block(sema, fcx, scope, stmts));
+
+            fcx.builder.if_stmt(
+                cond_tir,
+                &then_tirs,
+                &elif_tirs,
+                else_tirs.as_deref(),
+                sema.pool.void(),
+                span,
+            )
+        }
         other => panic!(
             "analyze_stmt: instruction at %{} is not a statement (tag={:?})",
             r.index(),
             other
         ),
+    }
+}
+
+fn analyze_block(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    stmts: &[InstRef],
+) -> Vec<TirRef> {
+    let mut child_scope = Scope {
+        parent: Some(scope),
+        bindings: HashMap::new(),
+    };
+    let mut tirs = Vec::with_capacity(stmts.len());
+    for stmt_ref in stmts {
+        tirs.push(analyze_stmt(sema, fcx, &mut child_scope, *stmt_ref));
+    }
+    tirs
+}
+
+fn check_condition_bool(sema: &mut Sema<'_>, fcx: &FuncCtx, cond_tir: TirRef, cond_uir: InstRef) {
+    let cond_ty = fcx.builder.ty_of(cond_tir);
+    if !sema.pool.is_error(cond_ty) && cond_ty != sema.pool.bool_() {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(cond_uir),
+            DiagCode::ConditionNotBool,
+            format!(
+                "condition must be 'bool', got '{}'",
+                sema.pool.display(cond_ty),
+            ),
+        ));
     }
 }
 
@@ -503,7 +564,9 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
         | InstTag::Lt
         | InstTag::Gt
         | InstTag::LtEq
-        | InstTag::GtEq => {
+        | InstTag::GtEq
+        | InstTag::And
+        | InstTag::Or => {
             let (lhs, rhs) = match inst.data {
                 InstData::BinOp { lhs, rhs } => (lhs, rhs),
                 _ => unreachable!("binary op must carry InstData::BinOp"),
@@ -530,6 +593,31 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                         DiagCode::UnsupportedOperator,
                         format!(
                             "unary operator '-' not supported for type '{}'",
+                            sema.pool.display(sub_ty),
+                        ),
+                    ));
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
+                }
+            }
+        }
+        InstTag::Not => {
+            let operand = match inst.data {
+                InstData::UnOp(o) => o,
+                _ => unreachable!("Not must carry InstData::UnOp"),
+            };
+            let sub = analyze_expr(sema, fcx, scope, operand);
+            let sub_ty = fcx.builder.ty_of(sub);
+            match sema.pool.kind(sub_ty) {
+                TypeKind::Bool => fcx
+                    .builder
+                    .unary(TirTag::BoolNot, sema.pool.bool_(), sub, span),
+                TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
+                _ => {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::UnsupportedOperator,
+                        format!(
+                            "logical operator 'not' requires 'bool' operand, got '{}'",
                             sema.pool.display(sub_ty),
                         ),
                     ));
@@ -595,9 +683,35 @@ fn check_binary_op(
         InstTag::Lt | InstTag::Gt | InstTag::LtEq | InstTag::GtEq
     );
     let is_modulo = matches!(tag, InstTag::Mod);
+    let is_logical = matches!(tag, InstTag::And | InstTag::Or);
     let kind = sema.pool.kind(kind_ty);
 
-    if is_equality {
+    if is_logical {
+        match kind {
+            TypeKind::Bool => {
+                let tir_tag = match tag {
+                    InstTag::And => TirTag::BoolAnd,
+                    InstTag::Or => TirTag::BoolOr,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+            }
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
+            _ => {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UnsupportedOperator,
+                    format!(
+                        "logical operator '{}' requires 'bool' operands, got '{}'",
+                        bin_op_symbol(tag),
+                        sema.pool.display(kind_ty),
+                    ),
+                ));
+                fcx.builder.unreachable(sema.pool.error_type(), span)
+            }
+        }
+    } else if is_equality {
         match kind {
             TypeKind::Int | TypeKind::Bool => {
                 let tir_tag = match tag {
@@ -876,6 +990,8 @@ fn bin_op_symbol(tag: InstTag) -> &'static str {
         InstTag::Gt => ">",
         InstTag::LtEq => "<=",
         InstTag::GtEq => ">=",
+        InstTag::And => "and",
+        InstTag::Or => "or",
         _ => "?",
     }
 }

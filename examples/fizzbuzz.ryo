@@ -1,0 +1,13 @@
+fn fizzbuzz(n: int):
+	if n % 15 == 0:
+		print("FizzBuzz\n")
+	elif n % 3 == 0:
+		print("Fizz\n")
+	elif n % 5 == 0:
+		print("Buzz\n")
+
+fn main():
+	fizzbuzz(3)
+	fizzbuzz(5)
+	fizzbuzz(15)
+	fizzbuzz(7)

@@ -24,6 +24,7 @@
 
 use crate::tir::{Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
+use cranelift::codegen::ir::BlockArg;
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -301,13 +302,7 @@ impl<M: Module> Codegen<M> {
                 inst_values: HashMap::new(),
             };
 
-            let mut has_return = false;
-            for stmt_ref in tir.body_stmts() {
-                if has_return {
-                    break;
-                }
-                has_return = Self::emit_stmt(&mut builder, &mut ctx, stmt_ref)?;
-            }
+            let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
 
             if !has_return {
                 let is_main = pool.str(tir.name) == "main";
@@ -335,6 +330,32 @@ impl<M: Module> Codegen<M> {
 
         self.ctx.clear();
         Ok(ir_text)
+    }
+
+    fn emit_body(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        stmts: &[TirRef],
+    ) -> Result<bool, String> {
+        let mut returns = false;
+        for &stmt_ref in stmts {
+            if returns {
+                break;
+            }
+            returns = Self::emit_stmt(builder, ctx, stmt_ref)?;
+        }
+        Ok(returns)
+    }
+
+    fn emit_scoped_body(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        stmts: &[TirRef],
+    ) -> Result<bool, String> {
+        let saved_locals = ctx.locals.clone();
+        let returns = Self::emit_body(builder, ctx, stmts)?;
+        ctx.locals = saved_locals;
+        Ok(returns)
     }
 
     /// Emit a top-level statement instruction. Returns `true` iff
@@ -386,6 +407,88 @@ impl<M: Module> Codegen<M> {
                 };
                 let _ = Self::eval_inst(builder, ctx, operand)?;
                 Ok(false)
+            }
+            TirTag::IfStmt => {
+                let view = ctx.tir.if_stmt_view(r);
+                let merge_block = builder.create_block();
+
+                let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
+                let then_block = builder.create_block();
+
+                let elif_count = view.elif_branches.len();
+                let has_else = view.else_stmts.is_some();
+                let capacity = elif_count + usize::from(has_else);
+                let mut next_blocks: Vec<Block> = Vec::with_capacity(capacity);
+                for _ in 0..elif_count {
+                    next_blocks.push(builder.create_block());
+                }
+                let else_or_merge = if has_else {
+                    let eb = builder.create_block();
+                    next_blocks.push(eb);
+                    eb
+                } else {
+                    merge_block
+                };
+
+                let first_fallthrough = next_blocks.first().copied().unwrap_or(else_or_merge);
+
+                builder
+                    .ins()
+                    .brif(cond_val, then_block, &[], first_fallthrough, &[]);
+
+                builder.seal_block(then_block);
+                builder.switch_to_block(then_block);
+                let then_returns = Self::emit_scoped_body(builder, ctx, &view.then_stmts)?;
+                if !then_returns {
+                    builder.ins().jump(merge_block, &[]);
+                }
+
+                let mut all_branches_return = then_returns;
+                for (i, elif) in view.elif_branches.iter().enumerate() {
+                    let elif_cond_block = next_blocks[i];
+                    builder.seal_block(elif_cond_block);
+                    builder.switch_to_block(elif_cond_block);
+
+                    let elif_cond_val = Self::eval_inst(builder, ctx, elif.cond)?;
+                    let elif_body_block = builder.create_block();
+
+                    let elif_fallthrough = if i + 1 < next_blocks.len() {
+                        next_blocks[i + 1]
+                    } else {
+                        merge_block
+                    };
+
+                    builder
+                        .ins()
+                        .brif(elif_cond_val, elif_body_block, &[], elif_fallthrough, &[]);
+
+                    builder.seal_block(elif_body_block);
+                    builder.switch_to_block(elif_body_block);
+                    let elif_returns = Self::emit_scoped_body(builder, ctx, &elif.body)?;
+                    if !elif_returns {
+                        builder.ins().jump(merge_block, &[]);
+                    }
+                    all_branches_return = all_branches_return && elif_returns;
+                }
+
+                if let Some(else_stmts) = &view.else_stmts {
+                    builder.seal_block(else_or_merge);
+                    builder.switch_to_block(else_or_merge);
+                    let else_returns = Self::emit_scoped_body(builder, ctx, else_stmts)?;
+                    if !else_returns {
+                        builder.ins().jump(merge_block, &[]);
+                    }
+                    all_branches_return = all_branches_return && else_returns;
+                } else {
+                    all_branches_return = false;
+                }
+
+                builder.seal_block(merge_block);
+                if !all_branches_return {
+                    builder.switch_to_block(merge_block);
+                }
+
+                Ok(all_branches_return)
             }
             other => Err(format!(
                 "emit_stmt: instruction at %{} is not a statement (tag={:?})",
@@ -441,6 +544,14 @@ impl<M: Module> Codegen<M> {
                 }
                 _ => unreachable!("INeg must carry TirData::UnOp"),
             },
+            TirTag::BoolNot => match inst.data {
+                TirData::UnOp(operand) => {
+                    let v = Self::eval_inst(builder, ctx, operand)?;
+                    let one = builder.ins().iconst(types::I8, 1);
+                    builder.ins().bxor(v, one)
+                }
+                _ => unreachable!("BoolNot must carry TirData::UnOp"),
+            },
             TirTag::IAdd
             | TirTag::ISub
             | TirTag::IMul
@@ -492,6 +603,70 @@ impl<M: Module> Codegen<M> {
                     TirTag::FCmpGe => builder.ins().fcmp(FloatCC::GreaterThanOrEqual, lv, rv),
                     _ => unreachable!(),
                 }
+            }
+            TirTag::BoolAnd => {
+                let (lhs_ref, rhs_ref) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!("BoolAnd must carry TirData::BinOp"),
+                };
+
+                let lhs_val = Self::eval_inst(builder, ctx, lhs_ref)?;
+
+                let rhs_block = builder.create_block();
+                let false_block = builder.create_block();
+                let merge_block = builder.create_block();
+                builder.append_block_param(merge_block, types::I8);
+
+                builder
+                    .ins()
+                    .brif(lhs_val, rhs_block, &[], false_block, &[]);
+
+                builder.seal_block(rhs_block);
+                builder.switch_to_block(rhs_block);
+                let rhs_val = Self::eval_inst(builder, ctx, rhs_ref)?;
+                builder.ins().jump(merge_block, &[BlockArg::Value(rhs_val)]);
+
+                builder.seal_block(false_block);
+                builder.switch_to_block(false_block);
+                let false_val = builder.ins().iconst(types::I8, 0);
+                builder
+                    .ins()
+                    .jump(merge_block, &[BlockArg::Value(false_val)]);
+
+                builder.seal_block(merge_block);
+                builder.switch_to_block(merge_block);
+                builder.block_params(merge_block)[0]
+            }
+            TirTag::BoolOr => {
+                let (lhs_ref, rhs_ref) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!("BoolOr must carry TirData::BinOp"),
+                };
+
+                let lhs_val = Self::eval_inst(builder, ctx, lhs_ref)?;
+
+                let true_block = builder.create_block();
+                let rhs_block = builder.create_block();
+                let merge_block = builder.create_block();
+                builder.append_block_param(merge_block, types::I8);
+
+                builder.ins().brif(lhs_val, true_block, &[], rhs_block, &[]);
+
+                builder.seal_block(true_block);
+                builder.switch_to_block(true_block);
+                let true_val = builder.ins().iconst(types::I8, 1);
+                builder
+                    .ins()
+                    .jump(merge_block, &[BlockArg::Value(true_val)]);
+
+                builder.seal_block(rhs_block);
+                builder.switch_to_block(rhs_block);
+                let rhs_val = Self::eval_inst(builder, ctx, rhs_ref)?;
+                builder.ins().jump(merge_block, &[BlockArg::Value(rhs_val)]);
+
+                builder.seal_block(merge_block);
+                builder.switch_to_block(merge_block);
+                builder.block_params(merge_block)[0]
             }
             TirTag::Call => Self::emit_call(builder, ctx, r)?,
             TirTag::Unreachable => {

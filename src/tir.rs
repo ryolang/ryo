@@ -169,13 +169,19 @@ pub enum TirTag {
     /// `TirData::UnOp`.
     ExprStmt,
 
+    // Logical operators (short-circuit in codegen).
+    BoolAnd,
+    BoolOr,
+    BoolNot,
+
+    /// If/elif/else statement. Variable payload in `extra`.
+    IfStmt,
+
     /// Inserted by sema at the point of an unrecoverable type error
     /// so the rest of the body still produces well-formed TIR. Has
     /// `ty == pool.error_type()`. Codegen must never see one — the
     /// driver short-circuits on `sink.has_errors()`.
     Unreachable,
-    // Reserved for the control-flow milestone:
-    //   Br, CondBr, Block.
 }
 
 // ---------- Instruction data ----------
@@ -360,7 +366,7 @@ impl TirBuilder {
     pub fn unary(&mut self, tag: TirTag, ty: TypeId, operand: TirRef, span: Span) -> TirRef {
         debug_assert!(matches!(
             tag,
-            TirTag::INeg | TirTag::Return | TirTag::ExprStmt
+            TirTag::INeg | TirTag::BoolNot | TirTag::Return | TirTag::ExprStmt
         ));
         self.push(tag, ty, TirData::UnOp(operand), span)
     }
@@ -396,6 +402,8 @@ impl TirBuilder {
                 | TirTag::FCmpLe
                 | TirTag::FCmpGt
                 | TirTag::FCmpGe
+                | TirTag::BoolAnd
+                | TirTag::BoolOr
         ));
         self.push(tag, ty, TirData::BinOp { lhs, rhs }, span)
     }
@@ -414,6 +422,13 @@ impl TirBuilder {
 
     fn len_u32(len: usize) -> u32 {
         u32::try_from(len).expect("TIR list length exceeded u32::MAX")
+    }
+
+    fn push_ref_list(&mut self, refs: &[TirRef]) {
+        self.extra.push(Self::len_u32(refs.len()));
+        for r in refs {
+            self.extra.push(r.raw());
+        }
     }
 
     /// Emit a `Call` with name and arg list packed into `extra`.
@@ -464,6 +479,46 @@ impl TirBuilder {
         )
     }
 
+    pub fn if_stmt(
+        &mut self,
+        cond: TirRef,
+        then_stmts: &[TirRef],
+        elif_branches: &[(TirRef, Vec<TirRef>)],
+        else_stmts: Option<&[TirRef]>,
+        ty: TypeId,
+        span: Span,
+    ) -> TirRef {
+        let elif_words: usize = elif_branches.iter().map(|(_, body)| 2 + body.len()).sum();
+        let total =
+            1 + 1 + then_stmts.len() + 1 + elif_words + 1 + else_stmts.map_or(0, |s| 1 + s.len());
+        self.extra.reserve(total);
+
+        let offset = self.extra_offset();
+        self.extra.push(cond.raw());
+        self.push_ref_list(then_stmts);
+        self.extra.push(Self::len_u32(elif_branches.len()));
+        for (elif_cond, elif_body) in elif_branches {
+            self.extra.push(elif_cond.raw());
+            self.push_ref_list(elif_body);
+        }
+        match else_stmts {
+            Some(stmts) => {
+                self.extra.push(1);
+                self.push_ref_list(stmts);
+            }
+            None => {
+                self.extra.push(0);
+            }
+        }
+        let len = Self::len_u32(self.extra.len() - offset as usize);
+        self.push(
+            TirTag::IfStmt,
+            ty,
+            TirData::Extra(ExtraRange { offset, len }),
+            span,
+        )
+    }
+
     /// Finish: bake in the body statement list and produce the
     /// finished [`Tir`].
     pub fn finish(mut self, stmts: &[TirRef]) -> Tir {
@@ -496,6 +551,18 @@ pub struct VarDeclView {
     pub name: StringId,
     pub mutable: bool,
     pub initializer: TirRef,
+}
+
+pub struct TirElifView {
+    pub cond: TirRef,
+    pub body: Vec<TirRef>,
+}
+
+pub struct TirIfStmtView {
+    pub cond: TirRef,
+    pub then_stmts: Vec<TirRef>,
+    pub elif_branches: Vec<TirElifView>,
+    pub else_stmts: Option<Vec<TirRef>>,
 }
 
 impl Tir {
@@ -534,6 +601,62 @@ impl Tir {
             initializer,
         }
     }
+
+    pub fn if_stmt_view(&self, r: TirRef) -> TirIfStmtView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::IfStmt));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("IfStmt must carry TirData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let mut pos = 0;
+
+        let cond = TirRef::from_raw(slice[pos]);
+        pos += 1;
+
+        let then_stmts = read_ref_list(slice, &mut pos);
+
+        let elif_count = slice[pos] as usize;
+        pos += 1;
+        let mut elif_branches = Vec::with_capacity(elif_count);
+        for _ in 0..elif_count {
+            let elif_cond = TirRef::from_raw(slice[pos]);
+            pos += 1;
+            let body = read_ref_list(slice, &mut pos);
+            elif_branches.push(TirElifView {
+                cond: elif_cond,
+                body,
+            });
+        }
+
+        let has_else = slice[pos] != 0;
+        pos += 1;
+        let else_stmts = if has_else {
+            Some(read_ref_list(slice, &mut pos))
+        } else {
+            None
+        };
+
+        TirIfStmtView {
+            cond,
+            then_stmts,
+            elif_branches,
+            else_stmts,
+        }
+    }
+}
+
+fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<TirRef> {
+    let count = slice[*pos] as usize;
+    *pos += 1;
+    let refs = slice[*pos..*pos + count]
+        .iter()
+        .copied()
+        .map(TirRef::from_raw)
+        .collect();
+    *pos += count;
+    refs
 }
 
 // ---------- Pretty-printer ----------
@@ -615,6 +738,23 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                 view.initializer.index()
             )
         }
+        (TirTag::IfStmt, TirData::Extra(_)) => {
+            let view = tir.if_stmt_view(r);
+            write!(f, "if_stmt cond=%{}", view.cond.index())?;
+            write!(f, " then=[{}]", view.then_stmts.len())?;
+            for elif in &view.elif_branches {
+                write!(
+                    f,
+                    " elif(cond=%{}, body=[{}])",
+                    elif.cond.index(),
+                    elif.body.len()
+                )?;
+            }
+            if let Some(else_s) = &view.else_stmts {
+                write!(f, " else=[{}]", else_s.len())?;
+            }
+            writeln!(f)
+        }
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
 }
@@ -642,6 +782,8 @@ fn bin_op_name(t: TirTag) -> &'static str {
         TirTag::FCmpLe => "fcmp_le",
         TirTag::FCmpGt => "fcmp_gt",
         TirTag::FCmpGe => "fcmp_ge",
+        TirTag::BoolAnd => "bool_and",
+        TirTag::BoolOr => "bool_or",
         _ => "?bin",
     }
 }
@@ -649,6 +791,7 @@ fn bin_op_name(t: TirTag) -> &'static str {
 fn un_op_name(t: TirTag) -> &'static str {
     match t {
         TirTag::INeg => "ineg",
+        TirTag::BoolNot => "bool_not",
         TirTag::Return => "ret",
         TirTag::ExprStmt => "expr_stmt",
         _ => "?un",
@@ -756,6 +899,30 @@ mod tests {
         assert_eq!(b.ty_of(fadd), pool.float());
         assert_eq!(b.ty_of(icmp_lt), pool.bool_());
         assert_eq!(b.ty_of(imod), pool.int());
+    }
+
+    #[test]
+    fn if_stmt_round_trips_through_extra() {
+        let mut pool = InternPool::new();
+        let bool_ty = pool.bool_();
+        let int_ty = pool.int();
+        let main = pool.intern_str("main");
+
+        let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
+        let cond = b.bool_const(true, bool_ty, sp());
+        let s1 = b.int_const(1, int_ty, sp());
+        let then_ret = b.unary(TirTag::Return, pool.void(), s1, sp());
+        let s2 = b.int_const(2, int_ty, sp());
+        let else_ret = b.unary(TirTag::Return, pool.void(), s2, sp());
+
+        let if_ref = b.if_stmt(cond, &[then_ret], &[], Some(&[else_ret]), pool.void(), sp());
+
+        let tir = b.finish(&[if_ref]);
+        let view = tir.if_stmt_view(if_ref);
+        assert_eq!(view.cond, cond);
+        assert_eq!(view.then_stmts, vec![then_ret]);
+        assert!(view.elif_branches.is_empty());
+        assert_eq!(view.else_stmts, Some(vec![else_ret]));
     }
 
     #[test]

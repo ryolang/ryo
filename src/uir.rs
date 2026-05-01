@@ -169,8 +169,16 @@ pub enum InstTag {
     /// so codegen knows whether to discard the produced value or feed
     /// it to a terminator.
     ExprStmt,
-    // Reserved for the control-flow milestone:
-    //   If, Loop, Break, Continue, Block.
+
+    // Logical operators. Both operands in `data.bin_op`.
+    And,
+    Or,
+
+    // Logical not. Operand in `data.un_op`.
+    Not,
+
+    /// If/elif/else statement. Variable payload in `extra`.
+    IfStmt,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -376,7 +384,7 @@ impl UirBuilder {
     pub fn unary(&mut self, tag: InstTag, operand: InstRef, span: Span) -> InstRef {
         debug_assert!(matches!(
             tag,
-            InstTag::Neg | InstTag::Return | InstTag::ExprStmt
+            InstTag::Neg | InstTag::Not | InstTag::Return | InstTag::ExprStmt
         ));
         self.push(tag, InstData::UnOp(operand), span)
     }
@@ -395,6 +403,8 @@ impl UirBuilder {
                 | InstTag::Gt
                 | InstTag::LtEq
                 | InstTag::GtEq
+                | InstTag::And
+                | InstTag::Or
         ));
         self.push(tag, InstData::BinOp { lhs, rhs }, span)
     }
@@ -490,6 +500,51 @@ impl UirBuilder {
             span,
         });
     }
+
+    fn push_ref_list(&mut self, refs: &[InstRef]) {
+        self.uir.extra.push(Self::len_u32(refs.len()));
+        for r in refs {
+            self.uir.extra.push(r.raw());
+        }
+    }
+
+    pub fn if_stmt(
+        &mut self,
+        cond: InstRef,
+        then_stmts: &[InstRef],
+        elif_branches: &[(InstRef, Vec<InstRef>)],
+        else_stmts: Option<&[InstRef]>,
+        span: Span,
+    ) -> InstRef {
+        let elif_words: usize = elif_branches.iter().map(|(_, body)| 2 + body.len()).sum();
+        let total =
+            1 + 1 + then_stmts.len() + 1 + elif_words + 1 + else_stmts.map_or(0, |s| 1 + s.len());
+        self.uir.extra.reserve(total);
+
+        let offset = self.extra_offset();
+        self.uir.extra.push(cond.raw());
+        self.push_ref_list(then_stmts);
+        self.uir.extra.push(Self::len_u32(elif_branches.len()));
+        for (elif_cond, elif_body) in elif_branches {
+            self.uir.extra.push(elif_cond.raw());
+            self.push_ref_list(elif_body);
+        }
+        match else_stmts {
+            Some(stmts) => {
+                self.uir.extra.push(1);
+                self.push_ref_list(stmts);
+            }
+            None => {
+                self.uir.extra.push(0);
+            }
+        }
+        let len = Self::len_u32(self.uir.extra.len() - offset as usize);
+        self.push(
+            InstTag::IfStmt,
+            InstData::Extra(ExtraRange { offset, len }),
+            span,
+        )
+    }
 }
 
 // ---------- Read-side helpers ----------
@@ -507,6 +562,18 @@ pub struct VarDeclView {
     /// `None` when the source had no annotation.
     pub ty: Option<TypeId>,
     pub initializer: InstRef,
+}
+
+pub struct ElifView {
+    pub cond: InstRef,
+    pub body: Vec<InstRef>,
+}
+
+pub struct IfStmtView {
+    pub cond: InstRef,
+    pub then_stmts: Vec<InstRef>,
+    pub elif_branches: Vec<ElifView>,
+    pub else_stmts: Option<Vec<InstRef>>,
 }
 
 impl Uir {
@@ -552,6 +619,62 @@ impl Uir {
             initializer,
         }
     }
+
+    pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::IfStmt));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("IfStmt must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let mut pos = 0;
+
+        let cond = InstRef::from_raw(slice[pos]);
+        pos += 1;
+
+        let then_stmts = read_ref_list(slice, &mut pos);
+
+        let elif_count = slice[pos] as usize;
+        pos += 1;
+        let mut elif_branches = Vec::with_capacity(elif_count);
+        for _ in 0..elif_count {
+            let elif_cond = InstRef::from_raw(slice[pos]);
+            pos += 1;
+            let body = read_ref_list(slice, &mut pos);
+            elif_branches.push(ElifView {
+                cond: elif_cond,
+                body,
+            });
+        }
+
+        let has_else = slice[pos] != 0;
+        pos += 1;
+        let else_stmts = if has_else {
+            Some(read_ref_list(slice, &mut pos))
+        } else {
+            None
+        };
+
+        IfStmtView {
+            cond,
+            then_stmts,
+            elif_branches,
+            else_stmts,
+        }
+    }
+}
+
+fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<InstRef> {
+    let count = slice[*pos] as usize;
+    *pos += 1;
+    let refs = slice[*pos..*pos + count]
+        .iter()
+        .copied()
+        .map(InstRef::from_raw)
+        .collect();
+    *pos += count;
+    refs
 }
 
 // ---------- Pretty-printer ----------
@@ -667,6 +790,23 @@ fn write_inst(
                 ),
             }
         }
+        (InstTag::IfStmt, InstData::Extra(_)) => {
+            let view = uir.if_stmt_view(r);
+            write!(f, "if_stmt cond=%{}", view.cond.index())?;
+            write!(f, " then=[{}]", view.then_stmts.len())?;
+            for elif in &view.elif_branches {
+                write!(
+                    f,
+                    " elif(cond=%{}, body=[{}])",
+                    elif.cond.index(),
+                    elif.body.len()
+                )?;
+            }
+            if let Some(else_s) = &view.else_stmts {
+                write!(f, " else=[{}]", else_s.len())?;
+            }
+            writeln!(f)
+        }
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
 }
@@ -684,6 +824,8 @@ fn bin_op_name(t: InstTag) -> &'static str {
         InstTag::Gt => "icmp_gt",
         InstTag::LtEq => "icmp_le",
         InstTag::GtEq => "icmp_ge",
+        InstTag::And => "bool_and",
+        InstTag::Or => "bool_or",
         _ => "?bin",
     }
 }
@@ -691,6 +833,7 @@ fn bin_op_name(t: InstTag) -> &'static str {
 fn un_op_name(t: InstTag) -> &'static str {
     match t {
         InstTag::Neg => "neg",
+        InstTag::Not => "bool_not",
         InstTag::Return => "ret",
         InstTag::ExprStmt => "expr_stmt",
         _ => "?un",
@@ -807,6 +950,68 @@ mod tests {
         let r = b.int_literal(2, sp());
         let _ = b.binary(InstTag::Lt, l, r, sp());
         let _ = b.binary(InstTag::Mod, l, r, sp());
+    }
+
+    #[test]
+    fn if_stmt_round_trips_through_extra() {
+        let mut b = UirBuilder::new();
+        let cond = b.bool_literal(true, sp());
+        let s1 = b.int_literal(1, sp());
+        let then_ret = b.unary(InstTag::Return, s1, sp());
+        let s2 = b.int_literal(2, sp());
+        let else_ret = b.unary(InstTag::Return, s2, sp());
+
+        let if_ref = b.if_stmt(cond, &[then_ret], &[], Some(&[else_ret]), sp());
+
+        let uir = b.finish();
+        let view = uir.if_stmt_view(if_ref);
+        assert_eq!(view.cond, cond);
+        assert_eq!(view.then_stmts, vec![then_ret]);
+        assert!(view.elif_branches.is_empty());
+        assert_eq!(view.else_stmts, Some(vec![else_ret]));
+    }
+
+    #[test]
+    fn if_stmt_with_elif_round_trips() {
+        let mut b = UirBuilder::new();
+        let cond = b.bool_literal(true, sp());
+        let s1 = b.int_literal(1, sp());
+        let then_ret = b.unary(InstTag::Return, s1, sp());
+
+        let elif_cond1 = b.bool_literal(false, sp());
+        let s2 = b.int_literal(2, sp());
+        let elif1_ret = b.unary(InstTag::Return, s2, sp());
+
+        let elif_cond2 = b.bool_literal(true, sp());
+        let s3 = b.int_literal(3, sp());
+        let s4 = b.int_literal(4, sp());
+        let elif2_a = b.unary(InstTag::ExprStmt, s3, sp());
+        let elif2_b = b.unary(InstTag::Return, s4, sp());
+
+        let s5 = b.int_literal(5, sp());
+        let else_ret = b.unary(InstTag::Return, s5, sp());
+
+        let if_ref = b.if_stmt(
+            cond,
+            &[then_ret],
+            &[
+                (elif_cond1, vec![elif1_ret]),
+                (elif_cond2, vec![elif2_a, elif2_b]),
+            ],
+            Some(&[else_ret]),
+            sp(),
+        );
+
+        let uir = b.finish();
+        let view = uir.if_stmt_view(if_ref);
+        assert_eq!(view.cond, cond);
+        assert_eq!(view.then_stmts, vec![then_ret]);
+        assert_eq!(view.elif_branches.len(), 2);
+        assert_eq!(view.elif_branches[0].cond, elif_cond1);
+        assert_eq!(view.elif_branches[0].body, vec![elif1_ret]);
+        assert_eq!(view.elif_branches[1].cond, elif_cond2);
+        assert_eq!(view.elif_branches[1].body, vec![elif2_a, elif2_b]);
+        assert_eq!(view.else_stmts, Some(vec![else_ret]));
     }
 
     #[test]

@@ -705,6 +705,108 @@ fn main():
 
 ---
 
+### Milestone 8b2: assert [alpha]
+**Goal:*** Implement `assert`
+- Add `assert` function:
+  ```ryo
+  fn assert(condition: bool, message: str)
+  ```
+- Write tests for panic and assertions
+
+## Why
+
+`assert(bool, message)` earns its keep in three roles, and for a language at Ryo's stage the first one is the most important:
+
+1. **Bootstrap test harness.** Until you have a real test runner, you can't write `#[test]`-style tests against your compiler. But once `assert` exists, every `.ryo` file in `tests/` becomes a self-contained spec: compile it, run it, check the exit code. Pass = 0, fail = nonzero with a useful message. This is exactly how `tcc`, early `rustc`, and most homemade languages bootstrap their test suites before there's anything fancier.
+2. **Executable documentation.** Examples in your README/spec that contain `assert` calls double as regression tests — the docs can't drift from reality without the test runner screaming.
+3. **User-facing invariants.** Eventually users want pre/postconditions and "this can't happen" guards. Same primitive serves all three.
+
+Worth making it a first-class language feature rather than waiting for a stdlib, because (a) you want it before you have a stdlib, and (b) it needs compiler magic (source location injection) that a normal function can't do cleanly.
+
+## How
+
+The big design call is **special form vs builtin function**. Recommended: special form. Three reasons:
+
+- You want `file:line` automatically injected at the call site. A regular function call can't see its own caller's span without compiler intrinsics like Rust's `file!()`/`line!()`. A special form gets it for free from the parser's existing span tracking.
+- The right-hand side (the runtime trap) needs privileges normal user code shouldn't have — write to stderr, abort the process. Hiding it behind a non-callable form keeps the surface clean.
+- It signals to readers (and to your own type checker) that this isn't an ordinary call.
+
+Concretely, the pipeline:
+
+**Parser.** Add `assert` as a reserved identifier. When the parser sees `assert(<expr>, <string-literal>)`, emit an AST node:
+
+```
+AssertStmt { cond: Expr, msg: StringLit, span: Span }
+```
+
+Until M15 gives you owned `String`, restrict `msg` to a string literal — same constraint `print` likely already has.
+
+**Type checker.** `cond` must unify to `bool`. `msg` must be a string literal type. That's it.
+
+**Lowering / codegen.** Desugar each `AssertStmt` into the equivalent of:
+
+```
+if not cond:
+    __ryo_assert_failed("<file>", <line>, <msg>)
+```
+
+`__ryo_assert_failed` is a runtime intrinsic — not user-callable, lives in your runtime crate/module. It writes `assertion failed at <file>:<line>: <msg>\n` to stderr and exits with code 101 (steal Rust's panic convention) or 1.
+
+**Roadmap placement.** Hard dependencies are `bool`, `if`, and unary `not` — all M8. Slot it as **M8.7** (right after M8.6 closures), or fold it into M8's deliverables since it's a one-day task once `if`/`bool` work. Don't wait for M9+; you'll want to use `assert` while writing tests for those milestones.
+
+One thing to defer explicitly: **lazy message formatting** (`assert(x, "got {}", x)`-style). That needs format strings, which need owned `String`, which is M15. For now, plain string literal message is fine and matches your existing capabilities. Document it as a known follow-up.
+
+Also defer: `debug_assert` (compiled-out in release builds). Comes essentially for free once you have build profiles, but profiles aren't on the roadmap yet.
+
+## Usage
+
+In test files (the primary motivator):
+
+```ryo
+fn main() -> int:
+    assert(2 + 2 == 4, "arithmetic is broken")
+    assert(not false, "negation is broken")
+
+    let x = 10
+    let y = 3
+    assert(x % y == 1, "modulo wrong")
+
+    return 0
+```
+
+In application code, as a runtime invariant:
+
+```ryo
+fn divide(a: int, b: int) -> int:
+    assert(b != 0, "divide by zero")
+    return a / b
+```
+
+Once closures land (M8.6), as a predicate sanity check:
+
+```ryo
+let is_even = fn(x: int) -> bool: x % 2 == 0
+assert(is_even(4), "4 should be even")
+assert(not is_even(5), "5 should not be even")
+```
+
+Failure output, on stderr:
+
+```
+assertion failed at tests/arith.ryo:3: arithmetic is broken
+```
+
+Then your test runner is just:
+
+```bash
+for f in tests/*.ryo; do
+    ryo run "$f" || echo "FAIL: $f"
+done
+```
+
+That single primitive unlocks the rest of your milestone validation work — every future feature gets tested with the same tool.
+---
+
 ### Milestone 8c: Loops & Loop Control [alpha]
 **Goal:** Implement `while` loops, counted `for i in range(...)` loops, and `break` / `continue`. This completes the v0.1 control-flow surface.
 

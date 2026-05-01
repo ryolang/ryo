@@ -1,2 +1,1 @@
-# print() returns void (nothing) - assignment required by current parser
 print("Hello, World!\n")

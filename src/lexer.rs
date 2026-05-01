@@ -42,6 +42,7 @@ pub enum Token {
     // Keywords.
     Fn,
     If,
+    Elif,
     Else,
     Return,
     Mut,
@@ -50,6 +51,9 @@ pub enum Token {
     Match,
     True,
     False,
+    And,
+    Or,
+    Not,
 
     // Identifiers.
     Ident(StringId),
@@ -97,6 +101,7 @@ impl fmt::Display for Token {
             Self::StrLit(id) => write!(f, "<str#{}>", id.raw()),
             Self::Fn => write!(f, "fn"),
             Self::If => write!(f, "if"),
+            Self::Elif => write!(f, "elif"),
             Self::Else => write!(f, "else"),
             Self::Return => write!(f, "return"),
             Self::Mut => write!(f, "mut"),
@@ -105,6 +110,9 @@ impl fmt::Display for Token {
             Self::Match => write!(f, "match"),
             Self::True => write!(f, "true"),
             Self::False => write!(f, "false"),
+            Self::And => write!(f, "and"),
+            Self::Or => write!(f, "or"),
+            Self::Not => write!(f, "not"),
             Self::Ident(id) => write!(f, "<id#{}>", id.raw()),
             Self::Add => write!(f, "+"),
             Self::Arrow => write!(f, "->"),
@@ -153,6 +161,8 @@ pub(crate) enum RawToken<'a> {
     Fn,
     #[token("if")]
     If,
+    #[token("elif")]
+    Elif,
     #[token("else")]
     Else,
     #[token("return")]
@@ -169,6 +179,12 @@ pub(crate) enum RawToken<'a> {
     True,
     #[token("false")]
     False,
+    #[token("and")]
+    And,
+    #[token("or")]
+    Or,
+    #[token("not")]
+    Not,
 
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
     Ident(&'a str),
@@ -360,6 +376,7 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
 
         RawToken::Fn => Token::Fn,
         RawToken::If => Token::If,
+        RawToken::Elif => Token::Elif,
         RawToken::Else => Token::Else,
         RawToken::Return => Token::Return,
         RawToken::Mut => Token::Mut,
@@ -368,6 +385,9 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::Match => Token::Match,
         RawToken::True => Token::True,
         RawToken::False => Token::False,
+        RawToken::And => Token::And,
+        RawToken::Or => Token::Or,
+        RawToken::Not => Token::Not,
 
         RawToken::Add => Token::Add,
         RawToken::Arrow => Token::Arrow,

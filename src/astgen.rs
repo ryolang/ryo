@@ -135,6 +135,20 @@ fn resolve_type(
     }
 }
 
+fn lower_block(
+    b: &mut UirBuilder,
+    stmts: &[ast::Statement],
+    prims: &Primitives,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> Vec<InstRef> {
+    let mut out = Vec::new();
+    for s in stmts {
+        gen_stmt(b, s, prims, pool, sink, &mut out);
+    }
+    out
+}
+
 fn gen_implicit_main(
     b: &mut UirBuilder,
     stmts: &[&ast::Statement],
@@ -207,10 +221,7 @@ fn gen_function_def(
         }
     }
 
-    let mut body_stmts: Vec<InstRef> = Vec::new();
-    for stmt in &func.body {
-        gen_stmt(b, stmt, prims, pool, sink, &mut body_stmts);
-    }
+    let body_stmts = lower_block(b, &func.body, prims, pool, sink);
 
     b.add_function(
         func.name.name,
@@ -257,6 +268,34 @@ fn gen_stmt(
                 "nested function definitions are not supported",
             ));
         }
+        ast::StmtKind::IfStmt(if_stmt) => {
+            let cond = gen_expr(b, &if_stmt.cond);
+            let then_stmts = lower_block(b, &if_stmt.then_block, prims, pool, sink);
+
+            let elif_branches: Vec<_> = if_stmt
+                .elif_branches
+                .iter()
+                .map(|elif| {
+                    let elif_cond = gen_expr(b, &elif.cond);
+                    let elif_body = lower_block(b, &elif.block, prims, pool, sink);
+                    (elif_cond, elif_body)
+                })
+                .collect();
+
+            let else_stmts = if_stmt
+                .else_block
+                .as_ref()
+                .map(|stmts| lower_block(b, stmts, prims, pool, sink));
+
+            let r = b.if_stmt(
+                cond,
+                &then_stmts,
+                &elif_branches,
+                else_stmts.as_deref(),
+                stmt.span,
+            );
+            out.push(r);
+        }
     }
 }
 
@@ -283,12 +322,18 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
                 ast::BinaryOperator::LtEq => InstTag::LtEq,
                 ast::BinaryOperator::GtEq => InstTag::GtEq,
                 ast::BinaryOperator::Mod => InstTag::Mod,
+                ast::BinaryOperator::And => InstTag::And,
+                ast::BinaryOperator::Or => InstTag::Or,
             };
             b.binary(tag, l, r, span)
         }
-        ast::ExprKind::UnaryOp(ast::UnaryOperator::Neg, sub) => {
+        ast::ExprKind::UnaryOp(op, sub) => {
             let s = gen_expr(b, sub);
-            b.unary(InstTag::Neg, s, span)
+            let tag = match op {
+                ast::UnaryOperator::Neg => InstTag::Neg,
+                ast::UnaryOperator::Not => InstTag::Not,
+            };
+            b.unary(tag, s, span)
         }
         ast::ExprKind::Call(name, args) => {
             let arg_refs: Vec<InstRef> = args.iter().map(|a| gen_expr(b, a)).collect();
@@ -516,5 +561,42 @@ mod tests {
                 other => panic!("expected IntLiteral, got {:?}", other),
             }
         }
+    }
+
+    #[test]
+    fn lower_and_operator() {
+        let (uir, pool) = parse_and_lower("x = true and false").unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        assert!(matches!(uir.inst(v.initializer).tag, InstTag::And));
+    }
+
+    #[test]
+    fn lower_or_operator() {
+        let (uir, pool) = parse_and_lower("x = true or false").unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        assert!(matches!(uir.inst(v.initializer).tag, InstTag::Or));
+    }
+
+    #[test]
+    fn lower_not_operator() {
+        let (uir, pool) = parse_and_lower("x = not true").unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        assert!(matches!(uir.inst(v.initializer).tag, InstTag::Not));
+    }
+
+    #[test]
+    fn lower_if_stmt() {
+        let code = "fn main():\n\tif true:\n\t\tx = 1\n\telse:\n\t\tx = 2\n";
+        let (uir, pool) = parse_and_lower(code).unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let stmts = uir.body_stmts(main);
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(uir.inst(stmts[0]).tag, InstTag::IfStmt));
+        let view = uir.if_stmt_view(stmts[0]);
+        assert_eq!(view.then_stmts.len(), 1);
+        assert!(view.else_stmts.is_some());
     }
 }

@@ -1,0 +1,16 @@
+fn classify(n: int) -> int:
+	if n < 0:
+		return -1
+	elif n == 0:
+		return 0
+	else:
+		return 1
+
+fn in_range(x: int, lo: int, hi: int) -> bool:
+	return x >= lo and x <= hi
+
+fn main():
+	c = classify(5)
+	r = in_range(5, 0, 10)
+	if r and not (c == 0):
+		print("ok\n")

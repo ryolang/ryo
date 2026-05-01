@@ -941,3 +941,133 @@ fn ir_emit_tir_prints_partial_tir_with_unreachable_on_sema_error() {
         stdout
     );
 }
+
+// ============================================================================
+// Milestone 8b: Conditionals & Logical Operators
+// ============================================================================
+
+#[test]
+fn test_if_elif_else_classify() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn classify(n: int) -> int:\n\tif n < 0:\n\t\treturn -1\n\telif n == 0:\n\t\treturn 0\n\telse:\n\t\treturn 1\n\nfn main():\n\tx = classify(5)\n\tprint(\"done\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "classify.ryo", code);
+
+    let output = run_ryo_command(&["run", "classify.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[Result] => 0"));
+}
+
+#[test]
+fn test_and_short_circuit_in_range() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn in_range(x: int, lo: int, hi: int) -> bool:\n\treturn x >= lo and x <= hi\n\nfn main():\n\tr = in_range(5, 0, 10)\n\tprint(\"done\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "in_range.ryo", code);
+
+    let output = run_ryo_command(&["run", "in_range.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[Result] => 0"));
+}
+
+#[test]
+fn test_not_operator_codegen() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = not true\n\ty = not false\n\tprint(\"done\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "not_op.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "not_op.ryo"], &test_file).expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[Result] => 0"));
+}
+
+#[test]
+fn test_simple_if_else() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tif true:\n\t\tprint(\"yes\\n\")\n\telse:\n\t\tprint(\"no\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "if_else.ryo", code);
+
+    let output = run_ryo_command(&["run", "if_else.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[Result] => 0"));
+}
+
+#[test]
+fn test_if_without_else() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tif true:\n\t\tprint(\"yes\\n\")\n\tprint(\"done\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "if_no_else.ryo", code);
+
+    let output = run_ryo_command(&["run", "if_no_else.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[Result] => 0"));
+}
+
+#[test]
+fn test_nested_if() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tif true:\n\t\tif false:\n\t\t\tprint(\"inner\\n\")\n\t\telse:\n\t\t\tprint(\"outer\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "nested_if.ryo", code);
+
+    let output = run_ryo_command(&["run", "nested_if.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[Result] => 0"));
+}
+
+#[test]
+fn test_combined_logical_and_conditional() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tif true and not false:\n\t\tprint(\"ok\\n\")\n\telse:\n\t\tprint(\"fail\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "combined.ryo", code);
+
+    let output = run_ryo_command(&["run", "combined.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[Result] => 0"));
+}

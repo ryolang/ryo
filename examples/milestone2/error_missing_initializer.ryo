@@ -1,4 +1,0 @@
-# Error example: missing expression after =
-# This should fail because an expression is required after =
-x =
-y = 10
