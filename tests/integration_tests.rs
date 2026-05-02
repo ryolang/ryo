@@ -1279,3 +1279,120 @@ fn panic_non_literal_rejected() {
         "panic with non-literal should be a compile error"
     );
 }
+
+// =============================================================================
+// AOT Build + Run Verification Tests
+// =============================================================================
+
+/// Run `ryo build` and return the path to the compiled binary.
+///
+/// The AOT pipeline writes the binary (named after the source file stem) into
+/// the process's CWD. We point CWD at a dedicated output directory so the
+/// artifact lands somewhere predictable and is cleaned up with the `TempDir`.
+fn run_ryo_build(source_file: &Path, out_dir: &Path) -> std::process::Output {
+    // We need the Cargo project root so `cargo run` can find Cargo.toml.
+    // CARGO_MANIFEST_DIR is set by Cargo during `cargo test`.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+
+    Command::new("cargo")
+        .args(["run", "--manifest-path"])
+        .arg(format!("{}/Cargo.toml", manifest_dir))
+        .args(["--", "build"])
+        .arg(source_file)
+        .current_dir(out_dir)
+        .output()
+        .expect("Failed to run ryo build command")
+}
+
+#[test]
+fn assert_true_aot_run_succeeds() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tassert(true, \"aot ok\")\n\tprint(\"built\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "assert_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = temp_dir.path().join("assert_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+
+    assert!(
+        run_output.status.success(),
+        "compiled binary should exit 0. stderr: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    assert!(
+        stdout.contains("built"),
+        "expected 'built' in stdout, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn assert_false_aot_run_exits_101() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tassert(false, \"boom\")\n";
+    let test_file = create_test_file(temp_dir.path(), "assert_false_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = temp_dir.path().join("assert_false_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+
+    assert_eq!(
+        run_output.status.code(),
+        Some(101),
+        "binary should exit 101 on assert failure"
+    );
+    let stderr = String::from_utf8_lossy(&run_output.stderr);
+    assert!(
+        stderr.contains("assertion failed: boom"),
+        "stderr should contain formatted message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn panic_aot_run_exits_101() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tpanic(\"explicit\")\n";
+    let test_file = create_test_file(temp_dir.path(), "panic_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = temp_dir.path().join("panic_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+
+    assert_eq!(
+        run_output.status.code(),
+        Some(101),
+        "binary should exit 101 on panic"
+    );
+    let stderr = String::from_utf8_lossy(&run_output.stderr);
+    assert!(
+        stderr.contains("panicked: explicit"),
+        "stderr should contain panic message, got: {}",
+        stderr
+    );
+}
