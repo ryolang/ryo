@@ -25,9 +25,6 @@ site/
 # Zed
 .zed/
 
-# Serena (MCP plugin)
-.serena/
-
 # Mac
 .DS_Store
 
@@ -43,3 +40,6 @@ docs/analysis/
 
 # Git worktrees (local isolated workspaces)
 .worktrees/
+
+# Graphify
+graphify-out/
