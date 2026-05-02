@@ -28,6 +28,10 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         name: "assert",
         return_ty: BuiltinReturn::Void,
     },
+    BuiltinFunction {
+        name: "panic",
+        return_ty: BuiltinReturn::Void,
+    },
 ];
 
 pub fn lookup(name: &str) -> Option<&'static BuiltinFunction> {
@@ -46,6 +50,11 @@ mod tests {
     #[test]
     fn lookup_assert_exists() {
         assert!(lookup("assert").is_some());
+    }
+
+    #[test]
+    fn lookup_panic_exists() {
+        assert!(lookup("panic").is_some());
     }
 
     #[test]
