@@ -700,8 +700,12 @@ impl<M: Module> Codegen<M> {
                     Self::generate_print_call(builder, ctx, &view.args)?;
                     Ok(builder.ins().iconst(ctx.int_type, 0))
                 }
+                "panic" => {
+                    Self::generate_panic_call(builder, ctx, r)?;
+                    Ok(builder.ins().iconst(ctx.int_type, 0))
+                }
                 "assert" => {
-                    Self::generate_assert_call(builder, ctx, &view.args)?;
+                    Self::generate_assert_call(builder, ctx, r, &view.args)?;
                     Ok(builder.ins().iconst(ctx.int_type, 0))
                 }
                 _ => Err(format!(
@@ -803,6 +807,7 @@ impl<M: Module> Codegen<M> {
     fn generate_assert_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
+        call_ref: TirRef,
         args: &[TirRef],
     ) -> Result<(), String> {
         debug_assert_eq!(args.len(), 2, "sema should reject assert() arity errors");
@@ -818,56 +823,11 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(fail_block);
         builder.switch_to_block(fail_block);
 
-        let string_id = match ctx.tir.inst(args[1]).data {
-            TirData::Str(id) => id,
-            other => unreachable!(
-                "sema should reject non-literal assert() message, got {:?}",
-                other
-            ),
-        };
-        let user_msg = ctx.pool.str(string_id).to_owned();
-        let full_msg = format!("assertion failed: {}\n", user_msg);
-        let full_msg_id = ctx.pool.intern_str(&full_msg);
-
-        let data_id = store_string(
-            full_msg_id,
-            &full_msg,
-            ctx.module,
-            ctx.data_ctx,
-            ctx.string_data,
-        )?;
-        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-        let string_ptr = builder.ins().global_value(ctx.int_type, data_ref);
-        let string_len = builder.ins().iconst(ctx.int_type, full_msg.len() as i64);
-        let fd = builder.ins().iconst(ctx.int_type, 2); // stderr
-
-        let mut write_sig = ctx.module.make_signature();
-        write_sig.params.push(AbiParam::new(ctx.int_type));
-        write_sig.params.push(AbiParam::new(ctx.int_type));
-        write_sig.params.push(AbiParam::new(ctx.int_type));
-        write_sig.returns.push(AbiParam::new(ctx.int_type));
-
-        let write_func = ctx
-            .module
-            .declare_function("write", Linkage::Import, &write_sig)
-            .map_err(|e| format!("Failed to declare write function: {}", e))?;
-        let write_ref = ctx.module.declare_func_in_func(write_func, builder.func);
-        builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
-
-        // call exit(101)
-        let mut exit_sig = ctx.module.make_signature();
-        exit_sig.params.push(AbiParam::new(ctx.int_type));
-
-        let exit_func = ctx
-            .module
-            .declare_function("exit", Linkage::Import, &exit_sig)
-            .map_err(|e| format!("Failed to declare exit function: {}", e))?;
-        let exit_ref = ctx.module.declare_func_in_func(exit_func, builder.func);
-        let exit_code = builder.ins().iconst(ctx.int_type, 101);
-        builder.ins().call(exit_ref, &[exit_code]);
-
-        // exit() is noreturn, but Cranelift needs a terminator
-        builder.ins().trap(TrapCode::user(1).unwrap());
+        let msg_id = ctx
+            .tir
+            .fail_message(call_ref)
+            .expect("sema should have recorded a fail message for assert()");
+        emit_fail_path(builder, ctx, msg_id)?;
 
         // --- ok path: continue ---
         builder.seal_block(ok_block);
@@ -875,6 +835,71 @@ impl<M: Module> Codegen<M> {
 
         Ok(())
     }
+
+    fn generate_panic_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        call_ref: TirRef,
+    ) -> Result<(), String> {
+        let msg_id = ctx
+            .tir
+            .fail_message(call_ref)
+            .expect("sema should have recorded a fail message for panic()");
+        emit_fail_path(builder, ctx, msg_id)?;
+        Ok(())
+    }
+}
+
+/// Shared fail path for `assert` and `panic`: write a pre-formatted
+/// message to stderr, call `exit(101)`, and emit a trap terminator
+/// (Cranelift requires a block terminator even after noreturn calls).
+fn emit_fail_path<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx: &mut FunctionContext<'_, M>,
+    msg_string_id: StringId,
+) -> Result<(), String> {
+    // Grab text and length before the mutable borrows in store_string.
+    let msg_text = ctx.pool.str(msg_string_id).to_owned();
+    let msg_len = msg_text.len();
+
+    let data_id = store_string(
+        msg_string_id,
+        &msg_text,
+        ctx.module,
+        ctx.data_ctx,
+        ctx.string_data,
+    )?;
+    let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+    let string_ptr = builder.ins().global_value(ctx.int_type, data_ref);
+    let string_len = builder.ins().iconst(ctx.int_type, msg_len as i64);
+    let fd = builder.ins().iconst(ctx.int_type, 2); // stderr
+
+    let mut write_sig = ctx.module.make_signature();
+    write_sig.params.push(AbiParam::new(ctx.int_type));
+    write_sig.params.push(AbiParam::new(ctx.int_type));
+    write_sig.params.push(AbiParam::new(ctx.int_type));
+    write_sig.returns.push(AbiParam::new(ctx.int_type));
+    let write_func = ctx
+        .module
+        .declare_function("write", Linkage::Import, &write_sig)
+        .map_err(|e| format!("Failed to declare write function: {}", e))?;
+    let write_ref = ctx.module.declare_func_in_func(write_func, builder.func);
+    builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
+
+    let mut exit_sig = ctx.module.make_signature();
+    exit_sig.params.push(AbiParam::new(ctx.int_type));
+    let exit_func = ctx
+        .module
+        .declare_function("exit", Linkage::Import, &exit_sig)
+        .map_err(|e| format!("Failed to declare exit function: {}", e))?;
+    let exit_ref = ctx.module.declare_func_in_func(exit_func, builder.func);
+    let exit_code = builder.ins().iconst(ctx.int_type, 101);
+    builder.ins().call(exit_ref, &[exit_code]);
+
+    // exit() is noreturn, but Cranelift needs a terminator
+    builder.ins().trap(TrapCode::user(1).unwrap());
+
+    Ok(())
 }
 
 /// Materialize a string literal pointer into the function. Pulled
