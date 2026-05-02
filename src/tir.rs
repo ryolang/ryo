@@ -45,6 +45,7 @@
 
 use crate::types::{InternPool, StringId, TypeId};
 use chumsky::span::{SimpleSpan, Span as _};
+use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU32;
 
@@ -236,6 +237,13 @@ pub struct Tir {
     /// top-level statements, in execution order.
     pub body: ExtraRange,
     pub span: Span,
+    /// Side table mapping a `TirRef` (the call instruction) to the
+    /// `StringId` of the pre-interned formatted message. This avoids
+    /// passing `&mut InternPool` to codegen. Used for panic/assert
+    /// builtin calls where sema formats the failure message and interns
+    /// it, then records the resulting `StringId` here keyed by the
+    /// call's `TirRef`.
+    fail_messages: HashMap<TirRef, StringId>,
 }
 
 impl Tir {
@@ -253,6 +261,14 @@ impl Tir {
             .copied()
             .map(TirRef::from_raw)
             .collect()
+    }
+
+    pub fn set_fail_message(&mut self, r: TirRef, sid: StringId) {
+        self.fail_messages.insert(r, sid);
+    }
+
+    pub fn fail_message(&self, r: TirRef) -> Option<StringId> {
+        self.fail_messages.get(&r).copied()
     }
 }
 
@@ -536,6 +552,7 @@ impl TirBuilder {
             spans: self.spans,
             body: ExtraRange { offset, len },
             span: self.span,
+            fail_messages: HashMap::new(),
         }
     }
 }
@@ -936,5 +953,31 @@ mod tests {
         let tir = b.finish(&[u]);
         assert!(matches!(tir.inst(u).tag, TirTag::Unreachable));
         assert_eq!(tir.inst(u).ty, err_ty);
+    }
+
+    #[test]
+    fn fail_message_table_roundtrip() {
+        let mut tir = {
+            let mut pool = InternPool::new();
+            let main = pool.intern_str("main");
+            let b = TirBuilder::new(main, vec![], pool.int(), sp());
+            b.finish(&[])
+        };
+        let r = TirRef::from_raw(42);
+        let sid = StringId::from_raw(7);
+        tir.set_fail_message(r, sid);
+        assert_eq!(tir.fail_message(r), Some(sid));
+    }
+
+    #[test]
+    fn fail_message_table_missing_returns_none() {
+        let tir = {
+            let mut pool = InternPool::new();
+            let main = pool.intern_str("main");
+            let b = TirBuilder::new(main, vec![], pool.int(), sp());
+            b.finish(&[])
+        };
+        let r = TirRef::from_raw(99);
+        assert_eq!(tir.fail_message(r), None);
     }
 }
