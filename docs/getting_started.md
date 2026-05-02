@@ -14,7 +14,7 @@ ryo --version
 
 ### From Source
 
-Requires **Rust 1.91+** ([Install Rust](https://rustup.rs/)). Zig linker is managed automatically.
+Requires **Rust 1.92+** ([Install Rust](https://rustup.rs/)). Zig linker is managed automatically.
 
 ```bash
 git clone https://github.com/ryolang/ryo.git
