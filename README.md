@@ -89,7 +89,7 @@ curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh -s
 
 ### From Source
 
-Requires **Rust 1.91+** ([Install Rust](https://rustup.rs/)). Zig linker is managed automatically.
+Requires **Rust 1.92+** ([Install Rust](https://rustup.rs/)). Zig linker is managed automatically.
 
 ```bash
 git clone https://github.com/ryolang/ryo.git
