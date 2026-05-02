@@ -846,6 +846,16 @@ impl<M: Module> Codegen<M> {
             .fail_message(call_ref)
             .expect("sema should have recorded a fail message for panic()");
         emit_fail_path(builder, ctx, msg_id)?;
+
+        // emit_fail_path terminated the current block (exit + trap).
+        // Create a new unreachable block so that any subsequent
+        // instructions emitted by the caller (the dummy iconst
+        // placeholder, or statements that follow in the body) land in
+        // valid — but dead — IR that Cranelift will eliminate.
+        let dead_block = builder.create_block();
+        builder.seal_block(dead_block);
+        builder.switch_to_block(dead_block);
+
         Ok(())
     }
 }

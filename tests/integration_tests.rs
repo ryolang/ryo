@@ -1071,3 +1071,211 @@ fn test_combined_logical_and_conditional() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("[Result] => 0"));
 }
+
+// ============================================================================
+// Milestone 8b2: Panic and Assert
+// ============================================================================
+
+#[test]
+fn panic_exits_with_101_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tpanic(\"boom\")\n";
+    let test_file = create_test_file(temp_dir.path(), "panic_basic.ryo", code);
+
+    let output = run_ryo_command(&["run", "panic_basic.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "panic() should exit nonzero. stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn assert_true_compiles_and_succeeds() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tassert(true, \"should pass\")\n\tprint(\"ok\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "assert_true.ryo", code);
+
+    let output = run_ryo_command(&["run", "assert_true.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "assert(true) should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[Result] => 0"));
+}
+
+#[test]
+fn assert_false_exits_with_101_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tassert(false, \"this should fail\")\n";
+    let test_file = create_test_file(temp_dir.path(), "assert_false.ryo", code);
+
+    let output = run_ryo_command(&["run", "assert_false.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "assert(false) should exit nonzero. stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn assert_expression_condition_compiles() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tassert(1 == 1, \"equality works\")\n\tassert(2 != 3, \"inequality works\")\n\tprint(\"all good\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "assert_expr.ryo", code);
+
+    let output = run_ryo_command(&["run", "assert_expr.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn multiple_asserts_all_passing() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tassert(true, \"first\")\n\tassert(1 == 1, \"second\")\n\tassert(1 != 2, \"third\")\n\tprint(\"done\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "multi_assert.ryo", code);
+
+    let output = run_ryo_command(&["run", "multi_assert.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(output.status.success());
+}
+
+#[test]
+fn assert_as_last_statement() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tassert(true, \"final\")\n";
+    let test_file = create_test_file(temp_dir.path(), "assert_last.ryo", code);
+
+    let output = run_ryo_command(&["run", "assert_last.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn assert_inside_if_body() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tif true:\n\t\tassert(1 == 1, \"in if\")\n\tprint(\"after\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "assert_in_if.ryo", code);
+
+    let output = run_ryo_command(&["run", "assert_in_if.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn panic_inside_if_branch_taken() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tif true:\n\t\tpanic(\"taken\")\n\tprint(\"unreachable\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "panic_in_if.ryo", code);
+
+    let output = run_ryo_command(&["run", "panic_in_if.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "panic in taken branch should exit nonzero. stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn panic_inside_if_branch_not_taken() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tif false:\n\t\tpanic(\"not taken\")\n\tprint(\"reached\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "panic_skipped.ryo", code);
+
+    let output = run_ryo_command(&["run", "panic_skipped.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "untaken panic branch should not fire. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn assert_non_bool_condition_rejected() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tassert(42, \"not bool\")\n";
+    let test_file = create_test_file(temp_dir.path(), "assert_bad_cond.ryo", code);
+
+    let output = run_ryo_command(&["run", "assert_bad_cond.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "non-bool condition should be a compile error"
+    );
+}
+
+#[test]
+fn assert_wrong_arity_rejected() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tassert(true)\n";
+    let test_file = create_test_file(temp_dir.path(), "assert_arity.ryo", code);
+
+    let output = run_ryo_command(&["run", "assert_arity.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "wrong arity should be a compile error"
+    );
+}
+
+#[test]
+fn panic_wrong_arity_rejected() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tpanic()\n";
+    let test_file = create_test_file(temp_dir.path(), "panic_arity.ryo", code);
+
+    let output = run_ryo_command(&["run", "panic_arity.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "panic with no args should be a compile error"
+    );
+}
+
+#[test]
+fn panic_non_literal_rejected() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tpanic(42)\n";
+    let test_file = create_test_file(temp_dir.path(), "panic_bad_arg.ryo", code);
+
+    let output = run_ryo_command(&["run", "panic_bad_arg.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "panic with non-literal should be a compile error"
+    );
+}
