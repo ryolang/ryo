@@ -104,38 +104,7 @@ These are underspecified aspects that will confuse developers if left undefined.
 
 ---
 
-## Resolved Issues
-
-### The Logic Paradoxes (Roadmap Breakers) — RESOLVED
-
-*   **Was:** Two ordering paradoxes in the implementation roadmap:
-    1.  Milestone 20 (`&mut`) was scheduled *after* Milestone 22 (Collections) and M23 (Drop), but `list.append(item)` and `drop(&mut self)` require mutable references.
-    2.  Closures (M4.5, now M8.6) included capture analysis before Basic Ownership (M15), but "Move Capture" requires Move semantics.
-*   **Resolution:**
-    1.  M20 moved to after M19 in Phase 3. New order: M15 → M16 → M17 → M18 → M19 → M20 → M21 → M22 → M23.
-    2.  M4.5 split: closure syntax and parsing remain in M4.5 (now M8.6); capture analysis (borrow/move rules for captured variables) deferred to new Milestone 15.5, after M15 defines Move semantics.
-
-These have been addressed by the Ownership Lite rewrite (specification.md, Section 5).
-
-### Borrow/Move Inconsistency — RESOLVED
-
-*   **Was:** Example files used conflicting syntax — `&scores` at call sites (Rust-style), `mut text: &str` (deprecated), inconsistent between `memory.ryo` and `mem.ryo`.
-*   **Resolution:** The 7 formalized rules now define:
-    *   Rule 2: Immutable borrows are implicit — `fn read(data: str)` borrows, no `&` needed at call site.
-    *   Rule 3: Mutable borrows use `&mut` in signature AND call site — `fn mutate(data: &mut str)` + `mutate(&mut x)`.
-    *   Rule 4: Moves use `move` keyword — `fn consume(move data: str)`.
-    *   Example files updated to match.
-
-### Ownership Lite Safety Gap — RESOLVED
-
-*   **Was:** "Ownership Lite" was underspecified. No clear boundary for where borrows could exist, leading to unanswerable questions about lifetime inference (returned references, references in structs, iterator lifetimes).
-*   **Resolution:** Three new rules eliminate the need for lifetime annotations entirely:
-    *   Rule 5: Functions cannot return borrows — always return owned values.
-    *   Rule 6: Structs cannot contain references — fields are owned values, `Shared[T]`, or IDs.
-    *   Section 5.7: Iterators are scope-locked views — cannot escape their block.
-*   **Trade-off acknowledged:** Where Rust uses lifetime-annotated borrows for zero-copy returns, Ryo returns owned values — but NRVO and move semantics make most returns zero-cost (see spec Section 5.9). Actual clones are rare in practice.
-
-### Iterator Invalidation — PARTIALLY RESOLVED
+### 16. Iterator Invalidation — PARTIALLY RESOLVED
 
 *   **Was:** Modifying a list while iterating causes use-after-free without Rust's strict borrow checker.
 *   **Resolution (compile-time):** Scope-locked views (spec 5.7) prevent iterators from escaping their block. Rule 7 (one writer OR many readers) prevents simultaneous mutation and iteration in concurrent contexts.
@@ -145,36 +114,10 @@ These have been addressed by the Ownership Lite rewrite (specification.md, Secti
     *   Mismatch triggers a panic with a clear message: `"collection modified during iteration"`.
     *   Cost: one integer comparison per iteration — negligible.
 
-### Hidden String Allocations — RESOLVED
 
-*   **Was:** If `str` is always heap-allocated, `x = "hello"` triggers a malloc. The distinction between `&str` (view) and `str` (owned) was unclear, especially for function parameters and return types.
-*   **Resolution:** Under the new Ownership Lite rules:
-    *   String literals are stored in `.rodata` (zero allocation). The compiler infers them as lightweight values.
-    *   Function parameters implicitly borrow (Rule 2) — `fn bar(s: str)` reads without copying. The compiler passes a fat pointer (address + length) automatically.
-    *   Functions cannot return `&str` (Rule 5) — they return owned `str`. The compiler applies copy elision when the original is no longer used.
-    *   Structs cannot contain `&str` (Rule 6) — they own their `str` fields.
-*   **The DX story is now clean:** Pass strings naturally (implicit borrow), return strings naturally (owned, compiler optimizes). No `&str` vs `str` decision for the developer in most code.
-
-### Resource Management Syntax — RESOLVED
-
-*   **Was:** No standard pattern for resource lifetime management (DB connections, file handles, pools).
-*   **Resolution:** `with ... as ...:` blocks (spec 5.5):
-    *   Identical syntax to Python's `with` statement.
-    *   Backed by RAII/Drop — any type implementing `Drop` works.
-    *   Cleanup behavior determined by the type: `Drop` closes files, returns pool connections, releases locks.
-    *   No separate `acquire` keyword — pools are stdlib types, `pool.acquire()` returns a guard whose `Drop` returns the resource.
-
----
-
-## Immediate Action Plan
-
-### Priority 1 (Roadmap Blockers)
-1.  ~~Reorder Phase 3: put M20 (`&mut`) before M21/M22/M23.~~ **Done.**
-2.  ~~Move Closure capture semantics (M4.5, now M8.6) to Phase 3.~~ **Done.**
 
 ### Priority 2 (Spec Completeness)
 3.  Add `never` type (`!`) to Section 4.
-4.  Standardize `main` return type (`void`, implicit exit 0).
 5.  Document inherent `impl` blocks.
 6.  Add "post-v0.1" note to Sections 9 (Concurrency) and generics usage.
 
@@ -188,14 +131,7 @@ These have been addressed by the Ownership Lite rewrite (specification.md, Secti
 
 ### Checklist
 
-- [x] Define borrow/move rules (7 formalized rules in spec Section 5)
-- [x] Define resource management pattern (`with ... as ...:`)
-- [x] Resolve string allocation ambiguity
-- [x] Define iterator safety model (scope-locked views + versioned iterators)
-- [x] Reorder Phase 3 milestones
-- [x] Move closure capture semantics to Phase 3
 - [ ] Add `never` type to spec
-- [ ] Standardize `main` return type
 - [ ] Define `mut x: T = val` as mandatory
 - [ ] Define shadowing rules
 - [ ] Define `==` as structural equality

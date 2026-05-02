@@ -51,7 +51,7 @@ fn double(x: int) -> int:
 - `docs/analysis/` — scratch/working artifacts, not committed
 - `docs/assets/` — images and static files
 - `docs/dev/` — implementation notes (see `docs/dev/CLAUDE.md`)
-- `docs/examples/` — Ryo code examples
+- `examples/` — Ryo code examples (working + `future/` for aspirational)
 - `docs/extra/` — supplementary documentation
 
 ---
@@ -74,7 +74,7 @@ docs/dev/*.md             (how the compiler/stdlib delivers — links back to sp
 
 **Roadmap owns pointers:** When a new dev doc is written, link it from the roadmap, not from the spec.
 
-**Spec is source of truth:** When index.md, language_comparison.md, or quickstart.md contradict the spec, update the companion, never the spec.
+**Spec is source of truth:** When index.md, getting_started.md, or language_comparison.md contradict the spec, update the companion, never the spec.
 
 **Preserve voice; minimal diffs:** Restructuring sections is out of scope. Preserve existing voice and structure. For multi-file changes, show diffs before applying.
 

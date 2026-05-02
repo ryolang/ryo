@@ -1,5 +1,6 @@
 # TODO
 
+- [ ] [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)
 - [ ] [Go by Example](https://www.mintlify.com/mmcgrana/gobyexample/introduction)
 - [ ] Iterators
 - [ ] Define Testing

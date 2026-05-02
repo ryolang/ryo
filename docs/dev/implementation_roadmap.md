@@ -341,9 +341,9 @@ fn main() -> int:
    - `docs/specification.md` Section 11: Complete module system specification (270+ lines)
    - `docs/specification.md` Section 2: Added `package` keyword to language keywords
    - `docs/proposals.md`: 8 future enhancement proposals (re-exports, workspaces, etc.)
-   - `docs/design_issues.md`: Comprehensive design rationale and trade-off analysis
-   - `docs/getting_started.md` Section 3: Complete module tutorial with examples
-   - `docs/examples/modules/`: 6 practical examples demonstrating all features
+   - `docs/dev/design_issues.md`: Comprehensive design rationale and trade-off analysis
+   - Module tutorial examples in `examples/future/modules/`
+   - `examples/future/modules/`: 6 practical examples demonstrating all features
    - `CLAUDE.md`: Module system design added to Key Design Decisions
 
 5. **Practical Examples** (6 comprehensive examples):
@@ -476,10 +476,10 @@ The module system will be **implemented** in:
 **References:**
 
 - `docs/specification.md` Section 11 - Complete specification
-- `docs/design_issues.md` - Design rationale and trade-offs
+- `docs/dev/design_issues.md` - Design rationale and trade-offs
 - `docs/proposals.md` - Future enhancements
-- `docs/examples/modules/` - Practical examples
-- `docs/getting_started.md` Section 3 - Tutorial
+- `examples/future/modules/` - Practical examples
+- `docs/getting_started.md` - Installation and first program
 - `CLAUDE.md` - Architecture guidelines
 
 **Next Steps:**
@@ -763,7 +763,7 @@ Also defer: `debug_assert` (compiled-out in release builds). Comes essentially f
 In test files (the primary motivator):
 
 ```ryo
-fn main() -> int:
+fn main():
     assert(2 + 2 == 4, "arithmetic is broken")
     assert(not false, "negation is broken")
 
@@ -771,7 +771,6 @@ fn main() -> int:
     let y = 3
     assert(x % y == 1, "modulo wrong")
 
-    return 0
 ```
 
 In application code, as a runtime invariant:
@@ -911,7 +910,7 @@ Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching,
 fn greet(name: str) -> str:
 	return "Hello, " + name + "!"   # name moved into the concatenation chain
 
-fn main() -> int:
+fn main():
 	user: str = "Alice"
 	msg = greet(user)                # user moved into greet
 	# print(user)                    # compile error: use after move
@@ -921,7 +920,6 @@ fn main() -> int:
 	x: int = 42
 	y = x                            # int is Copy — x still valid
 	print("x = " + int_to_str(x))    # ok
-	return 0
 ```
 
 **Implementation Notes:**
@@ -955,12 +953,11 @@ fn main() -> int:
 fn length(s: &str) -> int:
 	return s.len()
 
-fn main() -> int:
+fn main():
 	name: str = "Alice"
 	n1 = length(&name)            # name borrowed, not moved
 	n2 = length(&name)            # ok — still readable
 	print(name)                   # ok — name still owned here
-	return 0
 ```
 
 **Implementation Notes:**
@@ -993,7 +990,7 @@ fn main() -> int:
 fn increment(x: &mut int):
 	*x += 1
 
-fn main() -> int:
+fn main():
 	mut count = 0
 	increment(&mut count)
 	print(int_to_str(count))     # 1
@@ -1002,7 +999,6 @@ fn main() -> int:
 	# r1 = &mut count
 	# r2 = &mut count            # compile error: cannot borrow as mutable twice
 	# r3 = &count                # compile error: shared while mutable borrow live
-	return 0
 ```
 
 **Implementation Notes:**
@@ -1035,12 +1031,11 @@ fn first_word(text: &str) -> &str:
 			return text[0:i]      # slice into text, no copy
 	return text
 
-fn main() -> int:
+fn main():
 	s: str = "hello world"
 	word = first_word(&s)         # word: &str borrowed from s
 	print(word)                   # "hello"
 	print(s)                      # ok — s still owned
-	return 0
 ```
 
 **Implementation Notes:**
@@ -1173,10 +1168,9 @@ struct Rectangle:
 fn area(rect: Rectangle) -> float:
 	return rect.width * rect.height
 
-fn main() -> int:
+fn main():
 	r = Rectangle(width=10.0, height=5.0)
 	a = area(r)
-	return 0
 ```
 
 **Implementation Notes:**
@@ -1215,10 +1209,9 @@ fn divmod(a: int, b: int) -> (int, int):
 	remainder = a % b
 	return (quotient, remainder)
 
-fn main() -> int:
+fn main():
 	(q, r) = divmod(10, 3)
 	# q = 3, r = 1
-	return 0
 ```
 
 **Implementation Notes:**
@@ -1379,8 +1372,7 @@ fn fetch_and_parse() -> (http.ConnectionFailed | http.RequestTimeout | parse.Inv
 		Err(e): return e          # propagate parse errors
 	return data
 
-fn main() -> int:
-	return 0
+fn main():
 ```
 
 **Implementation Notes:**
@@ -1432,7 +1424,7 @@ fn find_user(id: int) -> ?User:
 		return none
 	return User(name="Alice", id=id)
 
-fn main() -> int:
+fn main():
 	user = find_user(42)
 
 	# Optional chaining
@@ -1442,11 +1434,10 @@ fn main() -> int:
 	display_name = user?.name orelse "Unknown"
 
 	# Early return with smart casting
-	u = user orelse return 1
+	u = user orelse return
 	# u is now User (not ?User) after this line
 	print(u.name)
 
-	return 0
 ```
 
 **Implementation Notes:**
@@ -1495,11 +1486,10 @@ impl Circle:
 	fn scale(self, factor: float) -> Circle:
 		return Circle(radius=self.radius * factor)
 
-fn main() -> int:
+fn main():
 	c = Circle(radius=5.0)
 	a = c.area()              # Consumes c (moved)
 	# c.area()                # Error: c was moved
-	return 0
 ```
 
 **Implementation Notes:**
@@ -1539,11 +1529,10 @@ fn sum_slice(numbers: &[int]) -> int:
 		total += n
 	return total
 
-fn main() -> int:
+fn main():
 	nums = [1, 2, 3, 4, 5]
 	total = sum_slice(&nums[1:4])    # pass slice [2, 3, 4]
 	print(int_to_str(total))         # 9
-	return 0
 ```
 
 **Implementation Notes:**
@@ -1577,7 +1566,7 @@ fn main() -> int:
 
 **Example:**
 ```ryo
-fn main() -> int:
+fn main():
 	mut numbers = list[int]()
 	numbers.append(1)
 	numbers.append(2)
@@ -1595,7 +1584,6 @@ fn main() -> int:
 	alice_score = scores.get("Alice") orelse 0
 	print(alice_score)  # 100
 
-	return 0
 ```
 
 **Implementation Notes:**
@@ -1726,11 +1714,10 @@ fn _validate(x: int) -> int:
 # src/main.ryo
 import math
 
-fn main() -> int:
+fn main():
 	result = math.add(2, 3)              # ✓ OK: add is pub
 	# math.internal_helper(5)            # ✓ OK: same package
 	# math._validate(10)                 # ❌ Error: module-private
-	return 0
 ```
 
 **Implementation Notes:**
@@ -1790,11 +1777,11 @@ import string
 import collections
 import os
 
-fn main() -> int:
+fn main():
 	args = os.args()
 	if args.len() < 2:
 		io.println("Usage: program <file>")
-		return 1
+		os.exit(1)
 
 	filename = args[1]
 	# v0.1: explicit error propagation via match (try/catch is v0.2)
@@ -1802,12 +1789,11 @@ fn main() -> int:
 		Ok(c): c
 		Err(e):
 			io.println("Error reading file: " + e.message())
-			return 1
+			os.exit(1)
 
 	words = string.split(content, " ")
 	io.println("Word count: " + int_to_str(words.len()))  # v0.1: concat (f-strings v0.2)
 
-	return 0
 ```
 
 **Implementation Notes:**
@@ -1861,12 +1847,11 @@ fn divide(a: int, b: int) -> int:
 		panic("Division by zero")
 	return a / b
 
-fn main() -> int:
+fn main():
 	assert(1 + 1 == 2, "Math is broken!")
 
 	result = divide(10, 0)  # Panics with stack trace
 	io.println(f"Result: {result}")
-	return 0
 ```
 
 **Output on panic (v0.1):**
