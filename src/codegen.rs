@@ -812,9 +812,7 @@ impl<M: Module> Codegen<M> {
         let ok_block = builder.create_block();
         let fail_block = builder.create_block();
 
-        builder
-            .ins()
-            .brif(cond_val, ok_block, &[], fail_block, &[]);
+        builder.ins().brif(cond_val, ok_block, &[], fail_block, &[]);
 
         // --- fail path: write message to stderr, then exit(101) ---
         builder.seal_block(fail_block);
@@ -840,9 +838,7 @@ impl<M: Module> Codegen<M> {
         )?;
         let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
         let string_ptr = builder.ins().global_value(ctx.int_type, data_ref);
-        let string_len = builder
-            .ins()
-            .iconst(ctx.int_type, full_msg.len() as i64);
+        let string_len = builder.ins().iconst(ctx.int_type, full_msg.len() as i64);
         let fd = builder.ins().iconst(ctx.int_type, 2); // stderr
 
         let mut write_sig = ctx.module.make_signature();

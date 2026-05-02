@@ -879,7 +879,8 @@ fn check_call(
     // never see them.
     if let Some(builtin) = builtins::lookup(sema.pool.str(name_id)) {
         let ret_ty = builtin.return_type(sema.pool);
-        check_builtin_call(sema, view, span);
+        let call_ref = fcx.builder.call(name_id, arg_tirs, ret_ty, span);
+        check_builtin_call(sema, fcx, view, call_ref, span);
 
         // Type-check assert condition (must be bool)
         if sema.pool.str(name_id) == "assert" && arg_tirs.len() == 2 {
@@ -896,7 +897,7 @@ fn check_call(
             }
         }
 
-        return fcx.builder.call(name_id, arg_tirs, ret_ty, span);
+        return call_ref;
     }
 
     // Demand the callee. With eagerly-resolved signatures this is
@@ -973,7 +974,13 @@ fn check_call(
 /// These checks are builtin-specific and temporary: once `print`
 /// moves to a runtime crate and is called through a normal
 /// signature (see ISSUES.md I-006), they go away.
-fn check_builtin_call(sema: &mut Sema<'_>, view: &CallView, span: Span) {
+fn check_builtin_call(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    call_tir_ref: TirRef,
+    span: Span,
+) {
     let name = sema.pool.str(view.name);
     if name == "print" {
         if view.args.len() != 1 {
@@ -1009,6 +1016,40 @@ fn check_builtin_call(sema: &mut Sema<'_>, view: &CallView, span: Span) {
                 DiagCode::BuiltinArgKind,
                 "assert() message must be a string literal",
             ));
+        } else {
+            let user_msg_id = match sema.uir.inst(view.args[1]).data {
+                InstData::Str(id) => id,
+                _ => unreachable!("StrLiteral tag implies Str data"),
+            };
+            let user_msg = sema.pool.str(user_msg_id).to_owned();
+            let formatted = format!("assertion failed: {}\n", user_msg);
+            let formatted_id = sema.pool.intern_str(&formatted);
+            fcx.builder.set_fail_message(call_tir_ref, formatted_id);
+        }
+    } else if name == "panic" {
+        if view.args.len() != 1 {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::ArityMismatch,
+                format!("panic() takes exactly 1 argument, got {}", view.args.len()),
+            ));
+            return;
+        }
+        if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
+            sema.sink.emit(Diag::error(
+                sema.uir.span(view.args[0]),
+                DiagCode::BuiltinArgKind,
+                "panic() argument must be a string literal",
+            ));
+        } else {
+            let user_msg_id = match sema.uir.inst(view.args[0]).data {
+                InstData::Str(id) => id,
+                _ => unreachable!("StrLiteral tag implies Str data"),
+            };
+            let user_msg = sema.pool.str(user_msg_id).to_owned();
+            let formatted = format!("panicked: {}\n", user_msg);
+            let formatted_id = sema.pool.intern_str(&formatted);
+            fcx.builder.set_fail_message(call_tir_ref, formatted_id);
         }
     }
 }
@@ -1664,5 +1705,30 @@ mod tests {
     fn assert_message_must_be_string_literal() {
         let err = run("fn main():\n\tassert(true, 42)\n").unwrap_err();
         assert!(any_code(&err, DiagCode::BuiltinArgKind));
+    }
+
+    // ---- M8c: panic builtin validation ----
+
+    #[test]
+    fn panic_wrong_arity_zero_args() {
+        let err = run("fn main():\n\tpanic()\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn panic_wrong_arity_two_args() {
+        let err = run("fn main():\n\tpanic(\"a\", \"b\")\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn panic_message_must_be_string_literal() {
+        let err = run("fn main():\n\tpanic(42)\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::BuiltinArgKind));
+    }
+
+    #[test]
+    fn panic_string_literal_ok() {
+        run("fn main():\n\tpanic(\"oops\")\n").unwrap();
     }
 }

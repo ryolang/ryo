@@ -319,6 +319,7 @@ pub struct TirBuilder {
     instructions: Vec<TypedInst>,
     extra: Vec<u32>,
     spans: Vec<Span>,
+    fail_messages: HashMap<TirRef, StringId>,
 }
 
 impl TirBuilder {
@@ -340,6 +341,7 @@ impl TirBuilder {
             instructions: vec![placeholder],
             extra: Vec::new(),
             spans: vec![placeholder_span],
+            fail_messages: HashMap::new(),
         }
     }
 
@@ -350,6 +352,10 @@ impl TirBuilder {
     /// arena stays an implementation detail.
     pub fn ty_of(&self, r: TirRef) -> TypeId {
         self.instructions[r.index()].ty
+    }
+
+    pub fn set_fail_message(&mut self, r: TirRef, sid: StringId) {
+        self.fail_messages.insert(r, sid);
     }
 
     fn push(&mut self, tag: TirTag, ty: TypeId, data: TirData, span: Span) -> TirRef {
@@ -552,7 +558,7 @@ impl TirBuilder {
             spans: self.spans,
             body: ExtraRange { offset, len },
             span: self.span,
-            fail_messages: HashMap::new(),
+            fail_messages: self.fail_messages,
         }
     }
 }
