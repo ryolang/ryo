@@ -85,7 +85,7 @@ struct FunctionContext<'a, M: Module> {
     string_data: &'a mut HashMap<StringId, DataId>,
     int_type: types::Type,
     triple: &'a Triple,
-    pool: &'a InternPool,
+    pool: &'a mut InternPool,
     tir: &'a Tir,
     locals: HashMap<StringId, Variable>,
     func_ids: &'a HashMap<StringId, FuncId>,
@@ -170,7 +170,7 @@ impl Codegen<JITModule> {
 }
 
 impl<M: Module> Codegen<M> {
-    pub fn compile(&mut self, tirs: &[Tir], pool: &InternPool) -> Result<FuncId, String> {
+    pub fn compile(&mut self, tirs: &[Tir], pool: &mut InternPool) -> Result<FuncId, String> {
         debug_assert!(
             no_unreachable_in(tirs),
             "codegen::compile requires sema to have produced TIR with no Unreachable instructions"
@@ -198,7 +198,7 @@ impl<M: Module> Codegen<M> {
     pub fn compile_and_dump_ir(
         &mut self,
         tirs: &[Tir],
-        pool: &InternPool,
+        pool: &mut InternPool,
     ) -> Result<String, String> {
         debug_assert!(
             no_unreachable_in(tirs),
@@ -263,7 +263,7 @@ impl<M: Module> Codegen<M> {
         &mut self,
         tir: &Tir,
         func_ids: &HashMap<StringId, FuncId>,
-        pool: &InternPool,
+        pool: &mut InternPool,
     ) -> Result<String, String> {
         let func_id = *func_ids
             .get(&tir.name)
@@ -700,6 +700,10 @@ impl<M: Module> Codegen<M> {
                     Self::generate_print_call(builder, ctx, &view.args)?;
                     Ok(builder.ins().iconst(ctx.int_type, 0))
                 }
+                "assert" => {
+                    Self::generate_assert_call(builder, ctx, &view.args)?;
+                    Ok(builder.ins().iconst(ctx.int_type, 0))
+                }
                 _ => Err(format!(
                     "Builtin '{}' has no codegen implementation",
                     name_str
@@ -792,6 +796,86 @@ impl<M: Module> Codegen<M> {
         let write_ref = ctx.module.declare_func_in_func(write_func, builder.func);
         let call_inst = builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
         let _bytes_written = builder.inst_results(call_inst)[0];
+
+        Ok(())
+    }
+
+    fn generate_assert_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        args: &[TirRef],
+    ) -> Result<(), String> {
+        debug_assert_eq!(args.len(), 2, "sema should reject assert() arity errors");
+
+        let cond_val = Self::eval_inst(builder, ctx, args[0])?;
+
+        let ok_block = builder.create_block();
+        let fail_block = builder.create_block();
+
+        builder
+            .ins()
+            .brif(cond_val, ok_block, &[], fail_block, &[]);
+
+        // --- fail path: write message to stderr, then exit(101) ---
+        builder.seal_block(fail_block);
+        builder.switch_to_block(fail_block);
+
+        let string_id = match ctx.tir.inst(args[1]).data {
+            TirData::Str(id) => id,
+            other => unreachable!(
+                "sema should reject non-literal assert() message, got {:?}",
+                other
+            ),
+        };
+        let user_msg = ctx.pool.str(string_id).to_owned();
+        let full_msg = format!("assertion failed: {}\n", user_msg);
+        let full_msg_id = ctx.pool.intern_str(&full_msg);
+
+        let data_id = store_string(
+            full_msg_id,
+            &full_msg,
+            ctx.module,
+            ctx.data_ctx,
+            ctx.string_data,
+        )?;
+        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+        let string_ptr = builder.ins().global_value(ctx.int_type, data_ref);
+        let string_len = builder
+            .ins()
+            .iconst(ctx.int_type, full_msg.len() as i64);
+        let fd = builder.ins().iconst(ctx.int_type, 2); // stderr
+
+        let mut write_sig = ctx.module.make_signature();
+        write_sig.params.push(AbiParam::new(ctx.int_type));
+        write_sig.params.push(AbiParam::new(ctx.int_type));
+        write_sig.params.push(AbiParam::new(ctx.int_type));
+        write_sig.returns.push(AbiParam::new(ctx.int_type));
+
+        let write_func = ctx
+            .module
+            .declare_function("write", Linkage::Import, &write_sig)
+            .map_err(|e| format!("Failed to declare write function: {}", e))?;
+        let write_ref = ctx.module.declare_func_in_func(write_func, builder.func);
+        builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
+
+        // call exit(101)
+        let mut exit_sig = ctx.module.make_signature();
+        exit_sig.params.push(AbiParam::new(ctx.int_type));
+
+        let exit_func = ctx
+            .module
+            .declare_function("exit", Linkage::Import, &exit_sig)
+            .map_err(|e| format!("Failed to declare exit function: {}", e))?;
+        let exit_ref = ctx.module.declare_func_in_func(exit_func, builder.func);
+        let exit_code = builder.ins().iconst(ctx.int_type, 101);
+        builder.ins().call(exit_ref, &[exit_code]);
+
+        // exit() is noreturn, but Cranelift needs a terminator
+        builder.ins().trap(TrapCode::user(1).unwrap());
+
+        // --- ok path: continue ---
+        builder.seal_block(ok_block);
+        builder.switch_to_block(ok_block);
 
         Ok(())
     }
