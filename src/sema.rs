@@ -880,6 +880,22 @@ fn check_call(
     if let Some(builtin) = builtins::lookup(sema.pool.str(name_id)) {
         let ret_ty = builtin.return_type(sema.pool);
         check_builtin_call(sema, view, span);
+
+        // Type-check assert condition (must be bool)
+        if sema.pool.str(name_id) == "assert" && arg_tirs.len() == 2 {
+            let cond_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if !sema.pool.compatible(cond_ty, sema.pool.bool_()) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "assert() condition must be 'bool', got '{}'",
+                        sema.pool.display(cond_ty),
+                    ),
+                ));
+            }
+        }
+
         return fcx.builder.call(name_id, arg_tirs, ret_ty, span);
     }
 
@@ -958,7 +974,8 @@ fn check_call(
 /// moves to a runtime crate and is called through a normal
 /// signature (see ISSUES.md I-006), they go away.
 fn check_builtin_call(sema: &mut Sema<'_>, view: &CallView, span: Span) {
-    if sema.pool.str(view.name) == "print" {
+    let name = sema.pool.str(view.name);
+    if name == "print" {
         if view.args.len() != 1 {
             sema.sink.emit(Diag::error(
                 span,
@@ -972,6 +989,25 @@ fn check_builtin_call(sema: &mut Sema<'_>, view: &CallView, span: Span) {
                 sema.uir.span(view.args[0]),
                 DiagCode::BuiltinArgKind,
                 "print() argument must be a string literal",
+            ));
+        }
+    } else if name == "assert" {
+        if view.args.len() != 2 {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::ArityMismatch,
+                format!(
+                    "assert() takes exactly 2 arguments (condition, message), got {}",
+                    view.args.len()
+                ),
+            ));
+            return;
+        }
+        if !matches!(sema.uir.inst(view.args[1]).tag, InstTag::StrLiteral) {
+            sema.sink.emit(Diag::error(
+                sema.uir.span(view.args[1]),
+                DiagCode::BuiltinArgKind,
+                "assert() message must be a string literal",
             ));
         }
     }
@@ -1586,5 +1622,47 @@ mod tests {
             "diags: {:?}",
             diags
         );
+    }
+
+    // ---- M8b: assert builtin validation ----
+
+    #[test]
+    fn assert_true_literal_ok() {
+        run("fn main():\n\tassert(true, \"ok\")\n").unwrap();
+    }
+
+    #[test]
+    fn assert_expression_condition_ok() {
+        run("fn main():\n\tassert(1 == 1, \"math works\")\n").unwrap();
+    }
+
+    #[test]
+    fn assert_wrong_arity_zero_args() {
+        let err = run("fn main():\n\tassert()\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn assert_wrong_arity_one_arg() {
+        let err = run("fn main():\n\tassert(true)\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn assert_wrong_arity_three_args() {
+        let err = run("fn main():\n\tassert(true, \"msg\", \"extra\")\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn assert_condition_must_be_bool() {
+        let err = run("fn main():\n\tassert(42, \"not bool\")\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::TypeMismatch));
+    }
+
+    #[test]
+    fn assert_message_must_be_string_literal() {
+        let err = run("fn main():\n\tassert(true, 42)\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::BuiltinArgKind));
     }
 }
