@@ -1,5 +1,8 @@
 # Standard Library
 
+!!! warning "Development Status"
+    This STD lib is aspirational only, nothing is implemented yet.
+
 ## 1. io Package (Input/Output Operations)
 
 **Purpose:** Provides basic input and output functionalities for interacting with the console, files, and potentially basic networking (if included in the core).
@@ -78,7 +81,7 @@
 
 **Essential Functions:**
 
-- `time.now_ms() -> int`: Returns the current time in milliseconds since some epoch (e.g., Unix epoch). Useful for measuring durations and timestamps.
+- `time.now() -> int`: Returns the current time in milliseconds since some epoch (e.g., Unix epoch). Useful for measuring durations and timestamps.
 - `time.duration_ms(milliseconds: int) -> Duration`: Creates a `Duration` object representing a duration in milliseconds (for clarity and type safety when dealing with time durations - `Duration` could be a simple struct).
 
 ## Missing

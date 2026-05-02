@@ -4,8 +4,7 @@
 fn is_equal(a: int, b: int) -> bool:
 	return a == b
 
-fn main() -> int:
+fn main():
 	flag: bool = true
 	same = is_equal(3, 3)
 	different = 3 != 4
-	return 0

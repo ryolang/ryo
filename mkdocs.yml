@@ -54,6 +54,11 @@ repo_name: ryo
 site_author: artefactop
 plugins:
   - search
+exclude_docs: |
+  dev/
+  analysis/
+  superpowers/
+  CLAUDE.md
 extra:
   homepage: https://ryolang.org
   social:
@@ -74,8 +79,9 @@ extra_javascript:
   - extra/init-highlight.js
 nav:
   - Home: index.md
-  - Executive Summary: executive_summary.md
+  - Getting Started: getting_started.md
   - Language Specification: specification.md
+  - Standard Library: std.md
 markdown_extensions:
   - admonition
   - attr_list

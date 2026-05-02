@@ -1,0 +1,12 @@
+import io
+
+fn main():
+	println("Welcome to the Ryo application!")
+	println("Please enter your name:")
+
+	input = io.readln() catch |e|:
+		eprintln(f"Failed to read line: {e.message()}")
+		exit(1)
+
+	name = input.trim()
+	println(f"Hello, {name}!")
