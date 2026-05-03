@@ -16,6 +16,16 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 
 ## 🔴 Blocking
 
+### I-035 — `cranelift_type_for(never)` must map to `types::I8`, not panic
+**Files:** `src/codegen.rs` (`cranelift_type_for`)
+**Summary:** Ryo allows binding values of type `never` (e.g. `x = panic("boom")`), because `never` correctly absorbs into any type expression. If `cranelift_type_for` encounters `TypeKind::Never` and panics (as originally planned), the backend will crash on perfectly valid code.
+**Resolution:** Map `TypeKind::Never` to a dummy representation (like `types::I8`). Because the value originates from a panic/unreachable instruction, Cranelift will correctly trap and enter a dead block before the dummy variable is ever read.
+
+### I-036 — `emit_assert` validation must short-circuit
+**Files:** `src/sema.rs` (`emit_assert`)
+**Summary:** If an `assert()` call passes a non-boolean condition, sema emits a `TypeMismatch` error but falls through instead of returning `unreachable`. This will attempt to build TIR nodes for a malformed operation, leading to downstream invariant violations.
+**Resolution:** Add `return fcx.builder.unreachable(sema.pool.error_type(), span);` immediately after the `sink.emit` call for the condition check.
+
 ### I-004 — String type is a raw pointer with no length
 **Files:** `src/codegen.rs` (`generate_print_call`)
 **Summary:** `StrLiteral` codegen returns a bare `global_value` pointer. There is no length, no slice ABI, no ownership metadata. `print()` works only on string literals because it grabs the length from the AST node, not from the runtime value. Any non-literal string operation will require a fat-pointer (`*u8, usize`) ABI decision.
@@ -173,6 +183,22 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Files:** `src/sema.rs` (`check_call`, `check_builtin_call`)
 **Summary:** `sema.pool.str(name_id) == "assert"` (and similar for `"panic"`, `"print"`) does a string dereference and byte comparison on every `check_call` invocation. Since the intern pool already deduplicates strings, comparing `name_id == assert_id` (where `assert_id` is cached once during builtin registration or sema init) would be a direct integer compare. Negligible today with three builtins and small programs, but the cost scales linearly with both the number of call sites and the number of builtins.
 **Resolution:** Cache `StringId`s for each builtin name (e.g., in `Sema` or alongside `builtins::BUILTINS`) and match on the id instead of the string. Same applies to the codegen-side `name_str == "print"` comparisons.
+
+### I-037 — Panic/Assert mechanism lacks `#file` / `#line` intrinsic expansion
+**Files:** `src/sema.rs`, `src/codegen.rs`
+**Summary:** The `panic` implementation bakes the source location (line, column) directly into a unique formatted string literal per call site at compile time. If a user asserts in ten places, the binary interns ten distinct copies of the assertion string format.
+**Resolution:** Add macro-style `#file` and `#line` intrinsics or special UIR nodes (e.g. `InstTag::FileLoc`) to sema/codegen. `__ryo_panic` can then take `line` and `col` as integer arguments and construct the format string dynamically via `libc` functions or standard runtime printing, sharing the user's message string across sites.
+
+### I-038 — Assert checks cannot be stripped in Release mode
+**Files:** `src/sema.rs`, `src/codegen.rs`
+**Summary:** Ryo has no mechanism to strip `assert` checks in `--release` configurations. The condition evaluates and branches at runtime unconditionally.
+**Resolution:** Introduce a compilation mode flag (`--release` vs `--debug`) and strip `assert` AST/UIR nodes during semantic analysis when building for release. Provide a `precondition` or `fatal` variant that explicitly ignores the release flag for mandatory bounds checks.
+
+### I-039 — `panic` provides no stack unwinding or stack traces
+**Files:** `src/codegen.rs` (`__ryo_panic`)
+**Summary:** A panic terminates execution instantly (`exit(101)`) and prints only the line/col of the `panic()` or `assert()` call site. If a shared utility function calls `panic`, the user gets no traceback to the caller.
+**Resolution:** Add DWARF debug info generation to Cranelift (`.debug_line`, `.debug_info`, `.debug_frame`). Implement a simple stack walker in the runtime (e.g., `backtrace` from `libc` or via DWARF frame unwinding) to print the call stack inside `__ryo_panic`.
+**Note:** DWARF emission is the shared prerequisite. Once it lands, interactive debugging via DAP ([Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)) comes nearly for free — lldb already speaks DAP, so VS Code / JetBrains attach without Ryo-specific work. The stack-trace feature in `__ryo_panic` is additive runtime work on top of that same DWARF foundation.
 
 ---
 
