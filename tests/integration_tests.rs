@@ -1415,7 +1415,9 @@ fn panic_with_emojis_aot_run_exits_101() {
     );
     let stderr = String::from_utf8_lossy(&run_output.stderr);
     assert!(
-        stderr.contains("panicked") && stderr.contains("in main()") && stderr.contains("🔥 boom 💥"),
+        stderr.contains("panicked")
+            && stderr.contains("in main()")
+            && stderr.contains("🔥 boom 💥"),
         "stderr should contain panic message with emojis, got: {}",
         stderr
     );

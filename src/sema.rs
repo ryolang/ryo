@@ -1107,7 +1107,12 @@ fn build_panic_call(
     let func_name = sema.pool.str(fcx.builder.name());
     let formatted = format!(
         "{} at {}:{}:{} in {}(): {}\n",
-        prefix, sema.file_path.display(), line, col, func_name, user_msg
+        prefix,
+        sema.file_path.display(),
+        line,
+        col,
+        func_name,
+        user_msg
     );
     let msg_len = formatted.len() as i64;
     let formatted_id = sema.pool.intern_str(&formatted);
