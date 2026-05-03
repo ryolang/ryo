@@ -1735,4 +1735,16 @@ mod tests {
     fn panic_string_literal_ok() {
         run("fn main():\n\tpanic(\"oops\")\n").unwrap();
     }
+
+    #[test]
+    fn panic_call_has_never_type() {
+        let (tirs, pool) = run("fn main():\n\tpanic(\"boom\")\n").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let call_ref = stmt_at(main, 0);
+        let inner = match main.inst(call_ref).data {
+            TirData::UnOp(operand) => operand,
+            _ => panic!("expected ExprStmt wrapping the call"),
+        };
+        assert_eq!(main.inst(inner).ty, pool.never());
+    }
 }

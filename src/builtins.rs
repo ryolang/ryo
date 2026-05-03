@@ -9,12 +9,14 @@ pub struct BuiltinFunction {
 #[derive(Copy, Clone)]
 enum BuiltinReturn {
     Void,
+    Never,
 }
 
 impl BuiltinFunction {
     pub fn return_type(&self, pool: &InternPool) -> TypeId {
         match self.return_ty {
             BuiltinReturn::Void => pool.void(),
+            BuiltinReturn::Never => pool.never(),
         }
     }
 }
@@ -30,7 +32,7 @@ pub const BUILTINS: &[BuiltinFunction] = &[
     },
     BuiltinFunction {
         name: "panic",
-        return_ty: BuiltinReturn::Void,
+        return_ty: BuiltinReturn::Never,
     },
 ];
 
