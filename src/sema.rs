@@ -51,6 +51,7 @@ use crate::tir::{Tir, TirBuilder, TirParam, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
 use crate::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 
 // ---------- Decl table ----------
 
@@ -133,8 +134,14 @@ impl<'a> Scope<'a> {
 /// Thin wrapper around [`Sema::run`] kept as the stable façade
 /// callers (the pipeline driver, tests) use. Equivalent to
 /// `Sema::run(uir, pool, sink)` but spelled the way it always was.
-pub fn analyze(uir: &Uir, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<Tir> {
-    Sema::run(uir, pool, sink)
+pub fn analyze(
+    uir: &Uir,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+    source: &str,
+    file_path: &Path,
+) -> Vec<Tir> {
+    Sema::run(uir, pool, sink, source, file_path)
 }
 
 // ---------- Sema driver ----------
@@ -145,6 +152,8 @@ pub struct Sema<'a> {
     uir: &'a Uir,
     pool: &'a mut InternPool,
     sink: &'a mut DiagSink,
+    source: &'a str,
+    file_path: &'a Path,
     /// Resolution status, parallel to `uir.func_bodies`.
     decl_state: Vec<DeclState>,
     /// Decls pending analysis.
@@ -167,15 +176,27 @@ pub struct Sema<'a> {
 impl<'a> Sema<'a> {
     /// Drive sema to fixpoint and return one [`Tir`] per UIR
     /// function body, in source order.
-    pub fn run(uir: &'a Uir, pool: &'a mut InternPool, sink: &'a mut DiagSink) -> Vec<Tir> {
-        let mut sema = Sema::new(uir, pool, sink);
+    pub fn run(
+        uir: &'a Uir,
+        pool: &'a mut InternPool,
+        sink: &'a mut DiagSink,
+        source: &'a str,
+        file_path: &'a Path,
+    ) -> Vec<Tir> {
+        let mut sema = Sema::new(uir, pool, sink, source, file_path);
         sema.resolve_signatures();
         sema.seed_worklist();
         sema.drive();
         sema.collect_results()
     }
 
-    fn new(uir: &'a Uir, pool: &'a mut InternPool, sink: &'a mut DiagSink) -> Self {
+    fn new(
+        uir: &'a Uir,
+        pool: &'a mut InternPool,
+        sink: &'a mut DiagSink,
+        source: &'a str,
+        file_path: &'a Path,
+    ) -> Self {
         let n = uir.func_bodies.len();
         let mut name_to_decl = HashMap::with_capacity(n);
         for (i, body) in uir.func_bodies.iter().enumerate() {
@@ -195,6 +216,8 @@ impl<'a> Sema<'a> {
             uir,
             pool,
             sink,
+            source,
+            file_path,
             decl_state: vec![DeclState::Unresolved; n],
             queue: VecDeque::with_capacity(n),
             name_to_decl,
@@ -212,6 +235,17 @@ impl<'a> Sema<'a> {
     /// worklist; the rest of the driver doesn't need to know.
     fn resolve_signatures(&mut self) {
         for body in &self.uir.func_bodies {
+            let name = self.pool.str(body.name);
+            if name.starts_with("__ryo_") {
+                self.sink.emit(Diag::error(
+                    body.span,
+                    DiagCode::ReservedIdentifier,
+                    format!(
+                        "identifiers starting with '__ryo_' are reserved for the compiler runtime: '{}'",
+                        name,
+                    ),
+                ));
+            }
             self.signatures.insert(
                 body.name,
                 FunctionSig {
@@ -743,7 +777,7 @@ fn check_binary_op(
                 ));
                 fcx.builder.unreachable(sema.pool.error_type(), span)
             }
-            TypeKind::Void | TypeKind::Tuple => {
+            TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -791,7 +825,7 @@ fn check_binary_op(
                 ));
                 fcx.builder.unreachable(sema.pool.error_type(), span)
             }
-            TypeKind::Bool | TypeKind::Void | TypeKind::Tuple => {
+            TypeKind::Bool | TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -878,9 +912,7 @@ fn check_call(
     // `name_to_decl`, so signature resolution and the worklist
     // never see them.
     if let Some(builtin) = builtins::lookup(sema.pool.str(name_id)) {
-        let ret_ty = builtin.return_type(sema.pool);
-        check_builtin_call(sema, view, span);
-        return fcx.builder.call(name_id, arg_tirs, ret_ty, span);
+        return emit_builtin_call(sema, fcx, view, arg_tirs, span, builtin);
     }
 
     // Demand the callee. With eagerly-resolved signatures this is
@@ -954,27 +986,180 @@ fn check_call(
 
 /// Front-end validation for builtin calls.
 ///
-/// These checks are builtin-specific and temporary: once `print`
-/// moves to a runtime crate and is called through a normal
-/// signature (see ISSUES.md I-006), they go away.
-fn check_builtin_call(sema: &mut Sema<'_>, view: &CallView, span: Span) {
-    if sema.pool.str(view.name) == "print" {
-        if view.args.len() != 1 {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::ArityMismatch,
-                format!("print() takes exactly 1 argument, got {}", view.args.len()),
-            ));
-            return;
+fn emit_builtin_call(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+    builtin: &'static crate::builtins::BuiltinFunction,
+) -> TirRef {
+    let name = sema.pool.str(view.name);
+    match name {
+        "print" => {
+            if !check_print_args(sema, view, span) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
         }
-        if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
-            sema.sink.emit(Diag::error(
-                sema.uir.span(view.args[0]),
-                DiagCode::BuiltinArgKind,
-                "print() argument must be a string literal",
-            ));
+        "panic" => emit_panic(sema, fcx, view, span),
+        "assert" => emit_assert(sema, fcx, view, arg_tirs, span),
+        _ => {
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
         }
     }
+}
+
+fn emit_panic(sema: &mut Sema<'_>, fcx: &mut FuncCtx, view: &CallView, span: Span) -> TirRef {
+    if view.args.len() != 1 {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            format!("panic() takes exactly 1 argument, got {}", view.args.len()),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[0]),
+            DiagCode::BuiltinArgKind,
+            "panic() argument must be a string literal",
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let user_msg_id = match sema.uir.inst(view.args[0]).data {
+        InstData::Str(id) => id,
+        _ => unreachable!("StrLiteral tag implies Str data"),
+    };
+    build_panic_call(sema, fcx, user_msg_id, "panicked", span)
+}
+
+fn emit_assert(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+) -> TirRef {
+    if view.args.len() != 2 {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            format!(
+                "assert() takes exactly 2 arguments (condition, message), got {}",
+                view.args.len()
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    let cond_ty = fcx.builder.ty_of(arg_tirs[0]);
+    if !sema.pool.compatible(cond_ty, sema.pool.bool_()) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[0]),
+            DiagCode::TypeMismatch,
+            format!(
+                "assert() condition must be 'bool', got '{}'",
+                sema.pool.display(cond_ty),
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    if !matches!(sema.uir.inst(view.args[1]).tag, InstTag::StrLiteral) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[1]),
+            DiagCode::BuiltinArgKind,
+            "assert() message must be a string literal",
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    let user_msg_id = match sema.uir.inst(view.args[1]).data {
+        InstData::Str(id) => id,
+        _ => unreachable!("StrLiteral tag implies Str data"),
+    };
+
+    let neg_cond = fcx
+        .builder
+        .unary(TirTag::BoolNot, sema.pool.bool_(), arg_tirs[0], span);
+
+    let panic_call = build_panic_call(sema, fcx, user_msg_id, "assertion failed", span);
+    let panic_stmt = fcx
+        .builder
+        .unary(TirTag::ExprStmt, sema.pool.void(), panic_call, span);
+
+    fcx.builder
+        .if_stmt(neg_cond, &[panic_stmt], &[], None, sema.pool.void(), span)
+}
+
+fn build_panic_call(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    user_msg_id: StringId,
+    prefix: &str,
+    span: Span,
+) -> TirRef {
+    let user_msg = sema.pool.str(user_msg_id).to_string();
+    let (line, col) = byte_offset_to_line_col(sema.source, span.start);
+    let func_name = sema.pool.str(fcx.builder.name());
+    let formatted = format!(
+        "{} at {}:{}:{} in {}(): {}\n",
+        prefix,
+        sema.file_path.display(),
+        line,
+        col,
+        func_name,
+        user_msg
+    );
+    let msg_len = formatted.len() as i64;
+    let formatted_id = sema.pool.intern_str(&formatted);
+
+    let str_ref = fcx.builder.str_const(formatted_id, sema.pool.str_(), span);
+    let len_ref = fcx.builder.int_const(msg_len, sema.pool.int(), span);
+    let panic_name = sema.pool.intern_str("__ryo_panic");
+    fcx.builder
+        .call(panic_name, &[str_ref, len_ref], sema.pool.never(), span)
+}
+
+fn check_print_args(sema: &mut Sema<'_>, view: &CallView, span: Span) -> bool {
+    if view.args.len() != 1 {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            format!("print() takes exactly 1 argument, got {}", view.args.len()),
+        ));
+        return false;
+    }
+    if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[0]),
+            DiagCode::BuiltinArgKind,
+            "print() argument must be a string literal",
+        ));
+        return false;
+    }
+    true
+}
+
+// Column counts unicode codepoints, not bytes — matches editor conventions.
+fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 fn bin_op_symbol(tag: InstTag) -> &'static str {
@@ -1030,7 +1215,7 @@ mod tests {
         if sink.has_errors() {
             return Err(sink.into_diags());
         }
-        let tirs = analyze(&uir, &mut pool, &mut sink);
+        let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
         if sink.has_errors() {
             return Err(sink.into_diags());
         }
@@ -1050,7 +1235,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let uir = astgen::generate(&program, &mut pool, &mut sink);
-        let tirs = analyze(&uir, &mut pool, &mut sink);
+        let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
         (tirs, sink.into_diags(), pool)
     }
 
@@ -1406,7 +1591,7 @@ mod tests {
         b.add_function(main_id, vec![], pool.int(), &[ret], sp());
         let uir = b.finish();
 
-        let mut sema = Sema::new(&uir, &mut pool, &mut sink);
+        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "test", Path::new("<test>"));
         sema.resolve_signatures();
         // Pretend we're mid-resolving `main`.
         sema.decl_state[0] = DeclState::InProgress;
@@ -1586,5 +1771,125 @@ mod tests {
             "diags: {:?}",
             diags
         );
+    }
+
+    // ---- M8b: assert builtin validation ----
+
+    #[test]
+    fn assert_true_literal_ok() {
+        run("fn main():\n\tassert(true, \"ok\")\n").unwrap();
+    }
+
+    #[test]
+    fn assert_expression_condition_ok() {
+        run("fn main():\n\tassert(1 == 1, \"math works\")\n").unwrap();
+    }
+
+    #[test]
+    fn assert_wrong_arity_zero_args() {
+        let err = run("fn main():\n\tassert()\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn assert_wrong_arity_one_arg() {
+        let err = run("fn main():\n\tassert(true)\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn assert_wrong_arity_three_args() {
+        let err = run("fn main():\n\tassert(true, \"msg\", \"extra\")\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn assert_condition_must_be_bool() {
+        let err = run("fn main():\n\tassert(42, \"not bool\")\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::TypeMismatch));
+    }
+
+    #[test]
+    fn assert_message_must_be_string_literal() {
+        let err = run("fn main():\n\tassert(true, 42)\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::BuiltinArgKind));
+    }
+
+    // ---- M8c: panic builtin validation ----
+
+    #[test]
+    fn panic_wrong_arity_zero_args() {
+        let err = run("fn main():\n\tpanic()\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn panic_wrong_arity_two_args() {
+        let err = run("fn main():\n\tpanic(\"a\", \"b\")\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn panic_message_must_be_string_literal() {
+        let err = run("fn main():\n\tpanic(42)\n").unwrap_err();
+        assert!(any_code(&err, DiagCode::BuiltinArgKind));
+    }
+
+    #[test]
+    fn panic_string_literal_ok() {
+        run("fn main():\n\tpanic(\"oops\")\n").unwrap();
+    }
+
+    #[test]
+    fn panic_call_has_never_type() {
+        let (tirs, pool) = run("fn main():\n\tpanic(\"boom\")\n").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let call_ref = stmt_at(main, 0);
+        let inner = match main.inst(call_ref).data {
+            TirData::UnOp(operand) => operand,
+            _ => panic!("expected ExprStmt wrapping the call"),
+        };
+        assert_eq!(main.inst(inner).ty, pool.never());
+    }
+
+    #[test]
+    fn panic_lowers_to_ryo_panic_call() {
+        let (tirs, pool) = run("fn main():\n\tpanic(\"boom\")\n").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        // Statement 0 is ExprStmt wrapping the call
+        let stmt = stmt_at(main, 0);
+        let call_ref = match main.inst(stmt).data {
+            TirData::UnOp(operand) => operand,
+            _ => panic!("expected ExprStmt"),
+        };
+        let call = main.inst(call_ref);
+        assert!(matches!(call.tag, TirTag::Call));
+        let view = main.call_view(call_ref);
+        assert_eq!(pool.str(view.name), "__ryo_panic");
+        // Two args: pointer (str) and length (int)
+        assert_eq!(view.args.len(), 2);
+    }
+
+    #[test]
+    fn assert_desugars_to_if_with_panic() {
+        let (tirs, pool) = run("fn main():\n\tassert(false, \"oops\")\n").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let stmt = stmt_at(main, 0);
+        let inner_ref = match main.inst(stmt).data {
+            TirData::UnOp(operand) => operand,
+            _ => panic!("expected ExprStmt"),
+        };
+        // assert desugars to IfStmt
+        assert!(
+            matches!(main.inst(inner_ref).tag, TirTag::IfStmt),
+            "assert should desugar to IfStmt, got {:?}",
+            main.inst(inner_ref).tag
+        );
+    }
+
+    #[test]
+    fn reserved_ryo_prefix_rejected() {
+        let errors = run_with_errors("fn __ryo_hack():\n\tprint(\"nope\")\n").1;
+        assert!(any_code(&errors, DiagCode::ReservedIdentifier));
     }
 }

@@ -1381,6 +1381,7 @@ fn main():
 - `.message() -> str` is exposed via a compiler-known interface (the user-facing `trait` keyword is v0.2/v0.3 — see Phase 5: Traits & Generics)
 - Ergonomic `try`/`catch` operators are deferred to v0.2 (see Phase 5: Try/Catch Operators); v0.1 uses `match` for propagation and handling
 - Dependencies: Milestone 11 (enums), Milestone 12 (pattern matching for handling)
+- **Error return traces** (Zig-inspired): instrument every error-return site to record the return address into a per-error trace buffer, giving users the full propagation path from creation to handler. Compiler inserts instrumentation at `match` error-forwarding sites (`Err(e): return e`); the trace buffer is a fixed-size array carried alongside the error union value. Zero cost when errors don't fire. Unlike panic stack traces (I-039, which walk frame pointers at crash time), error traces capture the *propagation chain* at each return site — showing every function that forwarded the error, not just where it was created. Requires DWARF `.debug_line` for source mapping (shared prerequisite with I-039).
 
 > **Note:** Milestone 14 (`try`/`catch` operators) has been **deferred to v0.2** — see Phase 5: Try/Catch Operators. The error-union *types* and `.message()` accessor remain in v0.1; only the propagation/handling sugar is deferred. Programs use `match` on the error union, which is verbose but fully expressive.
 

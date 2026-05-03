@@ -57,16 +57,16 @@ cargo run -- run examples/classify.ryo
 
 **More examples:** [`examples/`](examples/)
 
-## Current Status (Milestone 8b)
+## Current Status (Milestone 8b2)
 
-The compiler implements through **Milestone 8b: Conditionals & Logical Operators**:
+The compiler implements through **Milestone 8b2: Assert & Panic Builtins**:
 
 - **Types:** `int`, `float`, `bool`, `str` (literals)
 - **Operators:** arithmetic, comparison, logical, unary negation
 - **Variables:** immutable by default, `mut`, type annotations, type inference
 - **Functions:** definitions, calls, forward references, recursion
 - **Control flow:** `if`/`elif`/`else`, short-circuit `and`/`or`
-- **Builtins:** `print()`
+- **Builtins:** `print()`, `panic()`, `assert()`
 - **Compilation:** AOT (native binary) and JIT via Cranelift
 - **Tooling:** `ryo run`, `ryo build`, `ryo lex`, `ryo parse`, `ryo ir --emit=uir|tir|clif`
 
