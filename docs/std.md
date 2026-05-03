@@ -1,88 +1,106 @@
 # Standard Library
 
 !!! warning "Development Status"
-    This STD lib is aspirational only, nothing is implemented yet.
+    This STD lib is aspirational only. Aside from the global prelude builtins, the module system is not yet implemented.
 
-## 1. io Package (Input/Output Operations)
+## 0. The Prelude (Global Builtins)
 
-**Purpose:** Provides basic input and output functionalities for interacting with the console, files, and potentially basic networking (if included in the core).
+**Purpose:** To prevent global namespace pollution, only absolute language fundamentals live here. Everything else requires an explicit module import.
 
 **Essential Functions:**
 
-- `io.print(value: str)`: Prints a string value to the standard output (console). Initially discussed as `io.print` - let's stick with this to namespace I/O functions.
-- `io.println(value: str)`: Prints a string value to standard output followed by a newline.
-- `io.eprint(value: str)`: Prints a string value to standard error.
-- `io.eprintln(value: str)`: Prints a string value to standard error followed by a newline.
-- `io.readln() -> IoError!str`: Reads a line of text from standard input. Returns the line on success or an `IoError` on failure (e.g., EOF).
-- `io.open_file(path: str, mode: str) -> IoError!File`: Opens a file at the given path in the specified mode (e.g., `"r"` for read, `"w"` for write). Returns a `File` object on success or an `IoError` on failure.
-- `File` struct (within io):
-  - `File.read_all() -> IoError!str`: Reads the entire content of a file as a string.
-  - `File.read_line() -> IoError!str`: Reads a single line from a file.
-  - `File.write_all(content: str) -> IoError!void`: Writes the entire content string to the file.
-  - `File.write_line(line: str) -> IoError!void`: Writes a single line to the file.
-  - `File.close() -> IoError!void`: Closes the file.
+- `print(msg: str) -> void`: Writes the string directly to standard output. (Note: May eventually move to `io.print` once the module system is stable, but remains global for v0.1 ergonomics).
+- `assert(cond: bool, msg: str) -> void`: Asserts a runtime invariant. Desugars to `if not cond: panic(msg)`.
+- `panic(msg: str) -> never`: Unrecoverable fatal error. Instantly terminates the process (`exit(101)`) and prints the file, line, and user message to standard error.
 
-## 2. str Package (String Manipulation)
+## 1. process Package (Execution Environment)
+
+**Purpose:** Interacting with the current running host process and its execution environment. Separated from general OS utilities to provide a clear boundary for process state.
+
+**Essential Functions:**
+
+- `process.exit(code: int) -> never`: Immediately terminates the process with the given exit code. Destructors and cleanup routines are not run.
+- `process.args() -> list[str]`: Returns the command-line arguments passed to the program.
+- `process.env(key: str) -> ?str`: Retrieves the value of an environment variable, returning `none` if it is not set.
+
+## 2. fs Package (File System)
+
+**Purpose:** Stateless file and path operations. Separated from `io` to isolate OS-level filesystem interactions from stream buffering.
+
+**Essential Functions:**
+
+- `fs.read_file(path: str) -> IoError!str`: Reads an entire file into a string.
+- `fs.write_file(path: str, content: str) -> IoError!void`: Overwrites or creates a file with the given string.
+- `fs.cwd() -> IoError!str`: Returns the current working directory.
+
+## 3. io Package (Standard Streams)
+
+**Purpose:** For interacting with standard input, error, and general buffering.
+
+**Essential Functions:**
+
+- `io.eprint(msg: str) -> void`: Prints directly to standard error.
+- `io.readln() -> IoError!str`: Reads a single line of text from standard input. Returns the line on success or an `IoError` on failure (e.g., EOF).
+
+## 4. str Package (String Manipulation)
 
 **Purpose:** Provides common string manipulation functions.
 
 **Essential Functions:**
 
-- `str.len(s: str) -> int`: Returns the length of a string (number of characters).
-- `str.concat(s1: str, s2: str) -> str`: Concatenates two strings. (Though `+` operator for strings might also be considered for basic concatenation).
-- `str.contains(text: str, substring: str) -> bool`: Checks if a string contains a substring.
-- `str.starts_with(text: str, prefix: str) -> bool`: Checks if a string starts with a prefix.
-- `str.ends_with(text: str, suffix: str) -> bool`: Checks if a string ends with a suffix.
-- `str.to_int(s: str) -> ParseError!int`: Tries to parse a string into an integer. Returns the integer on success or a `ParseError` on failure.
-- `str.to_float(s: str) -> ParseError!float`: Tries to parse a string into a float. Returns the float on success or a `ParseError` on failure.
+- `str.len(s: str) -> int`: Returns the length of a string in bytes (or codepoints).
+- `str.contains(s: str, sub: str) -> bool`: Checks if a string contains a substring.
+- `str.starts_with(s: str, prefix: str) -> bool`: Checks if a string starts with a prefix.
+- `str.ends_with(s: str, suffix: str) -> bool`: Checks if a string ends with a suffix.
+- `str.split(s: str, sep: str) -> list[str]`: Splits a string by a given separator.
+- `str.trim(s: str) -> str`: Removes leading and trailing whitespace.
 - `str.format(format_string: str, ...args) -> str`: String formatting function (like f-strings or sprintf).
 
-## 3. conv Package (Type Conversions)
+## 5. Builtin Type Namespaces (Conversions)
 
-**Purpose:** Provides explicit type conversion functions, especially for basic types.
+**Purpose:** Replaces the messy generic `conv` package. Conversions live in the namespace of the target type (like Rust/Zig).
 
 **Essential Functions:**
 
-- `conv.to_str(value: any) -> str`: Converts a value of various basic types (`int`, `float`, `bool`, etc.) to its string representation. Handles basic types; for structs/enums, users would likely define `to_string()` methods.
-- `conv.to_int(value: float) -> ConversionError!int`: Converts a float to an integer. Returns an error for `NaN`, `Infinity`, or out-of-range values.
-- `conv.to_float(value: int) -> float`: Converts an integer to a float.
-- `conv.to_bool(value: any) -> ConversionError!bool`: Attempts to convert various types to boolean (e.g., `"true"`, `"false"`, `1`, `0`, empty string). Returns an error for invalid input.
+- `int.parse(s: str) -> ParseError!int`: Tries to parse a string into an integer.
+- `int.from_float(f: float) -> int`: Truncates a float to an integer.
+- `float.parse(s: str) -> ParseError!float`: Tries to parse a string into a float.
+- `float.from_int(i: int) -> float`: Converts an integer to a float.
+- `bool.parse(s: str) -> ParseError!bool`: Parses a string to boolean (e.g., `"true"`, `"false"`).
 
-## 4. list Package (List Utilities)
+## 6. list Package (List Utilities)
 
-**Purpose:** Provides utility functions that operate on list data structures. (Note: Basic list operations like indexing, appending, etc., might be built-in operators/methods - this package is for utility functions).
+**Purpose:** Operations for Ryo's generic list collections.
 
 **Essential Functions:**
 
 - `list.len(lst: list[T]) -> int`: Returns the length of a list.
-- `list.is_empty(lst: list[T]) -> bool`: Checks if a list is empty.
-- `list.first(lst: list[T]) -> ?T`: Returns the first element of a list, or `none` if the list is empty.
-- `list.last(lst: list[T]) -> ?T`: Returns the last element of a list, or `none` if the list is empty.
-- `list.append[T](lst: list[T], item: T) -> list[T]`: Appends an item to the end of a list and returns the modified list (or modifies in-place if lists are mutable, clarify mutability rules for lists).
-- `list.map[T, U](lst: list[T], f: fn(T) -> U) -> list[U]`: Applies a function `f` to each element of the list and returns a new list with the results (functional map).
-- `list.filter[T](lst: list[T], predicate: fn(T) -> bool) -> list[T]`: Filters a list, returning a new list containing only elements that satisfy the predicate function (functional filter).
+- `list.push(lst: list[T], item: T) -> void`: Appends an item to the end of a list.
+- `list.pop(lst: list[T]) -> ?T`: Removes and returns the last element, or `none` if empty.
+- `list.first(lst: list[T]) -> ?T`: Returns the first element of a list, or `none` if empty.
+- `list.map[T, U](lst: list[T], f: fn(T) -> U) -> list[U]`: Applies a function `f` to each element.
+- `list.filter[T](lst: list[T], predicate: fn(T) -> bool) -> list[T]`: Filters a list.
 
-## 5. map Package (Map Utilities)
+## 7. map Package (Map Utilities)
 
-**Purpose:** Provides utility functions that operate on map data structures. (Similar to list package - basic map operations would be built-in).
+**Purpose:** Operations for Ryo's generic map collections.
 
 **Essential Functions:**
 
 - `map.len(mp: map[K, V]) -> int`: Returns the number of key-value pairs in a map.
-- `map.is_empty(mp: map[K, V]) -> bool`: Checks if a map is empty.
-- `map.keys[K, V](mp: map[K, V]) -> list[K]`: Returns a list of keys from the map.
-- `map.values[K, V](mp: map[K, V]) -> list[V]`: Returns a list of values from the map.
-- `map.get[K, V](mp: map[K, V], key: K) -> ?V`: Retrieves the value associated with a key. Returns the value if key exists, `none` otherwise.
-- `map.contains_key[K, V](mp: map[K, V], key: K) -> bool`: Checks if a map contains a specific key.
+- `map.get(mp: map[K, V], key: K) -> ?V`: Retrieves the value associated with a key.
+- `map.set(mp: map[K, V], key: K, val: V) -> void`: Inserts or updates a key-value pair.
+- `map.remove(mp: map[K, V], key: K) -> void`: Removes a key from the map.
+- `map.keys(mp: map[K, V]) -> list[K]`: Returns a list of keys from the map.
 
-## 6. time Package (Time and Duration)
+## 8. time Package (Time and Duration)
 
 **Purpose:** Provides basic time-related functionalities.
 
 **Essential Functions:**
 
-- `time.now() -> int`: Returns the current time in milliseconds since some epoch (e.g., Unix epoch). Useful for measuring durations and timestamps.
-- `time.duration_ms(milliseconds: int) -> Duration`: Creates a `Duration` object representing a duration in milliseconds (for clarity and type safety when dealing with time durations - `Duration` could be a simple struct).
+- `time.now_ms() -> int`: Returns the current Unix epoch in milliseconds.
+- `time.duration_ms(milliseconds: int) -> Duration`: Creates a `Duration` object representing a duration in milliseconds.
 
 ## Missing
 
