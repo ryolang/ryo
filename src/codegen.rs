@@ -171,12 +171,39 @@ impl Codegen<JITModule> {
 }
 
 impl<M: Module> Codegen<M> {
+    fn declare_runtime_helpers(
+        module: &mut M,
+        builder_context: &mut FunctionBuilderContext,
+        ctx: &mut codegen::Context,
+        int_type: types::Type,
+        triple: &Triple,
+        pool: &InternPool,
+        func_ids: &mut HashMap<StringId, FuncId>,
+    ) -> Result<(), String> {
+        if let Some(panic_name) = pool.find_str("__ryo_panic") {
+            let panic_func_id =
+                emit_ryo_panic_function(module, builder_context, ctx, int_type, triple)?;
+            func_ids.insert(panic_name, panic_func_id);
+        }
+        Ok(())
+    }
+
     pub fn compile(&mut self, tirs: &[Tir], pool: &InternPool) -> Result<FuncId, String> {
         debug_assert!(
             no_unreachable_in(tirs),
             "codegen::compile requires sema to have produced TIR with no Unreachable instructions"
         );
-        let func_ids = self.declare_all_functions(tirs, pool)?;
+        let mut func_ids = self.declare_all_functions(tirs, pool)?;
+
+        Self::declare_runtime_helpers(
+            &mut self.module,
+            &mut self.builder_context,
+            &mut self.ctx,
+            self.int_type,
+            &self.triple,
+            pool,
+            &mut func_ids,
+        )?;
 
         for tir in tirs {
             self.compile_function(tir, &func_ids, pool)?;
@@ -205,7 +232,17 @@ impl<M: Module> Codegen<M> {
             no_unreachable_in(tirs),
             "codegen::compile_and_dump_ir requires sema to have produced TIR with no Unreachable instructions"
         );
-        let func_ids = self.declare_all_functions(tirs, pool)?;
+        let mut func_ids = self.declare_all_functions(tirs, pool)?;
+
+        Self::declare_runtime_helpers(
+            &mut self.module,
+            &mut self.builder_context,
+            &mut self.ctx,
+            self.int_type,
+            &self.triple,
+            pool,
+            &mut func_ids,
+        )?;
 
         let mut ir_output = String::new();
         for tir in tirs {
@@ -409,94 +446,100 @@ impl<M: Module> Codegen<M> {
                 let _ = Self::eval_inst(builder, ctx, operand)?;
                 Ok(false)
             }
-            TirTag::IfStmt => {
-                let view = ctx.tir.if_stmt_view(r);
-                let merge_block = builder.create_block();
-
-                let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
-                let then_block = builder.create_block();
-
-                let elif_count = view.elif_branches.len();
-                let has_else = view.else_stmts.is_some();
-                let capacity = elif_count + usize::from(has_else);
-                let mut next_blocks: Vec<Block> = Vec::with_capacity(capacity);
-                for _ in 0..elif_count {
-                    next_blocks.push(builder.create_block());
-                }
-                let else_or_merge = if has_else {
-                    let eb = builder.create_block();
-                    next_blocks.push(eb);
-                    eb
-                } else {
-                    merge_block
-                };
-
-                let first_fallthrough = next_blocks.first().copied().unwrap_or(else_or_merge);
-
-                builder
-                    .ins()
-                    .brif(cond_val, then_block, &[], first_fallthrough, &[]);
-
-                builder.seal_block(then_block);
-                builder.switch_to_block(then_block);
-                let then_returns = Self::emit_scoped_body(builder, ctx, &view.then_stmts)?;
-                if !then_returns {
-                    builder.ins().jump(merge_block, &[]);
-                }
-
-                let mut all_branches_return = then_returns;
-                for (i, elif) in view.elif_branches.iter().enumerate() {
-                    let elif_cond_block = next_blocks[i];
-                    builder.seal_block(elif_cond_block);
-                    builder.switch_to_block(elif_cond_block);
-
-                    let elif_cond_val = Self::eval_inst(builder, ctx, elif.cond)?;
-                    let elif_body_block = builder.create_block();
-
-                    let elif_fallthrough = if i + 1 < next_blocks.len() {
-                        next_blocks[i + 1]
-                    } else {
-                        merge_block
-                    };
-
-                    builder
-                        .ins()
-                        .brif(elif_cond_val, elif_body_block, &[], elif_fallthrough, &[]);
-
-                    builder.seal_block(elif_body_block);
-                    builder.switch_to_block(elif_body_block);
-                    let elif_returns = Self::emit_scoped_body(builder, ctx, &elif.body)?;
-                    if !elif_returns {
-                        builder.ins().jump(merge_block, &[]);
-                    }
-                    all_branches_return = all_branches_return && elif_returns;
-                }
-
-                if let Some(else_stmts) = &view.else_stmts {
-                    builder.seal_block(else_or_merge);
-                    builder.switch_to_block(else_or_merge);
-                    let else_returns = Self::emit_scoped_body(builder, ctx, else_stmts)?;
-                    if !else_returns {
-                        builder.ins().jump(merge_block, &[]);
-                    }
-                    all_branches_return = all_branches_return && else_returns;
-                } else {
-                    all_branches_return = false;
-                }
-
-                builder.seal_block(merge_block);
-                if !all_branches_return {
-                    builder.switch_to_block(merge_block);
-                }
-
-                Ok(all_branches_return)
-            }
+            TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
             other => Err(format!(
                 "emit_stmt: instruction at %{} is not a statement (tag={:?})",
                 r.index(),
                 other
             )),
         }
+    }
+
+    fn generate_if_stmt(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<bool, String> {
+        let view = ctx.tir.if_stmt_view(r);
+        let merge_block = builder.create_block();
+
+        let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
+        let then_block = builder.create_block();
+
+        let elif_count = view.elif_branches.len();
+        let has_else = view.else_stmts.is_some();
+        let capacity = elif_count + usize::from(has_else);
+        let mut next_blocks: Vec<Block> = Vec::with_capacity(capacity);
+        for _ in 0..elif_count {
+            next_blocks.push(builder.create_block());
+        }
+        let else_or_merge = if has_else {
+            let eb = builder.create_block();
+            next_blocks.push(eb);
+            eb
+        } else {
+            merge_block
+        };
+
+        let first_fallthrough = next_blocks.first().copied().unwrap_or(else_or_merge);
+
+        builder
+            .ins()
+            .brif(cond_val, then_block, &[], first_fallthrough, &[]);
+
+        builder.seal_block(then_block);
+        builder.switch_to_block(then_block);
+        let then_returns = Self::emit_scoped_body(builder, ctx, &view.then_stmts)?;
+        if !then_returns {
+            builder.ins().jump(merge_block, &[]);
+        }
+
+        let mut all_branches_return = then_returns;
+        for (i, elif) in view.elif_branches.iter().enumerate() {
+            let elif_cond_block = next_blocks[i];
+            builder.seal_block(elif_cond_block);
+            builder.switch_to_block(elif_cond_block);
+
+            let elif_cond_val = Self::eval_inst(builder, ctx, elif.cond)?;
+            let elif_body_block = builder.create_block();
+
+            let elif_fallthrough = if i + 1 < next_blocks.len() {
+                next_blocks[i + 1]
+            } else {
+                merge_block
+            };
+
+            builder
+                .ins()
+                .brif(elif_cond_val, elif_body_block, &[], elif_fallthrough, &[]);
+
+            builder.seal_block(elif_body_block);
+            builder.switch_to_block(elif_body_block);
+            let elif_returns = Self::emit_scoped_body(builder, ctx, &elif.body)?;
+            if !elif_returns {
+                builder.ins().jump(merge_block, &[]);
+            }
+            all_branches_return = all_branches_return && elif_returns;
+        }
+
+        if let Some(else_stmts) = &view.else_stmts {
+            builder.seal_block(else_or_merge);
+            builder.switch_to_block(else_or_merge);
+            let else_returns = Self::emit_scoped_body(builder, ctx, else_stmts)?;
+            if !else_returns {
+                builder.ins().jump(merge_block, &[]);
+            }
+            all_branches_return = all_branches_return && else_returns;
+        } else {
+            all_branches_return = false;
+        }
+
+        builder.seal_block(merge_block);
+        if !all_branches_return {
+            builder.switch_to_block(merge_block);
+        }
+
+        Ok(all_branches_return)
     }
 
     /// Materialize an instruction's value, recursively materializing
@@ -670,6 +713,10 @@ impl<M: Module> Codegen<M> {
                 builder.block_params(merge_block)[0]
             }
             TirTag::Call => Self::emit_call(builder, ctx, r)?,
+            TirTag::IfStmt => {
+                Self::generate_if_stmt(builder, ctx, r)?;
+                builder.ins().iconst(ctx.int_type, 0)
+            }
             TirTag::Unreachable => {
                 return Err(
                     "codegen reached an Unreachable TIR inst — sema must have errored".to_string(),
@@ -695,25 +742,12 @@ impl<M: Module> Codegen<M> {
         let view = ctx.tir.call_view(r);
         let name_id = view.name;
         let name_str = ctx.pool.str(name_id);
-        if crate::builtins::lookup(name_str).is_some() {
-            return match name_str {
-                "print" => {
-                    Self::generate_print_call(builder, ctx, &view.args)?;
-                    Ok(builder.ins().iconst(ctx.int_type, 0))
-                }
-                "panic" => {
-                    Self::generate_panic_call(builder, ctx, r)?;
-                    Ok(builder.ins().iconst(ctx.int_type, 0))
-                }
-                "assert" => {
-                    Self::generate_assert_call(builder, ctx, r, &view.args)?;
-                    Ok(builder.ins().iconst(ctx.int_type, 0))
-                }
-                _ => Err(format!(
-                    "Builtin '{}' has no codegen implementation",
-                    name_str
-                )),
-            };
+
+        // print is the only builtin with custom codegen (inline syscall).
+        // __ryo_panic and user functions go through the normal call path.
+        if name_str == "print" {
+            Self::generate_print_call(builder, ctx, &view.args)?;
+            return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
         let callee_id = *ctx
@@ -730,15 +764,26 @@ impl<M: Module> Codegen<M> {
         let call = builder.ins().call(callee_ref, &arg_values);
         let results = builder.inst_results(call);
 
-        Ok(if results.is_empty() {
-            // Void-returning callee: the surrounding expression
-            // still expects *some* value to plug into the memo
-            // table. Use a zero int as a benign placeholder; sema
-            // has already rejected programs that try to read it.
-            builder.ins().iconst(ctx.int_type, 0)
+        // If the callee returns never (e.g. __ryo_panic), the call is
+        // a terminator. Emit a trap + dead block for subsequent IR.
+        // The dead block needs no explicit terminator — compile_function's
+        // fallthrough `return 0` provides one, same pattern as the old
+        // generate_panic_call. Cranelift verifier is happy as long as
+        // every block has exactly one terminator.
+        let ret_ty = ctx.tir.inst(r).ty;
+        if ctx.pool.is_never(ret_ty) {
+            builder.ins().trap(TrapCode::user(1).unwrap());
+            let dead = builder.create_block();
+            builder.seal_block(dead);
+            builder.switch_to_block(dead);
+            return Ok(builder.ins().iconst(ctx.int_type, 0));
+        }
+
+        if results.is_empty() {
+            Ok(builder.ins().iconst(ctx.int_type, 0))
         } else {
-            results[0]
-        })
+            Ok(results[0])
+        }
     }
 
     fn generate_print_call(
@@ -774,18 +819,7 @@ impl<M: Module> Codegen<M> {
             .iconst(ctx.int_type, string_content.len() as i64);
         let fd = builder.ins().iconst(ctx.int_type, 1);
 
-        use target_lexicon::OperatingSystem;
-        match ctx.triple.operating_system {
-            OperatingSystem::Darwin { .. }
-            | OperatingSystem::MacOSX { .. }
-            | OperatingSystem::Linux => {}
-            _ => {
-                return Err(format!(
-                    "print() not yet supported on platform: {:?}",
-                    ctx.triple.operating_system
-                ));
-            }
-        }
+        check_platform_support(ctx.triple)?;
 
         let write_ref = declare_write(ctx.module, builder, ctx.int_type)?;
         let call_inst = builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
@@ -793,103 +827,73 @@ impl<M: Module> Codegen<M> {
 
         Ok(())
     }
+}
 
-    fn generate_assert_call(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        call_ref: TirRef,
-        args: &[TirRef],
-    ) -> Result<(), String> {
-        debug_assert_eq!(args.len(), 2, "sema should reject assert() arity errors");
-
-        let cond_val = Self::eval_inst(builder, ctx, args[0])?;
-
-        let ok_block = builder.create_block();
-        let fail_block = builder.create_block();
-
-        builder.ins().brif(cond_val, ok_block, &[], fail_block, &[]);
-
-        // --- fail path: write message to stderr, then exit(101) ---
-        builder.seal_block(fail_block);
-        builder.switch_to_block(fail_block);
-
-        let msg_id = ctx
-            .tir
-            .fail_message(call_ref)
-            .expect("sema should have recorded a fail message for assert()");
-        emit_fail_path(builder, ctx, msg_id)?;
-
-        // --- ok path: continue ---
-        builder.seal_block(ok_block);
-        builder.switch_to_block(ok_block);
-
-        Ok(())
-    }
-
-    fn generate_panic_call(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        call_ref: TirRef,
-    ) -> Result<(), String> {
-        let msg_id = ctx
-            .tir
-            .fail_message(call_ref)
-            .expect("sema should have recorded a fail message for panic()");
-        emit_fail_path(builder, ctx, msg_id)?;
-
-        // emit_fail_path terminated the current block (exit + trap).
-        // Create a new unreachable block so that any subsequent
-        // instructions emitted by the caller (the dummy iconst
-        // placeholder, or statements that follow in the body) land in
-        // valid — but dead — IR that Cranelift will eliminate.
-        let dead_block = builder.create_block();
-        builder.seal_block(dead_block);
-        builder.switch_to_block(dead_block);
-
-        Ok(())
+fn check_platform_support(triple: &Triple) -> Result<(), String> {
+    use target_lexicon::OperatingSystem;
+    match triple.operating_system {
+        OperatingSystem::Darwin { .. }
+        | OperatingSystem::MacOSX { .. }
+        | OperatingSystem::Linux => Ok(()),
+        _ => Err(format!(
+            "POSIX syscalls not yet supported on platform: {:?}",
+            triple.operating_system
+        )),
     }
 }
 
-/// Shared fail path for `assert` and `panic`: write a pre-formatted
-/// message to stderr, call `exit(101)`, and emit a trap terminator
-/// (Cranelift requires a block terminator even after noreturn calls).
-fn emit_fail_path<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx: &mut FunctionContext<'_, M>,
-    msg_string_id: StringId,
-) -> Result<(), String> {
-    let msg_text = ctx.pool.str(msg_string_id);
-    let msg_len = msg_text.len();
+fn emit_ryo_panic_function<M: Module>(
+    module: &mut M,
+    builder_context: &mut FunctionBuilderContext,
+    ctx: &mut codegen::Context,
+    int_type: types::Type,
+    triple: &Triple,
+) -> Result<FuncId, String> {
+    check_platform_support(triple)?;
 
-    let data_id = store_string(
-        msg_string_id,
-        msg_text,
-        ctx.module,
-        ctx.data_ctx,
-        ctx.string_data,
-    )?;
-    let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-    let string_ptr = builder.ins().global_value(ctx.int_type, data_ref);
-    let string_len = builder.ins().iconst(ctx.int_type, msg_len as i64);
-    let fd = builder.ins().iconst(ctx.int_type, 2); // stderr
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(int_type)); // ptr
+    sig.params.push(AbiParam::new(int_type)); // len
 
-    let write_ref = declare_write(ctx.module, builder, ctx.int_type)?;
-    builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
+    let func_id = module
+        .declare_function("__ryo_panic", Linkage::Local, &sig)
+        .map_err(|e| format!("Failed to declare __ryo_panic: {}", e))?;
 
-    let mut exit_sig = ctx.module.make_signature();
-    exit_sig.params.push(AbiParam::new(ctx.int_type));
-    let exit_func = ctx
-        .module
-        .declare_function("exit", Linkage::Import, &exit_sig)
-        .map_err(|e| format!("Failed to declare exit function: {}", e))?;
-    let exit_ref = ctx.module.declare_func_in_func(exit_func, builder.func);
-    let exit_code = builder.ins().iconst(ctx.int_type, 101);
-    builder.ins().call(exit_ref, &[exit_code]);
+    ctx.func.signature = sig.clone();
 
-    // exit() is noreturn, but Cranelift needs a terminator
-    builder.ins().trap(TrapCode::user(1).unwrap());
+    {
+        let mut builder = FunctionBuilder::new(&mut ctx.func, builder_context);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
 
-    Ok(())
+        let ptr = builder.block_params(entry)[0];
+        let len = builder.block_params(entry)[1];
+        let fd = builder.ins().iconst(int_type, 2); // stderr
+
+        let write_ref = declare_write(module, &mut builder, int_type)?;
+        builder.ins().call(write_ref, &[fd, ptr, len]);
+
+        let mut exit_sig = module.make_signature();
+        exit_sig.params.push(AbiParam::new(int_type));
+        let exit_func = module
+            .declare_function("exit", Linkage::Import, &exit_sig)
+            .map_err(|e| format!("Failed to declare exit: {}", e))?;
+        let exit_ref = module.declare_func_in_func(exit_func, builder.func);
+        let exit_code = builder.ins().iconst(int_type, 101);
+        builder.ins().call(exit_ref, &[exit_code]);
+
+        builder.ins().trap(TrapCode::user(1).unwrap());
+        builder.finalize();
+    }
+
+    module
+        .define_function(func_id, ctx)
+        .map_err(|e| format!("Failed to define __ryo_panic: {}", e))?;
+    ctx.clear();
+
+    Ok(func_id)
 }
 
 fn declare_write<M: Module>(

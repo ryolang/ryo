@@ -213,6 +213,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::UndefinedVariable => "E0010",
         DiagCode::UndefinedFunction => "E0011",
         DiagCode::TypeMismatch => "E0012",
+        DiagCode::ReservedIdentifier => "E0019",
         DiagCode::ArityMismatch => "E0013",
         DiagCode::BuiltinArgKind => "E0014",
         DiagCode::UnsupportedOperator => "E0015",

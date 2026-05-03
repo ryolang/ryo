@@ -133,7 +133,13 @@ impl<'a> Scope<'a> {
 /// Thin wrapper around [`Sema::run`] kept as the stable façade
 /// callers (the pipeline driver, tests) use. Equivalent to
 /// `Sema::run(uir, pool, sink)` but spelled the way it always was.
-pub fn analyze(uir: &Uir, pool: &mut InternPool, sink: &mut DiagSink, source: &str, file_path: &str) -> Vec<Tir> {
+pub fn analyze(
+    uir: &Uir,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+    source: &str,
+    file_path: &str,
+) -> Vec<Tir> {
     Sema::run(uir, pool, sink, source, file_path)
 }
 
@@ -169,7 +175,13 @@ pub struct Sema<'a> {
 impl<'a> Sema<'a> {
     /// Drive sema to fixpoint and return one [`Tir`] per UIR
     /// function body, in source order.
-    pub fn run(uir: &'a Uir, pool: &'a mut InternPool, sink: &'a mut DiagSink, source: &'a str, file_path: &'a str) -> Vec<Tir> {
+    pub fn run(
+        uir: &'a Uir,
+        pool: &'a mut InternPool,
+        sink: &'a mut DiagSink,
+        source: &'a str,
+        file_path: &'a str,
+    ) -> Vec<Tir> {
         let mut sema = Sema::new(uir, pool, sink, source, file_path);
         sema.resolve_signatures();
         sema.seed_worklist();
@@ -177,7 +189,13 @@ impl<'a> Sema<'a> {
         sema.collect_results()
     }
 
-    fn new(uir: &'a Uir, pool: &'a mut InternPool, sink: &'a mut DiagSink, source: &'a str, file_path: &'a str) -> Self {
+    fn new(
+        uir: &'a Uir,
+        pool: &'a mut InternPool,
+        sink: &'a mut DiagSink,
+        source: &'a str,
+        file_path: &'a str,
+    ) -> Self {
         let n = uir.func_bodies.len();
         let mut name_to_decl = HashMap::with_capacity(n);
         for (i, body) in uir.func_bodies.iter().enumerate() {
@@ -216,6 +234,17 @@ impl<'a> Sema<'a> {
     /// worklist; the rest of the driver doesn't need to know.
     fn resolve_signatures(&mut self) {
         for body in &self.uir.func_bodies {
+            let name = self.pool.str(body.name);
+            if name.starts_with("__ryo_") {
+                self.sink.emit(Diag::error(
+                    body.span,
+                    DiagCode::ReservedIdentifier,
+                    format!(
+                        "identifiers starting with '__ryo_' are reserved for the compiler runtime: '{}'",
+                        name,
+                    ),
+                ));
+            }
             self.signatures.insert(
                 body.name,
                 FunctionSig {
@@ -882,10 +911,7 @@ fn check_call(
     // `name_to_decl`, so signature resolution and the worklist
     // never see them.
     if let Some(builtin) = builtins::lookup(sema.pool.str(name_id)) {
-        let ret_ty = builtin.return_type(sema.pool);
-        let call_ref = fcx.builder.call(name_id, arg_tirs, ret_ty, span);
-        check_builtin_call(sema, fcx, view, arg_tirs, call_ref, span);
-        return call_ref;
+        return emit_builtin_call(sema, fcx, view, arg_tirs, span, builtin);
     }
 
     // Demand the callee. With eagerly-resolved signatures this is
@@ -959,107 +985,180 @@ fn check_call(
 
 /// Front-end validation for builtin calls.
 ///
-/// These checks are builtin-specific and temporary: once `print`
-/// moves to a runtime crate and is called through a normal
-/// signature (see ISSUES.md I-006), they go away.
-fn check_builtin_call(
+fn emit_builtin_call(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     view: &CallView,
     arg_tirs: &[TirRef],
-    call_tir_ref: TirRef,
     span: Span,
-) {
+    builtin: &'static crate::builtins::BuiltinFunction,
+) -> TirRef {
     let name = sema.pool.str(view.name);
     match name {
         "print" => {
-            if view.args.len() != 1 {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::ArityMismatch,
-                    format!("print() takes exactly 1 argument, got {}", view.args.len()),
-                ));
-                return;
-            }
-            if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
-                sema.sink.emit(Diag::error(
-                    sema.uir.span(view.args[0]),
-                    DiagCode::BuiltinArgKind,
-                    "print() argument must be a string literal",
-                ));
-            }
+            // print keeps the old path: emit as a normal builtin Call
+            let ret_ty = builtin.return_type(sema.pool);
+            let call_ref = fcx.builder.call(view.name, arg_tirs, ret_ty, span);
+            check_print_args(sema, view, span);
+            call_ref
         }
-        "assert" => {
-            if view.args.len() != 2 {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::ArityMismatch,
-                    format!(
-                        "assert() takes exactly 2 arguments (condition, message), got {}",
-                        view.args.len()
-                    ),
-                ));
-                return;
-            }
-            let cond_ty = fcx.builder.ty_of(arg_tirs[0]);
-            if !sema.pool.compatible(cond_ty, sema.pool.bool_()) {
-                sema.sink.emit(Diag::error(
-                    sema.uir.span(view.args[0]),
-                    DiagCode::TypeMismatch,
-                    format!(
-                        "assert() condition must be 'bool', got '{}'",
-                        sema.pool.display(cond_ty),
-                    ),
-                ));
-            }
-            intern_fail_message(
-                sema,
-                fcx,
-                view.args[1],
-                call_tir_ref,
-                "assert",
-                "assertion failed",
-            );
+        "panic" => emit_panic(sema, fcx, view, span),
+        "assert" => emit_assert(sema, fcx, view, arg_tirs, span),
+        _ => {
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
         }
-        "panic" => {
-            if view.args.len() != 1 {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::ArityMismatch,
-                    format!("panic() takes exactly 1 argument, got {}", view.args.len()),
-                ));
-                return;
-            }
-            intern_fail_message(sema, fcx, view.args[0], call_tir_ref, "panic", "panicked");
-        }
-        _ => {}
     }
 }
 
-fn intern_fail_message(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    msg_uir_ref: InstRef,
-    call_tir_ref: TirRef,
-    builtin_name: &str,
-    prefix: &str,
-) {
-    if !matches!(sema.uir.inst(msg_uir_ref).tag, InstTag::StrLiteral) {
+fn emit_panic(sema: &mut Sema<'_>, fcx: &mut FuncCtx, view: &CallView, span: Span) -> TirRef {
+    if view.args.len() != 1 {
         sema.sink.emit(Diag::error(
-            sema.uir.span(msg_uir_ref),
-            DiagCode::BuiltinArgKind,
-            format!("{}() argument must be a string literal", builtin_name),
+            span,
+            DiagCode::ArityMismatch,
+            format!("panic() takes exactly 1 argument, got {}", view.args.len()),
         ));
-        return;
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    let user_msg_id = match sema.uir.inst(msg_uir_ref).data {
+    if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[0]),
+            DiagCode::BuiltinArgKind,
+            "panic() argument must be a string literal",
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let user_msg_id = match sema.uir.inst(view.args[0]).data {
         InstData::Str(id) => id,
         _ => unreachable!("StrLiteral tag implies Str data"),
     };
-    let user_msg = sema.pool.str(user_msg_id);
-    let formatted = format!("{}: {}\n", prefix, user_msg);
+    let user_msg = sema.pool.str(user_msg_id).to_string();
+    let (line, col) = byte_offset_to_line_col(sema.source, span.start);
+    let func_name = sema.pool.str(fcx.builder.name());
+    let formatted = format!(
+        "panicked at {}:{}:{} in {}(): {}\n",
+        sema.file_path, line, col, func_name, user_msg
+    );
+    let msg_len = formatted.len() as i64;
     let formatted_id = sema.pool.intern_str(&formatted);
-    fcx.builder.set_fail_message(call_tir_ref, formatted_id);
+
+    let str_ref = fcx.builder.str_const(formatted_id, sema.pool.str_(), span);
+    let len_ref = fcx.builder.int_const(msg_len, sema.pool.int(), span);
+    let panic_name = sema.pool.intern_str("__ryo_panic");
+    fcx.builder
+        .call(panic_name, &[str_ref, len_ref], sema.pool.never(), span)
+}
+
+fn emit_assert(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+) -> TirRef {
+    if view.args.len() != 2 {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            format!(
+                "assert() takes exactly 2 arguments (condition, message), got {}",
+                view.args.len()
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    let cond_ty = fcx.builder.ty_of(arg_tirs[0]);
+    if !sema.pool.compatible(cond_ty, sema.pool.bool_()) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[0]),
+            DiagCode::TypeMismatch,
+            format!(
+                "assert() condition must be 'bool', got '{}'",
+                sema.pool.display(cond_ty),
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    if !matches!(sema.uir.inst(view.args[1]).tag, InstTag::StrLiteral) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[1]),
+            DiagCode::BuiltinArgKind,
+            "assert() message must be a string literal",
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    let user_msg_id = match sema.uir.inst(view.args[1]).data {
+        InstData::Str(id) => id,
+        _ => unreachable!("StrLiteral tag implies Str data"),
+    };
+    let user_msg = sema.pool.str(user_msg_id).to_string();
+    let (line, col) = byte_offset_to_line_col(sema.source, span.start);
+    let func_name = sema.pool.str(fcx.builder.name());
+    let formatted = format!(
+        "assertion failed at {}:{}:{} in {}(): {}\n",
+        sema.file_path, line, col, func_name, user_msg
+    );
+    let msg_len = formatted.len() as i64;
+    let formatted_id = sema.pool.intern_str(&formatted);
+
+    // Build the negated condition: `not cond`
+    let neg_cond = fcx
+        .builder
+        .unary(TirTag::BoolNot, sema.pool.bool_(), arg_tirs[0], span);
+
+    // Build the panic call as the then-body
+    let str_ref = fcx.builder.str_const(formatted_id, sema.pool.str_(), span);
+    let len_ref = fcx.builder.int_const(msg_len, sema.pool.int(), span);
+    let panic_name = sema.pool.intern_str("__ryo_panic");
+    let panic_call = fcx
+        .builder
+        .call(panic_name, &[str_ref, len_ref], sema.pool.never(), span);
+    let panic_stmt = fcx
+        .builder
+        .unary(TirTag::ExprStmt, sema.pool.void(), panic_call, span);
+
+    // Desugar to: if not cond: __ryo_panic(msg_ptr, msg_len)
+    fcx.builder
+        .if_stmt(neg_cond, &[panic_stmt], &[], None, sema.pool.void(), span)
+}
+
+fn check_print_args(sema: &mut Sema<'_>, view: &CallView, span: Span) {
+    if view.args.len() != 1 {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            format!("print() takes exactly 1 argument, got {}", view.args.len()),
+        ));
+        return;
+    }
+    if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[0]),
+            DiagCode::BuiltinArgKind,
+            "print() argument must be a string literal",
+        ));
+    }
+}
+
+// Column counts unicode codepoints, not bytes — matches editor conventions.
+fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 fn bin_op_symbol(tag: InstTag) -> &'static str {
@@ -1750,5 +1849,46 @@ mod tests {
             _ => panic!("expected ExprStmt wrapping the call"),
         };
         assert_eq!(main.inst(inner).ty, pool.never());
+    }
+
+    #[test]
+    fn panic_lowers_to_ryo_panic_call() {
+        let (tirs, pool) = run("fn main():\n\tpanic(\"boom\")\n").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        // Statement 0 is ExprStmt wrapping the call
+        let stmt = stmt_at(main, 0);
+        let call_ref = match main.inst(stmt).data {
+            TirData::UnOp(operand) => operand,
+            _ => panic!("expected ExprStmt"),
+        };
+        let call = main.inst(call_ref);
+        assert!(matches!(call.tag, TirTag::Call));
+        let view = main.call_view(call_ref);
+        assert_eq!(pool.str(view.name), "__ryo_panic");
+        // Two args: pointer (str) and length (int)
+        assert_eq!(view.args.len(), 2);
+    }
+
+    #[test]
+    fn assert_desugars_to_if_with_panic() {
+        let (tirs, pool) = run("fn main():\n\tassert(false, \"oops\")\n").unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let stmt = stmt_at(main, 0);
+        let inner_ref = match main.inst(stmt).data {
+            TirData::UnOp(operand) => operand,
+            _ => panic!("expected ExprStmt"),
+        };
+        // assert desugars to IfStmt
+        assert!(
+            matches!(main.inst(inner_ref).tag, TirTag::IfStmt),
+            "assert should desugar to IfStmt, got {:?}",
+            main.inst(inner_ref).tag
+        );
+    }
+
+    #[test]
+    fn reserved_ryo_prefix_rejected() {
+        let errors = run_with_errors("fn __ryo_hack():\n\tprint(\"nope\")\n").1;
+        assert!(any_code(&errors, DiagCode::ReservedIdentifier));
     }
 }

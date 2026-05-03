@@ -64,6 +64,9 @@ pub enum DiagCode {
     MainSignature,
 
     // --- sema ---
+    /// A user-defined function or variable uses the `__ryo_` prefix,
+    /// which is reserved for compiler runtime internals.
+    ReservedIdentifier,
     UndefinedVariable,
     UndefinedFunction,
     TypeMismatch,

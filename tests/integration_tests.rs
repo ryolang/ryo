@@ -1360,8 +1360,10 @@ fn assert_false_aot_run_exits_101() {
     );
     let stderr = String::from_utf8_lossy(&run_output.stderr);
     assert!(
-        stderr.contains("assertion failed: boom"),
-        "stderr should contain formatted message, got: {}",
+        stderr.contains("assertion failed")
+            && stderr.contains("in main()")
+            && stderr.contains("boom"),
+        "stderr should contain formatted message with location, got: {}",
         stderr
     );
 }
@@ -1391,8 +1393,8 @@ fn panic_aot_run_exits_101() {
     );
     let stderr = String::from_utf8_lossy(&run_output.stderr);
     assert!(
-        stderr.contains("panicked: explicit"),
-        "stderr should contain panic message, got: {}",
+        stderr.contains("panicked") && stderr.contains("in main()") && stderr.contains("explicit"),
+        "stderr should contain panic message with location, got: {}",
         stderr
     );
 }
