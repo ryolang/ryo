@@ -1369,6 +1369,37 @@ fn assert_false_aot_run_exits_101() {
 }
 
 #[test]
+fn panic_with_emojis_aot_run_exits_101() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tpanic(\"🔥 boom 💥\")\n";
+    let test_file = create_test_file(temp_dir.path(), "panic_emoji_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = temp_dir.path().join("panic_emoji_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+
+    assert_eq!(
+        run_output.status.code(),
+        Some(101),
+        "binary should exit 101 on panic"
+    );
+    let stderr = String::from_utf8_lossy(&run_output.stderr);
+    assert!(
+        stderr.contains("panicked") && stderr.contains("in main()") && stderr.contains("🔥 boom 💥"),
+        "stderr should contain panic message with emojis, got: {}",
+        stderr
+    );
+}
+
+#[test]
 fn panic_aot_run_exits_101() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\tpanic(\"explicit\")\n";
