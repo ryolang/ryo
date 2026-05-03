@@ -766,9 +766,8 @@ impl<M: Module> Codegen<M> {
         // If the callee returns never (e.g. __ryo_panic), the call is
         // a terminator. Emit a trap + dead block for subsequent IR.
         // The dead block needs no explicit terminator — compile_function's
-        // fallthrough `return 0` provides one, same pattern as the old
-        // generate_panic_call. Cranelift verifier is happy as long as
-        // every block has exactly one terminator.
+        // fallthrough `return 0` provides one. Cranelift verifier is
+        // happy as long as every block has exactly one terminator.
         let ret_ty = ctx.tir.inst(r).ty;
         if ctx.pool.is_never(ret_ty) {
             builder.ins().trap(TrapCode::user(1).unwrap());
