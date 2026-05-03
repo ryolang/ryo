@@ -1,0 +1,7 @@
+fn is_positive(n: int) -> bool:
+	return n > 0
+
+fn main():
+	assert(true, "literal true should pass")
+	assert(1 + 1 == 2, "basic arithmetic")
+	assert(is_positive(42), "42 is positive")
