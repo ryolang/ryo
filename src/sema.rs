@@ -743,7 +743,7 @@ fn check_binary_op(
                 ));
                 fcx.builder.unreachable(sema.pool.error_type(), span)
             }
-            TypeKind::Void | TypeKind::Tuple => {
+            TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -791,7 +791,7 @@ fn check_binary_op(
                 ));
                 fcx.builder.unreachable(sema.pool.error_type(), span)
             }
-            TypeKind::Bool | TypeKind::Void | TypeKind::Tuple => {
+            TypeKind::Bool | TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,

@@ -46,6 +46,7 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
         TypeKind::Str => pointer_ty,
         TypeKind::Bool => types::I8,
         TypeKind::Float => types::F64,
+        TypeKind::Never => types::I8, // dummy: dead code after trap, never executed
         TypeKind::Void => panic!("cranelift_type_for: void has no representation"),
         TypeKind::Error => {
             // Reaching codegen with the Error sentinel means sema

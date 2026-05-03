@@ -93,6 +93,7 @@ enum Tag {
     Str,
     Float,
     Error,
+    Never,
     /// Variable payload: `data` is the index into `extra` of an
     /// `(n_elems: u32, elem_0: u32, ..., elem_{n-1}: u32)` block.
     Tuple,
@@ -117,6 +118,7 @@ const ID_INT: u32 = 2;
 const ID_STR: u32 = 3;
 const ID_FLOAT: u32 = 4;
 const ID_ERROR: u32 = 5;
+const ID_NEVER: u32 = 6;
 
 // ---------- Public TypeKind facade ----------
 
@@ -143,6 +145,7 @@ pub enum TypeKind {
     /// `Error` as compatible with anything; see
     /// [`InternPool::is_error`] / [`InternPool::compatible`].
     Error,
+    Never,
     /// Variable-arity tuple. Reserved variant proving the
     /// sidecar-`extra` encoding works; not currently constructible
     /// from user syntax.
@@ -290,7 +293,11 @@ impl InternPool {
             tag: Tag::Error,
             data: 0,
         });
-        debug_assert!(pool.items.len() == (ID_ERROR + 1) as usize);
+        pool.items.push(Item {
+            tag: Tag::Never,
+            data: 0,
+        });
+        debug_assert!(pool.items.len() == (ID_NEVER + 1) as usize);
         pool
     }
 
@@ -304,6 +311,7 @@ impl InternPool {
             Tag::Str => TypeKind::Str,
             Tag::Float => TypeKind::Float,
             Tag::Error => TypeKind::Error,
+            Tag::Never => TypeKind::Never,
             Tag::Tuple => TypeKind::Tuple,
         }
     }
@@ -327,14 +335,22 @@ impl InternPool {
         TypeId(ID_ERROR)
     }
 
+    pub const fn never(&self) -> TypeId {
+        TypeId(ID_NEVER)
+    }
+
     pub fn is_error(&self, id: TypeId) -> bool {
         id.0 == ID_ERROR
+    }
+
+    pub fn is_never(&self, id: TypeId) -> bool {
+        id.0 == ID_NEVER
     }
 
     /// Compatibility predicate that absorbs the `Error` sentinel.
     /// Used anywhere sema would otherwise emit a type-mismatch.
     pub fn compatible(&self, a: TypeId, b: TypeId) -> bool {
-        a == b || self.is_error(a) || self.is_error(b)
+        a == b || self.is_error(a) || self.is_error(b) || self.is_never(a) || self.is_never(b)
     }
 
     /// Intern a tuple type. Dedups on element-id sequence with no
@@ -489,6 +505,7 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::Str => write!(f, "str"),
             TypeKind::Float => write!(f, "float"),
             TypeKind::Error => write!(f, "<error>"),
+            TypeKind::Never => write!(f, "never"),
             TypeKind::Tuple => {
                 let elems = self.pool.tuple_elements_vec(self.id);
                 write!(f, "(")?;
@@ -710,5 +727,35 @@ mod tests {
         }
         // Error vs Error is also compatible (trivially via reflexivity).
         assert!(pool.compatible(err, err));
+    }
+
+    #[test]
+    fn never_primitive_has_stable_id() {
+        let pool = InternPool::new();
+        assert_eq!(pool.never().raw(), 6);
+        assert_eq!(pool.kind(pool.never()), TypeKind::Never);
+        assert_ne!(pool.never(), pool.void());
+        assert_ne!(pool.never(), pool.error_type());
+    }
+
+    #[test]
+    fn never_displays_as_never() {
+        let pool = InternPool::new();
+        assert_eq!(format!("{}", pool.display(pool.never())), "never");
+    }
+
+    #[test]
+    fn never_is_compatible_with_anything() {
+        let pool = InternPool::new();
+        let n = pool.never();
+        assert!(pool.compatible(n, pool.int()));
+        assert!(pool.compatible(n, pool.bool_()));
+        assert!(pool.compatible(n, pool.str_()));
+        assert!(pool.compatible(n, pool.void()));
+        assert!(pool.compatible(n, pool.float()));
+        assert!(pool.compatible(n, pool.error_type()));
+        assert!(pool.compatible(pool.error_type(), n));
+        assert!(pool.compatible(pool.int(), n));
+        assert!(pool.compatible(n, n));
     }
 }
