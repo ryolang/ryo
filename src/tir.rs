@@ -319,6 +319,10 @@ pub struct TirBuilder {
 }
 
 impl TirBuilder {
+    pub fn name(&self) -> StringId {
+        self.name
+    }
+
     pub fn new(name: StringId, params: Vec<TirParam>, return_type: TypeId, span: Span) -> Self {
         // Slot 0 is the reserved sentinel — never read, never
         // referenced. Pushing a placeholder keeps `TirRef` indices
