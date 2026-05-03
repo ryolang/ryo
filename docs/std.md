@@ -9,7 +9,7 @@
 
 **Essential Functions:**
 
-- `print(msg: str) -> void`: Writes the string directly to standard output. (Note: May eventually move to `io.print` once the module system is stable, but remains global for v0.1 ergonomics).
+- `print(msg: str) -> void`: Writes the string directly to standard output. **Note: This will move to `io.print` once the module system is implemented.** Keeping it global for now reduces friction during pre-alpha bootstrapping.
 - `assert(cond: bool, msg: str) -> void`: Asserts a runtime invariant. Desugars to `if not cond: panic(msg)`.
 - `panic(msg: str) -> never`: Unrecoverable fatal error. Instantly terminates the process (`exit(101)`) and prints the file, line, and user message to standard error.
 
