@@ -46,7 +46,8 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
         TypeKind::Str => pointer_ty,
         TypeKind::Bool => types::I8,
         TypeKind::Float => types::F64,
-        TypeKind::Never => types::I8, // dummy: dead code after trap, never executed
+        // Dead code after trap, but Cranelift needs a concrete type for every SSA value
+        TypeKind::Never => types::I8,
         TypeKind::Void => panic!("cranelift_type_for: void has no representation"),
         TypeKind::Error => {
             // Reaching codegen with the Error sentinel means sema
@@ -188,13 +189,12 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    pub fn compile(&mut self, tirs: &[Tir], pool: &InternPool) -> Result<FuncId, String> {
-        debug_assert!(
-            no_unreachable_in(tirs),
-            "codegen::compile requires sema to have produced TIR with no Unreachable instructions"
-        );
+    fn prepare_compilation(
+        &mut self,
+        tirs: &[Tir],
+        pool: &InternPool,
+    ) -> Result<HashMap<StringId, FuncId>, String> {
         let mut func_ids = self.declare_all_functions(tirs, pool)?;
-
         Self::declare_runtime_helpers(
             &mut self.module,
             &mut self.builder_context,
@@ -204,6 +204,15 @@ impl<M: Module> Codegen<M> {
             pool,
             &mut func_ids,
         )?;
+        Ok(func_ids)
+    }
+
+    pub fn compile(&mut self, tirs: &[Tir], pool: &InternPool) -> Result<FuncId, String> {
+        debug_assert!(
+            no_unreachable_in(tirs),
+            "codegen::compile requires sema to have produced TIR with no Unreachable instructions"
+        );
+        let func_ids = self.prepare_compilation(tirs, pool)?;
 
         for tir in tirs {
             self.compile_function(tir, &func_ids, pool)?;
@@ -232,17 +241,7 @@ impl<M: Module> Codegen<M> {
             no_unreachable_in(tirs),
             "codegen::compile_and_dump_ir requires sema to have produced TIR with no Unreachable instructions"
         );
-        let mut func_ids = self.declare_all_functions(tirs, pool)?;
-
-        Self::declare_runtime_helpers(
-            &mut self.module,
-            &mut self.builder_context,
-            &mut self.ctx,
-            self.int_type,
-            &self.triple,
-            pool,
-            &mut func_ids,
-        )?;
+        let func_ids = self.prepare_compilation(tirs, pool)?;
 
         let mut ir_output = String::new();
         for tir in tirs {

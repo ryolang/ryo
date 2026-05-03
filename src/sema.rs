@@ -996,11 +996,11 @@ fn emit_builtin_call(
     let name = sema.pool.str(view.name);
     match name {
         "print" => {
-            // print keeps the old path: emit as a normal builtin Call
+            if !check_print_args(sema, view, span) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
             let ret_ty = builtin.return_type(sema.pool);
-            let call_ref = fcx.builder.call(view.name, arg_tirs, ret_ty, span);
-            check_print_args(sema, view, span);
-            call_ref
+            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
         }
         "panic" => emit_panic(sema, fcx, view, span),
         "assert" => emit_assert(sema, fcx, view, arg_tirs, span),
@@ -1032,21 +1032,7 @@ fn emit_panic(sema: &mut Sema<'_>, fcx: &mut FuncCtx, view: &CallView, span: Spa
         InstData::Str(id) => id,
         _ => unreachable!("StrLiteral tag implies Str data"),
     };
-    let user_msg = sema.pool.str(user_msg_id).to_string();
-    let (line, col) = byte_offset_to_line_col(sema.source, span.start);
-    let func_name = sema.pool.str(fcx.builder.name());
-    let formatted = format!(
-        "panicked at {}:{}:{} in {}(): {}\n",
-        sema.file_path, line, col, func_name, user_msg
-    );
-    let msg_len = formatted.len() as i64;
-    let formatted_id = sema.pool.intern_str(&formatted);
-
-    let str_ref = fcx.builder.str_const(formatted_id, sema.pool.str_(), span);
-    let len_ref = fcx.builder.int_const(msg_len, sema.pool.int(), span);
-    let panic_name = sema.pool.intern_str("__ryo_panic");
-    fcx.builder
-        .call(panic_name, &[str_ref, len_ref], sema.pool.never(), span)
+    build_panic_call(sema, fcx, user_msg_id, "panicked", span)
 }
 
 fn emit_assert(
@@ -1094,45 +1080,52 @@ fn emit_assert(
         InstData::Str(id) => id,
         _ => unreachable!("StrLiteral tag implies Str data"),
     };
-    let user_msg = sema.pool.str(user_msg_id).to_string();
-    let (line, col) = byte_offset_to_line_col(sema.source, span.start);
-    let func_name = sema.pool.str(fcx.builder.name());
-    let formatted = format!(
-        "assertion failed at {}:{}:{} in {}(): {}\n",
-        sema.file_path, line, col, func_name, user_msg
-    );
-    let msg_len = formatted.len() as i64;
-    let formatted_id = sema.pool.intern_str(&formatted);
 
-    // Build the negated condition: `not cond`
     let neg_cond = fcx
         .builder
         .unary(TirTag::BoolNot, sema.pool.bool_(), arg_tirs[0], span);
 
-    // Build the panic call as the then-body
-    let str_ref = fcx.builder.str_const(formatted_id, sema.pool.str_(), span);
-    let len_ref = fcx.builder.int_const(msg_len, sema.pool.int(), span);
-    let panic_name = sema.pool.intern_str("__ryo_panic");
-    let panic_call = fcx
-        .builder
-        .call(panic_name, &[str_ref, len_ref], sema.pool.never(), span);
+    let panic_call = build_panic_call(sema, fcx, user_msg_id, "assertion failed", span);
     let panic_stmt = fcx
         .builder
         .unary(TirTag::ExprStmt, sema.pool.void(), panic_call, span);
 
-    // Desugar to: if not cond: __ryo_panic(msg_ptr, msg_len)
     fcx.builder
         .if_stmt(neg_cond, &[panic_stmt], &[], None, sema.pool.void(), span)
 }
 
-fn check_print_args(sema: &mut Sema<'_>, view: &CallView, span: Span) {
+fn build_panic_call(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    user_msg_id: StringId,
+    prefix: &str,
+    span: Span,
+) -> TirRef {
+    let user_msg = sema.pool.str(user_msg_id).to_string();
+    let (line, col) = byte_offset_to_line_col(sema.source, span.start);
+    let func_name = sema.pool.str(fcx.builder.name());
+    let formatted = format!(
+        "{} at {}:{}:{} in {}(): {}\n",
+        prefix, sema.file_path, line, col, func_name, user_msg
+    );
+    let msg_len = formatted.len() as i64;
+    let formatted_id = sema.pool.intern_str(&formatted);
+
+    let str_ref = fcx.builder.str_const(formatted_id, sema.pool.str_(), span);
+    let len_ref = fcx.builder.int_const(msg_len, sema.pool.int(), span);
+    let panic_name = sema.pool.intern_str("__ryo_panic");
+    fcx.builder
+        .call(panic_name, &[str_ref, len_ref], sema.pool.never(), span)
+}
+
+fn check_print_args(sema: &mut Sema<'_>, view: &CallView, span: Span) -> bool {
     if view.args.len() != 1 {
         sema.sink.emit(Diag::error(
             span,
             DiagCode::ArityMismatch,
             format!("print() takes exactly 1 argument, got {}", view.args.len()),
         ));
-        return;
+        return false;
     }
     if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
         sema.sink.emit(Diag::error(
@@ -1140,7 +1133,9 @@ fn check_print_args(sema: &mut Sema<'_>, view: &CallView, span: Span) {
             DiagCode::BuiltinArgKind,
             "print() argument must be a string literal",
         ));
+        return false;
     }
+    true
 }
 
 // Column counts unicode codepoints, not bytes — matches editor conventions.
