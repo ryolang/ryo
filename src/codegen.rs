@@ -24,7 +24,7 @@
 
 use crate::tir::{Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
-use cranelift::codegen::ir::BlockArg;
+use cranelift::codegen::ir::{BlockArg, FuncRef};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -85,7 +85,7 @@ struct FunctionContext<'a, M: Module> {
     string_data: &'a mut HashMap<StringId, DataId>,
     int_type: types::Type,
     triple: &'a Triple,
-    pool: &'a mut InternPool,
+    pool: &'a InternPool,
     tir: &'a Tir,
     locals: HashMap<StringId, Variable>,
     func_ids: &'a HashMap<StringId, FuncId>,
@@ -170,7 +170,7 @@ impl Codegen<JITModule> {
 }
 
 impl<M: Module> Codegen<M> {
-    pub fn compile(&mut self, tirs: &[Tir], pool: &mut InternPool) -> Result<FuncId, String> {
+    pub fn compile(&mut self, tirs: &[Tir], pool: &InternPool) -> Result<FuncId, String> {
         debug_assert!(
             no_unreachable_in(tirs),
             "codegen::compile requires sema to have produced TIR with no Unreachable instructions"
@@ -198,7 +198,7 @@ impl<M: Module> Codegen<M> {
     pub fn compile_and_dump_ir(
         &mut self,
         tirs: &[Tir],
-        pool: &mut InternPool,
+        pool: &InternPool,
     ) -> Result<String, String> {
         debug_assert!(
             no_unreachable_in(tirs),
@@ -263,7 +263,7 @@ impl<M: Module> Codegen<M> {
         &mut self,
         tir: &Tir,
         func_ids: &HashMap<StringId, FuncId>,
-        pool: &mut InternPool,
+        pool: &InternPool,
     ) -> Result<String, String> {
         let func_id = *func_ids
             .get(&tir.name)
@@ -786,18 +786,7 @@ impl<M: Module> Codegen<M> {
             }
         }
 
-        let mut write_sig = ctx.module.make_signature();
-        write_sig.params.push(AbiParam::new(ctx.int_type));
-        write_sig.params.push(AbiParam::new(ctx.int_type));
-        write_sig.params.push(AbiParam::new(ctx.int_type));
-        write_sig.returns.push(AbiParam::new(ctx.int_type));
-
-        let write_func = ctx
-            .module
-            .declare_function("write", Linkage::Import, &write_sig)
-            .map_err(|e| format!("Failed to declare write function: {}", e))?;
-
-        let write_ref = ctx.module.declare_func_in_func(write_func, builder.func);
+        let write_ref = declare_write(ctx.module, builder, ctx.int_type)?;
         let call_inst = builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
         let _bytes_written = builder.inst_results(call_inst)[0];
 
@@ -868,13 +857,12 @@ fn emit_fail_path<M: Module>(
     ctx: &mut FunctionContext<'_, M>,
     msg_string_id: StringId,
 ) -> Result<(), String> {
-    // Grab text and length before the mutable borrows in store_string.
-    let msg_text = ctx.pool.str(msg_string_id).to_owned();
+    let msg_text = ctx.pool.str(msg_string_id);
     let msg_len = msg_text.len();
 
     let data_id = store_string(
         msg_string_id,
-        &msg_text,
+        msg_text,
         ctx.module,
         ctx.data_ctx,
         ctx.string_data,
@@ -884,16 +872,7 @@ fn emit_fail_path<M: Module>(
     let string_len = builder.ins().iconst(ctx.int_type, msg_len as i64);
     let fd = builder.ins().iconst(ctx.int_type, 2); // stderr
 
-    let mut write_sig = ctx.module.make_signature();
-    write_sig.params.push(AbiParam::new(ctx.int_type));
-    write_sig.params.push(AbiParam::new(ctx.int_type));
-    write_sig.params.push(AbiParam::new(ctx.int_type));
-    write_sig.returns.push(AbiParam::new(ctx.int_type));
-    let write_func = ctx
-        .module
-        .declare_function("write", Linkage::Import, &write_sig)
-        .map_err(|e| format!("Failed to declare write function: {}", e))?;
-    let write_ref = ctx.module.declare_func_in_func(write_func, builder.func);
+    let write_ref = declare_write(ctx.module, builder, ctx.int_type)?;
     builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
 
     let mut exit_sig = ctx.module.make_signature();
@@ -910,6 +889,22 @@ fn emit_fail_path<M: Module>(
     builder.ins().trap(TrapCode::user(1).unwrap());
 
     Ok(())
+}
+
+fn declare_write<M: Module>(
+    module: &mut M,
+    builder: &mut FunctionBuilder,
+    int_type: types::Type,
+) -> Result<FuncRef, String> {
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(int_type));
+    sig.params.push(AbiParam::new(int_type));
+    sig.params.push(AbiParam::new(int_type));
+    sig.returns.push(AbiParam::new(int_type));
+    let func_id = module
+        .declare_function("write", Linkage::Import, &sig)
+        .map_err(|e| format!("Failed to declare write function: {}", e))?;
+    Ok(module.declare_func_in_func(func_id, builder.func))
 }
 
 /// Materialize a string literal pointer into the function. Pulled

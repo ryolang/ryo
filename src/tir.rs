@@ -263,10 +263,6 @@ impl Tir {
             .collect()
     }
 
-    pub fn set_fail_message(&mut self, r: TirRef, sid: StringId) {
-        self.fail_messages.insert(r, sid);
-    }
-
     pub fn fail_message(&self, r: TirRef) -> Option<StringId> {
         self.fail_messages.get(&r).copied()
     }
@@ -963,15 +959,13 @@ mod tests {
 
     #[test]
     fn fail_message_table_roundtrip() {
-        let mut tir = {
-            let mut pool = InternPool::new();
-            let main = pool.intern_str("main");
-            let b = TirBuilder::new(main, vec![], pool.int(), sp());
-            b.finish(&[])
-        };
+        let mut pool = InternPool::new();
+        let main = pool.intern_str("main");
+        let mut b = TirBuilder::new(main, vec![], pool.int(), sp());
         let r = TirRef::from_raw(42);
         let sid = StringId::from_raw(7);
-        tir.set_fail_message(r, sid);
+        b.set_fail_message(r, sid);
+        let tir = b.finish(&[]);
         assert_eq!(tir.fail_message(r), Some(sid));
     }
 

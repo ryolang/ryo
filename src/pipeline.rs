@@ -296,7 +296,7 @@ pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerE
         if sink.has_errors() {
             return finish_with_diags(sink, &input, &name);
         }
-        generate_and_display_ir(&tirs, &mut pool)?;
+        generate_and_display_ir(&tirs, &pool)?;
     }
 
     finish_with_diags(sink, &input, &name)
@@ -386,7 +386,7 @@ fn lower_and_analyze(
     Ok(tirs)
 }
 
-fn generate_and_display_ir(tirs: &[Tir], pool: &mut InternPool) -> Result<(), CompilerError> {
+fn generate_and_display_ir(tirs: &[Tir], pool: &InternPool) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     let ir = codegen
@@ -416,7 +416,7 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     println!("[Codegen]");
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
     let main_id = codegen
-        .compile(&tirs, &mut pool)
+        .compile(&tirs, &pool)
         .map_err(CompilerError::CodegenError)?;
     let result = codegen
         .execute(main_id)
@@ -440,7 +440,7 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     codegen
-        .compile(&tirs, &mut pool)
+        .compile(&tirs, &pool)
         .map_err(CompilerError::CodegenError)?;
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
