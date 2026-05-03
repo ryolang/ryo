@@ -1085,11 +1085,18 @@ fn panic_exits_with_101_jit() {
     let output = run_ryo_command(&["run", "panic_basic.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert!(
-        !output.status.success(),
+    assert_ne!(
+        output.status.code(),
+        Some(0),
         "panic() should exit nonzero. stdout: {}, stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("panicked"),
+        "stderr should contain panic message, got: {}",
+        stderr
     );
 }
 
@@ -1120,11 +1127,18 @@ fn assert_false_exits_with_101_jit() {
     let output = run_ryo_command(&["run", "assert_false.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert!(
-        !output.status.success(),
+    assert_ne!(
+        output.status.code(),
+        Some(0),
         "assert(false) should exit nonzero. stdout: {}, stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("assertion failed"),
+        "stderr should contain assert failure message, got: {}",
+        stderr
     );
 }
 
@@ -1229,10 +1243,12 @@ fn assert_non_bool_condition_rejected() {
     let output = run_ryo_command(&["run", "assert_bad_cond.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert!(
-        !output.status.success(),
+    assert_ne!(
+        output.status.code(),
+        Some(0),
         "non-bool condition should be a compile error"
     );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E0012"));
 }
 
 #[test]
@@ -1244,10 +1260,12 @@ fn assert_wrong_arity_rejected() {
     let output = run_ryo_command(&["run", "assert_arity.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert!(
-        !output.status.success(),
+    assert_ne!(
+        output.status.code(),
+        Some(0),
         "wrong arity should be a compile error"
     );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E0013"));
 }
 
 #[test]
@@ -1259,10 +1277,12 @@ fn panic_wrong_arity_rejected() {
     let output = run_ryo_command(&["run", "panic_arity.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert!(
-        !output.status.success(),
+    assert_ne!(
+        output.status.code(),
+        Some(0),
         "panic with no args should be a compile error"
     );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E0013"));
 }
 
 #[test]
@@ -1274,10 +1294,12 @@ fn panic_non_literal_rejected() {
     let output = run_ryo_command(&["run", "panic_bad_arg.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert!(
-        !output.status.success(),
+    assert_ne!(
+        output.status.code(),
+        Some(0),
         "panic with non-literal should be a compile error"
     );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E0014"));
 }
 
 // =============================================================================

@@ -50,13 +50,17 @@ mod tests {
     }
 
     #[test]
-    fn lookup_assert_exists() {
-        assert!(lookup("assert").is_some());
+    fn lookup_assert_exists_and_returns_void() {
+        let pool = InternPool::new();
+        let b = lookup("assert").unwrap();
+        assert_eq!(b.return_type(&pool), pool.void());
     }
 
     #[test]
-    fn lookup_panic_exists() {
-        assert!(lookup("panic").is_some());
+    fn lookup_panic_exists_and_returns_never() {
+        let pool = InternPool::new();
+        let b = lookup("panic").unwrap();
+        assert_eq!(b.return_type(&pool), pool.never());
     }
 
     #[test]

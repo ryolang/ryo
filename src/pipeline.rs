@@ -283,7 +283,7 @@ pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerE
     // returns a well-formed TIR even with errors (Unreachable
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
-    let tirs = sema::analyze(&uir, &mut pool, &mut sink, &input, &name);
+    let tirs = sema::analyze(&uir, &mut pool, &mut sink, &input, file);
 
     if want.tir {
         display_tir(&tirs, &pool);
@@ -372,13 +372,14 @@ fn lower_and_analyze(
     pool: &mut InternPool,
     input: &str,
     source_name: &str,
+    file_path: &Path,
 ) -> Result<Vec<Tir>, CompilerError> {
     let mut sink = DiagSink::new();
     let uir = astgen::generate(program, pool, &mut sink);
     // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
-    let tirs = sema::analyze(&uir, pool, &mut sink, input, source_name);
+    let tirs = sema::analyze(&uir, pool, &mut sink, input, file_path);
     if sink.has_errors() {
         let diags = sink.into_diags();
         render_diags(&diags, input, source_name);
@@ -412,7 +413,7 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program, &pool);
     println!();
 
-    let tirs = lower_and_analyze(&program, &mut pool, &input, &name)?;
+    let tirs = lower_and_analyze(&program, &mut pool, &input, &name, file)?;
 
     println!("[Codegen]");
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
@@ -433,7 +434,7 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
     let name = source_name(file);
     let program = parse_source(&input, &mut pool, &name)?;
-    let tirs = lower_and_analyze(&program, &mut pool, &input, &name)?;
+    let tirs = lower_and_analyze(&program, &mut pool, &input, &name, file)?;
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 

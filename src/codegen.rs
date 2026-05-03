@@ -774,7 +774,8 @@ impl<M: Module> Codegen<M> {
             let dead = builder.create_block();
             builder.seal_block(dead);
             builder.switch_to_block(dead);
-            return Ok(builder.ins().iconst(ctx.int_type, 0));
+            let dummy_ty = cranelift_type_for(ret_ty, ctx.pool, ctx.int_type);
+            return Ok(builder.ins().iconst(dummy_ty, 0));
         }
 
         if results.is_empty() {
@@ -815,7 +816,7 @@ impl<M: Module> Codegen<M> {
         let string_len = builder
             .ins()
             .iconst(ctx.int_type, string_content.len() as i64);
-        let fd = builder.ins().iconst(ctx.int_type, 1);
+        let fd = builder.ins().iconst(types::I32, 1);
 
         check_platform_support(ctx.triple)?;
 
@@ -868,18 +869,18 @@ fn emit_ryo_panic_function<M: Module>(
 
         let ptr = builder.block_params(entry)[0];
         let len = builder.block_params(entry)[1];
-        let fd = builder.ins().iconst(int_type, 2); // stderr
+        let fd = builder.ins().iconst(types::I32, 2); // stderr
 
         let write_ref = declare_write(module, &mut builder, int_type)?;
         builder.ins().call(write_ref, &[fd, ptr, len]);
 
         let mut exit_sig = module.make_signature();
-        exit_sig.params.push(AbiParam::new(int_type));
+        exit_sig.params.push(AbiParam::new(types::I32));
         let exit_func = module
             .declare_function("exit", Linkage::Import, &exit_sig)
             .map_err(|e| format!("Failed to declare exit: {}", e))?;
         let exit_ref = module.declare_func_in_func(exit_func, builder.func);
-        let exit_code = builder.ins().iconst(int_type, 101);
+        let exit_code = builder.ins().iconst(types::I32, 101);
         builder.ins().call(exit_ref, &[exit_code]);
 
         builder.ins().trap(TrapCode::user(1).unwrap());
@@ -900,7 +901,7 @@ fn declare_write<M: Module>(
     int_type: types::Type,
 ) -> Result<FuncRef, String> {
     let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(int_type));
+    sig.params.push(AbiParam::new(types::I32));
     sig.params.push(AbiParam::new(int_type));
     sig.params.push(AbiParam::new(int_type));
     sig.returns.push(AbiParam::new(int_type));

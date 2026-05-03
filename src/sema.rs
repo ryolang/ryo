@@ -51,6 +51,7 @@ use crate::tir::{Tir, TirBuilder, TirParam, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
 use crate::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 
 // ---------- Decl table ----------
 
@@ -138,7 +139,7 @@ pub fn analyze(
     pool: &mut InternPool,
     sink: &mut DiagSink,
     source: &str,
-    file_path: &str,
+    file_path: &Path,
 ) -> Vec<Tir> {
     Sema::run(uir, pool, sink, source, file_path)
 }
@@ -152,7 +153,7 @@ pub struct Sema<'a> {
     pool: &'a mut InternPool,
     sink: &'a mut DiagSink,
     source: &'a str,
-    file_path: &'a str,
+    file_path: &'a Path,
     /// Resolution status, parallel to `uir.func_bodies`.
     decl_state: Vec<DeclState>,
     /// Decls pending analysis.
@@ -180,7 +181,7 @@ impl<'a> Sema<'a> {
         pool: &'a mut InternPool,
         sink: &'a mut DiagSink,
         source: &'a str,
-        file_path: &'a str,
+        file_path: &'a Path,
     ) -> Vec<Tir> {
         let mut sema = Sema::new(uir, pool, sink, source, file_path);
         sema.resolve_signatures();
@@ -194,7 +195,7 @@ impl<'a> Sema<'a> {
         pool: &'a mut InternPool,
         sink: &'a mut DiagSink,
         source: &'a str,
-        file_path: &'a str,
+        file_path: &'a Path,
     ) -> Self {
         let n = uir.func_bodies.len();
         let mut name_to_decl = HashMap::with_capacity(n);
@@ -1106,7 +1107,7 @@ fn build_panic_call(
     let func_name = sema.pool.str(fcx.builder.name());
     let formatted = format!(
         "{} at {}:{}:{} in {}(): {}\n",
-        prefix, sema.file_path, line, col, func_name, user_msg
+        prefix, sema.file_path.display(), line, col, func_name, user_msg
     );
     let msg_len = formatted.len() as i64;
     let formatted_id = sema.pool.intern_str(&formatted);
@@ -1209,7 +1210,7 @@ mod tests {
         if sink.has_errors() {
             return Err(sink.into_diags());
         }
-        let tirs = analyze(&uir, &mut pool, &mut sink, input, "<test>");
+        let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
         if sink.has_errors() {
             return Err(sink.into_diags());
         }
@@ -1229,7 +1230,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let uir = astgen::generate(&program, &mut pool, &mut sink);
-        let tirs = analyze(&uir, &mut pool, &mut sink, input, "<test>");
+        let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
         (tirs, sink.into_diags(), pool)
     }
 
@@ -1585,7 +1586,7 @@ mod tests {
         b.add_function(main_id, vec![], pool.int(), &[ret], sp());
         let uir = b.finish();
 
-        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "test", "<test>");
+        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "test", Path::new("<test>"));
         sema.resolve_signatures();
         // Pretend we're mid-resolving `main`.
         sema.decl_state[0] = DeclState::InProgress;

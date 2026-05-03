@@ -16,16 +16,6 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 
 ## 🔴 Blocking
 
-### I-035 — `cranelift_type_for(never)` must map to `types::I8`, not panic
-**Files:** `src/codegen.rs` (`cranelift_type_for`)
-**Summary:** Ryo allows binding values of type `never` (e.g. `x = panic("boom")`), because `never` correctly absorbs into any type expression. If `cranelift_type_for` encounters `TypeKind::Never` and panics (as originally planned), the backend will crash on perfectly valid code.
-**Resolution:** Map `TypeKind::Never` to a dummy representation (like `types::I8`). Because the value originates from a panic/unreachable instruction, Cranelift will correctly trap and enter a dead block before the dummy variable is ever read.
-
-### I-036 — `emit_assert` validation must short-circuit
-**Files:** `src/sema.rs` (`emit_assert`)
-**Summary:** If an `assert()` call passes a non-boolean condition, sema emits a `TypeMismatch` error but falls through instead of returning `unreachable`. This will attempt to build TIR nodes for a malformed operation, leading to downstream invariant violations.
-**Resolution:** Add `return fcx.builder.unreachable(sema.pool.error_type(), span);` immediately after the `sink.emit` call for the condition check.
-
 ### I-004 — String type is a raw pointer with no length
 **Files:** `src/codegen.rs` (`generate_print_call`)
 **Summary:** `StrLiteral` codegen returns a bare `global_value` pointer. There is no length, no slice ABI, no ownership metadata. `print()` works only on string literals because it grabs the length from the AST node, not from the runtime value. Any non-literal string operation will require a fat-pointer (`*u8, usize`) ABI decision.
