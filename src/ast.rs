@@ -57,6 +57,8 @@ impl Statement {
             StmtKind::Return(_) => "Return",
             StmtKind::ExprStmt(_) => "ExprStmt",
             StmtKind::IfStmt(_) => "IfStmt",
+            StmtKind::AssignOrDecl { .. } => "AssignOrDecl",
+            StmtKind::CompoundAssign { .. } => "CompoundAssign",
         };
         print!(
             "Statement [{}] ({}..{})",
@@ -97,6 +99,19 @@ impl Statement {
             StmtKind::IfStmt(_if_stmt) => {
                 println!("{}IfStmt", prefix);
             }
+            StmtKind::AssignOrDecl { target, value } => {
+                println!("{}AssignOrDecl: {}", prefix, pool.str(target.name));
+                value.pretty_print(&format!("{}  └── ", prefix), pool);
+            }
+            StmtKind::CompoundAssign { target, op, value } => {
+                println!(
+                    "{}CompoundAssign: {} {:?}",
+                    prefix,
+                    pool.str(target.name),
+                    op
+                );
+                value.pretty_print(&format!("{}  └── ", prefix), pool);
+            }
         }
     }
 }
@@ -109,6 +124,15 @@ pub enum StmtKind {
     Return(Option<Expression>),
     ExprStmt(Expression),
     IfStmt(IfStmt),
+    AssignOrDecl {
+        target: Ident,
+        value: Expression,
+    },
+    CompoundAssign {
+        target: Ident,
+        op: CompoundOp,
+        value: Expression,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -351,6 +375,16 @@ impl fmt::Display for UnaryOperator {
             UnaryOperator::Not => write!(f, "not"),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CompoundOp {
+    Add = 0,
+    Sub = 1,
+    Mul = 2,
+    Div = 3,
+    Mod = 4,
 }
 
 #[cfg(test)]
