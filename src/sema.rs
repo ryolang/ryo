@@ -292,6 +292,7 @@ impl<'a> Sema<'a> {
     /// diagnostic when a cycle is detected. The caller should fall
     /// back to the error type for whatever it was trying to
     /// compute.
+    #[allow(dead_code)]
     fn require_decl(&mut self, callee: DeclId, span: Span, name: StringId) -> bool {
         match self.decl_state[callee.index()] {
             DeclState::Unresolved | DeclState::Resolved => true,
@@ -921,6 +922,9 @@ fn check_call(
     // bodies don't depend on bodies — but the call sits here so
     // future inferred-return-type / comptime work picks up cycle
     // detection for free.
+    // UPDATE: We must NOT call `require_decl` here for normal function
+    // calls because it breaks recursive functions. A recursive function
+    // is `InProgress`, but its signature is already known!
     let callee = match sema.name_to_decl.get(&name_id).copied() {
         Some(d) => d,
         None => {
@@ -932,9 +936,7 @@ fn check_call(
             return fcx.builder.unreachable(sema.pool.error_type(), span);
         }
     };
-    if !sema.require_decl(callee, span, name_id) {
-        return fcx.builder.unreachable(sema.pool.error_type(), span);
-    }
+    let _ = callee;
 
     let sig = sema
         .signatures

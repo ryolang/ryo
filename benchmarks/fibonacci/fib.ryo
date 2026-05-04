@@ -1,0 +1,8 @@
+fn fibonacci(n: int) -> int:
+	if n <= 1:
+		return n
+	return fibonacci(n - 1) + fibonacci(n - 2)
+
+fn main():
+	assert(fibonacci(40) == 102334155, "fib(40) check")
+	print("assert passed, fib(40) is correct\n")
