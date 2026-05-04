@@ -15,16 +15,16 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 
 | Language | Mean Time | Speed vs Rust | Memory (Max Resident) |
 |----------|-----------|---------------|-----------------------|
-| **Rust** | ~262.0 ms | 1.00x         | 1.36 MB               |
-| **Go**   | ~296.1 ms | 1.13x slower  | 3.89 MB               |
-| **Swift**| ~332.2 ms | 1.27x slower  | 1.64 MB               |
-| **Ryo (JIT)** | ~366.4 ms | 1.40x slower | 9.56 MB               |
-| **Ryo (AOT)** | ~367.7 ms | 1.40x slower | **1.16 MB**           |
-| **Python**| ~16.81 s | ~64x slower   | 8.30 MB               |
+| **Rust** | ~262.5 ms | 1.00x         | 1.36 MB               |
+| **Go**   | ~294.3 ms | 1.12x slower  | 3.83 MB               |
+| **Swift**| ~330.6 ms | 1.26x slower  | 1.52 MB               |
+| **Ryo (JIT)** | ~364.0 ms | 1.39x slower | 4.09 MB               |
+| **Ryo (AOT)** | ~362.1 ms | 1.38x slower | **1.16 MB**           |
+| **Python**| ~16.89 s | ~64x slower   | 7.73 MB               |
 
-*(Measurements executed on macOS)*
+*(Measurements executed on macOS, Apple M3 Pro. Ryo is compiled using `--release`)*
 
 ### Notes on Memory Usage
 Ryo's Ahead-Of-Time (AOT) compiled binary stands out aggressively in memory footprint—claiming the **lightest memory usage of all languages tested** (1.16 MB vs Rust's 1.36 MB).
 
-Ryo's JIT compilation inherently consumes more memory (9.56 MB) due to running the Cranelift compiler infrastructure in memory alongside the actual benchmark logic.
+Even operating entirely as a JIT script interpreting/compiling source code directly, Ryo's compiler (via Cranelift) maintains an incredibly small memory footprint (~4 MB).

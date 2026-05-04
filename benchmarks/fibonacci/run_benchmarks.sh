@@ -5,7 +5,8 @@ echo "Building benchmarks..."
 rustc -O fib.rs -o fib_rs
 go build -o fib_go fib.go
 swiftc -O fib.swift -o fib_swift
-ryo_bin="../../target/debug/ryo"
+cargo build --release > /dev/null 2>&1
+ryo_bin="../../target/release/ryo"
 $ryo_bin build fib.ryo > /dev/null
 
 echo "-------------------"
