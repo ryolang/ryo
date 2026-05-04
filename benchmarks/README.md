@@ -42,3 +42,26 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 Ryo's Ahead-Of-Time (AOT) compiled binary stands out aggressively in memory footprint—claiming the **lightest memory usage of all languages tested** (1.16 MB vs Rust's 1.36 MB).
 
 Even operating entirely as a JIT script interpreting/compiling source code directly, Ryo's compiler (via Cranelift) maintains an incredibly small memory footprint (~4 MB).
+
+## Profiling with Samply
+
+To deeply inspect the performance characteristics of Ryo's execution via flamegraphs, we recommend using [samply](https://github.com/mstange/samply).
+
+First, install `samply`:
+```bash
+cargo install samply
+```
+
+Then, you can profile either the JIT execution or the standalone AOT compiled binary. 
+
+**Profile the AOT binary:**
+```bash
+samply record ./fib
+```
+
+**Profile the JIT compiler executing a file:**
+```bash
+samply record ../../target/release/ryo run fib.ryo
+```
+
+`samply` will execute the provided command and automatically open a browser window displaying the flamegraph, allowing you to trace Cranelift codegen overhead versus actual application execution time.
