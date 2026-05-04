@@ -179,6 +179,14 @@ pub enum InstTag {
 
     /// If/elif/else statement. Variable payload in `extra`.
     IfStmt,
+
+    /// Assignment or declaration (syntax ambiguity resolved later). Variable
+    /// payload in `extra` — see [`assign_or_decl_extra`].
+    AssignOrDecl,
+
+    /// Compound assignment (`+=`, `-=`, etc.). Variable payload in `extra` —
+    /// see [`compound_assign_extra`].
+    CompoundAssign,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -329,6 +337,32 @@ pub mod var_decl_extra {
 
     pub const FLAG_MUTABLE: u32 = 1 << 0;
     pub const TY_NONE_SENTINEL: u32 = u32::MAX;
+}
+
+/// Layout in `extra` for [`InstTag::AssignOrDecl`]:
+///
+/// ```text
+///   [0]  name:  StringId
+///   [1]  value: InstRef.raw()
+/// ```
+pub mod assign_or_decl_extra {
+    pub const NAME: usize = 0;
+    pub const VALUE: usize = 1;
+    pub const LEN: usize = 2;
+}
+
+/// Layout in `extra` for [`InstTag::CompoundAssign`]:
+///
+/// ```text
+///   [0]  name:  StringId
+///   [1]  op:    u32 (CompoundOp discriminant)
+///   [2]  value: InstRef.raw()
+/// ```
+pub mod compound_assign_extra {
+    pub const NAME: usize = 0;
+    pub const OP: usize = 1;
+    pub const VALUE: usize = 2;
+    pub const LEN: usize = 3;
 }
 
 // ---------- Builder ----------
@@ -545,6 +579,46 @@ impl UirBuilder {
             span,
         )
     }
+
+    pub fn assign_or_decl(
+        &mut self,
+        name: StringId,
+        value: InstRef,
+        span: Span,
+    ) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(name.raw());
+        self.uir.extra.push(value.raw());
+        self.push(
+            InstTag::AssignOrDecl,
+            InstData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(assign_or_decl_extra::LEN),
+            }),
+            span,
+        )
+    }
+
+    pub fn compound_assign(
+        &mut self,
+        name: StringId,
+        op: u32,
+        value: InstRef,
+        span: Span,
+    ) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(name.raw());
+        self.uir.extra.push(op);
+        self.uir.extra.push(value.raw());
+        self.push(
+            InstTag::CompoundAssign,
+            InstData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(compound_assign_extra::LEN),
+            }),
+            span,
+        )
+    }
 }
 
 // ---------- Read-side helpers ----------
@@ -562,6 +636,17 @@ pub struct VarDeclView {
     /// `None` when the source had no annotation.
     pub ty: Option<TypeId>,
     pub initializer: InstRef,
+}
+
+pub struct AssignOrDeclView {
+    pub name: StringId,
+    pub value: InstRef,
+}
+
+pub struct CompoundAssignView {
+    pub name: StringId,
+    pub op: u32,
+    pub value: InstRef,
 }
 
 pub struct ElifView {
@@ -617,6 +702,35 @@ impl Uir {
             mutable,
             ty,
             initializer,
+        }
+    }
+
+    pub fn assign_or_decl_view(&self, r: InstRef) -> AssignOrDeclView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::AssignOrDecl));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("AssignOrDecl must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        AssignOrDeclView {
+            name: StringId::from_raw(slice[assign_or_decl_extra::NAME]),
+            value: InstRef::from_raw(slice[assign_or_decl_extra::VALUE]),
+        }
+    }
+
+    pub fn compound_assign_view(&self, r: InstRef) -> CompoundAssignView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::CompoundAssign));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("CompoundAssign must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        CompoundAssignView {
+            name: StringId::from_raw(slice[compound_assign_extra::NAME]),
+            op: slice[compound_assign_extra::OP],
+            value: InstRef::from_raw(slice[compound_assign_extra::VALUE]),
         }
     }
 
@@ -806,6 +920,28 @@ fn write_inst(
                 write!(f, " else=[{}]", else_s.len())?;
             }
             writeln!(f)
+        }
+        (InstTag::AssignOrDecl, InstData::Extra(_)) => {
+            let v = uir.assign_or_decl_view(r);
+            writeln!(f, "assign_or_decl {} = %{}", pool.str(v.name), v.value.index())
+        }
+        (InstTag::CompoundAssign, InstData::Extra(_)) => {
+            let v = uir.compound_assign_view(r);
+            let op_str = match v.op {
+                0 => "+=",
+                1 => "-=",
+                2 => "*=",
+                3 => "/=",
+                4 => "%=",
+                _ => "??=",
+            };
+            writeln!(
+                f,
+                "compound_assign {} {} %{}",
+                pool.str(v.name),
+                op_str,
+                v.value.index()
+            )
         }
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
@@ -1029,5 +1165,36 @@ mod tests {
         b.add_function(main, vec![], pool.int(), &[e1, e2, r], sp());
         let uir = b.finish();
         assert_eq!(uir.body_stmts(&uir.func_bodies[0]), vec![e1, e2, r]);
+    }
+
+    #[test]
+    fn assign_or_decl_round_trips_through_extra() {
+        let mut pool = InternPool::new();
+        let x = pool.intern_str("x");
+
+        let mut b = UirBuilder::new();
+        let value = b.int_literal(42, sp());
+        let assign_or_decl = b.assign_or_decl(x, value, sp());
+
+        let uir = b.finish();
+        let view = uir.assign_or_decl_view(assign_or_decl);
+        assert_eq!(view.name, x);
+        assert_eq!(view.value, value);
+    }
+
+    #[test]
+    fn compound_assign_round_trips_through_extra() {
+        let mut pool = InternPool::new();
+        let x = pool.intern_str("x");
+
+        let mut b = UirBuilder::new();
+        let value = b.int_literal(10, sp());
+        let compound_assign = b.compound_assign(x, 0, value, sp()); // 0 = +=
+
+        let uir = b.finish();
+        let view = uir.compound_assign_view(compound_assign);
+        assert_eq!(view.name, x);
+        assert_eq!(view.op, 0);
+        assert_eq!(view.value, value);
     }
 }
