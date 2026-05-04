@@ -82,6 +82,50 @@ where
         )
 }
 
+fn assign_or_decl_parser<'a, I>()
+-> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    select! { Token::Ident(s) => s }
+        .map_with(|s, e| Ident {
+            name: s,
+            span: e.span(),
+        })
+        .then_ignore(just(Token::Assign))
+        .then(expression_parser())
+        .map_with(|(target, value), e| Statement {
+            span: e.span(),
+            kind: StmtKind::AssignOrDecl { target, value },
+        })
+}
+
+fn compound_assign_parser<'a, I>()
+-> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let op = choice((
+        just(Token::PlusAssign).to(CompoundOp::Add),
+        just(Token::MinusAssign).to(CompoundOp::Sub),
+        just(Token::StarAssign).to(CompoundOp::Mul),
+        just(Token::SlashAssign).to(CompoundOp::Div),
+        just(Token::PercentAssign).to(CompoundOp::Mod),
+    ));
+
+    select! { Token::Ident(s) => s }
+        .map_with(|s, e| Ident {
+            name: s,
+            span: e.span(),
+        })
+        .then(op)
+        .then(expression_parser())
+        .map_with(|((target, op), value), e| Statement {
+            span: e.span(),
+            kind: StmtKind::CompoundAssign { target, op, value },
+        })
+}
+
 /// Statements valid inside a function body.
 fn body_statement_parser<'a, I>()
 -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
@@ -111,7 +155,14 @@ where
             kind: StmtKind::ExprStmt(expr),
         });
 
-        choice((return_stmt, var_decl, if_stmt, expr_stmt))
+        choice((
+            return_stmt,
+            compound_assign_parser(),
+            assign_or_decl_parser(),
+            var_decl,
+            if_stmt,
+            expr_stmt,
+        ))
     })
 }
 
@@ -993,6 +1044,97 @@ mod tests {
                 }
             }
             other => panic!("expected FunctionDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_assign_or_decl() {
+        let (program, pool) = lex_and_parse("fn main():\n\tx = 42\n").unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        match &func.body[0].kind {
+            StmtKind::AssignOrDecl { target, value } => {
+                assert_eq!(pool.str(target.name), "x");
+                match &value.kind {
+                    ExprKind::Literal(Literal::Int(42)) => {}
+                    other => panic!("expected Int(42), got {:?}", other),
+                }
+            }
+            other => panic!("expected AssignOrDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_compound_assign_plus() {
+        let (program, pool) = lex_and_parse("fn main():\n\tx += 1\n").unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        match &func.body[0].kind {
+            StmtKind::CompoundAssign { target, op, .. } => {
+                assert_eq!(pool.str(target.name), "x");
+                assert_eq!(*op, CompoundOp::Add);
+            }
+            other => panic!("expected CompoundAssign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_all_compound_ops() {
+        for (src, expected_op) in [
+            ("x += 1", CompoundOp::Add),
+            ("x -= 1", CompoundOp::Sub),
+            ("x *= 1", CompoundOp::Mul),
+            ("x /= 1", CompoundOp::Div),
+            ("x %= 1", CompoundOp::Mod),
+        ] {
+            let code = format!("fn main():\n\t{}\n", src);
+            let (program, _pool) = lex_and_parse(&code).unwrap();
+            let func = match &program.statements[0].kind {
+                StmtKind::FunctionDef(f) => f,
+                other => panic!("expected FunctionDef, got {:?}", other),
+            };
+            match &func.body[0].kind {
+                StmtKind::CompoundAssign { op, .. } => {
+                    assert_eq!(*op, expected_op, "failed for: {}", src);
+                }
+                other => panic!("expected CompoundAssign for '{}', got {:?}", src, other),
+            }
+        }
+    }
+
+    #[test]
+    fn vardecl_still_works_with_mut() {
+        let (program, pool) = lex_and_parse("fn main():\n\tmut x = 10\n").unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        match &func.body[0].kind {
+            StmtKind::VarDecl(decl) => {
+                assert!(decl.mutable);
+                assert_eq!(pool.str(decl.name.name), "x");
+            }
+            other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn vardecl_with_type_annotation_still_works() {
+        let (program, _pool) = lex_and_parse("fn main():\n\tx: int = 10\n").unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        match &func.body[0].kind {
+            StmtKind::VarDecl(decl) => {
+                assert!(!decl.mutable);
+                assert!(decl.type_annotation.is_some());
+            }
+            other => panic!("expected VarDecl, got {:?}", other),
         }
     }
 

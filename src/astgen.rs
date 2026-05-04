@@ -268,6 +268,24 @@ fn gen_stmt(
                 "nested function definitions are not supported",
             ));
         }
+        ast::StmtKind::AssignOrDecl { target, value } => {
+            // TODO(M8c1-task5): lower to a proper UIR assign instruction.
+            // Temporarily lower as a non-mutable VarDecl so existing tests
+            // that use `x = 42` inside function bodies keep working after
+            // the parser now emits AssignOrDecl instead of VarDecl for
+            // bare `ident = expr`.
+            let initializer = gen_expr(b, value);
+            let r = b.var_decl(target.name, false, None, initializer, stmt.span);
+            out.push(r);
+        }
+        ast::StmtKind::CompoundAssign { .. } => {
+            // TODO(M8c1-task5): lower to UIR compound-assign instructions
+            sink.emit(Diag::error(
+                stmt.span,
+                DiagCode::NestedFunctionDef, // placeholder code until Task 6
+                "compound-assign not yet lowered to UIR",
+            ));
+        }
         ast::StmtKind::IfStmt(if_stmt) => {
             let cond = gen_expr(b, &if_stmt.cond);
             let then_stmts = lower_block(b, &if_stmt.then_block, prims, pool, sink);
