@@ -43,6 +43,6 @@ hyperfine --warmup 1 \
   './fib_swift' \
   './fib' \
   "$ryo_bin run fib.ryo" \
-  '~/.bun/bin/bun run fib.ts' \
+  "$HOME/.bun/bin/bun run fib.ts" \
   'elixir fib.exs' \
   'python3 fib.py'
