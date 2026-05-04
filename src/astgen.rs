@@ -269,22 +269,14 @@ fn gen_stmt(
             ));
         }
         ast::StmtKind::AssignOrDecl { target, value } => {
-            // TODO(M8c1-task5): lower to a proper UIR assign instruction.
-            // Temporarily lower as a non-mutable VarDecl so existing tests
-            // that use `x = 42` inside function bodies keep working after
-            // the parser now emits AssignOrDecl instead of VarDecl for
-            // bare `ident = expr`.
-            let initializer = gen_expr(b, value);
-            let r = b.var_decl(target.name, false, None, initializer, stmt.span);
+            let value_ref = gen_expr(b, value);
+            let r = b.assign_or_decl(target.name, value_ref, stmt.span);
             out.push(r);
         }
-        ast::StmtKind::CompoundAssign { .. } => {
-            // TODO(M8c1-task5): lower to UIR compound-assign instructions
-            sink.emit(Diag::error(
-                stmt.span,
-                DiagCode::NestedFunctionDef, // placeholder code until Task 6
-                "compound-assign not yet lowered to UIR",
-            ));
+        ast::StmtKind::CompoundAssign { target, op, value } => {
+            let value_ref = gen_expr(b, value);
+            let r = b.compound_assign(target.name, *op as u32, value_ref, stmt.span);
+            out.push(r);
         }
         ast::StmtKind::IfStmt(if_stmt) => {
             let cond = gen_expr(b, &if_stmt.cond);
@@ -616,5 +608,34 @@ mod tests {
         let view = uir.if_stmt_view(stmts[0]);
         assert_eq!(view.then_stmts.len(), 1);
         assert!(view.else_stmts.is_some());
+    }
+
+    #[test]
+    fn lower_assign_or_decl() {
+        let (uir, pool) = parse_and_lower("fn main():\n\tx = 42\n").unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let stmts = uir.body_stmts(main);
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(
+            uir.inst(stmts[0]).tag,
+            crate::uir::InstTag::AssignOrDecl
+        ));
+        let v = uir.assign_or_decl_view(stmts[0]);
+        assert_eq!(pool.str(v.name), "x");
+    }
+
+    #[test]
+    fn lower_compound_assign() {
+        let (uir, pool) = parse_and_lower("fn main():\n\tmut x = 10\n\tx += 1\n").unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let stmts = uir.body_stmts(main);
+        assert_eq!(stmts.len(), 2);
+        assert!(matches!(
+            uir.inst(stmts[1]).tag,
+            crate::uir::InstTag::CompoundAssign
+        ));
+        let v = uir.compound_assign_view(stmts[1]);
+        assert_eq!(pool.str(v.name), "x");
+        assert_eq!(v.op, 0); // CompoundOp::Add = 0
     }
 }

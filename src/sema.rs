@@ -483,6 +483,41 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                 span,
             )
         }
+        InstTag::AssignOrDecl => {
+            // TODO(M8c1-task7): Properly distinguish assign vs. decl.
+            // Temporarily treat as non-mutable VarDecl to keep existing
+            // tests passing after the parser started emitting AssignOrDecl
+            // for bare `x = expr` inside function bodies.
+            let view = sema.uir.assign_or_decl_view(r);
+            let init_tir = analyze_expr(sema, fcx, scope, view.value);
+            let inferred = fcx.builder.ty_of(init_tir);
+            let inferred = if inferred == sema.pool.void() {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.value),
+                    DiagCode::VoidValueInExpression,
+                    format!(
+                        "cannot bind '{}' to a 'void' value: the right-hand side has no value",
+                        sema.pool.str(view.name),
+                    ),
+                ));
+                sema.pool.error_type()
+            } else {
+                inferred
+            };
+            scope.insert(view.name, inferred);
+            fcx.builder
+                .var_decl(view.name, false, inferred, init_tir, span)
+        }
+        InstTag::CompoundAssign => {
+            // TODO(M8c1-task7): Implement proper compound assign checking.
+            // Temporarily emit a diagnostic and return a void statement.
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::NestedFunctionDef, // placeholder code until Task 7
+                "compound-assign not yet implemented in sema",
+            ));
+            fcx.builder.return_void(sema.pool.void(), span)
+        }
         other => panic!(
             "analyze_stmt: instruction at %{} is not a statement (tag={:?})",
             r.index(),
