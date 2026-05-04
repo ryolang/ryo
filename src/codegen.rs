@@ -446,6 +446,46 @@ impl<M: Module> Codegen<M> {
                 Ok(false)
             }
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
+            TirTag::Assign => {
+                let view = ctx.tir.assign_view(r);
+                let val = Self::eval_inst(builder, ctx, view.value)?;
+                let var = ctx.locals.get(&view.name).ok_or_else(|| {
+                    format!(
+                        "Undefined variable in assign: '{}'",
+                        ctx.pool.str(view.name)
+                    )
+                })?;
+                builder.def_var(*var, val);
+                Ok(false)
+            }
+            TirTag::CompoundAssign => {
+                let view = ctx.tir.compound_assign_view(r);
+                let rhs = Self::eval_inst(builder, ctx, view.value)?;
+                let var = ctx.locals.get(&view.name).ok_or_else(|| {
+                    format!(
+                        "Undefined variable in compound assign: '{}'",
+                        ctx.pool.str(view.name)
+                    )
+                })?;
+                let current = builder.use_var(*var);
+
+                let is_float = inst.ty == ctx.pool.float();
+                let result = match (view.op, is_float) {
+                    (0, false) => builder.ins().iadd(current, rhs),
+                    (1, false) => builder.ins().isub(current, rhs),
+                    (2, false) => builder.ins().imul(current, rhs),
+                    (3, false) => builder.ins().sdiv(current, rhs),
+                    (4, false) => builder.ins().srem(current, rhs),
+                    (0, true) => builder.ins().fadd(current, rhs),
+                    (1, true) => builder.ins().fsub(current, rhs),
+                    (2, true) => builder.ins().fmul(current, rhs),
+                    (3, true) => builder.ins().fdiv(current, rhs),
+                    _ => return Err(format!("unsupported compound op {} for type", view.op)),
+                };
+
+                builder.def_var(*var, result);
+                Ok(false)
+            }
             other => Err(format!(
                 "emit_stmt: instruction at %{} is not a statement (tag={:?})",
                 r.index(),
