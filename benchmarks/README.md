@@ -4,6 +4,16 @@ These benchmarks compare a standard recursive calculation of `fibonacci(40)` acr
 
 *Note: As of now, Ryo's recursive function capability works perfectly and is extremely fast!*
 
+## Prerequisites
+Before running the benchmarks, ensure you have the following tools installed and available in your PATH:
+- `rustc`
+- `go`
+- `swiftc`
+- `python3`
+- `hyperfine`
+
+You must also have a built Ryo compiler binary. By default, `run_benchmarks.sh` expects the `ryo` binary to be built in release mode at `../../target/release/ryo`. You can ensure this by running `cargo build --release` from the repository root before starting the benchmarks.
+
 ## Setup
 In the `benchmarks/fibonacci` directory, run:
 ```bash

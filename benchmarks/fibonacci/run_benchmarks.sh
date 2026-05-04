@@ -17,7 +17,8 @@ measure_mem() {
     shift
     # Run the command in a subshell, routing its stdout to /dev/null
     # then the time command's stderr is piped to grep
-    local mem_out=$(( /usr/bin/time -l "$@" > /dev/null ) 2>&1 | grep "maximum resident set size" | awk '{printf "%.2f MB", $1 / 1024 / 1024}')
+    local mem_out
+    mem_out=$( ( /usr/bin/time -l "$@" > /dev/null ) 2>&1 | grep "maximum resident set size" | awk '{printf "%.2f MB", $1 / 1024 / 1024}' )
     printf "%-12s %s\n" "[$name]" "$mem_out"
 }
 
