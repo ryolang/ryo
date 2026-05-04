@@ -2106,10 +2106,10 @@ mod tests {
 
     #[test]
     fn assign_or_decl_creates_immutable_binding() {
-        let result = run("fn main():\n\tx = 42\n");
+        let result = run("fn main():\n\tx = 42\n\ty = x\n");
         assert!(
             result.is_ok(),
-            "bare x = 42 should declare immutable x: {:?}",
+            "bare x = 42 should declare immutable x readable later: {:?}",
             result.err()
         );
     }

@@ -580,12 +580,7 @@ impl UirBuilder {
         )
     }
 
-    pub fn assign_or_decl(
-        &mut self,
-        name: StringId,
-        value: InstRef,
-        span: Span,
-    ) -> InstRef {
+    pub fn assign_or_decl(&mut self, name: StringId, value: InstRef, span: Span) -> InstRef {
         let offset = self.extra_offset();
         self.uir.extra.push(name.raw());
         self.uir.extra.push(value.raw());
@@ -923,7 +918,12 @@ fn write_inst(
         }
         (InstTag::AssignOrDecl, InstData::Extra(_)) => {
             let v = uir.assign_or_decl_view(r);
-            writeln!(f, "assign_or_decl {} = %{}", pool.str(v.name), v.value.index())
+            writeln!(
+                f,
+                "assign_or_decl {} = %{}",
+                pool.str(v.name),
+                v.value.index()
+            )
         }
         (InstTag::CompoundAssign, InstData::Extra(_)) => {
             let v = uir.compound_assign_view(r);
