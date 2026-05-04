@@ -28,6 +28,8 @@ measure_mem "Go" ./fib_go
 measure_mem "Swift" ./fib_swift
 measure_mem "Ryo (AOT)" ./fib
 measure_mem "Ryo (JIT)" $ryo_bin run fib.ryo
+measure_mem "Bun (TS)" ~/.bun/bin/bun run fib.ts
+measure_mem "Elixir" elixir fib.exs
 measure_mem "Python" python3 fib.py
 
 echo ""
@@ -41,4 +43,6 @@ hyperfine --warmup 1 \
   './fib_swift' \
   './fib' \
   "$ryo_bin run fib.ryo" \
+  '~/.bun/bin/bun run fib.ts' \
+  'elixir fib.exs' \
   'python3 fib.py'

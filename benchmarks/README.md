@@ -10,6 +10,8 @@ Before running the benchmarks, ensure you have the following tools installed and
 - `go`
 - `swiftc`
 - `python3`
+- `bun`
+- `elixir`
 - `hyperfine`
 
 You must also have a built Ryo compiler binary. By default, `run_benchmarks.sh` expects the `ryo` binary to be built in release mode at `../../target/release/ryo`. You can ensure this by running `cargo build --release` from the repository root before starting the benchmarks.
@@ -25,12 +27,14 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 
 | Language | Mean Time | Speed vs Rust | Memory (Max Resident) |
 |----------|-----------|---------------|-----------------------|
-| **Rust** | ~262.5 ms | 1.00x         | 1.36 MB               |
-| **Go**   | ~294.3 ms | 1.12x slower  | 3.83 MB               |
-| **Swift**| ~330.6 ms | 1.26x slower  | 1.52 MB               |
-| **Ryo (JIT)** | ~364.0 ms | 1.39x slower | 4.09 MB               |
-| **Ryo (AOT)** | ~362.1 ms | 1.38x slower | **1.16 MB**           |
-| **Python**| ~16.89 s | ~64x slower   | 7.73 MB               |
+| **Rust** | ~273.0 ms | 1.00x         | 1.36 MB               |
+| **Go**   | ~303.7 ms | 1.11x slower  | 4.00 MB               |
+| **Swift**| ~354.5 ms | 1.30x slower  | 1.72 MB               |
+| **Ryo (JIT)** | ~378.4 ms | 1.39x slower | 4.09 MB               |
+| **Ryo (AOT)** | ~384.4 ms | 1.41x slower | **1.16 MB**           |
+| **Bun (TS)**  | ~420.9 ms | 1.47x slower | 27.55 MB              |
+| **Elixir**    | ~932.3 ms | 3.26x slower | 88.06 MB              |
+| **Python**| ~17.72 s | ~62x slower   | 8.14 MB               |
 
 *(Measurements executed on macOS, Apple M3 Pro. Ryo is compiled using `--release`)*
 
