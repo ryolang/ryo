@@ -45,6 +45,7 @@
 //! decide whether to proceed to codegen — codegen itself must never
 //! see an `Unreachable`.
 
+use crate::ast::CompoundOp;
 use crate::builtins;
 use crate::diag::{Diag, DiagCode, DiagSink};
 use crate::tir::{Tir, TirBuilder, TirParam, TirRef, TirTag};
@@ -102,10 +103,14 @@ struct FunctionSig {
     return_type: TypeId,
 }
 
+struct Binding {
+    ty: TypeId,
+    mutable: bool,
+}
+
 struct Scope<'a> {
     parent: Option<&'a Scope<'a>>,
-    bindings: HashMap<StringId, TypeId>,
-    mutables: HashMap<StringId, bool>,
+    bindings: HashMap<StringId, Binding>,
 }
 
 impl<'a> Scope<'a> {
@@ -113,20 +118,11 @@ impl<'a> Scope<'a> {
         Scope {
             parent: None,
             bindings: HashMap::new(),
-            mutables: HashMap::new(),
         }
     }
 
     fn insert_binding(&mut self, name: StringId, ty: TypeId, mutable: bool) {
-        self.bindings.insert(name, ty);
-        self.mutables.insert(name, mutable);
-    }
-
-    fn is_mut(&self, name: StringId) -> Option<bool> {
-        self.mutables
-            .get(&name)
-            .copied()
-            .or_else(|| self.parent?.is_mut(name))
+        self.bindings.insert(name, Binding { ty, mutable });
     }
 
     fn contains_in_current(&self, name: StringId) -> bool {
@@ -136,8 +132,15 @@ impl<'a> Scope<'a> {
     fn lookup(&self, name: StringId) -> Option<TypeId> {
         self.bindings
             .get(&name)
-            .copied()
+            .map(|b| b.ty)
             .or_else(|| self.parent?.lookup(name))
+    }
+
+    fn lookup_full(&self, name: StringId) -> Option<(TypeId, bool)> {
+        self.bindings
+            .get(&name)
+            .map(|b| (b.ty, b.mutable))
+            .or_else(|| self.parent?.lookup_full(name))
     }
 }
 
@@ -392,6 +395,8 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             let view = sema.uir.var_decl_view(r);
             let init_tir = analyze_expr(sema, fcx, scope, view.initializer);
             let inferred = fcx.builder.ty_of(init_tir);
+            // Reject void RHS and recover with error sentinel so
+            // downstream uses don't cascade.
             let inferred = if inferred == sema.pool.void() {
                 sema.sink.emit(Diag::error(
                     sema.uir.span(view.initializer),
@@ -511,10 +516,8 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             let value_tir = analyze_expr(sema, fcx, scope, view.value);
             let value_ty = fcx.builder.ty_of(value_tir);
 
-            match scope.is_mut(view.name) {
-                Some(true) => {
-                    // Reassignment to mutable variable
-                    let existing_ty = scope.lookup(view.name).unwrap();
+            match scope.lookup_full(view.name) {
+                Some((existing_ty, true)) => {
                     if !sema.pool.is_error(value_ty)
                         && !sema.pool.is_error(existing_ty)
                         && !sema.pool.compatible(existing_ty, value_ty)
@@ -532,8 +535,7 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                     }
                     fcx.builder.assign(view.name, existing_ty, value_tir, span)
                 }
-                Some(false) => {
-                    // Found but immutable — error
+                Some((_, false)) => {
                     sema.sink.emit(Diag::error(
                         span,
                         DiagCode::ImmutableAssign,
@@ -545,7 +547,6 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
                 None => {
-                    // Not found anywhere in the scope chain — new immutable declaration
                     let resolved_ty = if value_ty == sema.pool.void() {
                         sema.sink.emit(Diag::error(
                             sema.uir.span(view.value),
@@ -571,8 +572,8 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             let value_tir = analyze_expr(sema, fcx, scope, view.value);
             let value_ty = fcx.builder.ty_of(value_tir);
 
-            let existing_ty = match scope.lookup(view.name) {
-                Some(ty) => ty,
+            let (existing_ty, is_mutable) = match scope.lookup_full(view.name) {
+                Some(pair) => pair,
                 None => {
                     sema.sink.emit(Diag::error(
                         span,
@@ -586,27 +587,23 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                 }
             };
 
-            match scope.is_mut(view.name) {
-                Some(true) => {}
-                _ => {
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::ImmutableAssign,
-                        format!(
-                            "cannot assign to immutable variable '{}'",
-                            sema.pool.str(view.name),
-                        ),
-                    ));
-                    return fcx.builder.unreachable(sema.pool.error_type(), span);
-                }
+            if !is_mutable {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ImmutableAssign,
+                    format!(
+                        "cannot assign to immutable variable '{}'",
+                        sema.pool.str(view.name),
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
 
-            // Check operator validity for the variable's type
-            let op = view.op; // 0=Add, 1=Sub, 2=Mul, 3=Div, 4=Mod
+            let op = view.op;
             let is_int = existing_ty == sema.pool.int();
             let is_float = existing_ty == sema.pool.float();
 
-            if op == 4 && is_float {
+            if op == CompoundOp::Mod && is_float {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::FloatModulo,
@@ -627,7 +624,6 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
 
-            // Type-check RHS against the variable's type
             if !sema.pool.is_error(value_ty)
                 && !sema.pool.is_error(existing_ty)
                 && !sema.pool.compatible(existing_ty, value_ty)
@@ -664,7 +660,6 @@ fn analyze_block(
     let mut child_scope = Scope {
         parent: Some(scope),
         bindings: HashMap::new(),
-        mutables: HashMap::new(),
     };
     let mut tirs = Vec::with_capacity(stmts.len());
     for stmt_ref in stmts {

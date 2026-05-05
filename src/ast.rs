@@ -387,6 +387,31 @@ pub enum CompoundOp {
     Mod = 4,
 }
 
+impl CompoundOp {
+    pub fn from_raw(v: u32) -> Self {
+        match v {
+            0 => Self::Add,
+            1 => Self::Sub,
+            2 => Self::Mul,
+            3 => Self::Div,
+            4 => Self::Mod,
+            _ => unreachable!("invalid CompoundOp discriminant: {v}"),
+        }
+    }
+}
+
+impl fmt::Display for CompoundOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Add => write!(f, "+="),
+            Self::Sub => write!(f, "-="),
+            Self::Mul => write!(f, "*="),
+            Self::Div => write!(f, "/="),
+            Self::Mod => write!(f, "%="),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

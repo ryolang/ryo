@@ -636,6 +636,6 @@ mod tests {
         ));
         let v = uir.compound_assign_view(stmts[1]);
         assert_eq!(pool.str(v.name), "x");
-        assert_eq!(v.op, 0); // CompoundOp::Add = 0
+        assert_eq!(v.op, crate::ast::CompoundOp::Add);
     }
 }

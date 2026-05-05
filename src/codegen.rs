@@ -22,6 +22,7 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
+use crate::ast::CompoundOp;
 use crate::tir::{Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
 use cranelift::codegen::ir::{BlockArg, FuncRef};
@@ -471,16 +472,16 @@ impl<M: Module> Codegen<M> {
 
                 let is_float = inst.ty == ctx.pool.float();
                 let result = match (view.op, is_float) {
-                    (0, false) => builder.ins().iadd(current, rhs),
-                    (1, false) => builder.ins().isub(current, rhs),
-                    (2, false) => builder.ins().imul(current, rhs),
-                    (3, false) => builder.ins().sdiv(current, rhs),
-                    (4, false) => builder.ins().srem(current, rhs),
-                    (0, true) => builder.ins().fadd(current, rhs),
-                    (1, true) => builder.ins().fsub(current, rhs),
-                    (2, true) => builder.ins().fmul(current, rhs),
-                    (3, true) => builder.ins().fdiv(current, rhs),
-                    _ => return Err(format!("unsupported compound op {} for type", view.op)),
+                    (CompoundOp::Add, false) => builder.ins().iadd(current, rhs),
+                    (CompoundOp::Sub, false) => builder.ins().isub(current, rhs),
+                    (CompoundOp::Mul, false) => builder.ins().imul(current, rhs),
+                    (CompoundOp::Div, false) => builder.ins().sdiv(current, rhs),
+                    (CompoundOp::Mod, false) => builder.ins().srem(current, rhs),
+                    (CompoundOp::Add, true) => builder.ins().fadd(current, rhs),
+                    (CompoundOp::Sub, true) => builder.ins().fsub(current, rhs),
+                    (CompoundOp::Mul, true) => builder.ins().fmul(current, rhs),
+                    (CompoundOp::Div, true) => builder.ins().fdiv(current, rhs),
+                    (CompoundOp::Mod, true) => return Err("float modulo not supported".to_string()),
                 };
 
                 builder.def_var(*var, result);

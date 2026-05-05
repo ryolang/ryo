@@ -43,6 +43,7 @@
 //! never-emitted sentinel so all valid refs are non-zero. Same
 //! invariant as [`crate::uir::InstRef`].
 
+use crate::ast::CompoundOp;
 use crate::types::{InternPool, StringId, TypeId};
 use chumsky::span::{SimpleSpan, Span as _};
 use std::fmt;
@@ -535,14 +536,14 @@ impl TirBuilder {
     pub fn compound_assign(
         &mut self,
         name: StringId,
-        op: u32,
+        op: CompoundOp,
         var_ty: TypeId,
         value: TirRef,
         span: Span,
     ) -> TirRef {
         let offset = self.extra_offset();
         self.extra.push(name.raw());
-        self.extra.push(op);
+        self.extra.push(op as u32);
         self.extra.push(value.raw());
         self.push(
             TirTag::CompoundAssign,
@@ -636,7 +637,7 @@ pub struct AssignView {
 
 pub struct CompoundAssignView {
     pub name: StringId,
-    pub op: u32,
+    pub op: CompoundOp,
     pub value: TirRef,
 }
 
@@ -713,7 +714,7 @@ impl Tir {
         let slice = &self.extra[range.as_range()];
         CompoundAssignView {
             name: StringId::from_raw(slice[compound_assign_extra::NAME]),
-            op: slice[compound_assign_extra::OP],
+            op: CompoundOp::from_raw(slice[compound_assign_extra::OP]),
             value: TirRef::from_raw(slice[compound_assign_extra::VALUE]),
         }
     }
@@ -860,19 +861,11 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
         }
         (TirTag::CompoundAssign, TirData::Extra(_)) => {
             let v = tir.compound_assign_view(r);
-            let op_str = match v.op {
-                0 => "+=",
-                1 => "-=",
-                2 => "*=",
-                3 => "/=",
-                4 => "%=",
-                _ => "??=",
-            };
             writeln!(
                 f,
                 "compound_assign {} {} %{}",
                 pool.str(v.name),
-                op_str,
+                v.op,
                 v.value.index()
             )
         }
@@ -1096,14 +1089,14 @@ mod tests {
         let init = b.int_const(10, int_ty, sp());
         let decl = b.var_decl(x, true, int_ty, init, sp());
         let delta = b.int_const(5, int_ty, sp());
-        let ca = b.compound_assign(x, 0, int_ty, delta, sp()); // 0 = Add
+        let ca = b.compound_assign(x, CompoundOp::Add, int_ty, delta, sp());
         let zero = b.int_const(0, int_ty, sp());
         let ret = b.unary(TirTag::Return, pool.void(), zero, sp());
         let tir = b.finish(&[decl, ca, ret]);
 
         let v = tir.compound_assign_view(ca);
         assert_eq!(v.name, x);
-        assert_eq!(v.op, 0);
+        assert_eq!(v.op, CompoundOp::Add);
         assert_eq!(v.value, delta);
         assert_eq!(tir.inst(ca).ty, int_ty);
     }

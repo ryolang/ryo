@@ -42,6 +42,7 @@
 //! never-emitted sentinel so all valid refs are non-zero. This
 //! mirrors Zig's `Zir.Inst.Index` / `Zir.Inst.OptionalIndex` pair.
 
+use crate::ast::CompoundOp;
 use crate::types::{InternPool, StringId, TypeId};
 use chumsky::span::{SimpleSpan, Span as _};
 use std::fmt;
@@ -640,7 +641,7 @@ pub struct AssignOrDeclView {
 
 pub struct CompoundAssignView {
     pub name: StringId,
-    pub op: u32,
+    pub op: CompoundOp,
     pub value: InstRef,
 }
 
@@ -724,7 +725,7 @@ impl Uir {
         let slice = &self.extra[range.as_range()];
         CompoundAssignView {
             name: StringId::from_raw(slice[compound_assign_extra::NAME]),
-            op: slice[compound_assign_extra::OP],
+            op: CompoundOp::from_raw(slice[compound_assign_extra::OP]),
             value: InstRef::from_raw(slice[compound_assign_extra::VALUE]),
         }
     }
@@ -927,19 +928,11 @@ fn write_inst(
         }
         (InstTag::CompoundAssign, InstData::Extra(_)) => {
             let v = uir.compound_assign_view(r);
-            let op_str = match v.op {
-                0 => "+=",
-                1 => "-=",
-                2 => "*=",
-                3 => "/=",
-                4 => "%=",
-                _ => "??=",
-            };
             writeln!(
                 f,
                 "compound_assign {} {} %{}",
                 pool.str(v.name),
-                op_str,
+                v.op,
                 v.value.index()
             )
         }
@@ -1194,7 +1187,7 @@ mod tests {
         let uir = b.finish();
         let view = uir.compound_assign_view(compound_assign);
         assert_eq!(view.name, x);
-        assert_eq!(view.op, 0);
+        assert_eq!(view.op, CompoundOp::Add);
         assert_eq!(view.value, value);
     }
 }
