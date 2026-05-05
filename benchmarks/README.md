@@ -28,12 +28,14 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 | Language | Mean Time | Speed vs Rust | Memory (Max Resident) |
 |----------|-----------|---------------|-----------------------|
 | **Rust** | ~258.1 ms | 1.00x         | 1.31 MB               |
+| **Kotlin**| ~266.0 ms | 1.03x slower  | 37.89 MB              |
 | **Go**   | ~309.0 ms | 1.20x slower  | 3.77 MB               |
 | **Swift**| ~361.8 ms | 1.40x slower  | 1.64 MB               |
 | **Ryo (AOT)** | ~363.0 ms | 1.41x slower | **1.16 MB**           |
 | **Ryo (JIT)** | ~371.6 ms | 1.44x slower | 4.09 MB               |
 | **Bun (TS)**  | ~407.7 ms | 1.58x slower | 27.53 MB              |
 | **Elixir**    | ~908.1 ms | 3.52x slower | 87.30 MB              |
+| **Ruby** | ~8.99 s | ~34.8x slower | 25.84 MB              |
 | **Python**| ~16.92 s | ~65.6x slower   | 7.70 MB               |
 
 *(Measurements executed on macOS, Apple M3 Pro. Ryo is compiled using `--release`)*

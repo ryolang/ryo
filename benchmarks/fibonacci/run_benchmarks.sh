@@ -5,6 +5,7 @@ echo "Building benchmarks..."
 rustc -O fib.rs -o fib_rs
 go build -o fib_go fib.go
 swiftc -O fib.swift -o fib_swift
+kotlinc fib.kt -include-runtime -d fib.jar
 cargo build --release > /dev/null 2>&1
 ryo_bin="../../target/release/ryo"
 $ryo_bin build fib.ryo > /dev/null
@@ -24,12 +25,14 @@ measure_mem() {
 
 # Run them once just to collect memory usage
 measure_mem "Rust" ./fib_rs
+measure_mem "Kotlin" java -jar fib.jar
 measure_mem "Go" ./fib_go
 measure_mem "Swift" ./fib_swift
 measure_mem "Ryo (AOT)" ./fib
 measure_mem "Ryo (JIT)" $ryo_bin run fib.ryo
 measure_mem "Bun (TS)" ~/.bun/bin/bun run fib.ts
 measure_mem "Elixir" elixir fib.exs
+measure_mem "Ruby" ruby fib.rb
 measure_mem "Python" python3 fib.py
 
 echo ""
@@ -39,10 +42,12 @@ echo "-------------------"
 
 hyperfine --warmup 1 \
   './fib_rs' \
+  'java -jar fib.jar' \
   './fib_go' \
   './fib_swift' \
   './fib' \
   "$ryo_bin run fib.ryo" \
   "$HOME/.bun/bin/bun run fib.ts" \
   'elixir fib.exs' \
+  'ruby fib.rb' \
   'python3 fib.py'
