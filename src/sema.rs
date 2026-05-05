@@ -45,6 +45,7 @@
 //! decide whether to proceed to codegen — codegen itself must never
 //! see an `Unreachable`.
 
+use crate::ast::CompoundOp;
 use crate::builtins;
 use crate::diag::{Diag, DiagCode, DiagSink};
 use crate::tir::{Tir, TirBuilder, TirParam, TirRef, TirTag};
@@ -102,9 +103,14 @@ struct FunctionSig {
     return_type: TypeId,
 }
 
+struct Binding {
+    ty: TypeId,
+    mutable: bool,
+}
+
 struct Scope<'a> {
     parent: Option<&'a Scope<'a>>,
-    bindings: HashMap<StringId, TypeId>,
+    bindings: HashMap<StringId, Binding>,
 }
 
 impl<'a> Scope<'a> {
@@ -115,15 +121,26 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn insert(&mut self, name: StringId, ty: TypeId) {
-        self.bindings.insert(name, ty);
+    fn insert_binding(&mut self, name: StringId, ty: TypeId, mutable: bool) {
+        self.bindings.insert(name, Binding { ty, mutable });
+    }
+
+    fn contains_in_current(&self, name: StringId) -> bool {
+        self.bindings.contains_key(&name)
     }
 
     fn lookup(&self, name: StringId) -> Option<TypeId> {
         self.bindings
             .get(&name)
-            .copied()
+            .map(|b| b.ty)
             .or_else(|| self.parent?.lookup(name))
+    }
+
+    fn lookup_full(&self, name: StringId) -> Option<(TypeId, bool)> {
+        self.bindings
+            .get(&name)
+            .map(|b| (b.ty, b.mutable))
+            .or_else(|| self.parent?.lookup_full(name))
     }
 }
 
@@ -330,7 +347,7 @@ impl<'a> Sema<'a> {
 fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     let mut scope = Scope::new();
     for param in &body.params {
-        scope.insert(param.name, param.ty);
+        scope.insert_binding(param.name, param.ty, false);
     }
 
     let params: Vec<TirParam> = body
@@ -378,9 +395,8 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             let view = sema.uir.var_decl_view(r);
             let init_tir = analyze_expr(sema, fcx, scope, view.initializer);
             let inferred = fcx.builder.ty_of(init_tir);
-            // A void value (e.g. `x = print(...)`) cannot be bound
-            // to a name. Reject and recover with the error sentinel
-            // so downstream uses don't cascade.
+            // Reject void RHS and recover with error sentinel so
+            // downstream uses don't cascade.
             let inferred = if inferred == sema.pool.void() {
                 sema.sink.emit(Diag::error(
                     sema.uir.span(view.initializer),
@@ -395,7 +411,19 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                 inferred
             };
             let resolved = resolve_var_decl_type(&view, inferred, sema);
-            scope.insert(view.name, resolved);
+
+            if scope.contains_in_current(view.name) {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::DuplicateDeclaration,
+                    format!(
+                        "'{}' is already declared in this scope",
+                        sema.pool.str(view.name),
+                    ),
+                ));
+            } else {
+                scope.insert_binding(view.name, resolved, view.mutable);
+            }
             fcx.builder
                 .var_decl(view.name, view.mutable, resolved, init_tir, span)
         }
@@ -482,6 +510,142 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                 sema.pool.void(),
                 span,
             )
+        }
+        InstTag::AssignOrDecl => {
+            let view = sema.uir.assign_or_decl_view(r);
+            let value_tir = analyze_expr(sema, fcx, scope, view.value);
+            let value_ty = fcx.builder.ty_of(value_tir);
+
+            match scope.lookup_full(view.name) {
+                Some((existing_ty, true)) => {
+                    if !sema.pool.is_error(value_ty)
+                        && !sema.pool.is_error(existing_ty)
+                        && !sema.pool.compatible(existing_ty, value_ty)
+                    {
+                        sema.sink.emit(Diag::error(
+                            sema.uir.span(view.value),
+                            DiagCode::TypeMismatch,
+                            format!(
+                                "type mismatch: '{}' is '{}', got '{}'",
+                                sema.pool.str(view.name),
+                                sema.pool.display(existing_ty),
+                                sema.pool.display(value_ty),
+                            ),
+                        ));
+                    }
+                    fcx.builder.assign(view.name, existing_ty, value_tir, span)
+                }
+                Some((_, false)) => {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::ImmutableAssign,
+                        format!(
+                            "cannot assign to immutable variable '{}'",
+                            sema.pool.str(view.name),
+                        ),
+                    ));
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
+                }
+                None => {
+                    let resolved_ty = if value_ty == sema.pool.void() {
+                        sema.sink.emit(Diag::error(
+                            sema.uir.span(view.value),
+                            DiagCode::VoidValueInExpression,
+                            format!(
+                                "cannot bind '{}' to a 'void' value: the right-hand side has no value",
+                                sema.pool.str(view.name),
+                            ),
+                        ));
+                        sema.pool.error_type()
+                    } else {
+                        value_ty
+                    };
+
+                    scope.insert_binding(view.name, resolved_ty, false);
+                    fcx.builder
+                        .var_decl(view.name, false, resolved_ty, value_tir, span)
+                }
+            }
+        }
+        InstTag::CompoundAssign => {
+            let view = sema.uir.compound_assign_view(r);
+            let value_tir = analyze_expr(sema, fcx, scope, view.value);
+            let value_ty = fcx.builder.ty_of(value_tir);
+
+            let (existing_ty, is_mutable) = match scope.lookup_full(view.name) {
+                Some(pair) => pair,
+                None => {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::UndefinedAssignTarget,
+                        format!(
+                            "cannot use compound assignment on undeclared variable '{}'",
+                            sema.pool.str(view.name),
+                        ),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+            };
+
+            if !is_mutable {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ImmutableAssign,
+                    format!(
+                        "cannot assign to immutable variable '{}'",
+                        sema.pool.str(view.name),
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+
+            if existing_ty == sema.pool.error_type() {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+
+            let op = view.op;
+            let is_int = existing_ty == sema.pool.int();
+            let is_float = existing_ty == sema.pool.float();
+
+            if op == CompoundOp::Mod && is_float {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::FloatModulo,
+                    "operator '%=' is not defined for 'float'".to_string(),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+
+            if !is_int && !is_float {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UnsupportedOperator,
+                    format!(
+                        "compound assignment is not defined for '{}'",
+                        sema.pool.display(existing_ty),
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+
+            if !sema.pool.is_error(value_ty)
+                && !sema.pool.is_error(existing_ty)
+                && !sema.pool.compatible(existing_ty, value_ty)
+            {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.value),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "type mismatch in compound assignment: '{}' is '{}', got '{}'",
+                        sema.pool.str(view.name),
+                        sema.pool.display(existing_ty),
+                        sema.pool.display(value_ty),
+                    ),
+                ));
+            }
+
+            fcx.builder
+                .compound_assign(view.name, view.op, existing_ty, value_tir, span)
         }
         other => panic!(
             "analyze_stmt: instruction at %{} is not a statement (tag={:?})",
@@ -1891,5 +2055,145 @@ mod tests {
     fn reserved_ryo_prefix_rejected() {
         let errors = run_with_errors("fn __ryo_hack():\n\tprint(\"nope\")\n").1;
         assert!(any_code(&errors, DiagCode::ReservedIdentifier));
+    }
+
+    // ---- M8c1: mutability + assignment ----
+
+    #[test]
+    fn reassign_mut_variable() {
+        let result = run("fn main():\n\tmut x = 1\n\tx = 2\n");
+        assert!(
+            result.is_ok(),
+            "reassignment to mut should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn reassign_immutable_rejected() {
+        let diags = run("fn main():\n\tx = 1\n\tx = 2\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ImmutableAssign));
+    }
+
+    #[test]
+    fn compound_assign_mut_ok() {
+        let result = run("fn main():\n\tmut x = 10\n\tx += 5\n");
+        assert!(
+            result.is_ok(),
+            "compound assign to mut should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn compound_assign_immutable_rejected() {
+        let diags = run("fn main():\n\tx = 10\n\tx += 5\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ImmutableAssign));
+    }
+
+    #[test]
+    fn compound_assign_undeclared_rejected() {
+        let diags = run("fn main():\n\ty += 5\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::UndefinedAssignTarget));
+    }
+
+    #[test]
+    fn reassign_type_mismatch_rejected() {
+        let diags = run("fn main():\n\tmut x = 1\n\tx = true\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::TypeMismatch));
+    }
+
+    #[test]
+    fn assign_or_decl_creates_immutable_binding() {
+        let result = run("fn main():\n\tx = 42\n\ty = x\n");
+        assert!(
+            result.is_ok(),
+            "bare x = 42 should declare immutable x readable later: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn duplicate_decl_same_scope_rejected() {
+        let diags = run("fn main():\n\tx = 1\n\tmut x = 2\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DuplicateDeclaration));
+    }
+
+    #[test]
+    fn duplicate_mut_decl_same_scope_rejected() {
+        let diags = run("fn main():\n\tmut x = 1\n\tmut x = 2\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DuplicateDeclaration));
+    }
+
+    #[test]
+    fn cross_scope_reassign_mut() {
+        let result = run("fn main():\n\tmut x = 1\n\tif true:\n\t\tx = 2\n");
+        assert!(
+            result.is_ok(),
+            "cross-scope reassign of mut should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn cross_scope_reassign_immutable_rejected() {
+        let diags = run("fn main():\n\tx = 1\n\tif true:\n\t\tx = 2\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ImmutableAssign));
+    }
+
+    #[test]
+    fn explicit_shadow_with_mut_ok() {
+        let result = run("fn main():\n\tx = 1\n\tif true:\n\t\tmut x = 2\n");
+        assert!(
+            result.is_ok(),
+            "explicit shadow with mut should work: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn percent_assign_on_float_rejected() {
+        let diags = run("fn main():\n\tmut x = 1.0\n\tx %= 2.0\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::FloatModulo));
+    }
+
+    #[test]
+    fn compound_assign_all_int_ops() {
+        for op in ["+=", "-=", "*=", "/=", "%="] {
+            let code = format!("fn main():\n\tmut x = 10\n\tx {} 3\n", op);
+            let result = run(&code);
+            assert!(
+                result.is_ok(),
+                "{} on int should succeed: {:?}",
+                op,
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn compound_assign_float_arithmetic_ops() {
+        for op in ["+=", "-=", "*=", "/="] {
+            let code = format!("fn main():\n\tmut x = 1.0\n\tx {} 0.5\n", op);
+            let result = run(&code);
+            assert!(
+                result.is_ok(),
+                "{} on float should succeed: {:?}",
+                op,
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn compound_assign_on_bool_rejected() {
+        let diags = run("fn main():\n\tmut x = true\n\tx += 1\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::UnsupportedOperator));
+    }
+
+    #[test]
+    fn compound_assign_rhs_type_mismatch_rejected() {
+        let diags = run("fn main():\n\tmut x = 10\n\tx += true\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::TypeMismatch));
     }
 }

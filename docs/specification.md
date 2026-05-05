@@ -245,12 +245,21 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 		mut counter = 0              # Mutable integer (type inferred)
 		mut temperature: float = 98.6 # Mutable float (explicit type)
 		```
-    *   **Variable Shadowing:** Shadowing is **allowed** (Rust-style). Declaring a new variable with the same name as an existing one in the same scope (or an outer scope) creates a new variable, effectively "shadowing" the previous one. This is useful for type transformations or reusing names without mutation.
+    *   **Variable Shadowing:** Same-scope shadowing is **not allowed**. Re-using a name in the same scope is a compile-time error — use a new name or `mut` if you need to update a value. Inner-scope shadowing (e.g., inside an `if` or loop body) **is** allowed via an explicit declaration (`mut x = ...` or `x: Type = ...`).
         ```ryo
-		x = "123"        # x is a string
-		x = int(x)       # x is now an int (new variable, shadows previous x)
+		x = "123"
+		x = int(x)       # ERROR: cannot assign to immutable variable 'x'
+
+		# Instead, use a different name:
+		x_str = "123"
+		x = int(x_str)   # OK: new declaration
+
+		# Inner-scope shadowing is allowed:
+		count = 10
+		if condition:
+			mut count = 0  # OK: shadows outer 'count' in this block
 		```
-    *   *(Rationale: Immutable-by-default promotes safer code. No `let` keyword provides Pythonic simplicity. Type inference reduces boilerplate while explicit types remain available for clarity. The `mut` keyword makes mutability explicit and visible).*
+    *   *(Rationale: Immutable-by-default promotes safer code. No `let` keyword provides Pythonic simplicity. Type inference reduces boilerplate while explicit types remain available for clarity. The `mut` keyword makes mutability explicit and visible. Banning same-scope shadowing avoids accidental rebinding — if `x = ...` appears twice, it's almost always a mistake, not a deliberate type transformation).*
     *   **Type Inference:** Ryo uses **bidirectional type checking** (like Rust, TypeScript, and modern statically-typed languages) which provides:
         *   **Function signatures require type annotations** - Good for documentation and API clarity
         *   **Local variables inferred from initialization** - Ergonomic for local code

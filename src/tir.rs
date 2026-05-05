@@ -43,6 +43,7 @@
 //! never-emitted sentinel so all valid refs are non-zero. Same
 //! invariant as [`crate::uir::InstRef`].
 
+use crate::ast::CompoundOp;
 use crate::types::{InternPool, StringId, TypeId};
 use chumsky::span::{SimpleSpan, Span as _};
 use std::fmt;
@@ -158,6 +159,14 @@ pub enum TirTag {
     /// `TypedInst` carries the *variable's* resolved type (matches
     /// the side-table behaviour from the Phase-3 interim sema).
     VarDecl,
+
+    /// Reassignment to an existing mutable variable.
+    /// Variable payload in `extra` — see [`assign_extra`].
+    Assign,
+
+    /// Compound assignment (`+=`, `-=`, etc.) to a mutable variable.
+    /// Variable payload in `extra` — see [`compound_assign_extra`].
+    CompoundAssign,
 
     /// `return <expr>`. Operand in `TirData::UnOp`.
     Return,
@@ -289,6 +298,32 @@ pub mod var_decl_extra {
     pub const LEN: usize = 3;
 
     pub const FLAG_MUTABLE: u32 = 1 << 0;
+}
+
+/// Layout in `extra` for [`TirTag::Assign`]:
+///
+/// ```text
+///   [0]  name:  StringId
+///   [1]  value: TirRef.raw()
+/// ```
+pub mod assign_extra {
+    pub const NAME: usize = 0;
+    pub const VALUE: usize = 1;
+    pub const LEN: usize = 2;
+}
+
+/// Layout in `extra` for [`TirTag::CompoundAssign`]:
+///
+/// ```text
+///   [0]  name:  StringId
+///   [1]  op:    u32 (CompoundOp discriminant)
+///   [2]  value: TirRef.raw()
+/// ```
+pub mod compound_assign_extra {
+    pub const NAME: usize = 0;
+    pub const OP: usize = 1;
+    pub const VALUE: usize = 2;
+    pub const LEN: usize = 3;
 }
 
 // ---------- Builder ----------
@@ -483,6 +518,44 @@ impl TirBuilder {
         )
     }
 
+    pub fn assign(&mut self, name: StringId, var_ty: TypeId, value: TirRef, span: Span) -> TirRef {
+        let offset = self.extra_offset();
+        self.extra.push(name.raw());
+        self.extra.push(value.raw());
+        self.push(
+            TirTag::Assign,
+            var_ty,
+            TirData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(assign_extra::LEN),
+            }),
+            span,
+        )
+    }
+
+    pub fn compound_assign(
+        &mut self,
+        name: StringId,
+        op: CompoundOp,
+        var_ty: TypeId,
+        value: TirRef,
+        span: Span,
+    ) -> TirRef {
+        let offset = self.extra_offset();
+        self.extra.push(name.raw());
+        self.extra.push(op as u32);
+        self.extra.push(value.raw());
+        self.push(
+            TirTag::CompoundAssign,
+            var_ty,
+            TirData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(compound_assign_extra::LEN),
+            }),
+            span,
+        )
+    }
+
     pub fn if_stmt(
         &mut self,
         cond: TirRef,
@@ -557,6 +630,17 @@ pub struct VarDeclView {
     pub initializer: TirRef,
 }
 
+pub struct AssignView {
+    pub name: StringId,
+    pub value: TirRef,
+}
+
+pub struct CompoundAssignView {
+    pub name: StringId,
+    pub op: CompoundOp,
+    pub value: TirRef,
+}
+
 pub struct TirElifView {
     pub cond: TirRef,
     pub body: Vec<TirRef>,
@@ -603,6 +687,35 @@ impl Tir {
             name,
             mutable,
             initializer,
+        }
+    }
+
+    pub fn assign_view(&self, r: TirRef) -> AssignView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::Assign));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("Assign must carry TirData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        AssignView {
+            name: StringId::from_raw(slice[assign_extra::NAME]),
+            value: TirRef::from_raw(slice[assign_extra::VALUE]),
+        }
+    }
+
+    pub fn compound_assign_view(&self, r: TirRef) -> CompoundAssignView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::CompoundAssign));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("CompoundAssign must carry TirData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        CompoundAssignView {
+            name: StringId::from_raw(slice[compound_assign_extra::NAME]),
+            op: CompoundOp::from_raw(slice[compound_assign_extra::OP]),
+            value: TirRef::from_raw(slice[compound_assign_extra::VALUE]),
         }
     }
 
@@ -740,6 +853,20 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                 kw,
                 pool.str(view.name),
                 view.initializer.index()
+            )
+        }
+        (TirTag::Assign, TirData::Extra(_)) => {
+            let v = tir.assign_view(r);
+            writeln!(f, "assign {} = %{}", pool.str(v.name), v.value.index())
+        }
+        (TirTag::CompoundAssign, TirData::Extra(_)) => {
+            let v = tir.compound_assign_view(r);
+            writeln!(
+                f,
+                "compound_assign {} {} %{}",
+                pool.str(v.name),
+                v.op,
+                v.value.index()
             )
         }
         (TirTag::IfStmt, TirData::Extra(_)) => {
@@ -927,6 +1054,51 @@ mod tests {
         assert_eq!(view.then_stmts, vec![then_ret]);
         assert!(view.elif_branches.is_empty());
         assert_eq!(view.else_stmts, Some(vec![else_ret]));
+    }
+
+    #[test]
+    fn assign_round_trips() {
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let x = pool.intern_str("x");
+        let main = pool.intern_str("main");
+
+        let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+        let init = b.int_const(42, int_ty, sp());
+        let decl = b.var_decl(x, true, int_ty, init, sp());
+        let new_val = b.int_const(99, int_ty, sp());
+        let asgn = b.assign(x, int_ty, new_val, sp());
+        let zero = b.int_const(0, int_ty, sp());
+        let ret = b.unary(TirTag::Return, pool.void(), zero, sp());
+        let tir = b.finish(&[decl, asgn, ret]);
+
+        let v = tir.assign_view(asgn);
+        assert_eq!(v.name, x);
+        assert_eq!(v.value, new_val);
+        assert_eq!(tir.inst(asgn).ty, int_ty);
+    }
+
+    #[test]
+    fn compound_assign_round_trips() {
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let x = pool.intern_str("x");
+        let main = pool.intern_str("main");
+
+        let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+        let init = b.int_const(10, int_ty, sp());
+        let decl = b.var_decl(x, true, int_ty, init, sp());
+        let delta = b.int_const(5, int_ty, sp());
+        let ca = b.compound_assign(x, CompoundOp::Add, int_ty, delta, sp());
+        let zero = b.int_const(0, int_ty, sp());
+        let ret = b.unary(TirTag::Return, pool.void(), zero, sp());
+        let tir = b.finish(&[decl, ca, ret]);
+
+        let v = tir.compound_assign_view(ca);
+        assert_eq!(v.name, x);
+        assert_eq!(v.op, CompoundOp::Add);
+        assert_eq!(v.value, delta);
+        assert_eq!(tir.inst(ca).ty, int_ty);
     }
 
     #[test]
