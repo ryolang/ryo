@@ -599,6 +599,10 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
 
+            if existing_ty == sema.pool.error_type() {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+
             let op = view.op;
             let is_int = existing_ty == sema.pool.int();
             let is_float = existing_ty == sema.pool.float();
