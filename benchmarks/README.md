@@ -27,19 +27,19 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 
 | Language | Mean Time | Speed vs Rust | Memory (Max Resident) |
 |----------|-----------|---------------|-----------------------|
-| **Rust** | ~273.0 ms | 1.00x         | 1.36 MB               |
-| **Go**   | ~303.7 ms | 1.11x slower  | 4.00 MB               |
-| **Swift**| ~354.5 ms | 1.30x slower  | 1.72 MB               |
-| **Ryo (JIT)** | ~378.4 ms | 1.39x slower | 4.09 MB               |
-| **Ryo (AOT)** | ~384.4 ms | 1.41x slower | **1.16 MB**           |
-| **Bun (TS)**  | ~420.9 ms | 1.47x slower | 27.55 MB              |
-| **Elixir**    | ~932.3 ms | 3.26x slower | 88.06 MB              |
-| **Python**| ~17.72 s | ~62x slower   | 8.14 MB               |
+| **Rust** | ~258.1 ms | 1.00x         | 1.31 MB               |
+| **Go**   | ~309.0 ms | 1.20x slower  | 3.77 MB               |
+| **Swift**| ~361.8 ms | 1.40x slower  | 1.64 MB               |
+| **Ryo (AOT)** | ~363.0 ms | 1.41x slower | **1.16 MB**           |
+| **Ryo (JIT)** | ~371.6 ms | 1.44x slower | 4.09 MB               |
+| **Bun (TS)**  | ~407.7 ms | 1.58x slower | 27.53 MB              |
+| **Elixir**    | ~908.1 ms | 3.52x slower | 87.30 MB              |
+| **Python**| ~16.92 s | ~65.6x slower   | 7.70 MB               |
 
 *(Measurements executed on macOS, Apple M3 Pro. Ryo is compiled using `--release`)*
 
 ### Notes on Memory Usage
-Ryo's Ahead-Of-Time (AOT) compiled binary stands out aggressively in memory footprint—claiming the **lightest memory usage of all languages tested** (1.16 MB vs Rust's 1.36 MB).
+Ryo's Ahead-Of-Time (AOT) compiled binary stands out aggressively in memory footprint—claiming the **lightest memory usage of all languages tested** (1.16 MB vs Rust's 1.31 MB).
 
 Even operating entirely as a JIT script interpreting/compiling source code directly, Ryo's compiler (via Cranelift) maintains an incredibly small memory footprint (~4 MB).
 
