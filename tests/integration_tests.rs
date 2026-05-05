@@ -1302,6 +1302,113 @@ fn panic_non_literal_rejected() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("E0014"));
 }
 
+// ============================================================================
+// Milestone 8c1: Variable Reassignment & Compound Assignment
+// ============================================================================
+
+#[test]
+fn test_mut_reassign_basic() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut x = 1\n\tx = 2\n\tassert(x == 2, \"x should be 2 after reassignment\")\n";
+    let test_file = create_test_file(temp_dir.path(), "reassign.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "reassign.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_compound_assign_int() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut x = 10\n\tx += 5\n\tx -= 3\n\tassert(x == 12, \"10 + 5 - 3 should be 12\")\n";
+    let test_file = create_test_file(temp_dir.path(), "compound.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "compound.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_compound_assign_mul_div_mod() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // 20 * 3 = 60, 60 / 2 = 30, 30 % 7 = 2
+    let code = "fn main():\n\tmut x = 20\n\tx *= 3\n\tx /= 2\n\tx %= 7\n\tassert(x == 2, \"20*3/2%7 should be 2\")\n";
+    let test_file = create_test_file(temp_dir.path(), "compound_mdm.ryo", code);
+
+    let output = run_ryo_command(&["run", "compound_mdm.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_compound_assign_float() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // 10.0 + 2.5 = 12.5, 12.5 - 0.5 = 12.0
+    let code = "fn main():\n\tmut x = 10.0\n\tx += 2.5\n\tx -= 0.5\n\tassert(x == 12.0, \"10.0+2.5-0.5 should be 12.0\")\n";
+    let test_file = create_test_file(temp_dir.path(), "compound_float.ryo", code);
+
+    let output = run_ryo_command(&["run", "compound_float.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_immutable_reassign_error() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 1\n\tx = 2\n";
+    let test_file = create_test_file(temp_dir.path(), "immutable_err.ryo", code);
+
+    let output = run_ryo_command(&["run", "immutable_err.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "should fail for immutable reassign"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot assign to immutable variable"),
+        "expected immutability error, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_cross_scope_mut_reassign() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut x = 1\n\tif true:\n\t\tx = 42\n\tassert(x == 42, \"cross-scope reassign should persist\")\n";
+    let test_file = create_test_file(temp_dir.path(), "cross_scope.ryo", code);
+
+    let output = run_ryo_command(&["run", "cross_scope.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // =============================================================================
 // AOT Build + Run Verification Tests
 // =============================================================================

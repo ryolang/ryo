@@ -57,6 +57,8 @@ impl Statement {
             StmtKind::Return(_) => "Return",
             StmtKind::ExprStmt(_) => "ExprStmt",
             StmtKind::IfStmt(_) => "IfStmt",
+            StmtKind::AssignOrDecl { .. } => "AssignOrDecl",
+            StmtKind::CompoundAssign { .. } => "CompoundAssign",
         };
         print!(
             "Statement [{}] ({}..{})",
@@ -97,6 +99,19 @@ impl Statement {
             StmtKind::IfStmt(_if_stmt) => {
                 println!("{}IfStmt", prefix);
             }
+            StmtKind::AssignOrDecl { target, value } => {
+                println!("{}AssignOrDecl: {}", prefix, pool.str(target.name));
+                value.pretty_print(&format!("{}  └── ", prefix), pool);
+            }
+            StmtKind::CompoundAssign { target, op, value } => {
+                println!(
+                    "{}CompoundAssign: {} {:?}",
+                    prefix,
+                    pool.str(target.name),
+                    op
+                );
+                value.pretty_print(&format!("{}  └── ", prefix), pool);
+            }
         }
     }
 }
@@ -109,6 +124,15 @@ pub enum StmtKind {
     Return(Option<Expression>),
     ExprStmt(Expression),
     IfStmt(IfStmt),
+    AssignOrDecl {
+        target: Ident,
+        value: Expression,
+    },
+    CompoundAssign {
+        target: Ident,
+        op: CompoundOp,
+        value: Expression,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -349,6 +373,41 @@ impl fmt::Display for UnaryOperator {
         match self {
             UnaryOperator::Neg => write!(f, "-"),
             UnaryOperator::Not => write!(f, "not"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CompoundOp {
+    Add = 0,
+    Sub = 1,
+    Mul = 2,
+    Div = 3,
+    Mod = 4,
+}
+
+impl CompoundOp {
+    pub fn from_raw(v: u32) -> Self {
+        match v {
+            0 => Self::Add,
+            1 => Self::Sub,
+            2 => Self::Mul,
+            3 => Self::Div,
+            4 => Self::Mod,
+            _ => unreachable!("invalid CompoundOp discriminant: {v}"),
+        }
+    }
+}
+
+impl fmt::Display for CompoundOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Add => write!(f, "+="),
+            Self::Sub => write!(f, "-="),
+            Self::Mul => write!(f, "*="),
+            Self::Div => write!(f, "/="),
+            Self::Mod => write!(f, "%="),
         }
     }
 }

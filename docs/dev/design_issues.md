@@ -37,10 +37,6 @@ These require resolution before implementation reaches the affected milestone.
 
 ### 5. Specification Holes
 
-*   **`main` Return:** Spec says `void`, Roadmap says `int`.
-    *   *The Fix:* Standardize on `void` (implicitly returns exit code 0).
-*   **`never` Type:** Used in panic definitions but not defined in the Type section.
-    *   *The Fix:* Add the Bottom Type (`!`) to the spec.
 *   **`impl` Blocks for non-Trait methods:** Roadmap shows `impl Rectangle: ...` but the spec only details `impl Trait for Type`.
     *   *The Fix:* Document inherent implementations explicitly in Section 3.
 *   **Generics Strategy:** Roadmap uses "Hardcoded Generics" for v0.1, but the spec implies true generics.
@@ -114,10 +110,15 @@ These are underspecified aspects that will confuse developers if left undefined.
     *   Mismatch triggers a panic with a clear message: `"collection modified during iteration"`.
     *   Cost: one integer comparison per iteration — negligible.
 
+### 17. Loop-as-an-Expression and Safe `continue` (Zig inspirations)
 
+*   **The Smell:** 
+    1. Loop-as-an-expression (`break <value>`) is highly useful for searching and initializing immutable variables, but is currently deferred.
+    2. In `while` loops, using `continue` skips the rest of the block. If manual counter increments are placed there, it results in an accidental infinite loop. Zig solves this with `while (cond) : (continue_expr)`.
+*   **Proposal for Loop Expressions:** Consider implementing `break <value>` in a later milestone (requires `Phi` node insertion or stack allocs at the exit block).
+*   **Proposal for Safe `while`:** Since Ryo uses Pythonic syntax, adding `:(expr)` breaks aesthetic coherence. However, we could introduce a `defer` statement or explore a block-level `continue` hook to guarantee increment execution. For now, rely on `ForRange` loops where `continue` safely jumps to the builtin increment block.
 
 ### Priority 2 (Spec Completeness)
-3.  Add `never` type (`!`) to Section 4.
 5.  Document inherent `impl` blocks.
 6.  Add "post-v0.1" note to Sections 9 (Concurrency) and generics usage.
 
@@ -128,6 +129,7 @@ These are underspecified aspects that will confuse developers if left undefined.
 10. Default `int` to `i64`.
 11. Allow default function arguments.
 12. Document double-panic behavior.
+13. Discuss/Track Loop-as-an-Expression and Safe `continue` features.
 
 ### Checklist
 
@@ -141,3 +143,4 @@ These are underspecified aspects that will confuse developers if left undefined.
 - [ ] Document double-panic abort behavior
 - [ ] Reserve variadic functions for built-ins only
 - [ ] Resolve `!` operator conflict
+- [ ] Track Loop-as-an-Expression and Safe `continue` (Issue 17)

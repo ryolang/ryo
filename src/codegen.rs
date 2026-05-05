@@ -22,6 +22,7 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
+use crate::ast::CompoundOp;
 use crate::tir::{Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
 use cranelift::codegen::ir::{BlockArg, FuncRef};
@@ -446,6 +447,46 @@ impl<M: Module> Codegen<M> {
                 Ok(false)
             }
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
+            TirTag::Assign => {
+                let view = ctx.tir.assign_view(r);
+                let val = Self::eval_inst(builder, ctx, view.value)?;
+                let var = ctx.locals.get(&view.name).ok_or_else(|| {
+                    format!(
+                        "Undefined variable in assign: '{}'",
+                        ctx.pool.str(view.name)
+                    )
+                })?;
+                builder.def_var(*var, val);
+                Ok(false)
+            }
+            TirTag::CompoundAssign => {
+                let view = ctx.tir.compound_assign_view(r);
+                let rhs = Self::eval_inst(builder, ctx, view.value)?;
+                let var = ctx.locals.get(&view.name).ok_or_else(|| {
+                    format!(
+                        "Undefined variable in compound assign: '{}'",
+                        ctx.pool.str(view.name)
+                    )
+                })?;
+                let current = builder.use_var(*var);
+
+                let is_float = inst.ty == ctx.pool.float();
+                let result = match (view.op, is_float) {
+                    (CompoundOp::Add, false) => builder.ins().iadd(current, rhs),
+                    (CompoundOp::Sub, false) => builder.ins().isub(current, rhs),
+                    (CompoundOp::Mul, false) => builder.ins().imul(current, rhs),
+                    (CompoundOp::Div, false) => builder.ins().sdiv(current, rhs),
+                    (CompoundOp::Mod, false) => builder.ins().srem(current, rhs),
+                    (CompoundOp::Add, true) => builder.ins().fadd(current, rhs),
+                    (CompoundOp::Sub, true) => builder.ins().fsub(current, rhs),
+                    (CompoundOp::Mul, true) => builder.ins().fmul(current, rhs),
+                    (CompoundOp::Div, true) => builder.ins().fdiv(current, rhs),
+                    (CompoundOp::Mod, true) => return Err("float modulo not supported".to_string()),
+                };
+
+                builder.def_var(*var, result);
+                Ok(false)
+            }
             other => Err(format!(
                 "emit_stmt: instruction at %{} is not a statement (tag={:?})",
                 r.index(),

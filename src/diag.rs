@@ -81,6 +81,15 @@ pub enum DiagCode {
     /// An `if` or `elif` condition expression evaluated to a non-bool
     /// type. Ryo requires conditions to be `bool` (no truthy coercion).
     ConditionNotBool,
+    /// Attempted reassignment to a variable not declared with `mut`.
+    ImmutableAssign,
+    /// A name is declared twice in the same scope.
+    DuplicateDeclaration,
+    /// Compound assignment (`+=`, etc.) on an undeclared variable.
+    UndefinedAssignTarget,
+    /// `%=` on float — float modulo not supported in v0.1.
+    FloatModulo,
+
     /// A declaration's resolution requires its own resolution to be
     /// already complete — e.g. a chain of decls whose types depend
     /// transitively on themselves. Today this is an infrastructure-

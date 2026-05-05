@@ -72,6 +72,11 @@ pub enum Token {
     LtEq,
     GtEq,
     Assign,
+    PlusAssign,
+    MinusAssign,
+    StarAssign,
+    SlashAssign,
+    PercentAssign,
     Colon,
 
     // Punctuation.
@@ -127,6 +132,11 @@ impl fmt::Display for Token {
             Self::LtEq => write!(f, "<="),
             Self::GtEq => write!(f, ">="),
             Self::Assign => write!(f, "="),
+            Self::PlusAssign => write!(f, "+="),
+            Self::MinusAssign => write!(f, "-="),
+            Self::StarAssign => write!(f, "*="),
+            Self::SlashAssign => write!(f, "/="),
+            Self::PercentAssign => write!(f, "%="),
             Self::Colon => write!(f, ":"),
             Self::LParen => write!(f, "("),
             Self::RParen => write!(f, ")"),
@@ -215,6 +225,16 @@ pub(crate) enum RawToken<'a> {
     Gt,
     #[token("=")]
     Assign,
+    #[token("+=")]
+    PlusAssign,
+    #[token("-=")]
+    MinusAssign,
+    #[token("*=")]
+    StarAssign,
+    #[token("/=")]
+    SlashAssign,
+    #[token("%=")]
+    PercentAssign,
     #[token(":")]
     Colon,
 
@@ -402,6 +422,11 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::LtEq => Token::LtEq,
         RawToken::GtEq => Token::GtEq,
         RawToken::Assign => Token::Assign,
+        RawToken::PlusAssign => Token::PlusAssign,
+        RawToken::MinusAssign => Token::MinusAssign,
+        RawToken::StarAssign => Token::StarAssign,
+        RawToken::SlashAssign => Token::SlashAssign,
+        RawToken::PercentAssign => Token::PercentAssign,
         RawToken::Colon => Token::Colon,
 
         RawToken::LParen => Token::LParen,
@@ -571,5 +596,24 @@ mod tests {
     fn lex_curly_braces_and_arrow() {
         let (toks, _) = lex_strings("{ } ->");
         assert_eq!(toks, vec![Token::LBrace, Token::RBrace, Token::Arrow]);
+    }
+
+    #[test]
+    fn compound_assign_tokens() {
+        let (toks, _) = lex_strings("x += 1");
+        assert_eq!(toks.len(), 3);
+        assert_eq!(toks[1], Token::PlusAssign);
+
+        let (toks, _) = lex_strings("x -= 2");
+        assert_eq!(toks[1], Token::MinusAssign);
+
+        let (toks, _) = lex_strings("x *= 3");
+        assert_eq!(toks[1], Token::StarAssign);
+
+        let (toks, _) = lex_strings("x /= 4");
+        assert_eq!(toks[1], Token::SlashAssign);
+
+        let (toks, _) = lex_strings("x %= 5");
+        assert_eq!(toks[1], Token::PercentAssign);
     }
 }
