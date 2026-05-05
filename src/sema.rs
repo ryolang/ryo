@@ -2198,4 +2198,62 @@ mod tests {
         let diags = run("fn main():\n\tmut x = 10\n\tx += true\n").unwrap_err();
         assert!(any_code(&diags, DiagCode::TypeMismatch));
     }
+
+    // ---- Recursive / self-referential calls ----
+
+    #[test]
+    fn direct_recursion_accepted() {
+        let code = "fn countdown(n: int) -> int:\n\tif n == 0:\n\t\treturn 0\n\treturn countdown(n - 1)\n\nfn main():\n\tx = countdown(5)\n";
+        let result = run(code);
+        assert!(
+            result.is_ok(),
+            "direct recursion should type-check: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn direct_recursion_return_type_resolved() {
+        let code = "fn fib(n: int) -> int:\n\tif n < 2:\n\t\treturn n\n\treturn fib(n - 1) + fib(n - 2)\n\nfn main():\n\tx = fib(10)\n";
+        let (tirs, pool) = run(code).unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let v = main.var_decl_view(stmt_at(main, 0));
+        assert_eq!(main.inst(v.initializer).ty, pool.int());
+    }
+
+    #[test]
+    fn mutual_recursion_accepted() {
+        let code = "fn is_even(n: int) -> bool:\n\tif n == 0:\n\t\treturn true\n\treturn is_odd(n - 1)\n\nfn is_odd(n: int) -> bool:\n\tif n == 0:\n\t\treturn false\n\treturn is_even(n - 1)\n\nfn main():\n\tx = is_even(4)\n";
+        let result = run(code);
+        assert!(
+            result.is_ok(),
+            "mutual recursion should type-check: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn mutual_recursion_return_types_resolved() {
+        let code = "fn is_even(n: int) -> bool:\n\tif n == 0:\n\t\treturn true\n\treturn is_odd(n - 1)\n\nfn is_odd(n: int) -> bool:\n\tif n == 0:\n\t\treturn false\n\treturn is_even(n - 1)\n\nfn main():\n\tx = is_even(4)\n\ty = is_odd(3)\n";
+        let (tirs, pool) = run(code).unwrap();
+        let main = tir_named(&tirs, &pool, "main");
+        let vx = main.var_decl_view(stmt_at(main, 0));
+        let vy = main.var_decl_view(stmt_at(main, 1));
+        assert_eq!(main.inst(vx.initializer).ty, pool.bool_());
+        assert_eq!(main.inst(vy.initializer).ty, pool.bool_());
+    }
+
+    #[test]
+    fn recursive_call_wrong_arity_rejected() {
+        let code = "fn f(n: int) -> int:\n\treturn f(n, n)\n\nfn main():\n\tx = f(1)\n";
+        let diags = run(code).unwrap_err();
+        assert!(any_code(&diags, DiagCode::ArityMismatch));
+    }
+
+    #[test]
+    fn recursive_call_wrong_arg_type_rejected() {
+        let code = "fn f(n: int) -> int:\n\treturn f(true)\n\nfn main():\n\tx = f(1)\n";
+        let diags = run(code).unwrap_err();
+        assert!(any_code(&diags, DiagCode::TypeMismatch));
+    }
 }
