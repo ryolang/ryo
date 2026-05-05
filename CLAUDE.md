@@ -65,6 +65,8 @@ GitHub Actions runs on pushes to `main` and PRs targeting `main`: `cargo fmt --c
 **Commit prefixes:** `feat:`, `fix:`, `docs:`, `spec:`, `dev:`, `roadmap:`, `test:`, `chore:`, `refactor:`.
 Keep subjects under 72 chars. Add body for non-obvious changes.
 
+Never author Claude on commits nor PRs.
+
 ---
 
 ## Design Change Escalation
