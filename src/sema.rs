@@ -421,9 +421,9 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                         sema.pool.str(view.name),
                     ),
                 ));
+            } else {
+                scope.insert_binding(view.name, resolved, view.mutable);
             }
-
-            scope.insert_binding(view.name, resolved, view.mutable);
             fcx.builder
                 .var_decl(view.name, view.mutable, resolved, init_tir, span)
         }

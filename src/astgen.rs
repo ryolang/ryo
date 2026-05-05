@@ -275,7 +275,7 @@ fn gen_stmt(
         }
         ast::StmtKind::CompoundAssign { target, op, value } => {
             let value_ref = gen_expr(b, value);
-            let r = b.compound_assign(target.name, *op as u32, value_ref, stmt.span);
+            let r = b.compound_assign(target.name, *op, value_ref, stmt.span);
             out.push(r);
         }
         ast::StmtKind::IfStmt(if_stmt) => {

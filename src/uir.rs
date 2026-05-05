@@ -598,13 +598,13 @@ impl UirBuilder {
     pub fn compound_assign(
         &mut self,
         name: StringId,
-        op: u32,
+        op: CompoundOp,
         value: InstRef,
         span: Span,
     ) -> InstRef {
         let offset = self.extra_offset();
         self.uir.extra.push(name.raw());
-        self.uir.extra.push(op);
+        self.uir.extra.push(op as u32);
         self.uir.extra.push(value.raw());
         self.push(
             InstTag::CompoundAssign,
@@ -1182,7 +1182,7 @@ mod tests {
 
         let mut b = UirBuilder::new();
         let value = b.int_literal(10, sp());
-        let compound_assign = b.compound_assign(x, 0, value, sp()); // 0 = +=
+        let compound_assign = b.compound_assign(x, CompoundOp::Add, value, sp());
 
         let uir = b.finish();
         let view = uir.compound_assign_view(compound_assign);
