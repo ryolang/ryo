@@ -12,6 +12,8 @@ Before running the benchmarks, ensure you have the following tools installed and
 - `python3`
 - `bun`
 - `elixir`
+- `ruby`
+- `kotlinc` and `temurin` (jvm)
 - `hyperfine`
 
 You must also have a built Ryo compiler binary. By default, `run_benchmarks.sh` expects the `ryo` binary to be built in release mode at `../../target/release/ryo`. You can ensure this by running `cargo build --release` from the repository root before starting the benchmarks.
