@@ -1770,3 +1770,19 @@ fn while_loop_aot_build_and_run() {
 
     assert!(run_output.status.success(), "compiled binary should exit 0");
 }
+
+#[test]
+fn while_true_with_return() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\twhile true:\n\t\treturn\n";
+    let test_file = create_test_file(temp_dir.path(), "while_return.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_return.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

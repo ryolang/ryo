@@ -118,8 +118,10 @@ impl Statement {
             StmtKind::WhileLoop { cond, body } => {
                 println!("{}WhileLoop", prefix);
                 cond.pretty_print(&format!("{}  ├── cond: ", prefix), pool);
-                for stmt in body {
-                    print!("{}  └── ", prefix);
+                for (i, stmt) in body.iter().enumerate() {
+                    let is_last = i == body.len() - 1;
+                    let branch = if is_last { "└──" } else { "├──" };
+                    print!("{}  {} ", prefix, branch);
                     stmt.pretty_print_inline();
                     println!();
                 }

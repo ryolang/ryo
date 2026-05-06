@@ -498,12 +498,18 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::WhileLoop => Self::generate_while_loop(builder, ctx, r),
             TirTag::Break => {
-                let loop_ctx = ctx.loop_stack.last().expect("break outside loop");
+                let loop_ctx = ctx
+                    .loop_stack
+                    .last()
+                    .expect("sema should reject break outside loop before codegen");
                 builder.ins().jump(loop_ctx.exit_block, &[]);
                 Ok(true)
             }
             TirTag::Continue => {
-                let loop_ctx = ctx.loop_stack.last().expect("continue outside loop");
+                let loop_ctx = ctx
+                    .loop_stack
+                    .last()
+                    .expect("sema should reject continue outside loop before codegen");
                 builder.ins().jump(loop_ctx.header_block, &[]);
                 Ok(true)
             }

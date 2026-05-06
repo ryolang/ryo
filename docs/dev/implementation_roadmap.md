@@ -19,8 +19,8 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 7 — Expressions & Operators (Extended) [alpha]](#milestone-7-expressions--operators-extended-alpha)
 - [ ] [Milestone 8 — Control Flow & Booleans [alpha]](#milestone-8-control-flow--booleans-alpha) *(split into 8a / 8b / 8c)*
   - [x] [Milestone 8a — Void Type & `main()` Signature [alpha]](#milestone-8a-void-type--main-signature-alpha)
-  - [ ] [Milestone 8b — Conditionals & Logical Operators [alpha]](#milestone-8b-conditionals--logical-operators-alpha)
-  - [ ] [Milestone 8c — Loops & Loop Control [alpha]](#milestone-8c-loops--loop-control-alpha)
+  - [x] [Milestone 8b — Conditionals & Logical Operators [alpha]](#milestone-8b-conditionals--logical-operators-alpha)
+  - [ ] [Milestone 8c — Loops & Loop Control [alpha]](#milestone-8c-loops--loop-control-alpha) *(partial: while/break/continue done, for/range is M8c3)*
 - [ ] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha)
 - [ ] [Milestone 8.2 — Immutable Borrows (`&T`) [alpha]](#milestone-82-immutable-borrows-t-alpha)
 - [ ] [Milestone 8.3 — Mutable Borrows (`&mut T`) [alpha]](#milestone-83-mutable-borrows-mut-t-alpha)
@@ -650,10 +650,11 @@ fn main():                  # no args, no return type (Go-style)
 
 ---
 
-### Milestone 8b: Conditionals & Logical Operators [alpha]
+### Milestone 8b: Conditionals & Logical Operators [alpha] ✅ COMPLETE
 **Goal:** Implement `if` / `elif` / `else` statements and the `and` / `or` / `not` logical operators with short-circuit evaluation. This is the first milestone to emit multiple Cranelift basic blocks per function.
 
-**Status:** ⏳ Planned
+**Status:** ✅ Complete
+**Completion Date:** December 2024
 
 **Tasks:**
 - **Lexer:** add keyword tokens `and`, `or`, `not`, `elif` (`if`, `else` already exist).
@@ -705,8 +706,11 @@ fn main():
 
 ---
 
-### Milestone 8b2: assert [alpha]
-**Goal:*** Implement `assert`
+### Milestone 8b2: assert [alpha] ✅ COMPLETE
+**Goal:** Implement `assert`
+
+**Status:** ✅ Complete
+**Completion Date:** December 2024
 - Add `assert` function:
   ```ryo
   fn assert(condition: bool, message: str)
@@ -809,7 +813,14 @@ That single primitive unlocks the rest of your milestone validation work — eve
 ### Milestone 8c: Loops & Loop Control [alpha]
 **Goal:** Implement `while` loops, counted `for i in range(...)` loops, and `break` / `continue`. This completes the v0.1 control-flow surface.
 
-**Status:** ⏳ Planned
+**Status:** 🚧 In Progress (M8c1/M8c2 complete: `while`/`break`/`continue`; M8c3 pending: `for`/`range`)
+
+**Completed:**
+- ✅ M8c1: Variable reassignment & mut enforcement (December 2024)
+- ✅ M8c2: While loops with break/continue (January 2026)
+
+**Remaining:**
+- ⏳ M8c3: `for i in range(start, end)` — see `docs/superpowers/plans/2026-05-04-milestone-8c3-for-range.md`
 
 **Tasks:**
 - **Lexer:** add keyword tokens `while`, `for`, `in`, `break`, `continue`.
