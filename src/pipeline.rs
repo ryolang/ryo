@@ -223,6 +223,8 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::DuplicateDeclaration => "E0021",
         DiagCode::UndefinedAssignTarget => "E0022",
         DiagCode::FloatModulo => "E0023",
+        DiagCode::BreakOutsideLoop => "E0024",
+        DiagCode::ContinueOutsideLoop => "E0025",
         DiagCode::CycleInResolution => "E0016",
         DiagCode::ParseError => "E0100",
         DiagCode::TooManyDiagnostics => "E0101",

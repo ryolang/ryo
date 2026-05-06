@@ -77,6 +77,13 @@ pub struct Codegen<M: Module> {
     triple: Triple,
 }
 
+/// Per-loop codegen state: the Cranelift blocks that `break` and
+/// `continue` jump to.
+struct LoopContext {
+    header_block: Block,
+    exit_block: Block,
+}
+
 /// Per-function emission state. Lives only for the duration of one
 /// `compile_function` call; reset between functions because
 /// Cranelift `Variable` ids and the `TirRef → Value` memo are both
@@ -96,6 +103,7 @@ struct FunctionContext<'a, M: Module> {
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
     inst_values: HashMap<TirRef, Value>,
+    loop_stack: Vec<LoopContext>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -338,6 +346,7 @@ impl<M: Module> Codegen<M> {
                 locals,
                 func_ids,
                 inst_values: HashMap::new(),
+                loop_stack: Vec::new(),
             };
 
             let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
@@ -375,14 +384,14 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         stmts: &[TirRef],
     ) -> Result<bool, String> {
-        let mut returns = false;
+        let mut block_terminated = false;
         for &stmt_ref in stmts {
-            if returns {
+            if block_terminated {
                 break;
             }
-            returns = Self::emit_stmt(builder, ctx, stmt_ref)?;
+            block_terminated = Self::emit_stmt(builder, ctx, stmt_ref)?;
         }
-        Ok(returns)
+        Ok(block_terminated)
     }
 
     fn emit_scoped_body(
@@ -391,9 +400,9 @@ impl<M: Module> Codegen<M> {
         stmts: &[TirRef],
     ) -> Result<bool, String> {
         let saved_locals = ctx.locals.clone();
-        let returns = Self::emit_body(builder, ctx, stmts)?;
+        let block_terminated = Self::emit_body(builder, ctx, stmts)?;
         ctx.locals = saved_locals;
-        Ok(returns)
+        Ok(block_terminated)
     }
 
     /// Emit a top-level statement instruction. Returns `true` iff
@@ -486,6 +495,17 @@ impl<M: Module> Codegen<M> {
 
                 builder.def_var(*var, result);
                 Ok(false)
+            }
+            TirTag::WhileLoop => Self::generate_while_loop(builder, ctx, r),
+            TirTag::Break => {
+                let loop_ctx = ctx.loop_stack.last().expect("break outside loop");
+                builder.ins().jump(loop_ctx.exit_block, &[]);
+                Ok(true)
+            }
+            TirTag::Continue => {
+                let loop_ctx = ctx.loop_stack.last().expect("continue outside loop");
+                builder.ins().jump(loop_ctx.header_block, &[]);
+                Ok(true)
             }
             other => Err(format!(
                 "emit_stmt: instruction at %{} is not a statement (tag={:?})",
@@ -580,6 +600,48 @@ impl<M: Module> Codegen<M> {
         }
 
         Ok(all_branches_return)
+    }
+
+    fn generate_while_loop(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<bool, String> {
+        let view = ctx.tir.while_loop_view(r);
+
+        let header_block = builder.create_block();
+        let body_block = builder.create_block();
+        let exit_block = builder.create_block();
+
+        builder.ins().jump(header_block, &[]);
+
+        builder.switch_to_block(header_block);
+        let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
+        builder
+            .ins()
+            .brif(cond_val, body_block, &[], exit_block, &[]);
+
+        builder.seal_block(body_block);
+        builder.switch_to_block(body_block);
+
+        ctx.loop_stack.push(LoopContext {
+            header_block,
+            exit_block,
+        });
+        let body_terminated = Self::emit_scoped_body(builder, ctx, &view.body)?;
+        ctx.loop_stack.pop();
+
+        if !body_terminated {
+            builder.ins().jump(header_block, &[]);
+        }
+
+        // Header has two predecessors: entry fallthrough and body back-edge.
+        // Seal it last because the back-edge didn't exist until the body emitted.
+        builder.seal_block(header_block);
+        builder.seal_block(exit_block);
+        builder.switch_to_block(exit_block);
+
+        Ok(false)
     }
 
     /// Materialize an instruction's value, recursively materializing

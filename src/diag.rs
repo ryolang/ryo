@@ -89,6 +89,10 @@ pub enum DiagCode {
     UndefinedAssignTarget,
     /// `%=` on float — float modulo not supported in v0.1.
     FloatModulo,
+    /// `break` used outside of any loop body.
+    BreakOutsideLoop,
+    /// `continue` used outside of any loop body.
+    ContinueOutsideLoop,
 
     /// A declaration's resolution requires its own resolution to be
     /// already complete — e.g. a chain of decls whose types depend

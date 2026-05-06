@@ -186,6 +186,15 @@ pub enum TirTag {
     /// If/elif/else statement. Variable payload in `extra`.
     IfStmt,
 
+    /// `while cond: body`. Variable payload in `extra` — see [`while_loop_extra`].
+    WhileLoop,
+
+    /// `break` statement.
+    Break,
+
+    /// `continue` statement.
+    Continue,
+
     /// Inserted by sema at the point of an unrecoverable type error
     /// so the rest of the body still produces well-formed TIR. Has
     /// `ty == pool.error_type()`. Codegen must never see one — the
@@ -324,6 +333,19 @@ pub mod compound_assign_extra {
     pub const OP: usize = 1;
     pub const VALUE: usize = 2;
     pub const LEN: usize = 3;
+}
+
+/// Layout in `extra` for [`TirTag::WhileLoop`]:
+///
+/// ```text
+///   [0]       cond:       TirRef.raw()
+///   [1]       body_count: u32
+///   [2..2+n]  body stmts: TirRef.raw() each
+/// ```
+pub mod while_loop_extra {
+    pub const COND: usize = 0;
+    pub const BODY_COUNT: usize = 1;
+    pub const BODY_START: usize = 2;
 }
 
 // ---------- Builder ----------
@@ -596,6 +618,33 @@ impl TirBuilder {
         )
     }
 
+    pub fn while_loop(&mut self, cond: TirRef, body: &[TirRef], ty: TypeId, span: Span) -> TirRef {
+        let offset = self.extra_offset();
+        self.extra.push(cond.raw());
+        self.extra.push(Self::len_u32(body.len()));
+        for &stmt in body {
+            self.extra.push(stmt.raw());
+        }
+        let len = while_loop_extra::BODY_START + body.len();
+        self.push(
+            TirTag::WhileLoop,
+            ty,
+            TirData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(len),
+            }),
+            span,
+        )
+    }
+
+    pub fn break_stmt(&mut self, ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::Break, ty, TirData::None, span)
+    }
+
+    pub fn continue_stmt(&mut self, ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::Continue, ty, TirData::None, span)
+    }
+
     /// Finish: bake in the body statement list and produce the
     /// finished [`Tir`].
     pub fn finish(mut self, stmts: &[TirRef]) -> Tir {
@@ -651,6 +700,11 @@ pub struct TirIfStmtView {
     pub then_stmts: Vec<TirRef>,
     pub elif_branches: Vec<TirElifView>,
     pub else_stmts: Option<Vec<TirRef>>,
+}
+
+pub struct WhileLoopView {
+    pub cond: TirRef,
+    pub body: Vec<TirRef>,
 }
 
 impl Tir {
@@ -761,6 +815,20 @@ impl Tir {
             elif_branches,
             else_stmts,
         }
+    }
+
+    pub fn while_loop_view(&self, r: TirRef) -> WhileLoopView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::WhileLoop));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("WhileLoop must carry TirData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let cond = TirRef::from_raw(slice[while_loop_extra::COND]);
+        let mut pos = while_loop_extra::BODY_COUNT;
+        let body = read_ref_list(slice, &mut pos);
+        WhileLoopView { cond, body }
     }
 }
 
@@ -886,6 +954,18 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
             }
             writeln!(f)
         }
+        (TirTag::WhileLoop, TirData::Extra(_)) => {
+            let v = tir.while_loop_view(r);
+            let body_refs: Vec<_> = v.body.iter().map(|b| format!("%{}", b.index())).collect();
+            writeln!(
+                f,
+                "while_loop cond=%{} body=[{}]",
+                v.cond.index(),
+                body_refs.join(", ")
+            )
+        }
+        (TirTag::Break, TirData::None) => writeln!(f, "break"),
+        (TirTag::Continue, TirData::None) => writeln!(f, "continue"),
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
 }

@@ -1560,3 +1560,213 @@ fn panic_aot_run_exits_101() {
         stderr
     );
 }
+
+// ─── while loops ──────────────────────────────────────────────────────────
+
+#[test]
+fn while_loop_countdown() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut i = 5\n\twhile i > 0:\n\t\ti -= 1\n\tassert(i == 0, \"countdown should reach 0\")\n";
+    let test_file = create_test_file(temp_dir.path(), "while_countdown.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_countdown.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn while_loop_accumulate() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // sum = 1+2+3+4+5 = 15
+    let code = "fn main():\n\tmut sum = 0\n\tmut i = 1\n\twhile i <= 5:\n\t\tsum += i\n\t\ti += 1\n\tassert(sum == 15, \"1+2+3+4+5 should be 15\")\n";
+    let test_file = create_test_file(temp_dir.path(), "while_accum.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_accum.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn while_break_exits_loop() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut i = 0\n\twhile true:\n\t\ti += 1\n\t\tif i == 3:\n\t\t\tbreak\n\tassert(i == 3, \"break at 3\")\n";
+    let test_file = create_test_file(temp_dir.path(), "while_break.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_break.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn while_continue_skips_iteration() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // Sum only odd numbers 1..10: 1+3+5+7+9 = 25
+    let code = "fn main():\n\tmut sum = 0\n\tmut i = 0\n\twhile i < 10:\n\t\ti += 1\n\t\tif i % 2 == 0:\n\t\t\tcontinue\n\t\tsum += i\n\tassert(sum == 25, \"odd sum 1..10 should be 25\")\n";
+    let test_file = create_test_file(temp_dir.path(), "while_continue.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_continue.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn while_nested_loops() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // 3 * 4 = 12
+    let code = "fn main():\n\tmut total = 0\n\tmut i = 0\n\twhile i < 3:\n\t\tmut j = 0\n\t\twhile j < 4:\n\t\t\ttotal += 1\n\t\t\tj += 1\n\t\ti += 1\n\tassert(total == 12, \"3*4 should be 12\")\n";
+    let test_file = create_test_file(temp_dir.path(), "while_nested.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_nested.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn while_break_inner_only() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // break in inner loop doesn't exit outer; outer runs 3 times, inner breaks at 2 each
+    let code = "fn main():\n\tmut total = 0\n\tmut i = 0\n\twhile i < 3:\n\t\tmut j = 0\n\t\twhile true:\n\t\t\tif j == 2:\n\t\t\t\tbreak\n\t\t\ttotal += 1\n\t\t\tj += 1\n\t\ti += 1\n\tassert(total == 6, \"3 outer * 2 inner = 6\")\n";
+    let test_file = create_test_file(temp_dir.path(), "while_break_inner.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_break_inner.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn while_false_body_never_runs() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut x = 0\n\twhile false:\n\t\tx = 99\n\tassert(x == 0, \"while false body should never run\")\n";
+    let test_file = create_test_file(temp_dir.path(), "while_false.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_false.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn while_break_outside_loop_error() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tbreak\n";
+    let test_file = create_test_file(temp_dir.path(), "break_outside.ryo", code);
+
+    let output = run_ryo_command(&["run", "break_outside.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "break outside loop should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0024"),
+        "should emit E0024 for break outside loop, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn while_continue_outside_loop_error() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tcontinue\n";
+    let test_file = create_test_file(temp_dir.path(), "continue_outside.ryo", code);
+
+    let output = run_ryo_command(&["run", "continue_outside.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "continue outside loop should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0025"),
+        "should emit E0025 for continue outside loop, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn while_non_bool_condition_error() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\twhile 42:\n\t\tx = 1\n";
+    let test_file = create_test_file(temp_dir.path(), "while_nonbool.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_nonbool.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "non-bool while condition should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0018"),
+        "should emit E0018 for non-bool condition, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn while_loop_aot_build_and_run() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut i = 10\n\twhile i > 0:\n\t\ti -= 1\n\tassert(i == 0, \"should count down to 0\")\n";
+    let test_file = create_test_file(temp_dir.path(), "while_aot.ryo", code);
+
+    let build_output = run_ryo_command(&["build", "while_aot.ryo"], &test_file)
+        .expect("Failed to run ryo build command");
+
+    assert!(
+        build_output.status.success(),
+        "build should succeed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let exe_path = std::env::current_dir()
+        .unwrap()
+        .join(format!("while_aot{}", std::env::consts::EXE_SUFFIX));
+    assert!(exe_path.exists(), "binary should exist at {:?}", exe_path);
+
+    let run_output = Command::new(&exe_path)
+        .output()
+        .expect("Failed to run compiled binary");
+
+    let _ = fs::remove_file(&exe_path);
+
+    assert!(run_output.status.success(), "compiled binary should exit 0");
+}
