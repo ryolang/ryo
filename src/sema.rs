@@ -362,12 +362,9 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
 
     let mut fcx = FuncCtx {
         builder: TirBuilder::new(body.name, params, body.return_type, body.span),
-        // Mapping from UIR `InstRef` to the TIR ref Sema emitted for
-        // it inside *this* function. UIR is tree-shaped today so
-        // this is defensive — but it's the right invariant before
-        // future SSA-shaped UIR with shared sub-expressions.
         inst_map: vec![None; sema.uir.instructions.len()],
         return_type: body.return_type,
+        loop_depth: 0,
     };
 
     let mut stmt_refs: Vec<TirRef> = Vec::with_capacity(sema.uir.body_stmts(body).len());
@@ -385,6 +382,7 @@ struct FuncCtx {
     builder: TirBuilder,
     inst_map: Vec<Option<TirRef>>,
     return_type: TypeId,
+    loop_depth: u32,
 }
 
 fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: InstRef) -> TirRef {
@@ -646,6 +644,39 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
 
             fcx.builder
                 .compound_assign(view.name, view.op, existing_ty, value_tir, span)
+        }
+        InstTag::WhileLoop => {
+            let view = sema.uir.while_loop_view(r);
+
+            let cond_tir = analyze_expr(sema, fcx, scope, view.cond);
+            check_condition_bool(sema, fcx, cond_tir, view.cond);
+
+            fcx.loop_depth += 1;
+            let body_tirs = analyze_block(sema, fcx, scope, &view.body);
+            fcx.loop_depth -= 1;
+
+            fcx.builder
+                .while_loop(cond_tir, &body_tirs, sema.pool.void(), span)
+        }
+        InstTag::Break => {
+            if fcx.loop_depth == 0 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::BreakOutsideLoop,
+                    "'break' can only be used inside a loop".to_string(),
+                ));
+            }
+            fcx.builder.break_stmt(sema.pool.void(), span)
+        }
+        InstTag::Continue => {
+            if fcx.loop_depth == 0 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ContinueOutsideLoop,
+                    "'continue' can only be used inside a loop".to_string(),
+                ));
+            }
+            fcx.builder.continue_stmt(sema.pool.void(), span)
         }
         other => panic!(
             "analyze_stmt: instruction at %{} is not a statement (tag={:?})",
@@ -2195,5 +2226,76 @@ mod tests {
     fn compound_assign_rhs_type_mismatch_rejected() {
         let diags = run("fn main():\n\tmut x = 10\n\tx += true\n").unwrap_err();
         assert!(any_code(&diags, DiagCode::TypeMismatch));
+    }
+
+    // ---- M8c2: while loops ----
+
+    #[test]
+    fn while_loop_basic() {
+        let result = run("fn main():\n\twhile true:\n\t\tbreak\n");
+        assert!(
+            result.is_ok(),
+            "basic while should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn while_non_bool_condition_rejected() {
+        let diags = run("fn main():\n\twhile 42:\n\t\tbreak\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ConditionNotBool));
+    }
+
+    #[test]
+    fn break_outside_loop_rejected() {
+        let diags = run("fn main():\n\tbreak\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::BreakOutsideLoop));
+    }
+
+    #[test]
+    fn continue_outside_loop_rejected() {
+        let diags = run("fn main():\n\tcontinue\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ContinueOutsideLoop));
+    }
+
+    #[test]
+    fn break_inside_while_ok() {
+        let result = run("fn main():\n\twhile true:\n\t\tbreak\n");
+        assert!(
+            result.is_ok(),
+            "break inside while should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn continue_inside_while_ok() {
+        let result = run("fn main():\n\tmut n = 3\n\twhile n > 0:\n\t\tn -= 1\n\t\tcontinue\n");
+        assert!(
+            result.is_ok(),
+            "continue inside while should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn while_body_has_own_scope() {
+        let diags = run(
+            "fn main():\n\twhile true:\n\t\tx = 1\n\t\tbreak\n\tassert(x == 1, \"unreachable\")\n",
+        )
+        .unwrap_err();
+        assert!(any_code(&diags, DiagCode::UndefinedVariable));
+    }
+
+    #[test]
+    fn nested_while_break_inner_only() {
+        let result = run(
+            "fn main():\n\tmut i = 2\n\twhile i > 0:\n\t\twhile true:\n\t\t\tbreak\n\t\ti -= 1\n",
+        );
+        assert!(
+            result.is_ok(),
+            "nested while with inner break: {:?}",
+            result.err()
+        );
     }
 }

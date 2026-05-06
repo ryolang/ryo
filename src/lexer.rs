@@ -54,6 +54,9 @@ pub enum Token {
     And,
     Or,
     Not,
+    While,
+    Break,
+    Continue,
 
     // Identifiers.
     Ident(StringId),
@@ -118,6 +121,9 @@ impl fmt::Display for Token {
             Self::And => write!(f, "and"),
             Self::Or => write!(f, "or"),
             Self::Not => write!(f, "not"),
+            Self::While => write!(f, "while"),
+            Self::Break => write!(f, "break"),
+            Self::Continue => write!(f, "continue"),
             Self::Ident(id) => write!(f, "<id#{}>", id.raw()),
             Self::Add => write!(f, "+"),
             Self::Arrow => write!(f, "->"),
@@ -195,6 +201,12 @@ pub(crate) enum RawToken<'a> {
     Or,
     #[token("not")]
     Not,
+    #[token("while")]
+    While,
+    #[token("break")]
+    Break,
+    #[token("continue")]
+    Continue,
 
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
     Ident(&'a str),
@@ -408,6 +420,9 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::And => Token::And,
         RawToken::Or => Token::Or,
         RawToken::Not => Token::Not,
+        RawToken::While => Token::While,
+        RawToken::Break => Token::Break,
+        RawToken::Continue => Token::Continue,
 
         RawToken::Add => Token::Add,
         RawToken::Arrow => Token::Arrow,
@@ -596,6 +611,12 @@ mod tests {
     fn lex_curly_braces_and_arrow() {
         let (toks, _) = lex_strings("{ } ->");
         assert_eq!(toks, vec![Token::LBrace, Token::RBrace, Token::Arrow]);
+    }
+
+    #[test]
+    fn while_break_continue_tokens() {
+        let (toks, _) = lex_strings("while break continue");
+        assert_eq!(toks, vec![Token::While, Token::Break, Token::Continue]);
     }
 
     #[test]

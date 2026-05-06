@@ -188,6 +188,15 @@ pub enum InstTag {
     /// Compound assignment (`+=`, `-=`, etc.). Variable payload in `extra` —
     /// see [`compound_assign_extra`].
     CompoundAssign,
+
+    /// `while cond: body`. Variable payload in `extra` — see [`while_loop_extra`].
+    WhileLoop,
+
+    /// `break` statement.
+    Break,
+
+    /// `continue` statement.
+    Continue,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -364,6 +373,19 @@ pub mod compound_assign_extra {
     pub const OP: usize = 1;
     pub const VALUE: usize = 2;
     pub const LEN: usize = 3;
+}
+
+/// Layout in `extra` for [`InstTag::WhileLoop`]:
+///
+/// ```text
+///   [0]       cond:       InstRef.raw()
+///   [1]       body_count: u32
+///   [2..2+n]  body stmts: InstRef.raw() each
+/// ```
+pub mod while_loop_extra {
+    pub const COND: usize = 0;
+    pub const BODY_COUNT: usize = 1;
+    pub const BODY_START: usize = 2;
 }
 
 // ---------- Builder ----------
@@ -615,6 +637,32 @@ impl UirBuilder {
             span,
         )
     }
+
+    pub fn while_loop(&mut self, cond: InstRef, body: &[InstRef], span: Span) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(cond.raw());
+        self.uir.extra.push(Self::len_u32(body.len()));
+        for &stmt in body {
+            self.uir.extra.push(stmt.raw());
+        }
+        let len = while_loop_extra::BODY_START + body.len();
+        self.push(
+            InstTag::WhileLoop,
+            InstData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(len),
+            }),
+            span,
+        )
+    }
+
+    pub fn break_stmt(&mut self, span: Span) -> InstRef {
+        self.push(InstTag::Break, InstData::None, span)
+    }
+
+    pub fn continue_stmt(&mut self, span: Span) -> InstRef {
+        self.push(InstTag::Continue, InstData::None, span)
+    }
 }
 
 // ---------- Read-side helpers ----------
@@ -643,6 +691,11 @@ pub struct CompoundAssignView {
     pub name: StringId,
     pub op: CompoundOp,
     pub value: InstRef,
+}
+
+pub struct WhileLoopView {
+    pub cond: InstRef,
+    pub body: Vec<InstRef>,
 }
 
 pub struct ElifView {
@@ -728,6 +781,20 @@ impl Uir {
             op: CompoundOp::from_raw(slice[compound_assign_extra::OP]),
             value: InstRef::from_raw(slice[compound_assign_extra::VALUE]),
         }
+    }
+
+    pub fn while_loop_view(&self, r: InstRef) -> WhileLoopView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::WhileLoop));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("WhileLoop must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let cond = InstRef::from_raw(slice[while_loop_extra::COND]);
+        let mut pos = while_loop_extra::BODY_COUNT;
+        let body = read_ref_list(slice, &mut pos);
+        WhileLoopView { cond, body }
     }
 
     pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView {
@@ -936,6 +1003,18 @@ fn write_inst(
                 v.value.index()
             )
         }
+        (InstTag::WhileLoop, InstData::Extra(_)) => {
+            let v = uir.while_loop_view(r);
+            let body_refs: Vec<_> = v.body.iter().map(|b| format!("%{}", b.index())).collect();
+            writeln!(
+                f,
+                "while_loop cond=%{} body=[{}]",
+                v.cond.index(),
+                body_refs.join(", ")
+            )
+        }
+        (InstTag::Break, InstData::None) => writeln!(f, "break"),
+        (InstTag::Continue, InstData::None) => writeln!(f, "continue"),
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
 }
