@@ -19,7 +19,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 7 — Expressions & Operators (Extended) [alpha]](#milestone-7-expressions--operators-extended-alpha)
 - [ ] [Milestone 8 — Control Flow & Booleans [alpha]](#milestone-8-control-flow--booleans-alpha) *(split into 8a / 8b / 8c)*
   - [x] [Milestone 8a — Void Type & `main()` Signature [alpha]](#milestone-8a-void-type--main-signature-alpha)
-  - [x] [Milestone 8b — Conditionals & Logical Operators [alpha]](#milestone-8b-conditionals--logical-operators-alpha)
+  - [x] [Milestone 8b — Conditionals & Logical Operators [alpha] ✅ COMPLETE](#milestone-8b-conditionals--logical-operators-alpha--complete)
   - [ ] [Milestone 8c — Loops & Loop Control [alpha]](#milestone-8c-loops--loop-control-alpha) *(partial: while/break/continue done, for/range is M8c3)*
 - [ ] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha)
 - [ ] [Milestone 8.2 — Immutable Borrows (`&T`) [alpha]](#milestone-82-immutable-borrows-t-alpha)
@@ -820,7 +820,7 @@ That single primitive unlocks the rest of your milestone validation work — eve
 - ✅ M8c2: While loops with break/continue (January 2026)
 
 **Remaining:**
-- ⏳ M8c3: `for i in range(start, end)` — see `docs/superpowers/plans/2026-05-04-milestone-8c3-for-range.md`
+- ⏳ [M8c3: `for i in range(start, end)`](../superpowers/plans/2026-05-04-milestone-8c3-for-range.md)
 
 **Tasks:**
 - **Lexer:** add keyword tokens `while`, `for`, `in`, `break`, `continue`.

@@ -1748,25 +1748,17 @@ fn while_loop_aot_build_and_run() {
     let code = "fn main():\n\tmut i = 10\n\twhile i > 0:\n\t\ti -= 1\n\tassert(i == 0, \"should count down to 0\")\n";
     let test_file = create_test_file(temp_dir.path(), "while_aot.ryo", code);
 
-    let build_output = run_ryo_command(&["build", "while_aot.ryo"], &test_file)
-        .expect("Failed to run ryo build command");
-
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
     assert!(
         build_output.status.success(),
         "build should succeed. STDERR: {}",
         String::from_utf8_lossy(&build_output.stderr)
     );
 
-    let exe_path = std::env::current_dir()
-        .unwrap()
-        .join(format!("while_aot{}", std::env::consts::EXE_SUFFIX));
-    assert!(exe_path.exists(), "binary should exist at {:?}", exe_path);
-
-    let run_output = Command::new(&exe_path)
+    let binary_path = temp_dir.path().join("while_aot");
+    let run_output = Command::new(&binary_path)
         .output()
         .expect("Failed to run compiled binary");
-
-    let _ = fs::remove_file(&exe_path);
 
     assert!(run_output.status.success(), "compiled binary should exit 0");
 }
