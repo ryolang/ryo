@@ -145,6 +145,25 @@ where
             kind: StmtKind::VarDecl(kind),
         });
 
+        let break_stmt = just(Token::Break).map_with(|_, e| Statement {
+            span: e.span(),
+            kind: StmtKind::Break,
+        });
+
+        let continue_stmt = just(Token::Continue).map_with(|_, e| Statement {
+            span: e.span(),
+            kind: StmtKind::Continue,
+        });
+
+        let while_stmt = just(Token::While)
+            .ignore_then(expression_parser())
+            .then_ignore(just(Token::Colon))
+            .then(indented_block(body_stmt.clone()))
+            .map_with(|(cond, body), e| Statement {
+                span: e.span(),
+                kind: StmtKind::WhileLoop { cond, body },
+            });
+
         let if_stmt = if_stmt_parser(body_stmt).map_with(|if_s, e| Statement {
             span: e.span(),
             kind: StmtKind::IfStmt(if_s),
@@ -161,6 +180,9 @@ where
             assign_or_decl_parser(),
             var_decl,
             if_stmt,
+            while_stmt,
+            break_stmt,
+            continue_stmt,
             expr_stmt,
         ))
     })
@@ -1135,6 +1157,70 @@ mod tests {
                 assert!(decl.type_annotation.is_some());
             }
             other => panic!("expected VarDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_while_loop() {
+        let code = "fn main():\n\twhile true:\n\t\tbreak\n";
+        let (program, _pool) = lex_and_parse(code).unwrap();
+        match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => {
+                assert_eq!(f.body.len(), 1);
+                match &f.body[0].kind {
+                    StmtKind::WhileLoop { body, .. } => {
+                        assert_eq!(body.len(), 1);
+                    }
+                    other => panic!("expected WhileLoop, got {:?}", other),
+                }
+            }
+            other => panic!("expected FunctionDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_break_statement() {
+        let code = "fn main():\n\twhile true:\n\t\tbreak\n";
+        let (program, _pool) = lex_and_parse(code).unwrap();
+        match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => match &f.body[0].kind {
+                StmtKind::WhileLoop { body, .. } => {
+                    assert!(matches!(body[0].kind, StmtKind::Break));
+                }
+                other => panic!("expected WhileLoop, got {:?}", other),
+            },
+            other => panic!("expected FunctionDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_continue_statement() {
+        let code = "fn main():\n\twhile true:\n\t\tcontinue\n";
+        let (program, _pool) = lex_and_parse(code).unwrap();
+        match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => match &f.body[0].kind {
+                StmtKind::WhileLoop { body, .. } => {
+                    assert!(matches!(body[0].kind, StmtKind::Continue));
+                }
+                other => panic!("expected WhileLoop, got {:?}", other),
+            },
+            other => panic!("expected FunctionDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_nested_while() {
+        let code = "fn main():\n\twhile true:\n\t\twhile false:\n\t\t\tbreak\n";
+        let (program, _pool) = lex_and_parse(code).unwrap();
+        match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => match &f.body[0].kind {
+                StmtKind::WhileLoop { body, .. } => {
+                    assert_eq!(body.len(), 1);
+                    assert!(matches!(body[0].kind, StmtKind::WhileLoop { .. }));
+                }
+                other => panic!("expected WhileLoop, got {:?}", other),
+            },
+            other => panic!("expected FunctionDef, got {:?}", other),
         }
     }
 

@@ -306,6 +306,20 @@ fn gen_stmt(
             );
             out.push(r);
         }
+        ast::StmtKind::WhileLoop { cond, body } => {
+            let cond_ref = gen_expr(b, cond);
+            let body_refs = lower_block(b, body, prims, pool, sink);
+            let r = b.while_loop(cond_ref, &body_refs, stmt.span);
+            out.push(r);
+        }
+        ast::StmtKind::Break => {
+            let r = b.break_stmt(stmt.span);
+            out.push(r);
+        }
+        ast::StmtKind::Continue => {
+            let r = b.continue_stmt(stmt.span);
+            out.push(r);
+        }
     }
 }
 
@@ -622,6 +636,27 @@ mod tests {
         ));
         let v = uir.assign_or_decl_view(stmts[0]);
         assert_eq!(pool.str(v.name), "x");
+    }
+
+    #[test]
+    fn lower_while_loop() {
+        let (uir, pool) = parse_and_lower("fn main():\n\twhile true:\n\t\tbreak\n").unwrap();
+        let dump = format!("{}", uir.dump(&pool));
+        assert!(dump.contains("while_loop"), "got:\n{}", dump);
+    }
+
+    #[test]
+    fn lower_break() {
+        let (uir, pool) = parse_and_lower("fn main():\n\twhile true:\n\t\tbreak\n").unwrap();
+        let dump = format!("{}", uir.dump(&pool));
+        assert!(dump.contains("break"), "got:\n{}", dump);
+    }
+
+    #[test]
+    fn lower_continue() {
+        let (uir, pool) = parse_and_lower("fn main():\n\twhile true:\n\t\tcontinue\n").unwrap();
+        let dump = format!("{}", uir.dump(&pool));
+        assert!(dump.contains("continue"), "got:\n{}", dump);
     }
 
     #[test]

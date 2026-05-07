@@ -59,6 +59,9 @@ impl Statement {
             StmtKind::IfStmt(_) => "IfStmt",
             StmtKind::AssignOrDecl { .. } => "AssignOrDecl",
             StmtKind::CompoundAssign { .. } => "CompoundAssign",
+            StmtKind::WhileLoop { .. } => "WhileLoop",
+            StmtKind::Break => "Break",
+            StmtKind::Continue => "Continue",
         };
         print!(
             "Statement [{}] ({}..{})",
@@ -112,6 +115,23 @@ impl Statement {
                 );
                 value.pretty_print(&format!("{}  └── ", prefix), pool);
             }
+            StmtKind::WhileLoop { cond, body } => {
+                println!("{}WhileLoop", prefix);
+                cond.pretty_print(&format!("{}  ├── cond: ", prefix), pool);
+                for (i, stmt) in body.iter().enumerate() {
+                    let is_last = i == body.len() - 1;
+                    let branch = if is_last { "└──" } else { "├──" };
+                    print!("{}  {} ", prefix, branch);
+                    stmt.pretty_print_inline();
+                    println!();
+                }
+            }
+            StmtKind::Break => {
+                println!("{}Break", prefix);
+            }
+            StmtKind::Continue => {
+                println!("{}Continue", prefix);
+            }
         }
     }
 }
@@ -133,6 +153,12 @@ pub enum StmtKind {
         op: CompoundOp,
         value: Expression,
     },
+    WhileLoop {
+        cond: Expression,
+        body: Vec<Statement>,
+    },
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone, PartialEq)]
