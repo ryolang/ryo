@@ -13,6 +13,7 @@ Before running the benchmarks, ensure you have the following tools installed and
 - `bun`
 - `elixir`
 - `ruby`
+- `julia`
 - `kotlinc` and `temurin` (jvm)
 - `hyperfine`
 
@@ -27,18 +28,19 @@ In the `benchmarks/fibonacci` directory, run:
 ## Results
 Calculating the 40th Fibonacci number recursively (Time taken):
 
-| Language | Mean Time | Speed vs Rust | Memory (Max Resident) |
-|----------|-----------|---------------|-----------------------|
-| **Rust** | ~258.1 ms | 1.00x         | 1.31 MB               |
-| **Kotlin**| ~266.0 ms | 1.03x slower  | 37.89 MB              |
-| **Go**   | ~309.0 ms | 1.20x slower  | 3.77 MB               |
-| **Swift**| ~361.8 ms | 1.40x slower  | 1.64 MB               |
-| **Ryo (AOT)** | ~363.0 ms | 1.41x slower | **1.16 MB**           |
-| **Ryo (JIT)** | ~371.6 ms | 1.44x slower | 4.09 MB               |
-| **Bun (TS)**  | ~407.7 ms | 1.58x slower | 27.53 MB              |
-| **Elixir**    | ~908.1 ms | 3.52x slower | 87.30 MB              |
-| **Ruby** | ~8.99 s | ~34.8x slower | 25.84 MB              |
-| **Python**| ~16.92 s | ~65.6x slower   | 7.70 MB               |
+| Language | Version | Mean Time | Speed vs Rust | Memory (Max Resident) |
+|----------|---------|-----------|---------------|-----------------------|
+| **Rust** | 1.95.0 | ~265.5 ms | 1.00x         | 1.36 MB               |
+| **Kotlin**| 2.3.21 (jvm 26) | ~272.0 ms | 1.02x slower  | 39.50 MB     |
+| **Go**   | 1.26.2 | ~297.5 ms | 1.12x slower  | 3.94 MB               |
+| **Swift**| 6.2.4 | ~340.0 ms | 1.28x slower  | 1.64 MB               |
+| **Ryo (AOT)** | 0.1.0 | ~365.4 ms | 1.38x slower | **1.16 MB**           |
+| **Ryo (JIT)** | 0.1.0 | ~369.3 ms | 1.39x slower | 4.20 MB               |
+| **Bun (TS)**  | 1.3.13 | ~415.0 ms | 1.56x slower | 27.30 MB              |
+| **Julia** | 1.12.6 | ~431.5 ms | 1.63x slower | 216.06 MB             |
+| **Elixir**    | 1.19.5 | ~921.8 ms | 3.47x slower | 88.41 MB              |
+| **Ruby** | 2.6.10p210 | ~8.97 s | ~33.8x slower | 26.00 MB              |
+| **Python**| 3.9.6 | ~17.23 s | ~64.9x slower   | 8.09 MB               |
 
 *(Measurements executed on macOS, Apple M3 Pro. Ryo is compiled using `--release`)*
 

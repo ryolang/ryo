@@ -10,6 +10,23 @@ cargo build --release > /dev/null 2>&1
 ryo_bin="../../target/release/ryo"
 $ryo_bin build fib.ryo > /dev/null
 
+echo ""
+echo "-------------------"
+echo "Language Versions"
+echo "-------------------"
+echo "Rust:     $(rustc --version | cut -d' ' -f2)"
+echo "Kotlin:   $(kotlinc -version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1)"
+echo "Go:       $(go version | awk '{print $3}' | sed 's/go//')"
+echo "Swift:    $(swiftc --version | head -1 | awk '{print $4}')"
+echo "Ryo:      $($ryo_bin --version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' || echo 'dev')"
+echo "Bun:      $(~/.bun/bin/bun --version)"
+echo "Elixir:   $(elixir --version | grep Elixir | awk '{print $2}')"
+echo "Ruby:     $(ruby --version | awk '{print $2}')"
+echo "Python:   $(python3 --version | awk '{print $2}')"
+echo "Julia:    $(julia --version 2>/dev/null | awk '{print $3}' || echo 'not installed')"
+echo "Java:     $(java -version 2>&1 | head -1 | awk -F '"' '{print $2}')"
+
+echo ""
 echo "-------------------"
 echo "Memory Usage (Maximum Resident Set Size)"
 echo "-------------------"
@@ -53,6 +70,7 @@ measure_mem "Bun (TS)" ~/.bun/bin/bun run fib.ts
 measure_mem "Elixir" elixir fib.exs
 measure_mem "Ruby" ruby fib.rb
 measure_mem "Python" python3 fib.py
+measure_mem "Julia" julia fib.jl
 
 echo ""
 echo "-------------------"
@@ -69,4 +87,5 @@ hyperfine --warmup 1 \
   "$HOME/.bun/bin/bun run fib.ts" \
   'elixir fib.exs' \
   'ruby fib.rb' \
-  'python3 fib.py'
+  'python3 fib.py' \
+  'julia fib.jl'
