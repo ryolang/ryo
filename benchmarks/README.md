@@ -34,7 +34,7 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 | **Kotlin**| 2.3.21 (jvm 26) | ~272.0 ms | 1.02x slower  | 39.50 MB     |
 | **Go**   | 1.26.2 | ~297.5 ms | 1.12x slower  | 3.94 MB               |
 | **Swift**| 6.2.4 | ~340.0 ms | 1.28x slower  | 1.64 MB               |
-| **Ryo (AOT)** | 0.1.0 | ~365.4 ms | 1.38x slower | **1.16 MB**           |
+| **Ryo (AOT)** | 0.1.0 | ~349.8 ms | 1.38x slower | **1.16 MB**           |
 | **Ryo (JIT)** | 0.1.0 | ~369.3 ms | 1.39x slower | 4.20 MB               |
 | **Bun (TS)**  | 1.3.13 | ~415.0 ms | 1.56x slower | 27.30 MB              |
 | **Julia** | 1.12.6 | ~431.5 ms | 1.63x slower | 216.06 MB             |
