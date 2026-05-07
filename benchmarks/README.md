@@ -9,10 +9,10 @@ Before running the benchmarks, ensure you have the following tools installed and
 - `rustc`
 - `go`
 - `swiftc`
-- `python3`
+- `uv` (for Python 3.14)
 - `bun`
 - `elixir`
-- `ruby`
+- `ruby` (installed with homebrew)
 - `julia`
 - `kotlinc` and `temurin` (jvm)
 - `hyperfine`
@@ -39,8 +39,8 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 | **Bun (TS)**  | 1.3.13 | ~415.0 ms | 1.56x slower | 27.30 MB              |
 | **Julia** | 1.12.6 | ~431.5 ms | 1.63x slower | 216.06 MB             |
 | **Elixir**    | 1.19.5 | ~921.8 ms | 3.47x slower | 88.41 MB              |
-| **Ruby** | 2.6.10p210 | ~8.97 s | ~33.8x slower | 26.00 MB              |
-| **Python**| 3.9.6 | ~17.23 s | ~64.9x slower   | 8.09 MB               |
+| **Python**| 3.14.4 | ~4.98 s | ~19.60x slower   | 26.64 MB               |
+| **Ruby** | 4.0.3 | ~7.7 s | ~30.4x slower | 16.36 MB              |
 
 *(Measurements executed on macOS, Apple M3 Pro. Ryo is compiled using `--release`)*
 
