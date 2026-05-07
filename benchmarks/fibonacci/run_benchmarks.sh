@@ -21,7 +21,7 @@ echo "Swift:    $(swiftc --version | head -1 | awk '{print $4}')"
 echo "Ryo:      $($ryo_bin --version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' || echo 'dev')"
 echo "Bun:      $(~/.bun/bin/bun --version)"
 echo "Elixir:   $(elixir --version | grep Elixir | awk '{print $2}')"
-echo "Ruby:     $(/opt/homebrew/opt/ruby/bin/ruby --version | awk '{print $2}')"
+echo "Ruby:     $(ruby --version | awk '{print $2}')"
 echo "Python:   $(uv run --python 3.14 python --version | awk '{print $2}')"
 echo "Julia:    $(julia --version 2>/dev/null | awk '{print $3}' || echo 'not installed')"
 echo "Java:     $(java -version 2>&1 | head -1 | awk -F '"' '{print $2}')"
@@ -68,7 +68,7 @@ measure_mem "Ryo (AOT)" ./fib
 measure_mem "Ryo (JIT)" $ryo_bin run fib.ryo
 measure_mem "Bun (TS)" ~/.bun/bin/bun run fib.ts
 measure_mem "Elixir" elixir fib.exs
-measure_mem "Ruby" /opt/homebrew/opt/ruby/bin/ruby fib.rb
+measure_mem "Ruby" ruby fib.rb
 measure_mem "Python" uv run --python 3.14 fib.py
 measure_mem "Julia" julia fib.jl
 
@@ -86,6 +86,6 @@ hyperfine --warmup 1 \
   "$ryo_bin run fib.ryo" \
   "$HOME/.bun/bin/bun run fib.ts" \
   'elixir fib.exs' \
-  '/opt/homebrew/opt/ruby/bin/ruby fib.rb' \
+  'ruby fib.rb' \
   'uv run --python 3.14 fib.py' \
   'julia fib.jl'
