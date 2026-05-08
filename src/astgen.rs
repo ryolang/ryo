@@ -312,8 +312,28 @@ fn gen_stmt(
             let r = b.while_loop(cond_ref, &body_refs, stmt.span);
             out.push(r);
         }
-        ast::StmtKind::ForRange { .. } => {
-            todo!("ForRange astgen lowering")
+        ast::StmtKind::ForRange {
+            var,
+            iterator,
+            start,
+            end,
+            body,
+        } => {
+            if pool.str(iterator.name) != "range" {
+                sink.emit(Diag::error(
+                    iterator.span,
+                    DiagCode::ParseError,
+                    format!(
+                        "only `range(...)` is supported in `for` loops in v0.1, got `{}`",
+                        pool.str(iterator.name),
+                    ),
+                ));
+            }
+            let start_ref = gen_expr(b, start);
+            let end_ref = gen_expr(b, end);
+            let body_refs = lower_block(b, body, prims, pool, sink);
+            let r = b.for_range(var.name, start_ref, end_ref, &body_refs, stmt.span);
+            out.push(r);
         }
         ast::StmtKind::Break => {
             let r = b.break_stmt(stmt.span);
@@ -675,5 +695,19 @@ mod tests {
         let v = uir.compound_assign_view(stmts[1]);
         assert_eq!(pool.str(v.name), "x");
         assert_eq!(v.op, crate::ast::CompoundOp::Add);
+    }
+
+    #[test]
+    fn lower_for_range() {
+        let (uir, pool) =
+            parse_and_lower("fn main():\n\tfor i in range(0, 10):\n\t\tprint(i)\n").unwrap();
+        let dump = format!("{}", uir.dump(&pool));
+        assert!(dump.contains("for_range"), "got:\n{}", dump);
+    }
+
+    #[test]
+    fn for_non_range_iterator_rejected() {
+        let result = parse_and_lower("fn main():\n\tfor i in something(0, 10):\n\t\tprint(i)\n");
+        assert!(result.is_err(), "non-range iterator should be rejected");
     }
 }
