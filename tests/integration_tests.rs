@@ -1778,3 +1778,174 @@ fn while_true_with_return() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ============================================================================
+// Milestone 8c3: For-Range Loops
+// ============================================================================
+
+#[test]
+fn test_for_range_sum() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // 0+1+2+3+4 = 10
+    let code = "fn main():\n\tmut sum = 0\n\tfor i in range(0, 5):\n\t\tsum += i\n\tassert(sum == 10, \"0+1+2+3+4 should be 10\")\n";
+    let test_file = create_test_file(temp_dir.path(), "for_sum.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "for_sum.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_for_range_zero_iterations_start_gt_end() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut ran = 0\n\tfor i in range(5, 3):\n\t\tran = 1\n\tassert(ran == 0, \"body should never run when start > end\")\n";
+    let test_file = create_test_file(temp_dir.path(), "for_empty.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "for_empty.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_for_range_zero_iterations_equal() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut ran = 0\n\tfor i in range(5, 5):\n\t\tran = 1\n\tassert(ran == 0, \"body should never run when start == end\")\n";
+    let test_file = create_test_file(temp_dir.path(), "for_equal.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "for_equal.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_for_range_with_break() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // break at i==3, so last assigned is 2
+    let code = "fn main():\n\tmut last = 0\n\tfor i in range(0, 10):\n\t\tif i == 3:\n\t\t\tbreak\n\t\tlast = i\n\tassert(last == 2, \"last before break at 3 should be 2\")\n";
+    let test_file = create_test_file(temp_dir.path(), "for_break.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "for_break.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_for_range_with_continue() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // 0+1+3+4 = 8 (skipped 2)
+    let code = "fn main():\n\tmut sum = 0\n\tfor i in range(0, 5):\n\t\tif i == 2:\n\t\t\tcontinue\n\t\tsum += i\n\tassert(sum == 8, \"0+1+3+4 should be 8\")\n";
+    let test_file = create_test_file(temp_dir.path(), "for_continue.ryo", code);
+
+    let output = run_ryo_command(&["run", "for_continue.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_nested_for_loops() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // 3 * 2 = 6
+    let code = "fn main():\n\tmut sum = 0\n\tfor i in range(0, 3):\n\t\tfor j in range(0, 2):\n\t\t\tsum += 1\n\tassert(sum == 6, \"3*2 should be 6\")\n";
+    let test_file = create_test_file(temp_dir.path(), "nested_for.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "nested_for.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_for_inside_while() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // 2 * 3 = 6
+    let code = "fn main():\n\tmut count = 0\n\tmut n = 2\n\twhile n > 0:\n\t\tfor i in range(0, 3):\n\t\t\tcount += 1\n\t\tn -= 1\n\tassert(count == 6, \"2*3 should be 6\")\n";
+    let test_file = create_test_file(temp_dir.path(), "for_in_while.ryo", code);
+
+    let output = run_ryo_command(&["run", "for_in_while.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_while_inside_for() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // 3 * 2 = 6
+    let code = "fn main():\n\tmut count = 0\n\tfor i in range(0, 3):\n\t\tmut j = 2\n\t\twhile j > 0:\n\t\t\tcount += 1\n\t\t\tj -= 1\n\tassert(count == 6, \"3*2 should be 6\")\n";
+    let test_file = create_test_file(temp_dir.path(), "while_in_for.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_in_for.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_nested_for_same_var_name() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // 3 * 2 = 6, inner `i` shadows outer `i`
+    let code = "fn main():\n\tmut sum = 0\n\tfor i in range(0, 3):\n\t\tfor i in range(0, 2):\n\t\t\tsum += 1\n\tassert(sum == 6, \"3*2 with shadowed i should be 6\")\n";
+    let test_file = create_test_file(temp_dir.path(), "for_shadow.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "for_shadow.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_for_body_return() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn first_multiple_of_3(limit: int) -> int:\n\tfor i in range(0, limit):\n\t\tif i > 0 and i % 3 == 0:\n\t\t\treturn i\n\treturn -1\n\nfn main():\n\tx = first_multiple_of_3(10)\n\tassert(x == 3, \"first multiple of 3 in 0..10 should be 3\")\n";
+    let test_file = create_test_file(temp_dir.path(), "for_return.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "for_return.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
