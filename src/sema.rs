@@ -439,6 +439,7 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                         sema.pool.str(view.name),
                     ),
                 ));
+                scope.insert_binding(view.name, sema.pool.error_type(), view.mutable);
             } else {
                 scope.insert_binding(view.name, resolved, view.mutable);
             }
@@ -588,6 +589,7 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                                 sema.pool.str(view.name),
                             ),
                         ));
+                        scope.insert_binding(view.name, sema.pool.error_type(), false);
                     } else {
                         scope.insert_binding(view.name, resolved_ty, false);
                     }
@@ -2557,5 +2559,15 @@ mod tests {
     fn range_called_outside_loop_gives_helpful_error() {
         let diags = run("fn main():\n\trange(0, 5)\n").unwrap_err();
         assert!(any_code(&diags, DiagCode::ReservedBuiltinName));
+    }
+
+    #[test]
+    fn reserved_name_no_cascade_undefined_variable() {
+        let diags = run("fn main():\n\trange = 42\n\tprint(range)\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ReservedBuiltinName));
+        assert!(
+            !any_code(&diags, DiagCode::UndefinedVariable),
+            "should not cascade into UndefinedVariable"
+        );
     }
 }
