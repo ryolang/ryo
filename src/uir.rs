@@ -192,6 +192,9 @@ pub enum InstTag {
     /// `while cond: body`. Variable payload in `extra` — see [`while_loop_extra`].
     WhileLoop,
 
+    /// `for i in range(start, end): body`. Variable payload in `extra` — see [`for_range_extra`].
+    ForRange,
+
     /// `break` statement.
     Break,
 
@@ -386,6 +389,23 @@ pub mod while_loop_extra {
     pub const COND: usize = 0;
     pub const BODY_COUNT: usize = 1;
     pub const BODY_START: usize = 2;
+}
+
+/// Layout in `extra` for [`InstTag::ForRange`]:
+///
+/// ```text
+///   [0]       var_name:   StringId.raw()
+///   [1]       start:      InstRef.raw()
+///   [2]       end:        InstRef.raw()
+///   [3]       body_count: u32
+///   [4..4+n]  body stmts: InstRef.raw() each
+/// ```
+pub mod for_range_extra {
+    pub const VAR_NAME: usize = 0;
+    pub const START: usize = 1;
+    pub const END: usize = 2;
+    pub const BODY_COUNT: usize = 3;
+    pub const BODY_START: usize = 4;
 }
 
 // ---------- Builder ----------
@@ -656,6 +676,33 @@ impl UirBuilder {
         )
     }
 
+    pub fn for_range(
+        &mut self,
+        var_name: StringId,
+        start: InstRef,
+        end: InstRef,
+        body: &[InstRef],
+        span: Span,
+    ) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(var_name.raw());
+        self.uir.extra.push(start.raw());
+        self.uir.extra.push(end.raw());
+        self.uir.extra.push(Self::len_u32(body.len()));
+        for &stmt in body {
+            self.uir.extra.push(stmt.raw());
+        }
+        let len = for_range_extra::BODY_START + body.len();
+        self.push(
+            InstTag::ForRange,
+            InstData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(len),
+            }),
+            span,
+        )
+    }
+
     pub fn break_stmt(&mut self, span: Span) -> InstRef {
         self.push(InstTag::Break, InstData::None, span)
     }
@@ -695,6 +742,13 @@ pub struct CompoundAssignView {
 
 pub struct WhileLoopView {
     pub cond: InstRef,
+    pub body: Vec<InstRef>,
+}
+
+pub struct ForRangeView {
+    pub var_name: StringId,
+    pub start: InstRef,
+    pub end: InstRef,
     pub body: Vec<InstRef>,
 }
 
@@ -795,6 +849,31 @@ impl Uir {
         let mut pos = while_loop_extra::BODY_COUNT;
         let body = read_ref_list(slice, &mut pos);
         WhileLoopView { cond, body }
+    }
+
+    pub fn for_range_view(&self, r: InstRef) -> ForRangeView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::ForRange));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("ForRange must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let var_name = StringId::from_raw(slice[for_range_extra::VAR_NAME]);
+        let start = InstRef::from_raw(slice[for_range_extra::START]);
+        let end = InstRef::from_raw(slice[for_range_extra::END]);
+        let body_count = slice[for_range_extra::BODY_COUNT] as usize;
+        let body = slice[for_range_extra::BODY_START..for_range_extra::BODY_START + body_count]
+            .iter()
+            .copied()
+            .map(InstRef::from_raw)
+            .collect();
+        ForRangeView {
+            var_name,
+            start,
+            end,
+            body,
+        }
     }
 
     pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView {
@@ -1010,6 +1089,18 @@ fn write_inst(
                 f,
                 "while_loop cond=%{} body=[{}]",
                 v.cond.index(),
+                body_refs.join(", ")
+            )
+        }
+        (InstTag::ForRange, InstData::Extra(_)) => {
+            let v = uir.for_range_view(r);
+            let body_refs: Vec<_> = v.body.iter().map(|b| format!("%{}", b.index())).collect();
+            writeln!(
+                f,
+                "for_range {} in range(%{}, %{}) body=[{}]",
+                pool.str(v.var_name),
+                v.start.index(),
+                v.end.index(),
                 body_refs.join(", ")
             )
         }
