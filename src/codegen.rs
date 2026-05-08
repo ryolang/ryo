@@ -127,6 +127,12 @@ impl Codegen<ObjectModule> {
         shared_builder
             .enable("is_pic")
             .map_err(|e| format!("Error enabling is_pic: {}", e))?;
+        shared_builder
+            .set("opt_level", "speed")
+            .map_err(|e| format!("Error setting opt_level: {}", e))?;
+        shared_builder
+            .set("preserve_frame_pointers", "true")
+            .map_err(|e| format!("Error setting preserve_frame_pointers: {}", e))?;
         let shared_flags = settings::Flags::new(shared_builder);
 
         let isa = isa::lookup(target_triple.clone())
