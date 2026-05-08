@@ -93,6 +93,10 @@ pub enum DiagCode {
     BreakOutsideLoop,
     /// `continue` used outside of any loop body.
     ContinueOutsideLoop,
+    /// A `range()` argument is not `int`.
+    RangeArgType,
+    /// User attempted to declare a function or variable with a reserved builtin name.
+    ReservedBuiltinName,
 
     /// A declaration's resolution requires its own resolution to be
     /// already complete — e.g. a chain of decls whose types depend

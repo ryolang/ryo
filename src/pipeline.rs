@@ -225,6 +225,8 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::FloatModulo => "E0023",
         DiagCode::BreakOutsideLoop => "E0024",
         DiagCode::ContinueOutsideLoop => "E0025",
+        DiagCode::RangeArgType => "E0026",
+        DiagCode::ReservedBuiltinName => "E0027",
         DiagCode::CycleInResolution => "E0016",
         DiagCode::ParseError => "E0100",
         DiagCode::TooManyDiagnostics => "E0101",
