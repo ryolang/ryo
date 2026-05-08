@@ -60,6 +60,7 @@ impl Statement {
             StmtKind::AssignOrDecl { .. } => "AssignOrDecl",
             StmtKind::CompoundAssign { .. } => "CompoundAssign",
             StmtKind::WhileLoop { .. } => "WhileLoop",
+            StmtKind::ForRange { .. } => "ForRange",
             StmtKind::Break => "Break",
             StmtKind::Continue => "Continue",
         };
@@ -126,6 +127,29 @@ impl Statement {
                     println!();
                 }
             }
+            StmtKind::ForRange {
+                var,
+                iterator,
+                start,
+                end,
+                body,
+            } => {
+                println!(
+                    "{}ForRange: {} in {}",
+                    prefix,
+                    pool.str(var.name),
+                    pool.str(iterator.name)
+                );
+                start.pretty_print(&format!("{}  ├── start: ", prefix), pool);
+                end.pretty_print(&format!("{}  ├── end: ", prefix), pool);
+                for (i, stmt) in body.iter().enumerate() {
+                    let is_last = i == body.len() - 1;
+                    let branch = if is_last { "└──" } else { "├──" };
+                    print!("{}  {} ", prefix, branch);
+                    stmt.pretty_print_inline();
+                    println!();
+                }
+            }
             StmtKind::Break => {
                 println!("{}Break", prefix);
             }
@@ -155,6 +179,13 @@ pub enum StmtKind {
     },
     WhileLoop {
         cond: Expression,
+        body: Vec<Statement>,
+    },
+    ForRange {
+        var: Ident,
+        iterator: Ident,
+        start: Expression,
+        end: Expression,
         body: Vec<Statement>,
     },
     Break,

@@ -312,6 +312,9 @@ fn gen_stmt(
             let r = b.while_loop(cond_ref, &body_refs, stmt.span);
             out.push(r);
         }
+        ast::StmtKind::ForRange { .. } => {
+            todo!("ForRange astgen lowering")
+        }
         ast::StmtKind::Break => {
             let r = b.break_stmt(stmt.span);
             out.push(r);
