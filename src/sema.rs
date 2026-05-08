@@ -263,6 +263,16 @@ impl<'a> Sema<'a> {
                     ),
                 ));
             }
+            if crate::builtins::is_reserved_name(name) {
+                self.sink.emit(Diag::error(
+                    body.span,
+                    DiagCode::ReservedBuiltinName,
+                    format!(
+                        "'{}' is a reserved builtin and cannot be used as a function name",
+                        name,
+                    ),
+                ));
+            }
             self.signatures.insert(
                 body.name,
                 FunctionSig {
@@ -1194,6 +1204,18 @@ fn check_call(
     // never see them.
     if let Some(builtin) = builtins::lookup(sema.pool.str(name_id)) {
         return emit_builtin_call(sema, fcx, view, arg_tirs, span, builtin);
+    }
+
+    if crate::builtins::is_reserved_name(sema.pool.str(name_id)) {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ReservedBuiltinName,
+            format!(
+                "'{}' is a syntactic construct, not a callable function; use `for i in range(start, end):`",
+                sema.pool.str(name_id),
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
     // Demand the callee. With eagerly-resolved signatures this is
@@ -2519,6 +2541,21 @@ mod tests {
     #[test]
     fn range_redefinition_as_mut_rejected() {
         let diags = run("fn main():\n\tmut range = 42\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ReservedBuiltinName));
+    }
+
+    #[test]
+    fn range_as_function_name_rejected() {
+        let diags = run(
+            "fn range(a: int, b: int) -> int:\n\treturn a + b\n\nfn main():\n\tprint(\"hi\")\n",
+        )
+        .unwrap_err();
+        assert!(any_code(&diags, DiagCode::ReservedBuiltinName));
+    }
+
+    #[test]
+    fn range_called_outside_loop_gives_helpful_error() {
+        let diags = run("fn main():\n\trange(0, 5)\n").unwrap_err();
         assert!(any_code(&diags, DiagCode::ReservedBuiltinName));
     }
 }
