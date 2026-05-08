@@ -190,6 +190,24 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Resolution:** Add DWARF debug info generation to Cranelift (`.debug_line`, `.debug_info`, `.debug_frame`). Implement a simple stack walker in the runtime (e.g., `backtrace` from `libc` or via DWARF frame unwinding) to print the call stack inside `__ryo_panic`.
 **Note:** DWARF emission is the shared prerequisite. Once it lands, interactive debugging via DAP ([Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)) comes nearly for free — lldb already speaks DAP, so VS Code / JetBrains attach without Ryo-specific work. The stack-trace feature in `__ryo_panic` is additive runtime work on top of that same DWARF foundation.
 
+### I-040 — Cascading `UndefinedVariable` after reserved-name rejection
+
+**Files:** `src/sema.rs` (`InstTag::VarDecl`, `InstTag::AssignOrDecl`)
+**Summary:** When a user writes `mut range = 42`, sema emits `ReservedBuiltinName` and deliberately skips inserting the binding. If the user subsequently references `range` (e.g., `print(range)`), they get a secondary `UndefinedVariable` error. This is standard single-pass behaviour but could be avoided by inserting an error-typed "poisoned" binding on rejection, so downstream references resolve silently without cascading diagnostics.
+**Resolution:** On reserved-name rejection, call `scope.insert_binding(name, pool.error_type(), false)` instead of skipping the insert entirely. The error type is already treated as compatible with everything, so subsequent uses will type-check without emitting further errors.
+
+### I-041 — `for-range` arity: only 2-arg form supported
+
+**Files:** `src/parser.rs` (for-range parser)
+**Summary:** Python allows `range(stop)` (implied start=0) and `range(start, stop, step)`. Ryo's parser strictly enforces `range(start, end)` (exactly 2 arguments). This is documented v0.1 behaviour. Users coming from Python will inevitably try `for i in range(10):` and receive a generic arity error.
+**Resolution:** Consider supporting `range(end)` as sugar for `range(0, end)` in a future milestone. The 3-arg `range(start, end, step)` form requires a more complex increment block in codegen. Both are additive and non-breaking.
+
+### I-042 — HashMap clone per for-loop iteration in codegen
+
+**Files:** `src/codegen.rs` (`generate_for_range`, `emit_scoped_body`)
+**Summary:** `generate_for_range` (and `emit_scoped_body` for while-loops) clones the entire `ctx.locals` HashMap to establish a temporary scope for the loop body, then restores it afterward. For typical functions with <20 locals this is negligible, but it scales linearly with both nesting depth and local count.
+**Resolution:** Restructure `locals` as a scoped environment (e.g., linked list of scope frames or a `Vec`-backed stack with push/pop) rather than flat-map cloning. This is a codegen-internal refactor with no semantic impact. Low priority until profiling shows it matters.
+
 ---
 
 ## Cross-References
