@@ -189,6 +189,10 @@ pub enum TirTag {
     /// `while cond: body`. Variable payload in `extra` — see [`while_loop_extra`].
     WhileLoop,
 
+    /// `for var in range(start, end): body`. Variable payload in `extra`
+    /// — see [`for_range_extra`].
+    ForRange,
+
     /// `break` statement.
     Break,
 
@@ -346,6 +350,23 @@ pub mod while_loop_extra {
     pub const COND: usize = 0;
     pub const BODY_COUNT: usize = 1;
     pub const BODY_START: usize = 2;
+}
+
+/// Layout in `extra` for [`TirTag::ForRange`]:
+///
+/// ```text
+///   [0]       var_name:   StringId
+///   [1]       start:      TirRef.raw()
+///   [2]       end:        TirRef.raw()
+///   [3]       body_count: u32
+///   [4..4+n]  body stmts: TirRef.raw() each
+/// ```
+pub mod for_range_extra {
+    pub const VAR_NAME: usize = 0;
+    pub const START: usize = 1;
+    pub const END: usize = 2;
+    pub const BODY_COUNT: usize = 3;
+    pub const BODY_START: usize = 4;
 }
 
 // ---------- Builder ----------
@@ -637,6 +658,35 @@ impl TirBuilder {
         )
     }
 
+    pub fn for_range(
+        &mut self,
+        var_name: StringId,
+        start: TirRef,
+        end: TirRef,
+        body: &[TirRef],
+        ty: TypeId,
+        span: Span,
+    ) -> TirRef {
+        let offset = self.extra_offset();
+        self.extra.push(var_name.raw());
+        self.extra.push(start.raw());
+        self.extra.push(end.raw());
+        self.extra.push(Self::len_u32(body.len()));
+        for &stmt in body {
+            self.extra.push(stmt.raw());
+        }
+        let len = for_range_extra::BODY_START + body.len();
+        self.push(
+            TirTag::ForRange,
+            ty,
+            TirData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(len),
+            }),
+            span,
+        )
+    }
+
     pub fn break_stmt(&mut self, ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::Break, ty, TirData::None, span)
     }
@@ -704,6 +754,13 @@ pub struct TirIfStmtView {
 
 pub struct WhileLoopView {
     pub cond: TirRef,
+    pub body: Vec<TirRef>,
+}
+
+pub struct ForRangeView {
+    pub var_name: StringId,
+    pub start: TirRef,
+    pub end: TirRef,
     pub body: Vec<TirRef>,
 }
 
@@ -829,6 +886,27 @@ impl Tir {
         let mut pos = while_loop_extra::BODY_COUNT;
         let body = read_ref_list(slice, &mut pos);
         WhileLoopView { cond, body }
+    }
+
+    pub fn for_range_view(&self, r: TirRef) -> ForRangeView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::ForRange));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("ForRange must carry TirData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let var_name = StringId::from_raw(slice[for_range_extra::VAR_NAME]);
+        let start = TirRef::from_raw(slice[for_range_extra::START]);
+        let end = TirRef::from_raw(slice[for_range_extra::END]);
+        let mut pos = for_range_extra::BODY_COUNT;
+        let body = read_ref_list(slice, &mut pos);
+        ForRangeView {
+            var_name,
+            start,
+            end,
+            body,
+        }
     }
 }
 
@@ -961,6 +1039,18 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                 f,
                 "while_loop cond=%{} body=[{}]",
                 v.cond.index(),
+                body_refs.join(", ")
+            )
+        }
+        (TirTag::ForRange, TirData::Extra(_)) => {
+            let v = tir.for_range_view(r);
+            let body_refs: Vec<_> = v.body.iter().map(|b| format!("%{}", b.index())).collect();
+            writeln!(
+                f,
+                "for_range {} in range(%{}, %{}) body=[{}]",
+                pool.str(v.var_name),
+                v.start.index(),
+                v.end.index(),
                 body_refs.join(", ")
             )
         }

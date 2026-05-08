@@ -420,6 +420,15 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                         sema.pool.str(view.name),
                     ),
                 ));
+            } else if crate::builtins::is_reserved_name(sema.pool.str(view.name)) {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ReservedBuiltinName,
+                    format!(
+                        "'{}' is a reserved builtin and cannot be redefined",
+                        sema.pool.str(view.name),
+                    ),
+                ));
             } else {
                 scope.insert_binding(view.name, resolved, view.mutable);
             }
@@ -560,7 +569,18 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                         value_ty
                     };
 
-                    scope.insert_binding(view.name, resolved_ty, false);
+                    if crate::builtins::is_reserved_name(sema.pool.str(view.name)) {
+                        sema.sink.emit(Diag::error(
+                            span,
+                            DiagCode::ReservedBuiltinName,
+                            format!(
+                                "'{}' is a reserved builtin and cannot be redefined",
+                                sema.pool.str(view.name),
+                            ),
+                        ));
+                    } else {
+                        scope.insert_binding(view.name, resolved_ty, false);
+                    }
                     fcx.builder
                         .var_decl(view.name, false, resolved_ty, value_tir, span)
                 }
@@ -659,6 +679,49 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             fcx.builder
                 .while_loop(cond_tir, &body_tirs, sema.pool.void(), span)
         }
+        InstTag::ForRange => {
+            let view = sema.uir.for_range_view(r);
+
+            let start_tir = analyze_expr(sema, fcx, scope, view.start);
+            let end_tir = analyze_expr(sema, fcx, scope, view.end);
+
+            let start_ty = fcx.builder.ty_of(start_tir);
+            let end_ty = fcx.builder.ty_of(end_tir);
+
+            if !sema.pool.is_error(start_ty) && start_ty != sema.pool.int() {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.start),
+                    DiagCode::RangeArgType,
+                    format!(
+                        "range() start must be 'int', got '{}'",
+                        sema.pool.display(start_ty),
+                    ),
+                ));
+            }
+            if !sema.pool.is_error(end_ty) && end_ty != sema.pool.int() {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.end),
+                    DiagCode::RangeArgType,
+                    format!(
+                        "range() end must be 'int', got '{}'",
+                        sema.pool.display(end_ty),
+                    ),
+                ));
+            }
+
+            let int_ty = sema.pool.int();
+            let void_ty = sema.pool.void();
+            let var_name = view.var_name;
+
+            fcx.loop_depth += 1;
+            let body_tirs = analyze_block_seeded(sema, fcx, scope, &view.body, |child_scope| {
+                child_scope.insert_binding(var_name, int_ty, false);
+            });
+            fcx.loop_depth -= 1;
+
+            fcx.builder
+                .for_range(var_name, start_tir, end_tir, &body_tirs, void_ty, span)
+        }
         InstTag::Break => {
             if fcx.loop_depth == 0 {
                 sema.sink.emit(Diag::error(
@@ -697,6 +760,28 @@ fn analyze_block(
         parent: Some(scope),
         bindings: HashMap::new(),
     };
+    let mut tirs = Vec::with_capacity(stmts.len());
+    for stmt_ref in stmts {
+        tirs.push(analyze_stmt(sema, fcx, &mut child_scope, *stmt_ref));
+    }
+    tirs
+}
+
+/// Variant of [`analyze_block`] that accepts a closure to seed the
+/// child scope before analyzing body statements. Used by for-range
+/// to inject the loop variable into scope.
+fn analyze_block_seeded(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    stmts: &[InstRef],
+    seed: impl FnOnce(&mut Scope),
+) -> Vec<TirRef> {
+    let mut child_scope = Scope {
+        parent: Some(scope),
+        bindings: HashMap::new(),
+    };
+    seed(&mut child_scope);
     let mut tirs = Vec::with_capacity(stmts.len());
     for stmt_ref in stmts {
         tirs.push(analyze_stmt(sema, fcx, &mut child_scope, *stmt_ref));
@@ -2357,5 +2442,83 @@ mod tests {
             "nested while with inner break: {:?}",
             result.err()
         );
+    }
+
+    // ---- M8c3: for-range loops ----
+
+    #[test]
+    fn for_range_basic() {
+        let result = run("fn main():\n\tfor i in range(0, 5):\n\t\tx = i\n");
+        assert!(
+            result.is_ok(),
+            "basic for-range should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn for_range_non_int_start_rejected() {
+        let diags = run("fn main():\n\tfor i in range(true, 5):\n\t\tx = i\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::RangeArgType));
+    }
+
+    #[test]
+    fn for_range_non_int_end_rejected() {
+        let diags = run("fn main():\n\tfor i in range(0, 1.5):\n\t\tx = i\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::RangeArgType));
+    }
+
+    #[test]
+    fn for_range_loop_var_immutable() {
+        let diags = run("fn main():\n\tfor i in range(0, 5):\n\t\ti = 10\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ImmutableAssign));
+    }
+
+    #[test]
+    fn for_range_loop_var_not_visible_after() {
+        let diags = run("fn main():\n\tfor i in range(0, 5):\n\t\tx = i\n\ty = i\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::UndefinedVariable));
+    }
+
+    #[test]
+    fn for_range_duplicate_decl_in_body_rejected() {
+        let diags = run("fn main():\n\tfor i in range(0, 5):\n\t\tmut i = 10\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DuplicateDeclaration));
+    }
+
+    #[test]
+    fn for_range_shadow_in_nested_scope_ok() {
+        let result = run(
+            "fn main():\n\tfor i in range(0, 5):\n\t\tif true:\n\t\t\tmut i = 10\n\t\t\tx = i\n",
+        );
+        assert!(
+            result.is_ok(),
+            "shadow in nested scope should work: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn for_range_break_continue_ok() {
+        let result = run(
+            "fn main():\n\tfor i in range(0, 10):\n\t\tif i == 3:\n\t\t\tcontinue\n\t\tif i == 7:\n\t\t\tbreak\n",
+        );
+        assert!(
+            result.is_ok(),
+            "break/continue in for should work: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn range_redefinition_as_variable_rejected() {
+        let diags = run("fn main():\n\trange = 42\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ReservedBuiltinName));
+    }
+
+    #[test]
+    fn range_redefinition_as_mut_rejected() {
+        let diags = run("fn main():\n\tmut range = 42\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ReservedBuiltinName));
     }
 }
