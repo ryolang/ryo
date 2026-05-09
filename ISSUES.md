@@ -196,11 +196,15 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** Python allows `range(stop)` (implied start=0) and `range(start, stop, step)`. Ryo's parser strictly enforces `range(start, end)` (exactly 2 arguments). This is documented v0.1 behaviour. Users coming from Python will inevitably try `for i in range(10):` and receive a generic arity error.
 **Resolution:** Consider supporting `range(end)` as sugar for `range(0, end)` in a future milestone. The 3-arg `range(start, end, step)` form requires a more complex increment block in codegen. Both are additive and non-breaking.
 
-### I-041 — HashMap clone per for-loop iteration in codegen
+### I-041 — `range` is a syntactic hack, not a function
+**Files:** `src/builtins.rs`, `src/sema.rs`
+**Summary:** `range(0, 5)` is hardcoded as a reserved keyword in semantic analysis rather than a standard library function. If a generic `for element in collection:` loop is implemented in the future, the `range` hardcoding will need to be removed in favor of a true `RangeIterator` protocol.
+**Resolution:** Defer until Structs, Generics, and Iterator Interfaces are formally designed and implemented. Once they exist, remove the specific `range` semantic checks and transition it to a standard library function.
 
-**Files:** `src/codegen.rs` (`generate_for_range`, `emit_scoped_body`)
-**Summary:** `generate_for_range` (and `emit_scoped_body` for while-loops) clones the entire `ctx.locals` HashMap to establish a temporary scope for the loop body, then restores it afterward. For typical functions with <20 locals this is negligible, but it scales linearly with both nesting depth and local count.
-**Resolution:** Restructure `locals` as a scoped environment (e.g., linked list of scope frames or a `Vec`-backed stack with push/pop) rather than flat-map cloning. This is a codegen-internal refactor with no semantic impact. Low priority until profiling shows it matters.
+### I-042 — For loop codegen needs to be desugared into while loops
+**Files:** `src/codegen.rs`
+**Summary:** Currently, `for-range` loops have bespoke code generation that manually emits basic blocks, jump instructions, and raw counter increments. When general iterators are added, loops should be desugared during the AST-to-UIR phase into standard `while` loops that call `.next()`.
+**Resolution:** Once iterators land, remove the `generate_for_range` codegen entirely and rely on standard `while` codegen to emit loops.
 
 ---
 
