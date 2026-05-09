@@ -26,9 +26,9 @@ macro_rules! assert_ryo_runs {
     ($test_name:expr, $code:expr) => {{
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let test_file = create_test_file(temp_dir.path(), $test_name, $code);
-        let output = run_ryo_command(&["run", $test_name], &test_file)
-            .expect("Failed to run ryo command");
-        
+        let output =
+            run_ryo_command(&["run", $test_name], &test_file).expect("Failed to run ryo command");
+
         assert!(
             output.status.success(),
             "STDERR: {}",
