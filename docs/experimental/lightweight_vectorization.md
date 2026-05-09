@@ -107,7 +107,21 @@ This architecture grants Ryo world-class Tensor ergonomics and raw C/SIMD perfor
 
 ---
 
-## 4. Codegen Simplicity
+## 4. Performance Observability (Missed Vectorization Warnings)
+
+A major pain point in languages like C++ and Rust is "silent vectorization failure." A developer writes a loop expecting it to run 4x faster via SIMD, but accidentally introduces a branch or a memory dependency. The compiler silently aborts vectorization and emits slow scalar code, leaving the user guessing.
+
+To solve this, Ryo's vectorizer will embrace **explicit performance observability**:
+
+1. **Diagnostic Feedback:** If the compiler analyzes a loop that performs array/tensor memory access but *fails* the "Strictly Simple" checklist, it will emit a compiler warning (`DiagCode::MissedVectorization`).
+2. **Actionable Reasons:** The warning will explicitly state *why* vectorization failed (e.g., `"Loop vectorization failed: detected conditional 'if' branch at line 42"` or `"detected loop-carried dependency on variable 'a'"`).
+3. **Controlling Noise (Opt-In):** To prevent spamming users writing basic non-math scripts, these warnings must be opt-in. This can be controlled via:
+   * A compiler flag: `ryo build --warn-simd`
+   * Or an explicit loop annotation: `@simd for i in range(0, 100):` (If annotated, failure to vectorize becomes a hard compiler error).
+
+---
+
+## 5. Codegen Simplicity
 By moving the complexity into the TIR rewriting phase, `codegen.rs` remains incredibly simple. 
 
 When the Codegen phase encounters a `TirTag::FAddSimd4`, it simply requests Cranelift's native `fadd` instruction acting on Cranelift's native `f32x4` or `f64x2` types. It does not need to know that a loop was vectorized.
