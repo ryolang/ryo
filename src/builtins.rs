@@ -41,10 +41,8 @@ pub fn lookup(name: &str) -> Option<&'static BuiltinFunction> {
 }
 
 /// Names that are not callable builtins but cannot be redefined by user code.
-#[allow(dead_code)]
 pub const RESERVED_NAMES: &[&str] = &["range"];
 
-#[allow(dead_code)]
 pub fn is_reserved_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }

@@ -297,7 +297,6 @@ pub struct LexError {
     /// only by the parser-test glue, but the field is part of the
     /// public surface so the full-pipeline driver can route it
     /// through Ariadne once Phase 1's diag module lands here.
-    #[allow(dead_code)]
     pub span: Span,
     pub message: String,
 }

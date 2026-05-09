@@ -79,9 +79,7 @@ pub struct Codegen<M: Module> {
 
 /// Per-loop codegen state: the Cranelift blocks that `break` and
 /// `continue` jump to.
-#[allow(dead_code)]
 struct LoopContext {
-    header_block: Block,
     exit_block: Block,
     /// Where `continue` jumps. For while-loops this is the header
     /// (re-evaluate condition); for for-range loops this is the
@@ -649,7 +647,6 @@ impl<M: Module> Codegen<M> {
         builder.switch_to_block(body_block);
 
         ctx.loop_stack.push(LoopContext {
-            header_block,
             exit_block,
             continue_target: header_block,
         });
@@ -697,7 +694,6 @@ impl<M: Module> Codegen<M> {
 
         // Push loop context: continue targets increment
         ctx.loop_stack.push(LoopContext {
-            header_block,
             exit_block,
             continue_target: increment_block,
         });
