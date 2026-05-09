@@ -73,9 +73,41 @@ ForRange(start=limit, end=len, step=1):
     StoreScalar(c, i, res)
 ```
 
+## 3. Integrating with Tensors (DLPack) and Operator Ergonomics
+
+This lightweight vectorization strategy works perfectly with Ryo's DLPack Tensor wrappers (see `docs/dev/tensor.md`). However, connecting safe, DLPack-backed Tensors to raw SIMD loops requires addressing two conflicts: **Safety Checks** and **Operator Ergonomics**.
+
+### A. Bridging Safety and SIMD (Bounds Hoisting)
+The safe `Tensor.get(index)` method inherently contains a bounds-checking `if` branch, which violates the "Strictly Simple" rule of the vectorizer. To allow Tensor loops to vectorize, the compiler must perform optimizations before the vectorization pass:
+
+1. **Inlining:** The compiler automatically inlines `get()` and `set()` into the loop body.
+2. **Bounds Hoisting:** The compiler detects that the loop boundaries (`0` to `len`) are bounded by the tensor shape, and hoists the panic-branch *outside* the loop.
+3. **Contiguity Verification:** The compiler inserts a runtime check ensuring the DLPack `stride == 1` before entering the SIMD loop.
+
+Once these safety checks are hoisted, the loop body becomes a "Strictly Simple" sequence of raw pointer offsets, allowing the vectorizer to strip-mine it safely.
+
+### B. Operator Ergonomics (The "PyTorch" Standard)
+High-Performance Computing and Machine Learning users (coming from PyTorch, TileLang, or Mojo) absolutely expect mathematical operators (`a + b`, `w * x`) to work on Tensors. However, allowing arbitrary user-level operator overloading creates significant complexity in the compiler (trait resolution, dynamic dispatch).
+
+To keep the compiler simple while satisfying industry standards, Ryo uses **Compiler-Hardcoded Ergonomics for Tensors**:
+
+1. **No User Overloading:** Users cannot define `impl Add` for their own structs.
+2. **Semantic Interception:** In `sema.rs`, if a `BinaryOp::Add` involves two `Tensor` types, the compiler silently desugars it into a method call: `a.add(b)`.
+3. **Standard Library Power:** The `.add()` method is written natively in the Ryo standard library using a simple, bounds-checked `for-range` scalar loop.
+
+**The Full Pipeline in Action:**
+1. User writes PyTorch-style math: `c = a + b`
+2. Sema desugars to: `c = a.add(b)`
+3. The stdlib `add()` function contains a simple scalar loop.
+4. The optimizer hoists the bounds checks.
+5. The Mini-MLIR pass detects the now-branchless loop and rewrites it into explicit SIMD.
+6. Cranelift emits AVX/NEON instructions.
+
+This architecture grants Ryo world-class Tensor ergonomics and raw C/SIMD performance while keeping the semantic analyzer and codegen engines radically simple.
+
 ---
 
-## 3. Codegen Simplicity
+## 4. Codegen Simplicity
 By moving the complexity into the TIR rewriting phase, `codegen.rs` remains incredibly simple. 
 
 When the Codegen phase encounters a `TirTag::FAddSimd4`, it simply requests Cranelift's native `fadd` instruction acting on Cranelift's native `f32x4` or `f64x2` types. It does not need to know that a loop was vectorized.
