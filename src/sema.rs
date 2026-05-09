@@ -263,16 +263,12 @@ impl<'a> Sema<'a> {
                     ),
                 ));
             }
-            if crate::builtins::is_reserved_name(name) {
-                self.sink.emit(Diag::error(
-                    body.span,
-                    DiagCode::ReservedBuiltinName,
-                    format!(
-                        "'{}' is a reserved builtin and cannot be used as a function name",
-                        name,
-                    ),
-                ));
-            }
+            check_reserved_builtin(
+                self,
+                body.name,
+                body.span,
+                "is a reserved builtin and cannot be used as a function name",
+            );
             self.signatures.insert(
                 body.name,
                 FunctionSig {
@@ -430,15 +426,12 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                         sema.pool.str(view.name),
                     ),
                 ));
-            } else if crate::builtins::is_reserved_name(sema.pool.str(view.name)) {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::ReservedBuiltinName,
-                    format!(
-                        "'{}' is a reserved builtin and cannot be redefined",
-                        sema.pool.str(view.name),
-                    ),
-                ));
+            } else if check_reserved_builtin(
+                sema,
+                view.name,
+                span,
+                "is a reserved builtin and cannot be redefined",
+            ) {
                 scope.insert_binding(view.name, sema.pool.error_type(), view.mutable);
             } else {
                 scope.insert_binding(view.name, resolved, view.mutable);
@@ -580,15 +573,12 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                         value_ty
                     };
 
-                    if crate::builtins::is_reserved_name(sema.pool.str(view.name)) {
-                        sema.sink.emit(Diag::error(
-                            span,
-                            DiagCode::ReservedBuiltinName,
-                            format!(
-                                "'{}' is a reserved builtin and cannot be redefined",
-                                sema.pool.str(view.name),
-                            ),
-                        ));
+                    if check_reserved_builtin(
+                        sema,
+                        view.name,
+                        span,
+                        "is a reserved builtin and cannot be redefined",
+                    ) {
                         scope.insert_binding(view.name, sema.pool.error_type(), false);
                     } else {
                         scope.insert_binding(view.name, resolved_ty, false);
@@ -726,17 +716,12 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             let var_name = view.var_name;
 
             fcx.loop_depth += 1;
-            let is_reserved = crate::builtins::is_reserved_name(sema.pool.str(var_name));
-            if is_reserved {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::ReservedBuiltinName,
-                    format!(
-                        "'{}' is a reserved builtin and cannot be redefined",
-                        sema.pool.str(var_name),
-                    ),
-                ));
-            }
+            let is_reserved = check_reserved_builtin(
+                sema,
+                var_name,
+                span,
+                "is a reserved builtin and cannot be redefined",
+            );
             let error_ty = sema.pool.error_type();
             let body_tirs = analyze_block_seeded(sema, fcx, scope, &view.body, |child_scope| {
                 if is_reserved {
@@ -1224,15 +1209,12 @@ fn check_call(
         return emit_builtin_call(sema, fcx, view, arg_tirs, span, builtin);
     }
 
-    if crate::builtins::is_reserved_name(sema.pool.str(name_id)) {
-        sema.sink.emit(Diag::error(
-            span,
-            DiagCode::ReservedBuiltinName,
-            format!(
-                "'{}' is a syntactic construct, not a callable function; use `for i in range(start, end):`",
-                sema.pool.str(name_id),
-            ),
-        ));
+    if check_reserved_builtin(
+        sema,
+        name_id,
+        span,
+        "is a syntactic construct, not a callable function; use `for i in range(start, end):`",
+    ) {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
@@ -1500,6 +1482,25 @@ fn bin_op_symbol(tag: InstTag) -> &'static str {
         InstTag::And => "and",
         InstTag::Or => "or",
         _ => "?",
+    }
+}
+
+fn check_reserved_builtin(
+    sema: &mut Sema<'_>,
+    name_id: StringId,
+    span: Span,
+    message: &str,
+) -> bool {
+    let name = sema.pool.str(name_id);
+    if crate::builtins::is_reserved_name(name) {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ReservedBuiltinName,
+            format!("'{}' {}", name, message),
+        ));
+        true
+    } else {
+        false
     }
 }
 

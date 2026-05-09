@@ -22,6 +22,21 @@ fn create_test_file(dir: &Path, filename: &str, content: &str) -> std::path::Pat
     file_path
 }
 
+macro_rules! assert_ryo_runs {
+    ($test_name:expr, $code:expr) => {{
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let test_file = create_test_file(temp_dir.path(), $test_name, $code);
+        let output = run_ryo_command(&["run", $test_name], &test_file)
+            .expect("Failed to run ryo command");
+        
+        assert!(
+            output.status.success(),
+            "STDERR: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }};
+}
+
 #[test]
 fn test_lex_command_integration() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
@@ -1785,102 +1800,42 @@ fn while_true_with_return() {
 
 #[test]
 fn test_for_range_sum() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
     // 0+1+2+3+4 = 10
     let code = "fn main():\n\tmut sum = 0\n\tfor i in range(0, 5):\n\t\tsum += i\n\tassert(sum == 10, \"0+1+2+3+4 should be 10\")\n";
-    let test_file = create_test_file(temp_dir.path(), "for_sum.ryo", code);
-
-    let output =
-        run_ryo_command(&["run", "for_sum.ryo"], &test_file).expect("Failed to run ryo command");
-
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_ryo_runs!("for_sum.ryo", code);
 }
 
 #[test]
 fn test_for_range_zero_iterations_start_gt_end() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\tmut ran = 0\n\tfor i in range(5, 3):\n\t\tran = 1\n\tassert(ran == 0, \"body should never run when start > end\")\n";
-    let test_file = create_test_file(temp_dir.path(), "for_empty.ryo", code);
-
-    let output =
-        run_ryo_command(&["run", "for_empty.ryo"], &test_file).expect("Failed to run ryo command");
-
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_ryo_runs!("for_empty.ryo", code);
 }
 
 #[test]
 fn test_for_range_zero_iterations_equal() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\tmut ran = 0\n\tfor i in range(5, 5):\n\t\tran = 1\n\tassert(ran == 0, \"body should never run when start == end\")\n";
-    let test_file = create_test_file(temp_dir.path(), "for_equal.ryo", code);
-
-    let output =
-        run_ryo_command(&["run", "for_equal.ryo"], &test_file).expect("Failed to run ryo command");
-
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_ryo_runs!("for_equal.ryo", code);
 }
 
 #[test]
 fn test_for_range_with_break() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
     // break at i==3, so last assigned is 2
     let code = "fn main():\n\tmut last = 0\n\tfor i in range(0, 10):\n\t\tif i == 3:\n\t\t\tbreak\n\t\tlast = i\n\tassert(last == 2, \"last before break at 3 should be 2\")\n";
-    let test_file = create_test_file(temp_dir.path(), "for_break.ryo", code);
-
-    let output =
-        run_ryo_command(&["run", "for_break.ryo"], &test_file).expect("Failed to run ryo command");
-
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_ryo_runs!("for_break.ryo", code);
 }
 
 #[test]
 fn test_for_range_with_continue() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
     // 0+1+3+4 = 8 (skipped 2)
     let code = "fn main():\n\tmut sum = 0\n\tfor i in range(0, 5):\n\t\tif i == 2:\n\t\t\tcontinue\n\t\tsum += i\n\tassert(sum == 8, \"0+1+3+4 should be 8\")\n";
-    let test_file = create_test_file(temp_dir.path(), "for_continue.ryo", code);
-
-    let output = run_ryo_command(&["run", "for_continue.ryo"], &test_file)
-        .expect("Failed to run ryo command");
-
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_ryo_runs!("for_continue.ryo", code);
 }
 
 #[test]
 fn test_nested_for_loops() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
     // 3 * 2 = 6
     let code = "fn main():\n\tmut sum = 0\n\tfor i in range(0, 3):\n\t\tfor j in range(0, 2):\n\t\t\tsum += 1\n\tassert(sum == 6, \"3*2 should be 6\")\n";
-    let test_file = create_test_file(temp_dir.path(), "nested_for.ryo", code);
-
-    let output =
-        run_ryo_command(&["run", "nested_for.ryo"], &test_file).expect("Failed to run ryo command");
-
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_ryo_runs!("nested_for.ryo", code);
 }
 
 #[test]

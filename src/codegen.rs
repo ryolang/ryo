@@ -711,13 +711,16 @@ impl<M: Module> Codegen<M> {
         // because we need to insert the counter binding between the save
         // and the emit; emit_scoped_body's internal save would shadow our
         // insertion.
-        let saved_locals = ctx.locals.clone();
-        ctx.locals.insert(view.var_name, counter);
+        let shadowed_var = ctx.locals.insert(view.var_name, counter);
 
         let body_terminated = Self::emit_body(builder, ctx, &view.body)?;
 
         // Restore locals (loop variable goes out of scope)
-        ctx.locals = saved_locals;
+        if let Some(old_var) = shadowed_var {
+            ctx.locals.insert(view.var_name, old_var);
+        } else {
+            ctx.locals.remove(&view.var_name);
+        }
 
         if !body_terminated {
             builder.ins().jump(increment_block, &[]);
