@@ -107,6 +107,25 @@ on mutation(collection) where active_view_borrows(collection):
     error("cannot mutate collection while a view is active (Rule 7)")
 ```
 
+### Hybrid Eager Destruction (Section 5.4)
+
+To implement Hybrid Eager Destruction, the borrow checker pass calculates the **last use** of every variable. 
+
+```pseudocode
+on function_end(f):
+    for var in function_variables:
+        if var.type.implements_drop():
+            # Resource: destroyed lexically at block end
+            insert_drop(var, location=var.scope.end)
+        else:
+            # Pure Memory: destroyed eagerly after last use
+            last_use = find_last_read_or_write(var)
+            if last_use != null:
+                insert_free(var, location=last_use.next_instruction)
+            else:
+                insert_free(var, location=var.declaration)
+```
+
 ### Edge Cases
 
 **Conditional moves — branches must agree:**

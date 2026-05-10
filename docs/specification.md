@@ -202,7 +202,11 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 *   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error union prefix (`!`), optional chaining (`?.`), range bounds (`..`, used in constrained types `int(1..65535)` — not used for iteration or slicing), slice (`:` inside `[]`, e.g., `s[1:4]`, `s[:4]`, `s[2:]` — Python/Go convention).
     *   **Important Note:** The `!` operator is used exclusively for error union type prefixes (`!T` = error or T, `ErrorType!T` = ErrorType or T). The `!` is NOT used for logical negation—use `not` instead (following Python convention). Similarly, `?` operator in type context (`?T`) denotes optional types, while `?.` is the optional chaining operator.
     *   `_` (Underscore): The underscore `_` is treated as a special identifier. When used in patterns (`match`, destructuring assignment), it signifies a wildcard or an intentionally ignored value; it does not bind to a variable.
-*   **Literals:** Integers (decimal `123`, hex `0xFF`, octal `0o77`, binary `0b11`; underscores `1_000`), Floats (`123.45`, `1.23e-10`; underscores `1_000.0`), Strings (`"..."` basic escapes like `\n`, `\t`, `\\`, `\"`, `\xHH`, `\u{HHHH}`). `f"..."` (f-strings with `{expression}` interpolation), Booleans (`true`, `false`), Optional null value (`none`), List (`[...]`), Map (`{key: value, ...}`), Tuple (`(v1, v2, ...)`), Char (`'a'`, `'\u{1F600}'`).
+*   **Literals:** Integers (decimal `123`, hex `0xFF`, octal `0o77`, binary `0b11`; underscores `1_000`), Floats (`123.45`, `1.23e-10`; underscores `1_000.0`), Strings (`"..."` basic escapes like `\n`, `\t`, `\\`, `\"`, `\xHH`, `\u{HHHH}`). `f"..."` (f-strings with `{expression}` interpolation). `t"..."` (t-strings for template literal parsing/interpolation). Booleans (`true`, `false`), Optional null value (`none`), List (`[...]`), Map (`{key: value, ...}`), Tuple (`(v1, v2, ...)`), Char (`'a'`, `'\u{1F600}'`).
+
+    **Note on Strings (`f"..."` vs `t"..."`):**
+    *   **F-strings (`f"..."`):** Produce a standard `str`. The compiler immediately evaluates the interpolations and concatenates the resulting string.
+    *   **T-strings (`t"..."`):** Inspired by Python 3.14's `t-strings`, these do not produce a raw `str`. Instead, they produce a `Template` object (which contains the static string parts and the dynamic values as separate components). This is the foundation for secure web templating and database queries in Ryo. By passing a `Template` to a parser (like an HTML or SQL builder), the builder can securely escape the dynamic values before rendering, entirely preventing Injection and XSS attacks.
 *   **Comments:**
     *   **Regular Comment:** Starts with `#` followed by a space or directly by the comment text. Continues to the end of the line. Ignored by the compiler.
         ```ryo
@@ -436,6 +440,11 @@ fn mutate_list(items: &mut list[int]):  # Explicit mutable borrow
 *   `list[T]`: Dynamic array. Homogeneous. *(Built-in fundamental type)*
 *   `map[K, V]`: Hash map. Homogeneous keys/values. `K` must be hashable/comparable. *(Built-in fundamental type)*
 
+#### **Performance Note: Strict Bounds Checking (No Negative Indexing)**
+For maximum execution speed and optimal CPU branch prediction, Ryo enforces **strict, zero-based bounds checking**. 
+*   Negative indexing (e.g., `my_list[-1]`) is **not supported** in Ryo, as allowing it would require a hidden `if index < 0` branch on every single memory access, defeating auto-vectorization.
+*   **DX-First Error:** Because Ryo targets Python developers who expect negative indexing, writing `my_list[-1]` yields a special compiler error: *"Error: Ryo does not support negative indexing for performance reasons. Use `my_list.last()` instead."*
+
 #### **Safety Note: Versioned Iterators**
 To prevent "Iterator Invalidation" bugs (modifying a collection while iterating), Ryo uses **Versioned Iterators**.
 *   Each collection has a modification counter.
@@ -453,6 +462,7 @@ To prevent "Iterator Invalidation" bugs (modifying a collection while iterating)
 
 *   **Syntax:** `?T` represents a value of type `T` that may be absent (represented by `none`). Eliminates null pointer errors through explicit, type-safe handling.
 *   **Null literal:** `none` (lowercase keyword, consistent with `true` and `false`). *(Rationale: Python-familiar, semantically clear—"none" means "no value")*
+*   **Zero-Cost Optionals (Niche Optimization):** For any pointer-backed type (`str`, `list`, `map`, `shared[T]`, and references like `&Point`), the compiler guarantees that `?T` has the exact same memory layout as `T`. The `none` value is simply represented by a null pointer at the machine level. There is no boxing or metadata overhead.
 *   **Declaration and Assignment:**
     ```ryo
 	user: ?User = none
@@ -1230,25 +1240,41 @@ fn main():
 	#  but enforced in concurrent contexts — see Concurrency section)
 ```
 
-### 5.4 RAII (`Drop` Trait) — Deterministic Cleanup
+### 5.4 Hybrid Eager Destruction & RAII (`Drop` Trait)
 
-The `Drop` trait guarantees that resources (file handles, network sockets, heap memory) are cleaned up *exactly* when their owning variable goes out of scope.
+Ryo employs a **Hybrid Eager Destruction** model to optimize memory usage without compromising predictable resource management. This approach cleanly separates "Pure Memory" from "Observable Resources".
+
+#### 1. Pure Memory is Destroyed Eagerly (Dataflow-based)
+If a type does **not** implement a custom `Drop` trait (e.g., `str`, `list[T]`, primitive arrays, or plain structs containing them), the compiler destroys it immediately after its **last syntactic use**, rather than waiting for the end of the lexical scope. 
+
+*   *Why?* The developer cannot observe exactly *when* pure memory is freed, only that it is. Eager destruction dramatically reduces peak memory overhead in long-running functions (similar to Mojo's eager destruction) without requiring developers to manually scope variables or call `del`.
+
+#### 2. Resources are Destroyed Lexically (RAII/Scope-based)
+If a type **does** implement a custom `Drop` trait (e.g., `File`, `MutexGuard`, `Connection`), it represents an observable resource. These are destroyed **strictly at the end of their lexical scope** (or `with` block). Eager destruction is disabled for these types.
+
+*   *Why?* When a developer acquires a lock or opens a transaction, they rely on scope boundaries for correctness. Eagerly dropping a lock because the variable isn't referenced later in the function could cause subtle data races. Lexical destruction guarantees predictable, Python-like semantics.
 
 ```ryo
 impl Drop for Connection:
-	fn drop(self):
+	fn drop(move self):
 		self.close()
 
-fn handle():
-	conn = Connection.open("db://...")
-	# use conn...
-# conn.drop() called automatically here — deterministic, no GC
+fn process_data():
+	mut data = load_massive_list()      # `list` has no custom Drop
+	
+	with counter.lock() as guard:       # `MutexGuard` implements Drop
+		guard.value += len(data)        # <--- `data` is eagerly destroyed RIGHT HERE
+		
+		# ... intensive work continues ...
+		# `data` memory is already freed!
+		
+	# <--- `guard` is lexically destroyed RIGHT HERE (lock predictably released)
 ```
 
-*   **Drop order** is reverse declaration order within a scope.
-*   **Relation to Ownership:** The Move/Borrow model dictates *who* owns the value and *when* ownership ends. The `Drop` trait dictates *what happens* when ownership ends. They work together.
+*   **Drop order (for resources):** Reverse declaration order within a scope.
+*   **Relation to Ownership:** The Move/Borrow model dictates *who* owns the value. The Hybrid Eager model dictates *when* ownership ends (after last use for memory, at scope exit for resources). The `Drop` trait dictates *what happens* when ownership ends.
 
-*(Rationale: `drop` takes `self` by move rather than `&mut self` because under Ownership Lite the value is being destroyed — there is no reason to borrow something that ceases to exist. This is consistent with Rule 2 (parameters borrow implicitly); the compiler inserts the `drop` call at scope exit and the value is consumed.)*
+*(Rationale: `drop` takes `self` by move rather than `&mut self` because the value is being destroyed — there is no reason to borrow something that ceases to exist. This hybrid model gives Ryo 90% of Mojo's performance benefits with 0% of the cognitive overhead or race-condition risks associated with pure eager destruction.)*
 
 ### 5.5 `with` — Resource Lifetime Blocks
 
@@ -1382,8 +1408,8 @@ The Ryo Ownership Model is a four-layered system:
 │  Explicit resource lifetime boundaries               │
 │  One keyword, many behaviors (Drop determines how)   │
 ├─────────────────────────────────────────────────────┤
-│  Layer 2: RAII / Drop                                │
-│  Deterministic cleanup when ownership ends           │
+│  Layer 2: Hybrid Eager Destruction & RAII            │
+│  Dataflow cleanup for memory, Lexical for resources  │
 ├─────────────────────────────────────────────────────┤
 │  Layer 1: Move / Borrow / Exclusive Access           │
 │  Governs how data is accessed and transferred        │
@@ -1689,7 +1715,21 @@ Closures are categorized by their capture behavior for type checking purposes:
 
 **Note:** In the initial implementation, these are compiler-internal concepts, not user-facing traits. Full trait-based closures are planned for post-v0.1.0.
 
-#### 6.2.4 Closures as Function Parameters
+#### 6.2.4 Stateless Closure Coercion (C-ABI)
+
+If a closure captures **no variables** from its enclosing scope, the compiler automatically coerces it into a plain, state-free function pointer.
+
+```ryo
+# Stateless closure - captures nothing
+double = fn(x): x * 2
+
+# Implicitly coerces to a C-ABI function pointer
+ffi_c.register_callback(double)
+```
+
+*(Rationale: This allows developers to use Python-like lambda syntax effortlessly, even when interacting with C FFI, without needing a separate syntax for "function pointers" versus "closures". If the user accidentally captures state in a closure passed to FFI, the compiler will catch it and emit a clear error: "Cannot pass stateful closure to C FFI".)*
+
+#### 6.2.5 Closures as Function Parameters
 
 Closures can be passed as function parameters, enabling higher-order functions:
 
@@ -3407,6 +3447,8 @@ fn main():
 *   **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
 *   **Core Packages (Initial):**
     *   `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`, `assert`, `range`), error and optional type support. **`print` and `println` accept exactly one `&str` argument** — there are no variadic forms (see Section 6.1.2). For non-string values, use an f-string: `println(f"x = {x}")`.
+    *   `template`: Native support for parsing and evaluating `t"..."` strings. Includes builder traits and HTML/SQL sanitization utilities (similar to Dave Peck's `tdom` concept for Python) to safely construct DOM trees or queries from Template types.
+        *   Includes `template.include("path")`: A compiler-backed function that reads an external file (like `.html` or `.sql`) at compile-time and treats it as an inline `t-string`. This allows designers to edit plain HTML files without logic, while the Ryo compiler statically checks and interpolates variables into the Template object at compile-time with zero runtime parsing cost. Control flow (loops/conditionals) must be handled in Ryo via component composition (joining multiple Templates) to maintain strict MVC separation.
     *   `io`: Console (`readln`), Files (`File`), Buffering (functions return `IoError!T`), implements `Drop`.
     *   `string`: `&str` manipulation, parsing (functions return `ParseError!T`).
     *   `collections`: `list[T]`, `map[K, V]` types and methods.
