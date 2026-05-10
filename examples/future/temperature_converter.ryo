@@ -2,52 +2,52 @@
 # Temperature conversion example demonstrating enums, structs, and pattern matching
 
 enum TempScale:
-\tCelsius
-\tFahrenheit
-\tKelvin
+	Celsius
+	Fahrenheit
+	Kelvin
 
 struct Temperature:
-\tvalue: float
-\tscale: TempScale
+	value: float
+	scale: TempScale
 
 fn to_celsius(temp: Temperature) -> Temperature:
-\tmatch temp.scale:
-\t\tTempScale.Celsius:
-\t\t\treturn temp
-\t\tTempScale.Fahrenheit:
-\t\t\treturn Temperature(
-\t\t\t\tvalue=(temp.value - 32.0) * 5.0 / 9.0,
-\t\t\t\tscale=TempScale.Celsius
-\t\t\t)
-\t\tTempScale.Kelvin:
-\t\t\treturn Temperature(
-\t\t\t\tvalue=temp.value - 273.15,
-\t\t\t\tscale=TempScale.Celsius
-\t\t\t)
+	match temp.scale:
+		TempScale.Celsius:
+			return temp
+		TempScale.Fahrenheit:
+			return Temperature(
+				value=(temp.value - 32.0) * 5.0 / 9.0,
+				scale=TempScale.Celsius
+			)
+		TempScale.Kelvin:
+			return Temperature(
+				value=temp.value - 273.15,
+				scale=TempScale.Celsius
+			)
 
 fn to_fahrenheit(temp: Temperature) -> Temperature:
-\tcelsius = to_celsius(temp)
-\treturn Temperature(
-\t\tvalue=celsius.value * 9.0 / 5.0 + 32.0,
-\t\tscale=TempScale.Fahrenheit
-\t)
+	celsius = to_celsius(temp)
+	return Temperature(
+		value=celsius.value * 9.0 / 5.0 + 32.0,
+		scale=TempScale.Fahrenheit
+	)
 
 fn to_kelvin(temp: Temperature) -> Temperature:
-\tcelsius = to_celsius(temp)
-\treturn Temperature(
-\t\tvalue=celsius.value + 273.15,
-\t\tscale=TempScale.Kelvin
-\t)
+	celsius = to_celsius(temp)
+	return Temperature(
+		value=celsius.value + 273.15,
+		scale=TempScale.Kelvin
+	)
 
 fn main():
-\t# Create a temperature in Fahrenheit
-\ttemp_f = Temperature(value=98.6, scale=TempScale.Fahrenheit)
+	# Create a temperature in Fahrenheit
+	temp_f = Temperature(value=98.6, scale=TempScale.Fahrenheit)
 
-\t# Convert to all scales
-\ttemp_c = to_celsius(temp_f)
-\ttemp_k = to_kelvin(temp_f)
+	# Convert to all scales
+	temp_c = to_celsius(temp_f)
+	temp_k = to_kelvin(temp_f)
 
-\tprint(f"Body temperature:")
-\tprint(f"  Celsius: {temp_c.value:.1f}°C")
-\tprint(f"  Fahrenheit: {temp_f.value:.1f}°F")
-\tprint(f"  Kelvin: {temp_k.value:.1f}K")
+	print(f"Body temperature:")
+	print(f"  Celsius: {temp_c.value:.1f}°C")
+	print(f"  Fahrenheit: {temp_f.value:.1f}°F")
+	print(f"  Kelvin: {temp_k.value:.1f}K")

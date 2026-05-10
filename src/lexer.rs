@@ -57,6 +57,8 @@ pub enum Token {
     While,
     Break,
     Continue,
+    For,
+    In,
 
     // Identifiers.
     Ident(StringId),
@@ -124,6 +126,8 @@ impl fmt::Display for Token {
             Self::While => write!(f, "while"),
             Self::Break => write!(f, "break"),
             Self::Continue => write!(f, "continue"),
+            Self::For => write!(f, "for"),
+            Self::In => write!(f, "in"),
             Self::Ident(id) => write!(f, "<id#{}>", id.raw()),
             Self::Add => write!(f, "+"),
             Self::Arrow => write!(f, "->"),
@@ -207,6 +211,10 @@ pub(crate) enum RawToken<'a> {
     Break,
     #[token("continue")]
     Continue,
+    #[token("for")]
+    For,
+    #[token("in")]
+    In,
 
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
     Ident(&'a str),
@@ -289,7 +297,6 @@ pub struct LexError {
     /// only by the parser-test glue, but the field is part of the
     /// public surface so the full-pipeline driver can route it
     /// through Ariadne once Phase 1's diag module lands here.
-    #[allow(dead_code)]
     pub span: Span,
     pub message: String,
 }
@@ -423,6 +430,8 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::While => Token::While,
         RawToken::Break => Token::Break,
         RawToken::Continue => Token::Continue,
+        RawToken::For => Token::For,
+        RawToken::In => Token::In,
 
         RawToken::Add => Token::Add,
         RawToken::Arrow => Token::Arrow,
@@ -617,6 +626,16 @@ mod tests {
     fn while_break_continue_tokens() {
         let (toks, _) = lex_strings("while break continue");
         assert_eq!(toks, vec![Token::While, Token::Break, Token::Continue]);
+    }
+
+    #[test]
+    fn for_in_tokens() {
+        let (toks, pool) = lex_strings("for x in range");
+        assert_eq!(toks.len(), 4);
+        assert_eq!(toks[0], Token::For);
+        ident(&toks, 1, &pool, "x");
+        assert_eq!(toks[2], Token::In);
+        ident(&toks, 3, &pool, "range");
     }
 
     #[test]

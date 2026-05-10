@@ -40,6 +40,13 @@ pub fn lookup(name: &str) -> Option<&'static BuiltinFunction> {
     BUILTINS.iter().find(|b| b.name == name)
 }
 
+/// Names that are not callable builtins but cannot be redefined by user code.
+pub const RESERVED_NAMES: &[&str] = &["range"];
+
+pub fn is_reserved_name(name: &str) -> bool {
+    RESERVED_NAMES.contains(&name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +73,15 @@ mod tests {
     #[test]
     fn lookup_unknown_returns_none() {
         assert!(lookup("nonexistent").is_none());
+    }
+
+    #[test]
+    fn range_is_reserved() {
+        assert!(is_reserved_name("range"));
+    }
+
+    #[test]
+    fn non_reserved_name() {
+        assert!(!is_reserved_name("foo"));
     }
 }

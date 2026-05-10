@@ -1,0 +1,5 @@
+fn main():
+	mut count = 0
+	for i in range(0, 5):
+		count += 1
+	assert(count == 5, "count is not 5")

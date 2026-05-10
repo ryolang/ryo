@@ -80,8 +80,11 @@ pub struct Codegen<M: Module> {
 /// Per-loop codegen state: the Cranelift blocks that `break` and
 /// `continue` jump to.
 struct LoopContext {
-    header_block: Block,
     exit_block: Block,
+    /// Where `continue` jumps. For while-loops this is the header
+    /// (re-evaluate condition); for for-range loops this is the
+    /// increment block (advance the counter before re-checking).
+    continue_target: Block,
 }
 
 /// Per-function emission state. Lives only for the duration of one
@@ -503,6 +506,7 @@ impl<M: Module> Codegen<M> {
                 Ok(false)
             }
             TirTag::WhileLoop => Self::generate_while_loop(builder, ctx, r),
+            TirTag::ForRange => Self::generate_for_range(builder, ctx, r),
             TirTag::Break => {
                 debug_assert!(
                     ctx.loop_stack.last().is_some(),
@@ -522,7 +526,7 @@ impl<M: Module> Codegen<M> {
                 let Some(loop_ctx) = ctx.loop_stack.last() else {
                     return Err("codegen reached continue outside loop".to_string());
                 };
-                builder.ins().jump(loop_ctx.header_block, &[]);
+                builder.ins().jump(loop_ctx.continue_target, &[]);
                 Ok(true)
             }
             other => Err(format!(
@@ -643,8 +647,8 @@ impl<M: Module> Codegen<M> {
         builder.switch_to_block(body_block);
 
         ctx.loop_stack.push(LoopContext {
-            header_block,
             exit_block,
+            continue_target: header_block,
         });
         let body_terminated = Self::emit_scoped_body(builder, ctx, &view.body)?;
         ctx.loop_stack.pop();
@@ -656,6 +660,83 @@ impl<M: Module> Codegen<M> {
         // Header has two predecessors: entry fallthrough and body back-edge.
         // Seal it last because the back-edge didn't exist until the body emitted.
         builder.seal_block(header_block);
+        builder.seal_block(exit_block);
+        builder.switch_to_block(exit_block);
+
+        Ok(false)
+    }
+
+    fn generate_for_range(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<bool, String> {
+        let view = ctx.tir.for_range_view(r);
+
+        // 1. Create all blocks up front
+        let header_block = builder.create_block();
+        let body_block = builder.create_block();
+        let increment_block = builder.create_block();
+        let exit_block = builder.create_block();
+
+        // 2. Evaluate bounds once, create hidden counter
+        let start_val = Self::eval_inst(builder, ctx, view.start)?;
+        let end_val = Self::eval_inst(builder, ctx, view.end)?;
+        let counter = builder.declare_var(ctx.int_type);
+        builder.def_var(counter, start_val);
+        builder.ins().jump(header_block, &[]);
+
+        // 3. Header — DO NOT seal yet (back-edge from increment not emitted)
+        builder.switch_to_block(header_block);
+        let i = builder.use_var(counter);
+        let cond = builder.ins().icmp(IntCC::SignedLessThan, i, end_val);
+        builder.ins().brif(cond, body_block, &[], exit_block, &[]);
+
+        // Push loop context: continue targets increment
+        ctx.loop_stack.push(LoopContext {
+            exit_block,
+            continue_target: increment_block,
+        });
+
+        // 4. Body — seal immediately (only predecessor is header's brif true-arm)
+        builder.seal_block(body_block);
+        builder.switch_to_block(body_block);
+
+        // Scope the loop variable: map var_name to the counter Variable.
+        // We deliberately use emit_body rather than emit_scoped_body here
+        // because we need to insert the counter binding between the save
+        // and the emit; emit_scoped_body's internal save would shadow our
+        // insertion.
+        let shadowed_var = ctx.locals.insert(view.var_name, counter);
+
+        let body_terminated = Self::emit_body(builder, ctx, &view.body)?;
+
+        // Restore locals (loop variable goes out of scope)
+        if let Some(old_var) = shadowed_var {
+            ctx.locals.insert(view.var_name, old_var);
+        } else {
+            ctx.locals.remove(&view.var_name);
+        }
+
+        if !body_terminated {
+            builder.ins().jump(increment_block, &[]);
+        }
+
+        ctx.loop_stack.pop();
+
+        // 5. Increment — seal after body
+        builder.seal_block(increment_block);
+        builder.switch_to_block(increment_block);
+        let i_current = builder.use_var(counter);
+        let one = builder.ins().iconst(ctx.int_type, 1);
+        let i_next = builder.ins().iadd(i_current, one);
+        builder.def_var(counter, i_next);
+        builder.ins().jump(header_block, &[]);
+
+        // 6. Seal header (predecessors: entry jump + increment back-edge)
+        builder.seal_block(header_block);
+
+        // 7. Exit — always reachable
         builder.seal_block(exit_block);
         builder.switch_to_block(exit_block);
 

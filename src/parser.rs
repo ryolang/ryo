@@ -164,6 +164,50 @@ where
                 kind: StmtKind::WhileLoop { cond, body },
             });
 
+        let for_range_stmt = just(Token::For)
+            .ignore_then(select! { Token::Ident(s) => s }.map_with(|s, e| Ident {
+                name: s,
+                span: e.span(),
+            }))
+            .then_ignore(just(Token::In))
+            .then(select! { Token::Ident(s) => s }.map_with(|s, e| Ident {
+                name: s,
+                span: e.span(),
+            }))
+            .then_ignore(just(Token::LParen))
+            .then(
+                expression_parser()
+                    .separated_by(just(Token::Comma))
+                    .collect::<Vec<_>>(),
+            )
+            .then_ignore(just(Token::RParen))
+            .then_ignore(just(Token::Colon))
+            .then(indented_block(body_stmt.clone()))
+            .try_map_with(|(((var, iterator), args), body), e| {
+                if args.len() != 2 {
+                    return Err(Rich::custom(
+                        e.span(),
+                        format!(
+                            "range() requires two arguments: range(start, end), got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let mut args = args.into_iter();
+                let start = args.next().unwrap();
+                let end = args.next().unwrap();
+                Ok(Statement {
+                    span: e.span(),
+                    kind: StmtKind::ForRange {
+                        var,
+                        iterator,
+                        start,
+                        end,
+                        body,
+                    },
+                })
+            });
+
         let if_stmt = if_stmt_parser(body_stmt).map_with(|if_s, e| Statement {
             span: e.span(),
             kind: StmtKind::IfStmt(if_s),
@@ -181,6 +225,7 @@ where
             var_decl,
             if_stmt,
             while_stmt,
+            for_range_stmt,
             break_stmt,
             continue_stmt,
             expr_stmt,
@@ -1244,5 +1289,103 @@ mod tests {
             },
             other => panic!("expected VarDecl, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_for_range() {
+        let code = "fn main():\n\tfor i in range(0, 10):\n\t\tprint(i)\n";
+        let (program, pool) = lex_and_parse(code).unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        let stmts = &func.body;
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0].kind {
+            StmtKind::ForRange {
+                var,
+                iterator,
+                body,
+                ..
+            } => {
+                assert_eq!(pool.str(var.name), "i");
+                assert_eq!(pool.str(iterator.name), "range");
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("expected ForRange, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_for_range_with_expressions() {
+        let code = "fn main():\n\tfor x in range(1 + 2, 10 - 3):\n\t\tprint(x)\n";
+        let (program, pool) = lex_and_parse(code).unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        let stmts = &func.body;
+        match &stmts[0].kind {
+            StmtKind::ForRange { var, iterator, .. } => {
+                assert_eq!(pool.str(var.name), "x");
+                assert_eq!(pool.str(iterator.name), "range");
+            }
+            other => panic!("expected ForRange, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_for_range_nested() {
+        let code =
+            "fn main():\n\tfor i in range(0, 5):\n\t\tfor j in range(0, 3):\n\t\t\tprint(i)\n";
+        let (program, _pool) = lex_and_parse(code).unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        let stmts = &func.body;
+        match &stmts[0].kind {
+            StmtKind::ForRange { body, .. } => {
+                assert_eq!(body.len(), 1);
+                assert!(matches!(body[0].kind, StmtKind::ForRange { .. }));
+            }
+            other => panic!("expected ForRange, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_for_break_continue() {
+        let code = "fn main():\n\tfor i in range(0, 10):\n\t\tif i == 5:\n\t\t\tbreak\n\t\tif i == 3:\n\t\t\tcontinue\n";
+        let (program, _pool) = lex_and_parse(code).unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        let stmts = &func.body;
+        assert!(matches!(stmts[0].kind, StmtKind::ForRange { .. }));
+    }
+
+    #[test]
+    fn parse_for_range_wrong_arity_one_arg() {
+        let code = "fn main():\n\tfor i in range(5):\n\t\tprint(i)\n";
+        let result = lex_and_parse(code);
+        assert!(result.is_err(), "range(5) should fail with arity error");
+    }
+
+    #[test]
+    fn parse_for_range_wrong_arity_three_args() {
+        let code = "fn main():\n\tfor i in range(0, 10, 2):\n\t\tprint(i)\n";
+        let result = lex_and_parse(code);
+        assert!(
+            result.is_err(),
+            "range(0, 10, 2) should fail with arity error"
+        );
+    }
+
+    #[test]
+    fn parse_for_range_wrong_arity_zero_args() {
+        let code = "fn main():\n\tfor i in range():\n\t\tprint(i)\n";
+        let result = lex_and_parse(code);
+        assert!(result.is_err(), "range() should fail with arity error");
     }
 }
