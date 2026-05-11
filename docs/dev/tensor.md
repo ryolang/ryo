@@ -1,3 +1,5 @@
+**Status:** Design (v0.2+) | Implementation (Deferred)
+
 # Tensor Safety: DLPack Wrapping Strategy
 
 DLPack is essentially a "Raw C Pointer with Metadata," which is inherently **unsafe**. Exposing `DLTensor` directly to Ryo users would break all safety guarantees (bounds checking, lifetime safety, type safety).
@@ -80,7 +82,14 @@ pub struct Tensor[T]:
 impl Drop for Tensor[T]:
     fn drop(&mut self):
         unsafe:
-            # Call the C-level destructor provided by DLPack
+            # Call the C-level destructor provided by DLPack.
+            # External backends invoked via the FFI must return a heap-allocated
+            # DLManagedTensor* whose dl_tensor points to the GPU data.
+            # Ownership of that DLManagedTensor is transferred exactly once to Ryo.
+            # Ryo will call the DLManagedTensor->deleter exactly once when the created
+            # Tensor[T] is finalized, so backends must not free the DLManagedTensor or its
+            # dl_tensor after returning it (they may only free any temporary host-side structures).
+            # The deleter must correctly free GPU memory and the DLManagedTensor itself.
             if self._handle != null:
                 self._handle.deleter(self._handle)
 ```
@@ -123,7 +132,26 @@ fn matmul(a: Tensor[f32], b: Tensor[f32]) -> Tensor[f32]:
         return Tensor.from_raw(raw_c_ptr)
 ```
 
-### 4. Summary
+### 4. CPU vs. GPU Execution Strategy (Cranelift Limitations)
+
+Because Ryo uses Cranelift as its backend, the compiler can only generate code for **CPUs**. Cranelift cannot emit PTX (Nvidia), AMDGPU, or SPIR-V instructions. To achieve GPU execution, Ryo acts as the **Host Orchestrator**.
+
+**CPU Execution (Ryo + Cranelift SIMD):**
+If a tensor's `DLContext` is set to `CPU`, Ryo's internal vectorization pass (see `docs/experimental/lightweight_vectorization.md`) will optimize simple scalar loops over the tensor's memory and emit extremely fast AVX/NEON CPU SIMD instructions natively via Cranelift.
+
+**GPU Execution (Ryo + FFI + External Kernels):**
+If a tensor's `DLContext` is set to `GPU`, Ryo does not compile the math loops itself. Instead:
+1. The user calls a tensor method (e.g., `a.matmul(b)` or `a + b`).
+2. The Ryo standard library checks the device context.
+3. If it is on a GPU, Ryo uses the Foreign Function Interface (FFI) to pass the raw `DLTensor` pointers to an external backend (like TileLang, LibTorch, or custom CUDA kernels).
+4. The external library executes the math on the GPU, leaving the result in VRAM.
+5. Ryo receives the pointer to the result and safely wraps it in a new `Tensor[T]` struct.
+
+This allows Ryo to compile instantly while still driving state-of-the-art GPU workflows.
+
+---
+
+### 5. Summary
 
 *   **DLTensor** is inherently unsafe (raw C pointers, manual memory management).
 *   **Ryo's Strategy:** Never expose `DLTensor` to the user.
@@ -134,3 +162,9 @@ fn matmul(a: Tensor[f32], b: Tensor[f32]) -> Tensor[f32]:
     3.  **`impl Drop`** solves Memory Leaks and Use-After-Free.
 
 This **contains the blast radius** of unsafe code to the single file where `Tensor` is defined. The rest of the application remains safe.
+
+## References
+
+- Spec: `docs/specification.md`
+- Dev: `docs/dev/implementation_roadmap.md`
+- Milestone: Milestone 8

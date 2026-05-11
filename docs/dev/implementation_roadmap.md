@@ -17,10 +17,10 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 5 — Module System (Design Phase)](#milestone-5-module-system-design-phase--complete)
 - [x] [Milestone 6.5 — Booleans & Equality [alpha]](#milestone-65-booleans--equality-alpha)
 - [x] [Milestone 7 — Expressions & Operators (Extended) [alpha]](#milestone-7-expressions--operators-extended-alpha)
-- [ ] [Milestone 8 — Control Flow & Booleans [alpha]](#milestone-8-control-flow--booleans-alpha) *(split into 8a / 8b / 8c)*
+- [x] [Milestone 8 — Control Flow & Booleans [alpha] ✅ COMPLETE](#milestone-8-control-flow--booleans-alpha) *(split into 8a / 8b / 8c)*
   - [x] [Milestone 8a — Void Type & `main()` Signature [alpha]](#milestone-8a-void-type--main-signature-alpha)
   - [x] [Milestone 8b — Conditionals & Logical Operators [alpha] ✅ COMPLETE](#milestone-8b-conditionals--logical-operators-alpha--complete)
-  - [ ] [Milestone 8c — Loops & Loop Control [alpha]](#milestone-8c-loops--loop-control-alpha) *(partial: while/break/continue done, for/range is M8c3)*
+  - [x] [Milestone 8c — Loops & Loop Control [alpha] ✅ COMPLETE](#milestone-8c-loops--loop-control-alpha--complete)
 - [ ] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha)
 - [ ] [Milestone 8.2 — Immutable Borrows (`&T`) [alpha]](#milestone-82-immutable-borrows-t-alpha)
 - [ ] [Milestone 8.3 — Mutable Borrows (`&mut T`) [alpha]](#milestone-83-mutable-borrows-mut-t-alpha)
@@ -573,7 +573,7 @@ Note: Review [Project Structure](project_structure) and make the first split bef
 
 ### Milestone 8: Control Flow & Booleans [alpha]
 
-**Status:** ⏳ Planned — split into three sub-milestones (**8a → 8b → 8c**) to keep each PR reviewable and to land foundational changes (void, `main()` shape) before introducing basic-block emission.
+**Status:** ✅ COMPLETE — split into three sub-milestones (**8a → 8b → 8c**) to keep each PR reviewable and to land foundational changes (void, `main()` shape) before introducing basic-block emission.
 
 **Aggregate Goal:** Implement `if/else` statements, `while` / `for` loops, boolean logic with short-circuit evaluation, and the `void` unit type. After 8c lands, programs can branch, loop, and call void-returning functions like `print` without the `_ = ...` workaround.
 
@@ -810,17 +810,15 @@ done
 That single primitive unlocks the rest of your milestone validation work — every future feature gets tested with the same tool.
 ---
 
-### Milestone 8c: Loops & Loop Control [alpha]
+### Milestone 8c: Loops & Loop Control [alpha] ✅ COMPLETE
 **Goal:** Implement `while` loops, counted `for i in range(...)` loops, and `break` / `continue`. This completes the v0.1 control-flow surface.
 
-**Status:** 🚧 In Progress (M8c1/M8c2 complete: `while`/`break`/`continue`; M8c3 pending: `for`/`range`)
+**Status:** ✅ COMPLETE
 
 **Completed:**
 - ✅ M8c1: Variable reassignment & mut enforcement (December 2024)
 - ✅ M8c2: While loops with break/continue (January 2026)
-
-**Remaining:**
-- ⏳ [M8c3: `for i in range(start, end)`](../superpowers/plans/2026-05-04-milestone-8c3-for-range.md)
+- ✅ [M8c3: `for i in range(start, end)`](../superpowers/plans/2026-05-04-milestone-8c3-for-range.md)
 
 **Tasks:**
 - **Lexer:** add keyword tokens `while`, `for`, `in`, `break`, `continue`.
