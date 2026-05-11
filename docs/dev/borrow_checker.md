@@ -1,3 +1,5 @@
+**Status:** Design (v0.1) | Implementation (v0.1)
+
 # Borrow Checker Algorithm Sketch
 
 > Draft — implementation-level detail extracted from specification.md Section 5.
@@ -113,17 +115,22 @@ To implement Hybrid Eager Destruction, the borrow checker pass calculates the **
 
 ```pseudocode
 on function_end(f):
+    # Path-sensitive ownership query checks if var is still Valid at a given location.
+    # Applies merge rules at control-flow joins to skip scheduling on paths where moved.
     for var in function_variables:
         if var.type.implements_drop():
             # Resource: destroyed lexically at block end
-            insert_drop(var, location=var.scope.end)
+            if query_ownership_state(var, at=var.scope.end) == Valid:
+                insert_drop(var, location=var.scope.end)
         else:
             # Pure Memory: destroyed eagerly after last use
             last_use = find_last_read_or_write(var)
             if last_use != null:
-                insert_free(var, location=last_use.next_instruction)
+                if query_ownership_state(var, at=last_use.next_instruction) == Valid:
+                    insert_free(var, location=last_use.next_instruction)
             else:
-                insert_free(var, location=var.declaration)
+                if query_ownership_state(var, at=var.declaration) == Valid:
+                    insert_free(var, location=var.declaration)
 ```
 
 ### Edge Cases
@@ -200,3 +207,9 @@ on match(scrutinee, arms):
     if any(arm moves scrutinee):
         scrutinee.state = Moved
 ```
+
+## References
+
+- Spec: `docs/specification.md`
+- Dev: `docs/dev/implementation_roadmap.md`
+- Milestone: Milestone 8

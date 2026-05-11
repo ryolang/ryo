@@ -1399,27 +1399,13 @@ fn get_evens(items: list[int]) -> list[int]:
 
 The Ryo Ownership Model is a four-layered system:
 
-```
-┌─────────────────────────────────────────────────────┐
-│  Layer 4: shared[T] / weak[T]                       │
-│  For multi-owner scenarios (shared state, graphs)    │
-├─────────────────────────────────────────────────────┤
-│  Layer 3: with blocks                                │
-│  Explicit resource lifetime boundaries               │
-│  One keyword, many behaviors (Drop determines how)   │
-├─────────────────────────────────────────────────────┤
-│  Layer 2: Hybrid Eager Destruction & RAII            │
-│  Dataflow cleanup for memory, Lexical for resources  │
-├─────────────────────────────────────────────────────┤
-│  Layer 1: Move / Borrow / Exclusive Access           │
-│  Governs how data is accessed and transferred        │
-│                                                      │
-│  Key restrictions that eliminate lifetime annotations:│
-│  - Borrows are parameter conventions, not types      │
-│  - Functions cannot return borrows (Rule 5)          │
-│  - Structs cannot contain references (Rule 6)        │
-│  - Iterators are scope-locked views (Section 5.7)    │
-└─────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    L4["Layer 4: shared[T] / weak[T]<br/>For multi-owner scenarios (shared state, graphs)"]
+    L3["Layer 3: with blocks<br/>Explicit resource lifetime boundaries<br/>One keyword, many behaviors (Drop determines how)"]
+    L2["Layer 2: Hybrid Eager Destruction & RAII<br/>Dataflow cleanup for memory, Lexical for resources"]
+    L1["Layer 1: Move / Borrow / Exclusive Access<br/>Governs how data is accessed and transferred<br/><br/>Key restrictions that eliminate lifetime annotations:<br/>- Borrows are parameter conventions, not types<br/>- Functions cannot return borrows (Rule 5)<br/>- Structs cannot contain references (Rule 6)<br/>- Iterators are scope-locked views (Section 5.7)"]
+    L4 --> L3 --> L2 --> L1
 ```
 
 **The trade-off, stated honestly:** Ryo trades lifetime annotations for simplicity. Where Rust would return a borrowed `&str` slice tied to the caller's scope, Ryo returns an owned `str` — but most returns are free thanks to NRVO and move semantics (see Section 5.9). Actual clones are limited to cases where the caller genuinely needs an independent copy. For shared-state scenarios, Ryo's `shared[mutex[T]]` is comparable in ceremony to Rust's `Arc<Mutex<T>>` — neither language makes concurrent mutation invisible. For web backends, CLI tools, and scripts, these costs are negligible. For performance-critical inner loops, `unsafe` blocks (restricted to system packages) provide an escape hatch to raw pointers.

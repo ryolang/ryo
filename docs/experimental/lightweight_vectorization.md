@@ -47,7 +47,7 @@ Once a loop is proven safe, the pass rewrites the TIR. It performs **Strip-Minin
 If a target CPU supports 4x Float SIMD registers, the TIR is rewritten as follows:
 
 ### Original TIR (Conceptual)
-```
+```ryo
 ForRange(start=0, end=len, step=1):
     valA = LoadScalar(a, i)
     valB = LoadScalar(b, i)
@@ -56,7 +56,7 @@ ForRange(start=0, end=len, step=1):
 ```
 
 ### Rewritten TIR (Conceptual)
-```
+```ryo
 // Main SIMD Loop (Steps by 4)
 let limit = len - (len % 4)
 ForRange(start=0, end=limit, step=4):

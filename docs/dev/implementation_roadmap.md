@@ -20,7 +20,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8 — Control Flow & Booleans [alpha] ✅ COMPLETE](#milestone-8-control-flow--booleans-alpha) *(split into 8a / 8b / 8c)*
   - [x] [Milestone 8a — Void Type & `main()` Signature [alpha]](#milestone-8a-void-type--main-signature-alpha)
   - [x] [Milestone 8b — Conditionals & Logical Operators [alpha] ✅ COMPLETE](#milestone-8b-conditionals--logical-operators-alpha--complete)
-  - [x] [Milestone 8c — Loops & Loop Control [alpha] ✅ COMPLETE](#milestone-8c-loops--loop-control-alpha)
+  - [x] [Milestone 8c — Loops & Loop Control [alpha] ✅ COMPLETE](#milestone-8c-loops--loop-control-alpha--complete)
 - [ ] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha)
 - [ ] [Milestone 8.2 — Immutable Borrows (`&T`) [alpha]](#milestone-82-immutable-borrows-t-alpha)
 - [ ] [Milestone 8.3 — Mutable Borrows (`&mut T`) [alpha]](#milestone-83-mutable-borrows-mut-t-alpha)
@@ -573,7 +573,7 @@ Note: Review [Project Structure](project_structure) and make the first split bef
 
 ### Milestone 8: Control Flow & Booleans [alpha]
 
-**Status:** ⏳ Planned — split into three sub-milestones (**8a → 8b → 8c**) to keep each PR reviewable and to land foundational changes (void, `main()` shape) before introducing basic-block emission.
+**Status:** ✅ COMPLETE — split into three sub-milestones (**8a → 8b → 8c**) to keep each PR reviewable and to land foundational changes (void, `main()` shape) before introducing basic-block emission.
 
 **Aggregate Goal:** Implement `if/else` statements, `while` / `for` loops, boolean logic with short-circuit evaluation, and the `void` unit type. After 8c lands, programs can branch, loop, and call void-returning functions like `print` without the `_ = ...` workaround.
 
