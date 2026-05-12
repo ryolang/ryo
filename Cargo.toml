@@ -8,7 +8,7 @@ edition = "2024"
 [dependencies]
 
 ariadne = "0.6"
-chumsky = "0.12"
+chumsky = "0.13"
 # Direct dep so InternPool can use `HashTable` for borrow-keyed
 # lookups (stable Rust's `std::collections::HashMap` doesn't
 # expose `raw_entry_mut`). Pinned to 0.17 — the latest stable and
