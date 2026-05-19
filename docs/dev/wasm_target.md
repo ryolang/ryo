@@ -1,6 +1,6 @@
 # WASM Target Implementation Plan (Draft — v0.3)
 
-**Status:** Design (v0.2+)
+**Status:** Design (v0.3)
 
 This document describes the plan for adding a WebAssembly compilation target to the Ryo compiler. It is the actionable counterpart to the long-term WasmFX discussion in [concurrency.md](concurrency.md#future-wasm-target-via-wasmfx).
 
@@ -69,7 +69,7 @@ Cranelift already supports `wasm32` as an ISA target. Concretely:
 
 Replace `zig cc` with `zig wasm-ld` for the WASM target. Critically, **no `-lc` flag** — the `ryo_rt` artifact brings its own allocator and calls WASI imports directly, so there is no need to link wasi-libc.
 
-```
+```shell
 zig wasm-ld -o out.wasm user.o ryo_rt.wasm \
     --no-entry --export=_start
 ```

@@ -135,14 +135,14 @@ This is **Go's cgo model** implemented via corosensei. Mature engineering, no ne
 
 **This proposal (Kotlin-borrowed):**
 - Four explicit modes:
-  - `Channel.unbounded[T]()` — current `create[T]()`. Sender never blocks; memory unbounded.
-  - `Channel.bounded[T](capacity)` — current `bounded[T]()`. Sender blocks at capacity.
-  - `Channel.rendezvous[T]()` — capacity 0. Sender blocks until receiver picks up. Synchronous handoff. (Equivalent to `bounded[T](0)` but named for clarity.)
-  - `Channel.conflated[T]()` — buffer of 1; new sends overwrite the unreceived value. Useful for "latest state" patterns (UI updates, sensor readings).
+  - `channel.unbounded[T]()` — current `create[T]()`. Sender never blocks; memory unbounded.
+  - `channel.bounded[T](capacity)` — current `bounded[T]()`. Sender blocks at capacity.
+  - `channel.rendezvous[T]()` — capacity 0. Sender blocks until receiver picks up. Synchronous handoff. (Equivalent to `bounded[T](0)` but named for clarity.)
+  - `channel.conflated[T]()` — buffer of 1; new sends overwrite the unreceived value. Useful for "latest state" patterns (UI updates, sensor readings).
 - The first two are exactly what the current plan provides. The latter two are net-new and trivial on the same `VecDeque` infrastructure.
 
 **Impact on the plan:**
-- §4.1 gains two channel modes. Each ~20 LOC additional. API surface widens slightly but discoverably (single `Channel` namespace).
+- §4.1 gains two channel modes. Each ~20 LOC additional. API surface widens slightly but discoverably (single `channel` namespace).
 
 ---
 

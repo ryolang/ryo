@@ -1,3 +1,5 @@
+**Status:** Reference
+
 # Mojo Programming Language
 
 Last updated on 2026-05-11 (commit [b0032c8](https://github.com/modular/modular/commit/b0032c8), `main`).

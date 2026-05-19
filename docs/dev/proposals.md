@@ -1034,7 +1034,7 @@ The same flags apply to `ryo build` for embedding permissions into the compiled 
 
 #### **Permission Categories**
 
-```
+```text
 --allow-read[=<paths>]    Filesystem read access (path-scoped)
 --allow-write[=<paths>]   Filesystem write access (path-scoped)
 --allow-net[=<hosts>]     Network access (host:port-scoped)
