@@ -23,7 +23,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
   - [x] [Milestone 8c — Loops & Loop Control [alpha] ✅ COMPLETE](#milestone-8c-loops--loop-control-alpha--complete)
 - [ ] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha)
 - [ ] [Milestone 8.2 — Immutable Borrows (`&T`) [alpha]](#milestone-82-immutable-borrows-t-alpha)
-- [ ] [Milestone 8.3 — Mutable Borrows (`&mut T`) [alpha]](#milestone-83-mutable-borrows-mut-t-alpha)
+- [ ] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha]](#milestone-83-mutable-borrows-inout-alpha)
 - [ ] [Milestone 8.4 — String Slices (`&str`) [alpha]](#milestone-84-string-slices-str-alpha)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
@@ -885,7 +885,7 @@ fn main():
 - Dependencies: Milestone 8b (block-emission infrastructure, branch lowering), Milestone 7 (ordering comparisons in loop conditions and `range` bounds).
 
 ### Milestone 8.1: Heap-Allocated `str` Type & Move Semantics [alpha]
-**Goal:** Promote string literals from read-only data to a real heap-allocated `str` type, and introduce the ownership-tracking pass that catches use-after-move on named bindings. Borrows (`&T`/`&mut T`) and string slices (`&str`) follow in M8.2–M8.4.
+**Goal:** Promote string literals from read-only data to a real heap-allocated `str` type, introduce the ownership-tracking pass that catches use-after-move on named bindings, and land the **implicit immutable borrow** for function parameters (spec Rule 2) together with the **`move` keyword** that opts into ownership transfer (spec Rule 4). Explicit `&T` / `inout T` borrow syntax and string slices (`&str`) follow in M8.2–M8.4.
 
 **Status:** ⏳ Planned
 
@@ -897,19 +897,26 @@ Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching,
   - String literals from M3.5 currently store in `.rodata` (read-only)
   - Upgrade to heap-allocated `str` (dynamic length, length-prefixed)
   - Enable string variables: `s: str = "hello"`
-- Add string concatenation: `s1 + s2` (or `s.concat(other)`)
-- Add string methods: `.len()`, `.is_empty()`, `.chars()`, `.substring(start, end)`
+- Add string concatenation: `s1 + s2` (move left, borrow right)
+- Add string methods: `.len()`, `.is_empty()`, `.substring(start, end)` (`.chars()` is deferred — needs iterators)
 - Add stdlib helpers for non-string formatting: `int_to_str(x)`, `float_to_str(x)`, `bool_to_str(b)`
 - **F-strings (`f"Value: {x}"`) are deferred to v0.2** — see Phase 5: F-strings & String Interpolation. v0.1 uses `+` concatenation with the `*_to_str` helpers above.
-- Implement the **ownership-tracking pass** (`src/sema.rs` extension):
-  - Track variable states (uninitialized, valid, moved) for named bindings
-  - Implement move semantics for non-Copy types: `s2 = s1` invalidates `s1`
-  - Detect and report use-after-move at compile time
+- Parser/AST: accept the **`move` keyword** as a prefix on parameter declarations (`fn consume(move s: str)`). Without `move`, parameters borrow. Sema records the convention on the function signature (type-only; ownership lives elsewhere).
+- Add a **new pipeline stage `src/ownership.rs`** between Sema and Codegen — modeled on Mojo's MLIR-based lifetime/ASAP-destruction passes (Zig stops being a useful compiler reference for the borrow checker; see [mojo_reference.md](mojo_reference.md)). The pass mutates each `Tir` in place: inserts `TirTag::Free`, tracks per-`TirRef` ownership state, and reports diagnostics.
+  - Per-`TirRef` (SSA value) state lattice: `NotTracked` / `Valid` / `Moved { moved_at, moved_via }`
+  - `current_owner: HashMap<StringId, TirRef>` shadow table for named bindings
+  - Implicit immutable borrow for function parameters (Rule 2); `move` opts into ownership transfer (Rule 4)
+  - Standard forward dataflow with CFG-join merges; loop fixed-point (typically converges in 2 iterations)
+  - Reassignment of `mut` move-typed bindings frees the prior buffer
+  - Backward liveness computes last-use; `Free` instructions inserted at last-use program points
+  - Anonymous owned temporaries (e.g., `"a" + "b"` inside a `print`) freed at end of statement
+  - DX-grade diagnostics: file, module, function, binding name, declaration span, move-kind, move-specific help text. Multi-label rendering via the existing Ariadne path in `diag.rs`. See the **Diagnostics** section of the design doc for the rendering target.
 - Implement `Copy` semantics as a **compiler-known marker** (the user-facing `trait` keyword is deferred to v0.2/v0.3 — see Phase 5: Traits & Generics):
   - Primitives (`int`, `float`, `bool`) are Copy
   - Heap types (`str`, future `list`/`map`) are Move
   - Aggregates (struct/tuple/enum, once they exist in M9–M11) are Move by default
-- Codegen: heap allocation for `str`, free at scope exit, memcpy on move
+- Codegen: heap allocation for `str` via the embedded runtime, fat-pointer transfer on move (3 × `i64`, no buffer copy), eager destruction (`Free` inserted after last use, not at scope exit)
+- Embed the runtime as a Go-style dual-crate-type (`staticlib` + `rlib`) so every Ryo binary is self-contained
 - Update `print()` to accept owned `str` (still works on literals via the same path)
 
 **Visible Progress:** Strings are real values — assignable, concatenable, returnable. Use-after-move is caught at compile time.
@@ -917,14 +924,23 @@ Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching,
 **Example:**
 ```ryo
 fn greet(name: str) -> str:
-	return "Hello, " + name + "!"   # name moved into the concatenation chain
+	# `name` is borrowed (Rule 2). The literal "Hello, " is the moved left
+	# operand; `name` and "!" are the borrowed right operands.
+	return "Hello, " + name + "!"
+
+fn consume(move s: str):
+	# `move` opts into ownership transfer; the callee owns `s` until end-of-scope.
+	print(s)
 
 fn main():
 	user: str = "Alice"
-	msg = greet(user)                # user moved into greet
-	# print(user)                    # compile error: use after move
+	msg = greet(user)                # user borrowed — still valid
+	print(user)                      # ok (Rule 2)
 	print(msg)                       # "Hello, Alice!"
 	print("len = " + int_to_str(msg.len()))
+
+	consume(user)                    # user → Moved here
+	# print(user)                    # compile error: use after move
 
 	x: int = 42
 	y = x                            # int is Copy — x still valid
@@ -932,9 +948,11 @@ fn main():
 ```
 
 **Implementation Notes:**
-- Move tracking covers **named bindings only** in this milestone. `&T` / `&mut T` borrows arrive in M8.2 / M8.3, and field-by-field move tracking (partial moves out of structs/tuples) follows naturally because the same dataflow analysis is reused.
-- `str` deallocation is automatic at scope exit (simple RAII; user-extensible cleanup via the `drop` method lands in M23).
+- **Pipeline pivot.** Up through M8c the compiler followed Zig's pipeline. M8.1 introduces a new `Ownership` stage between Sema and Codegen, modeled on Mojo (see [mojo_reference.md](mojo_reference.md)). Sema becomes type-only; ownership is its own pass. Ryo's surface design, syntax, and types are unchanged.
+- Move tracking covers **named bindings and anonymous owned temporaries** in this milestone. Explicit `&T` / `inout T` borrow syntax arrives in M8.2 / M8.3; field-by-field move tracking (partial moves out of structs/tuples) follows naturally because the same dataflow analysis is reused.
+- `str` deallocation follows hybrid eager destruction (spec Section 5.4) — `Free` is inserted after the binding's last use, after the old buffer when a `mut` binding is reassigned over a `Valid` slot, and at the end of the enclosing statement for anonymous owned temporaries. Lexical scope-exit RAII would be too late and would leak intermediate buffers in concat chains. User-extensible cleanup via the `drop` method lands in M23.
 - Allocator failure surfaces as a panic in v0.1; allocation-fallible APIs ship alongside error unions (M13).
+- Detailed design: see [2026-05-11-milestone-8.1-heap-str-and-move-semantics-design.md](../superpowers/specs/2026-05-11-milestone-8.1-heap-str-and-move-semantics-design.md).
 - Dependencies: Milestone 8 (control flow blocks shape the dataflow regions the move tracker walks).
 
 ### Milestone 8.2: Immutable Borrows (`&T`) [alpha]
@@ -975,38 +993,38 @@ fn main():
 - Many borrows are **implicit** at call sites once method receivers (M17) ship
 - Dependencies: Milestone 8.1 (move tracker provides the dataflow infrastructure)
 
-### Milestone 8.3: Mutable Borrows (`&mut T`) [alpha]
+### Milestone 8.3: Mutable Borrows (`inout`) [alpha]
 **Goal:** Add mutable references with aliasing exclusion, completing the v0.1 borrow checker.
 
 **Status:** ⏳ Planned
 
 **Tasks:**
-- Add `&mut` syntax to lexer/parser
+- Add `inout` syntax to lexer/parser
 - Extend type system: `Type::MutRef(Box<Type>)`
 - Parse:
-  - Type annotations: `&mut User`
-  - Borrow expressions: `&mut value`
+  - Type annotations: `inout User`
+  - Borrow expressions: `&value`
 - Extend the borrow checker with exclusion rules:
   - **At most one mutable borrow** at any point
   - **No immutable borrows while a mutable borrow is live**
   - Mutable borrows still cannot outlive the borrowed value
 - Codegen: mutable pointers with write access, dereference for assignment
 
-**Visible Progress:** Mutation through references is safe and aliasing-free. Foundations for `&mut self` methods (M17) and in-place collection updates (M22) are in place.
+**Visible Progress:** Mutation through references is safe and aliasing-free. Foundations for `inout self` methods (M17) and in-place collection updates (M22) are in place.
 
 **Example:**
 ```ryo
-fn increment(x: &mut int):
+fn increment(x: inout int):
 	*x += 1
 
 fn main():
 	mut count = 0
-	increment(&mut count)
+	increment(&count)
 	print(int_to_str(count))     # 1
 
 	# Aliasing prevented:
-	# r1 = &mut count
-	# r2 = &mut count            # compile error: cannot borrow as mutable twice
+	# r1 = &count
+	# r2 = &count                # compile error: cannot borrow as mutable twice
 	# r3 = &count                # compile error: shared while mutable borrow live
 ```
 
@@ -1401,7 +1419,7 @@ fn main():
 > **Note:** Milestone 15 (originally "Basic Ownership & String Type") has been **split and moved earlier in the timeline**. See:
 > - **Milestone 8.1** — heap-allocated `str` type and move tracking
 > - **Milestone 8.2** — immutable borrows `&T`
-> - **Milestone 8.3** — mutable borrows `&mut T`
+> - **Milestone 8.3** — mutable borrows `inout`
 > - **Milestone 8.4** — string slices `&str`
 >
 > Closure capture analysis (originally Milestone 15.5) is **deferred to v0.2** — see Phase 5: Closures & Lambda Expressions.
@@ -1473,7 +1491,7 @@ fn main():
 - Handle `self` parameter:
   - `self` for consuming methods (move)
   - `&self` for immutable borrow (available since M8.2)
-  - `&mut self` for mutable borrow (available since M8.3)
+  - `inout self` for mutable borrow (available since M8.3)
 - Extend type system:
   - Associate methods with types
   - Type-check method calls
@@ -1506,7 +1524,7 @@ fn main():
 - `self` **moves by default** (ownership)
 - Method call syntax: `obj.method()` desugars to `Type::method(obj)`
 - No method overloading (one method per name per type)
-- Dependencies: Milestone 8.1 (ownership/move tracking for `self`), Milestone 8.2/8.3 (borrows for `&self` / `&mut self`)
+- Dependencies: Milestone 8.1 (ownership/move tracking for `self`), Milestone 8.2/8.3 (borrows for `&self` / `inout self`)
 
 > **Note:** Milestone 18 (Traits) has been **deferred to v0.2/v0.3** and folded into the Phase 5 "Traits & Generics" track. Without generics, traits are largely cosmetic — you cannot write `fn max[T: Comparable](...)` — so shipping them together preserves design coherence. A handful of trait-shaped concepts the v0.1 language depends on (`.message()` on errors, `Copy` marker, `Drop` cleanup) are implemented as **compiler-known interfaces** rather than user-extensible traits in v0.1. Methods on user types still work via `impl` blocks (Milestone 17); only the `trait` keyword and trait bounds are deferred.
 
@@ -1519,11 +1537,11 @@ fn main():
 
 **Tasks:**
 - Add `[T]` array literal syntax to lexer/parser: `[1, 2, 3]`
-- Extend type system: `Type::Slice(Box<Type>)` for array slices `&[T]` and `&mut [T]`
+- Extend type system: `Type::Slice(Box<Type>)` for array slices `&[T]` and `inout [T]`
 - Parse slice operations on arrays:
   - `array[start:end]` — partial slice
   - `array[:]` — full slice
-  - `&array[1:4]`, `&mut array[1:4]` — slice borrows
+  - `&array[1:4]` — slice borrow (mutability determined by the parameter type: `&[T]` vs `inout [T]`)
 - Codegen:
   - Slice representation (pointer + length, fat pointer)
   - Bounds checking at runtime (panic on out-of-range)
@@ -1549,7 +1567,7 @@ fn main():
 - Array slices are **fat pointers** (pointer + length); the same representation `&str` already uses
 - Bounds checking at runtime; out-of-range slicing panics
 - `[T]` array literals create stack-allocated fixed-size arrays in v0.1; growable `list[T]` lands in M22
-- Dependencies: Milestone 8.2 (immutable borrows), Milestone 8.3 (`&mut [T]` slices)
+- Dependencies: Milestone 8.2 (immutable borrows), Milestone 8.3 (`inout [T]` slices)
 
 ### Milestone 22: Collections (List, Map)
 **Goal:** Implement `list[T]` and `map[K, V]` with hardcoded types
@@ -1601,13 +1619,15 @@ fn main():
 - Generics deferred to Phase 5 (post-v0.1.0)
 - Collections own their data (RAII cleanup in M23)
 - Iteration uses immutable borrows
-- Dependencies: Milestone 8.3 (`&mut` for append/remove), Milestone 21 (array slices for iteration)
+- **Copy-on-write at the buffer level** — `list[T]`, `map[K, V]`, and `str` are class-backed but present value semantics to the user. A mutating method checks the backing buffer's refcount; if > 1, it clones the buffer first. This is the Swift collection model (`Array`, `Dictionary`, `String`) and is the prerequisite for `shared[T]`'s performance story (spec 5.6).
+- **ARC optimizer pass** ([arc_optimizer.md](arc_optimizer.md)) must land alongside or shortly after this milestone. Without retain/release elision, every collection access in shared-state code pays atomic refcount cost. Sequencing: design and prototype the pass during this milestone; commit it before any benchmark publication.
+- Dependencies: Milestone 8.3 (`inout` for append/remove), Milestone 21 (array slices for iteration)
 
 ### Milestone 23: RAII & Drop (Compiler Intrinsic)
 **Goal:** Implement automatic resource cleanup via a compiler-known `drop` method
 
 **Tasks:**
-- Recognize `fn drop(&mut self)` as a **compiler-known method name** on any type. No `trait Drop` keyword in v0.1 — the user-facing `trait` system is deferred to v0.2/v0.3 (see Phase 5: Traits & Generics). Once traits land, `Drop` will be promoted to a real trait without breaking source compatibility (the method signature is identical).
+- Recognize `fn drop(inout self)` as a **compiler-known method name** on any type. No `trait Drop` keyword in v0.1 — the user-facing `trait` system is deferred to v0.2/v0.3 (see Phase 5: Traits & Generics). Once traits land, `Drop` will be promoted to a real trait without breaking source compatibility (the method signature is identical).
 - Implement automatic drop calls:
   - At end of scope
   - On early returns
@@ -1632,7 +1652,7 @@ struct File:
 # as the cleanup hook. v0.2+ will allow `impl Drop for File:` once the
 # trait keyword exists; the method body is unchanged.
 impl File:
-	fn drop(&mut self):
+	fn drop(inout self):
 		close_file(self.handle)  # FFI call
 
 fn process_file(path: &str):
@@ -1653,8 +1673,8 @@ fn early_return():
 - Drop order: **reverse of declaration order** (like Rust)
 - User-defined cleanup via the special `drop` method on `impl` blocks (no `trait Drop` keyword needed yet)
 - Prevents resource leaks (files, sockets, memory)
-- **Forward compatibility:** when the user-facing trait system ships in v0.2/v0.3, `Drop` becomes a real trait and existing `fn drop(&mut self)` methods continue to work unchanged
-- Dependencies: Milestone 17 (methods — `impl` blocks), Milestone 8.3 (mutable borrows for `&mut self`)
+- **Forward compatibility:** when the user-facing trait system ships in v0.2/v0.3, `Drop` becomes a real trait and existing `fn drop(inout self)` methods continue to work unchanged
+- Dependencies: Milestone 17 (methods — `impl` blocks), Milestone 8.3 (mutable borrows for `inout self`)
 
 ## Phase 4: Module System & Core Ecosystem
 
@@ -2459,7 +2479,7 @@ fn main():
 - v0.1 already exposes a few trait-shaped concepts as **compiler-known interfaces** (`.message()` on errors, `Copy` marker, `drop` method for RAII); promoting them to real traits in v0.2/v0.3 is source-compatible.
 
 **Migration from v0.1 compiler intrinsics to real traits:**
-- `fn drop(&mut self)` (compiler-known method) → `impl Drop for T` (no source change to method body)
+- `fn drop(inout self)` (compiler-known method) → `impl Drop for T` (no source change to method body)
 - `Copy` (compiler marker) → user-derivable `#[derive(Copy)]`
 - `.message()` (compiler-known error accessor) → `impl Error for T` with explicit `fn message(&self) -> str`
 
@@ -2484,10 +2504,10 @@ struct Stack[T]:
 	items: list[T]
 
 impl[T] Stack[T]:
-	fn push(&mut self, item: T):
+	fn push(inout self, item: T):
 		self.items.append(item)
 
-	fn pop(&mut self) -> ?T:
+	fn pop(inout self) -> ?T:
 		return self.items.pop()
 ```
 
@@ -2973,7 +2993,7 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Realistic Estimates (2-4 weeks per milestone)
 
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
-**Phase 2 (M4-M13):** 14 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (&mut T), M8.4 (&str); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~42 weeks (~10 months)
+**Phase 2 (M4-M13):** 14 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (&str); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~42 weeks (~10 months)
 **Phase 3 (M16, M17, M21, M22, M23):** 5 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~15 weeks (~4 months)
 **Phase 4 (M24-M27):** 5 milestones (includes M26.5 Distribution & Installer) × 4 weeks avg = ~20 weeks (~5 months)
 

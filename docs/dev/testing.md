@@ -66,7 +66,7 @@ fn create_db() -> DbFixture:
 
 # Runs on teardown (automatically called when 'fix' goes out of scope)
 impl Drop for DbFixture:
-    fn drop(&mut self):
+    fn drop(inout self):
         # delete temp db...
 
 #[test]
@@ -135,7 +135,7 @@ fn test_addition():
 Add `#[bench]` attribute for v0.1.
 ```ryo
 #[bench]
-fn bench_parsing(b: &mut Bencher):
+fn bench_parsing(b: inout Bencher):
     for _ in b.iter():
         parse_heavy_json()
 ```

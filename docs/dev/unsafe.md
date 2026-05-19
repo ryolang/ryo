@@ -77,7 +77,7 @@ impl Buffer:
             p = malloc(size)
             return Buffer(ptr=p)
 
-    fn drop(&mut self):
+    fn drop(inout self):
         unsafe:
             free(self.ptr)
 ```

@@ -8,8 +8,8 @@ fn read_text(text: str):
 	print(text)
 
 # Mutable borrow — function can mutate but doesn't take ownership
-fn mutate_text(text: &mut str):
-	# text is a mutable reference
+fn mutate_text(text: inout str):
+	# text is a mutable borrow (`inout`)
 	# We can modify it during this function's lifetime
 	text = f"{text}, mutated"
 	print(text)
@@ -30,7 +30,7 @@ fn my_function():
 	read_text(message)
 
 	# Explicit mutable borrow — message still usable after
-	mutate_text(&mut message)
+	mutate_text(&message)
 
 	# Move ownership — message can no longer be used
 	take_text(message)

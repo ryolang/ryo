@@ -51,7 +51,7 @@ on reassign(var) where var.is_mutable:
 
 ### Rule 2 — Implicit Borrow for Parameters
 
-When a function call passes an owned value to a regular parameter (not `move`, not `&mut`):
+When a function call passes an owned value to a regular parameter (not `move`, not `inout`):
 
 ```pseudocode
 on call(f, arg) where param is default (immutable borrow):
@@ -60,7 +60,7 @@ on call(f, arg) where param is default (immutable borrow):
     # arg.state stays Valid — caller retains ownership
     # borrow is released when callee returns
 
-on call(f, arg) where param is `&mut`:
+on call(f, arg) where param is `inout`:
     check_use(arg)
     assert arg.is_mutable, "cannot mutably borrow immutable variable"
     assert no_active_borrows(arg), "Rule 7: exclusive access violated"
@@ -186,8 +186,8 @@ on call f(x, g(x)):
     # Multiple immutable borrows are allowed (Rule 7: many readers OK)
     # SAFE: both are immutable
 
-# f(&mut x, g(x)) — mutable + immutable conflict
-on call f(&mut x, g(x)):
+# f(&x, g(x)) — mutable + immutable conflict (f's first param is `inout`)
+on call f(&x, g(x)):
     error("cannot mutably borrow 'x' while it is also immutably borrowed")
 ```
 

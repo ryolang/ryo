@@ -11,7 +11,7 @@ This section specifies the memory representation and calling conventions for clo
 |---|---|---|---|
 | No captures | Thin function pointer | 1 pointer | Identical to a C function pointer. No environment allocated. |
 | Immutable captures (`Fn`) | Environment struct + function pointer | 2 pointers (fat pointer) | Environment is stack-allocated when closure does not escape; heap-allocated (via ownership transfer) when it does. |
-| Mutable captures (`FnMut`) | Environment struct + function pointer | 2 pointers (fat pointer) | Requires exclusive (`&mut`) access to the environment on each call. |
+| Mutable captures (`FnMut`) | Environment struct + function pointer | 2 pointers (fat pointer) | Requires exclusive (`inout`) access to the environment on each call. |
 | Move captures (`FnMove`) | Owned environment struct + function pointer | 2 pointers (fat pointer) | Environment is consumed on call. Single-use unless the compiler can prove otherwise. |
 
 The **environment struct** is an anonymous, compiler-generated struct containing each captured variable (or a reference to it) in declaration order. Field alignment follows platform ABI rules (same as user-defined structs with `#[repr(C)]` layout).
@@ -73,7 +73,7 @@ Closures spawned as concurrent tasks (see Section 12) have additional representa
 1. **Must be `FnMove`:** Task closures own their environment entirely. No borrowed references to the spawning scope are permitted.
 2. **Send-safety:** The environment struct must contain only types that are safe to transfer across task boundaries. Specifically:
    - `shared[T]` handles must be explicitly cloned before capture (not borrowed from the parent scope).
-   - Raw mutable references (`&mut T`) are prohibited in task closure environments.
+   - Raw mutable references (`inout T`) are prohibited in task closure environments.
 3. **Heap allocation:** Task closure environments are always heap-allocated because their lifetime is decoupled from the spawning scope.
 
 ```ryo

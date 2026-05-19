@@ -88,7 +88,7 @@ docs/dev/*.md             (how the compiler/stdlib delivers — links back to sp
 
 **Task closures move implicitly.** In Section 9, closures passed to `task.run`/`task.scope`/`task.spawn_detached` capture by move automatically. Writing `move` on them is accepted but redundant. Elsewhere, `move` is always explicit.
 
-**`&mut` and `move` are the same cost.** Under NRVO, both compile to a pointer pass. See Section 5.2.1.
+**`inout` and `move` are the same cost.** Under NRVO, both compile to a pointer pass. See Section 5.2.1. (Note: spec switched from `&mut Type` + `&mut x` to `inout Type` + `&x` for the Swift/Mojo idiom — see Section 5.3 Rule 3 rationale.)
 
 **Section 5.1 and Rule 2 are both correct.** Section 5.1's "moved by default" applies to assignment and return. Rule 2 says parameters default to immutable borrow. These cover different cases. Do not "fix" the apparent contradiction.
 

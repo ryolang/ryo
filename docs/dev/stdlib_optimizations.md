@@ -90,7 +90,7 @@ fn write_header(move buf: str, name: str, value: str) -> str:
 - Any API where the caller wants to reuse capacity across calls
 
 ### When not to use it
-- APIs where `&mut` is cleaner (no return, simpler chaining)
+- APIs where `inout` is cleaner (no return, simpler chaining)
 - One-shot construction (just return a fresh owned value)
 
 ### Stdlib APIs adopting this pattern

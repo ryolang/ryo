@@ -80,7 +80,7 @@ pub struct Tensor[T]:
 
 # 4. RAII: When the variable goes out of scope, this runs.
 impl Drop for Tensor[T]:
-    fn drop(&mut self):
+    fn drop(inout self):
         unsafe:
             # Call the C-level destructor provided by DLPack.
             # External backends invoked via the FFI must return a heap-allocated

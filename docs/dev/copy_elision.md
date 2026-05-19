@@ -81,7 +81,7 @@ Not directly possible in Ryo's current design, but can occur via
 
 ### F2: Return of a binding whose address was taken
 If the binding's storage address has been shared (e.g., passed as
-`&mut` to a function that stores the address), elision would change
+`inout` to a function that stores the address), elision would change
 observable behavior.
 
 ### F3: Conditional return where different paths produce different bindings with incompatible storage
