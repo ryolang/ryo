@@ -43,3 +43,6 @@ docs/analysis/
 
 # Graphify
 graphify-out/
+
+# Claude Code (personal settings)
+.claude/
