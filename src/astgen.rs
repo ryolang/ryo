@@ -386,6 +386,10 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
             let arg_refs: Vec<InstRef> = args.iter().map(|a| gen_expr(b, a)).collect();
             b.call(*name, &arg_refs, span)
         }
+        ast::ExprKind::MethodCall { .. } => {
+            // TODO(task-13): lower method calls to UIR
+            todo!("MethodCall lowering lands in Task 13")
+        }
     }
 }
 

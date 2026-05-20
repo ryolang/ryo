@@ -406,28 +406,57 @@ where
             let ident_expr = select! { Token::Ident(name) => name }
                 .map_with(|name, e| Expression::new(ExprKind::Ident(name), e.span()));
 
-            let parenthesized = expr.delimited_by(just(Token::LParen), just(Token::RParen));
+            let parenthesized = expr
+                .clone()
+                .delimited_by(just(Token::LParen), just(Token::RParen));
 
             call.or(ident_expr).or(literal).or(parenthesized)
         };
+
+        let postfix = atom
+            .foldl(
+                just(Token::Dot)
+                    .ignore_then(select! { Token::Ident(name) => name })
+                    .then(
+                        expr.clone()
+                            .separated_by(just(Token::Comma))
+                            .allow_trailing()
+                            .collect::<Vec<_>>()
+                            .delimited_by(just(Token::LParen), just(Token::RParen)),
+                    )
+                    .map_with(|(method, args), e| (method, args, e.span()))
+                    .repeated(),
+                |receiver, (method, args, span): (_, _, SimpleSpan)| {
+                    let start = receiver.span.start;
+                    let end = span.end;
+                    Expression::new(
+                        ExprKind::MethodCall {
+                            receiver: Box::new(receiver),
+                            method,
+                            args,
+                        },
+                        SimpleSpan::new((), start..end),
+                    )
+                },
+            )
+            .boxed();
 
         let unary_op = choice((
             just(Token::Sub).to(UnaryOperator::Neg),
             just(Token::Not).to(UnaryOperator::Not),
         ));
 
-        let unary =
-            unary_op
-                .repeated()
-                .collect::<Vec<_>>()
-                .then(atom)
-                .map_with(|(ops, expr), e| {
-                    let mut result = expr;
-                    for op in ops.into_iter().rev() {
-                        result = Expression::new(ExprKind::UnaryOp(op, Box::new(result)), e.span());
-                    }
-                    result
-                });
+        let unary = unary_op
+            .repeated()
+            .collect::<Vec<_>>()
+            .then(postfix)
+            .map_with(|(ops, expr), e| {
+                let mut result = expr;
+                for op in ops.into_iter().rev() {
+                    result = Expression::new(ExprKind::UnaryOp(op, Box::new(result)), e.span());
+                }
+                result
+            });
 
         let term = unary.clone().foldl(
             choice((
