@@ -210,8 +210,17 @@ impl Codegen<ObjectModule> {
 
 impl Codegen<JITModule> {
     pub fn new_jit() -> Result<Self, String> {
-        let jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
+        let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
             .map_err(|e| format!("Failed to create JIT builder: {}", e))?;
+
+        // Register runtime symbols so the JIT can resolve them.
+        jit_builder.symbols([
+            (
+                "ryo_str_from_literal",
+                ryo_runtime::ryo_str_from_literal as *const u8,
+            ),
+            ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
+        ]);
 
         Ok(Self::from_module(
             JITModule::new(jit_builder),
@@ -1205,40 +1214,22 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         args: &[TirRef],
     ) -> Result<(), String> {
-        // Sema has already validated arity and the string-literal
-        // constraint (see `sema::check_builtin_call`). The matches
-        // below are therefore infallible.
         debug_assert_eq!(args.len(), 1, "sema should reject print() arity errors");
-        let string_id = match ctx.tir.inst(args[0]).data {
-            TirData::Str(id) => id,
-            other => unreachable!(
-                "sema should reject non-literal print() args, got {:?}",
-                other
-            ),
+        debug_assert!(
+            is_str_type(ctx.tir.inst(args[0]).ty, ctx.pool),
+            "sema should reject non-str print() args",
+        );
+
+        let repr = Self::eval_inst_str(builder, ctx, args[0])?;
+        let (ptr, len) = match repr {
+            ValueRepr::Str { ptr, len, .. } => (ptr, len),
+            _ => unreachable!("str-typed arg produced Scalar"),
         };
-        let string_content = ctx.pool.str(string_id);
-
-        let data_id = store_string(
-            string_id,
-            string_content,
-            ctx.module,
-            ctx.data_ctx,
-            ctx.string_data,
-        )?;
-        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-        let string_ptr = builder.ins().global_value(ctx.int_type, data_ref);
-
-        let string_len = builder
-            .ins()
-            .iconst(ctx.int_type, string_content.len() as i64);
-        let fd = builder.ins().iconst(types::I32, 1);
 
         check_platform_support(ctx.triple)?;
-
+        let fd = builder.ins().iconst(types::I32, 1);
         let write_ref = declare_write(ctx.module, builder, ctx.int_type)?;
-        let call_inst = builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
-        let _bytes_written = builder.inst_results(call_inst)[0];
-
+        builder.ins().call(write_ref, &[fd, ptr, len]);
         Ok(())
     }
 }

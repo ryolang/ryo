@@ -995,6 +995,7 @@ dependencies = [
  "dirs",
  "hashbrown 0.17.1",
  "logos",
+ "ryo-runtime",
  "tar",
  "target-lexicon",
  "tempfile",

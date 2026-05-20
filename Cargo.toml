@@ -19,6 +19,7 @@ edition = "2024"
 [build-dependencies]
 
 [dependencies]
+ryo-runtime = { path = "runtime" }
 
 ariadne = "0.6"
 chumsky = "0.12"

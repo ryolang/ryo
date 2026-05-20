@@ -12,7 +12,10 @@ pub(crate) fn link_executable(
 
     let output = Command::new(&zig_path)
         .args([
-            "cc", "-o", exe_file, obj_file,
+            "cc",
+            "-o",
+            exe_file,
+            obj_file,
             runtime_lib.to_str().unwrap_or("libryo_runtime.a"),
         ])
         .output()

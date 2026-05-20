@@ -1904,3 +1904,27 @@ fn test_for_body_return() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn test_str_variable_print() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tname: str = \"Hello\"\n\tprint(name)\n";
+    let test_file = create_test_file(temp_dir.path(), "str_var_print.ryo", code);
+
+    let output = run_ryo_command(&["run", "str_var_print.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Hello"),
+        "Output should contain 'Hello', got: {}",
+        stdout
+    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
+}

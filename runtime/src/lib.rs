@@ -421,7 +421,11 @@ mod tests {
     #[test]
     fn test_int_to_str_positive() {
         unsafe {
-            let mut out = RyoStrFat { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
             ryo_int_to_str(42, &mut out);
             let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
             assert_eq!(slice, b"42");
@@ -432,7 +436,11 @@ mod tests {
     #[test]
     fn test_int_to_str_negative() {
         unsafe {
-            let mut out = RyoStrFat { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
             ryo_int_to_str(-123, &mut out);
             let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
             assert_eq!(slice, b"-123");
@@ -443,7 +451,11 @@ mod tests {
     #[test]
     fn test_int_to_str_zero() {
         unsafe {
-            let mut out = RyoStrFat { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
             ryo_int_to_str(0, &mut out);
             let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
             assert_eq!(slice, b"0");
@@ -454,7 +466,11 @@ mod tests {
     #[test]
     fn test_float_to_str() {
         unsafe {
-            let mut out = RyoStrFat { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
             ryo_float_to_str(2.75, &mut out);
             let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
             let s = core::str::from_utf8(slice).unwrap();
@@ -466,7 +482,11 @@ mod tests {
     #[test]
     fn test_bool_to_str_true() {
         unsafe {
-            let mut out = RyoStrFat { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
             ryo_bool_to_str(1, &mut out);
             let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
             assert_eq!(slice, b"true");
@@ -477,7 +497,11 @@ mod tests {
     #[test]
     fn test_bool_to_str_false() {
         unsafe {
-            let mut out = RyoStrFat { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
             ryo_bool_to_str(0, &mut out);
             let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
             assert_eq!(slice, b"false");

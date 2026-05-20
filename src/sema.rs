@@ -1301,7 +1301,7 @@ fn emit_builtin_call(
     let name = sema.pool.str(view.name);
     match name {
         "print" => {
-            if !check_print_args(sema, view, span) {
+            if !check_print_args(sema, fcx, view, arg_tirs, span) {
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
@@ -1428,7 +1428,13 @@ fn build_panic_call(
         .call(panic_name, &[str_ref, len_ref], sema.pool.never(), span)
 }
 
-fn check_print_args(sema: &mut Sema<'_>, view: &CallView, span: Span) -> bool {
+fn check_print_args(
+    sema: &mut Sema<'_>,
+    fcx: &FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+) -> bool {
     if view.args.len() != 1 {
         sema.sink.emit(Diag::error(
             span,
@@ -1437,11 +1443,15 @@ fn check_print_args(sema: &mut Sema<'_>, view: &CallView, span: Span) -> bool {
         ));
         return false;
     }
-    if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
+    let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+    if !matches!(sema.pool.kind(arg_ty), TypeKind::Str) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),
-            DiagCode::BuiltinArgKind,
-            "print() argument must be a string literal",
+            DiagCode::TypeMismatch,
+            format!(
+                "print() argument must be str, got {}",
+                sema.pool.display(arg_ty)
+            ),
         ));
         return false;
     }
@@ -1748,12 +1758,6 @@ mod tests {
         let v = main.var_decl_view(stmt_at(main, 0));
         assert_eq!(main.inst(v.initializer).ty, pool.bool_());
         assert!(matches!(main.inst(v.initializer).data, TirData::Bool(true)));
-    }
-
-    #[test]
-    fn print_with_non_literal_rejected_in_sema() {
-        let diags = run("x = \"hi\"\nprint(x)").unwrap_err();
-        assert!(any_code(&diags, DiagCode::BuiltinArgKind));
     }
 
     #[test]
