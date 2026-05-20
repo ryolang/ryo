@@ -59,9 +59,9 @@ impl Trie:
 			node = node.children[char]
 		return self.collect_from_node(node, prefix)
 
-	# Mutable operations - require &mut self
+	# Mutable operations - require `inout self`
 
-	fn insert(&mut self, word: str):
+	fn insert(inout self, word: str):
 		mut node = self.root
 		for char in word:
 			if not node.children.contains(char):
@@ -69,7 +69,7 @@ impl Trie:
 			node = node.children[char]
 		node.is_end_of_word = true
 
-	fn delete(&mut self, word: str) -> bool:
+	fn delete(inout self, word: str) -> bool:
 		return self.delete_from_node(mut self.root, word, 0)
 
 	fn delete_from_node(mut self, mut node: TrieNode, word: str, index: int) -> bool:
@@ -117,8 +117,8 @@ fn main():
 	# trie is no longer valid (moved to trie2)
 	print(f"  Words in trie2: {trie2.collect_words()}")
 
-	# Test 3: Mutable borrow (&mut)
-	# Tests Rule 3: Mutable borrows require &mut in signature AND call site
+	# Test 3: Mutable borrow (inout)
+	# Tests Rule 3: Mutable borrows require `inout` in signature AND `&` at call site
 	# Demonstrates exclusive mutable access to modify trie state
 	print("\nTest 3: Mutable borrow - exclusive modification")
 	mut trie3 = Trie.create()
@@ -129,7 +129,7 @@ fn main():
 
 	# Test 4: Immutable borrows (concurrent reads)
 	# Tests Rule 2: Function parameters are implicitly borrowed
-	# Demonstrates multiple simultaneous reads without &mut
+	# Demonstrates multiple simultaneous reads without `inout`
 	print("\nTest 4: Immutable borrows - concurrent reads")
 	trie4 = Trie.create()
 	trie4.insert("cat")

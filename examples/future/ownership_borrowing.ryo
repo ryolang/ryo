@@ -3,7 +3,7 @@
 #
 # Key rules:
 #   Rule 2: Function parameters are implicitly borrowed (no & needed)
-#   Rule 3: Mutable borrows require &mut in signature AND call site
+#   Rule 3: Mutable borrows require `inout` in signature AND `&` at call site
 #   Rule 4: Move parameters use `move` keyword in signature
 #   Rule 5: Functions cannot return borrows — always return owned values
 
@@ -15,7 +15,7 @@ fn greet_person(person: Person):
 	# Implicit immutable borrow — can read but not modify
 	print(f"Hello, {person.name}! You are {person.age} years old.")
 
-fn have_birthday(person: &mut Person):
+fn have_birthday(person: inout Person):
 	# Mutable borrow — can modify the person
 	person.age += 1
 	print(f"Happy birthday, {person.name}! Now you are {person.age}.")
@@ -36,8 +36,8 @@ fn main():
 	greet_person(alice)
 	greet_person(alice)
 
-	# Mutable borrow — explicit &mut at call site
-	have_birthday(&mut alice)
+	# Mutable borrow — explicit `&` at call site
+	have_birthday(&alice)
 
 	# Implicit borrow again after mutable borrow is done
 	greet_person(alice)
@@ -69,10 +69,10 @@ fn main():
 
 	print_first(numbers)
 
-	# Explicit &mut for modification
-	fn double_first(list: &mut list[int]):
+	# Explicit `inout` for modification, `&` at call site
+	fn double_first(list: inout list[int]):
 		if not list.is_empty():
 			list[0] *= 2
 
-	double_first(&mut numbers)
+	double_first(&numbers)
 	print_first(numbers)

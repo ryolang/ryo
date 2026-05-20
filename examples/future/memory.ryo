@@ -4,10 +4,10 @@ fn main():
 	total = sum(scores)         # implicit immutable borrow
 	print(total)                # 270
 
-	add_extra(&mut scores, 5)   # explicit mutable borrow
+	add_extra(&scores, 5)       # explicit mutable borrow (signature: `inout list[int]`)
 	print(scores)               # [95, 90, 100]
 
 # Compiler ensures `list` is valid for the borrow duration
-fn add_extra(list: &mut [int], bonus: int):
+fn add_extra(list: inout list[int], bonus: int):
 	for i in 0..len(list):
 		list[i] += bonus

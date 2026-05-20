@@ -21,7 +21,7 @@ The compiler maps these directly to CPU registers or Cranelift types.
 #### B. Memory Primitives ("Ownership Lite" Mechanics)
 The compiler needs these to run the Borrow Checker and Layout generation.
 *   `&T` (Immutable Reference)
-*   `&mut T` (Mutable Reference)
+*   `inout T` (Mutable Reference)
 *   `*void` / `*T` (Unsafe C Pointers)
 *   `?T` (Optional/Nullable - Logic for `none` and `orelse` is hardcoded in codegen).
 

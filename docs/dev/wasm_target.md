@@ -1,10 +1,15 @@
-# WASM Target Implementation Plan (Draft — v0.2)
+# WASM Target Implementation Plan (Draft — v0.3)
 
-**Status:** Design (v0.2+)
+**Status:** Design (v0.3)
 
-This document describes the plan for adding a WebAssembly compilation target to the Ryo compiler at the current stage of development (pre-Milestone 27, before the concurrency runtime exists). It is the actionable counterpart to the long-term WasmFX discussion in [concurrency.md](concurrency.md#future-wasm-target-via-wasmfx).
+This document describes the plan for adding a WebAssembly compilation target to the Ryo compiler. It is the actionable counterpart to the long-term WasmFX discussion in [concurrency.md](concurrency.md#future-wasm-target-via-wasmfx).
 
 The plan is intentionally scoped to what is achievable **today** with Cranelift's stable WASM backend and WASI preview 1, and explicitly defers everything that depends on stack switching, threads, or async I/O.
+
+## Changelog
+
+- **v0.3 (2026-05-12):** Switched the runtime model from "lean on wasi-libc" (L1) to **"bundled Rust allocator + direct WASI imports"** (L2). This matches Go's no-external-runtime-dependency model on WASM and is consistent with M8.1's commitment to a Go-style embedded runtime crate (`ryo_rt`). Removes the wasi-libc dependency and shrinks the import surface to 3–6 well-known WASI functions per binary. Reflects the existence of the M8.1 runtime crate, which earlier drafts noted as "not yet existing."
+- **v0.2 (initial):** Cranelift WASM backend, wasi-libc allocator, wasm-ld via Zig toolchain. Replaced in v0.3.
 
 ---
 
@@ -28,9 +33,9 @@ The plan is intentionally scoped to what is achievable **today** with Cranelift'
 ## Current Compiler State (relevant facts)
 
 - Backend: **Cranelift 0.130** (`src/codegen.rs`, ~625 LOC). IR is largely target-agnostic.
-- Linker: `zig cc` driver (`src/linker.rs`, `src/toolchain.rs`). Zig ships `wasm-ld` and a `wasm32-wasi` libc out of the box.
-- Pipeline: lex → parse → AST → semantic → UIR → TIR → Cranelift IR → object → link (`src/pipeline.rs`).
-- No runtime crate exists yet — the compiled program currently links against system libc only via Zig.
+- Linker: `zig cc` driver (`src/linker.rs`, `src/toolchain.rs`). Zig ships `wasm-ld` out of the box.
+- Pipeline: lex → parse → AST → semantic → UIR → TIR → **Ownership pass (M8.1+)** → Cranelift IR → object → link (`src/pipeline.rs`).
+- **Runtime crate (`ryo_rt`)** lands in M8.1 — see [M8.1 design doc](../superpowers/specs/2026-05-11-milestone-8.1-heap-str-and-move-semantics-design.md). It produces three artifacts (`staticlib` for native, `cdylib` for WASM, `rlib` for compiler-internal JIT) and bundles its own allocator so neither libc nor wasi-libc is a hard dependency at the runtime layer.
 - Concurrency runtime (Phase 5, Milestones 32–34) is **not yet implemented**, so there is no green-thread code to port. This is the easiest possible moment to add WASM support.
 
 ---
@@ -62,30 +67,30 @@ Cranelift already supports `wasm32` as an ISA target. Concretely:
 
 ### Linker
 
-Replace `zig cc` with `zig wasm-ld` (or invoke `wasm-ld` directly if Zig's bundled copy is reachable):
+Replace `zig cc` with `zig wasm-ld` for the WASM target. Critically, **no `-lc` flag** — the `ryo_rt` artifact brings its own allocator and calls WASI imports directly, so there is no need to link wasi-libc.
 
-```
-zig wasm-ld -o out.wasm input.o \
-    --no-entry --export=_start \
-    -L<zig-lib>/wasi/libc -lc
+```shell
+zig wasm-ld -o out.wasm user.o ryo_rt.wasm \
+    --no-entry --export=_start
 ```
 
 Add a `Linker::link_wasm` path in `src/linker.rs` parallel to the existing native linker. The Zig toolchain manager (`src/toolchain.rs`) already downloads Zig, so no new toolchain dependency is introduced.
 
 ### Runtime / Stdlib Shims
 
-Today's compiled programs use almost no runtime. The required shims for v0.2 WASM:
+The `ryo_rt` runtime crate (introduced in M8.1) does the heavy lifting on every target. For WASM specifically, the crate bundles its own allocator and calls WASI imports directly — the **L2 Go-style model** in [M8.1's runtime section](../superpowers/specs/2026-05-11-milestone-8.1-heap-str-and-move-semantics-design.md). This replaces the earlier "lean on wasi-libc" plan (L1) so that Ryo WASM modules have no system-library dependency beyond the WASI host imports they actually use.
 
 | Need | Implementation |
 |---|---|
-| Program entry | Emit `_start` (WASI convention) instead of `main`. Map Ryo's top-level / `main` to `_start`. |
-| `panic` / abort | Lower panics to a call into a tiny WASI wrapper that writes the message to fd 2 and calls `proc_exit(1)`. |
-| Allocator | WASM has no system allocator. Bundle a minimal `dlmalloc`-style allocator as a Ryo-side static, OR reuse the one Zig links in via `wasi-libc`. Prefer the latter — zero new code. |
-| stdout / print | When stdlib `print` lands (Milestone 24), route it to `fd_write` via `wasi-libc`'s `write(2)`. Identical source-level API. |
-| File I/O | Same — goes through wasi-libc; transparent. |
-| Time / random | wasi-libc forwards to WASI `clock_time_get` and `random_get`. Transparent. |
+| Program entry | Emit `_start` (WASI convention) instead of `main`. Map Ryo's top-level / `main` to `_start`, returning `()` (host gets exit code 0) or an `i32` exit code. |
+| `panic` / abort | Lower panics to a call into a tiny runtime wrapper that writes the message via the imported `fd_write` to fd 2 and calls the imported `proc_exit(1)`. |
+| Allocator | Runtime bundles `dlmalloc-rs` (or a similar small allocator) as `#[global_allocator]` under `cfg(target_arch = "wasm32")`. All `ryo_str_alloc` / `ryo_str_free` / future container allocations route through it. **No wasi-libc dependency.** |
+| stdout / print | When stdlib `print` lands (Milestone 24), route it to the imported `fd_write` directly. The runtime declares the WASI imports with `#[link(wasm_import_module = "wasi_snapshot_preview1")]`. |
+| File I/O | Same model — direct WASI imports (`path_open`, `fd_read`, `fd_write`, `fd_close`) declared as `extern "C"` in the runtime, no C shim. |
+| Time / random | Direct imports of `clock_time_get` and `random_get`. |
+| Atomics (post-M11 `shared[T]`) | Use Rust's `std::sync::atomic`, which compiles to WASM atomics when the `+atomics` feature is enabled. Single-threaded WASM builds use non-atomic loads/stores; semantics are preserved either way. |
 
-Net: **no new runtime code** for v0.2 if we lean on wasi-libc through Zig.
+Net: the runtime crate is **the only Rust→WASM artifact** linked into a user binary. The output `.wasm` declares 3–6 host imports (the WASI functions actually used) and no other external dependencies. This is the WASM equivalent of Go's "all you need is `chmod +x` and run."
 
 ### Type System Adjustments
 
@@ -97,7 +102,7 @@ Net: **no new runtime code** for v0.2 if we lean on wasi-libc through Zig.
 | `i8` / `u8` / `i16` / `u16` | native | stored as i32, narrowed at boundaries | Cranelift handles automatically; verify bool layout |
 | `i128` / `u128` | software | software (slower) | acceptable, document |
 | pointer-sized | 64-bit | 32-bit | **Audit required** — see Codegen step 2 |
-| `str` / slice fat pointers | `(ptr: u64, len: u64)` | `(ptr: u32, len: u32)` | layout already abstracted via `pointer_type()` if step 2 done correctly |
+| `str` / slice fat pointers | `(ptr: u64, len: u64, cap: u64)` | `(ptr: u32, len: u32, cap: u32)` | layout already abstracted via `pointer_type()` if step 2 done correctly. The runtime's `RyoStr` uses `usize` so the Rust source compiles to both layouts. See [M8.1 Cranelift Representation](../superpowers/specs/2026-05-11-milestone-8.1-heap-str-and-move-semantics-design.md). |
 
 ### CLI Surface
 
@@ -160,11 +165,15 @@ Each phase ends in a green CI run and a demo. Estimates assume the same ~8 hr/we
 - Feature-gate the WASM path behind `cargo build --features wasm` so partial work cannot break native CI.
 - **Demo:** `ryo build --target wasm32-wasip1 trivial.ryo` produces a WASM object file (not yet linked).
 
-### Phase B — Linking & Hello Exit Code (1 week)
+### Phase B — Runtime Crate WASM Build + Linking + Hello Exit Code (1–2 weeks)
 
-- Implement `Linker::link_wasm` invoking `wasm-ld` via the Zig toolchain.
-- Map top-level / `main` to `_start`; emit a tiny WASI exit wrapper.
-- **Demo:** `wasmtime hello.wasm; echo $?` returns the value of a Ryo program that evaluates to an integer (Milestone 3 parity, on WASM).
+- Extend `runtime/Cargo.toml` to add `cdylib` to `crate-type` and conditional `dlmalloc` dep under `cfg(target_arch = "wasm32")`.
+- Add the bundled allocator module (`runtime/src/alloc_wasm.rs`) with `#[global_allocator]` set to `dlmalloc::GlobalDlmalloc`.
+- Declare WASI imports (`fd_write`, `proc_exit`, `clock_time_get`, `random_get`) as `extern "C"` in the runtime under the same cfg gate.
+- Extend the compiler's `build.rs` to invoke `cargo build -p ryo_rt --target wasm32-wasip1 --release` alongside the native build; embed both artifacts via `include_bytes!`.
+- Implement `Linker::link_wasm` invoking `wasm-ld` via the Zig toolchain. Pass `ryo_rt.wasm` from the embedded blob, **no `-lc`**.
+- Map top-level / `main` to `_start`; the runtime provides the WASI exit wrapper.
+- **Demo:** `wasmtime hello.wasm; echo $?` returns the value of a Ryo program that evaluates to an integer (Milestone 3 parity, on WASM). Output `.wasm` declares 1–2 WASI imports and no others.
 
 ### Phase C — Core Language Coverage (1–2 weeks)
 
@@ -174,7 +183,7 @@ Each phase ends in a green CI run and a demo. Estimates assume the same ~8 hr/we
 
 ### Phase D — Stdlib Plumbing (concurrent with Milestone 24)
 
-- When `print`, file I/O, and core stdlib symbols land, ensure their wasi-libc routing is correct.
+- When `print`, file I/O, and core stdlib symbols land, ensure they route through the runtime's WASI imports (not wasi-libc).
 - Document gaps in `docs/targets.md`.
 - **Demo:** `hello_world.ryo` prints "Hello, world!" under `wasmtime --dir=.`.
 
@@ -196,10 +205,11 @@ Each phase ends in a green CI run and a demo. Estimates assume the same ~8 hr/we
 ## Risks & Open Questions
 
 1. **Cranelift WASM object emission maturity.** `cranelift-object` targeting `wasm32` may not be a fully supported configuration in 0.130. Mitigation: spike during Phase A; if blocked, fall back to single-module emission via `cranelift-wasm`.
-2. **Pointer-width audit completeness.** Any silently-baked 64-bit assumption in `tir.rs` / `uir.rs` will produce subtly wrong code. Mitigation: a focused review pass plus running every existing integration test under the WASM target before declaring Phase C done.
+2. **Pointer-width audit completeness.** Any silently-baked 64-bit assumption in `tir.rs` / `uir.rs` will produce subtly wrong code. The M8.1 runtime uses `usize` / `*mut u8` so the runtime side is safe, but compiler-side codegen needs a focused review. Mitigation: run every existing integration test under the WASM target before declaring Phase C done.
 3. **Zig bundled `wasm-ld` invocation surface.** Verify that the Zig version pinned by `src/toolchain.rs` exposes `zig wasm-ld` cleanly. If not, document a `wasm-ld` system dependency and fall back gracefully.
-4. **Allocator coupling.** Pulling in wasi-libc's `malloc` is convenient but ties the binary size floor to ~30 KB. If size becomes a concern, swap in a small Rust-side allocator.
+4. **Allocator choice.** `dlmalloc-rs` is well-maintained and matches Rust's own `wasm32-unknown-unknown` default, but it adds ~10 KB to the WASM module. For size-critical use cases (sub-10 KB binaries) consider `lol_alloc` or a bump allocator. Decision deferable until benchmarks exist.
 5. **Future concurrency divergence.** When the green-thread runtime lands (M32+), a WASM build must produce a clear "feature not available on this target" error rather than silently linking nothing. Phase A's feature-gating gives us the hook to enforce this.
+6. **Atomics availability.** `shared[T]`'s atomic refcount operations require the WASM atomics proposal (`+atomics` feature). For Phase B–D, atomics are unused (single-threaded execution). When `shared[T]` lands (post-M11) the WASM build must explicitly enable atomics; alternatively, single-threaded WASM builds can use non-atomic ops since contention is impossible.
 
 ---
 
@@ -207,5 +217,7 @@ Each phase ends in a green CI run and a demo. Estimates assume the same ~8 hr/we
 
 - Spec: §1 (Target Domains, mentions Wasm), §17 (Implementation Strategy — Cranelift WebAssembly support)
 - Dev: [concurrency.md](concurrency.md#future-wasm-target-via-wasmfx) (WasmFX deferral), [compilation_pipeline.md](compilation_pipeline.md), [proposals.md](proposals.md) (cross-compilation CLI)
+- Dev: [M8.1 design doc](../superpowers/specs/2026-05-11-milestone-8.1-heap-str-and-move-semantics-design.md) (runtime crate, dual-artifact build, pointer-width handling)
+- Dev: [arc_optimizer.md](arc_optimizer.md) (target-agnostic refcount elision; runs on TIR before backend lowering)
 - Milestone: Slot between Milestones 27 (Core Language Complete) and 28+; adds no language features. To be linked from `implementation_roadmap.md` once approved.
-- External: [Cranelift WASM docs](https://github.com/bytecodealliance/wasmtime/tree/main/cranelift), [WASI preview 1 spec](https://github.com/WebAssembly/WASI/tree/main/legacy/preview1), [wasi-libc](https://github.com/WebAssembly/wasi-libc)
+- External: [Cranelift WASM docs](https://github.com/bytecodealliance/wasmtime/tree/main/cranelift), [WASI preview 1 spec](https://github.com/WebAssembly/WASI/tree/main/legacy/preview1), [`dlmalloc-rs`](https://crates.io/crates/dlmalloc), Go's WASI runtime as conceptual prior art.

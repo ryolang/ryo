@@ -47,7 +47,7 @@ Dev docs are referenced FROM the roadmap, not FROM the spec (see docs/CLAUDE.md 
 ## Milestone Dependencies
 
 Known sequencing constraints:
-- M20 (`&mut`) MUST precede M22 (collections) and M23 (Drop)
+- M20 (`inout` / mutable borrows) MUST precede M22 (collections) and M23 (Drop)
 - Closure capture analysis MUST follow M15 (ownership basics)
 
 When proposing roadmap changes, verify they don't violate these dependencies.

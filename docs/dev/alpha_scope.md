@@ -77,7 +77,7 @@ Cross-reference: [implementation_roadmap.md](implementation_roadmap.md). Alpha-i
 | **M8** — Control Flow & Booleans | `if` / `elif` / `else`, `while` |
 | **M8.1** — Heap-Allocated `str` & Move Semantics | `f"user_{id}"` allocates owned strings |
 | **M8.2** — Immutable Borrows (`&T`) | Function parameters that read but don't take ownership |
-| **M8.3** — Mutable Borrows (`&mut T`) | Required for any non-trivial helper functions; without it, alpha programs cannot mutate through references |
+| **M8.3** — Mutable Borrows (`inout`) | Required for any non-trivial helper functions; without it, alpha programs cannot mutate through references |
 | **M8.4** — String Slices (`&str`) | `print(s: &str)` and other str-borrowing builtins |
 | **M11** — Enums (Algebraic Data Types) | `error NotFound` lowers to a unit enum variant |
 | **M12** — Pattern Matching | `match err: NotFound: "unknown"` |

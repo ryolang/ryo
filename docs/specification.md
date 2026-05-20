@@ -290,9 +290,9 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 	struct Counter:
 		count: int
 	trait Resettable:
-		fn reset(&mut self)
+		fn reset(inout self)
 	impl Resettable for Counter:
-		fn reset(&mut self): self.count = 0
+		fn reset(inout self): self.count = 0
 	```
 *   **Method Call:** `instance.method(args...)`. Field Access: `instance.field`.
 *   **Control Flow:** `if/elif/else`, two `for` loop forms and `while`:
@@ -373,18 +373,18 @@ Slices are lightweight borrowed views into owned data. They are **scope-locked**
 
 *   `str` slice: Immutable UTF-8 view (pointer + byte length). Created via `my_str[start:end]` or string slicing operations. Supports shorthand: `s[:end]` (from start), `s[start:]` (to end).
 *   `list[T]` slice: Immutable view of `T` elements (pointer + element length). Created via `my_list[start:end]`. Supports shorthand: `items[:3]`, `items[2:]`.
-*   `&mut list[T]` slice: Mutable slice passed via explicit `&mut` parameter.
+*   `inout list[T]` parameter: Mutable list access passed via explicit `inout` parameter and call-site `&` (see Section 5.3, Rule 3).
 
 **Function parameters use owned types** — the compiler handles borrowing implicitly (Rule 2):
 ```ryo
-fn process_string(s: str):        # Implicit immutable borrow
+fn process_string(s: str):              # Implicit immutable borrow
 	# ... read s ...
 
-fn process_list(items: list[int]):  # Implicit immutable borrow
+fn process_list(items: list[int]):      # Implicit immutable borrow
 	# ... read items ...
 
-fn mutate_list(items: &mut list[int]):  # Explicit mutable borrow
-	# ... modify items ...
+fn mutate_list(items: inout list[int]): # Explicit mutable borrow
+	# ... modify items ...                # caller writes `mutate_list(&my_list)`
 ```
 
 *(Rationale: Under Ownership Lite, borrows are parameter-passing conventions, not general-purpose types. Slices exist for efficient iteration and chaining within a scope, but cannot escape. This eliminates the need for lifetime annotations while preserving zero-copy performance within expression chains.)*
@@ -1002,25 +1002,25 @@ Ryo defines three explicit ways to pass data into functions. These are **paramet
 | Mode | Syntax | Semantics | Caller's Variable After Call |
 | :--- | :--- | :--- | :--- |
 | **Immutable Borrow** | `data: Type` (implicit) | Read-only access. The default for all parameters. | **Valid** — unchanged |
-| **Mutable Borrow** | `data: &mut Type` (in signature) + `&mut x` (at call site) | Exclusive mutable access. No other borrows allowed simultaneously. | **Valid** — may be modified |
+| **Mutable Borrow** | `data: inout Type` (in signature) + `&x` (at call site) | Exclusive mutable access. No other borrows allowed simultaneously. | **Valid** — may be modified |
 | **Move** | `move data: Type` (in signature) | Transfers ownership. The function now owns the value. | **Invalidated** — use-after-move is a compile error |
 
 #### 5.2.1 Choosing Between Parameter Modes
 
 Section 5.2's table lists three parameter modes: immutable borrow
-(default), `&mut` (mutable borrow), and `move` (ownership transfer).
-The decision rule is not "do I want to mutate?" — both `&mut` and
+(default), `inout` (mutable borrow), and `move` (ownership transfer).
+The decision rule is not "do I want to mutate?" — both `inout` and
 `move` can mutate. The question is: **does ownership of this value
 need to leave the caller?**
 
 | Need | Use |
 |------|-----|
 | Read-only access | Default borrow (no annotation) |
-| Modify in place, caller keeps the value | `&mut` |
+| Modify in place, caller keeps the value | `inout` |
 | Take ownership permanently | `move` |
 | Take ownership temporarily and return it | `move T -> T` |
 
-##### Use `&mut` when:
+##### Use `inout` when:
 
 - The function modifies data and the caller keeps the binding
 - Most mutation APIs (`buf.push_str`, `list.sort`, `map.insert`)
@@ -1028,7 +1028,7 @@ need to leave the caller?**
 
 Example:
 ```ryo
-fn add_header(buf: &mut str, header: str):
+fn add_header(buf: inout str, header: str):
 	buf.push_str(header)
 	buf.push('\n')
 ```
@@ -1037,7 +1037,7 @@ fn add_header(buf: &mut str, header: str):
 
 1. **Storage in another scope.** Inserting into a collection, storing
    in a struct field, sending across a channel, spawning into a task.
-   The value outlives the call; `&mut` cannot express this because
+   The value outlives the call; `inout` cannot express this because
    a borrow ends when the function returns.
 
    ```ryo
@@ -1046,7 +1046,7 @@ fn add_header(buf: &mut str, header: str):
    ```
 
 2. **Type transformation.** Consuming one type to produce another.
-   `&mut` cannot do this because the caller's binding has a fixed
+   `inout` cannot do this because the caller's binding has a fixed
    type — you cannot mutate a `list[u8]` into a `str`.
 
    ```ryo
@@ -1054,7 +1054,7 @@ fn add_header(buf: &mut str, header: str):
    ```
 
 3. **Conditional ownership return.** Take ownership, return it to the
-   caller on failure, keep it on success. `&mut` is always valid
+   caller on failure, keep it on success. `inout` is always valid
    after the call, so there is no way to express "I took it unless
    I gave it back."
 
@@ -1087,31 +1087,31 @@ fn add_header(buf: &mut str, header: str):
 
 ##### Performance note
 
-Under Ryo's copy elision rules (see Section 5.9), `&mut` and `move`
+Under Ryo's copy elision rules (see Section 5.9), `inout` and `move`
 compile to identical cost. Both pass a pointer; neither copies the
 underlying data. The choice is about ownership semantics and
 call-site readability, not performance.
 
 ##### Concurrency constraint
 
-Values that cross task boundaries cannot be `&mut` borrowed —
+Values that cross task boundaries cannot be `inout` borrowed —
 borrows do not survive across tasks (Rule 5). The choice for data
 crossing concurrent code is between `move` (task owns the value) and
-`shared[T]` (multiple tasks share access). `&mut` is not an option.
+`shared[T]` (multiple tasks share access). `inout` is not an option.
 
 ##### Interaction with Drop
 
-`&mut` leaves Drop timing with the caller — the value is dropped
+`inout` leaves Drop timing with the caller — the value is dropped
 when the caller's scope ends. `move` hands Drop responsibility to
 the callee — the value is dropped when the callee's scope ends, or
 earlier if the callee passes ownership elsewhere. For resource types
-(files, connections, locks), prefer `&mut` for operations and `move`
+(files, connections, locks), prefer `inout` for operations and `move`
 only when the resource is being consumed.
 
-*(Rationale: The `&mut`/`move` distinction is one of the sharper
+*(Rationale: The `inout`/`move` distinction is one of the sharper
 edges in Ryo's design. Making the decision rule explicit — and
 making performance a non-factor in the choice — frees developers to
-choose based on semantics. Most code wants `&mut`; the four cases
+choose based on semantics. Most code wants `inout`; the four cases
 above are when `move` earns its place.)*
 
 ### 5.3 Formalized Rules
@@ -1143,20 +1143,20 @@ This is the core ergonomic trade-off: `fn read(data: MyStruct)` is equivalent to
 
 #### Rule 3: Mutable Borrows Are Always Explicit
 
-Mutation requires `&mut` in **both** the function signature and at the call site. This makes mutation visible during code review — a reader immediately knows "this call changes my variable."
+Mutation requires `inout` on the parameter declaration and `&` on the corresponding argument at the call site. This makes mutation visible during code review — a reader immediately knows "this call changes my variable."
 
 ```ryo
-fn add_bonus(scores: &mut list[int], bonus: int):
+fn add_bonus(scores: inout list[int], bonus: int):
 	for i in range(len(scores)):
 		scores[i] += bonus
 
 fn main():
 	mut scores = [90, 85, 95]
-	add_bonus(&mut scores, 5)    # explicit: scores changes here
+	add_bonus(&scores, 5)        # explicit: scores changes here
 	print(scores)                # [95, 90, 100]
 ```
 
-*(Rationale: "Read is implicit, Write is explicit." Immutable borrows are the common case and should be frictionless. Mutable borrows are the exception and should be visible.)*
+*(Rationale: "Read is implicit, Write is explicit." Immutable borrows are the common case and should be frictionless. Mutable borrows are the exception and should be visible. The signature uses `inout` (Swift / Mojo idiom) rather than `&mut Type` to avoid reading like a first-class reference type — in Ryo, mutable borrows are parameter conventions only (Rules 5 and 6 forbid storing or returning them). The call-site `&` keeps mutation visible to readers and grep-able for code review.)*
 
 #### Rule 4: Move Parameters Override the Default
 
@@ -1175,7 +1175,7 @@ fn main():
 
 #### Rule 5: Functions Cannot Return Borrows
 
-**Functions always return owned values.** A return type cannot be `&T`, `&mut T`, `&str`, or `&[T]`. This is the rule that eliminates lifetime annotations — if borrows never escape a function, the compiler always knows exactly when they end.
+**Functions always return owned values.** A return type cannot be a borrow or scope-locked view (`&str`, `&[T]`, or any other view type). `inout` is a parameter-only convention and cannot appear in a return position. This is the rule that eliminates lifetime annotations — if borrows never escape a function, the compiler always knows exactly when they end.
 
 ```ryo
 # NOT allowed — returning a borrow requires lifetime tracking
@@ -1221,7 +1221,7 @@ struct Order:
 
 #### Rule 7: Borrowing Rules (Compile-Time Enforced)
 
-*   **One Writer OR Many Readers:** At any point, a value can have *either* one or more immutable borrows *OR* exactly one mutable borrow (`&mut`). Never both.
+*   **One Writer OR Many Readers:** At any point, a value can have *either* one or more immutable borrows *OR* exactly one mutable borrow (`inout`). Never both.
 *   **Borrows Are Scoped to Calls:** A borrow begins when a function is called and ends when it returns. Because borrows can't be stored or returned (Rules 5 and 6), the compiler always knows the exact scope.
 
 ```ryo
@@ -1233,7 +1233,7 @@ fn main():
 	b = len(data)         # immutable borrow, released on return
 
 	# One writer — fine
-	add_bonus(&mut data, 10)  # exclusive mutable borrow
+	add_bonus(&data, 10)      # exclusive mutable borrow (signature: `inout list[int]`)
 
 	# Writer + reader — compile error
 	# (Not possible in sequential code due to call scoping,
@@ -1274,7 +1274,7 @@ fn process_data():
 *   **Drop order (for resources):** Reverse declaration order within a scope.
 *   **Relation to Ownership:** The Move/Borrow model dictates *who* owns the value. The Hybrid Eager model dictates *when* ownership ends (after last use for memory, at scope exit for resources). The `Drop` trait dictates *what happens* when ownership ends.
 
-*(Rationale: `drop` takes `self` by move rather than `&mut self` because the value is being destroyed — there is no reason to borrow something that ceases to exist. This hybrid model gives Ryo 90% of Mojo's performance benefits with 0% of the cognitive overhead or race-condition risks associated with pure eager destruction.)*
+*(Rationale: `drop` takes `self` by move rather than `inout self` because the value is being destroyed — there is no reason to borrow something that ceases to exist. This hybrid model gives Ryo 90% of Mojo's performance benefits with 0% of the cognitive overhead or race-condition risks associated with pure eager destruction.)*
 
 ### 5.5 `with` — Resource Lifetime Blocks
 
@@ -1317,7 +1317,7 @@ fn read_file(path: str) -> Error!str:
 		f.read()
 	# f closed here (Drop closes it)
 
-fn update_count(counter: &mut mutex[int]):
+fn update_count(counter: inout mutex[int]):
 	with counter.lock() as guard:            # acquires the lock
 		guard.value += 1
 	# lock released here (Drop releases it)
@@ -1333,7 +1333,14 @@ The Move/Borrow model handles tree-shaped data well, but some patterns need shar
 2.  **Shared State:** A configuration object accessed by multiple concurrent tasks.
 3.  **Long-Lived Resources:** State shared across route handlers in a web server.
 
-`shared[T]` (Atomic Reference Counted pointer) allows multiple owners. The data is dropped when the last reference is released. `weak[T]` breaks reference cycles.
+`shared[T]` allows multiple owners via atomic reference counting. The data is dropped when the last reference is released. The semantic model follows **Swift's class reference semantics**, not Rust's manual `Arc<T>`: refcount operations are implicit on assignment, the compiler aggressively elides redundant retain/release pairs, and stdlib container types (`list`, `map`, `str`) implement copy-on-write so users see value semantics even when storage is shared. The practical effect is that `shared[T]` is cheap in common patterns and expensive only when reference counts actually cross thread boundaries or escape into closures.
+
+`weak[T]` and `unowned[T]` break reference cycles:
+
+*   `weak[T]` — nilable on drop; the holder must check before use. Suitable for parent-pointers in trees, observer subscribers, and any reference that may legitimately outlive its referent.
+*   `unowned[T]` — traps on use-after-drop. Suitable for "I know this lives at least as long as I do" relationships where a check would be noise.
+
+Cycles between `shared[T]` values that do not include at least one `weak[T]` or `unowned[T]` link will leak memory — the runtime does not perform cycle collection.
 
 ```ryo
 # Shared config across route handlers
@@ -1352,12 +1359,13 @@ fn setup_server():
 	)
 ```
 
-*   `shared[T]` is **explicit opt-in** — the developer acknowledges the ARC overhead.
+*   `shared[T]` is **explicit opt-in** — the developer chooses shared ownership at the type level, and the type signature tells a reviewer "this data is shared."
 *   `shared[T]` is a **normal owned type** — it can be stored in struct fields, returned from functions, and moved between scopes. The inner `T` is accessed through the container.
+*   Assignment retains, drop releases; the user never writes `.clone()`. Most retain/release pairs are elided by the compiler before codegen.
 
-*(Rationale: In Ryo's target domains, `shared[T]` is common in server code — shared DB pools, shared configuration, shared caches. It is not an "escape hatch" to be avoided; it is the idiomatic tool for shared state. The key is that it's explicit: the type signature tells the reviewer "this data is shared.")*
+*(Rationale: In Ryo's target domains, `shared[T]` is common in server code — shared DB pools, shared configuration, shared caches. It is not an "escape hatch" to be avoided; it is the idiomatic tool for shared state. Swift's model is the closest published precedent for "refcounting that's actually fast in application code," and it pairs naturally with Ryo's no-explicit-lifetimes design.)*
 
-**Cost clarification:** For read-only shared state, `shared[T]` is simpler than Rust's approach — no need for `Arc` wrappers when the data is immutable. However, for mutable shared state, `shared[mutex[T]]` has ceremony parity with Rust's `Arc<Mutex<T>>` — the difference is syntax (lowercase, no angle brackets), not conceptual complexity. The lock/unlock ceremony is identical.
+**Cost clarification:** For read-only shared state, `shared[T]` is simpler than Rust's approach — no `Arc` wrappers, no explicit clones, no lifetime annotations. Refcount operations that cannot be elided cost the same as Rust's `Arc::clone` / `Arc::drop` (an atomic increment / decrement). For mutable shared state, `shared[mutex[T]]` has ceremony parity with Rust's `Arc<Mutex<T>>`. For read-heavy mutable state, `shared[rwlock[T]]` allows concurrent readers.
 
 ### 5.7 Iterators and Views
 
@@ -1436,13 +1444,13 @@ are the tools in order of preference.
 
 #### Idiomatic techniques
 
-3. **Use `&mut` for in-place mutation.** When a function modifies
-   data rather than producing a new value, take `&mut` instead of
+3. **Use `inout` for in-place mutation.** When a function modifies
+   data rather than producing a new value, take `inout` instead of
    consuming and returning. See Section 5.2.1 for the full decision
-   rule between `&mut` and `move`.
+   rule between `inout` and `move`.
 
    ```ryo
-   fn add_header(buf: &mut str, header: str):
+   fn add_header(buf: inout str, header: str):
    	buf.push_str(header)
    	buf.push('\n')
    ```
@@ -1498,7 +1506,7 @@ before restructuring.
   the syntactic noise.
 - **Lifetime-annotated return references.** The whole point of
   Ownership Lite is to not have these. For shared access, use
-  `shared[T]`; for in-place mutation, use `&mut`.
+  `shared[T]`; for in-place mutation, use `inout`.
 
 *(Rationale: Most returns are free — NRVO writes directly into the
 caller's slot, and move semantics transfer a pointer, not data.
@@ -1511,7 +1519,7 @@ lifetimes.)*
 
 ### 6.1 Functions & Methods
 
-*   **Functions/Methods:** Standard definition/call. Return single value (can be tuple). Methods use `self` (implicit immutable borrow, consistent with Rule 2), `&mut self` (explicit mutable borrow), or `move self` (take ownership).
+*   **Functions/Methods:** Standard definition/call. Return single value (can be tuple). Methods use `self` (implicit immutable borrow, consistent with Rule 2), `inout self` (explicit mutable borrow), or `move self` (take ownership).
 
 ### 6.1.1 Named Parameters & Default Values
 
@@ -2506,7 +2514,7 @@ fn average(items: list[float]) -> float:
 
 #[pre(index >= 0)]
 #[pre(index <= items.len())]
-fn insert_at(items: &mut list[int], index: int, value: int):
+fn insert_at(items: inout list[int], index: int, value: int):
     items.insert(index, value)
 ```
 

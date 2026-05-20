@@ -67,7 +67,7 @@ result = try some_operation() catch |e|:
 **Basic Trait Bounds**
 ```ryo
 # Future syntax for trait bounds
-fn sort[T](list: &mut list[T])
+fn sort[T](list: inout list[T])
 where T: Comparable:
 	# Implementation using T's comparison capabilities
 
@@ -103,7 +103,7 @@ where
 trait Iterator:
 	type Item
 
-	fn next(&mut self) -> ?Self.Item
+	fn next(inout self) -> ?Self.Item
 
 	# Default implementations
 	fn collect[C](self) -> C
@@ -114,7 +114,7 @@ trait Iterator:
 impl Iterator for ListIterator[T]:
 	type Item = T
 
-	fn next(&mut self) -> ?T:
+	fn next(inout self) -> ?T:
 		# Implementation
 		pass
 ```
@@ -154,7 +154,7 @@ impl[T] Container[T]:
 	fn get(&self) -> &T:
 		return &self.value
 	
-	fn set(&mut self, new_value: T):
+	fn set(inout self, new_value: T):
 		self.value = new_value
 
 # Conditional implementations
@@ -211,7 +211,7 @@ Currently, Ryo supports `for item in collection:` syntax but lacks a formal iter
 trait Iterator:
 	type Item
 
-	fn next(&mut self) -> ?Self.Item
+	fn next(inout self) -> ?Self.Item
 
 	# Default implementations for common operations
 	fn map[B](self, f: fn(Self.Item) -> B) -> MapIterator[Self, B]:
@@ -238,7 +238,7 @@ trait Iterator:
 impl Iterator for ListIterator[T]:
 	type Item = T
 
-	fn next(&mut self) -> ?T:
+	fn next(inout self) -> ?T:
 		if self.index < self.list.len():
 			item = self.list[self.index]
 			self.index += 1
@@ -400,10 +400,10 @@ Currently, Ryo has basic f-strings. Enhanced formatting capabilities are planned
 ```ryo
 # Future formatting trait system
 trait Display:
-	fn fmt(&self, formatter: &mut Formatter) -> FormatError!void
+	fn fmt(&self, formatter: inout Formatter) -> FormatError!void
 
 trait Debug:
-	fn fmt(&self, formatter: &mut Formatter) -> FormatError!void
+	fn fmt(&self, formatter: inout Formatter) -> FormatError!void
 
 # Automatic implementations possible with attributes
 #[derive(Debug)]
@@ -412,7 +412,7 @@ struct Point:
 	y: float
 
 impl Display for Point:
-	fn fmt(&self, formatter: &mut Formatter) -> FormatError!void:
+	fn fmt(&self, formatter: inout Formatter) -> FormatError!void:
 		formatter.write(f"({self.x}, {self.y})")
 ```
 
@@ -449,7 +449,7 @@ struct Currency:
 	symbol: str
 
 impl Display for Currency:
-	fn fmt(&self, formatter: &mut Formatter) -> FormatError!void:
+	fn fmt(&self, formatter: inout Formatter) -> FormatError!void:
 		formatter.write(f"{self.symbol}{self.amount:.2}")
 
 price = Currency(amount=123.456, symbol="$")
@@ -889,7 +889,7 @@ process_shapes(shapes)
 - Traits used as trait objects must be "object safe"
 - No associated types in object-safe traits initially
 - No generic methods in object-safe traits initially
-- Methods must use `&self`, `&mut self`, or `self` (no arbitrary self types)
+- Methods must use `&self`, `inout self`, or `self` (no arbitrary self types)
 
 **Performance Considerations**
 - Dynamic dispatch has runtime cost (virtual function calls)
@@ -962,7 +962,7 @@ unsafe fn manipulate_raw_memory(ptr: *mut u8, len: usize):
 	for i in range(len):
 		*ptr.offset(i) = 0  # Raw pointer arithmetic and dereference
 
-fn safe_wrapper(data: &mut [u8]):
+fn safe_wrapper(data: inout [u8]):
 	unsafe:
 		manipulate_raw_memory(data.as_mut_ptr(), data.len())
 ```
@@ -987,6 +987,156 @@ FFI and unsafe operations are necessary escape hatches for:
 - Platform-specific functionality
 
 However, these features are advanced and should be used sparingly, with safety as the primary responsibility of the developer.
+
+### **Runtime Permissions (Sandboxing for AI-Generated Code)**
+
+To make AI-generated and untrusted code safe to run without compromising Ryo's colorless concurrency model, the runtime gains a **process-level permissions system** modeled on Deno's. Permissions are enforced at the syscall boundary, not at the type level — so function signatures stay clean and no capability threading is required.
+
+This is **not** a capability-based I/O system in the type-theoretic sense. Effects do not appear in function signatures. The runtime simply refuses syscalls that exceed the granted permission set, returning an error to the caller through the normal error-handling path.
+
+#### **Motivation**
+
+The "AI writes, human reviews" workflow (see spec Section 5.9 rationale and the landing page positioning) implies that humans should be able to run AI-generated code with confidence that it cannot reach beyond a known sandbox. Existing protections (static types, ownership, exhaustive matching) catch correctness bugs but cannot prevent *intentional* or *unintentional* misuse of I/O effects — an AI assistant that decides "we should log this to the network" can write code that compiles and runs.
+
+Three design constraints rule out the alternatives:
+
+- **Capability-based I/O (Zero-style)** requires threading a `World` or sub-capability through every function that performs I/O. This is a form of function coloring and conflicts with Ryo's spec-level commitment to colorless code.
+- **Effect tracking via attributes (`#[fs]`, `#[net]`)** has the same coloring cost in a different syntactic shape.
+- **No protection at all** is the current default and is unsuitable for running untrusted AI output.
+
+Runtime permissions satisfy all three: zero coloring tax, real safety, no new keywords, no spec changes.
+
+#### **CLI Surface**
+
+Permissions are granted at invocation time:
+
+```bash
+# Default — no permissions. fs, net, env, run all denied.
+ryo run untrusted.ryo
+
+# Grant filesystem read on a specific path.
+ryo run script.ryo --allow-read=./data
+
+# Grant net access to a specific host.
+ryo run client.ryo --allow-net=api.example.com:443
+
+# Grant filesystem write to /tmp, network broadly, env vars by allowlist.
+ryo run app.ryo \
+    --allow-write=/tmp \
+    --allow-net \
+    --allow-env=HOME,USER
+
+# Permissive — grant everything (development mode).
+ryo run app.ryo --allow-all
+```
+
+The same flags apply to `ryo build` for embedding permissions into the compiled binary metadata (for AOT-compiled distribution where the runtime enforces permissions on launch).
+
+#### **Permission Categories**
+
+```text
+--allow-read[=<paths>]    Filesystem read access (path-scoped)
+--allow-write[=<paths>]   Filesystem write access (path-scoped)
+--allow-net[=<hosts>]     Network access (host:port-scoped)
+--allow-env[=<vars>]      Environment variable read (allowlist)
+--allow-run[=<paths>]     Subprocess execution (path-scoped)
+--allow-ffi[=<libs>]      FFI / native library loading (library-scoped)
+--allow-sys[=<calls>]     System info access (uid, hostname, networkInterfaces, etc.)
+--allow-all               All of the above. Discouraged outside development.
+```
+
+Scoped grants (paths, hosts, vars) are the recommended form. Bare `--allow-net` without a host is equivalent to a network kill-switch off.
+
+Each category mirrors a well-defined set of stdlib functions. Calling a denied function returns a `PermissionDenied` error through the regular error-union mechanism:
+
+```ryo
+fn read_config() -> PermissionDenied!str:
+    return std.fs.read_to_string("/etc/secret")     # returns PermissionDenied if not allowed
+```
+
+#### **In-Program Capability Scopes**
+
+For nested sandboxing within a single program — e.g., running a plugin or evaluating user-provided expressions with reduced privileges — the runtime exposes a `with_permissions` block primitive:
+
+```ryo
+fn run_plugin(plugin: Plugin):
+    # Drop all permissions for the duration of the block.
+    with_permissions(none):
+        plugin.execute()                  # any I/O inside fails with PermissionDenied
+
+    # Or grant a reduced set.
+    with_permissions(allow_read=["./plugin_data"]):
+        plugin.read_config()
+```
+
+`with_permissions` is purely subtractive — a child scope can only **remove** permissions, never add ones the parent didn't have. This matches the principle of least privilege and prevents privilege escalation.
+
+#### **What's Gated and What Isn't**
+
+| Operation | Gated by | Notes |
+|---|---|---|
+| `std.fs.*` | `--allow-read` / `--allow-write` | Path-scoped |
+| `std.net.*` | `--allow-net` | Host:port-scoped |
+| `std.env.get` / `std.env.set` | `--allow-env` | Variable allowlist |
+| `std.proc.spawn` | `--allow-run` | Executable path-scoped |
+| `extern "C"` FFI calls | `--allow-ffi` | Library-scoped |
+| `std.sys.*` | `--allow-sys` | Per-call allowlist (hostname, uid, etc.) |
+| Pure computation | **Not gated** | int math, string ops, allocation, struct/enum construction |
+| Channel ops | **Not gated** | In-process IPC; no external effect |
+| `task.spawn` / `task.scope` | **Not gated** | In-process concurrency |
+| `print` to stdout/stderr | **Not gated by default** | See *Print Exception* below |
+| Random number generation | **Not gated by default** | Pseudo-random is in-process; crypto-secure RNG (`std.rand.secure`) is gated by `--allow-sys` |
+| Time / clock reads | **Not gated** | High-resolution timers gated by `--allow-sys` if implementation requires syscall |
+
+**Print Exception:** Standard output and error are not gated by default because they're considered part of the contract between a program and its launcher. Programs that wish to suppress stdout from sandboxed children can pipe `2>/dev/null` or use `with_permissions` to attach a custom writer. A `--no-stdout` / `--no-stderr` opt-in is available for hardened sandboxes.
+
+#### **AOT Binary Embedding**
+
+When a binary is built with permission flags, the requirements are embedded in the binary metadata. The runtime checks them at startup:
+
+```bash
+ryo build app.ryo --requires-read=./data --requires-net=api.example.com -o app
+./app                            # runtime enforces declared permissions
+./app --allow-net=other.com      # rejected: binary's declared net allowlist is fixed at build time
+```
+
+This makes distribution semantics clear: end users see what an AOT binary will access, and the binary cannot escalate its own permissions at runtime.
+
+#### **Why This Over Capability-Based I/O**
+
+| Property | Runtime Permissions (this proposal) | Capability-based I/O (Zero-style) |
+|---|---|---|
+| Function signature coloring | None | High — `World` threads through call chains |
+| Spec compatibility | ✓ Colorless promise preserved | ✗ Adds effect coloring |
+| AI-generated code safety | High (process boundary) | High (type boundary) |
+| Refactoring cost when adding I/O | Zero (no signature changes) | High (cascading capability threading) |
+| Static purity proofs | No | Yes (types reveal effects) |
+| LLM friendliness | High — `print` is just `print` | Lower — generated code may forget to thread `World` |
+| Implementation cost | Medium (syscall hooks + CLI plumbing) | Higher (compiler-side effect tracking + propagation) |
+
+The runtime-permissions model trades compile-time effect tracking for runtime enforcement. For AI-generated code safety, the process boundary is sufficient — what matters is preventing the program from doing harmful things, not proving function-level purity. The compile-time purity property is a research-grade concern that doesn't justify the coloring cost for v0.2.
+
+#### **Prior Art**
+
+- **Deno** — the canonical example. `deno run --allow-read=./data script.ts` is the model. Deno's permission system is widely deployed and battle-tested as of 2024.
+- **Bun** — adopted Deno-compatible permissions in 2024.
+- **WASI capabilities** — directory pre-opens and host imports are a permission system at the host-boundary layer; complements this proposal on the WASM target.
+- **Linux seccomp / sandboxing primitives** — kernel-level analog; orthogonal to language-level permissions but a useful belt-and-suspenders layer.
+
+Zero's capability-based I/O is the closest *language-level* precedent for AI-safety effect restriction but takes the type-theoretic path Ryo rejects. The Deno approach matches Ryo's design constraints better.
+
+#### **Rationale**
+
+The "AI writes, human reviews" positioning requires that AI-generated code be safe to run without exhaustive auditing. Static memory safety and type checking are necessary but insufficient — they catch correctness bugs, not effect-based misuse. Runtime permissions complete the safety story by giving humans a kill-switch for I/O without requiring the type system to track effects.
+
+Adopting Deno's model rather than Zero's is the load-bearing decision: it preserves the spec's colorless promise (no `World` threading, no `suspend`-like keywords) while solving the same underlying problem (preventing AI-generated code from reaching network/disk/processes without explicit human authorization).
+
+#### **Phase and Scope**
+
+- **Phase:** v0.2 (post-core-language).
+- **Dependencies:** Standard library I/O modules (`std.fs`, `std.net`, `std.env`, `std.proc`) — these are the syscall surface to instrument.
+- **Out of scope for v0.2:** Type-level effect tracking, capability-based I/O, algebraic effects. Revisit if v0.3+ benchmarks of AI-safety incidents motivate the additional cost.
+- **Compatibility:** Backwards-compatible. Code that runs without flags today continues to run with `--allow-all` (or equivalent) in v0.2.
 
 ### **SIMD Support**
 
@@ -1231,7 +1381,7 @@ fn test_http_request():
 #[benchmark]
 fn bench_sort():
 	data = generate_test_data(10000)
-	sort(&mut data)
+	sort(&data)
 ```
 
 #### **Documentation Generator**
@@ -1301,6 +1451,7 @@ Based on analysis of missing features and their importance to Ryo's goals, here 
 7. **Enhanced Pattern Matching** - Guards, OR patterns, advanced destructuring
 8. **Language Server Protocol (LSP)** - IDE support for autocompletion, diagnostics, refactoring
 9. **Testing Framework** - Built-in test framework with benchmarking capabilities
+10. **Runtime Permissions** - Deno-style sandbox flags (`--allow-read`, `--allow-net`, …) for safely running AI-generated and untrusted code; preserves the colorless concurrency promise
 
 *Rationale: These features significantly improve developer productivity and code expressiveness while maintaining language simplicity.*
 
