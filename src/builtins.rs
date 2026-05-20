@@ -10,6 +10,7 @@ pub struct BuiltinFunction {
 enum BuiltinReturn {
     Void,
     Never,
+    Str,
 }
 
 impl BuiltinFunction {
@@ -17,6 +18,7 @@ impl BuiltinFunction {
         match self.return_ty {
             BuiltinReturn::Void => pool.void(),
             BuiltinReturn::Never => pool.never(),
+            BuiltinReturn::Str => pool.str_(),
         }
     }
 }
@@ -33,6 +35,18 @@ pub const BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction {
         name: "panic",
         return_ty: BuiltinReturn::Never,
+    },
+    BuiltinFunction {
+        name: "int_to_str",
+        return_ty: BuiltinReturn::Str,
+    },
+    BuiltinFunction {
+        name: "float_to_str",
+        return_ty: BuiltinReturn::Str,
+    },
+    BuiltinFunction {
+        name: "bool_to_str",
+        return_ty: BuiltinReturn::Str,
     },
 ];
 

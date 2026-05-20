@@ -1989,3 +1989,72 @@ fn test_str_inequality() {
     let code = "fn main():\n\ta: str = \"hello\"\n\tb: str = \"world\"\n\tassert(a != b, \"different strings should not be equal\")\n";
     assert_ryo_runs!("str_inequality.ryo", code);
 }
+
+#[test]
+fn test_int_to_str_builtin() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\ts: str = int_to_str(42)\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "int_to_str.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "int_to_str.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("42"),
+        "Output should contain '42', got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_float_to_str_builtin() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\ts: str = float_to_str(2.75)\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "float_to_str.ryo", code);
+
+    let output = run_ryo_command(&["run", "float_to_str.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("2.75"),
+        "Output should contain '2.75', got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_bool_to_str_builtin() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\ts: str = bool_to_str(true)\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "bool_to_str.ryo", code);
+
+    let output = run_ryo_command(&["run", "bool_to_str.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("true"),
+        "Output should contain 'true', got: {}",
+        stdout
+    );
+}

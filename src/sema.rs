@@ -1322,6 +1322,87 @@ fn emit_builtin_call(
         }
         "panic" => emit_panic(sema, fcx, view, span),
         "assert" => emit_assert(sema, fcx, view, arg_tirs, span),
+        "int_to_str" => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "int_to_str() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if !matches!(sema.pool.kind(arg_ty), TypeKind::Int) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "int_to_str() argument must be int, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+        }
+        "float_to_str" => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "float_to_str() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if !matches!(sema.pool.kind(arg_ty), TypeKind::Float) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "float_to_str() argument must be float, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+        }
+        "bool_to_str" => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "bool_to_str() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if !matches!(sema.pool.kind(arg_ty), TypeKind::Bool) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "bool_to_str() argument must be bool, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+        }
         _ => {
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, ret_ty, span)
@@ -1750,10 +1831,7 @@ mod tests {
         let (tirs, _pool) = run("x = \"a\" == \"b\"").unwrap();
         // The equality produces a bool-typed StrCmpEq instruction.
         let body = &tirs[0];
-        let has_str_eq = body
-            .instructions
-            .iter()
-            .any(|i| i.tag == TirTag::StrCmpEq);
+        let has_str_eq = body.instructions.iter().any(|i| i.tag == TirTag::StrCmpEq);
         assert!(has_str_eq, "expected StrCmpEq in TIR");
     }
 

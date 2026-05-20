@@ -222,6 +222,12 @@ impl Codegen<JITModule> {
             ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
             ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
             ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
+            ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
+            (
+                "ryo_float_to_str",
+                ryo_runtime::ryo_float_to_str as *const u8,
+            ),
+            ("ryo_bool_to_str", ryo_runtime::ryo_bool_to_str as *const u8),
         ]);
 
         Ok(Self::from_module(
@@ -1141,6 +1147,55 @@ impl<M: Module> Codegen<M> {
                     return Ok(ValueRepr::Scalar(val));
                 }
             }
+            TirTag::Call => {
+                let view = ctx.tir.call_view(r);
+                let name_str = ctx.pool.str(view.name);
+                if name_str == "int_to_str"
+                    || name_str == "float_to_str"
+                    || name_str == "bool_to_str"
+                {
+                    let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
+
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        24,
+                        3,
+                    ));
+                    let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+                    let (fn_name, param_ty) = match name_str {
+                        "int_to_str" => ("ryo_int_to_str", ctx.int_type),
+                        "float_to_str" => ("ryo_float_to_str", types::F64),
+                        "bool_to_str" => ("ryo_bool_to_str", types::I8),
+                        _ => unreachable!(),
+                    };
+
+                    let func_ref = Self::declare_runtime_fn(
+                        ctx.module,
+                        builder,
+                        fn_name,
+                        &[param_ty, ctx.int_type],
+                        &[],
+                    )?;
+                    builder.ins().call(func_ref, &[arg_val, out_ptr]);
+
+                    let ptr = builder
+                        .ins()
+                        .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+                    let len = builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+                    let cap = builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+
+                    ValueRepr::Str { ptr, len, cap }
+                } else {
+                    // Non-formatter call — delegate to scalar
+                    let val = Self::eval_inst(builder, ctx, r)?;
+                    return Ok(ValueRepr::Scalar(val));
+                }
+            }
             TirTag::StrConcat => {
                 let (lhs, rhs) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
@@ -1260,6 +1315,39 @@ impl<M: Module> Codegen<M> {
         // __ryo_panic and user functions go through the normal call path.
         if name_str == "print" {
             Self::generate_print_call(builder, ctx, &view.args)?;
+            return Ok(builder.ins().iconst(ctx.int_type, 0));
+        }
+
+        // Formatter builtins — when called as a bare statement (result
+        // discarded), we still emit the call but throw away the output.
+        // The primary path is eval_inst_str (used when result is assigned
+        // to a str variable or passed to print).
+        if name_str == "int_to_str" || name_str == "float_to_str" || name_str == "bool_to_str" {
+            let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
+
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                24,
+                3,
+            ));
+            let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+            let (fn_name, param_ty) = match name_str {
+                "int_to_str" => ("ryo_int_to_str", ctx.int_type),
+                "float_to_str" => ("ryo_float_to_str", types::F64),
+                "bool_to_str" => ("ryo_bool_to_str", types::I8),
+                _ => unreachable!(),
+            };
+
+            let func_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                fn_name,
+                &[param_ty, ctx.int_type],
+                &[],
+            )?;
+            builder.ins().call(func_ref, &[arg_val, out_ptr]);
+
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
