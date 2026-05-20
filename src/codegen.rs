@@ -15,7 +15,7 @@
 //!    instructions (e.g. `IAdd %3, %5` materializes `%3` and `%5`
 //!    first). Cranelift always needs nested values; doing it
 //!    through `TirRef` indexing is the point.
-//! 2. The `eval_inst` memoization map (`HashMap<TirRef, Value>`)
+//! 2. The `eval_inst` memoization map (`HashMap<TirRef, ValueRepr>`)
 //!    so a shared sub-expression isn't re-emitted. TIR today is
 //!    tree-shaped (one parent per inst) so this is purely
 //!    defensive — but it's the right invariant before lazy sema
@@ -87,6 +87,29 @@ struct LoopContext {
     continue_target: Block,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ValueRepr {
+    Scalar(Value),
+    #[allow(dead_code)]
+    Str { ptr: Value, len: Value, cap: Value },
+}
+
+impl ValueRepr {
+    fn expect_scalar(self) -> Value {
+        match self {
+            ValueRepr::Scalar(v) => v,
+            ValueRepr::Str { .. } => panic!("expected Scalar, got Str"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+enum LocalVar {
+    Scalar(Variable),
+    Str { ptr: Variable, len: Variable, cap: Variable },
+}
+
 /// Per-function emission state. Lives only for the duration of one
 /// `compile_function` call; reset between functions because
 /// Cranelift `Variable` ids and the `TirRef → Value` memo are both
@@ -102,10 +125,10 @@ struct FunctionContext<'a, M: Module> {
     tir: &'a Tir,
     locals: HashMap<StringId, Variable>,
     func_ids: &'a HashMap<StringId, FuncId>,
-    /// `TirRef → Value` memo. Materializing the same instruction
+    /// `TirRef → ValueRepr` memo. Materializing the same instruction
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
-    inst_values: HashMap<TirRef, Value>,
+    inst_values: HashMap<TirRef, ValueRepr>,
     loop_stack: Vec<LoopContext>,
 }
 
@@ -751,8 +774,8 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<Value, String> {
-        if let Some(&v) = ctx.inst_values.get(&r) {
-            return Ok(v);
+        if let Some(repr) = ctx.inst_values.get(&r) {
+            return Ok(repr.expect_scalar());
         }
         let inst = ctx.tir.inst(r);
         let value = match inst.tag {
@@ -931,7 +954,7 @@ impl<M: Module> Codegen<M> {
                 ));
             }
         };
-        ctx.inst_values.insert(r, value);
+        ctx.inst_values.insert(r, ValueRepr::Scalar(value));
         Ok(value)
     }
 
@@ -1170,4 +1193,44 @@ fn no_unreachable_in(tirs: &[Tir]) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cranelift::codegen::ir::Value as ClifValue;
+
+    #[test]
+    fn value_repr_scalar_roundtrip() {
+        let v = ClifValue::from_u32(1);
+        let repr = ValueRepr::Scalar(v);
+        assert_eq!(repr.expect_scalar(), v);
+    }
+
+    #[test]
+    fn value_repr_str_fields() {
+        let repr = ValueRepr::Str {
+            ptr: ClifValue::from_u32(1),
+            len: ClifValue::from_u32(2),
+            cap: ClifValue::from_u32(3),
+        };
+        match repr {
+            ValueRepr::Str { ptr, len, cap } => {
+                assert_ne!(ptr, len);
+                assert_ne!(len, cap);
+            }
+            _ => panic!("expected Str"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected Scalar, got Str")]
+    fn value_repr_expect_scalar_panics_on_str() {
+        let repr = ValueRepr::Str {
+            ptr: ClifValue::from_u32(1),
+            len: ClifValue::from_u32(2),
+            cap: ClifValue::from_u32(3),
+        };
+        repr.expect_scalar();
+    }
 }
