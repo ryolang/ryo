@@ -1928,3 +1928,52 @@ fn test_str_variable_print() {
     );
     assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
+
+#[test]
+fn test_str_concat() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code =
+        "fn main():\n\ta: str = \"Hello, \"\n\tb: str = \"World!\"\n\tc: str = a + b\n\tprint(c)\n";
+    let test_file = create_test_file(temp_dir.path(), "str_concat.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "str_concat.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Hello, World!"),
+        "Output should contain 'Hello, World!', got: {}",
+        stdout
+    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
+}
+
+#[test]
+fn test_str_concat_chained() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tresult: str = \"a\" + \"b\" + \"c\"\n\tprint(result)\n";
+    let test_file = create_test_file(temp_dir.path(), "str_concat_chained.ryo", code);
+
+    let output = run_ryo_command(&["run", "str_concat_chained.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("abc"),
+        "Output should contain 'abc', got: {}",
+        stdout
+    );
+    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
+}

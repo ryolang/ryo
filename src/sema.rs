@@ -1176,6 +1176,21 @@ fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.float(), lhs, rhs, span)
             }
+            TypeKind::Str => {
+                if tag != InstTag::Add {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::UnsupportedOperator,
+                        format!(
+                            "arithmetic operator '{}' not supported for type 'str'",
+                            bin_op_symbol(tag),
+                        ),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+                fcx.builder
+                    .binary(TirTag::StrConcat, sema.pool.str_(), lhs, rhs, span)
+            }
             TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             _ => {
                 sema.sink.emit(Diag::error(

@@ -220,6 +220,7 @@ impl Codegen<JITModule> {
                 ryo_runtime::ryo_str_from_literal as *const u8,
             ),
             ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
+            ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
         ]);
 
         Ok(Self::from_module(
@@ -1027,6 +1028,9 @@ impl<M: Module> Codegen<M> {
                 Self::generate_if_stmt(builder, ctx, r)?;
                 builder.ins().iconst(ctx.int_type, 0)
             }
+            TirTag::StrConcat => {
+                return Err("StrConcat must be materialized through eval_inst_str".to_string());
+            }
             TirTag::Unreachable => {
                 return Err(
                     "codegen reached an Unreachable TIR inst — sema must have errored".to_string(),
@@ -1102,6 +1106,58 @@ impl<M: Module> Codegen<M> {
                     let val = Self::eval_inst(builder, ctx, r)?;
                     return Ok(ValueRepr::Scalar(val));
                 }
+            }
+            TirTag::StrConcat => {
+                let (lhs, rhs) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!(),
+                };
+                let l_repr = Self::eval_inst_str(builder, ctx, lhs)?;
+                let r_repr = Self::eval_inst_str(builder, ctx, rhs)?;
+                let (l_ptr, l_len) = match l_repr {
+                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
+                    _ => unreachable!(),
+                };
+                let (r_ptr, r_len) = match r_repr {
+                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
+                    _ => unreachable!(),
+                };
+
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    24,
+                    3,
+                ));
+                let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+                let concat_ref = Self::declare_runtime_fn(
+                    ctx.module,
+                    builder,
+                    "ryo_str_concat",
+                    &[
+                        ctx.int_type,
+                        types::I64,
+                        ctx.int_type,
+                        types::I64,
+                        ctx.int_type,
+                    ],
+                    &[],
+                )?;
+                builder
+                    .ins()
+                    .call(concat_ref, &[l_ptr, l_len, r_ptr, r_len, out_ptr]);
+
+                let ptr = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+                let len = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+                let cap = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+
+                ValueRepr::Str { ptr, len, cap }
             }
             _ => {
                 // Delegate to scalar eval_inst for non-str instructions
