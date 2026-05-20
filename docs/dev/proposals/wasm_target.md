@@ -1,8 +1,10 @@
-# WASM Target — Proposal (Deferred)
+# WASM Target (Draft — v0.4)
 
-**Status:** Proposal — Deferred post-v0.1.0 (revival requires a strategic commitment to a second backend)
+**Status:** Design (v0.2+)
 
-This document describes the design space for a WebAssembly compilation target. As of 2026-05-20, the spike (see [m8d-cranelift-wasm-spike.md](../../analysis/m8d-cranelift-wasm-spike.md)) showed that **Cranelift does not emit WASM**, so the original "thin plumbing" plan collapsed. Reviving WASM requires building a second backend. This proposal sketches what that would entail and what remains valid.
+Deferred post-v0.1.0; revival requires a strategic commitment to a second backend (see "Why this is deferred" below).
+
+This document describes the design space for a WebAssembly compilation target. A 2026-05-20 verification spike showed that **Cranelift does not emit WASM**, so the original "thin plumbing" plan collapsed. Reviving WASM requires building a second backend. This proposal sketches what that would entail and what remains valid.
 
 ## Changelog
 
@@ -14,7 +16,7 @@ This document describes the design space for a WebAssembly compilation target. A
 
 ## Why this is deferred
 
-The 2026-05-20 spike (see [m8d-cranelift-wasm-spike.md](../../analysis/m8d-cranelift-wasm-spike.md)) established that:
+The 2026-05-20 spike established that:
 
 - `cranelift_codegen::isa::lookup(Triple::from_str("wasm32-wasip1"))` returns `LookupError::Unsupported`.
 - Cranelift 0.131's available ISAs are `x86`, `arm64`, `s390x`, `riscv64`, and `pulley` (a portable interpreter). There is no wasm32 backend, with or without feature flags.
@@ -133,8 +135,9 @@ The pointer-width audit motivation outlives the WASM target — it applies to an
 
 ## References
 
-- Spike outcome (load-bearing): [docs/analysis/m8d-cranelift-wasm-spike.md](../../analysis/m8d-cranelift-wasm-spike.md)
-- Spec: [§1](../../specification.md) (Target Domains — mentions Wasm), [§17](../../specification.md) (Tooling), [§19](../../specification.md) (Future Work — WebAssembly Target Details)
+- Spec: [§1](../../specification.md) (Target Domains — mentions Wasm), [§16](../../specification.md) (Tooling), [§19](../../specification.md) (Future Work — WebAssembly Target Details)
 - Dev: [concurrency.md](../concurrency.md) — WasmFX future direction for concurrency-on-WASM
 - Dev: [arc_optimizer.md](../arc_optimizer.md) — target-agnostic ARC pass remains correct under any backend
+- Milestone: None active. Proposal is deferred; revival would slot as a new "WASM Backend" milestone after M27 (Core Language Complete) in [implementation_roadmap.md](../implementation_roadmap.md).
+- Spike record: working notes kept locally under `docs/analysis/` (gitignored per [docs/CLAUDE.md](../../CLAUDE.md) — scratch/uncommitted); the substantive findings are inlined above under "Why this is deferred."
 - External: [wasm-encoder source](https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder), [WASI preview 1](https://github.com/WebAssembly/WASI/tree/main/legacy/preview1), [WasmFX](https://wasmfx.dev/)
