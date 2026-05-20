@@ -25,7 +25,7 @@
 use crate::ast::CompoundOp;
 use crate::tir::{Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
-use cranelift::codegen::ir::{BlockArg, FuncRef};
+use cranelift::codegen::ir::{ArgumentPurpose, BlockArg, FuncRef};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -35,16 +35,25 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::HashMap;
 use target_lexicon::Triple;
 
+/// Returns `true` if `ty` resolves to `Str` in the pool.
+///
+/// Callers use this to gate multi-value (fat-pointer) paths before
+/// reaching `cranelift_type_for`, which panics on `Str`.
+fn is_str_type(ty: TypeId, pool: &InternPool) -> bool {
+    matches!(pool.kind(ty), TypeKind::Str)
+}
+
 /// Map a TIR type to the corresponding Cranelift IR type.
 ///
 /// `Int` uses the target's pointer-sized integer (i64 on 64-bit).
 /// `Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
-/// `Str` is represented as a pointer (pointer-sized integer).
+/// `Str` is a fat pointer (ptr, len, cap) — it cannot map to a single type;
+/// callers must gate with `is_str_type` before reaching this function.
 /// `Void` has no Cranelift representation and should not be mapped here.
 fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) -> types::Type {
     match pool.kind(ty) {
         TypeKind::Int => pointer_ty,
-        TypeKind::Str => pointer_ty,
+        TypeKind::Str => panic!("cranelift_type_for: str is multi-value; use is_str_type gate"),
         TypeKind::Bool => types::I8,
         TypeKind::Float => types::F64,
         // Dead code after trap, but Cranelift needs a concrete type for every SSA value
@@ -319,8 +328,14 @@ impl<M: Module> Codegen<M> {
     fn build_signature(&self, tir: &Tir, pool: &InternPool) -> Signature {
         let mut sig = self.module.make_signature();
         for param in &tir.params {
-            let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
-            sig.params.push(AbiParam::new(cl_ty));
+            if is_str_type(param.ty, pool) {
+                sig.params.push(AbiParam::new(self.int_type)); // ptr
+                sig.params.push(AbiParam::new(types::I64)); // len
+                sig.params.push(AbiParam::new(types::I64)); // cap
+            } else {
+                let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
+                sig.params.push(AbiParam::new(cl_ty));
+            }
         }
         // C-ABI shim for `main`: Ryo's `fn main()` is void, but the
         // host C runtime (crt0 via zig cc, or our JIT trampoline)
@@ -331,8 +346,16 @@ impl<M: Module> Codegen<M> {
         if is_main {
             sig.returns.push(AbiParam::new(self.int_type));
         } else if tir.return_type != pool.void() {
-            let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
-            sig.returns.push(AbiParam::new(cl_ty));
+            if is_str_type(tir.return_type, pool) {
+                // sret: hidden pointer prepended to regular params, no IR-level return.
+                sig.params.insert(
+                    0,
+                    AbiParam::special(self.int_type, ArgumentPurpose::StructReturn),
+                );
+            } else {
+                let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
+                sig.returns.push(AbiParam::new(cl_ty));
+            }
         }
         sig
     }
@@ -359,6 +382,12 @@ impl<M: Module> Codegen<M> {
             let int_type = self.int_type;
             let mut locals: HashMap<StringId, Variable> = HashMap::new();
 
+            for param in tir.params.iter() {
+                assert!(
+                    !is_str_type(param.ty, pool),
+                    "str parameters not yet supported (landing in Task 15)"
+                );
+            }
             for (i, param) in tir.params.iter().enumerate() {
                 let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                 let var = builder.declare_var(cl_ty);
@@ -449,6 +478,10 @@ impl<M: Module> Codegen<M> {
         match inst.tag {
             TirTag::VarDecl => {
                 let view = ctx.tir.var_decl_view(r);
+                if is_str_type(inst.ty, ctx.pool) {
+                    // str VarDecl will be handled in Task 6
+                    todo!("str VarDecl codegen");
+                }
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
                 // The variable's resolved type lives in the VarDecl
                 // inst's `ty` slot directly — no side-table lookup.
