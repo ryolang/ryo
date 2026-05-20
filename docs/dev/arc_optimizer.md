@@ -74,7 +74,7 @@ The ARC optimizer runs after the ownership pass for two reasons:
 
 A reasonable implementation strategy is to **share the dataflow framework** between the two passes — same lattice scaffolding, different transfer functions. The ARC optimizer is then "compose witness intervals over the same TIR" rather than a separate pass with its own dataflow library.
 
-**Target-agnostic.** The pass operates on TIR before backend lowering and is unaffected by the choice of native (Cranelift → object) vs WASM (Cranelift → `wasm-ld`). On WASM, the elided retains/releases are WASM atomic ops when the `+atomics` feature is enabled, and ordinary loads/stores otherwise — the pass doesn't need to care which. See [wasm_target.md](wasm_target.md) for backend-specific concerns.
+**Target-agnostic.** The pass operates on TIR before backend lowering, so it is unaffected by the choice of native (Cranelift → object) vs any future WASM backend. If a WASM emission path is ever built (see [proposals/wasm_target.md](proposals/wasm_target.md) — currently deferred), the elided retains/releases would be WASM atomic ops when the `+atomics` feature is enabled and ordinary loads/stores otherwise; the pass would not need to care which.
 
 ## The pass, sketched
 

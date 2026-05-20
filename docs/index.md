@@ -38,7 +38,7 @@ hide:
 | **Concurrency** | Green threads + Task/Future/Channel (colorless functions) |
 | **Types** | Static with bidirectional inference |
 | **Null Safety** | Optional types (`?T`) with `?.` chaining and `orelse` |
-| **Performance** | Native code via Cranelift (AOT, JIT, WebAssembly) |
+| **Performance** | Native code via Cranelift (AOT and JIT) |
 
 ---
 

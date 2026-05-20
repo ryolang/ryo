@@ -127,8 +127,8 @@ Companion to [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](moj
 | **Ownership / borrow check** | `rustc_borrowck` (NLL + Polonius) on MIR | `CheckLifetime` on MLIR | Exclusivity + ARC check on SIL | `OwnershipPass` on TIR |
 | **ARC elision** | LLVM `ObjCArcOpts` (limited) | (limited) | SIL `ARCOptimizer` (aggressive) | `arc_optimizer.rs` (planned) |
 | **Native backend** | LLVM | LLVM | LLVM | Cranelift |
-| **WASM backend** | LLVM (`wasm32-*`) | Not yet supported | LLVM (`swiftwasm` fork) | Cranelift (`wasm32-wasip1`, post-Phase-D) |
-| **WASM runtime model** | Rust std on `wasm32-wasi` uses wasi-libc | N/A | Swift runtime ported (large) | Go-style: bundled `dlmalloc-rs` + direct WASI imports, no wasi-libc — see [wasm_target.md](wasm_target.md) |
+| **WASM backend** | LLVM (`wasm32-*`) | Not yet supported | LLVM (`swiftwasm` fork) | None today — Cranelift does not emit WASM. Future work would build a parallel `wasm-encoder` backend — see [proposals/wasm_target.md](proposals/wasm_target.md). |
+| **WASM runtime model** | Rust std on `wasm32-wasi` uses wasi-libc | N/A | Swift runtime ported (large) | TBD — earlier "Go-style bundled `dlmalloc-rs` + direct WASI imports" plan was tied to the dropped Cranelift-emits-WASM design; the runtime model will be revisited if/when the second backend is funded. |
 
 ## Philosophical positioning
 
@@ -167,6 +167,6 @@ Ryo deliberately picks: Mojo's argument conventions, Mojo's ASAP destruction, Sw
 - Dev: `docs/dev/arc_optimizer.md` (Swift-style refcount elision design)
 - Dev: `docs/dev/borrow_checker.md` (Ryo's algorithm sketch)
 - Dev: `docs/dev/concurrency.md` (Ryo's concurrency model)
-- Dev: `docs/dev/wasm_target.md` (WASM compilation, Go-style runtime, L2 bundled allocator)
+- Dev: `docs/dev/proposals/wasm_target.md` (WASM target — deferred proposal)
 - Milestone: `docs/dev/implementation_roadmap.md`
 - Upstream: <https://github.com/rust-lang/rust>, <https://github.com/modular/modular/tree/main/mojo>, <https://github.com/swiftlang/swift>

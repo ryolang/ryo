@@ -3779,7 +3779,7 @@ Ryo includes a first-class testing framework.
 
 *   **Linker/Driver:** **Zig (`zig cc`)** is the mandatory linker and driver.
     *   *Rationale:* Enables easy cross-compilation (e.g., `ryo build --target x86_64-linux-musl`) and seamless C interop.
-*   **Compiler Backend:** **Cranelift**. Supports AOT, JIT, WebAssembly. *(Rationale: Good balance of performance, compile speed, JIT/Wasm support).*
+*   **Compiler Backend:** **Cranelift**. Supports AOT and JIT. *(Rationale: Good balance of performance and compile speed; provides both AOT and JIT from a single backend.)* A WebAssembly target is a future possibility but is not provided by Cranelift; it would require a parallel backend — see [§19](#19-missing-elements--future-work).
 *   **Tools:** `ryo` package manager integrated, `ryo-bindgen` for automatic C FFI binding generation, `ryo` REPL (using JIT), Integrated Testing (`ryo test`). LSP future goal.
 
 ## 17. FFI & `unsafe`
