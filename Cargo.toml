@@ -1,3 +1,16 @@
+[workspace]
+members = ["runtime"]
+
+# Without `panic = "abort"`, Rust emits unwinding metadata (`_Unwind_*`
+# symbols) that zig cc cannot resolve when linking user binaries.
+# These settings live at the workspace root because profile configuration
+# isn't permitted in workspace member manifests.
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
 [package]
 name = "ryo"
 version = "0.1.0"
