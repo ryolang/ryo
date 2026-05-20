@@ -13,7 +13,7 @@ This doc is structured as a **delta against [`concurrency.md`](concurrency.md)**
 
 This proposal does **not** change the user-facing spec. Ryo remains colorless. No `suspend` keyword. One new user-facing primitive (`with_pool`, borrowed from Kotlin's `withContext`).
 
-> **Sibling reference docs:** [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`wasm_target.md`](wasm_target.md).
+> **Sibling reference docs:** [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`proposals/wasm_target.md`](proposals/wasm_target.md).
 
 ---
 
@@ -368,7 +368,7 @@ This is a meaningful detail. The proposal is **not a rewrite of the concurrency 
 7. **WASM target: corosensei or stack-switching proposal?**
    - corosensei supports WASM (via Emscripten / wasm32 targets, with limitations) but the story is rougher than native.
    - The WebAssembly stack-switching proposal, when stable, gives true Loom semantics on WASM at no implementation cost to Ryo.
-   - **Recommendation:** ship WASM concurrency on corosensei initially (matches native), then migrate to stack-switching proposal when it stabilizes. Wrapped in [wasm_target.md](wasm_target.md)'s feature-flagged WASM path.
+   - **Recommendation:** ship WASM concurrency on corosensei initially (matches native), then migrate to stack-switching proposal when it stabilizes. Subject to the WASM target itself being revived — see [proposals/wasm_target.md](proposals/wasm_target.md).
 
 ---
 
@@ -389,7 +389,7 @@ Until then, [concurrency.md](concurrency.md) stays as the committed plan. This d
 
 - Plan being compared against: [concurrency.md](concurrency.md) (Go-style M:N green threads via `corosensei`).
 - Spec: [`docs/specification.md`](../specification.md) Section 9 (Concurrency).
-- Sibling design docs: [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`wasm_target.md`](wasm_target.md).
+- Sibling design docs: [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`proposals/wasm_target.md`](proposals/wasm_target.md).
 - Upstream prior art:
   - [JEP 444: Virtual Threads (Java 21 GA)](https://openjdk.org/jeps/444) — Loom (inspiration for the FFI ergonomics goal).
   - [Loom OpenJDK wiki](https://wiki.openjdk.org/display/loom/Main).
