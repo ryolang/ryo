@@ -221,6 +221,7 @@ impl Codegen<JITModule> {
             ),
             ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
             ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
+            ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
         ]);
 
         Ok(Self::from_module(
@@ -1027,6 +1028,39 @@ impl<M: Module> Codegen<M> {
             TirTag::IfStmt => {
                 Self::generate_if_stmt(builder, ctx, r)?;
                 builder.ins().iconst(ctx.int_type, 0)
+            }
+            TirTag::StrCmpEq | TirTag::StrCmpNe => {
+                let (lhs, rhs) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!(),
+                };
+                let l_repr = Self::eval_inst_str(builder, ctx, lhs)?;
+                let r_repr = Self::eval_inst_str(builder, ctx, rhs)?;
+                let (l_ptr, l_len) = match l_repr {
+                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
+                    _ => unreachable!(),
+                };
+                let (r_ptr, r_len) = match r_repr {
+                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
+                    _ => unreachable!(),
+                };
+
+                let eq_ref = Self::declare_runtime_fn(
+                    ctx.module,
+                    builder,
+                    "ryo_str_eq",
+                    &[ctx.int_type, types::I64, ctx.int_type, types::I64],
+                    &[types::I8],
+                )?;
+                let call = builder.ins().call(eq_ref, &[l_ptr, l_len, r_ptr, r_len]);
+                let result = builder.inst_results(call)[0];
+
+                if inst.tag == TirTag::StrCmpNe {
+                    let one = builder.ins().iconst(types::I8, 1);
+                    builder.ins().bxor(result, one)
+                } else {
+                    result
+                }
             }
             TirTag::StrConcat => {
                 return Err("StrConcat must be materialized through eval_inst_str".to_string());

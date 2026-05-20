@@ -1061,15 +1061,13 @@ fn check_binary_op(
             }
             TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             TypeKind::Str => {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::UnsupportedOperator,
-                    format!(
-                        "equality operator '{}' not supported for type 'str' (yet)",
-                        bin_op_symbol(tag),
-                    ),
-                ));
-                fcx.builder.unreachable(sema.pool.error_type(), span)
+                let tir_tag = match tag {
+                    InstTag::Eq => TirTag::StrCmpEq,
+                    InstTag::NotEq => TirTag::StrCmpNe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
             TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
                 sema.sink.emit(Diag::error(
@@ -1748,9 +1746,15 @@ mod tests {
     }
 
     #[test]
-    fn string_equality_rejected() {
-        let diags = run("x = \"a\" == \"b\"").unwrap_err();
-        assert!(any_code(&diags, DiagCode::UnsupportedOperator));
+    fn string_equality_accepted() {
+        let (tirs, _pool) = run("x = \"a\" == \"b\"").unwrap();
+        // The equality produces a bool-typed StrCmpEq instruction.
+        let body = &tirs[0];
+        let has_str_eq = body
+            .instructions
+            .iter()
+            .any(|i| i.tag == TirTag::StrCmpEq);
+        assert!(has_str_eq, "expected StrCmpEq in TIR");
     }
 
     #[test]

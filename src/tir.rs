@@ -138,6 +138,10 @@ pub enum TirTag {
     // String concatenation.
     StrConcat,
 
+    // String equality.
+    StrCmpEq,
+    StrCmpNe,
+
     // Float arithmetic / comparison.
     FAdd,
     FSub,
@@ -478,6 +482,8 @@ impl TirBuilder {
                 | TirTag::ICmpGt
                 | TirTag::ICmpGe
                 | TirTag::StrConcat
+                | TirTag::StrCmpEq
+                | TirTag::StrCmpNe
                 | TirTag::FAdd
                 | TirTag::FSub
                 | TirTag::FMul
@@ -1088,6 +1094,8 @@ fn bin_op_name(t: TirTag) -> &'static str {
         TirTag::FCmpGt => "fcmp_gt",
         TirTag::FCmpGe => "fcmp_ge",
         TirTag::StrConcat => "str_concat",
+        TirTag::StrCmpEq => "str_eq",
+        TirTag::StrCmpNe => "str_ne",
         TirTag::BoolAnd => "bool_and",
         TirTag::BoolOr => "bool_or",
         _ => "?bin",

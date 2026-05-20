@@ -1977,3 +1977,15 @@ fn test_str_concat_chained() {
     );
     assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
+
+#[test]
+fn test_str_equality() {
+    let code = "fn main():\n\ta: str = \"hello\"\n\tb: str = \"hello\"\n\tassert(a == b, \"equal strings should be equal\")\n";
+    assert_ryo_runs!("str_equality.ryo", code);
+}
+
+#[test]
+fn test_str_inequality() {
+    let code = "fn main():\n\ta: str = \"hello\"\n\tb: str = \"world\"\n\tassert(a != b, \"different strings should not be equal\")\n";
+    assert_ryo_runs!("str_inequality.ryo", code);
+}
