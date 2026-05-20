@@ -14,6 +14,32 @@ fn main() {
         _ => pkg_version,
     };
     println!("cargo:rustc-env=RYO_VERSION={version}");
+
+    // Runtime archive path — set by `just build` or default location.
+    let runtime_path = env::var("RYO_RUNTIME_LIB").unwrap_or_else(|_| {
+        let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+        let target_dir =
+            env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| format!("{manifest_dir}/target"));
+        let path = std::path::PathBuf::from(&target_dir)
+            .join("release")
+            .join("libryo_runtime.a");
+        if !path.exists() {
+            panic!(
+                "\n\nlibryo_runtime.a not found at {}\n\
+                 Run `just build` or `cargo build -p ryo-runtime --release` first.\n\n",
+                path.display()
+            );
+        }
+        path.to_str().unwrap().to_string()
+    });
+
+    println!("cargo:rustc-env=RYO_RUNTIME_LIB={runtime_path}");
+    println!("cargo:rerun-if-env-changed=RYO_RUNTIME_LIB");
+    println!("cargo:rerun-if-changed={runtime_path}");
+
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let runtime_src = std::path::PathBuf::from(&manifest_dir).join("runtime/src");
+    println!("cargo:rerun-if-changed={}", runtime_src.display());
 }
 
 fn resolve_git_ref() -> Option<String> {

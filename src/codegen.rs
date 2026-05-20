@@ -100,7 +100,11 @@ struct LoopContext {
 enum ValueRepr {
     Scalar(Value),
     #[allow(dead_code)]
-    Str { ptr: Value, len: Value, cap: Value },
+    Str {
+        ptr: Value,
+        len: Value,
+        cap: Value,
+    },
 }
 
 impl ValueRepr {
@@ -116,7 +120,17 @@ impl ValueRepr {
 #[allow(dead_code)]
 enum LocalVar {
     Scalar(Variable),
-    Str { ptr: Variable, len: Variable, cap: Variable },
+    Str {
+        ptr: Variable,
+        len: Variable,
+        cap: Variable,
+    },
+}
+
+struct StrLocals {
+    ptr: Variable,
+    len: Variable,
+    cap: Variable,
 }
 
 /// Per-function emission state. Lives only for the duration of one
@@ -139,6 +153,7 @@ struct FunctionContext<'a, M: Module> {
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
     inst_values: HashMap<TirRef, ValueRepr>,
     loop_stack: Vec<LoopContext>,
+    str_locals: HashMap<StringId, StrLocals>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -408,6 +423,7 @@ impl<M: Module> Codegen<M> {
                 func_ids,
                 inst_values: HashMap::new(),
                 loop_stack: Vec::new(),
+                str_locals: HashMap::new(),
             };
 
             let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
@@ -479,8 +495,27 @@ impl<M: Module> Codegen<M> {
             TirTag::VarDecl => {
                 let view = ctx.tir.var_decl_view(r);
                 if is_str_type(inst.ty, ctx.pool) {
-                    // str VarDecl will be handled in Task 6
-                    todo!("str VarDecl codegen");
+                    let repr = Self::eval_inst_str(builder, ctx, view.initializer)?;
+                    match repr {
+                        ValueRepr::Str { ptr, len, cap } => {
+                            let var_ptr = builder.declare_var(ctx.int_type);
+                            let var_len = builder.declare_var(types::I64);
+                            let var_cap = builder.declare_var(types::I64);
+                            builder.def_var(var_ptr, ptr);
+                            builder.def_var(var_len, len);
+                            builder.def_var(var_cap, cap);
+                            ctx.str_locals.insert(
+                                view.name,
+                                StrLocals {
+                                    ptr: var_ptr,
+                                    len: var_len,
+                                    cap: var_cap,
+                                },
+                            );
+                        }
+                        _ => unreachable!("str-typed initializer should produce ValueRepr::Str"),
+                    }
+                    return Ok(false);
                 }
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
                 // The variable's resolved type lives in the VarDecl
@@ -825,7 +860,16 @@ impl<M: Module> Codegen<M> {
                 _ => unreachable!("FloatConst must carry TirData::Float"),
             },
             TirTag::StrConst => match inst.data {
-                TirData::Str(id) => emit_str_literal(builder, ctx, id)?,
+                TirData::Str(id) => {
+                    // Returns the raw .rodata pointer — used by __ryo_panic
+                    // which takes (ptr, len) scalars. For fat-pointer str
+                    // materialisation, callers use eval_inst_str instead.
+                    let content = ctx.pool.str(id);
+                    let data_id =
+                        store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+                    let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+                    builder.ins().global_value(ctx.int_type, data_ref)
+                }
                 _ => unreachable!("StrConst must carry TirData::Str"),
             },
             TirTag::Var => match inst.data {
@@ -989,6 +1033,119 @@ impl<M: Module> Codegen<M> {
         };
         ctx.inst_values.insert(r, ValueRepr::Scalar(value));
         Ok(value)
+    }
+
+    /// Declare an external runtime function by name and return a
+    /// `FuncRef` usable in the current function being built.
+    fn declare_runtime_fn(
+        module: &mut M,
+        builder: &mut FunctionBuilder,
+        name: &str,
+        params: &[types::Type],
+        returns: &[types::Type],
+    ) -> Result<FuncRef, String> {
+        let mut sig = module.make_signature();
+        for &p in params {
+            sig.params.push(AbiParam::new(p));
+        }
+        for &r in returns {
+            sig.returns.push(AbiParam::new(r));
+        }
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .map_err(|e| format!("Failed to declare {}: {}", name, e))?;
+        Ok(module.declare_func_in_func(func_id, builder.func))
+    }
+
+    /// Materialize a str-typed TIR instruction, returning a
+    /// `ValueRepr::Str` triple. Falls back to scalar `eval_inst`
+    /// for non-str instructions.
+    fn eval_inst_str(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<ValueRepr, String> {
+        if let Some(repr) = ctx.inst_values.get(&r) {
+            return Ok(*repr);
+        }
+        let inst = ctx.tir.inst(r);
+        let repr = match inst.tag {
+            TirTag::StrConst => {
+                let id = match inst.data {
+                    TirData::Str(id) => id,
+                    _ => unreachable!(),
+                };
+                Self::emit_str_literal_fat(builder, ctx, id)?
+            }
+            TirTag::Var => {
+                let name = match inst.data {
+                    TirData::Var(name) => name,
+                    _ => unreachable!(),
+                };
+                if let Some(locals) = ctx.str_locals.get(&name) {
+                    ValueRepr::Str {
+                        ptr: builder.use_var(locals.ptr),
+                        len: builder.use_var(locals.len),
+                        cap: builder.use_var(locals.cap),
+                    }
+                } else {
+                    // Not a str local — fall through to scalar
+                    let val = Self::eval_inst(builder, ctx, r)?;
+                    return Ok(ValueRepr::Scalar(val));
+                }
+            }
+            _ => {
+                // Delegate to scalar eval_inst for non-str instructions
+                let val = Self::eval_inst(builder, ctx, r)?;
+                return Ok(ValueRepr::Scalar(val));
+            }
+        };
+        ctx.inst_values.insert(r, repr);
+        Ok(repr)
+    }
+
+    /// Emit a string literal as a fat pointer triple (ptr, len, cap)
+    /// by calling `ryo_str_from_literal` at runtime.
+    fn emit_str_literal_fat(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        id: StringId,
+    ) -> Result<ValueRepr, String> {
+        let content = ctx.pool.str(id);
+        let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+        let rodata_ptr = builder.ins().global_value(ctx.int_type, data_ref);
+        let lit_len = builder.ins().iconst(types::I64, content.len() as i64);
+
+        // Allocate 24-byte stack slot for out parameter (8-byte aligned)
+        let slot =
+            builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 24, 3));
+        let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+        // Call ryo_str_from_literal(data, len, out)
+        let from_literal_ref = Self::declare_runtime_fn(
+            ctx.module,
+            builder,
+            "ryo_str_from_literal",
+            &[ctx.int_type, types::I64, ctx.int_type],
+            &[],
+        )?;
+        builder
+            .ins()
+            .call(from_literal_ref, &[rodata_ptr, lit_len, out_ptr]);
+
+        // Load the triple back from the stack slot
+        let ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+        let cap = builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+
+        Ok(ValueRepr::Str { ptr, len, cap })
     }
 
     fn emit_call(
@@ -1173,6 +1330,7 @@ fn declare_write<M: Module>(
 /// out of the `Codegen` impl so it can be called without juggling
 /// `&mut self` borrows alongside the `FunctionContext`'s mutable
 /// references to the same fields.
+#[allow(dead_code)]
 fn emit_str_literal<M: Module>(
     builder: &mut FunctionBuilder,
     ctx: &mut FunctionContext<'_, M>,
