@@ -1035,6 +1035,30 @@ impl<M: Module> Codegen<M> {
                 Self::generate_if_stmt(builder, ctx, r)?;
                 builder.ins().iconst(ctx.int_type, 0)
             }
+            TirTag::StrLen => {
+                let operand = match inst.data {
+                    TirData::UnOp(r) => r,
+                    _ => unreachable!("StrLen must carry TirData::UnOp"),
+                };
+                let repr = Self::eval_inst_str(builder, ctx, operand)?;
+                match repr {
+                    ValueRepr::Str { len, .. } => len,
+                    _ => unreachable!("StrLen operand must produce ValueRepr::Str"),
+                }
+            }
+            TirTag::StrIsEmpty => {
+                let operand = match inst.data {
+                    TirData::UnOp(r) => r,
+                    _ => unreachable!("StrIsEmpty must carry TirData::UnOp"),
+                };
+                let repr = Self::eval_inst_str(builder, ctx, operand)?;
+                let len_val = match repr {
+                    ValueRepr::Str { len, .. } => len,
+                    _ => unreachable!("StrIsEmpty operand must produce ValueRepr::Str"),
+                };
+                let zero = builder.ins().iconst(types::I64, 0);
+                builder.ins().icmp(IntCC::Equal, len_val, zero)
+            }
             TirTag::StrCmpEq | TirTag::StrCmpNe => {
                 let (lhs, rhs) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),

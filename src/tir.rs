@@ -142,6 +142,11 @@ pub enum TirTag {
     StrCmpEq,
     StrCmpNe,
 
+    /// Read the `len` field of a str fat pointer. Operand in `TirData::UnOp`.
+    StrLen,
+    /// `str.is_empty()` — compares len to 0. Operand in `TirData::UnOp`.
+    StrIsEmpty,
+
     // Float arithmetic / comparison.
     FAdd,
     FSub,
@@ -506,6 +511,13 @@ impl TirBuilder {
 
     pub fn unreachable(&mut self, ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::Unreachable, ty, TirData::None, span)
+    }
+
+    /// General-purpose instruction emit for tags that don't fit the
+    /// `unary` / `binary` debug-assert gates. Sema uses this for
+    /// method-call lowerings like `StrLen` / `StrIsEmpty`.
+    pub fn push_typed(&mut self, tag: TirTag, data: TirData, ty: TypeId, span: Span) -> TirRef {
+        self.push(tag, ty, data, span)
     }
 
     fn extra_offset(&self) -> u32 {
@@ -1108,6 +1120,8 @@ fn un_op_name(t: TirTag) -> &'static str {
         TirTag::BoolNot => "bool_not",
         TirTag::Return => "ret",
         TirTag::ExprStmt => "expr_stmt",
+        TirTag::StrLen => "str_len",
+        TirTag::StrIsEmpty => "str_is_empty",
         _ => "?un",
     }
 }

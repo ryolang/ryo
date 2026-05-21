@@ -2058,3 +2058,59 @@ fn test_bool_to_str_builtin() {
         stdout
     );
 }
+
+// ---- str.len() and str.is_empty() method calls ----
+
+#[test]
+fn test_str_len() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "s: str = \"hello\"\nassert(s.len() == 5, \"len should be 5\")";
+    let test_file = create_test_file(temp_dir.path(), "str_len.ryo", code);
+    let output = run_ryo_command(&["run", "str_len.ryo"], &test_file).expect("Failed to run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_str_is_empty() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "s: str = \"\"\nassert(s.is_empty(), \"empty string should be empty\")";
+    let test_file = create_test_file(temp_dir.path(), "str_empty.ryo", code);
+    let output = run_ryo_command(&["run", "str_empty.ryo"], &test_file).expect("Failed to run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_str_is_empty_false() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code =
+        "s: str = \"hi\"\nassert(not s.is_empty(), \"non-empty string should not be empty\")";
+    let test_file = create_test_file(temp_dir.path(), "str_not_empty.ryo", code);
+    let output = run_ryo_command(&["run", "str_not_empty.ryo"], &test_file).expect("Failed to run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_str_len_concat() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "s: str = \"ab\" + \"cde\"\nassert(s.len() == 5, \"concat len should be 5\")";
+    let test_file = create_test_file(temp_dir.path(), "str_len_concat.ryo", code);
+    let output =
+        run_ryo_command(&["run", "str_len_concat.ryo"], &test_file).expect("Failed to run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

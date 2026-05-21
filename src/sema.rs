@@ -48,7 +48,7 @@
 use crate::ast::CompoundOp;
 use crate::builtins;
 use crate::diag::{Diag, DiagCode, DiagSink};
-use crate::tir::{Tir, TirBuilder, TirParam, TirRef, TirTag};
+use crate::tir::{Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
 use crate::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
 use std::collections::{HashMap, VecDeque};
@@ -964,6 +964,67 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                 arg_tirs.push(analyze_expr(sema, fcx, scope, *a));
             }
             check_call(sema, fcx, &view, &arg_tirs, span)
+        }
+        InstTag::MethodCall => {
+            let view = sema.uir.method_call_view(r);
+            let receiver_tir = analyze_expr(sema, fcx, scope, view.receiver);
+            let receiver_ty = fcx.builder.ty_of(receiver_tir);
+            let method_name = sema.pool.str(view.name).to_string();
+
+            // For now, only str has methods
+            if sema.pool.kind(receiver_ty) != TypeKind::Str {
+                if !sema.pool.is_error(receiver_ty) {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::TypeMismatch,
+                        format!("type '{}' has no methods", sema.pool.display(receiver_ty)),
+                    ));
+                }
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+
+            match method_name.as_str() {
+                "len" => {
+                    if !view.args.is_empty() {
+                        sema.sink.emit(Diag::error(
+                            span,
+                            DiagCode::ArityMismatch,
+                            "str.len() takes no arguments".to_string(),
+                        ));
+                        return fcx.builder.unreachable(sema.pool.error_type(), span);
+                    }
+                    fcx.builder.push_typed(
+                        TirTag::StrLen,
+                        TirData::UnOp(receiver_tir),
+                        sema.pool.int(),
+                        span,
+                    )
+                }
+                "is_empty" => {
+                    if !view.args.is_empty() {
+                        sema.sink.emit(Diag::error(
+                            span,
+                            DiagCode::ArityMismatch,
+                            "str.is_empty() takes no arguments".to_string(),
+                        ));
+                        return fcx.builder.unreachable(sema.pool.error_type(), span);
+                    }
+                    fcx.builder.push_typed(
+                        TirTag::StrIsEmpty,
+                        TirData::UnOp(receiver_tir),
+                        sema.pool.bool_(),
+                        span,
+                    )
+                }
+                _ => {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::UndefinedFunction,
+                        format!("str has no method '{}'", method_name),
+                    ));
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
+                }
+            }
         }
         other => panic!(
             "analyze_expr: instruction at %{} is not an expression (tag={:?})",
