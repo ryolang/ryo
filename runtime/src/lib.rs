@@ -86,11 +86,10 @@ pub unsafe extern "C" fn ryo_str_from_literal(data: *const u8, len: u64, out: *m
             (*out).cap = 0;
             return;
         }
-        let ptr = ryo_str_alloc(len);
-        core::ptr::copy_nonoverlapping(data, ptr, len as usize);
-        (*out).ptr = ptr;
+        // Return pointer directly to rodata with cap=0 as static sentinel
+        (*out).ptr = data as *mut u8;
         (*out).len = len;
-        (*out).cap = len;
+        (*out).cap = 0;
     }
 }
 
@@ -330,11 +329,40 @@ mod tests {
                 cap: 0,
             };
             ryo_str_from_literal(data.as_ptr(), 5, &mut out);
-            assert!(!out.ptr.is_null());
+            assert_eq!(out.ptr as *const u8, data.as_ptr());
             assert_eq!(out.len, 5);
-            assert_eq!(out.cap, 5);
+            assert_eq!(out.cap, 0);
             let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
             assert_eq!(slice, b"hello");
+        }
+    }
+
+    #[test]
+    fn test_from_literal_returns_static_pointer() {
+        unsafe {
+            let data = b"hello";
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_str_from_literal(data.as_ptr(), 5, &mut out);
+            assert_eq!(out.ptr as *const u8, data.as_ptr());
+            assert_eq!(out.len, 5);
+            assert_eq!(out.cap, 0);
+        }
+    }
+
+    #[test]
+    fn test_free_static_str_is_noop() {
+        unsafe {
+            let data = b"hello";
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_str_from_literal(data.as_ptr(), 5, &mut out);
             ryo_str_free(out.ptr, out.cap);
         }
     }
