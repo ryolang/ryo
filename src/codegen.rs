@@ -108,6 +108,7 @@ enum ValueRepr {
 }
 
 impl ValueRepr {
+    #[allow(dead_code)]
     fn expect_scalar(self) -> Value {
         match self {
             ValueRepr::Scalar(v) => v,
@@ -154,6 +155,9 @@ struct FunctionContext<'a, M: Module> {
     inst_values: HashMap<TirRef, ValueRepr>,
     loop_stack: Vec<LoopContext>,
     str_locals: HashMap<StringId, StrLocals>,
+    /// For str-returning functions: the hidden sret pointer (first block param)
+    /// through which the callee writes the (ptr, len, cap) triple.
+    sret_ptr: Option<Value>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -414,18 +418,41 @@ impl<M: Module> Codegen<M> {
             let int_type = self.int_type;
             let mut locals: HashMap<StringId, Variable> = HashMap::new();
 
+            let is_main = pool.str(tir.name) == "main";
+            let returns_str = !is_main && is_str_type(tir.return_type, pool);
+            let mut block_idx: usize = if returns_str { 1 } else { 0 };
+            let sret_ptr = if returns_str {
+                Some(builder.block_params(entry_block)[0])
+            } else {
+                None
+            };
+
+            let mut str_param_locals: HashMap<StringId, StrLocals> = HashMap::new();
+
             for param in tir.params.iter() {
-                assert!(
-                    !is_str_type(param.ty, pool),
-                    "str parameters not yet supported (landing in Task 15)"
-                );
-            }
-            for (i, param) in tir.params.iter().enumerate() {
-                let cl_ty = cranelift_type_for(param.ty, pool, int_type);
-                let var = builder.declare_var(cl_ty);
-                let param_val = builder.block_params(entry_block)[i];
-                builder.def_var(var, param_val);
-                locals.insert(param.name, var);
+                if is_str_type(param.ty, pool) {
+                    let var_ptr = builder.declare_var(int_type);
+                    let var_len = builder.declare_var(types::I64);
+                    let var_cap = builder.declare_var(types::I64);
+                    builder.def_var(var_ptr, builder.block_params(entry_block)[block_idx]);
+                    builder.def_var(var_len, builder.block_params(entry_block)[block_idx + 1]);
+                    builder.def_var(var_cap, builder.block_params(entry_block)[block_idx + 2]);
+                    str_param_locals.insert(
+                        param.name,
+                        StrLocals {
+                            ptr: var_ptr,
+                            len: var_len,
+                            cap: var_cap,
+                        },
+                    );
+                    block_idx += 3;
+                } else {
+                    let cl_ty = cranelift_type_for(param.ty, pool, int_type);
+                    let var = builder.declare_var(cl_ty);
+                    builder.def_var(var, builder.block_params(entry_block)[block_idx]);
+                    locals.insert(param.name, var);
+                    block_idx += 1;
+                }
             }
 
             let mut ctx: FunctionContext<'_, M> = FunctionContext {
@@ -440,23 +467,21 @@ impl<M: Module> Codegen<M> {
                 func_ids,
                 inst_values: HashMap::new(),
                 loop_stack: Vec::new(),
-                str_locals: HashMap::new(),
+                str_locals: str_param_locals,
+                sret_ptr,
             };
 
             let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
 
             if !has_return {
-                let is_main = pool.str(tir.name) == "main";
-                if is_main || tir.return_type != pool.void() {
-                    // `main` always returns int 0 to the OS even
-                    // when Ryo declares it void; non-main
-                    // non-void functions also fall through to a
-                    // zero return today (sema accepts missing
-                    // returns; control-flow analysis lands in M8b).
+                if is_main {
                     let zero = builder.ins().iconst(int_type, 0);
                     builder.ins().return_(&[zero]);
-                } else {
+                } else if returns_str || tir.return_type == pool.void() {
                     builder.ins().return_(&[]);
+                } else {
+                    let zero = builder.ins().iconst(int_type, 0);
+                    builder.ins().return_(&[zero]);
                 }
             }
 
@@ -548,8 +573,21 @@ impl<M: Module> Codegen<M> {
                     TirData::UnOp(o) => o,
                     _ => unreachable!("Return must carry TirData::UnOp"),
                 };
-                let val = Self::eval_inst(builder, ctx, operand)?;
-                builder.ins().return_(&[val]);
+                if is_str_type(ctx.tir.return_type, ctx.pool) {
+                    let sret = ctx.sret_ptr.expect("str-returning fn must have sret_ptr");
+                    let repr = Self::eval_inst_str(builder, ctx, operand)?;
+                    let (ptr, len, cap) = match repr {
+                        ValueRepr::Str { ptr, len, cap } => (ptr, len, cap),
+                        _ => unreachable!("str return must produce ValueRepr::Str"),
+                    };
+                    builder.ins().store(MemFlags::trusted(), ptr, sret, 0);
+                    builder.ins().store(MemFlags::trusted(), len, sret, 8);
+                    builder.ins().store(MemFlags::trusted(), cap, sret, 16);
+                    builder.ins().return_(&[]);
+                } else {
+                    let val = Self::eval_inst(builder, ctx, operand)?;
+                    builder.ins().return_(&[val]);
+                }
                 Ok(true)
             }
             TirTag::ReturnVoid => {
@@ -860,7 +898,13 @@ impl<M: Module> Codegen<M> {
         r: TirRef,
     ) -> Result<Value, String> {
         if let Some(repr) = ctx.inst_values.get(&r) {
-            return Ok(repr.expect_scalar());
+            return Ok(match repr {
+                ValueRepr::Scalar(v) => *v,
+                // str-returning calls cache ValueRepr::Str; return the ptr
+                // component as the scalar stand-in (callers that need the
+                // full triple use eval_inst_str).
+                ValueRepr::Str { ptr, .. } => *ptr,
+            });
         }
         let inst = ctx.tir.inst(r);
         let value = match inst.tag {
@@ -1108,7 +1152,8 @@ impl<M: Module> Codegen<M> {
                 ));
             }
         };
-        ctx.inst_values.insert(r, ValueRepr::Scalar(value));
+        // Don't overwrite if emit_call already cached a Str repr (sret convention).
+        ctx.inst_values.entry(r).or_insert(ValueRepr::Scalar(value));
         Ok(value)
     }
 
@@ -1215,9 +1260,14 @@ impl<M: Module> Codegen<M> {
 
                     ValueRepr::Str { ptr, len, cap }
                 } else {
-                    // Non-formatter call — delegate to scalar
-                    let val = Self::eval_inst(builder, ctx, r)?;
-                    return Ok(ValueRepr::Scalar(val));
+                    // User call — eval_inst triggers emit_call which handles
+                    // sret for str-returning calls and caches ValueRepr::Str.
+                    Self::eval_inst(builder, ctx, r)?;
+                    if let Some(repr) = ctx.inst_values.get(&r) {
+                        return Ok(*repr);
+                    }
+                    // Fallback for non-str returning calls
+                    return Ok(ValueRepr::Scalar(builder.ins().iconst(ctx.int_type, 0)));
                 }
             }
             TirTag::StrConcat => {
@@ -1335,8 +1385,28 @@ impl<M: Module> Codegen<M> {
         let name_id = view.name;
         let name_str = ctx.pool.str(name_id);
 
-        // print is the only builtin with custom codegen (inline syscall).
-        // __ryo_panic and user functions go through the normal call path.
+        // print and __ryo_panic have custom codegen (inline syscall / raw scalar ABI).
+        // They do NOT use the str-triple expansion that user functions use.
+        if name_str == "__ryo_panic" {
+            // __ryo_panic(ptr, len) takes raw scalars — the StrConst .rodata
+            // pointer and an int len — NOT the str-triple ABI.
+            let mut arg_values = Vec::with_capacity(view.args.len());
+            for arg in &view.args {
+                arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
+            }
+            let callee_id = *ctx
+                .func_ids
+                .get(&name_id)
+                .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
+            let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
+            builder.ins().call(callee_ref, &arg_values);
+            builder.ins().trap(TrapCode::user(1).unwrap());
+            let dead = builder.create_block();
+            builder.seal_block(dead);
+            builder.switch_to_block(dead);
+            return Ok(builder.ins().iconst(types::I8, 0));
+        }
+
         if name_str == "print" {
             Self::generate_print_call(builder, ctx, &view.args)?;
             return Ok(builder.ins().iconst(ctx.int_type, 0));
@@ -1380,22 +1450,32 @@ impl<M: Module> Codegen<M> {
             .get(&name_id)
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
-        let mut arg_values = Vec::with_capacity(view.args.len());
+        let mut arg_values = Vec::with_capacity(view.args.len() * 3 + 1);
         for arg in &view.args {
-            arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
+            let arg_ty = ctx.tir.inst(*arg).ty;
+            if is_str_type(arg_ty, ctx.pool) {
+                let repr = Self::eval_inst_str(builder, ctx, *arg)?;
+                match repr {
+                    ValueRepr::Str { ptr, len, cap } => {
+                        arg_values.push(ptr);
+                        arg_values.push(len);
+                        arg_values.push(cap);
+                    }
+                    _ => unreachable!("str-typed arg must produce ValueRepr::Str"),
+                }
+            } else {
+                arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
+            }
         }
 
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
-        let call = builder.ins().call(callee_ref, &arg_values);
-        let results = builder.inst_results(call);
+
+        let ret_ty = ctx.tir.inst(r).ty;
 
         // If the callee returns never (e.g. __ryo_panic), the call is
         // a terminator. Emit a trap + dead block for subsequent IR.
-        // The dead block needs no explicit terminator — compile_function's
-        // fallthrough `return 0` provides one. Cranelift verifier is
-        // happy as long as every block has exactly one terminator.
-        let ret_ty = ctx.tir.inst(r).ty;
         if ctx.pool.is_never(ret_ty) {
+            builder.ins().call(callee_ref, &arg_values);
             builder.ins().trap(TrapCode::user(1).unwrap());
             let dead = builder.create_block();
             builder.seal_block(dead);
@@ -1403,6 +1483,33 @@ impl<M: Module> Codegen<M> {
             let dummy_ty = cranelift_type_for(ret_ty, ctx.pool, ctx.int_type);
             return Ok(builder.ins().iconst(dummy_ty, 0));
         }
+
+        if is_str_type(ret_ty, ctx.pool) {
+            // sret: allocate 24-byte slot, prepend pointer to args
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                24,
+                3,
+            ));
+            let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+            let mut all_args = Vec::with_capacity(arg_values.len() + 1);
+            all_args.push(out);
+            all_args.extend(arg_values);
+
+            builder.ins().call(callee_ref, &all_args);
+
+            let ptr = builder
+                .ins()
+                .load(ctx.int_type, MemFlags::trusted(), out, 0);
+            let len = builder.ins().load(types::I64, MemFlags::trusted(), out, 8);
+            let cap = builder.ins().load(types::I64, MemFlags::trusted(), out, 16);
+            ctx.inst_values.insert(r, ValueRepr::Str { ptr, len, cap });
+            return Ok(ptr); // dummy scalar — consumers use eval_inst_str
+        }
+
+        let call = builder.ins().call(callee_ref, &arg_values);
+        let results = builder.inst_results(call);
 
         if results.is_empty() {
             Ok(builder.ins().iconst(ctx.int_type, 0))

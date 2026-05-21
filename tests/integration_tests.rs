@@ -2182,9 +2182,7 @@ fn test_str_empty_len_zero() {
     );
 }
 
-// Requires Task 15: sret plumbing
 #[test]
-#[ignore]
 fn test_str_passed_to_function() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn greet(name: str):\n\tprint(name)\n\ngreet(\"Alice\")";
@@ -2197,9 +2195,7 @@ fn test_str_passed_to_function() {
     );
 }
 
-// Requires Task 15: sret plumbing
 #[test]
-#[ignore]
 fn test_str_returned_from_function() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code =
