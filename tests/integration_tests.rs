@@ -2114,3 +2114,101 @@ fn test_str_len_concat() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn test_str_empty_concat_left() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code =
+        "s: str = \"\" + \"hello\"\nassert(s.len() == 5, \"empty + hello should have len 5\")";
+    let test_file = create_test_file(temp_dir.path(), "empty_left.ryo", code);
+    let output = run_ryo_command(&["run", "empty_left.ryo"], &test_file).expect("Failed");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_str_empty_concat_both() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "s: str = \"\" + \"\"\nassert(s.is_empty(), \"empty + empty should be empty\")";
+    let test_file = create_test_file(temp_dir.path(), "empty_both.ryo", code);
+    let output = run_ryo_command(&["run", "empty_both.ryo"], &test_file).expect("Failed");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_str_empty_equality() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code =
+        "a: str = \"\"\nb: str = \"\"\nassert(a == b, \"two empty strings should be equal\")";
+    let test_file = create_test_file(temp_dir.path(), "empty_eq.ryo", code);
+    let output = run_ryo_command(&["run", "empty_eq.ryo"], &test_file).expect("Failed");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_str_concat_with_to_str() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "n: int = 42\ns: str = \"value = \" + int_to_str(n)\nprint(s)";
+    let test_file = create_test_file(temp_dir.path(), "concat_int.ryo", code);
+    let output = run_ryo_command(&["run", "concat_int.ryo"], &test_file).expect("Failed");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_str_empty_len_zero() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "s: str = \"\"\nassert(s.len() == 0, \"empty string len should be 0\")";
+    let test_file = create_test_file(temp_dir.path(), "empty_len.ryo", code);
+    let output = run_ryo_command(&["run", "empty_len.ryo"], &test_file).expect("Failed");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// Requires Task 15: sret plumbing
+#[test]
+#[ignore]
+fn test_str_passed_to_function() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn greet(name: str):\n\tprint(name)\n\ngreet(\"Alice\")";
+    let test_file = create_test_file(temp_dir.path(), "str_param.ryo", code);
+    let output = run_ryo_command(&["run", "str_param.ryo"], &test_file).expect("Failed");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// Requires Task 15: sret plumbing
+#[test]
+#[ignore]
+fn test_str_returned_from_function() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code =
+        "fn make_greeting() -> str:\n\treturn \"Hello!\"\n\ns: str = make_greeting()\nprint(s)";
+    let test_file = create_test_file(temp_dir.path(), "str_return.ryo", code);
+    let output = run_ryo_command(&["run", "str_return.ryo"], &test_file).expect("Failed");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
