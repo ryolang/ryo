@@ -603,4 +603,51 @@ mod tests {
             ryo_str_free(out.ptr, out.cap);
         }
     }
+
+    #[test]
+    fn test_concat_static_left_heap_right() {
+        unsafe {
+            // Simulate: "Hello, " + heap_string
+            let left = b"Hello, ";
+            let left_fat = RyoStrFat {
+                ptr: left.as_ptr() as *mut u8,
+                len: 7,
+                cap: 0, // static
+            };
+
+            // Create a heap string for the right side
+            let mut right_fat = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            let right_data = b"World!";
+            let right_ptr = ryo_str_alloc(6);
+            core::ptr::copy_nonoverlapping(right_data.as_ptr(), right_ptr, 6);
+            right_fat.ptr = right_ptr;
+            right_fat.len = 6;
+            right_fat.cap = 6;
+
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_str_concat(
+                left_fat.ptr, left_fat.len,
+                right_fat.ptr, right_fat.len,
+                &mut out,
+            );
+
+            assert_eq!(out.len, 13);
+            assert!(out.cap > 0); // heap-allocated result
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            assert_eq!(slice, b"Hello, World!");
+
+            // Free: static left is safe (cap=0 → noop), heap right and result freed
+            ryo_str_free(left_fat.ptr, left_fat.cap);
+            ryo_str_free(right_fat.ptr, right_fat.cap);
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
 }
