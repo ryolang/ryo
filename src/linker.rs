@@ -10,14 +10,24 @@ pub(crate) fn link_executable(
 ) -> Result<(), CompilerError> {
     let zig_path = toolchain::ensure_zig()?;
 
+    let mut args = vec![
+        "cc",
+        "-o",
+        exe_file,
+        obj_file,
+        runtime_lib.to_str().unwrap_or("libryo_runtime.a"),
+    ];
+
+    // Rust's staticlib bundles precompiled std objects that reference
+    // _Unwind_* symbols even with panic=abort (from backtrace support).
+    // On macOS the system libunwind satisfies them; on Linux we must
+    // explicitly link zig's bundled libunwind.
+    if cfg!(target_os = "linux") {
+        args.push("-lunwind");
+    }
+
     let output = Command::new(&zig_path)
-        .args([
-            "cc",
-            "-o",
-            exe_file,
-            obj_file,
-            runtime_lib.to_str().unwrap_or("libryo_runtime.a"),
-        ])
+        .args(&args)
         .output()
         .map_err(|e| CompilerError::LinkError(format!("Failed to run zig cc: {e}")))?;
 
