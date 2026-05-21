@@ -115,12 +115,15 @@ pub unsafe extern "C" fn ryo_str_concat(
             (*out).cap = 0;
             return;
         }
+        let l_sz: usize = l_len.try_into().unwrap_or_else(|_| oom_abort());
+        let r_sz: usize = r_len.try_into().unwrap_or_else(|_| oom_abort());
+        let _: usize = total.try_into().unwrap_or_else(|_| oom_abort());
         let ptr = ryo_str_alloc(total);
-        if l_len > 0 {
-            core::ptr::copy_nonoverlapping(l_ptr, ptr, l_len as usize);
+        if l_sz > 0 {
+            core::ptr::copy_nonoverlapping(l_ptr, ptr, l_sz);
         }
-        if r_len > 0 {
-            core::ptr::copy_nonoverlapping(r_ptr, ptr.add(l_len as usize), r_len as usize);
+        if r_sz > 0 {
+            core::ptr::copy_nonoverlapping(r_ptr, ptr.add(l_sz), r_sz);
         }
         (*out).ptr = ptr;
         (*out).len = total;
