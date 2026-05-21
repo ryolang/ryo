@@ -12,7 +12,7 @@ pub fn extract_runtime_to_temp() -> Result<PathBuf, io::Error> {
     Ok(path)
 }
 
-pub fn cleanup_runtime_temp(path: &PathBuf) {
+pub fn cleanup_runtime_temp(path: &std::path::Path) {
     let _ = fs::remove_file(path);
     if let Some(parent) = path.parent() {
         let _ = fs::remove_dir(parent);

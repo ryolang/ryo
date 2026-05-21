@@ -99,33 +99,17 @@ struct LoopContext {
 #[derive(Debug, Clone, Copy)]
 enum ValueRepr {
     Scalar(Value),
-    #[allow(dead_code)]
-    Str {
-        ptr: Value,
-        len: Value,
-        cap: Value,
-    },
+    Str { ptr: Value, len: Value, cap: Value },
 }
 
 impl ValueRepr {
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn expect_scalar(self) -> Value {
         match self {
             ValueRepr::Scalar(v) => v,
             ValueRepr::Str { .. } => panic!("expected Scalar, got Str"),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-enum LocalVar {
-    Scalar(Variable),
-    Str {
-        ptr: Variable,
-        len: Variable,
-        cap: Variable,
-    },
 }
 
 struct StrLocals {
@@ -1266,8 +1250,7 @@ impl<M: Module> Codegen<M> {
                     if let Some(repr) = ctx.inst_values.get(&r) {
                         return Ok(*repr);
                     }
-                    // Fallback for non-str returning calls
-                    return Ok(ValueRepr::Scalar(builder.ins().iconst(ctx.int_type, 0)));
+                    unreachable!("str-returning user call must cache ValueRepr::Str via emit_call");
                 }
             }
             TirTag::StrConcat => {
@@ -1624,22 +1607,6 @@ fn declare_write<M: Module>(
         .declare_function("write", Linkage::Import, &sig)
         .map_err(|e| format!("Failed to declare write function: {}", e))?;
     Ok(module.declare_func_in_func(func_id, builder.func))
-}
-
-/// Materialize a string literal pointer into the function. Pulled
-/// out of the `Codegen` impl so it can be called without juggling
-/// `&mut self` borrows alongside the `FunctionContext`'s mutable
-/// references to the same fields.
-#[allow(dead_code)]
-fn emit_str_literal<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx: &mut FunctionContext<'_, M>,
-    id: StringId,
-) -> Result<Value, String> {
-    let content = ctx.pool.str(id);
-    let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
-    let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-    Ok(builder.ins().global_value(ctx.int_type, data_ref))
 }
 
 fn store_string<M: Module>(

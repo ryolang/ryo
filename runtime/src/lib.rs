@@ -52,6 +52,20 @@ pub unsafe extern "C" fn ryo_str_realloc(ptr: *mut u8, old_cap: u64, new_cap: u6
     new_ptr
 }
 
+/// Helper for fixed-string results (nan, inf, etc.)
+///
+/// # Safety
+/// `out` must point to a valid `RyoStrFat`.
+unsafe fn write_str_result(s: &[u8], out: *mut RyoStrFat) {
+    let ptr = ryo_str_alloc(s.len() as u64);
+    unsafe {
+        core::ptr::copy_nonoverlapping(s.as_ptr(), ptr, s.len());
+        (*out).ptr = ptr;
+        (*out).len = s.len() as u64;
+        (*out).cap = s.len() as u64;
+    }
+}
+
 fn layout_for(cap: u64) -> Layout {
     Layout::from_size_align(cap as usize, 1).unwrap_or_else(|_| oom_abort())
 }
@@ -73,9 +87,6 @@ pub unsafe extern "C" fn ryo_str_from_literal(data: *const u8, len: u64, out: *m
             return;
         }
         let ptr = ryo_str_alloc(len);
-        if ptr.is_null() {
-            oom_abort();
-        }
         core::ptr::copy_nonoverlapping(data, ptr, len as usize);
         (*out).ptr = ptr;
         (*out).len = len;
@@ -103,9 +114,6 @@ pub unsafe extern "C" fn ryo_str_concat(
             return;
         }
         let ptr = ryo_str_alloc(total);
-        if ptr.is_null() {
-            oom_abort();
-        }
         if l_len > 0 {
             core::ptr::copy_nonoverlapping(l_ptr, ptr, l_len as usize);
         }
@@ -144,11 +152,14 @@ pub unsafe extern "C" fn ryo_str_eq(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_int_to_str(value: i64, out: *mut RyoStrFat) {
     let mut buf = [0u8; 20];
-    let mut n = value;
-    let negative = n < 0;
-    if negative {
-        n = n.wrapping_neg();
-    }
+    let negative = value < 0;
+    // Work with unsigned magnitude to handle i64::MIN correctly
+    // (i64::MIN.wrapping_neg() overflows back to i64::MIN).
+    let mut n: u64 = if negative {
+        (value as u64).wrapping_neg()
+    } else {
+        value as u64
+    };
     let mut pos = buf.len();
     if n == 0 {
         pos -= 1;
@@ -166,9 +177,6 @@ pub unsafe extern "C" fn ryo_int_to_str(value: i64, out: *mut RyoStrFat) {
     }
     let len = (buf.len() - pos) as u64;
     let ptr = ryo_str_alloc(len);
-    if ptr.is_null() {
-        oom_abort();
-    }
     unsafe {
         core::ptr::copy_nonoverlapping(buf.as_ptr().add(pos), ptr, len as usize);
         (*out).ptr = ptr;
@@ -181,6 +189,17 @@ pub unsafe extern "C" fn ryo_int_to_str(value: i64, out: *mut RyoStrFat) {
 /// `out` must point to a valid `RyoStrFat`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_float_to_str(value: f64, out: *mut RyoStrFat) {
+    if value.is_nan() {
+        return unsafe { write_str_result(b"nan", out) };
+    }
+    if value.is_infinite() {
+        if value < 0.0 {
+            return unsafe { write_str_result(b"-inf", out) };
+        } else {
+            return unsafe { write_str_result(b"inf", out) };
+        }
+    }
+
     let mut buf = [0u8; 64];
     let mut pos = 0usize;
 
@@ -231,9 +250,6 @@ pub unsafe extern "C" fn ryo_float_to_str(value: f64, out: *mut RyoStrFat) {
 
     let len = pos as u64;
     let ptr = ryo_str_alloc(len);
-    if ptr.is_null() {
-        oom_abort();
-    }
     unsafe {
         core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, len as usize);
         (*out).ptr = ptr;
@@ -247,16 +263,7 @@ pub unsafe extern "C" fn ryo_float_to_str(value: f64, out: *mut RyoStrFat) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_bool_to_str(value: u8, out: *mut RyoStrFat) {
     let s: &[u8] = if value != 0 { b"true" } else { b"false" };
-    let ptr = ryo_str_alloc(s.len() as u64);
-    if ptr.is_null() {
-        oom_abort();
-    }
-    unsafe {
-        core::ptr::copy_nonoverlapping(s.as_ptr(), ptr, s.len());
-        (*out).ptr = ptr;
-        (*out).len = s.len() as u64;
-        (*out).cap = s.len() as u64;
-    }
+    unsafe { write_str_result(s, out) };
 }
 
 #[cfg(test)]
@@ -459,6 +466,66 @@ mod tests {
             ryo_int_to_str(0, &mut out);
             let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
             assert_eq!(slice, b"0");
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn test_int_to_str_min() {
+        unsafe {
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_int_to_str(i64::MIN, &mut out);
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            assert_eq!(slice, b"-9223372036854775808");
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn test_float_to_str_nan() {
+        unsafe {
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_float_to_str(f64::NAN, &mut out);
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            assert_eq!(slice, b"nan");
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn test_float_to_str_inf() {
+        unsafe {
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_float_to_str(f64::INFINITY, &mut out);
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            assert_eq!(slice, b"inf");
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn test_float_to_str_neg_inf() {
+        unsafe {
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_float_to_str(f64::NEG_INFINITY, &mut out);
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            assert_eq!(slice, b"-inf");
             ryo_str_free(out.ptr, out.cap);
         }
     }
