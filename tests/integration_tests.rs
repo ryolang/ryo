@@ -2037,6 +2037,37 @@ fn test_float_to_str_builtin() {
 }
 
 #[test]
+fn test_float_to_str_large_number() {
+    let dir = tempfile::tempdir().unwrap();
+    // 18000000000000000000.0 is a large number (1.8e19)
+    let src = create_test_file(dir.path(), "large_float.ryo", "fn main():\n\tprint(float_to_str(18000000000000000000.0))\n");
+    let output = run_ryo_command(&["run", "large_float.ryo"], &src);
+    let output = output.unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Extract the float value: it's after "[Codegen]" and before "[Result]"
+    let after_codegen = stdout.split("[Codegen]").nth(1).unwrap();
+    let float_str = after_codegen.split("[Result]").next().unwrap().trim();
+    let parsed: f64 = float_str.parse().unwrap();
+    assert_eq!(parsed, 1.8e19);
+}
+
+#[test]
+fn test_float_to_str_small_decimal() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = create_test_file(dir.path(), "small_float.ryo", "fn main():\n\tprint(float_to_str(0.1))\n");
+    let output = run_ryo_command(&["run", "small_float.ryo"], &src);
+    let output = output.unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Extract the float value: it's after "[Codegen]" and before "[Result]"
+    let after_codegen = stdout.split("[Codegen]").nth(1).unwrap();
+    let float_str = after_codegen.split("[Result]").next().unwrap().trim();
+    let parsed: f64 = float_str.parse().unwrap();
+    assert_eq!(parsed, 0.1);
+}
+
+#[test]
 fn test_bool_to_str_builtin() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\ts: str = bool_to_str(true)\n\tprint(s)\n";
