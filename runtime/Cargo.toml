@@ -6,3 +6,6 @@ edition = "2024"
 [lib]
 crate-type = ["staticlib", "rlib"]
 # rlib is needed for `cargo test` to work (staticlib alone doesn't support test harness)
+
+[dependencies]
+ryu = "1"

@@ -199,58 +199,13 @@ pub unsafe extern "C" fn ryo_float_to_str(value: f64, out: *mut RyoStrFat) {
         }
     }
 
-    let mut buf = [0u8; 64];
-    let mut pos = 0usize;
-
-    let negative = value < 0.0;
-    let abs_val = if negative { -value } else { value };
-
-    if negative {
-        buf[pos] = b'-';
-        pos += 1;
-    }
-
-    let int_part = abs_val as u64;
-    let frac_part = ((abs_val - int_part as f64) * 1_000_000.0 + 0.5) as u64;
-
-    // Write integer part
-    let mut int_buf = [0u8; 20];
-    let mut int_pos = int_buf.len();
-    if int_part == 0 {
-        int_pos -= 1;
-        int_buf[int_pos] = b'0';
-    } else {
-        let mut n = int_part;
-        while n > 0 {
-            int_pos -= 1;
-            int_buf[int_pos] = b'0' + (n % 10) as u8;
-            n /= 10;
-        }
-    }
-    let int_len = int_buf.len() - int_pos;
-    buf[pos..pos + int_len].copy_from_slice(&int_buf[int_pos..]);
-    pos += int_len;
-
-    // Write fractional part (trim trailing zeros)
-    buf[pos] = b'.';
-    pos += 1;
-    let mut frac_buf = [0u8; 6];
-    let mut f = frac_part;
-    for i in (0..6).rev() {
-        frac_buf[i] = b'0' + (f % 10) as u8;
-        f /= 10;
-    }
-    let mut frac_len = 6;
-    while frac_len > 1 && frac_buf[frac_len - 1] == b'0' {
-        frac_len -= 1;
-    }
-    buf[pos..pos + frac_len].copy_from_slice(&frac_buf[..frac_len]);
-    pos += frac_len;
-
-    let len = pos as u64;
+    let mut buf = ryu::Buffer::new();
+    let s = buf.format(value);
+    let bytes = s.as_bytes();
+    let len = bytes.len() as u64;
     let ptr = ryo_str_alloc(len);
     unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, len as usize);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize);
         (*out).ptr = ptr;
         (*out).len = len;
         (*out).cap = len;
@@ -570,6 +525,41 @@ mod tests {
             let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
             let s = core::str::from_utf8(slice).unwrap();
             assert!(s.starts_with("2.75"), "got: {}", s);
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn test_float_to_str_large_value() {
+        unsafe {
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            // Value larger than u64::MAX — old code would saturate
+            ryo_float_to_str(1.8e19, &mut out);
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            let s = core::str::from_utf8(slice).unwrap();
+            let parsed: f64 = s.parse().unwrap();
+            assert_eq!(parsed, 1.8e19);
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn test_float_to_str_precision() {
+        unsafe {
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_float_to_str(0.1 + 0.2, &mut out);
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            let s = core::str::from_utf8(slice).unwrap();
+            let parsed: f64 = s.parse().unwrap();
+            assert_eq!(parsed, 0.1 + 0.2);
             ryo_str_free(out.ptr, out.cap);
         }
     }
