@@ -69,6 +69,14 @@ IMPORTANT: Never author Claude on commits nor PRs.
 
 ---
 
+## Issue Tracking
+
+Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, pick the appropriate severity (Blocking / Correctness / Cleanup), and include Files, Summary, and Resolution fields.
+
+Do **not** create issues for things you're fixing right now — just fix them. Do **not** use GitHub Issues for these; `ISSUES.md` is the single source of truth.
+
+---
+
 ## Design Change Escalation
 
 Ryo is pre-alpha. Design changes to the language specification require explicit human approval. Coherence fixes (resolving contradictions, filling documented gaps, tightening phrasing) can proceed as normal work, but anything that adds, removes, or alters a language feature stops for review.
