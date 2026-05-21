@@ -624,8 +624,10 @@ mod tests {
                 cap: 0,
             };
             ryo_str_concat(
-                left_fat.ptr, left_fat.len,
-                right_fat.ptr, right_fat.len,
+                left_fat.ptr,
+                left_fat.len,
+                right_fat.ptr,
+                right_fat.len,
                 &mut out,
             );
 

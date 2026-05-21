@@ -28,7 +28,11 @@ pub fn extract_runtime_to_temp() -> Result<PathBuf, io::Error> {
 
     fs::create_dir_all(&dir)?;
     // Write to a temp name and rename for atomicity
-    let tmp_path = dir.join(format!("libryo_runtime-{}.a.tmp.{}", hash, std::process::id()));
+    let tmp_path = dir.join(format!(
+        "libryo_runtime-{}.a.tmp.{}",
+        hash,
+        std::process::id()
+    ));
     fs::write(&tmp_path, RYO_RUNTIME_LIB)?;
     fs::rename(&tmp_path, &path)?;
     Ok(path)
