@@ -971,6 +971,10 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
             let receiver_ty = fcx.builder.ty_of(receiver_tir);
             let method_name = sema.pool.str(view.name).to_string();
 
+            for &arg in &view.args {
+                analyze_expr(sema, fcx, scope, arg);
+            }
+
             // For now, only str has methods
             if sema.pool.kind(receiver_ty) != TypeKind::Str {
                 if !sema.pool.is_error(receiver_ty) {
@@ -1396,6 +1400,9 @@ fn emit_builtin_call(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
             if !matches!(sema.pool.kind(arg_ty), TypeKind::Int) {
                 sema.sink.emit(Diag::error(
                     sema.uir.span(view.args[0]),
@@ -1423,6 +1430,9 @@ fn emit_builtin_call(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
             if !matches!(sema.pool.kind(arg_ty), TypeKind::Float) {
                 sema.sink.emit(Diag::error(
                     sema.uir.span(view.args[0]),
@@ -1450,6 +1460,9 @@ fn emit_builtin_call(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
             if !matches!(sema.pool.kind(arg_ty), TypeKind::Bool) {
                 sema.sink.emit(Diag::error(
                     sema.uir.span(view.args[0]),
@@ -1599,6 +1612,9 @@ fn check_print_args(
         return false;
     }
     let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+    if sema.pool.is_error(arg_ty) {
+        return false;
+    }
     if !matches!(sema.pool.kind(arg_ty), TypeKind::Str) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),

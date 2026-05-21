@@ -105,7 +105,10 @@ pub unsafe extern "C" fn ryo_str_concat(
     out: *mut RyoStrFat,
 ) {
     unsafe {
-        let total = l_len + r_len;
+        let total = match l_len.checked_add(r_len) {
+            Some(t) => t,
+            None => oom_abort(),
+        };
         if total == 0 {
             (*out).ptr = std::ptr::null_mut();
             (*out).len = 0;

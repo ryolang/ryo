@@ -5,11 +5,10 @@ use std::path::PathBuf;
 
 const RYO_RUNTIME_LIB: &[u8] = include_bytes!(env!("RYO_RUNTIME_LIB"));
 
-fn cache_dir() -> PathBuf {
+fn cache_dir() -> Result<PathBuf, io::Error> {
     dirs::home_dir()
-        .expect("cannot determine home directory")
-        .join(".ryo")
-        .join("cache")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "cannot determine home directory"))
+        .map(|h| h.join(".ryo").join("cache"))
 }
 
 fn content_hash() -> String {
@@ -18,7 +17,7 @@ fn content_hash() -> String {
 }
 
 pub fn extract_runtime_to_temp() -> Result<PathBuf, io::Error> {
-    let dir = cache_dir();
+    let dir = cache_dir()?;
     let hash = content_hash();
     let path = dir.join(format!("libryo_runtime-{}.a", hash));
 

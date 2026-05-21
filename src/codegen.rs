@@ -112,6 +112,7 @@ impl ValueRepr {
     }
 }
 
+#[derive(Clone)]
 struct StrLocals {
     ptr: Variable,
     len: Variable,
@@ -503,8 +504,10 @@ impl<M: Module> Codegen<M> {
         stmts: &[TirRef],
     ) -> Result<bool, String> {
         let saved_locals = ctx.locals.clone();
+        let saved_str_locals = ctx.str_locals.clone();
         let block_terminated = Self::emit_body(builder, ctx, stmts)?;
         ctx.locals = saved_locals;
+        ctx.str_locals = saved_str_locals;
         Ok(block_terminated)
     }
 
@@ -597,6 +600,19 @@ impl<M: Module> Codegen<M> {
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
             TirTag::Assign => {
                 let view = ctx.tir.assign_view(r);
+                if ctx.str_locals.contains_key(&view.name) {
+                    let repr = Self::eval_inst_str(builder, ctx, view.value)?;
+                    match repr {
+                        ValueRepr::Str { ptr, len, cap } => {
+                            let locals = ctx.str_locals.get(&view.name).unwrap();
+                            builder.def_var(locals.ptr, ptr);
+                            builder.def_var(locals.len, len);
+                            builder.def_var(locals.cap, cap);
+                        }
+                        _ => unreachable!("str-typed assign should produce ValueRepr::Str"),
+                    }
+                    return Ok(false);
+                }
                 let val = Self::eval_inst(builder, ctx, view.value)?;
                 let var = ctx.locals.get(&view.name).ok_or_else(|| {
                     format!(
