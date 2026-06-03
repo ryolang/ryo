@@ -90,6 +90,7 @@ pub enum Token {
     LBrace,
     RBrace,
     Comma,
+    Dot,
 
     // Newline + indentation tokens (post-processed by `indent`).
     Newline,
@@ -153,6 +154,7 @@ impl fmt::Display for Token {
             Self::LBrace => write!(f, "{{"),
             Self::RBrace => write!(f, "}}"),
             Self::Comma => write!(f, ","),
+            Self::Dot => write!(f, "."),
             Self::Newline => write!(f, "<newline>"),
             Self::Indent => write!(f, "<indent>"),
             Self::Dedent => write!(f, "<dedent>"),
@@ -268,6 +270,8 @@ pub(crate) enum RawToken<'a> {
     RBrace,
     #[token(",")]
     Comma,
+    #[token(".")]
+    Dot,
 
     #[regex(r"\n[ \t]*")]
     Newline(&'a str),
@@ -458,6 +462,7 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::LBrace => Token::LBrace,
         RawToken::RBrace => Token::RBrace,
         RawToken::Comma => Token::Comma,
+        RawToken::Dot => Token::Dot,
 
         RawToken::Newline(_) => Token::Newline,
         RawToken::Indent => Token::Indent,

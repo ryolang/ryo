@@ -135,6 +135,16 @@ pub enum TirTag {
     ICmpGt,
     ICmpGe,
 
+    // String concatenation.
+    StrConcat,
+
+    // String equality.
+    StrCmpEq,
+    StrCmpNe,
+
+    /// Read the `len` field of a str fat pointer. Operand in `TirData::UnOp`.
+    StrLen,
+
     // Float arithmetic / comparison.
     FAdd,
     FSub,
@@ -474,6 +484,9 @@ impl TirBuilder {
                 | TirTag::ICmpLe
                 | TirTag::ICmpGt
                 | TirTag::ICmpGe
+                | TirTag::StrConcat
+                | TirTag::StrCmpEq
+                | TirTag::StrCmpNe
                 | TirTag::FAdd
                 | TirTag::FSub
                 | TirTag::FMul
@@ -496,6 +509,13 @@ impl TirBuilder {
 
     pub fn unreachable(&mut self, ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::Unreachable, ty, TirData::None, span)
+    }
+
+    /// General-purpose instruction emit for tags that don't fit the
+    /// `unary` / `binary` debug-assert gates. Sema uses this for
+    /// method-call lowerings like `StrLen`.
+    pub fn push_typed(&mut self, tag: TirTag, data: TirData, ty: TypeId, span: Span) -> TirRef {
+        self.push(tag, ty, data, span)
     }
 
     fn extra_offset(&self) -> u32 {
@@ -1083,6 +1103,9 @@ fn bin_op_name(t: TirTag) -> &'static str {
         TirTag::FCmpLe => "fcmp_le",
         TirTag::FCmpGt => "fcmp_gt",
         TirTag::FCmpGe => "fcmp_ge",
+        TirTag::StrConcat => "str_concat",
+        TirTag::StrCmpEq => "str_eq",
+        TirTag::StrCmpNe => "str_ne",
         TirTag::BoolAnd => "bool_and",
         TirTag::BoolOr => "bool_or",
         _ => "?bin",
@@ -1095,6 +1118,7 @@ fn un_op_name(t: TirTag) -> &'static str {
         TirTag::BoolNot => "bool_not",
         TirTag::Return => "ret",
         TirTag::ExprStmt => "expr_stmt",
+        TirTag::StrLen => "str_len",
         _ => "?un",
     }
 }

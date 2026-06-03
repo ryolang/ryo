@@ -337,6 +337,9 @@ impl Expression {
             ExprKind::BinaryOp(_, op, _) => format!("BinaryOp({})", op),
             ExprKind::UnaryOp(op, _) => format!("UnaryOp({})", op),
             ExprKind::Call(name, _) => format!("Call({})", pool.str(*name)),
+            ExprKind::MethodCall { method, .. } => {
+                format!("MethodCall(.{})", pool.str(*method))
+            }
         };
 
         println!(
@@ -361,6 +364,14 @@ impl Expression {
                     arg.pretty_print(&format!("{}{}", new_prefix, prefix_char), pool);
                 }
             }
+            ExprKind::MethodCall { receiver, args, .. } => {
+                receiver.pretty_print(&format!("{}├── recv: ", new_prefix), pool);
+                for (i, arg) in args.iter().enumerate() {
+                    let is_last = i == args.len() - 1;
+                    let prefix_char = if is_last { "└── " } else { "├── " };
+                    arg.pretty_print(&format!("{}{}", new_prefix, prefix_char), pool);
+                }
+            }
         }
     }
 }
@@ -372,6 +383,11 @@ pub enum ExprKind {
     BinaryOp(Box<Expression>, BinaryOperator, Box<Expression>),
     UnaryOp(UnaryOperator, Box<Expression>),
     Call(StringId, Vec<Expression>),
+    MethodCall {
+        receiver: Box<Expression>,
+        method: StringId,
+        args: Vec<Expression>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -15,7 +15,7 @@
 //!    instructions (e.g. `IAdd %3, %5` materializes `%3` and `%5`
 //!    first). Cranelift always needs nested values; doing it
 //!    through `TirRef` indexing is the point.
-//! 2. The `eval_inst` memoization map (`HashMap<TirRef, Value>`)
+//! 2. The `eval_inst` memoization map (`HashMap<TirRef, ValueRepr>`)
 //!    so a shared sub-expression isn't re-emitted. TIR today is
 //!    tree-shaped (one parent per inst) so this is purely
 //!    defensive — but it's the right invariant before lazy sema
@@ -25,7 +25,7 @@
 use crate::ast::CompoundOp;
 use crate::tir::{Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
-use cranelift::codegen::ir::{BlockArg, FuncRef};
+use cranelift::codegen::ir::{ArgumentPurpose, BlockArg, FuncRef};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -35,16 +35,25 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::HashMap;
 use target_lexicon::Triple;
 
+/// Returns `true` if `ty` resolves to `Str` in the pool.
+///
+/// Callers use this to gate multi-value (fat-pointer) paths before
+/// reaching `cranelift_type_for`, which panics on `Str`.
+fn is_str_type(ty: TypeId, pool: &InternPool) -> bool {
+    matches!(pool.kind(ty), TypeKind::Str)
+}
+
 /// Map a TIR type to the corresponding Cranelift IR type.
 ///
 /// `Int` uses the target's pointer-sized integer (i64 on 64-bit).
 /// `Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
-/// `Str` is represented as a pointer (pointer-sized integer).
+/// `Str` is a fat pointer (ptr, len, cap) — it cannot map to a single type;
+/// callers must gate with `is_str_type` before reaching this function.
 /// `Void` has no Cranelift representation and should not be mapped here.
 fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) -> types::Type {
     match pool.kind(ty) {
         TypeKind::Int => pointer_ty,
-        TypeKind::Str => pointer_ty,
+        TypeKind::Str => panic!("cranelift_type_for: str is multi-value; use is_str_type gate"),
         TypeKind::Bool => types::I8,
         TypeKind::Float => types::F64,
         // Dead code after trap, but Cranelift needs a concrete type for every SSA value
@@ -87,6 +96,29 @@ struct LoopContext {
     continue_target: Block,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ValueRepr {
+    Scalar(Value),
+    Str { ptr: Value, len: Value, cap: Value },
+}
+
+impl ValueRepr {
+    #[cfg(test)]
+    fn expect_scalar(self) -> Value {
+        match self {
+            ValueRepr::Scalar(v) => v,
+            ValueRepr::Str { .. } => panic!("expected Scalar, got Str"),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct StrLocals {
+    ptr: Variable,
+    len: Variable,
+    cap: Variable,
+}
+
 /// Per-function emission state. Lives only for the duration of one
 /// `compile_function` call; reset between functions because
 /// Cranelift `Variable` ids and the `TirRef → Value` memo are both
@@ -102,11 +134,15 @@ struct FunctionContext<'a, M: Module> {
     tir: &'a Tir,
     locals: HashMap<StringId, Variable>,
     func_ids: &'a HashMap<StringId, FuncId>,
-    /// `TirRef → Value` memo. Materializing the same instruction
+    /// `TirRef → ValueRepr` memo. Materializing the same instruction
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
-    inst_values: HashMap<TirRef, Value>,
+    inst_values: HashMap<TirRef, ValueRepr>,
     loop_stack: Vec<LoopContext>,
+    str_locals: HashMap<StringId, StrLocals>,
+    /// For str-returning functions: the hidden sret pointer (first block param)
+    /// through which the callee writes the (ptr, len, cap) triple.
+    sret_ptr: Option<Value>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -163,8 +199,25 @@ impl Codegen<ObjectModule> {
 
 impl Codegen<JITModule> {
     pub fn new_jit() -> Result<Self, String> {
-        let jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
+        let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
             .map_err(|e| format!("Failed to create JIT builder: {}", e))?;
+
+        // Register runtime symbols so the JIT can resolve them.
+        jit_builder.symbols([
+            (
+                "ryo_str_from_literal",
+                ryo_runtime::ryo_str_from_literal as *const u8,
+            ),
+            ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
+            ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
+            ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
+            ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
+            (
+                "ryo_float_to_str",
+                ryo_runtime::ryo_float_to_str as *const u8,
+            ),
+            ("ryo_bool_to_str", ryo_runtime::ryo_bool_to_str as *const u8),
+        ]);
 
         Ok(Self::from_module(
             JITModule::new(jit_builder),
@@ -296,8 +349,14 @@ impl<M: Module> Codegen<M> {
     fn build_signature(&self, tir: &Tir, pool: &InternPool) -> Signature {
         let mut sig = self.module.make_signature();
         for param in &tir.params {
-            let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
-            sig.params.push(AbiParam::new(cl_ty));
+            if is_str_type(param.ty, pool) {
+                sig.params.push(AbiParam::new(self.int_type)); // ptr
+                sig.params.push(AbiParam::new(types::I64)); // len
+                sig.params.push(AbiParam::new(types::I64)); // cap
+            } else {
+                let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
+                sig.params.push(AbiParam::new(cl_ty));
+            }
         }
         // C-ABI shim for `main`: Ryo's `fn main()` is void, but the
         // host C runtime (crt0 via zig cc, or our JIT trampoline)
@@ -308,8 +367,16 @@ impl<M: Module> Codegen<M> {
         if is_main {
             sig.returns.push(AbiParam::new(self.int_type));
         } else if tir.return_type != pool.void() {
-            let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
-            sig.returns.push(AbiParam::new(cl_ty));
+            if is_str_type(tir.return_type, pool) {
+                // sret: hidden pointer prepended to regular params, no IR-level return.
+                sig.params.insert(
+                    0,
+                    AbiParam::special(self.int_type, ArgumentPurpose::StructReturn),
+                );
+            } else {
+                let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
+                sig.returns.push(AbiParam::new(cl_ty));
+            }
         }
         sig
     }
@@ -336,12 +403,41 @@ impl<M: Module> Codegen<M> {
             let int_type = self.int_type;
             let mut locals: HashMap<StringId, Variable> = HashMap::new();
 
-            for (i, param) in tir.params.iter().enumerate() {
-                let cl_ty = cranelift_type_for(param.ty, pool, int_type);
-                let var = builder.declare_var(cl_ty);
-                let param_val = builder.block_params(entry_block)[i];
-                builder.def_var(var, param_val);
-                locals.insert(param.name, var);
+            let is_main = pool.str(tir.name) == "main";
+            let returns_str = !is_main && is_str_type(tir.return_type, pool);
+            let mut block_idx: usize = if returns_str { 1 } else { 0 };
+            let sret_ptr = if returns_str {
+                Some(builder.block_params(entry_block)[0])
+            } else {
+                None
+            };
+
+            let mut str_param_locals: HashMap<StringId, StrLocals> = HashMap::new();
+
+            for param in tir.params.iter() {
+                if is_str_type(param.ty, pool) {
+                    let var_ptr = builder.declare_var(int_type);
+                    let var_len = builder.declare_var(types::I64);
+                    let var_cap = builder.declare_var(types::I64);
+                    builder.def_var(var_ptr, builder.block_params(entry_block)[block_idx]);
+                    builder.def_var(var_len, builder.block_params(entry_block)[block_idx + 1]);
+                    builder.def_var(var_cap, builder.block_params(entry_block)[block_idx + 2]);
+                    str_param_locals.insert(
+                        param.name,
+                        StrLocals {
+                            ptr: var_ptr,
+                            len: var_len,
+                            cap: var_cap,
+                        },
+                    );
+                    block_idx += 3;
+                } else {
+                    let cl_ty = cranelift_type_for(param.ty, pool, int_type);
+                    let var = builder.declare_var(cl_ty);
+                    builder.def_var(var, builder.block_params(entry_block)[block_idx]);
+                    locals.insert(param.name, var);
+                    block_idx += 1;
+                }
             }
 
             let mut ctx: FunctionContext<'_, M> = FunctionContext {
@@ -356,22 +452,21 @@ impl<M: Module> Codegen<M> {
                 func_ids,
                 inst_values: HashMap::new(),
                 loop_stack: Vec::new(),
+                str_locals: str_param_locals,
+                sret_ptr,
             };
 
             let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
 
             if !has_return {
-                let is_main = pool.str(tir.name) == "main";
-                if is_main || tir.return_type != pool.void() {
-                    // `main` always returns int 0 to the OS even
-                    // when Ryo declares it void; non-main
-                    // non-void functions also fall through to a
-                    // zero return today (sema accepts missing
-                    // returns; control-flow analysis lands in M8b).
+                if is_main {
                     let zero = builder.ins().iconst(int_type, 0);
                     builder.ins().return_(&[zero]);
-                } else {
+                } else if returns_str || tir.return_type == pool.void() {
                     builder.ins().return_(&[]);
+                } else {
+                    let zero = builder.ins().iconst(int_type, 0);
+                    builder.ins().return_(&[zero]);
                 }
             }
 
@@ -409,8 +504,10 @@ impl<M: Module> Codegen<M> {
         stmts: &[TirRef],
     ) -> Result<bool, String> {
         let saved_locals = ctx.locals.clone();
+        let saved_str_locals = ctx.str_locals.clone();
         let block_terminated = Self::emit_body(builder, ctx, stmts)?;
         ctx.locals = saved_locals;
+        ctx.str_locals = saved_str_locals;
         Ok(block_terminated)
     }
 
@@ -426,6 +523,29 @@ impl<M: Module> Codegen<M> {
         match inst.tag {
             TirTag::VarDecl => {
                 let view = ctx.tir.var_decl_view(r);
+                if is_str_type(inst.ty, ctx.pool) {
+                    let repr = Self::eval_inst_str(builder, ctx, view.initializer)?;
+                    match repr {
+                        ValueRepr::Str { ptr, len, cap } => {
+                            let var_ptr = builder.declare_var(ctx.int_type);
+                            let var_len = builder.declare_var(types::I64);
+                            let var_cap = builder.declare_var(types::I64);
+                            builder.def_var(var_ptr, ptr);
+                            builder.def_var(var_len, len);
+                            builder.def_var(var_cap, cap);
+                            ctx.str_locals.insert(
+                                view.name,
+                                StrLocals {
+                                    ptr: var_ptr,
+                                    len: var_len,
+                                    cap: var_cap,
+                                },
+                            );
+                        }
+                        _ => unreachable!("str-typed initializer should produce ValueRepr::Str"),
+                    }
+                    return Ok(false);
+                }
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
                 // The variable's resolved type lives in the VarDecl
                 // inst's `ty` slot directly — no side-table lookup.
@@ -440,8 +560,21 @@ impl<M: Module> Codegen<M> {
                     TirData::UnOp(o) => o,
                     _ => unreachable!("Return must carry TirData::UnOp"),
                 };
-                let val = Self::eval_inst(builder, ctx, operand)?;
-                builder.ins().return_(&[val]);
+                if is_str_type(ctx.tir.return_type, ctx.pool) {
+                    let sret = ctx.sret_ptr.expect("str-returning fn must have sret_ptr");
+                    let repr = Self::eval_inst_str(builder, ctx, operand)?;
+                    let (ptr, len, cap) = match repr {
+                        ValueRepr::Str { ptr, len, cap } => (ptr, len, cap),
+                        _ => unreachable!("str return must produce ValueRepr::Str"),
+                    };
+                    builder.ins().store(MemFlags::trusted(), ptr, sret, 0);
+                    builder.ins().store(MemFlags::trusted(), len, sret, 8);
+                    builder.ins().store(MemFlags::trusted(), cap, sret, 16);
+                    builder.ins().return_(&[]);
+                } else {
+                    let val = Self::eval_inst(builder, ctx, operand)?;
+                    builder.ins().return_(&[val]);
+                }
                 Ok(true)
             }
             TirTag::ReturnVoid => {
@@ -467,6 +600,22 @@ impl<M: Module> Codegen<M> {
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
             TirTag::Assign => {
                 let view = ctx.tir.assign_view(r);
+                if is_str_type(inst.ty, ctx.pool) {
+                    let repr = Self::eval_inst_str(builder, ctx, view.value)?;
+                    let ValueRepr::Str { ptr, len, cap } = repr else {
+                        unreachable!("str-typed assign should produce ValueRepr::Str");
+                    };
+                    let locals = ctx.str_locals.get(&view.name).ok_or_else(|| {
+                        format!(
+                            "Undefined string variable in assign: '{}'",
+                            ctx.pool.str(view.name)
+                        )
+                    })?;
+                    builder.def_var(locals.ptr, ptr);
+                    builder.def_var(locals.len, len);
+                    builder.def_var(locals.cap, cap);
+                    return Ok(false);
+                }
                 let val = Self::eval_inst(builder, ctx, view.value)?;
                 let var = ctx.locals.get(&view.name).ok_or_else(|| {
                     format!(
@@ -751,8 +900,14 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<Value, String> {
-        if let Some(&v) = ctx.inst_values.get(&r) {
-            return Ok(v);
+        if let Some(repr) = ctx.inst_values.get(&r) {
+            return Ok(match repr {
+                ValueRepr::Scalar(v) => *v,
+                // str-returning calls cache ValueRepr::Str; return the ptr
+                // component as the scalar stand-in (callers that need the
+                // full triple use eval_inst_str).
+                ValueRepr::Str { ptr, .. } => *ptr,
+            });
         }
         let inst = ctx.tir.inst(r);
         let value = match inst.tag {
@@ -769,7 +924,16 @@ impl<M: Module> Codegen<M> {
                 _ => unreachable!("FloatConst must carry TirData::Float"),
             },
             TirTag::StrConst => match inst.data {
-                TirData::Str(id) => emit_str_literal(builder, ctx, id)?,
+                TirData::Str(id) => {
+                    // Returns the raw .rodata pointer — used by __ryo_panic
+                    // which takes (ptr, len) scalars. For fat-pointer str
+                    // materialisation, callers use eval_inst_str instead.
+                    let content = ctx.pool.str(id);
+                    let data_id =
+                        store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+                    let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+                    builder.ins().global_value(ctx.int_type, data_ref)
+                }
                 _ => unreachable!("StrConst must carry TirData::Str"),
             },
             TirTag::Var => match inst.data {
@@ -918,6 +1082,53 @@ impl<M: Module> Codegen<M> {
                 Self::generate_if_stmt(builder, ctx, r)?;
                 builder.ins().iconst(ctx.int_type, 0)
             }
+            TirTag::StrLen => {
+                let operand = match inst.data {
+                    TirData::UnOp(r) => r,
+                    _ => unreachable!("StrLen must carry TirData::UnOp"),
+                };
+                let repr = Self::eval_inst_str(builder, ctx, operand)?;
+                match repr {
+                    ValueRepr::Str { len, .. } => len,
+                    _ => unreachable!("StrLen operand must produce ValueRepr::Str"),
+                }
+            }
+            TirTag::StrCmpEq | TirTag::StrCmpNe => {
+                let (lhs, rhs) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!(),
+                };
+                let l_repr = Self::eval_inst_str(builder, ctx, lhs)?;
+                let r_repr = Self::eval_inst_str(builder, ctx, rhs)?;
+                let (l_ptr, l_len) = match l_repr {
+                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
+                    _ => unreachable!(),
+                };
+                let (r_ptr, r_len) = match r_repr {
+                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
+                    _ => unreachable!(),
+                };
+
+                let eq_ref = Self::declare_runtime_fn(
+                    ctx.module,
+                    builder,
+                    "ryo_str_eq",
+                    &[ctx.int_type, types::I64, ctx.int_type, types::I64],
+                    &[types::I8],
+                )?;
+                let call = builder.ins().call(eq_ref, &[l_ptr, l_len, r_ptr, r_len]);
+                let result = builder.inst_results(call)[0];
+
+                if inst.tag == TirTag::StrCmpNe {
+                    let one = builder.ins().iconst(types::I8, 1);
+                    builder.ins().bxor(result, one)
+                } else {
+                    result
+                }
+            }
+            TirTag::StrConcat => {
+                return Err("StrConcat must be materialized through eval_inst_str".to_string());
+            }
             TirTag::Unreachable => {
                 return Err(
                     "codegen reached an Unreachable TIR inst — sema must have errored".to_string(),
@@ -931,8 +1142,227 @@ impl<M: Module> Codegen<M> {
                 ));
             }
         };
-        ctx.inst_values.insert(r, value);
+        // Don't overwrite if emit_call already cached a Str repr (sret convention).
+        ctx.inst_values.entry(r).or_insert(ValueRepr::Scalar(value));
         Ok(value)
+    }
+
+    /// Declare an external runtime function by name and return a
+    /// `FuncRef` usable in the current function being built.
+    fn declare_runtime_fn(
+        module: &mut M,
+        builder: &mut FunctionBuilder,
+        name: &str,
+        params: &[types::Type],
+        returns: &[types::Type],
+    ) -> Result<FuncRef, String> {
+        let mut sig = module.make_signature();
+        for &p in params {
+            sig.params.push(AbiParam::new(p));
+        }
+        for &r in returns {
+            sig.returns.push(AbiParam::new(r));
+        }
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .map_err(|e| format!("Failed to declare {}: {}", name, e))?;
+        Ok(module.declare_func_in_func(func_id, builder.func))
+    }
+
+    /// Materialize a str-typed TIR instruction, returning a
+    /// `ValueRepr::Str` triple. Falls back to scalar `eval_inst`
+    /// for non-str instructions.
+    fn eval_inst_str(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<ValueRepr, String> {
+        if let Some(repr) = ctx.inst_values.get(&r) {
+            return Ok(*repr);
+        }
+        let inst = ctx.tir.inst(r);
+        let repr = match inst.tag {
+            TirTag::StrConst => {
+                let id = match inst.data {
+                    TirData::Str(id) => id,
+                    _ => unreachable!(),
+                };
+                Self::emit_str_literal_fat(builder, ctx, id)?
+            }
+            TirTag::Var => {
+                let name = match inst.data {
+                    TirData::Var(name) => name,
+                    _ => unreachable!(),
+                };
+                if let Some(locals) = ctx.str_locals.get(&name) {
+                    ValueRepr::Str {
+                        ptr: builder.use_var(locals.ptr),
+                        len: builder.use_var(locals.len),
+                        cap: builder.use_var(locals.cap),
+                    }
+                } else {
+                    // Not a str local — fall through to scalar
+                    let val = Self::eval_inst(builder, ctx, r)?;
+                    return Ok(ValueRepr::Scalar(val));
+                }
+            }
+            TirTag::Call => {
+                let view = ctx.tir.call_view(r);
+                let name_str = ctx.pool.str(view.name);
+                if name_str == "int_to_str"
+                    || name_str == "float_to_str"
+                    || name_str == "bool_to_str"
+                {
+                    let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
+
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        24,
+                        3,
+                    ));
+                    let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+                    let (fn_name, param_ty) = match name_str {
+                        "int_to_str" => ("ryo_int_to_str", ctx.int_type),
+                        "float_to_str" => ("ryo_float_to_str", types::F64),
+                        "bool_to_str" => ("ryo_bool_to_str", types::I8),
+                        _ => unreachable!(),
+                    };
+
+                    let func_ref = Self::declare_runtime_fn(
+                        ctx.module,
+                        builder,
+                        fn_name,
+                        &[param_ty, ctx.int_type],
+                        &[],
+                    )?;
+                    builder.ins().call(func_ref, &[arg_val, out_ptr]);
+
+                    let ptr = builder
+                        .ins()
+                        .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+                    let len = builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+                    let cap = builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+
+                    ValueRepr::Str { ptr, len, cap }
+                } else {
+                    // User call — eval_inst triggers emit_call which handles
+                    // sret for str-returning calls and caches ValueRepr::Str.
+                    Self::eval_inst(builder, ctx, r)?;
+                    if let Some(repr) = ctx.inst_values.get(&r) {
+                        return Ok(*repr);
+                    }
+                    unreachable!("str-returning user call must cache ValueRepr::Str via emit_call");
+                }
+            }
+            TirTag::StrConcat => {
+                let (lhs, rhs) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!(),
+                };
+                let l_repr = Self::eval_inst_str(builder, ctx, lhs)?;
+                let r_repr = Self::eval_inst_str(builder, ctx, rhs)?;
+                let (l_ptr, l_len) = match l_repr {
+                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
+                    _ => unreachable!(),
+                };
+                let (r_ptr, r_len) = match r_repr {
+                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
+                    _ => unreachable!(),
+                };
+
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    24,
+                    3,
+                ));
+                let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+                let concat_ref = Self::declare_runtime_fn(
+                    ctx.module,
+                    builder,
+                    "ryo_str_concat",
+                    &[
+                        ctx.int_type,
+                        types::I64,
+                        ctx.int_type,
+                        types::I64,
+                        ctx.int_type,
+                    ],
+                    &[],
+                )?;
+                builder
+                    .ins()
+                    .call(concat_ref, &[l_ptr, l_len, r_ptr, r_len, out_ptr]);
+
+                let ptr = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+                let len = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+                let cap = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+
+                ValueRepr::Str { ptr, len, cap }
+            }
+            _ => {
+                // Delegate to scalar eval_inst for non-str instructions
+                let val = Self::eval_inst(builder, ctx, r)?;
+                return Ok(ValueRepr::Scalar(val));
+            }
+        };
+        ctx.inst_values.insert(r, repr);
+        Ok(repr)
+    }
+
+    /// Emit a string literal as a fat pointer triple (ptr, len, cap)
+    /// by calling `ryo_str_from_literal` at runtime.
+    fn emit_str_literal_fat(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        id: StringId,
+    ) -> Result<ValueRepr, String> {
+        let content = ctx.pool.str(id);
+        let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+        let rodata_ptr = builder.ins().global_value(ctx.int_type, data_ref);
+        let lit_len = builder.ins().iconst(types::I64, content.len() as i64);
+
+        // Allocate 24-byte stack slot for out parameter (8-byte aligned)
+        let slot =
+            builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 24, 3));
+        let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+        // Call ryo_str_from_literal(data, len, out)
+        let from_literal_ref = Self::declare_runtime_fn(
+            ctx.module,
+            builder,
+            "ryo_str_from_literal",
+            &[ctx.int_type, types::I64, ctx.int_type],
+            &[],
+        )?;
+        builder
+            .ins()
+            .call(from_literal_ref, &[rodata_ptr, lit_len, out_ptr]);
+
+        // Load the triple back from the stack slot
+        let ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+        let cap = builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+
+        Ok(ValueRepr::Str { ptr, len, cap })
     }
 
     fn emit_call(
@@ -944,10 +1374,63 @@ impl<M: Module> Codegen<M> {
         let name_id = view.name;
         let name_str = ctx.pool.str(name_id);
 
-        // print is the only builtin with custom codegen (inline syscall).
-        // __ryo_panic and user functions go through the normal call path.
+        // print and __ryo_panic have custom codegen (inline syscall / raw scalar ABI).
+        // They do NOT use the str-triple expansion that user functions use.
+        if name_str == "__ryo_panic" {
+            // __ryo_panic(ptr, len) takes raw scalars — the StrConst .rodata
+            // pointer and an int len — NOT the str-triple ABI.
+            let mut arg_values = Vec::with_capacity(view.args.len());
+            for arg in &view.args {
+                arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
+            }
+            let callee_id = *ctx
+                .func_ids
+                .get(&name_id)
+                .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
+            let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
+            builder.ins().call(callee_ref, &arg_values);
+            builder.ins().trap(TrapCode::user(1).unwrap());
+            let dead = builder.create_block();
+            builder.seal_block(dead);
+            builder.switch_to_block(dead);
+            return Ok(builder.ins().iconst(types::I8, 0));
+        }
+
         if name_str == "print" {
             Self::generate_print_call(builder, ctx, &view.args)?;
+            return Ok(builder.ins().iconst(ctx.int_type, 0));
+        }
+
+        // Formatter builtins — when called as a bare statement (result
+        // discarded), we still emit the call but throw away the output.
+        // The primary path is eval_inst_str (used when result is assigned
+        // to a str variable or passed to print).
+        if name_str == "int_to_str" || name_str == "float_to_str" || name_str == "bool_to_str" {
+            let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
+
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                24,
+                3,
+            ));
+            let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+            let (fn_name, param_ty) = match name_str {
+                "int_to_str" => ("ryo_int_to_str", ctx.int_type),
+                "float_to_str" => ("ryo_float_to_str", types::F64),
+                "bool_to_str" => ("ryo_bool_to_str", types::I8),
+                _ => unreachable!(),
+            };
+
+            let func_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                fn_name,
+                &[param_ty, ctx.int_type],
+                &[],
+            )?;
+            builder.ins().call(func_ref, &[arg_val, out_ptr]);
+
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
@@ -956,22 +1439,32 @@ impl<M: Module> Codegen<M> {
             .get(&name_id)
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
-        let mut arg_values = Vec::with_capacity(view.args.len());
+        let mut arg_values = Vec::with_capacity(view.args.len() * 3 + 1);
         for arg in &view.args {
-            arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
+            let arg_ty = ctx.tir.inst(*arg).ty;
+            if is_str_type(arg_ty, ctx.pool) {
+                let repr = Self::eval_inst_str(builder, ctx, *arg)?;
+                match repr {
+                    ValueRepr::Str { ptr, len, cap } => {
+                        arg_values.push(ptr);
+                        arg_values.push(len);
+                        arg_values.push(cap);
+                    }
+                    _ => unreachable!("str-typed arg must produce ValueRepr::Str"),
+                }
+            } else {
+                arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
+            }
         }
 
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
-        let call = builder.ins().call(callee_ref, &arg_values);
-        let results = builder.inst_results(call);
+
+        let ret_ty = ctx.tir.inst(r).ty;
 
         // If the callee returns never (e.g. __ryo_panic), the call is
         // a terminator. Emit a trap + dead block for subsequent IR.
-        // The dead block needs no explicit terminator — compile_function's
-        // fallthrough `return 0` provides one. Cranelift verifier is
-        // happy as long as every block has exactly one terminator.
-        let ret_ty = ctx.tir.inst(r).ty;
         if ctx.pool.is_never(ret_ty) {
+            builder.ins().call(callee_ref, &arg_values);
             builder.ins().trap(TrapCode::user(1).unwrap());
             let dead = builder.create_block();
             builder.seal_block(dead);
@@ -979,6 +1472,33 @@ impl<M: Module> Codegen<M> {
             let dummy_ty = cranelift_type_for(ret_ty, ctx.pool, ctx.int_type);
             return Ok(builder.ins().iconst(dummy_ty, 0));
         }
+
+        if is_str_type(ret_ty, ctx.pool) {
+            // sret: allocate 24-byte slot, prepend pointer to args
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                24,
+                3,
+            ));
+            let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+            let mut all_args = Vec::with_capacity(arg_values.len() + 1);
+            all_args.push(out);
+            all_args.extend(arg_values);
+
+            builder.ins().call(callee_ref, &all_args);
+
+            let ptr = builder
+                .ins()
+                .load(ctx.int_type, MemFlags::trusted(), out, 0);
+            let len = builder.ins().load(types::I64, MemFlags::trusted(), out, 8);
+            let cap = builder.ins().load(types::I64, MemFlags::trusted(), out, 16);
+            ctx.inst_values.insert(r, ValueRepr::Str { ptr, len, cap });
+            return Ok(ptr); // dummy scalar — consumers use eval_inst_str
+        }
+
+        let call = builder.ins().call(callee_ref, &arg_values);
+        let results = builder.inst_results(call);
 
         if results.is_empty() {
             Ok(builder.ins().iconst(ctx.int_type, 0))
@@ -992,40 +1512,22 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         args: &[TirRef],
     ) -> Result<(), String> {
-        // Sema has already validated arity and the string-literal
-        // constraint (see `sema::check_builtin_call`). The matches
-        // below are therefore infallible.
         debug_assert_eq!(args.len(), 1, "sema should reject print() arity errors");
-        let string_id = match ctx.tir.inst(args[0]).data {
-            TirData::Str(id) => id,
-            other => unreachable!(
-                "sema should reject non-literal print() args, got {:?}",
-                other
-            ),
+        debug_assert!(
+            is_str_type(ctx.tir.inst(args[0]).ty, ctx.pool),
+            "sema should reject non-str print() args",
+        );
+
+        let repr = Self::eval_inst_str(builder, ctx, args[0])?;
+        let (ptr, len) = match repr {
+            ValueRepr::Str { ptr, len, .. } => (ptr, len),
+            _ => unreachable!("str-typed arg produced Scalar"),
         };
-        let string_content = ctx.pool.str(string_id);
-
-        let data_id = store_string(
-            string_id,
-            string_content,
-            ctx.module,
-            ctx.data_ctx,
-            ctx.string_data,
-        )?;
-        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-        let string_ptr = builder.ins().global_value(ctx.int_type, data_ref);
-
-        let string_len = builder
-            .ins()
-            .iconst(ctx.int_type, string_content.len() as i64);
-        let fd = builder.ins().iconst(types::I32, 1);
 
         check_platform_support(ctx.triple)?;
-
+        let fd = builder.ins().iconst(types::I32, 1);
         let write_ref = declare_write(ctx.module, builder, ctx.int_type)?;
-        let call_inst = builder.ins().call(write_ref, &[fd, string_ptr, string_len]);
-        let _bytes_written = builder.inst_results(call_inst)[0];
-
+        builder.ins().call(write_ref, &[fd, ptr, len]);
         Ok(())
     }
 }
@@ -1113,21 +1615,6 @@ fn declare_write<M: Module>(
     Ok(module.declare_func_in_func(func_id, builder.func))
 }
 
-/// Materialize a string literal pointer into the function. Pulled
-/// out of the `Codegen` impl so it can be called without juggling
-/// `&mut self` borrows alongside the `FunctionContext`'s mutable
-/// references to the same fields.
-fn emit_str_literal<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx: &mut FunctionContext<'_, M>,
-    id: StringId,
-) -> Result<Value, String> {
-    let content = ctx.pool.str(id);
-    let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
-    let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-    Ok(builder.ins().global_value(ctx.int_type, data_ref))
-}
-
 fn store_string<M: Module>(
     content_id: StringId,
     content: &str,
@@ -1170,4 +1657,44 @@ fn no_unreachable_in(tirs: &[Tir]) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cranelift::codegen::ir::Value as ClifValue;
+
+    #[test]
+    fn value_repr_scalar_roundtrip() {
+        let v = ClifValue::from_u32(1);
+        let repr = ValueRepr::Scalar(v);
+        assert_eq!(repr.expect_scalar(), v);
+    }
+
+    #[test]
+    fn value_repr_str_fields() {
+        let repr = ValueRepr::Str {
+            ptr: ClifValue::from_u32(1),
+            len: ClifValue::from_u32(2),
+            cap: ClifValue::from_u32(3),
+        };
+        match repr {
+            ValueRepr::Str { ptr, len, cap } => {
+                assert_ne!(ptr, len);
+                assert_ne!(len, cap);
+            }
+            _ => panic!("expected Str"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected Scalar, got Str")]
+    fn value_repr_expect_scalar_panics_on_str() {
+        let repr = ValueRepr::Str {
+            ptr: ClifValue::from_u32(1),
+            len: ClifValue::from_u32(2),
+            cap: ClifValue::from_u32(3),
+        };
+        repr.expect_scalar();
+    }
 }

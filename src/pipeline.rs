@@ -7,6 +7,7 @@ use crate::errors::CompilerError;
 use crate::lexer::{self, Token};
 use crate::linker;
 use crate::parser::program_parser;
+use crate::runtime_lib;
 use crate::sema;
 use crate::tir::{self, Tir};
 use crate::types::InternPool;
@@ -457,7 +458,13 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     fs::write(&obj_filename, obj_bytes).map_err(CompilerError::from)?;
     println!("Generated object file: {}", obj_filename);
 
-    linker::link_executable(&obj_filename, &exe_filename)?;
+    // Extract embedded runtime archive and link
+    let runtime_path = runtime_lib::extract_runtime_to_temp()
+        .map_err(|e| CompilerError::LinkError(format!("Failed to extract runtime: {e}")))?;
+
+    linker::link_executable(&obj_filename, &exe_filename, &runtime_path)?;
+
+    runtime_lib::cleanup_runtime_temp(&runtime_path);
     let _ = fs::remove_file(&obj_filename);
 
     println!("Built: {}", exe_filename);

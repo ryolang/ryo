@@ -36,6 +36,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: clippy
+      - run: cargo build -p ryo-runtime --release
       - run: cargo clippy --all-targets
 
   test:
@@ -65,4 +66,5 @@ jobs:
       - name: Install Zig toolchain
         if: steps.zig-cache.outputs.cache-hit != 'true'
         run: cargo run -- toolchain install
+      - run: cargo build -p ryo-runtime --release
       - run: cargo test

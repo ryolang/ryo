@@ -48,7 +48,7 @@
 use crate::ast::CompoundOp;
 use crate::builtins;
 use crate::diag::{Diag, DiagCode, DiagSink};
-use crate::tir::{Tir, TirBuilder, TirParam, TirRef, TirTag};
+use crate::tir::{Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
 use crate::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
 use std::collections::{HashMap, VecDeque};
@@ -965,6 +965,74 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
             }
             check_call(sema, fcx, &view, &arg_tirs, span)
         }
+        InstTag::MethodCall => {
+            let view = sema.uir.method_call_view(r);
+            let receiver_tir = analyze_expr(sema, fcx, scope, view.receiver);
+            let receiver_ty = fcx.builder.ty_of(receiver_tir);
+            let method_name = sema.pool.str(view.name).to_string();
+
+            for &arg in &view.args {
+                analyze_expr(sema, fcx, scope, arg);
+            }
+
+            // For now, only str has methods
+            if sema.pool.kind(receiver_ty) != TypeKind::Str {
+                if !sema.pool.is_error(receiver_ty) {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::TypeMismatch,
+                        format!("type '{}' has no methods", sema.pool.display(receiver_ty)),
+                    ));
+                }
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+
+            match method_name.as_str() {
+                "len" => {
+                    if !view.args.is_empty() {
+                        sema.sink.emit(Diag::error(
+                            span,
+                            DiagCode::ArityMismatch,
+                            "str.len() takes no arguments".to_string(),
+                        ));
+                        return fcx.builder.unreachable(sema.pool.error_type(), span);
+                    }
+                    fcx.builder.push_typed(
+                        TirTag::StrLen,
+                        TirData::UnOp(receiver_tir),
+                        sema.pool.int(),
+                        span,
+                    )
+                }
+                "is_empty" => {
+                    if !view.args.is_empty() {
+                        sema.sink.emit(Diag::error(
+                            span,
+                            DiagCode::ArityMismatch,
+                            "str.is_empty() takes no arguments".to_string(),
+                        ));
+                        return fcx.builder.unreachable(sema.pool.error_type(), span);
+                    }
+                    let len_tir = fcx.builder.push_typed(
+                        TirTag::StrLen,
+                        TirData::UnOp(receiver_tir),
+                        sema.pool.int(),
+                        span,
+                    );
+                    let zero = fcx.builder.int_const(0, sema.pool.int(), span);
+                    fcx.builder
+                        .binary(TirTag::ICmpEq, sema.pool.bool_(), len_tir, zero, span)
+                }
+                _ => {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::UndefinedFunction,
+                        format!("str has no method '{}'", method_name),
+                    ));
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
+                }
+            }
+        }
         other => panic!(
             "analyze_expr: instruction at %{} is not an expression (tag={:?})",
             r.index(),
@@ -1061,15 +1129,13 @@ fn check_binary_op(
             }
             TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             TypeKind::Str => {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::UnsupportedOperator,
-                    format!(
-                        "equality operator '{}' not supported for type 'str' (yet)",
-                        bin_op_symbol(tag),
-                    ),
-                ));
-                fcx.builder.unreachable(sema.pool.error_type(), span)
+                let tir_tag = match tag {
+                    InstTag::Eq => TirTag::StrCmpEq,
+                    InstTag::NotEq => TirTag::StrCmpNe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
             TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
                 sema.sink.emit(Diag::error(
@@ -1175,6 +1241,21 @@ fn check_binary_op(
                 };
                 fcx.builder
                     .binary(tir_tag, sema.pool.float(), lhs, rhs, span)
+            }
+            TypeKind::Str => {
+                if tag != InstTag::Add {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::UnsupportedOperator,
+                        format!(
+                            "arithmetic operator '{}' not supported for type 'str'",
+                            bin_op_symbol(tag),
+                        ),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+                fcx.builder
+                    .binary(TirTag::StrConcat, sema.pool.str_(), lhs, rhs, span)
             }
             TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             _ => {
@@ -1301,7 +1382,7 @@ fn emit_builtin_call(
     let name = sema.pool.str(view.name);
     match name {
         "print" => {
-            if !check_print_args(sema, view, span) {
+            if !check_print_args(sema, fcx, view, arg_tirs, span) {
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
@@ -1309,6 +1390,96 @@ fn emit_builtin_call(
         }
         "panic" => emit_panic(sema, fcx, view, span),
         "assert" => emit_assert(sema, fcx, view, arg_tirs, span),
+        "int_to_str" => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "int_to_str() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            if !matches!(sema.pool.kind(arg_ty), TypeKind::Int) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "int_to_str() argument must be int, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+        }
+        "float_to_str" => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "float_to_str() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            if !matches!(sema.pool.kind(arg_ty), TypeKind::Float) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "float_to_str() argument must be float, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+        }
+        "bool_to_str" => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "bool_to_str() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            if !matches!(sema.pool.kind(arg_ty), TypeKind::Bool) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "bool_to_str() argument must be bool, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+        }
         _ => {
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, ret_ty, span)
@@ -1428,7 +1599,13 @@ fn build_panic_call(
         .call(panic_name, &[str_ref, len_ref], sema.pool.never(), span)
 }
 
-fn check_print_args(sema: &mut Sema<'_>, view: &CallView, span: Span) -> bool {
+fn check_print_args(
+    sema: &mut Sema<'_>,
+    fcx: &FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+) -> bool {
     if view.args.len() != 1 {
         sema.sink.emit(Diag::error(
             span,
@@ -1437,11 +1614,18 @@ fn check_print_args(sema: &mut Sema<'_>, view: &CallView, span: Span) -> bool {
         ));
         return false;
     }
-    if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
+    let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+    if sema.pool.is_error(arg_ty) {
+        return false;
+    }
+    if !matches!(sema.pool.kind(arg_ty), TypeKind::Str) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),
-            DiagCode::BuiltinArgKind,
-            "print() argument must be a string literal",
+            DiagCode::TypeMismatch,
+            format!(
+                "print() argument must be str, got {}",
+                sema.pool.display(arg_ty)
+            ),
         ));
         return false;
     }
@@ -1723,9 +1907,12 @@ mod tests {
     }
 
     #[test]
-    fn string_equality_rejected() {
-        let diags = run("x = \"a\" == \"b\"").unwrap_err();
-        assert!(any_code(&diags, DiagCode::UnsupportedOperator));
+    fn string_equality_accepted() {
+        let (tirs, _pool) = run("x = \"a\" == \"b\"").unwrap();
+        // The equality produces a bool-typed StrCmpEq instruction.
+        let body = &tirs[0];
+        let has_str_eq = body.instructions.iter().any(|i| i.tag == TirTag::StrCmpEq);
+        assert!(has_str_eq, "expected StrCmpEq in TIR");
     }
 
     #[test]
@@ -1748,12 +1935,6 @@ mod tests {
         let v = main.var_decl_view(stmt_at(main, 0));
         assert_eq!(main.inst(v.initializer).ty, pool.bool_());
         assert!(matches!(main.inst(v.initializer).data, TirData::Bool(true)));
-    }
-
-    #[test]
-    fn print_with_non_literal_rejected_in_sema() {
-        let diags = run("x = \"hi\"\nprint(x)").unwrap_err();
-        assert!(any_code(&diags, DiagCode::BuiltinArgKind));
     }
 
     #[test]

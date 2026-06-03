@@ -36,16 +36,18 @@ All Ryo code examples **must** use Python-style colons and indentation, **NOT** 
 
 ## Build & Test Commands
 
+Standard cargo commands work fully out-of-the-box (even on a clean checkout) because `build.rs` automatically compiles the `ryo-runtime` static library in a separate target directory if it isn't found.
+
 ```bash
-cargo fmt                        # Auto-format (CI runs --check with -Dwarnings)
-cargo clippy --all-targets       # Lint (CI enforces, warnings are errors)
-cargo check                      # Check for errors
-cargo build [--release]          # Build debug or release
+cargo build                      # Automatically builds the runtime (if missing) and then compiles the compiler
+cargo check                      # Check compiler for errors
+cargo test                       # Run all unit + integration tests
 cargo run -- run <file>          # JIT compile and execute
 cargo run -- build <file>        # AOT compile to binary
-cargo test                       # Run tests
 cargo run -- toolchain install   # Download Zig linker
 cargo run -- toolchain status    # Check Zig status
+cargo clippy --all-targets       # Lint (warnings are errors)
+cargo fmt --check                # Check code formatting style
 ```
 
 **File extensions:** `.ryo` (source), `.md` (docs), `.rs` (Rust), `.o`/`.obj` (generated)
@@ -65,7 +67,15 @@ GitHub Actions runs on pushes to `main` and PRs targeting `main`: `cargo fmt --c
 **Commit prefixes:** `feat:`, `fix:`, `docs:`, `spec:`, `dev:`, `roadmap:`, `test:`, `chore:`, `refactor:`.
 Keep subjects under 72 chars. Add body for non-obvious changes.
 
-Never author Claude on commits nor PRs.
+IMPORTANT: Never author Claude on commits nor PRs.
+
+---
+
+## Issue Tracking
+
+Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, pick the appropriate severity (Blocking / Correctness / Cleanup), and include Files, Summary, and Resolution fields.
+
+Do **not** create issues for things you're fixing right now — just fix them. Do **not** use GitHub Issues for these; `ISSUES.md` is the single source of truth.
 
 ---
 

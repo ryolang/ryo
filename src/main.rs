@@ -12,6 +12,8 @@ mod lexer;
 mod linker;
 mod parser;
 mod pipeline;
+#[allow(dead_code)]
+mod runtime_lib;
 mod sema;
 mod tir;
 mod toolchain;

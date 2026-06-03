@@ -200,6 +200,9 @@ pub enum InstTag {
 
     /// `continue` statement.
     Continue,
+
+    /// Method call (e.g. `receiver.name(args)`). Variable payload in `extra` — see [`method_call_extra`].
+    MethodCall,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -376,6 +379,21 @@ pub mod compound_assign_extra {
     pub const OP: usize = 1;
     pub const VALUE: usize = 2;
     pub const LEN: usize = 3;
+}
+
+/// Layout in `extra` for [`InstTag::MethodCall`]:
+///
+/// ```text
+///   [0]  receiver: InstRef.raw()
+///   [1]  name:     StringId.raw()
+///   [2]  argc:     u32
+///   [3..3+argc] args: InstRef.raw()
+/// ```
+pub mod method_call_extra {
+    pub const RECEIVER: usize = 0;
+    pub const NAME: usize = 1;
+    pub const ARGC: usize = 2;
+    pub const ARGS: usize = 3;
 }
 
 /// Layout in `extra` for [`InstTag::WhileLoop`]:
@@ -710,6 +728,29 @@ impl UirBuilder {
     pub fn continue_stmt(&mut self, span: Span) -> InstRef {
         self.push(InstTag::Continue, InstData::None, span)
     }
+
+    /// Emits a `MethodCall` with receiver, name, and arg list packed into `extra`.
+    pub fn method_call(
+        &mut self,
+        receiver: InstRef,
+        name: StringId,
+        args: &[InstRef],
+        span: Span,
+    ) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(receiver.raw());
+        self.uir.extra.push(name.raw());
+        self.uir.extra.push(Self::len_u32(args.len()));
+        for arg in args {
+            self.uir.extra.push(arg.raw());
+        }
+        let len = Self::len_u32(method_call_extra::ARGS + args.len());
+        self.push(
+            InstTag::MethodCall,
+            InstData::Extra(ExtraRange { offset, len }),
+            span,
+        )
+    }
 }
 
 // ---------- Read-side helpers ----------
@@ -750,6 +791,13 @@ pub struct ForRangeView {
     pub start: InstRef,
     pub end: InstRef,
     pub body: Vec<InstRef>,
+}
+
+/// Decoded view of an [`InstTag::MethodCall`] payload.
+pub struct MethodCallView {
+    pub receiver: InstRef,
+    pub name: StringId,
+    pub args: Vec<InstRef>,
 }
 
 pub struct ElifView {
@@ -873,6 +921,29 @@ impl Uir {
             start,
             end,
             body,
+        }
+    }
+
+    pub fn method_call_view(&self, r: InstRef) -> MethodCallView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::MethodCall));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("MethodCall must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let receiver = InstRef::from_raw(slice[method_call_extra::RECEIVER]);
+        let name = StringId::from_raw(slice[method_call_extra::NAME]);
+        let argc = slice[method_call_extra::ARGC] as usize;
+        let args = slice[method_call_extra::ARGS..method_call_extra::ARGS + argc]
+            .iter()
+            .copied()
+            .map(InstRef::from_raw)
+            .collect();
+        MethodCallView {
+            receiver,
+            name,
+            args,
         }
     }
 
@@ -1103,6 +1174,22 @@ fn write_inst(
                 v.end.index(),
                 body_refs.join(", ")
             )
+        }
+        (InstTag::MethodCall, InstData::Extra(_)) => {
+            let view = uir.method_call_view(r);
+            write!(
+                f,
+                "method_call %{}.{}(",
+                view.receiver.index(),
+                pool.str(view.name)
+            )?;
+            for (i, a) in view.args.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "%{}", a.index())?;
+            }
+            writeln!(f, ")")
         }
         (InstTag::Break, InstData::None) => writeln!(f, "break"),
         (InstTag::Continue, InstData::None) => writeln!(f, "continue"),
