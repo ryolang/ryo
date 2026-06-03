@@ -2431,3 +2431,69 @@ fn test_borrow_param_then_use_ok() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn test_conditional_move_then_use_fails() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	flag: bool = true
+	name: str = "Alice"
+	if flag:
+		consume(name)
+	print(name)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "cond_move.ryo", code);
+    let output = run_ryo_command(&["run", "cond_move.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "expected E0020 — name moved on then-branch"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0020"), "expected E0020: {}", stderr);
+}
+
+#[test]
+fn test_conditional_move_both_branches_fails() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	flag: bool = true
+	name: str = "Alice"
+	if flag:
+		consume(name)
+	else:
+		consume(name)
+	print(name)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "cond_both.ryo", code);
+    let output = run_ryo_command(&["run", "cond_both.ryo"], &test_file).expect("run");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_conditional_use_inside_branch_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn main():
+	flag: bool = true
+	name: str = "Alice"
+	if flag:
+		print(name)
+	else:
+		print(name)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "cond_ok.ryo", code);
+    let output = run_ryo_command(&["run", "cond_ok.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

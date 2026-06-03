@@ -89,12 +89,70 @@ pub(crate) enum MoveKind {
 /// `origin` records, for each tracked `TirRef`, the upstream value
 /// it derives from (or `None` for fresh allocations) — used to walk
 /// back to the root owner when diagnosing a use-after-move.
-#[derive(Default)]
+#[derive(Default, Clone)]
 #[allow(dead_code)]
 pub(crate) struct Ownership {
     pub states: HashMap<TirRef, OwnerState>,
     pub current_owner: HashMap<StringId, TirRef>,
     pub origin: HashMap<TirRef, Option<TirRef>>,
+}
+
+impl Ownership {
+    /// Capture the current lattice for branch analysis. The CFG-join
+    /// logic in `analyze_if_stmt` snapshots state before each branch,
+    /// walks branches independently from that snapshot, then merges.
+    fn clone_snapshot(&self) -> Ownership {
+        self.clone()
+    }
+
+    /// Reset the lattice to a previous snapshot. Used to walk each
+    /// branch of an `if` from the same starting state.
+    fn restore_from(&mut self, snap: &Ownership) {
+        self.states = snap.states.clone();
+        self.current_owner = snap.current_owner.clone();
+        self.origin = snap.origin.clone();
+    }
+
+    /// Conservatively merge per-branch lattices into `self`. For each
+    /// tracked `TirRef`, if any branch left it `Moved` the merged
+    /// state is `Moved` — that way a value consumed on only one
+    /// branch is still treated as moved at the join point and a
+    /// post-`if` use trips E0020. Non-`Moved` states pick the first
+    /// observed branch state. `current_owner` entries from any branch
+    /// are preserved so reseats inside a branch survive the join.
+    fn merge_branches(&mut self, branches: &[Ownership]) {
+        let mut all_refs: std::collections::HashSet<TirRef> = std::collections::HashSet::new();
+        for b in branches {
+            all_refs.extend(b.states.keys().copied());
+        }
+        for r in all_refs {
+            let mut merged: Option<OwnerState> = None;
+            for b in branches {
+                let s = b.states.get(&r).cloned().unwrap_or(OwnerState::NotTracked);
+                merged = Some(match (merged, s) {
+                    (None, s) => s,
+                    (Some(OwnerState::Moved { moved_at, kind }), _) => {
+                        OwnerState::Moved { moved_at, kind }
+                    }
+                    (_, OwnerState::Moved { moved_at, kind }) => {
+                        OwnerState::Moved { moved_at, kind }
+                    }
+                    (Some(a), _) => a,
+                });
+            }
+            if let Some(state) = merged {
+                self.states.insert(r, state);
+            }
+        }
+        for b in branches {
+            for (name, owner) in &b.current_owner {
+                self.current_owner.entry(*name).or_insert(*owner);
+            }
+            for (k, v) in &b.origin {
+                self.origin.entry(*k).or_insert(*v);
+            }
+        }
+    }
 }
 
 /// Validate move safety for every function body. Emits diagnostics
@@ -164,6 +222,7 @@ fn analyze_stmt(
         TirTag::Assign => analyze_assign(tir, pool, own, sink, by_name, stmt),
         TirTag::Return => analyze_return(tir, pool, own, sink, by_name, stmt),
         TirTag::ReturnVoid => {}
+        TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, by_name, stmt),
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {
                 visit_expr(tir, pool, own, sink, by_name, o);
@@ -342,6 +401,58 @@ fn consume_for_assignment(
         }
         OwnerState::NotTracked => {}
     }
+}
+
+/// CFG join for `if` / `elif` / `else`. The naïve forward walk
+/// would let a move inside a then-branch persist past the merge
+/// regardless of whether else also moved — wrong for the spec's
+/// guarantee that conditionally-moved values are not safe to use
+/// after the join. Snapshot the lattice before each branch, walk
+/// each branch from the snapshot independently, then merge. If any
+/// branch left a value `Moved`, the post-`if` state is `Moved`;
+/// when no `else` is present, the implicit fall-through branch is
+/// the pre-`if` snapshot itself, so an unconsumed pre-`if` value
+/// stays usable after the join.
+fn analyze_if_stmt(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let view = tir.if_stmt_view(r);
+    visit_expr(tir, pool, own, sink, by_name, view.cond);
+
+    let snapshot = own.clone_snapshot();
+
+    for stmt in &view.then_stmts {
+        analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+    }
+    let then_state = own.clone_snapshot();
+
+    let mut branch_results = vec![then_state];
+    for elif in &view.elif_branches {
+        own.restore_from(&snapshot);
+        visit_expr(tir, pool, own, sink, by_name, elif.cond);
+        for stmt in &elif.body {
+            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+        }
+        branch_results.push(own.clone_snapshot());
+    }
+
+    if let Some(else_stmts) = &view.else_stmts {
+        own.restore_from(&snapshot);
+        for stmt in else_stmts {
+            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+        }
+        branch_results.push(own.clone_snapshot());
+    } else {
+        branch_results.push(snapshot.clone());
+    }
+
+    own.restore_from(&snapshot);
+    own.merge_branches(&branch_results);
 }
 
 fn visit_expr(
