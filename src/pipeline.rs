@@ -294,6 +294,7 @@ pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerE
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
     let tirs = sema::analyze(&uir, &mut pool, &mut sink, &input, file);
+    crate::ownership::check(&tirs, &pool, &mut sink);
 
     if want.tir {
         display_tir(&tirs, &pool);
@@ -390,6 +391,7 @@ fn lower_and_analyze(
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
     let tirs = sema::analyze(&uir, pool, &mut sink, input, file_path);
+    crate::ownership::check(&tirs, pool, &mut sink);
     if sink.has_errors() {
         let diags = sink.into_diags();
         render_diags(&diags, input, source_name);
