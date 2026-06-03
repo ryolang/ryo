@@ -1020,13 +1020,8 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                         span,
                     );
                     let zero = fcx.builder.int_const(0, sema.pool.int(), span);
-                    fcx.builder.binary(
-                        TirTag::ICmpEq,
-                        sema.pool.bool_(),
-                        len_tir,
-                        zero,
-                        span,
-                    )
+                    fcx.builder
+                        .binary(TirTag::ICmpEq, sema.pool.bool_(), len_tir, zero, span)
                 }
                 _ => {
                     sema.sink.emit(Diag::error(

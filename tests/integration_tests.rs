@@ -2268,6 +2268,14 @@ fn test_str_shadowed_by_int_assignment_does_not_panic() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("2"), "Output should contain '2', got: {}", stdout);
-    assert!(stdout.contains("hello"), "Output should contain 'hello', got: {}", stdout);
+    assert!(
+        stdout.contains("2"),
+        "Output should contain '2', got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("hello"),
+        "Output should contain 'hello', got: {}",
+        stdout
+    );
 }

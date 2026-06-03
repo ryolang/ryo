@@ -29,19 +29,16 @@ fn main() {
             "debug" | "dev" => "debug",
             _ => {
                 let opt_level = env::var("OPT_LEVEL").unwrap_or_else(|_| "0".to_string());
-                if opt_level != "0" {
-                    "release"
-                } else {
-                    "debug"
-                }
+                if opt_level != "0" { "release" } else { "debug" }
             }
         };
         let mut path = std::path::PathBuf::from(&target_dir)
-            .join(&profile)
+            .join(profile)
             .join("libryo_runtime.a");
         if !path.exists() {
             // Build the runtime archive in-process in a separate target directory to avoid deadlocks.
-            let custom_target_dir = std::path::PathBuf::from(&manifest_dir).join("target/runtime-build");
+            let custom_target_dir =
+                std::path::PathBuf::from(&manifest_dir).join("target/runtime-build");
             let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
             let mut cmd = std::process::Command::new(&cargo);
             cmd.arg("build")
@@ -56,7 +53,7 @@ fn main() {
                 .status()
                 .unwrap_or_else(|e| panic!("failed to spawn `cargo build -p ryo-runtime`: {e}"));
             if status.success() {
-                path = custom_target_dir.join(&profile).join("libryo_runtime.a");
+                path = custom_target_dir.join(profile).join("libryo_runtime.a");
             }
         }
         if !path.exists() {
