@@ -190,6 +190,7 @@ fn gen_function_def(
                 pool,
                 sink,
             ),
+            is_move: p.is_move,
             span: p.name.span,
         })
         .collect();
