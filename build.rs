@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::env;
 
 fn main() {
@@ -15,27 +16,72 @@ fn main() {
     };
     println!("cargo:rustc-env=RYO_VERSION={version}");
 
-    // Runtime archive path — set by `just build` or default location.
+    // Runtime archive path. Honor RYO_RUNTIME_LIB if set (used by downstream
+    // packagers). Otherwise build it on demand using the current cargo profile
+    // in a separate target directory to avoid cargo lock deadlocks.
     let runtime_path = env::var("RYO_RUNTIME_LIB").unwrap_or_else(|_| {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
         let target_dir =
             env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| format!("{manifest_dir}/target"));
-        let path = std::path::PathBuf::from(&target_dir)
-            .join("release")
+        let raw_profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+        let profile = match raw_profile.as_str() {
+            "release" | "production" | "prod" => "release",
+            "debug" | "dev" => "debug",
+            _ => {
+                let opt_level = env::var("OPT_LEVEL").unwrap_or_else(|_| "0".to_string());
+                if opt_level != "0" {
+                    "release"
+                } else {
+                    "debug"
+                }
+            }
+        };
+        let mut path = std::path::PathBuf::from(&target_dir)
+            .join(&profile)
             .join("libryo_runtime.a");
         if !path.exists() {
+            // Build the runtime archive in-process in a separate target directory to avoid deadlocks.
+            let custom_target_dir = std::path::PathBuf::from(&manifest_dir).join("target/runtime-build");
+            let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+            let mut cmd = std::process::Command::new(&cargo);
+            cmd.arg("build")
+                .arg("-p")
+                .arg("ryo-runtime")
+                .arg("--target-dir")
+                .arg(custom_target_dir.to_str().unwrap());
+            if profile == "release" {
+                cmd.arg("--release");
+            }
+            let status = cmd
+                .status()
+                .unwrap_or_else(|e| panic!("failed to spawn `cargo build -p ryo-runtime`: {e}"));
+            if status.success() {
+                path = custom_target_dir.join(&profile).join("libryo_runtime.a");
+            }
+        }
+        if !path.exists() {
             panic!(
-                "\n\nlibryo_runtime.a not found at {}\n\
-                 Run `just build` or `cargo build -p ryo-runtime --release` first.\n\n",
+                "libryo_runtime.a still missing at {} after build attempt",
                 path.display()
             );
         }
-        path.to_str().unwrap().to_string()
+        path.to_str()
+            .expect("RYO_RUNTIME_LIB path is non-UTF-8; set RYO_RUNTIME_LIB explicitly")
+            .to_string()
     });
 
     println!("cargo:rustc-env=RYO_RUNTIME_LIB={runtime_path}");
     println!("cargo:rerun-if-env-changed=RYO_RUNTIME_LIB");
     println!("cargo:rerun-if-changed={runtime_path}");
+
+    let runtime_bytes = std::fs::read(&runtime_path).unwrap_or_else(|e| {
+        panic!("failed to read runtime lib at {}: {}", runtime_path, e);
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(&runtime_bytes);
+    let hash_result = hasher.finalize();
+    let hash_string = format!("{:x}", hash_result);
+    println!("cargo:rustc-env=RYO_RUNTIME_HASH={hash_string}");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let runtime_src = std::path::PathBuf::from(&manifest_dir).join("runtime/src");

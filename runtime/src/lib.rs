@@ -13,6 +13,7 @@ pub extern "C" fn ryo_str_alloc(cap: u64) -> *mut u8 {
         return std::ptr::null_mut();
     }
     let layout = layout_for(cap);
+    // SAFETY: layout has nonzero size (cap > 0 checked above) and align 1 is valid for u8.
     let ptr = unsafe { alloc(layout) };
     if ptr.is_null() {
         oom_abort();
@@ -29,6 +30,7 @@ pub unsafe extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64) {
         return;
     }
     let layout = layout_for(cap);
+    // SAFETY: caller contract — ptr came from ryo_str_alloc/realloc with this exact cap.
     unsafe { dealloc(ptr, layout) };
 }
 
@@ -41,10 +43,12 @@ pub unsafe extern "C" fn ryo_str_realloc(ptr: *mut u8, old_cap: u64, new_cap: u6
         return ryo_str_alloc(new_cap);
     }
     if new_cap == 0 {
+        // SAFETY: ptr/old_cap came from a prior alloc per our # Safety doc.
         unsafe { ryo_str_free(ptr, old_cap) };
         return std::ptr::null_mut();
     }
     let layout = layout_for(old_cap);
+    // SAFETY: ptr/old_cap pair from prior alloc; new_cap > 0 checked above; layout matches old_cap.
     let new_ptr = unsafe { realloc(ptr, layout, new_cap as usize) };
     if new_ptr.is_null() {
         oom_abort();
@@ -58,6 +62,7 @@ pub unsafe extern "C" fn ryo_str_realloc(ptr: *mut u8, old_cap: u64, new_cap: u6
 /// `out` must point to a valid `RyoStrFat`.
 unsafe fn write_str_result(s: &[u8], out: *mut RyoStrFat) {
     let ptr = ryo_str_alloc(s.len() as u64);
+    // SAFETY: both ptr and s.as_ptr() are valid for s.len() bytes, and copy_nonoverlapping is safe.
     unsafe {
         core::ptr::copy_nonoverlapping(s.as_ptr(), ptr, s.len());
         (*out).ptr = ptr;
@@ -79,6 +84,7 @@ fn oom_abort() -> ! {
 /// `data` must point to `len` readable bytes. `out` must point to a valid `RyoStrFat`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_str_from_literal(data: *const u8, len: u64, out: *mut RyoStrFat) {
+    // SAFETY: caller contract — out points to a valid RyoStrFat.
     unsafe {
         if len == 0 {
             (*out).ptr = std::ptr::null_mut();
@@ -104,6 +110,7 @@ pub unsafe extern "C" fn ryo_str_concat(
     r_len: u64,
     out: *mut RyoStrFat,
 ) {
+    // SAFETY: caller contract — out points to a valid RyoStrFat and input buffers are valid for reading.
     unsafe {
         let total = match l_len.checked_add(r_len) {
             Some(t) => t,
@@ -120,9 +127,11 @@ pub unsafe extern "C" fn ryo_str_concat(
         let _: usize = total.try_into().unwrap_or_else(|_| oom_abort());
         let ptr = ryo_str_alloc(total);
         if l_sz > 0 {
+            debug_assert!(!l_ptr.is_null());
             core::ptr::copy_nonoverlapping(l_ptr, ptr, l_sz);
         }
         if r_sz > 0 {
+            debug_assert!(!r_ptr.is_null());
             core::ptr::copy_nonoverlapping(r_ptr, ptr.add(l_sz), r_sz);
         }
         (*out).ptr = ptr;
@@ -147,6 +156,7 @@ pub unsafe extern "C" fn ryo_str_eq(
     if a_len == 0 {
         return 1;
     }
+    // SAFETY: caller contract — a_ptr/a_len and b_ptr/b_len describe valid byte ranges.
     let a_slice = unsafe { core::slice::from_raw_parts(a_ptr, a_len as usize) };
     let b_slice = unsafe { core::slice::from_raw_parts(b_ptr, b_len as usize) };
     if a_slice == b_slice { 1 } else { 0 }
@@ -156,7 +166,7 @@ pub unsafe extern "C" fn ryo_str_eq(
 /// `out` must point to a valid `RyoStrFat`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_int_to_str(value: i64, out: *mut RyoStrFat) {
-    let mut buf = [0u8; 20];
+    let mut buf = [0u8; 32];
     let negative = value < 0;
     // Work with unsigned magnitude to handle i64::MIN correctly
     // (i64::MIN.wrapping_neg() overflows back to i64::MIN).
@@ -182,6 +192,7 @@ pub unsafe extern "C" fn ryo_int_to_str(value: i64, out: *mut RyoStrFat) {
     }
     let len = (buf.len() - pos) as u64;
     let ptr = ryo_str_alloc(len);
+    // SAFETY: ptr is newly allocated for len bytes, out is valid to write.
     unsafe {
         core::ptr::copy_nonoverlapping(buf.as_ptr().add(pos), ptr, len as usize);
         (*out).ptr = ptr;
@@ -195,12 +206,15 @@ pub unsafe extern "C" fn ryo_int_to_str(value: i64, out: *mut RyoStrFat) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_float_to_str(value: f64, out: *mut RyoStrFat) {
     if value.is_nan() {
+        // SAFETY: write_str_result safely writes Nan string through out.
         return unsafe { write_str_result(b"nan", out) };
     }
     if value.is_infinite() {
         if value < 0.0 {
+            // SAFETY: write_str_result safely writes -inf string through out.
             return unsafe { write_str_result(b"-inf", out) };
         } else {
+            // SAFETY: write_str_result safely writes inf string through out.
             return unsafe { write_str_result(b"inf", out) };
         }
     }
@@ -210,6 +224,7 @@ pub unsafe extern "C" fn ryo_float_to_str(value: f64, out: *mut RyoStrFat) {
     let bytes = s.as_bytes();
     let len = bytes.len() as u64;
     let ptr = ryo_str_alloc(len);
+    // SAFETY: ptr is newly allocated for len bytes, out is valid to write.
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize);
         (*out).ptr = ptr;
@@ -223,6 +238,7 @@ pub unsafe extern "C" fn ryo_float_to_str(value: f64, out: *mut RyoStrFat) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_bool_to_str(value: u8, out: *mut RyoStrFat) {
     let s: &[u8] = if value != 0 { b"true" } else { b"false" };
+    // SAFETY: write_str_result safely writes through out.
     unsafe { write_str_result(s, out) };
 }
 

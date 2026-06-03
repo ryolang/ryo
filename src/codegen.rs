@@ -600,17 +600,20 @@ impl<M: Module> Codegen<M> {
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
             TirTag::Assign => {
                 let view = ctx.tir.assign_view(r);
-                if ctx.str_locals.contains_key(&view.name) {
+                if is_str_type(inst.ty, ctx.pool) {
                     let repr = Self::eval_inst_str(builder, ctx, view.value)?;
-                    match repr {
-                        ValueRepr::Str { ptr, len, cap } => {
-                            let locals = ctx.str_locals.get(&view.name).unwrap();
-                            builder.def_var(locals.ptr, ptr);
-                            builder.def_var(locals.len, len);
-                            builder.def_var(locals.cap, cap);
-                        }
-                        _ => unreachable!("str-typed assign should produce ValueRepr::Str"),
-                    }
+                    let ValueRepr::Str { ptr, len, cap } = repr else {
+                        unreachable!("str-typed assign should produce ValueRepr::Str");
+                    };
+                    let locals = ctx.str_locals.get(&view.name).ok_or_else(|| {
+                        format!(
+                            "Undefined string variable in assign: '{}'",
+                            ctx.pool.str(view.name)
+                        )
+                    })?;
+                    builder.def_var(locals.ptr, ptr);
+                    builder.def_var(locals.len, len);
+                    builder.def_var(locals.cap, cap);
                     return Ok(false);
                 }
                 let val = Self::eval_inst(builder, ctx, view.value)?;
@@ -1089,19 +1092,6 @@ impl<M: Module> Codegen<M> {
                     ValueRepr::Str { len, .. } => len,
                     _ => unreachable!("StrLen operand must produce ValueRepr::Str"),
                 }
-            }
-            TirTag::StrIsEmpty => {
-                let operand = match inst.data {
-                    TirData::UnOp(r) => r,
-                    _ => unreachable!("StrIsEmpty must carry TirData::UnOp"),
-                };
-                let repr = Self::eval_inst_str(builder, ctx, operand)?;
-                let len_val = match repr {
-                    ValueRepr::Str { len, .. } => len,
-                    _ => unreachable!("StrIsEmpty operand must produce ValueRepr::Str"),
-                };
-                let zero = builder.ins().iconst(types::I64, 0);
-                builder.ins().icmp(IntCC::Equal, len_val, zero)
             }
             TirTag::StrCmpEq | TirTag::StrCmpNe => {
                 let (lhs, rhs) = match inst.data {

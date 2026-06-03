@@ -1,4 +1,3 @@
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -12,8 +11,7 @@ fn cache_dir() -> Result<PathBuf, io::Error> {
 }
 
 fn content_hash() -> String {
-    let hash = Sha256::digest(RYO_RUNTIME_LIB);
-    format!("{:x}", hash)[..16].to_string()
+    env!("RYO_RUNTIME_HASH")[..16].to_string()
 }
 
 pub fn extract_runtime_to_temp() -> Result<PathBuf, io::Error> {

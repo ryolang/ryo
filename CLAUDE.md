@@ -36,16 +36,18 @@ All Ryo code examples **must** use Python-style colons and indentation, **NOT** 
 
 ## Build & Test Commands
 
+Standard cargo commands work fully out-of-the-box (even on a clean checkout) because `build.rs` automatically compiles the `ryo-runtime` static library in a separate target directory if it isn't found.
+
 ```bash
-cargo fmt                        # Auto-format (CI runs --check with -Dwarnings)
-cargo clippy --all-targets       # Lint (CI enforces, warnings are errors)
-cargo check                      # Check for errors
-cargo build [--release]          # Build debug or release
+cargo build                      # Automatically builds the runtime (if missing) and then compiles the compiler
+cargo check                      # Check compiler for errors
+cargo test                       # Run all unit + integration tests
 cargo run -- run <file>          # JIT compile and execute
 cargo run -- build <file>        # AOT compile to binary
-cargo test                       # Run tests
 cargo run -- toolchain install   # Download Zig linker
 cargo run -- toolchain status    # Check Zig status
+cargo clippy --all-targets       # Lint (warnings are errors)
+cargo fmt --check                # Check code formatting style
 ```
 
 **File extensions:** `.ryo` (source), `.md` (docs), `.rs` (Rust), `.o`/`.obj` (generated)

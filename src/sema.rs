@@ -1013,10 +1013,18 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                         ));
                         return fcx.builder.unreachable(sema.pool.error_type(), span);
                     }
-                    fcx.builder.push_typed(
-                        TirTag::StrIsEmpty,
+                    let len_tir = fcx.builder.push_typed(
+                        TirTag::StrLen,
                         TirData::UnOp(receiver_tir),
+                        sema.pool.int(),
+                        span,
+                    );
+                    let zero = fcx.builder.int_const(0, sema.pool.int(), span);
+                    fcx.builder.binary(
+                        TirTag::ICmpEq,
                         sema.pool.bool_(),
+                        len_tir,
+                        zero,
                         span,
                     )
                 }

@@ -2255,3 +2255,19 @@ fn test_str_returned_from_function() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn test_str_shadowed_by_int_assignment_does_not_panic() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut s: str = \"hello\"\n\tif true:\n\t\tmut s: int = 1\n\t\ts = 2\n\t\tprint(int_to_str(s))\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "str_shadow.ryo", code);
+    let output = run_ryo_command(&["run", "str_shadow.ryo"], &test_file).expect("Failed");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("2"), "Output should contain '2', got: {}", stdout);
+    assert!(stdout.contains("hello"), "Output should contain 'hello', got: {}", stdout);
+}

@@ -17,6 +17,7 @@ version = "0.1.0"
 edition = "2024"
 
 [build-dependencies]
+sha2 = "0.10"
 
 [dependencies]
 ryo-runtime = { path = "runtime" }
@@ -40,7 +41,6 @@ tar = "0.4"
 target-lexicon = "0.13.5"
 ureq = "3"
 dirs = "6"
-sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3.27"
