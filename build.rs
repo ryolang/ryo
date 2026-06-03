@@ -24,6 +24,14 @@ fn main() {
         let target_dir =
             env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| format!("{manifest_dir}/target"));
         let raw_profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+        // Mapping rules for Cargo profile resolution:
+        // - Known "release", "production", and "prod" profiles map to "release".
+        // - Known "debug" and "dev" profiles map to "debug".
+        // - For unrecognized/custom profiles, we consult OPT_LEVEL and treat any
+        //   non-"0" optimization level as "release" (since custom optimized profiles
+        //   typically build under optimized target layouts).
+        // NOTE: Custom profiles with debug = true but OPT_LEVEL > 0 (e.g., opt-level = 1, 2, 3)
+        // will be classified as "release", avoiding build directory mismatch surprises.
         let profile = match raw_profile.as_str() {
             "release" | "production" | "prod" => "release",
             "debug" | "dev" => "debug",
@@ -45,7 +53,7 @@ fn main() {
                 .arg("-p")
                 .arg("ryo-runtime")
                 .arg("--target-dir")
-                .arg(custom_target_dir.to_str().unwrap());
+                .arg(&custom_target_dir);
             if profile == "release" {
                 cmd.arg("--release");
             }
@@ -62,9 +70,17 @@ fn main() {
                 path.display()
             );
         }
-        path.to_str()
-            .expect("RYO_RUNTIME_LIB path is non-UTF-8; set RYO_RUNTIME_LIB explicitly")
-            .to_string()
+        // Safely check if path contains non-UTF-8 characters, providing clear instructions if so.
+        match path.to_str() {
+            Some(s) => s.to_string(),
+            None => {
+                panic!(
+                    "The resolved runtime library path at '{}' contains non-UTF-8 characters. \
+                     Please set the RYO_RUNTIME_LIB environment variable explicitly to override it.",
+                    path.display()
+                );
+            }
+        }
     });
 
     println!("cargo:rustc-env=RYO_RUNTIME_LIB={runtime_path}");
