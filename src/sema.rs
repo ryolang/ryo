@@ -54,6 +54,17 @@ use crate::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarD
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
+// ---------- Copy-type classification ----------
+
+/// True for types whose values are duplicated on read (no destructor,
+/// no aliasing concern). Mirrors Mojo's `Copyable` trait for the
+/// scalar primitives Ryo currently has. Used by sema to flag
+/// redundant `move` annotations and (later) by the ownership pass
+/// to short-circuit liveness on these instructions.
+fn is_copy_type_kind(kind: TypeKind) -> bool {
+    matches!(kind, TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+}
+
 // ---------- Decl table ----------
 
 /// Index into `uir.func_bodies`. One [`DeclId`] per function the
@@ -355,6 +366,26 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     let mut scope = Scope::new();
     for param in &body.params {
         scope.insert_binding(param.name, param.ty, false);
+    }
+
+    // W0002: warn on `move` annotations applied to Copy-typed
+    // parameters. Copy types (int, float, bool) are duplicated on
+    // every read regardless of the annotation, so `move` is
+    // redundant noise. `move` on `str` (and other heap types) stays
+    // silent — that's the whole reason the keyword exists.
+    for param in &body.params {
+        if param.is_move && is_copy_type_kind(sema.pool.kind(param.ty)) {
+            let name = sema.pool.str(param.name).to_string();
+            let ty_str = sema.pool.display(param.ty).to_string();
+            sema.sink.emit(Diag::warning(
+                param.span,
+                DiagCode::RedundantMove,
+                format!(
+                    "redundant 'move' on Copy-typed parameter '{}': {} values are copied on every read",
+                    name, ty_str,
+                ),
+            ));
+        }
     }
 
     let params: Vec<TirParam> = body

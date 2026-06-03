@@ -2279,3 +2279,37 @@ fn test_str_shadowed_by_int_assignment_does_not_panic() {
         stdout
     );
 }
+
+#[test]
+fn test_redundant_move_on_int_warns() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let code = "fn f(move x: int):\n\tprint(int_to_str(x))\n\nf(42)";
+    let test_file = create_test_file(temp_dir.path(), "redundant_move.ryo", code);
+    let output = run_ryo_command(&["run", "redundant_move.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0002"),
+        "expected W0002 in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_move_on_str_no_warning() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let code = "fn f(move s: str):\n\tprint(s)\n\nf(\"hi\")";
+    let test_file = create_test_file(temp_dir.path(), "move_on_str.ryo", code);
+    let output = run_ryo_command(&["run", "move_on_str.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("W0002"), "unexpected W0002: {}", stderr);
+}

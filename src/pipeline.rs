@@ -228,6 +228,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::ContinueOutsideLoop => "E0025",
         DiagCode::RangeArgType => "E0026",
         DiagCode::ReservedBuiltinName => "E0027",
+        DiagCode::RedundantMove => "W0002",
         DiagCode::CycleInResolution => "E0016",
         DiagCode::ParseError => "E0100",
         DiagCode::TooManyDiagnostics => "E0101",
@@ -393,6 +394,13 @@ fn lower_and_analyze(
         let diags = sink.into_diags();
         render_diags(&diags, input, source_name);
         return Err(CompilerError::Diagnostics(diags));
+    }
+    // No errors — but warnings/notes may still be queued. Render
+    // them so the user sees `move`-on-Copy lints (W0002) and any
+    // future lints on otherwise-successful builds.
+    let diags = sink.into_diags();
+    if !diags.is_empty() {
+        render_diags(&diags, input, source_name);
     }
     Ok(tirs)
 }

@@ -43,7 +43,6 @@ pub struct Diag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
-    #[allow(dead_code)]
     Warning,
     #[allow(dead_code)]
     Note,
@@ -97,6 +96,10 @@ pub enum DiagCode {
     RangeArgType,
     /// User attempted to declare a function or variable with a reserved builtin name.
     ReservedBuiltinName,
+    /// `move` annotation on a Copy-typed parameter (int, float, bool).
+    /// Accepted, but redundant — Copy types are duplicated on
+    /// assignment regardless. W-prefixed because it's a warning.
+    RedundantMove,
 
     /// A declaration's resolution requires its own resolution to be
     /// already complete — e.g. a chain of decls whose types depend
@@ -134,6 +137,16 @@ impl Diag {
         Diag {
             span,
             severity: Severity::Error,
+            code,
+            message: message.into(),
+            notes: Vec::new(),
+        }
+    }
+
+    pub fn warning(span: Span, code: DiagCode, message: impl Into<String>) -> Self {
+        Diag {
+            span,
+            severity: Severity::Warning,
             code,
             message: message.into(),
             notes: Vec::new(),
