@@ -21,7 +21,7 @@
 //!
 //! See `docs/dev/mojo_reference.md`.
 
-use crate::diag::DiagSink;
+use crate::diag::{Diag, DiagCode, DiagSink};
 use crate::tir::{Span, Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::HashMap;
@@ -106,7 +106,7 @@ pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) {
     }
 }
 
-fn analyze_function(tir: &Tir, pool: &InternPool, _sink: &mut DiagSink) {
+fn analyze_function(tir: &Tir, pool: &InternPool, sink: &mut DiagSink) {
     let mut own = Ownership::default();
 
     // Initialise per-parameter state. Move-typed params start at
@@ -127,7 +127,7 @@ fn analyze_function(tir: &Tir, pool: &InternPool, _sink: &mut DiagSink) {
     }
 
     for stmt in tir.body_stmts() {
-        analyze_stmt(tir, pool, &mut own, stmt);
+        analyze_stmt(tir, pool, &mut own, sink, stmt);
     }
 }
 
@@ -141,11 +141,140 @@ fn synthetic_param_ref(name: StringId) -> TirRef {
     TirRef::from_raw(raw)
 }
 
-fn analyze_stmt(tir: &Tir, pool: &InternPool, own: &mut Ownership, stmt: TirRef) {
-    visit_expr(tir, pool, own, stmt);
+fn analyze_stmt(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    stmt: TirRef,
+) {
+    let inst = *tir.inst(stmt);
+    match inst.tag {
+        TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, stmt),
+        TirTag::Assign => analyze_assign(tir, pool, own, sink, stmt),
+        TirTag::ExprStmt => {
+            if let TirData::UnOp(o) = inst.data {
+                visit_expr(tir, pool, own, sink, o);
+            }
+        }
+        _ => {
+            visit_expr(tir, pool, own, sink, stmt);
+        }
+    }
 }
 
-fn visit_expr(tir: &Tir, pool: &InternPool, own: &mut Ownership, r: TirRef) {
+/// Move-typed `VarDecl` is a consumer: the new binding takes
+/// ownership of the initializer's underlying value. If the
+/// initializer aliases a borrowed parameter, this is the E0021
+/// "move out of borrowed parameter" site; if the underlying owner is
+/// already `Moved`, this is the E0020 "use after move" site.
+fn analyze_var_decl(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    r: TirRef,
+) {
+    let view = tir.var_decl_view(r);
+    let init = view.initializer;
+    let init_ty = tir.inst(init).ty;
+    visit_expr(tir, pool, own, sink, init);
+    if needs_tracking(init_ty, pool) {
+        let span = tir.span(r);
+        consume_for_assignment(own, sink, init, span, MoveKind::Assignment);
+        rebind_to_init(own, view.name, init);
+    } else {
+        own.current_owner.insert(view.name, init);
+    }
+}
+
+/// Reassignment to a Move-typed binding. Same consumption rules as
+/// `VarDecl`; the existing binding name is reseated to whichever
+/// SSA value owns the new underlying allocation.
+fn analyze_assign(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    r: TirRef,
+) {
+    let view = tir.assign_view(r);
+    let value_ty = tir.inst(view.value).ty;
+    visit_expr(tir, pool, own, sink, view.value);
+    if needs_tracking(value_ty, pool) {
+        let span = tir.span(r);
+        consume_for_assignment(own, sink, view.value, span, MoveKind::Assignment);
+        rebind_to_init(own, view.name, view.value);
+    }
+}
+
+/// Reseat `name` to point at `init` as its current owner. After a
+/// consume, the source binding's underlying value is `Moved`; the
+/// new binding takes a fresh, independent slot in the lattice so
+/// subsequent reads of `name` resolve to a `Valid` owner instead of
+/// tripping over the just-moved underlying. We do this by severing
+/// `init`'s `origin` link (if any) and stamping it `Valid`.
+fn rebind_to_init(own: &mut Ownership, name: StringId, init: TirRef) {
+    own.origin.insert(init, None);
+    own.states.insert(init, OwnerState::Valid);
+    own.current_owner.insert(name, init);
+}
+
+/// Walk back from `init` to whichever SSA value currently owns the
+/// underlying allocation. `visit_expr` is responsible for populating
+/// `origin` for `Var` reads; for fresh producers (`StrConst`,
+/// `StrConcat`, `Call`) `init` is itself the owner.
+fn underlying_owner(own: &Ownership, init: TirRef) -> TirRef {
+    match own.origin.get(&init).copied() {
+        Some(Some(owner)) => owner,
+        _ => init,
+    }
+}
+
+/// Apply the consumption transition for a Move-typed initializer.
+/// Caller must have already populated origin/state for `init` via
+/// `visit_expr`.
+fn consume_for_assignment(
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    init: TirRef,
+    span: Span,
+    kind: MoveKind,
+) {
+    let underlying = underlying_owner(own, init);
+    let state = own
+        .states
+        .get(&underlying)
+        .cloned()
+        .unwrap_or(OwnerState::NotTracked);
+    match state {
+        OwnerState::Valid => {
+            own.states.insert(
+                underlying,
+                OwnerState::Moved {
+                    moved_at: span,
+                    kind,
+                },
+            );
+        }
+        OwnerState::Borrowed => {
+            sink.emit(Diag::error(
+                span,
+                DiagCode::MoveOutOfBorrowedParam,
+                "cannot move out of borrowed parameter",
+            ));
+        }
+        OwnerState::Moved { moved_at, .. } => {
+            sink.emit(
+                Diag::error(span, DiagCode::UseAfterMove, "use of moved value")
+                    .with_note(Some(moved_at), "value was moved here"),
+            );
+        }
+        OwnerState::NotTracked => {}
+    }
+}
+
+fn visit_expr(tir: &Tir, pool: &InternPool, own: &mut Ownership, sink: &mut DiagSink, r: TirRef) {
     let inst = *tir.inst(r);
     match inst.tag {
         // ---- Allocating instructions ----
@@ -165,8 +294,8 @@ fn visit_expr(tir: &Tir, pool: &InternPool, own: &mut Ownership, r: TirRef) {
                 own.origin.insert(r, None);
             }
             if let TirData::BinOp { lhs, rhs } = inst.data {
-                visit_expr(tir, pool, own, lhs);
-                visit_expr(tir, pool, own, rhs);
+                visit_expr(tir, pool, own, sink, lhs);
+                visit_expr(tir, pool, own, sink, rhs);
             }
         }
         TirTag::Call => {
@@ -180,13 +309,16 @@ fn visit_expr(tir: &Tir, pool: &InternPool, own: &mut Ownership, r: TirRef) {
             }
             let view = tir.call_view(r);
             for arg in view.args {
-                visit_expr(tir, pool, own, arg);
+                visit_expr(tir, pool, own, sink, arg);
             }
         }
         // ---- Aliasing read ----
         // `Var` is a non-consuming read. Record which SSA value it
         // currently aliases so a later use-after-move diagnostic can
-        // walk back to the root owner.
+        // walk back to the root owner. Per the design spec, an
+        // aliasing read of an already-`Moved` owner is itself an
+        // E0020 use-after-move. Reads of `Borrowed` owners are fine
+        // (Rule 2 — borrowed parameters can be freely read).
         TirTag::Var => {
             let name = match inst.data {
                 TirData::Var(n) => n,
@@ -196,23 +328,35 @@ fn visit_expr(tir: &Tir, pool: &InternPool, own: &mut Ownership, r: TirRef) {
                 && needs_tracking(inst.ty, pool)
             {
                 own.origin.insert(r, Some(owner));
+                if let Some(OwnerState::Moved { moved_at, .. }) = own.states.get(&owner).cloned() {
+                    sink.emit(
+                        Diag::error(tir.span(r), DiagCode::UseAfterMove, "use of moved value")
+                            .with_note(Some(moved_at), "value was moved here"),
+                    );
+                }
             }
         }
         // ---- Everything else: recurse on operands so nested
         // ---- producers/aliases are still observed.
         _ => {
-            recurse_operands(tir, pool, own, r);
+            recurse_operands(tir, pool, own, sink, r);
         }
     }
 }
 
-fn recurse_operands(tir: &Tir, pool: &InternPool, own: &mut Ownership, r: TirRef) {
+fn recurse_operands(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    r: TirRef,
+) {
     let inst = *tir.inst(r);
     match inst.data {
-        TirData::UnOp(o) => visit_expr(tir, pool, own, o),
+        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, o),
         TirData::BinOp { lhs, rhs } => {
-            visit_expr(tir, pool, own, lhs);
-            visit_expr(tir, pool, own, rhs);
+            visit_expr(tir, pool, own, sink, lhs);
+            visit_expr(tir, pool, own, sink, rhs);
         }
         // `Extra`-shaped instructions (VarDecl, Assign, Call,
         // IfStmt, WhileLoop, ForRange, CompoundAssign) have

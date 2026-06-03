@@ -2313,3 +2313,65 @@ fn test_move_on_str_no_warning() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("W0002"), "unexpected W0002: {}", stderr);
 }
+
+#[test]
+fn test_use_after_move_assignment() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "name: str = \"Alice\"\nother: str = name\nprint(name)";
+    let test_file = create_test_file(temp_dir.path(), "uam_assign.ryo", code);
+    let output = run_ryo_command(&["run", "uam_assign.ryo"], &test_file).expect("run");
+    assert!(!output.status.success(), "expected compile error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0020"),
+        "expected E0020 in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_move_out_of_borrowed_parameter() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn process(data: str):\n\tother: str = data\n\nprocess(\"hi\")";
+    let test_file = create_test_file(temp_dir.path(), "move_borrowed.ryo", code);
+    let output = run_ryo_command(&["run", "move_borrowed.ryo"], &test_file).expect("run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0021"), "expected E0021: {}", stderr);
+}
+
+#[test]
+fn test_move_param_consumed_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn consume(move s: str):\n\tother: str = s\n\nconsume(\"hi\")";
+    let test_file = create_test_file(temp_dir.path(), "move_ok.ryo", code);
+    let output = run_ryo_command(&["run", "move_ok.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_str_concat_then_use_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "a: str = \"hi\"\nb: str = \"there\"\nc: str = a + b\nprint(c)";
+    let test_file = create_test_file(temp_dir.path(), "concat_ok.ryo", code);
+    let output = run_ryo_command(&["run", "concat_ok.ryo"], &test_file).expect("run");
+    assert!(output.status.success());
+}
+
+#[test]
+fn test_str_concat_then_use_after_move_in_concat() {
+    let temp_dir = TempDir::new().expect("temp");
+    // a + b reads a and b as borrows (not moves); a is still valid.
+    let code = "a: str = \"hi\"\nb: str = \"!\"\nc: str = a + b\nprint(a)";
+    let test_file = create_test_file(temp_dir.path(), "concat_borrows.ryo", code);
+    let output = run_ryo_command(&["run", "concat_borrows.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
