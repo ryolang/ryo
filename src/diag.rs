@@ -110,6 +110,16 @@ pub enum DiagCode {
     /// comptime / inferred-return-type work doesn't stack-overflow.
     CycleInResolution,
 
+    // --- ownership (M8.1b) ---
+    /// Use of a value after it has been moved.
+    UseAfterMove,
+    /// Attempted to move out of a borrowed parameter.
+    MoveOutOfBorrowedParam,
+    /// Attempted to return a borrowed value (Rule 5).
+    ReturnBorrowedValue,
+    /// A Move-typed value is declared (or assigned) but never used.
+    DeadStore,
+
     // --- parser ---
     ParseError,
 
