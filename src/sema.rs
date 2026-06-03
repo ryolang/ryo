@@ -363,6 +363,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         .map(|p| TirParam {
             name: p.name,
             ty: p.ty,
+            is_move: p.is_move,
             span: p.span,
         })
         .collect();

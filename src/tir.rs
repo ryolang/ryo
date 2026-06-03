@@ -246,6 +246,7 @@ pub struct TypedInst {
 pub struct TirParam {
     pub name: StringId,
     pub ty: TypeId,
+    pub is_move: bool,
     pub span: Span,
 }
 
@@ -962,6 +963,9 @@ impl<'a> fmt::Display for TirDump<'a> {
             for (i, p) in tir.params.iter().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
+                }
+                if p.is_move {
+                    write!(f, "move ")?;
                 }
                 write!(f, "{}: {}", self.pool.str(p.name), self.pool.display(p.ty))?;
             }
