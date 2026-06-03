@@ -2411,6 +2411,12 @@ fn test_use_after_move_param() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("E0020"), "expected E0020: {}", stderr);
+    let count = stderr.matches("E0020").count();
+    assert_eq!(
+        count, 1,
+        "expected exactly one E0020, got {}: {}",
+        count, stderr
+    );
 }
 
 #[test]

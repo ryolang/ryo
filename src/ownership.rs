@@ -404,31 +404,14 @@ fn visit_expr(
                         tir.span(r),
                         MoveKind::MoveParam { callee: view.name },
                     );
-                } else {
-                    // Borrow: just verify the underlying owner is not
-                    // already `Moved`. Var-reads inside `visit_expr`
-                    // already fire E0020 for that case, but we keep a
-                    // call-site check so the diagnostic message can
-                    // be specific to "borrowed argument".
-                    let underlying = underlying_owner(own, *arg);
-                    if let Some(OwnerState::Moved { moved_at, .. }) =
-                        own.states.get(&underlying).cloned()
-                        && underlying != *arg
-                    {
-                        // The Var-read path fires its own E0020 when
-                        // the Var instruction's owner is Moved; only
-                        // emit here when the moved owner is reached
-                        // via aliasing (so we don't double-report).
-                        sink.emit(
-                            Diag::error(
-                                tir.span(r),
-                                DiagCode::UseAfterMove,
-                                "use of moved value as borrowed argument",
-                            )
-                            .with_note(Some(moved_at), "value was moved here"),
-                        );
-                    }
                 }
+                // Borrow path: no extra check here. With the current
+                // set of producers (StrConst/StrConcat/Call/Var), every
+                // tracked str argument flows through `Var`, and the
+                // `Var` arm already fires E0020 for use-after-move.
+                // Adding a call-site check would double-report. If a
+                // future producer pattern bypasses `Var` (e.g. passing
+                // a moved Call result directly), revisit this.
             }
         }
         // ---- Aliasing read ----
