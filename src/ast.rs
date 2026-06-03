@@ -77,9 +77,11 @@ impl Statement {
                 println!("{}FunctionDef: {}", prefix, pool.str(func.name.name));
                 let inner = format!("{}  ", prefix);
                 for param in &func.params {
+                    let move_prefix = if param.is_move { "move " } else { "" };
                     println!(
-                        "{}├── param: {}: {}",
+                        "{}├── param: {}{}: {}",
                         inner,
+                        move_prefix,
                         pool.str(param.name.name),
                         pool.str(param.type_annotation.name),
                     );
@@ -255,6 +257,7 @@ pub struct FunctionDef {
 pub struct Param {
     pub name: Ident,
     pub type_annotation: TypeExpr,
+    pub is_move: bool,
     pub span: SimpleSpan,
 }
 

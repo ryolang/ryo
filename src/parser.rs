@@ -319,6 +319,7 @@ where
         .map_with(|(name, type_annotation), e| Param {
             name,
             type_annotation,
+            is_move: false,
             span: e.span(),
         });
 
