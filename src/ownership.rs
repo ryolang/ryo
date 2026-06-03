@@ -22,7 +22,7 @@
 //! See `docs/dev/mojo_reference.md`.
 
 use crate::diag::DiagSink;
-use crate::tir::{Span, Tir, TirRef};
+use crate::tir::{Span, Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::HashMap;
 
@@ -32,7 +32,7 @@ use std::collections::HashMap;
 /// without invalidating the source. Mirrors Mojo's `Copyable` trait
 /// for the scalar primitives Ryo currently has. The ownership walk
 /// short-circuits on these — they never enter the lattice.
-#[allow(dead_code)] // wired into the walk in Task 10
+#[allow(dead_code)] // wired into consumption logic in later tasks
 pub(crate) fn is_copy_type(ty: TypeId, pool: &InternPool) -> bool {
     matches!(
         pool.kind(ty),
@@ -43,7 +43,6 @@ pub(crate) fn is_copy_type(ty: TypeId, pool: &InternPool) -> bool {
 /// True for types whose values transfer ownership on `=` and must be
 /// tracked through the function body. Today: `str` only. Future heap
 /// types (`List[T]`, `Dict[K, V]`) will join this set.
-#[allow(dead_code)] // wired into the walk in Task 10
 pub(crate) fn is_move_type(ty: TypeId, pool: &InternPool) -> bool {
     matches!(pool.kind(ty), TypeKind::Str)
 }
@@ -52,7 +51,6 @@ pub(crate) fn is_move_type(ty: TypeId, pool: &InternPool) -> bool {
 /// needs a lattice slot. Currently identical to `is_move_type`, but
 /// kept as its own name so the walk reads correctly when borrows
 /// land and the answer becomes "move OR borrowed-of-move".
-#[allow(dead_code)] // wired into the walk in Task 10
 pub(crate) fn needs_tracking(ty: TypeId, pool: &InternPool) -> bool {
     is_move_type(ty, pool)
 }
@@ -108,8 +106,128 @@ pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) {
     }
 }
 
-fn analyze_function(_tir: &Tir, _pool: &InternPool, _sink: &mut DiagSink) {
-    // No-op for now; lattice + walk land in subsequent tasks.
+fn analyze_function(tir: &Tir, pool: &InternPool, _sink: &mut DiagSink) {
+    let mut own = Ownership::default();
+
+    // Initialise per-parameter state. Move-typed params start at
+    // `Valid` (the callee owns them); borrowed params start at
+    // `Borrowed`. Copy-typed params skip the lattice entirely.
+    for param in &tir.params {
+        if !needs_tracking(param.ty, pool) {
+            continue;
+        }
+        let synthetic = synthetic_param_ref(param.name);
+        let state = if param.is_move {
+            OwnerState::Valid
+        } else {
+            OwnerState::Borrowed
+        };
+        own.states.insert(synthetic, state);
+        own.current_owner.insert(param.name, synthetic);
+    }
+
+    for stmt in tir.body_stmts() {
+        analyze_stmt(tir, pool, &mut own, stmt);
+    }
+}
+
+/// Build a stable synthetic [`TirRef`] for a parameter so it can
+/// share the `states` map with real instruction refs. Encoded near
+/// `u32::MAX` to keep it well clear of real per-function indices
+/// (which start at 1 and grow with body size). `u32::MAX - name.raw()`
+/// stays non-zero for any plausible interned-string id.
+fn synthetic_param_ref(name: StringId) -> TirRef {
+    let raw = u32::MAX - name.raw();
+    TirRef::from_raw(raw)
+}
+
+fn analyze_stmt(tir: &Tir, pool: &InternPool, own: &mut Ownership, stmt: TirRef) {
+    visit_expr(tir, pool, own, stmt);
+}
+
+fn visit_expr(tir: &Tir, pool: &InternPool, own: &mut Ownership, r: TirRef) {
+    let inst = *tir.inst(r);
+    match inst.tag {
+        // ---- Allocating instructions ----
+        // `StrConst` materializes a fresh heap string at runtime;
+        // `StrConcat` produces a brand-new allocation from its two
+        // operands. Both enter the lattice as `Valid` with no
+        // upstream origin.
+        TirTag::StrConst => {
+            if needs_tracking(inst.ty, pool) {
+                own.states.insert(r, OwnerState::Valid);
+                own.origin.insert(r, None);
+            }
+        }
+        TirTag::StrConcat => {
+            if needs_tracking(inst.ty, pool) {
+                own.states.insert(r, OwnerState::Valid);
+                own.origin.insert(r, None);
+            }
+            if let TirData::BinOp { lhs, rhs } = inst.data {
+                visit_expr(tir, pool, own, lhs);
+                visit_expr(tir, pool, own, rhs);
+            }
+        }
+        TirTag::Call => {
+            // A str-returning call (e.g. `int_to_str`) is a producer.
+            // Argument-side consumption lands in a later task; for
+            // now just recurse so any nested producers/aliases are
+            // observed.
+            if needs_tracking(inst.ty, pool) {
+                own.states.insert(r, OwnerState::Valid);
+                own.origin.insert(r, None);
+            }
+            let view = tir.call_view(r);
+            for arg in view.args {
+                visit_expr(tir, pool, own, arg);
+            }
+        }
+        // ---- Aliasing read ----
+        // `Var` is a non-consuming read. Record which SSA value it
+        // currently aliases so a later use-after-move diagnostic can
+        // walk back to the root owner.
+        TirTag::Var => {
+            let name = match inst.data {
+                TirData::Var(n) => n,
+                _ => unreachable!("Var must carry TirData::Var"),
+            };
+            if let Some(&owner) = own.current_owner.get(&name)
+                && needs_tracking(inst.ty, pool)
+            {
+                own.origin.insert(r, Some(owner));
+            }
+        }
+        // ---- Everything else: recurse on operands so nested
+        // ---- producers/aliases are still observed.
+        _ => {
+            recurse_operands(tir, pool, own, r);
+        }
+    }
+}
+
+fn recurse_operands(tir: &Tir, pool: &InternPool, own: &mut Ownership, r: TirRef) {
+    let inst = *tir.inst(r);
+    match inst.data {
+        TirData::UnOp(o) => visit_expr(tir, pool, own, o),
+        TirData::BinOp { lhs, rhs } => {
+            visit_expr(tir, pool, own, lhs);
+            visit_expr(tir, pool, own, rhs);
+        }
+        // `Extra`-shaped instructions (VarDecl, Assign, Call,
+        // IfStmt, WhileLoop, ForRange, CompoundAssign) have
+        // bespoke decoders. Consumption logic lands in subsequent
+        // tasks; until then their operands are deliberately not
+        // descended into here so we avoid double-visits when those
+        // tasks introduce per-tag handling.
+        TirData::Extra(_) => {}
+        TirData::None
+        | TirData::Int(_)
+        | TirData::Float(_)
+        | TirData::Str(_)
+        | TirData::Bool(_)
+        | TirData::Var(_) => {}
+    }
 }
 
 #[cfg(test)]
@@ -138,5 +256,28 @@ mod tests {
         let pool = InternPool::new();
         assert!(needs_tracking(pool.str_(), &pool));
         assert!(!needs_tracking(pool.int(), &pool));
+    }
+
+    #[test]
+    fn str_const_walk_no_panic() {
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void: <str_const "hello"> as expr_stmt
+        let mut b = TirBuilder::new(main, vec![], void, span);
+        let s = b.str_const(hello, str_ty, span);
+        let stmt = b.unary(TirTag::ExprStmt, void, s, span);
+        let tir = b.finish(&[stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(sink.is_empty());
     }
 }
