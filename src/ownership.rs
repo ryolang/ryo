@@ -101,12 +101,21 @@ pub(crate) struct Ownership {
 /// into `sink`. Returns nothing — codegen continues to consume the
 /// unchanged `&[Tir]`.
 pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) {
+    // Name-keyed lookup so call sites can read the callee's per-
+    // parameter `is_move` flags. Builtins (`print`, `assert`,
+    // `int_to_str`) are not in this map and default to borrowing.
+    let by_name: HashMap<StringId, &Tir> = tirs.iter().map(|t| (t.name, t)).collect();
     for tir in tirs {
-        analyze_function(tir, pool, sink);
+        analyze_function(tir, pool, sink, &by_name);
     }
 }
 
-fn analyze_function(tir: &Tir, pool: &InternPool, sink: &mut DiagSink) {
+fn analyze_function(
+    tir: &Tir,
+    pool: &InternPool,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+) {
     let mut own = Ownership::default();
 
     // Initialise per-parameter state. Move-typed params start at
@@ -127,7 +136,7 @@ fn analyze_function(tir: &Tir, pool: &InternPool, sink: &mut DiagSink) {
     }
 
     for stmt in tir.body_stmts() {
-        analyze_stmt(tir, pool, &mut own, sink, stmt);
+        analyze_stmt(tir, pool, &mut own, sink, by_name, stmt);
     }
 }
 
@@ -146,19 +155,22 @@ fn analyze_stmt(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
     stmt: TirRef,
 ) {
     let inst = *tir.inst(stmt);
     match inst.tag {
-        TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, stmt),
-        TirTag::Assign => analyze_assign(tir, pool, own, sink, stmt),
+        TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, by_name, stmt),
+        TirTag::Assign => analyze_assign(tir, pool, own, sink, by_name, stmt),
+        TirTag::Return => analyze_return(tir, pool, own, sink, by_name, stmt),
+        TirTag::ReturnVoid => {}
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {
-                visit_expr(tir, pool, own, sink, o);
+                visit_expr(tir, pool, own, sink, by_name, o);
             }
         }
         _ => {
-            visit_expr(tir, pool, own, sink, stmt);
+            visit_expr(tir, pool, own, sink, by_name, stmt);
         }
     }
 }
@@ -173,12 +185,13 @@ fn analyze_var_decl(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
     r: TirRef,
 ) {
     let view = tir.var_decl_view(r);
     let init = view.initializer;
     let init_ty = tir.inst(init).ty;
-    visit_expr(tir, pool, own, sink, init);
+    visit_expr(tir, pool, own, sink, by_name, init);
     if needs_tracking(init_ty, pool) {
         let span = tir.span(r);
         consume_for_assignment(own, sink, init, span, MoveKind::Assignment);
@@ -196,15 +209,72 @@ fn analyze_assign(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
     r: TirRef,
 ) {
     let view = tir.assign_view(r);
     let value_ty = tir.inst(view.value).ty;
-    visit_expr(tir, pool, own, sink, view.value);
+    visit_expr(tir, pool, own, sink, by_name, view.value);
     if needs_tracking(value_ty, pool) {
         let span = tir.span(r);
         consume_for_assignment(own, sink, view.value, span, MoveKind::Assignment);
         rebind_to_init(own, view.name, view.value);
+    }
+}
+
+/// Move-typed `Return` is a consumer: the returned value flows out of
+/// the function and the caller takes ownership. Borrowed parameters
+/// cannot be returned (E0022). If the underlying owner is already
+/// `Moved`, this is the E0020 "use after move" site.
+fn analyze_return(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let inst = *tir.inst(r);
+    let operand = match inst.data {
+        TirData::UnOp(o) => o,
+        _ => unreachable!("Return must carry TirData::UnOp"),
+    };
+    let ty = tir.inst(operand).ty;
+    visit_expr(tir, pool, own, sink, by_name, operand);
+    if !needs_tracking(ty, pool) {
+        return;
+    }
+    let span = tir.span(r);
+    let underlying = underlying_owner(own, operand);
+    let state = own
+        .states
+        .get(&underlying)
+        .cloned()
+        .unwrap_or(OwnerState::NotTracked);
+    match state {
+        OwnerState::Valid => {
+            own.states.insert(
+                underlying,
+                OwnerState::Moved {
+                    moved_at: span,
+                    kind: MoveKind::Return,
+                },
+            );
+        }
+        OwnerState::Borrowed => {
+            sink.emit(Diag::error(
+                span,
+                DiagCode::ReturnBorrowedValue,
+                "cannot return borrowed value",
+            ));
+        }
+        OwnerState::Moved { moved_at, .. } => {
+            sink.emit(
+                Diag::error(span, DiagCode::UseAfterMove, "use of moved value in return")
+                    .with_note(Some(moved_at), "value was moved here"),
+            );
+        }
+        OwnerState::NotTracked => {}
     }
 }
 
@@ -274,7 +344,14 @@ fn consume_for_assignment(
     }
 }
 
-fn visit_expr(tir: &Tir, pool: &InternPool, own: &mut Ownership, sink: &mut DiagSink, r: TirRef) {
+fn visit_expr(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
     let inst = *tir.inst(r);
     match inst.tag {
         // ---- Allocating instructions ----
@@ -294,22 +371,64 @@ fn visit_expr(tir: &Tir, pool: &InternPool, own: &mut Ownership, sink: &mut Diag
                 own.origin.insert(r, None);
             }
             if let TirData::BinOp { lhs, rhs } = inst.data {
-                visit_expr(tir, pool, own, sink, lhs);
-                visit_expr(tir, pool, own, sink, rhs);
+                visit_expr(tir, pool, own, sink, by_name, lhs);
+                visit_expr(tir, pool, own, sink, by_name, rhs);
             }
         }
         TirTag::Call => {
             // A str-returning call (e.g. `int_to_str`) is a producer.
-            // Argument-side consumption lands in a later task; for
-            // now just recurse so any nested producers/aliases are
-            // observed.
             if needs_tracking(inst.ty, pool) {
                 own.states.insert(r, OwnerState::Valid);
                 own.origin.insert(r, None);
             }
             let view = tir.call_view(r);
-            for arg in view.args {
-                visit_expr(tir, pool, own, sink, arg);
+            // Look up callee parameter conventions. Builtins
+            // (`print`, `assert`, `int_to_str`) have no entry and
+            // default to borrowing all args.
+            let callee_params = by_name.get(&view.name).map(|t| t.params.as_slice());
+            for (i, arg) in view.args.iter().enumerate() {
+                visit_expr(tir, pool, own, sink, by_name, *arg);
+                let arg_ty = tir.inst(*arg).ty;
+                if !needs_tracking(arg_ty, pool) {
+                    continue;
+                }
+                let is_move_param = callee_params
+                    .and_then(|ps| ps.get(i))
+                    .map(|p| p.is_move)
+                    .unwrap_or(false);
+                if is_move_param {
+                    consume_for_assignment(
+                        own,
+                        sink,
+                        *arg,
+                        tir.span(r),
+                        MoveKind::MoveParam { callee: view.name },
+                    );
+                } else {
+                    // Borrow: just verify the underlying owner is not
+                    // already `Moved`. Var-reads inside `visit_expr`
+                    // already fire E0020 for that case, but we keep a
+                    // call-site check so the diagnostic message can
+                    // be specific to "borrowed argument".
+                    let underlying = underlying_owner(own, *arg);
+                    if let Some(OwnerState::Moved { moved_at, .. }) =
+                        own.states.get(&underlying).cloned()
+                        && underlying != *arg
+                    {
+                        // The Var-read path fires its own E0020 when
+                        // the Var instruction's owner is Moved; only
+                        // emit here when the moved owner is reached
+                        // via aliasing (so we don't double-report).
+                        sink.emit(
+                            Diag::error(
+                                tir.span(r),
+                                DiagCode::UseAfterMove,
+                                "use of moved value as borrowed argument",
+                            )
+                            .with_note(Some(moved_at), "value was moved here"),
+                        );
+                    }
+                }
             }
         }
         // ---- Aliasing read ----
@@ -339,7 +458,7 @@ fn visit_expr(tir: &Tir, pool: &InternPool, own: &mut Ownership, sink: &mut Diag
         // ---- Everything else: recurse on operands so nested
         // ---- producers/aliases are still observed.
         _ => {
-            recurse_operands(tir, pool, own, sink, r);
+            recurse_operands(tir, pool, own, sink, by_name, r);
         }
     }
 }
@@ -349,14 +468,15 @@ fn recurse_operands(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
     match inst.data {
-        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, o),
+        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, by_name, o),
         TirData::BinOp { lhs, rhs } => {
-            visit_expr(tir, pool, own, sink, lhs);
-            visit_expr(tir, pool, own, sink, rhs);
+            visit_expr(tir, pool, own, sink, by_name, lhs);
+            visit_expr(tir, pool, own, sink, by_name, rhs);
         }
         // `Extra`-shaped instructions (VarDecl, Assign, Call,
         // IfStmt, WhileLoop, ForRange, CompoundAssign) have

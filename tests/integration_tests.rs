@@ -2375,3 +2375,53 @@ fn test_str_concat_then_use_after_move_in_concat() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn test_use_after_move_return() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn make() -> str:\n\ts: str = \"hi\"\n\treturn s\n\nx: str = make()\nprint(x)";
+    let test_file = create_test_file(temp_dir.path(), "ret_ok.ryo", code);
+    let output = run_ryo_command(&["run", "ret_ok.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_return_borrowed_param() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code =
+        "fn passthrough(s: str) -> str:\n\treturn s\n\nx: str = passthrough(\"hi\")\nprint(x)";
+    let test_file = create_test_file(temp_dir.path(), "ret_borrowed.ryo", code);
+    let output = run_ryo_command(&["run", "ret_borrowed.ryo"], &test_file).expect("run");
+    assert!(!output.status.success(), "expected E0022");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0022"), "expected E0022: {}", stderr);
+}
+
+#[test]
+fn test_use_after_move_param() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code =
+        "fn consume(move s: str):\n\tprint(s)\n\nname: str = \"Alice\"\nconsume(name)\nprint(name)";
+    let test_file = create_test_file(temp_dir.path(), "uam_param.ryo", code);
+    let output = run_ryo_command(&["run", "uam_param.ryo"], &test_file).expect("run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0020"), "expected E0020: {}", stderr);
+}
+
+#[test]
+fn test_borrow_param_then_use_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn print_twice(s: str):\n\tprint(s)\n\tprint(s)\n\nprint_twice(\"hi\")";
+    let test_file = create_test_file(temp_dir.path(), "borrow_ok.ryo", code);
+    let output = run_ryo_command(&["run", "borrow_ok.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
