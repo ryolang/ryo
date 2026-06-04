@@ -957,6 +957,32 @@ fn ir_emit_tir_prints_partial_tir_with_unreachable_on_sema_error() {
     );
 }
 
+#[test]
+fn test_ryo_ir_surfaces_warnings_on_success() {
+    // I-044 regression: `ryo ir` used to call sema + ownership
+    // against a sink and only render on the error path, so any
+    // warnings (W0001 DeadStore, W0002 RedundantMove) emitted on
+    // a successful run were silently dropped. After the
+    // single-tail-block refactor, `ryo ir` should surface the same
+    // diagnostics on stderr that `ryo run` / `ryo build` already
+    // do (cf. test_redundant_move_on_int_warns).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn f(move x: int):\n\tprint(int_to_str(x))\n\nf(42)";
+    let test_file = create_test_file(temp_dir.path(), "ir_w0002.ryo", code);
+    let output = run_ryo_command(&["ir", "--emit=tir", "ir_w0002.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0002"),
+        "expected W0002 from ryo ir on stderr: {}",
+        stderr
+    );
+}
+
 // ============================================================================
 // Milestone 8b: Conditionals & Logical Operators
 // ============================================================================

@@ -290,7 +290,7 @@ pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerE
     if !(want.tir || want.clif) {
         // UIR-only run. Surface astgen diagnostics now, with a
         // non-zero exit if anything fired.
-        return finish_with_diags(sink, &input, &name);
+        return finalize_diags(sink, &input, &name);
     }
 
     // For TIR / CLIF we also run sema. Per the §4.5 design, sema
@@ -310,12 +310,16 @@ pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerE
         // failed, surface the diagnostics and abort — we cannot
         // produce a meaningful CLIF dump from a broken TIR.
         if sink.has_errors() {
-            return finish_with_diags(sink, &input, &name);
+            return finalize_diags(sink, &input, &name);
         }
         generate_and_display_ir(&tirs, &pool)?;
     }
 
-    finish_with_diags(sink, &input, &name)
+    // Tail block: drains the sink whether sema/ownership were
+    // clean or only emitted warnings. Without this `ryo ir` would
+    // silently swallow W0001/W0002 on success — the bug I-044
+    // tracked.
+    finalize_diags(sink, &input, &name)
 }
 
 /// Resolve `--emit` flag values into a normalized set. Membership
@@ -354,14 +358,28 @@ impl EmitSet {
     }
 }
 
-/// Render any pending diagnostics and translate them into a
-/// `CompilerError::Diagnostics` (or `Ok(())` if the sink is
-/// clean). Centralized so every `ryo ir` exit path uses the same
-/// rendering plumbing.
-fn finish_with_diags(sink: DiagSink, input: &str, source_name: &str) -> Result<(), CompilerError> {
-    if sink.has_errors() {
-        let diags = sink.into_diags();
+/// Drain `sink`, render whatever is queued, and translate into a
+/// terminal pipeline result.
+///
+/// Single tail-block used by every front-end driver (`ryo run`,
+/// `ryo build`, `ryo ir`) so that:
+///
+/// * warnings (`W0001` DeadStore, `W0002` RedundantMove, …) reach
+///   the user on otherwise-successful runs, and
+/// * the success and error paths render the *same* diagnostics
+///   exactly once — never via two separate `render_diags` calls
+///   that could drift out of sync.
+///
+/// Returns `Err(CompilerError::Diagnostics(_))` iff at least one
+/// diagnostic has `Severity::Error`; warnings/notes alone do not
+/// fail the build.
+fn finalize_diags(sink: DiagSink, input: &str, source_name: &str) -> Result<(), CompilerError> {
+    let diags = sink.into_diags();
+    let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
+    if !diags.is_empty() {
         render_diags(&diags, input, source_name);
+    }
+    if has_errors {
         Err(CompilerError::Diagnostics(diags))
     } else {
         Ok(())
@@ -396,18 +414,12 @@ fn lower_and_analyze(
     // run is the whole point of the structured-diagnostics phase.
     let tirs = sema::analyze(&uir, pool, &mut sink, input, file_path);
     crate::ownership::check(&tirs, pool, &mut sink);
-    if sink.has_errors() {
-        let diags = sink.into_diags();
-        render_diags(&diags, input, source_name);
-        return Err(CompilerError::Diagnostics(diags));
-    }
-    // No errors — but warnings/notes may still be queued. Render
-    // them so the user sees `move`-on-Copy lints (W0002) and any
-    // future lints on otherwise-successful builds.
-    let diags = sink.into_diags();
-    if !diags.is_empty() {
-        render_diags(&diags, input, source_name);
-    }
+    // Single tail block: render-if-non-empty, Err iff any errors.
+    // Same shape as `ir_command` so warnings (`W0001` DeadStore,
+    // `W0002` RedundantMove, …) surface on the success path
+    // without a separate render block that could drift from the
+    // error path.
+    finalize_diags(sink, input, source_name)?;
     Ok(tirs)
 }
 

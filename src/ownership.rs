@@ -272,6 +272,14 @@ fn analyze_stmt(
         TirTag::Break | TirTag::Continue => {
             // 8.1c attaches Free metadata here; 8.1b is a no-op.
         }
+        TirTag::CompoundAssign => {
+            // Compound-assign on Move-typed values is rejected by sema today
+            // (str doesn't support `+=`/`-=`/etc.), so this is unreachable for
+            // tracked types. Explicit no-op arm so the next reader doesn't
+            // wonder whether the fall-through to visit_expr is correct.
+            // Revisit when compound-assign on Move-typed values becomes
+            // representable. See ISSUES.md I-046.
+        }
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {
                 visit_expr(tir, pool, own, sink, by_name, o);
