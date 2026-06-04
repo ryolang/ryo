@@ -342,6 +342,7 @@ fn analyze_assign(
         let consumed_name = consumed_binding_name(tir, view.value);
         consume_for_assignment(pool, own, sink, view.value, span, consumed_name);
         rebind_to_init(own, view.name, view.value);
+        own.pending_dead_store.insert(view.value, (view.name, span));
     }
 }
 

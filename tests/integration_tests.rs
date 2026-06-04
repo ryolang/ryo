@@ -2777,3 +2777,22 @@ fn test_no_dead_store_when_used() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("W0001"), "unexpected W0001: {}", stderr);
 }
+
+#[test]
+fn test_dead_store_warning_reassignment() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tmut name: str = \"Alice\"\n\tprint(name)\n\tname = \"Bob\"\n\tprint(\"done\")\n";
+    let test_file = create_test_file(temp_dir.path(), "reassign_dead.ryo", code);
+    let output = run_ryo_command(&["run", "reassign_dead.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0001"),
+        "expected W0001 in stderr: {}",
+        stderr
+    );
+}
