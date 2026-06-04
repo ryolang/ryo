@@ -374,8 +374,8 @@ impl EmitSet {
 /// diagnostic has `Severity::Error`; warnings/notes alone do not
 /// fail the build.
 fn finalize_diags(sink: DiagSink, input: &str, source_name: &str) -> Result<(), CompilerError> {
+    let has_errors = sink.has_errors();
     let diags = sink.into_diags();
-    let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
     if !diags.is_empty() {
         render_diags(&diags, input, source_name);
     }

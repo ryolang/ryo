@@ -273,12 +273,18 @@ fn analyze_stmt(
             // 8.1c attaches Free metadata here; 8.1b is a no-op.
         }
         TirTag::CompoundAssign => {
-            // Compound-assign on Move-typed values is rejected by sema today
-            // (str doesn't support `+=`/`-=`/etc.), so this is unreachable for
-            // tracked types. Explicit no-op arm so the next reader doesn't
-            // wonder whether the fall-through to visit_expr is correct.
-            // Revisit when compound-assign on Move-typed values becomes
-            // representable. See ISSUES.md I-046.
+            // Sema rejects compound-assign on Move-typed values today
+            // (str doesn't support `+=`/`-=`/etc.). Enforce the invariant
+            // here so a future sema relaxation that reaches the ownership
+            // pass without ownership-aware handling trips a debug build
+            // instead of silently falling through to no analysis.
+            // See ISSUES.md I-046.
+            let view = tir.compound_assign_view(stmt);
+            debug_assert!(
+                !needs_tracking(tir.inst(view.value).ty, pool),
+                "compound-assign on Move-typed value reached ownership pass; \
+                 sema should have rejected — see ISSUES.md I-046",
+            );
         }
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {
