@@ -318,7 +318,16 @@ fn analyze_var_decl(
     visit_expr(tir, pool, own, sink, by_name, init);
     if needs_tracking(init_ty, pool) {
         let span = tir.span(r);
-        consume_for_assignment(own, sink, init, span, MoveKind::Assignment);
+        let consumed_name = consumed_binding_name(tir, init);
+        consume_for_assignment(
+            pool,
+            own,
+            sink,
+            init,
+            span,
+            MoveKind::Assignment,
+            consumed_name,
+        );
         rebind_to_init(own, view.name, init);
         // Register the new binding as pending dead-store. The walk
         // clears this entry on any later read or consumption; a
@@ -346,7 +355,16 @@ fn analyze_assign(
     visit_expr(tir, pool, own, sink, by_name, view.value);
     if needs_tracking(value_ty, pool) {
         let span = tir.span(r);
-        consume_for_assignment(own, sink, view.value, span, MoveKind::Assignment);
+        let consumed_name = consumed_binding_name(tir, view.value);
+        consume_for_assignment(
+            pool,
+            own,
+            sink,
+            view.value,
+            span,
+            MoveKind::Assignment,
+            consumed_name,
+        );
         rebind_to_init(own, view.name, view.value);
     }
 }
@@ -374,6 +392,7 @@ fn analyze_return(
         return;
     }
     let span = tir.span(r);
+    let consumed_name = consumed_binding_name(tir, operand);
     let underlying = underlying_owner(own, operand);
     let state = own
         .states
@@ -392,16 +411,36 @@ fn analyze_return(
             );
         }
         OwnerState::Borrowed => {
-            sink.emit(Diag::error(
-                span,
-                DiagCode::ReturnBorrowedValue,
-                "cannot return borrowed value",
-            ));
+            sink.emit(
+                Diag::error(
+                    span,
+                    DiagCode::ReturnBorrowedValue,
+                    format!(
+                        "cannot return borrowed value {} (Rule 5)",
+                        format_binding(consumed_name, pool),
+                    ),
+                )
+                .with_note(
+                    None,
+                    "help: return a locally-allocated value, or accept the parameter as `move`",
+                ),
+            );
         }
         OwnerState::Moved { moved_at, .. } => {
             sink.emit(
-                Diag::error(span, DiagCode::UseAfterMove, "use of moved value in return")
-                    .with_note(Some(moved_at), "value was moved here"),
+                Diag::error(
+                    span,
+                    DiagCode::UseAfterMove,
+                    format!(
+                        "use of moved value {}",
+                        format_binding(consumed_name, pool),
+                    ),
+                )
+                .with_note(Some(moved_at), "value moved here")
+                .with_note(
+                    None,
+                    "help: consider using the value before the move, or pass by default (borrow) instead of `move`",
+                ),
             );
         }
         OwnerState::NotTracked => {}
@@ -435,11 +474,13 @@ fn underlying_owner(own: &Ownership, init: TirRef) -> TirRef {
 /// Caller must have already populated origin/state for `init` via
 /// `visit_expr`.
 fn consume_for_assignment(
+    pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
     init: TirRef,
     span: Span,
     kind: MoveKind,
+    name: Option<StringId>,
 ) {
     let underlying = underlying_owner(own, init);
     let state = own
@@ -459,19 +500,57 @@ fn consume_for_assignment(
             );
         }
         OwnerState::Borrowed => {
-            sink.emit(Diag::error(
-                span,
-                DiagCode::MoveOutOfBorrowedParam,
-                "cannot move out of borrowed parameter",
-            ));
+            sink.emit(
+                Diag::error(
+                    span,
+                    DiagCode::MoveOutOfBorrowedParam,
+                    format!(
+                        "cannot move out of borrowed parameter {}",
+                        format_binding(name, pool),
+                    ),
+                )
+                .with_note(
+                    None,
+                    "help: add `move` to the parameter declaration if you need ownership",
+                ),
+            );
         }
         OwnerState::Moved { moved_at, .. } => {
             sink.emit(
-                Diag::error(span, DiagCode::UseAfterMove, "use of moved value")
-                    .with_note(Some(moved_at), "value was moved here"),
+                Diag::error(
+                    span,
+                    DiagCode::UseAfterMove,
+                    format!("use of moved value {}", format_binding(name, pool)),
+                )
+                .with_note(Some(moved_at), "value moved here")
+                .with_note(
+                    None,
+                    "help: consider using the value before the move, or pass by default (borrow) instead of `move`",
+                ),
             );
         }
         OwnerState::NotTracked => {}
+    }
+}
+
+/// Render a binding name for inclusion in a diagnostic message.
+/// Returns `` `name` `` for known bindings and `value` for anonymous
+/// temporaries (concat results, fresh allocations, etc.).
+fn format_binding(name: Option<StringId>, pool: &InternPool) -> String {
+    match name {
+        Some(n) => format!("`{}`", pool.str(n)),
+        None => "value".to_string(),
+    }
+}
+
+/// If `r` is a direct `Var` read, return the binding name it aliases.
+/// Used at consume sites to thread the source binding name into
+/// E0020/E0021/E0022 messages. Returns `None` for fresh producers
+/// (StrConst, StrConcat, Call), where there's no source binding.
+fn consumed_binding_name(tir: &Tir, r: TirRef) -> Option<StringId> {
+    match tir.inst(r).data {
+        TirData::Var(n) => Some(n),
+        _ => None,
     }
 }
 
@@ -700,12 +779,15 @@ fn visit_expr(
                     .map(|p| p.is_move)
                     .unwrap_or(false);
                 if is_move_param {
+                    let consumed_name = consumed_binding_name(tir, *arg);
                     consume_for_assignment(
+                        pool,
                         own,
                         sink,
                         *arg,
                         tir.span(r),
                         MoveKind::MoveParam { callee: view.name },
+                        consumed_name,
                     );
                 }
                 // Borrow path: no extra check here. With the current
@@ -740,8 +822,16 @@ fn visit_expr(
                 own.origin.insert(r, Some(owner));
                 if let Some(OwnerState::Moved { moved_at, .. }) = own.states.get(&owner).cloned() {
                     sink.emit(
-                        Diag::error(tir.span(r), DiagCode::UseAfterMove, "use of moved value")
-                            .with_note(Some(moved_at), "value was moved here"),
+                        Diag::error(
+                            tir.span(r),
+                            DiagCode::UseAfterMove,
+                            format!("use of moved value `{}`", pool.str(name)),
+                        )
+                        .with_note(Some(moved_at), "value moved here")
+                        .with_note(
+                            None,
+                            "help: consider using the value before the move, or pass by default (borrow) instead of `move`",
+                        ),
                     );
                 }
             }

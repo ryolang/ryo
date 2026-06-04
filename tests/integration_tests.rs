@@ -2420,6 +2420,34 @@ fn test_use_after_move_param() {
 }
 
 #[test]
+fn test_e0020_message_includes_binding_name() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	name: str = "Alice"
+	consume(name)
+	print(name)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "e0020_label.ryo", code);
+    let output = run_ryo_command(&["run", "e0020_label.ryo"], &test_file).expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0020"), "stderr: {}", stderr);
+    assert!(
+        stderr.contains("name"),
+        "expected binding name in message: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("moved here") || stderr.contains("moved into"),
+        "expected move-site note: {}",
+        stderr
+    );
+}
+
+#[test]
 fn test_borrow_param_then_use_ok() {
     let temp_dir = TempDir::new().expect("temp");
     let code = "fn print_twice(s: str):\n\tprint(s)\n\tprint(s)\n\nprint_twice(\"hi\")";
