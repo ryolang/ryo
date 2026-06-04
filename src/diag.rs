@@ -171,6 +171,12 @@ impl Diag {
         });
         self
     }
+
+    /// Top-level help note (no span). Renders with a "help: " prefix
+    /// so callers don't need to encode the convention.
+    pub fn with_help(self, message: impl Into<String>) -> Self {
+        self.with_note(None, format!("help: {}", message.into()))
+    }
 }
 
 /// Accumulator for diagnostics emitted by a single compilation pass.

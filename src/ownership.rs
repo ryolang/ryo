@@ -28,18 +28,6 @@ use std::collections::{HashMap, HashSet};
 
 // ---------- Classification ----------
 
-/// True for types whose values can be freely duplicated by `=`
-/// without invalidating the source. Mirrors Mojo's `Copyable` trait
-/// for the scalar primitives Ryo currently has. The ownership walk
-/// short-circuits on these — they never enter the lattice.
-#[allow(dead_code)] // wired into consumption logic in later tasks
-pub(crate) fn is_copy_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(
-        pool.kind(ty),
-        TypeKind::Int | TypeKind::Float | TypeKind::Bool
-    )
-}
-
 /// True for types whose values transfer ownership on `=` and must be
 /// tracked through the function body. Today: `str` only. Future heap
 /// types (`List[T]`, `Dict[K, V]`) will join this set.
@@ -62,23 +50,11 @@ pub(crate) fn needs_tracking(ty: TypeId, pool: &InternPool) -> bool {
 /// typed values start at `Valid` on definition, transition to
 /// `Borrowed` while a borrow is live, and to `Moved` once consumed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum OwnerState {
     NotTracked,
     Valid,
     Borrowed,
-    Moved { moved_at: Span, kind: MoveKind },
-}
-
-/// Why a value transitioned to `Moved`. Currently only used to track
-/// the kind for future per-kind diagnostic phrasing — see ISSUES.md
-/// or future tasks. No diagnostic reads back the variant today.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum MoveKind {
-    Assignment,
-    Return,
-    MoveParam,
+    Moved { moved_at: Span },
 }
 
 /// Per-function ownership state. `states` is the lattice itself,
@@ -90,7 +66,6 @@ pub(crate) enum MoveKind {
 /// it derives from (or `None` for fresh allocations) — used to walk
 /// back to the root owner when diagnosing a use-after-move.
 #[derive(Default, Clone)]
-#[allow(dead_code)]
 pub(crate) struct Ownership {
     pub states: HashMap<TirRef, OwnerState>,
     pub current_owner: HashMap<StringId, TirRef>,
@@ -103,22 +78,6 @@ pub(crate) struct Ownership {
 }
 
 impl Ownership {
-    /// Capture the current lattice for branch analysis. The CFG-join
-    /// logic in `analyze_if_stmt` snapshots state before each branch,
-    /// walks branches independently from that snapshot, then merges.
-    fn clone_snapshot(&self) -> Ownership {
-        self.clone()
-    }
-
-    /// Reset the lattice to a previous snapshot. Used to walk each
-    /// branch of an `if` from the same starting state.
-    fn restore_from(&mut self, snap: &Ownership) {
-        self.states = snap.states.clone();
-        self.current_owner = snap.current_owner.clone();
-        self.origin = snap.origin.clone();
-        self.pending_dead_store = snap.pending_dead_store.clone();
-    }
-
     /// Conservatively merge per-branch lattices into `self`. For each
     /// tracked `TirRef`, if any branch left it `Moved` the merged
     /// state is `Moved` — that way a value consumed on only one
@@ -126,28 +85,22 @@ impl Ownership {
     /// post-`if` use trips E0020. Non-`Moved` states pick the first
     /// observed branch state. `current_owner` entries from any branch
     /// are preserved so reseats inside a branch survive the join.
-    fn merge_branches(&mut self, branches: &[Ownership]) {
-        let mut all_refs: std::collections::HashSet<TirRef> = std::collections::HashSet::new();
+    fn merge_branches(&mut self, branches: &[&Ownership]) {
+        // Rule: any branch Moved → Moved; otherwise first observed
+        // (across branches) wins. Walk each branch once and merge
+        // directly into `self.states` — no intermediate set of keys.
         for b in branches {
-            all_refs.extend(b.states.keys().copied());
-        }
-        for r in all_refs {
-            let mut merged: Option<OwnerState> = None;
-            for b in branches {
-                let s = b.states.get(&r).cloned().unwrap_or(OwnerState::NotTracked);
-                merged = Some(match (merged, s) {
-                    (None, s) => s,
-                    (Some(OwnerState::Moved { moved_at, kind }), _) => {
-                        OwnerState::Moved { moved_at, kind }
-                    }
-                    (_, OwnerState::Moved { moved_at, kind }) => {
-                        OwnerState::Moved { moved_at, kind }
-                    }
-                    (Some(a), _) => a,
-                });
-            }
-            if let Some(state) = merged {
-                self.states.insert(r, state);
+            for (r, s) in &b.states {
+                self.states
+                    .entry(*r)
+                    .and_modify(|cur| {
+                        if !matches!(cur, OwnerState::Moved { .. })
+                            && matches!(s, OwnerState::Moved { .. })
+                        {
+                            *cur = s.clone();
+                        }
+                    })
+                    .or_insert_with(|| s.clone());
             }
         }
         for b in branches {
@@ -165,43 +118,32 @@ impl Ownership {
         // (1) Pre-branch entries (already in `self.pending_dead_store`
         //     before the branches walked): every branch started with
         //     the entry. If any branch cleared it, the value was
-        //     used somewhere — drop it. So the rule is "intersect
-        //     across branches".
+        //     used somewhere — drop it. Rule: intersect across
+        //     branches.
         //
         // (2) Branch-local entries (introduced inside a branch by a
         //     VarDecl): only the introducing branch has the key. If
-        //     that branch ended with the entry still pending, the
-        //     binding was declared and never used inside the branch
-        //     and W0001 should still fire after the join. So the
-        //     rule is "union across branches".
+        //     that branch ended with the entry still pending, W0001
+        //     should still fire after the join. Rule: union across
+        //     branches (skipping keys that were pre-branch — those
+        //     are governed by rule (1)).
         //
-        // Distinguishing (1) vs (2) is just: was the key in
-        // `self.pending_dead_store` before the merge? Walk both
-        // groups separately so each gets its correct rule.
-        let mut merged_pending: HashMap<TirRef, (StringId, Span)> = HashMap::new();
-
-        // (1) Pre-branch entries — keep iff still pending in *every*
-        // branch.
-        for (k, v) in &self.pending_dead_store {
-            if branches
+        // Snapshot the pre-branch key set so the union step can
+        // distinguish branch-local keys from pre-branch keys that
+        // (1) may have just dropped.
+        let pre_branch_keys: HashSet<TirRef> = self.pending_dead_store.keys().copied().collect();
+        self.pending_dead_store.retain(|k, _| {
+            branches
                 .iter()
                 .all(|b| b.pending_dead_store.contains_key(k))
-            {
-                merged_pending.insert(*k, *v);
-            }
-        }
-
-        // (2) Branch-local entries — anything in a branch's pending
-        // that wasn't pre-existing.
+        });
         for b in branches {
             for (k, v) in &b.pending_dead_store {
-                if !self.pending_dead_store.contains_key(k) {
-                    merged_pending.insert(*k, *v);
+                if !pre_branch_keys.contains(k) {
+                    self.pending_dead_store.insert(*k, *v);
                 }
             }
         }
-
-        self.pending_dead_store = merged_pending;
     }
 }
 
@@ -319,15 +261,7 @@ fn analyze_var_decl(
     if needs_tracking(init_ty, pool) {
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, init);
-        consume_for_assignment(
-            pool,
-            own,
-            sink,
-            init,
-            span,
-            MoveKind::Assignment,
-            consumed_name,
-        );
+        consume_for_assignment(pool, own, sink, init, span, consumed_name);
         rebind_to_init(own, view.name, init);
         // Register the new binding as pending dead-store. The walk
         // clears this entry on any later read or consumption; a
@@ -356,15 +290,7 @@ fn analyze_assign(
     if needs_tracking(value_ty, pool) {
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, view.value);
-        consume_for_assignment(
-            pool,
-            own,
-            sink,
-            view.value,
-            span,
-            MoveKind::Assignment,
-            consumed_name,
-        );
+        consume_for_assignment(pool, own, sink, view.value, span, consumed_name);
         rebind_to_init(own, view.name, view.value);
     }
 }
@@ -402,13 +328,8 @@ fn analyze_return(
     match state {
         OwnerState::Valid => {
             own.pending_dead_store.remove(&underlying);
-            own.states.insert(
-                underlying,
-                OwnerState::Moved {
-                    moved_at: span,
-                    kind: MoveKind::Return,
-                },
-            );
+            own.states
+                .insert(underlying, OwnerState::Moved { moved_at: span });
         }
         OwnerState::Borrowed => {
             sink.emit(
@@ -420,10 +341,7 @@ fn analyze_return(
                         format_binding(consumed_name, pool),
                     ),
                 )
-                .with_note(
-                    None,
-                    "help: return a locally-allocated value, or accept the parameter as `move`",
-                ),
+                .with_help("return a locally-allocated value, or accept the parameter as `move`"),
             );
         }
         OwnerState::Moved { .. } => {
@@ -468,7 +386,6 @@ fn consume_for_assignment(
     sink: &mut DiagSink,
     init: TirRef,
     span: Span,
-    kind: MoveKind,
     name: Option<StringId>,
 ) {
     let underlying = underlying_owner(own, init);
@@ -480,13 +397,8 @@ fn consume_for_assignment(
     match state {
         OwnerState::Valid => {
             own.pending_dead_store.remove(&underlying);
-            own.states.insert(
-                underlying,
-                OwnerState::Moved {
-                    moved_at: span,
-                    kind,
-                },
-            );
+            own.states
+                .insert(underlying, OwnerState::Moved { moved_at: span });
         }
         OwnerState::Borrowed => {
             sink.emit(
@@ -498,10 +410,7 @@ fn consume_for_assignment(
                         format_binding(name, pool),
                     ),
                 )
-                .with_note(
-                    None,
-                    "help: add `move` to the parameter declaration if you need ownership",
-                ),
+                .with_help("add `move` to the parameter declaration if you need ownership"),
             );
         }
         OwnerState::Moved { .. } => {
@@ -565,35 +474,38 @@ fn analyze_if_stmt(
     let view = tir.if_stmt_view(r);
     visit_expr(tir, pool, own, sink, by_name, view.cond);
 
-    let snapshot = own.clone_snapshot();
+    let snapshot = own.clone();
 
     for stmt in &view.then_stmts {
         analyze_stmt(tir, pool, own, sink, by_name, *stmt);
     }
-    let then_state = own.clone_snapshot();
+    let then_state = own.clone();
 
     let mut branch_results = vec![then_state];
     for elif in &view.elif_branches {
-        own.restore_from(&snapshot);
+        *own = snapshot.clone();
         visit_expr(tir, pool, own, sink, by_name, elif.cond);
         for stmt in &elif.body {
             analyze_stmt(tir, pool, own, sink, by_name, *stmt);
         }
-        branch_results.push(own.clone_snapshot());
+        branch_results.push(own.clone());
     }
 
     if let Some(else_stmts) = &view.else_stmts {
-        own.restore_from(&snapshot);
+        *own = snapshot.clone();
         for stmt in else_stmts {
             analyze_stmt(tir, pool, own, sink, by_name, *stmt);
         }
-        branch_results.push(own.clone_snapshot());
+        branch_results.push(own.clone());
     } else {
         branch_results.push(snapshot.clone());
     }
 
-    own.restore_from(&snapshot);
-    own.merge_branches(&branch_results);
+    // Final restore: `snapshot` has no further uses, so move instead
+    // of clone.
+    *own = snapshot;
+    let refs: Vec<&Ownership> = branch_results.iter().collect();
+    own.merge_branches(&refs);
 }
 
 /// Fixed-point ownership analysis for `while`. Walks the body once
@@ -614,7 +526,7 @@ fn analyze_while_loop(
     r: TirRef,
 ) {
     let view = tir.while_loop_view(r);
-    let entry = own.clone_snapshot();
+    let entry = own.clone();
 
     // First pass into a scratch sink — diagnostics are kept only if
     // a single iteration suffices. If the lattice changes we re-walk
@@ -625,24 +537,21 @@ fn analyze_while_loop(
     for stmt in &view.body {
         analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, *stmt);
     }
-    let after_first = own.clone_snapshot();
+    let after_first = own.clone();
 
     if states_differ(&entry, &after_first) {
-        let merged = merge_two(&entry, &after_first);
-        own.restore_from(&merged);
+        *own = merge_two(&entry, &after_first);
         visit_expr(tir, pool, own, sink, by_name, view.cond);
         for stmt in &view.body {
             analyze_stmt(tir, pool, own, sink, by_name, *stmt);
         }
-        let after_second = own.clone_snapshot();
-        let final_merged = merge_two(&entry, &after_second);
-        own.restore_from(&final_merged);
+        let after_second = own.clone();
+        *own = merge_two(&entry, &after_second);
     } else {
         for d in scratch_sink.into_diags() {
             sink.emit(d);
         }
-        let final_merged = merge_two(&entry, &after_first);
-        own.restore_from(&final_merged);
+        *own = merge_two(&entry, &after_first);
     }
 }
 
@@ -664,29 +573,26 @@ fn analyze_for_range(
     visit_expr(tir, pool, own, sink, by_name, view.start);
     visit_expr(tir, pool, own, sink, by_name, view.end);
 
-    let entry = own.clone_snapshot();
+    let entry = own.clone();
 
     let mut scratch_sink = DiagSink::new();
     for stmt in &view.body {
         analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, *stmt);
     }
-    let after_first = own.clone_snapshot();
+    let after_first = own.clone();
 
     if states_differ(&entry, &after_first) {
-        let merged = merge_two(&entry, &after_first);
-        own.restore_from(&merged);
+        *own = merge_two(&entry, &after_first);
         for stmt in &view.body {
             analyze_stmt(tir, pool, own, sink, by_name, *stmt);
         }
-        let after_second = own.clone_snapshot();
-        let final_merged = merge_two(&entry, &after_second);
-        own.restore_from(&final_merged);
+        let after_second = own.clone();
+        *own = merge_two(&entry, &after_second);
     } else {
         for d in scratch_sink.into_diags() {
             sink.emit(d);
         }
-        let final_merged = merge_two(&entry, &after_first);
-        own.restore_from(&final_merged);
+        *own = merge_two(&entry, &after_first);
     }
 }
 
@@ -696,11 +602,24 @@ fn analyze_for_range(
 /// state changes (e.g. fresh definitions added inside the body) are
 /// loop-invariant for the use-after-move check.
 fn states_differ(a: &Ownership, b: &Ownership) -> bool {
-    let keys: HashSet<TirRef> = a.states.keys().chain(b.states.keys()).copied().collect();
-    for k in keys {
-        let av = a.states.get(&k).cloned().unwrap_or(OwnerState::NotTracked);
-        let bv = b.states.get(&k).cloned().unwrap_or(OwnerState::NotTracked);
-        if matches!(av, OwnerState::Moved { .. }) != matches!(bv, OwnerState::Moved { .. }) {
+    // Diverge iff some TirRef is Moved in one and not the other.
+    // Walk each side once and check the other's matching entry —
+    // missing entries default to NotTracked, so a Moved with no
+    // counterpart counts as a divergence on its own.
+    for (k, av) in &a.states {
+        let a_moved = matches!(av, OwnerState::Moved { .. });
+        let b_moved = matches!(b.states.get(k), Some(OwnerState::Moved { .. }));
+        if a_moved != b_moved {
+            return true;
+        }
+    }
+    for (k, bv) in &b.states {
+        if !matches!(bv, OwnerState::Moved { .. }) {
+            continue;
+        }
+        // Only need to catch keys exclusive to b that are Moved —
+        // keys present in a were handled in the first loop.
+        if !a.states.contains_key(k) {
             return true;
         }
     }
@@ -711,8 +630,8 @@ fn states_differ(a: &Ownership, b: &Ownership) -> bool {
 /// either input has a TirRef `Moved`, the result is `Moved`. Used to
 /// seed the second pass and to compute the post-loop state.
 fn merge_two(a: &Ownership, b: &Ownership) -> Ownership {
-    let mut merged = a.clone_snapshot();
-    merged.merge_branches(&[a.clone_snapshot(), b.clone_snapshot()]);
+    let mut merged = a.clone();
+    merged.merge_branches(&[a, b]);
     merged
 }
 
@@ -770,15 +689,7 @@ fn visit_expr(
                     .unwrap_or(false);
                 if is_move_param {
                     let consumed_name = consumed_binding_name(tir, *arg);
-                    consume_for_assignment(
-                        pool,
-                        own,
-                        sink,
-                        *arg,
-                        tir.span(r),
-                        MoveKind::MoveParam,
-                        consumed_name,
-                    );
+                    consume_for_assignment(pool, own, sink, *arg, tir.span(r), consumed_name);
                 }
                 // Borrow path: no extra check here. With the current
                 // set of producers (StrConst/StrConcat/Call/Var), every
@@ -818,9 +729,8 @@ fn visit_expr(
                             format!("use of moved value `{}`", pool.str(name)),
                         )
                         .with_note(Some(moved_at), "value moved here")
-                        .with_note(
-                            None,
-                            "help: consider using the value before the move, or pass by default (borrow) instead of `move`",
+                        .with_help(
+                            "consider using the value before the move, or pass by default (borrow) instead of `move`",
                         ),
                     );
                 }
@@ -872,10 +782,10 @@ mod tests {
     #[test]
     fn copy_types_classified() {
         let pool = InternPool::new();
-        assert!(is_copy_type(pool.int(), &pool));
-        assert!(is_copy_type(pool.float(), &pool));
-        assert!(is_copy_type(pool.bool_(), &pool));
-        assert!(!is_copy_type(pool.str_(), &pool));
+        assert!(pool.is_copy(pool.int()));
+        assert!(pool.is_copy(pool.float()));
+        assert!(pool.is_copy(pool.bool_()));
+        assert!(!pool.is_copy(pool.str_()));
     }
 
     #[test]
