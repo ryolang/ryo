@@ -241,6 +241,11 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** After their distinct preludes (visit `cond` vs visit `start` + `end`), the bodies are byte-for-byte the same — entry snapshot, scratch-sink walk, `states_differ` check, optional re-walk, final `merge_two`. Two near-clones of a non-trivial fixed-point loop is exactly where divergence creeps in (only one gets a fix when behavior needs to change).
 **Resolution:** Extract `analyze_loop_body(tir, pool, own, sink, by_name, body: &[TirRef])` after the caller has visited the loop's prelude. Folds with I-045 (propagate-only + check pass) — both refactors touch the same bodies.
 
+### I-053 — `OwnerState::Borrowed` is currently parameter-only
+**Files:** `src/ownership.rs` (`OwnerState`)
+**Summary:** `OwnerState::Borrowed` is set only at parameter init; no expression produces it. The two sites that read it (E0021, E0022) could equivalently look up `tir.params` for the underlying owner's source param and check `is_move`. The state is anticipating real borrow expressions (`&x`) which the spec migrated to in commit 2ccf6b6 but the compiler doesn't lower yet.
+**Resolution:** Document the invariant inline ("only ever set at param init in M8.1b; transitions arrive when `&x` borrow expressions land in a future milestone"). No code change today.
+
 ### I-054 — `parse_source` and lex error paths bypass `finalize_diags`
 **Files:** `src/pipeline.rs` (`parse_source`, `display_tokens`)
 **Summary:** `finalize_diags` consolidates the drain + render + `Err(CompilerError::Diagnostics(_))` shape for the sink-using stages (`lower_and_analyze`, `ir_command`). The lex error paths and `parse_source`'s parse-error branch still hand-roll the same pattern over a `Vec<Diag>` they build directly (no `DiagSink`). Drift risk is real: parse/lex paths skip the `Severity::Error` filter (they assume every diag they emit is an error, which holds today but isn't enforced), and any future change to the rendering convention has to be applied in three places.
@@ -250,11 +255,6 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Files:** `src/ownership.rs` (`analyze_var_decl`, `analyze_assign`)
 **Summary:** Both helpers register a Move-typed binding into `own.pending_dead_store` with `(name, span)` after `rebind_to_init`. The pattern was a single site before commit 20cdd02 added W0001 reassignment coverage; it is now a 2-site duplication. If W0001 ever needs different policy at one site (e.g., distinguishing fresh declaration from reassignment), the duplication will silently allow it.
 **Resolution:** Extract `register_pending_dead_store(own, owner, name, span)`, or fold the registration into `rebind_to_init` (which already takes the binding) and have it accept the span/name pair. Either is a 3-line change.
-
-### I-053 — `OwnerState::Borrowed` is currently parameter-only
-**Files:** `src/ownership.rs` (`OwnerState`)
-**Summary:** `OwnerState::Borrowed` is set only at parameter init; no expression produces it. The two sites that read it (E0021, E0022) could equivalently look up `tir.params` for the underlying owner's source param and check `is_move`. The state is anticipating real borrow expressions (`&x`) which the spec migrated to in commit 2ccf6b6 but the compiler doesn't lower yet.
-**Resolution:** Document the invariant inline ("only ever set at param init in M8.1b; transitions arrive when `&x` borrow expressions land in a future milestone"). No code change today.
 
 ---
 

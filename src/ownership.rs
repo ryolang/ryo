@@ -245,10 +245,14 @@ fn analyze_function(
 /// Build a stable synthetic [`TirRef`] for a parameter so it can
 /// share the `states` map with real instruction refs. Encoded near
 /// `u32::MAX` to keep it well clear of real per-function indices
-/// (which start at 1 and grow with body size). `u32::MAX - name.raw()`
-/// stays non-zero for any plausible interned-string id.
+/// (which start at 1 and grow with body size). `TirRef` wraps
+/// `NonZeroU32`, so we clamp the lower bound to 1 to defend against
+/// the edge case `name.raw() == u32::MAX` (which would otherwise
+/// panic at `from_raw`). The collision-free property relies on real
+/// instruction refs never reaching `u32::MAX - max_string_id`, which
+/// is structurally impossible for any realistic program.
 fn synthetic_param_ref(name: StringId) -> TirRef {
-    let raw = u32::MAX - name.raw();
+    let raw = u32::MAX.saturating_sub(name.raw()).max(1);
     TirRef::from_raw(raw)
 }
 
@@ -593,15 +597,30 @@ fn analyze_if_stmt(
     own.merge_branches(&refs);
 }
 
-/// Fixed-point ownership analysis for `while`. Walks the body once
-/// from the entry state into a scratch sink; if no tracked TirRef
-/// changed Moved-ness across the back-edge, the body is loop-invariant
-/// for ownership purposes and the scratch diagnostics are flushed.
-/// Otherwise we re-walk from the merged (entry ⊔ post-body) state and
-/// emit diagnostics on the second pass — a binding moved inside the
-/// body without rebinding before the back-edge surfaces as E0020 on
-/// iteration two. Converges in at most 2 iterations for the M8.1
-/// pattern set (per the design doc).
+/// 2-pass approximation of a fixed-point ownership analysis for
+/// `while`. Walks the body once from the entry state into a scratch
+/// sink; if no tracked TirRef changed Moved-ness across the back-edge,
+/// the body is loop-invariant for ownership purposes and the scratch
+/// diagnostics are flushed. Otherwise we re-walk from the merged
+/// (entry ⊔ post-body) state and emit diagnostics on the second pass
+/// — a binding moved inside the body without rebinding before the
+/// back-edge surfaces as E0020 on iteration two.
+///
+/// Why two passes suffice for the M8.1 pattern set (instead of a
+/// general fixed-point loop): the merge is monotonic over the
+/// Moved-ness sub-lattice (`Valid → Moved` is the only transition,
+/// and merge takes "any branch Moved → Moved"), and there are no
+/// iteration-count-dependent conditionals — so a TirRef that flips
+/// from `Valid` to `Moved` in pass one stays `Moved` after the
+/// (entry ⊔ post-body) merge and a third walk would observe nothing
+/// new. Original phrasing for traceability:
+/// "Converges in at most 2 iterations for the M8.1 pattern set".
+///
+/// **Maintainer note.** If a future change introduces non-monotonic
+/// merges (e.g., `Moved → Valid` re-entry as a real lattice transition
+/// rather than via rebinding) or iteration-count-dependent control
+/// flow inside the body, revert this to a true fixed-point loop
+/// (iterate until `states_differ` returns false).
 fn analyze_while_loop(
     tir: &Tir,
     pool: &InternPool,

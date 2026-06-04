@@ -191,7 +191,7 @@ fn gen_function_def(
                 sink,
             ),
             is_move: p.is_move,
-            span: p.name.span,
+            span: p.span,
         })
         .collect();
 

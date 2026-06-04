@@ -2459,6 +2459,11 @@ fn main():
 "#;
     let test_file = create_test_file(temp_dir.path(), "uam_vardecl_one.ryo", code);
     let output = run_ryo_command(&["run", "uam_vardecl_one.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "expected compile error, STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     let count = stderr.matches("E0020").count();
     assert_eq!(
@@ -2485,6 +2490,11 @@ fn main():
 "#;
     let test_file = create_test_file(temp_dir.path(), "uam_ret_one.ryo", code);
     let output = run_ryo_command(&["run", "uam_ret_one.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "expected compile error, STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     let count = stderr.matches("E0020").count();
     assert_eq!(
