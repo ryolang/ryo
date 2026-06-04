@@ -2564,3 +2564,34 @@ fn main():
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn test_dead_store_warning() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "name: str = \"Alice\"\nprint(\"hello\")";
+    let test_file = create_test_file(temp_dir.path(), "dead_store.ryo", code);
+    let output = run_ryo_command(&["run", "dead_store.ryo"], &test_file).expect("run");
+    // Warning, not error — exit success.
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0001"),
+        "expected W0001 in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_no_dead_store_when_used() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "name: str = \"Alice\"\nprint(name)";
+    let test_file = create_test_file(temp_dir.path(), "live_store.ryo", code);
+    let output = run_ryo_command(&["run", "live_store.ryo"], &test_file).expect("run");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("W0001"), "unexpected W0001: {}", stderr);
+}

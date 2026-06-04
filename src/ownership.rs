@@ -95,6 +95,11 @@ pub(crate) struct Ownership {
     pub states: HashMap<TirRef, OwnerState>,
     pub current_owner: HashMap<StringId, TirRef>,
     pub origin: HashMap<TirRef, Option<TirRef>>,
+    /// VarDecls of Move-typed values, keyed by the underlying owner
+    /// `TirRef`. Cleared when the binding is read (`Var`) or consumed
+    /// (move/return). Whatever remains at function end is a dead
+    /// store, surfaced as W0001.
+    pub pending_dead_store: HashMap<TirRef, (StringId, Span)>,
 }
 
 impl Ownership {
@@ -111,6 +116,7 @@ impl Ownership {
         self.states = snap.states.clone();
         self.current_owner = snap.current_owner.clone();
         self.origin = snap.origin.clone();
+        self.pending_dead_store = snap.pending_dead_store.clone();
     }
 
     /// Conservatively merge per-branch lattices into `self`. For each
@@ -152,6 +158,50 @@ impl Ownership {
                 self.origin.entry(*k).or_insert(*v);
             }
         }
+
+        // Pending dead-store entries: a key falls into one of two
+        // buckets relative to the pre-branch snapshot in `self`.
+        //
+        // (1) Pre-branch entries (already in `self.pending_dead_store`
+        //     before the branches walked): every branch started with
+        //     the entry. If any branch cleared it, the value was
+        //     used somewhere — drop it. So the rule is "intersect
+        //     across branches".
+        //
+        // (2) Branch-local entries (introduced inside a branch by a
+        //     VarDecl): only the introducing branch has the key. If
+        //     that branch ended with the entry still pending, the
+        //     binding was declared and never used inside the branch
+        //     and W0001 should still fire after the join. So the
+        //     rule is "union across branches".
+        //
+        // Distinguishing (1) vs (2) is just: was the key in
+        // `self.pending_dead_store` before the merge? Walk both
+        // groups separately so each gets its correct rule.
+        let mut merged_pending: HashMap<TirRef, (StringId, Span)> = HashMap::new();
+
+        // (1) Pre-branch entries — keep iff still pending in *every*
+        // branch.
+        for (k, v) in &self.pending_dead_store {
+            if branches
+                .iter()
+                .all(|b| b.pending_dead_store.contains_key(k))
+            {
+                merged_pending.insert(*k, *v);
+            }
+        }
+
+        // (2) Branch-local entries — anything in a branch's pending
+        // that wasn't pre-existing.
+        for b in branches {
+            for (k, v) in &b.pending_dead_store {
+                if !self.pending_dead_store.contains_key(k) {
+                    merged_pending.insert(*k, *v);
+                }
+            }
+        }
+
+        self.pending_dead_store = merged_pending;
     }
 }
 
@@ -195,6 +245,16 @@ fn analyze_function(
 
     for stmt in tir.body_stmts() {
         analyze_stmt(tir, pool, &mut own, sink, by_name, stmt);
+    }
+
+    // Anything left pending was declared but never read or
+    // consumed — emit W0001 once per surviving binding.
+    for (_owner, (name, span)) in own.pending_dead_store.drain() {
+        sink.emit(Diag::warning(
+            span,
+            DiagCode::DeadStore,
+            format!("value `{}` is declared but never used", pool.str(name)),
+        ));
     }
 }
 
@@ -260,6 +320,11 @@ fn analyze_var_decl(
         let span = tir.span(r);
         consume_for_assignment(own, sink, init, span, MoveKind::Assignment);
         rebind_to_init(own, view.name, init);
+        // Register the new binding as pending dead-store. The walk
+        // clears this entry on any later read or consumption; a
+        // surviving entry at function end fires W0001. Keyed by
+        // `init`, the same TirRef `rebind_to_init` stamped Valid.
+        own.pending_dead_store.insert(init, (view.name, span));
     } else {
         own.current_owner.insert(view.name, init);
     }
@@ -317,6 +382,7 @@ fn analyze_return(
         .unwrap_or(OwnerState::NotTracked);
     match state {
         OwnerState::Valid => {
+            own.pending_dead_store.remove(&underlying);
             own.states.insert(
                 underlying,
                 OwnerState::Moved {
@@ -383,6 +449,7 @@ fn consume_for_assignment(
         .unwrap_or(OwnerState::NotTracked);
     match state {
         OwnerState::Valid => {
+            own.pending_dead_store.remove(&underlying);
             own.states.insert(
                 underlying,
                 OwnerState::Moved {
@@ -665,6 +732,11 @@ fn visit_expr(
             if let Some(&owner) = own.current_owner.get(&name)
                 && needs_tracking(inst.ty, pool)
             {
+                // Any read counts as "used" for dead-store purposes,
+                // even if it ultimately fires E0020 — once the
+                // programmer's code looked at the value, they
+                // didn't ignore it.
+                own.pending_dead_store.remove(&owner);
                 own.origin.insert(r, Some(owner));
                 if let Some(OwnerState::Moved { moved_at, .. }) = own.states.get(&owner).cloned() {
                     sink.emit(
