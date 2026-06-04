@@ -2420,6 +2420,55 @@ fn test_use_after_move_param() {
 }
 
 #[test]
+fn test_use_after_move_in_vardecl_one_diag() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	name: str = "Alice"
+	consume(name)
+	other: str = name
+"#;
+    let test_file = create_test_file(temp_dir.path(), "uam_vardecl_one.ryo", code);
+    let output = run_ryo_command(&["run", "uam_vardecl_one.ryo"], &test_file).expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let count = stderr.matches("E0020").count();
+    assert_eq!(
+        count, 1,
+        "expected exactly one E0020, got {}: {}",
+        count, stderr
+    );
+}
+
+#[test]
+fn test_use_after_move_in_return_one_diag() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn forward(move s: str) -> str:
+	consume(s)
+	return s
+
+fn main():
+	x: str = forward("hi")
+	print(x)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "uam_ret_one.ryo", code);
+    let output = run_ryo_command(&["run", "uam_ret_one.ryo"], &test_file).expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let count = stderr.matches("E0020").count();
+    assert_eq!(
+        count, 1,
+        "expected exactly one E0020, got {}: {}",
+        count, stderr
+    );
+}
+
+#[test]
 fn test_e0020_message_includes_binding_name() {
     let temp_dir = TempDir::new().expect("temp");
     let code = r#"

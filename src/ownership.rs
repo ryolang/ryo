@@ -70,15 +70,15 @@ pub(crate) enum OwnerState {
     Moved { moved_at: Span, kind: MoveKind },
 }
 
-/// Why a value transitioned to `Moved`. Drives diagnostic phrasing
-/// at the use-after-move site ("moved into return", "moved into
-/// `foo`", etc.).
+/// Why a value transitioned to `Moved`. Currently only used to track
+/// the kind for future per-kind diagnostic phrasing — see ISSUES.md
+/// or future tasks. No diagnostic reads back the variant today.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum MoveKind {
     Assignment,
     Return,
-    MoveParam { callee: StringId },
+    MoveParam,
 }
 
 /// Per-function ownership state. `states` is the lattice itself,
@@ -426,22 +426,11 @@ fn analyze_return(
                 ),
             );
         }
-        OwnerState::Moved { moved_at, .. } => {
-            sink.emit(
-                Diag::error(
-                    span,
-                    DiagCode::UseAfterMove,
-                    format!(
-                        "use of moved value {}",
-                        format_binding(consumed_name, pool),
-                    ),
-                )
-                .with_note(Some(moved_at), "value moved here")
-                .with_note(
-                    None,
-                    "help: consider using the value before the move, or pass by default (borrow) instead of `move`",
-                ),
-            );
+        OwnerState::Moved { .. } => {
+            // No diagnostic here — the `Var` arm in `visit_expr`
+            // already emits E0020 when `return name` reads a moved
+            // `name`. See the same rationale on the `Moved` arm in
+            // `consume_for_assignment`.
         }
         OwnerState::NotTracked => {}
     }
@@ -515,19 +504,20 @@ fn consume_for_assignment(
                 ),
             );
         }
-        OwnerState::Moved { moved_at, .. } => {
-            sink.emit(
-                Diag::error(
-                    span,
-                    DiagCode::UseAfterMove,
-                    format!("use of moved value {}", format_binding(name, pool)),
-                )
-                .with_note(Some(moved_at), "value moved here")
-                .with_note(
-                    None,
-                    "help: consider using the value before the move, or pass by default (borrow) instead of `move`",
-                ),
-            );
+        OwnerState::Moved { .. } => {
+            // No diagnostic here — the `Var` arm in `visit_expr`
+            // already emits E0020 for any aliasing read of a moved
+            // owner, which covers every path that lands here today
+            // (the only operands that reach a consume site with
+            // `Moved` underlying state arrive via `Var`). Direct
+            // producers (StrConst/StrConcat/Call) are stamped
+            // `Valid` in `visit_expr` on a freshly-walked branch and
+            // cannot be `Moved` here. Emitting again would
+            // double-report a single fault.
+            //
+            // If a future producer pattern bypasses `Var` and lands
+            // here in `Moved` state, prefer no diagnostic over a
+            // duplicate; revisit then.
         }
         OwnerState::NotTracked => {}
     }
@@ -786,7 +776,7 @@ fn visit_expr(
                         sink,
                         *arg,
                         tir.span(r),
-                        MoveKind::MoveParam { callee: view.name },
+                        MoveKind::MoveParam,
                         consumed_name,
                     );
                 }
