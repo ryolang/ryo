@@ -86,6 +86,18 @@ impl Ownership {
     /// observed branch state. `current_owner` entries from any branch
     /// are preserved so reseats inside a branch survive the join.
     fn merge_branches(&mut self, branches: &[&Ownership]) {
+        // Snapshot pre-branch (name, owner) pairs before we start
+        // touching `self.states`. After the per-TirRef merge below
+        // we revisit each pre-branch binding and recompute its state
+        // through whichever owner each branch ended on, so a branch
+        // that reseats `current_owner[name]` to a fresh TirRef still
+        // contributes its end-of-branch state to the merged binding.
+        // Without this, post-`if` reads of `name` resolve through the
+        // pre-branch owner whose state reflects only what happened to
+        // *that* TirRef, missing reseats inside branches.
+        let pre_branch_owners: Vec<(StringId, TirRef)> =
+            self.current_owner.iter().map(|(n, t)| (*n, *t)).collect();
+
         // Rule: any branch Moved → Moved; otherwise first observed
         // (across branches) wins. Walk each branch once and merge
         // directly into `self.states` — no intermediate set of keys.
@@ -109,6 +121,36 @@ impl Ownership {
             }
             for (k, v) in &b.origin {
                 self.origin.entry(*k).or_insert(*v);
+            }
+        }
+
+        // Binding-aware override: for each name that existed before
+        // the branches walked, look up where each branch left that
+        // binding (b.current_owner[name]), read that owner's state in
+        // the branch, and merge across branches with the same any-
+        // Moved-wins rule. Write the merged state back onto the
+        // pre-branch owner in `self.states` so post-merge reads of
+        // `name` (which still resolve via `self.current_owner[name]`
+        // = owner_pre) see the union of what each branch did to its
+        // respective end-of-branch owner.
+        for (name, owner_pre) in &pre_branch_owners {
+            let mut merged: Option<OwnerState> = None;
+            for b in branches {
+                let owner_b = b.current_owner.get(name).copied().unwrap_or(*owner_pre);
+                let state_b = b
+                    .states
+                    .get(&owner_b)
+                    .cloned()
+                    .unwrap_or(OwnerState::NotTracked);
+                merged = Some(match (&merged, &state_b) {
+                    (None, _) => state_b,
+                    (Some(OwnerState::Moved { .. }), _) => merged.clone().unwrap(),
+                    (_, OwnerState::Moved { .. }) => state_b,
+                    (Some(_), _) => merged.clone().unwrap(),
+                });
+            }
+            if let Some(state) = merged {
+                self.states.insert(*owner_pre, state);
             }
         }
 

@@ -2643,6 +2643,85 @@ fn main():
 }
 
 #[test]
+fn test_conditional_partial_rebind_then_use_fails() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	mut s: str = "hello"
+	flag: bool = true
+	if flag:
+		s = "world"
+		consume(s)
+	else:
+		print("else")
+	print(s)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "cond_partial_rebind.ryo", code);
+    let output = run_ryo_command(&["run", "cond_partial_rebind.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "expected E0020: STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0020"), "expected E0020: {}", stderr);
+}
+
+#[test]
+fn test_loop_consume_then_rebind_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	mut name: str = "Alice"
+	mut i: int = 0
+	while i < 3:
+		consume(name)
+		name = "Bob"
+		i = i + 1
+"#;
+    let test_file = create_test_file(temp_dir.path(), "loop_consume_rebind.ryo", code);
+    let output = run_ryo_command(&["run", "loop_consume_rebind.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_both_branches_consume_and_rebind_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	mut name: str = "Alice"
+	flag: bool = true
+	if flag:
+		consume(name)
+		name = "Bob"
+	else:
+		consume(name)
+		name = "Charlie"
+	print(name)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "both_branches_rebind.ryo", code);
+    let output = run_ryo_command(&["run", "both_branches_rebind.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_dead_store_warning() {
     let temp_dir = TempDir::new().expect("temp");
     let code = "name: str = \"Alice\"\nprint(\"hello\")";
