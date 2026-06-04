@@ -24,7 +24,7 @@
 use crate::diag::{Diag, DiagCode, DiagSink};
 use crate::tir::{Span, Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ---------- Classification ----------
 
@@ -223,6 +223,11 @@ fn analyze_stmt(
         TirTag::Return => analyze_return(tir, pool, own, sink, by_name, stmt),
         TirTag::ReturnVoid => {}
         TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, by_name, stmt),
+        TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, by_name, stmt),
+        TirTag::ForRange => analyze_for_range(tir, pool, own, sink, by_name, stmt),
+        TirTag::Break | TirTag::Continue => {
+            // 8.1c attaches Free metadata here; 8.1b is a no-op.
+        }
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {
                 visit_expr(tir, pool, own, sink, by_name, o);
@@ -453,6 +458,126 @@ fn analyze_if_stmt(
 
     own.restore_from(&snapshot);
     own.merge_branches(&branch_results);
+}
+
+/// Fixed-point ownership analysis for `while`. Walks the body once
+/// from the entry state into a scratch sink; if no tracked TirRef
+/// changed Moved-ness across the back-edge, the body is loop-invariant
+/// for ownership purposes and the scratch diagnostics are flushed.
+/// Otherwise we re-walk from the merged (entry ⊔ post-body) state and
+/// emit diagnostics on the second pass — a binding moved inside the
+/// body without rebinding before the back-edge surfaces as E0020 on
+/// iteration two. Converges in at most 2 iterations for the M8.1
+/// pattern set (per the design doc).
+fn analyze_while_loop(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let view = tir.while_loop_view(r);
+    let entry = own.clone_snapshot();
+
+    // First pass into a scratch sink — diagnostics are kept only if
+    // a single iteration suffices. If the lattice changes we re-walk
+    // and the scratch diags are dropped (the second walk re-emits
+    // anything that's still wrong).
+    let mut scratch_sink = DiagSink::new();
+    visit_expr(tir, pool, own, &mut scratch_sink, by_name, view.cond);
+    for stmt in &view.body {
+        analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, *stmt);
+    }
+    let after_first = own.clone_snapshot();
+
+    if states_differ(&entry, &after_first) {
+        let merged = merge_two(&entry, &after_first);
+        own.restore_from(&merged);
+        visit_expr(tir, pool, own, sink, by_name, view.cond);
+        for stmt in &view.body {
+            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+        }
+        let after_second = own.clone_snapshot();
+        let final_merged = merge_two(&entry, &after_second);
+        own.restore_from(&final_merged);
+    } else {
+        for d in scratch_sink.into_diags() {
+            sink.emit(d);
+        }
+        let final_merged = merge_two(&entry, &after_first);
+        own.restore_from(&final_merged);
+    }
+}
+
+/// `for i in range(start, end)` loop var is `int` (Copy), so the
+/// induction variable never enters the lattice. The body runs the
+/// same fixed-point as `while`.
+fn analyze_for_range(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let view = tir.for_range_view(r);
+    // Start/end are visited unconditionally — they're plain `int`
+    // exprs, so they don't move anything, but they may contain nested
+    // reads we want to record.
+    visit_expr(tir, pool, own, sink, by_name, view.start);
+    visit_expr(tir, pool, own, sink, by_name, view.end);
+
+    let entry = own.clone_snapshot();
+
+    let mut scratch_sink = DiagSink::new();
+    for stmt in &view.body {
+        analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, *stmt);
+    }
+    let after_first = own.clone_snapshot();
+
+    if states_differ(&entry, &after_first) {
+        let merged = merge_two(&entry, &after_first);
+        own.restore_from(&merged);
+        for stmt in &view.body {
+            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+        }
+        let after_second = own.clone_snapshot();
+        let final_merged = merge_two(&entry, &after_second);
+        own.restore_from(&final_merged);
+    } else {
+        for d in scratch_sink.into_diags() {
+            sink.emit(d);
+        }
+        let final_merged = merge_two(&entry, &after_first);
+        own.restore_from(&final_merged);
+    }
+}
+
+/// Compare two lattices on the Moved-ness of every tracked `TirRef`.
+/// Per the M8.1b plan, the only transition that forces a re-walk is a
+/// `Valid`/`Borrowed` → `Moved` flip across the back-edge — non-Moved
+/// state changes (e.g. fresh definitions added inside the body) are
+/// loop-invariant for the use-after-move check.
+fn states_differ(a: &Ownership, b: &Ownership) -> bool {
+    let keys: HashSet<TirRef> = a.states.keys().chain(b.states.keys()).copied().collect();
+    for k in keys {
+        let av = a.states.get(&k).cloned().unwrap_or(OwnerState::NotTracked);
+        let bv = b.states.get(&k).cloned().unwrap_or(OwnerState::NotTracked);
+        if matches!(av, OwnerState::Moved { .. }) != matches!(bv, OwnerState::Moved { .. }) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Merge two lattices by reusing the existing branch-merge join: if
+/// either input has a TirRef `Moved`, the result is `Moved`. Used to
+/// seed the second pass and to compute the post-loop state.
+fn merge_two(a: &Ownership, b: &Ownership) -> Ownership {
+    let mut merged = a.clone_snapshot();
+    merged.merge_branches(&[a.clone_snapshot(), b.clone_snapshot()]);
+    merged
 }
 
 fn visit_expr(

@@ -2497,3 +2497,70 @@ fn main():
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn test_move_in_while_without_rebind_fails() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	mut name: str = "Alice"
+	mut i: int = 0
+	while i < 3:
+		consume(name)
+		i = i + 1
+"#;
+    let test_file = create_test_file(temp_dir.path(), "loop_move.ryo", code);
+    let output = run_ryo_command(&["run", "loop_move.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "expected E0020 — name moved without rebind"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0020"), "expected E0020: {}", stderr);
+}
+
+#[test]
+fn test_borrow_in_while_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn main():
+	name: str = "Alice"
+	mut i: int = 0
+	while i < 3:
+		print(name)
+		i = i + 1
+"#;
+    let test_file = create_test_file(temp_dir.path(), "loop_borrow.ryo", code);
+    let output = run_ryo_command(&["run", "loop_borrow.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_move_then_rebind_in_loop_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	mut i: int = 0
+	while i < 3:
+		mut name: str = "Alice"
+		consume(name)
+		i = i + 1
+"#;
+    let test_file = create_test_file(temp_dir.path(), "loop_rebind.ryo", code);
+    let output = run_ryo_command(&["run", "loop_rebind.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
