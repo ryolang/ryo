@@ -211,6 +211,41 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** The runtime staticlib only uses `std::alloc`, `std::process::abort()`, and `eprintln!`, yet linking against precompiled `std` bundles objects with `_Unwind_*` symbol references. This forces the linker to pass `-lunwind` on Linux (workaround in `src/linker.rs`). Migrating to `#![no_std]` with `extern crate alloc` eliminates the dependency entirely.
 **Resolution:** Replace `std::alloc` with `alloc::alloc` (identical API). Replace `eprintln!` + `process::abort()` with `extern "C" { fn abort() -> !; }`. Add `#[panic_handler]` that aborts. Keep the `rlib` crate-type for `cargo test` via a `#[cfg(test)]` std gate. `ryu` already supports `no_std`. Benefits: smaller archive, faster link times, no hidden unwind dependency, simpler cross-compilation.
 
+### I-045 — Loop fixed-point uses a scratch sink and re-walks the body to suppress duplicates
+**Files:** `src/ownership.rs` (`analyze_while_loop`, `analyze_for_range`)
+**Summary:** Both loop helpers walk the body once into a throwaway `DiagSink`, compare entry vs. post-body Moved-ness via `states_differ`, and then either replay the scratch diagnostics (converged) or re-walk the body from the merged state against the real sink (didn't converge). Diagnostic output is implicitly a function of *which iteration emitted it*, not of the converged lattice. Today this happens to work because the M8.1 patterns converge in ≤2 iterations, but the body-twice-with-discard shape couples diagnostic emission to control-flow analysis instead of running checks against a fixed-point.
+**Resolution:** Refactor to a propagate-only first pass (state mutations only, no diagnostics), iterate to fixed-point, then a single check pass at the converged lattice that emits diagnostics. Removes the scratch sink entirely and makes the loop helpers symmetric with `analyze_if_stmt`.
+
+### I-047 — UIR `is_move` field is a pass-through
+**Files:** `src/uir.rs` (`UirParam`), `src/astgen.rs`, `src/sema.rs`
+**Summary:** `is_move` is threaded lexer → parser → AST → UIR → TIR. The UIR copy is never read: astgen propagates the AST flag in, sema reads it back out into `TirParam`, and no UIR pass inspects it. UIR is structural lowering with no semantic meaning, so `UirParam::is_move` is dead weight that exists only to bridge two layers it shouldn't.
+**Resolution:** Drop `UirParam::is_move`. Sema can read the flag straight from the AST `FuncBody` (or via a side-channel keyed by FuncBody) when it constructs `TirParam`. Wait until any other UIR-level pass needs the flag before re-introducing it.
+
+### I-048 — Ownership pass looks up call conventions by name at every Call site
+**Files:** `src/ownership.rs` (`visit_expr` Call arm), `src/sema.rs`
+**Summary:** For every `Call` instruction, the ownership walker rebuilds a `by_name: HashMap<StringId, &Tir>` over all functions and indexes `params[i].is_move` to decide whether each arg should consume or borrow. The map is threaded through nine functions, and builtins need a special "no entry → all borrow" branch. Sema already knows the callee signature when it lowers the call; encoding the per-arg convention into TIR there would let ownership read it directly.
+**Resolution:** Add an `arg_modes: ExtraRange` (or a per-arg `ParamMode` enum) alongside `args` in the TIR `Call` view, populated by sema. Ownership then reads `tir.call_view(r).arg_modes[i]` and the `by_name` plumbing disappears. Builtins become uniform (sema stamps `Borrow` for them). Also gives a place to put future indirect-call / fn-pointer conventions.
+
+### I-049 — `synthetic_param_ref` encoding is informal; model `Owner` as an enum
+**Files:** `src/ownership.rs` (`synthetic_param_ref`, `Ownership::states`/`origin`)
+**Summary:** Parameters live in the same `states: HashMap<TirRef, OwnerState>` as instruction refs by encoding their key as `u32::MAX - name.raw()`. Correctness depends on real per-function `TirRef`s never approaching `u32::MAX/2` and on `name.raw()` never being zero — neither asserted, both relying on convention. A future change to either `TirRef` numbering or `StringId` interning silently breaks the assumption. Cleaner shape: model owners as an explicit `enum Owner { Param(StringId), Inst(TirRef) }` and key the lattice maps on `Owner`.
+**Resolution:** Introduce `Owner` and migrate `Ownership::states`/`origin`/`pending_dead_store` and `current_owner` value types over to it. Drops the `synthetic_param_ref` helper, the implicit numbering coupling, and gives a clean place to add `Owner::Borrow(...)` once real borrow expressions land.
+
+### I-050 — Var-arm holds UAM detection; consume sites are silent by policy
+**Files:** `src/ownership.rs` (`visit_expr` Var arm, `consume_for_assignment`, `analyze_return`, Call arm)
+**Summary:** Use-after-move detection only fires in the `Var` arm of `visit_expr`. The four consume sites (VarDecl, Assign, Return, move-Call) all carry comments explaining why they *don't* re-emit, and the policy works only because every consumable operand currently flows through `Var`. Three reviewers (and one bug fix during M8.1b) flagged this as the wrong altitude: any future producer pattern that bypasses `Var` (e.g., a directly-passed `Call` result that was already moved upstream) silently sidesteps the check.
+**Resolution:** Invert responsibility. The consume helper becomes the single authority on UAM (it already inspects `underlying_owner` + state); the `Var` arm restricts itself to bookkeeping (origin link + dead-store clear). Pair the change with regression coverage that exercises a non-Var operand path so the new authority is observably tested.
+
+### I-051 — `analyze_while_loop` / `analyze_for_range` are 90% identical
+**Files:** `src/ownership.rs`
+**Summary:** After their distinct preludes (visit `cond` vs visit `start` + `end`), the bodies are byte-for-byte the same — entry snapshot, scratch-sink walk, `states_differ` check, optional re-walk, final `merge_two`. Two near-clones of a non-trivial fixed-point loop is exactly where divergence creeps in (only one gets a fix when behavior needs to change).
+**Resolution:** Extract `analyze_loop_body(tir, pool, own, sink, by_name, body: &[TirRef])` after the caller has visited the loop's prelude. Folds with I-045 (propagate-only + check pass) — both refactors touch the same bodies.
+
+### I-053 — `OwnerState::Borrowed` is currently parameter-only
+**Files:** `src/ownership.rs` (`OwnerState`)
+**Summary:** `OwnerState::Borrowed` is set only at parameter init; no expression produces it. The two sites that read it (E0021, E0022) could equivalently look up `tir.params` for the underlying owner's source param and check `is_move`. The state is anticipating real borrow expressions (`&x`) which the spec migrated to in commit 2ccf6b6 but the compiler doesn't lower yet.
+**Resolution:** Document the invariant inline ("only ever set at param init in M8.1b; transitions arrive when `&x` borrow expressions land in a future milestone"). No code change today.
+
 ---
 
 ## Cross-References
