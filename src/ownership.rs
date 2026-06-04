@@ -369,39 +369,15 @@ fn analyze_return(
     }
     let span = tir.span(r);
     let consumed_name = consumed_binding_name(tir, operand);
-    let underlying = underlying_owner(own, operand);
-    let state = own
-        .states
-        .get(&underlying)
-        .cloned()
-        .unwrap_or(OwnerState::NotTracked);
-    match state {
-        OwnerState::Valid => {
-            own.pending_dead_store.remove(&underlying);
-            own.states
-                .insert(underlying, OwnerState::Moved { moved_at: span });
-        }
-        OwnerState::Borrowed => {
-            sink.emit(
-                Diag::error(
-                    span,
-                    DiagCode::ReturnBorrowedValue,
-                    format!(
-                        "cannot return borrowed value {} (Rule 5)",
-                        format_binding(consumed_name, pool),
-                    ),
-                )
-                .with_help("return a locally-allocated value, or accept the parameter as `move`"),
-            );
-        }
-        OwnerState::Moved { .. } => {
-            // No diagnostic here — the `Var` arm in `visit_expr`
-            // already emits E0020 when `return name` reads a moved
-            // `name`. See the same rationale on the `Moved` arm in
-            // `consume_for_assignment`.
-        }
-        OwnerState::NotTracked => {}
-    }
+    consume_underlying(
+        pool,
+        own,
+        sink,
+        operand,
+        span,
+        consumed_name,
+        BorrowedAction::ReturnBorrowed,
+    );
 }
 
 /// Reseat `name` to point at `init` as its current owner. After a
@@ -427,6 +403,19 @@ fn underlying_owner(own: &Ownership, init: TirRef) -> TirRef {
     }
 }
 
+/// Which diagnostic the shared `consume_underlying` helper should
+/// emit on the `Borrowed` arm. `consume_for_assignment` and
+/// `analyze_return` run identical state transitions otherwise — the
+/// only thing that diverges is the error code / wording / help when
+/// the underlying owner is borrowed.
+enum BorrowedAction {
+    /// E0021 — `consume_for_assignment` site (VarDecl / Assign /
+    /// move-typed Call argument).
+    MoveOutOfParam,
+    /// E0022 — `analyze_return` site.
+    ReturnBorrowed,
+}
+
 /// Apply the consumption transition for a Move-typed initializer.
 /// Caller must have already populated origin/state for `init` via
 /// `visit_expr`.
@@ -438,7 +427,38 @@ fn consume_for_assignment(
     span: Span,
     name: Option<StringId>,
 ) {
-    let underlying = underlying_owner(own, init);
+    consume_underlying(
+        pool,
+        own,
+        sink,
+        init,
+        span,
+        name,
+        BorrowedAction::MoveOutOfParam,
+    );
+}
+
+/// Shared transition for every consume site (assignment, return,
+/// move-typed Call argument). Walks back to the underlying owner,
+/// reads its state, and either:
+///
+/// * `Valid` → stamp `Moved { moved_at: span }` and clear any pending
+///   dead-store entry,
+/// * `Borrowed` → emit E0021 or E0022 per `on_borrowed`,
+/// * `Moved` → silent (the `Var` arm of `visit_expr` already emitted
+///   E0020 for the aliasing read that brought us here; emitting again
+///   would double-report a single fault — see commit 2c5985d),
+/// * `NotTracked` → no-op.
+fn consume_underlying(
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    operand: TirRef,
+    span: Span,
+    name: Option<StringId>,
+    on_borrowed: BorrowedAction,
+) {
+    let underlying = underlying_owner(own, operand);
     let state = own
         .states
         .get(&underlying)
@@ -451,17 +471,25 @@ fn consume_for_assignment(
                 .insert(underlying, OwnerState::Moved { moved_at: span });
         }
         OwnerState::Borrowed => {
-            sink.emit(
-                Diag::error(
-                    span,
+            let (code, msg, help) = match on_borrowed {
+                BorrowedAction::MoveOutOfParam => (
                     DiagCode::MoveOutOfBorrowedParam,
                     format!(
                         "cannot move out of borrowed parameter {}",
                         format_binding(name, pool),
                     ),
-                )
-                .with_help("add `move` to the parameter declaration if you need ownership"),
-            );
+                    "add `move` to the parameter declaration if you need ownership",
+                ),
+                BorrowedAction::ReturnBorrowed => (
+                    DiagCode::ReturnBorrowedValue,
+                    format!(
+                        "cannot return borrowed value {} (Rule 5)",
+                        format_binding(name, pool),
+                    ),
+                    "return a locally-allocated value, or accept the parameter as `move`",
+                ),
+            };
+            sink.emit(Diag::error(span, code, msg).with_help(help));
         }
         OwnerState::Moved { .. } => {
             // No diagnostic here — the `Var` arm in `visit_expr`
