@@ -483,7 +483,7 @@ fn analyze_var_decl(
         // clears this entry on any later read or consumption; a
         // surviving entry at function end fires W0001. Keyed by
         // `init`, the same TirRef `rebind_to_init` stamped Valid.
-        own.pending_dead_store.insert(init, (view.name, span, r));
+        register_pending_dead_store(own, init, view.name, span, r);
     } else {
         own.current_owner.insert(view.name, init);
     }
@@ -509,8 +509,7 @@ fn analyze_assign(
         let consumed_name = consumed_binding_name(tir, view.value);
         consume_for_assignment(pool, own, sink, view.value, span, consumed_name);
         rebind_to_init(own, view.name, view.value);
-        own.pending_dead_store
-            .insert(view.value, (view.name, span, r));
+        register_pending_dead_store(own, view.value, view.name, span, r);
     }
 }
 
@@ -561,6 +560,23 @@ fn rebind_to_init(own: &mut Ownership, name: StringId, init: TirRef) {
     own.states.insert(init, OwnerState::Valid);
     own.current_owner.insert(name, init);
     own.named_owners.insert(init);
+}
+
+/// Register a Move-typed binding into `pending_dead_store`. The owner
+/// key (`init`/`value` TirRef) is whatever currently owns the
+/// allocation; `decl_inst` is the `VarDecl`/`Assign` instruction's own
+/// TirRef and serves as the Free anchor if the binding turns out to be
+/// a dead store. Single source of truth for `analyze_var_decl` and
+/// `analyze_assign` — closes ISSUES.md I-055.
+fn register_pending_dead_store(
+    own: &mut Ownership,
+    owner: TirRef,
+    name: StringId,
+    span: Span,
+    decl_inst: TirRef,
+) {
+    own.pending_dead_store
+        .insert(owner, (name, span, decl_inst));
 }
 
 /// Walk back from `init` to whichever SSA value currently owns the
