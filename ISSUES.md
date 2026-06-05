@@ -256,6 +256,11 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** The Task 3 last-use pass and the Task 4 anonymous-temp pass both implement the same recursive operand walk over every TIR shape (`UnOp`, `BinOp`, `Call`, `VarDecl`, `Assign`, `CompoundAssign`, `IfStmt`, `WhileLoop`, `ForRange`). They differ only in the per-operand action (record `last_use.entry(owner).or_insert(r)` vs `consumer_of.entry(operand).or_insert(r)`). When new control-flow shapes land (M8.1c Task 9 `BranchId`, Task 10 `break`/`continue`, future `match`), both walkers must be updated in lockstep — drift means missed Frees and silent leaks.
 **Resolution:** Extract a `walk_operands(tir, r, &mut |parent, operand|)` callback-style helper. Each pass passes its own per-operand closure. Single source of truth for TIR-shape coverage.
 
+### I-057 — Borrowed-scalar StrConst args of `__ryo_panic` schedule unnecessary Frees
+**Files:** `src/ownership.rs`, `src/codegen.rs`
+**Summary:** The ownership pass treats every `StrConst` whose result is Move-typed as a `temp_owner` and (post-Task 4) schedules a Free for it. But codegen's `__ryo_panic` lowering uses the *borrowed-scalar* ABI for its StrConst arg — passing the raw `.rodata` pointer with `cap=0`. Codegen's `emit_unconditional_frees` and `sweep_unconditional_frees` silently skip these via the `ValueRepr::Scalar` arm. The skip is safe (`ryo_str_free(ptr, 0)` is a runtime no-op for rodata), but it's a band-aid.
+**Resolution:** Teach the ownership pass to recognise StrConst args feeding directly into the borrowed-scalar ABI (today: `__ryo_panic`'s first arg) and exclude them from `temp_owners`. Once the pass stops over-scheduling, the codegen Scalar-skip can be tightened back into a hard error. (Or, alternatively, push the borrowed-scalar ABI handling closer to the ownership pass and unify with the str-triple ABI.)
+
 ---
 
 ## Cross-References

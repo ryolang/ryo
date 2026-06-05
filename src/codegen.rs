@@ -1217,7 +1217,7 @@ impl<M: Module> Codegen<M> {
     /// raw `.rodata` pointers (e.g. the StrConst arg of `__ryo_panic`,
     /// which uses the borrowed-scalar ABI). They don't own a heap
     /// allocation and `cap` isn't tracked through the scalar path,
-    /// so emitting a Free is both incorrect and impossible.
+    /// so emitting a Free is both incorrect and impossible. See I-057.
     ///
     /// `freed_at` (a set of `free_schedule` indices) guards against
     /// double-emission across the eval-end hooks and the end-of-stmt
@@ -1243,16 +1243,12 @@ impl<M: Module> Codegen<M> {
         }
         let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
         for (idx, target) in pending {
-            // If the target wasn't materialised yet, defer: the
-            // anchor's program point may precede the target's
-            // definition (this happens today for Task 3 entries where
-            // `last_use` resolves to the post-rebind owner of a
-            // binding — see the open ownership-pass interaction
-            // documented in the milestone notes). A later sweep
-            // re-checks once the target is cached.
-            let Some(repr) = ctx.inst_values.get(&target).copied() else {
-                continue;
-            };
+            let repr = ctx.inst_values.get(&target).copied().ok_or_else(|| {
+                format!(
+                    "ownership pass scheduled Free for %{} but no ValueRepr cached",
+                    target.index()
+                )
+            })?;
             ctx.freed_at.insert(idx);
             match repr {
                 ValueRepr::Str { ptr, cap, .. } => {
@@ -1262,6 +1258,7 @@ impl<M: Module> Codegen<M> {
                     // Scalar-cached str = raw `.rodata` ptr (e.g. the
                     // StrConst arg of `__ryo_panic`'s borrowed-scalar
                     // ABI). Not heap-allocated; nothing to free.
+                    // See I-057.
                 }
             }
         }

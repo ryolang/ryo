@@ -125,6 +125,15 @@ pub(crate) struct Ownership {
     /// pass excludes these — they're handled by the named-binding
     /// last-use pass (Task 3).
     pub named_owners: HashSet<TirRef>,
+
+    /// Per-`Var`-read snapshot of the owner that was live at the
+    /// program point of the read. Populated during the forward walk
+    /// (`visit_expr`'s `Var` arm) and consulted by `collect_last_uses`
+    /// instead of resolving through `current_owner`'s end-of-function
+    /// state — which would misroute reads that precede a `mut`
+    /// reassignment to the post-rebind owner. For Move-typed reads
+    /// this anchors the last-use Free to the correct allocation.
+    pub owner_at_read: HashMap<TirRef, TirRef>,
 }
 
 impl Ownership {
@@ -302,6 +311,13 @@ fn analyze_function(
     for &stmt in body_stmts.iter().rev() {
         collect_last_uses(tir, pool, &own, stmt, &mut last_use);
     }
+    // Owners already covered by `free_on_reassign` must not be
+    // scheduled again via the last-use pass — that would double-free
+    // the same allocation. (Pre-rebind owners are now reachable from
+    // last_use after the `owner_at_read` snapshot fix; without this
+    // guard a pre-rebind owner would receive both a reassign-Free and
+    // a last-use-Free.)
+    let reassign_targets: HashSet<TirRef> = sidecar.free_on_reassign.values().copied().collect();
     for (owner, state) in &own.states {
         if !matches!(state, OwnerState::Valid) {
             continue;
@@ -312,6 +328,9 @@ fn analyze_function(
         // names near `u32::MAX`; real instruction refs are
         // structurally `<< u32::MAX / 2`.
         if is_synthetic_param_ref(*owner) {
+            continue;
+        }
+        if reassign_targets.contains(owner) {
             continue;
         }
         if let Some(&after) = last_use.get(owner) {
@@ -956,15 +975,18 @@ fn collect_last_uses(
     last_use: &mut HashMap<TirRef, TirRef>,
 ) {
     let inst = *tir.inst(r);
-    // Record this instruction's own `Var` read, if any. Resolve the
-    // binding name through `current_owner`'s end-of-function state —
-    // sound for the M8.1 pattern set because any binding rebound mid-
-    // function leaves the pre-reassign owner in `Moved` state, which
-    // the caller's `OwnerState::Valid` filter then skips.
+    // Record this instruction's own `Var` read, if any. Resolve via
+    // the per-read `owner_at_read` snapshot taken during the forward
+    // walk — `current_owner`'s end-of-function state would misroute
+    // reads that precede a `mut` reassignment to the post-rebind
+    // owner (wrong target, double-free hazard once heap-allocated
+    // strings reach this pattern). The snapshot anchors each read to
+    // the owner that was live *at that read*, regardless of any
+    // subsequent rebinds.
     if let TirTag::Var = inst.tag
-        && let TirData::Var(name) = inst.data
+        && let TirData::Var(_) = inst.data
         && needs_tracking(inst.ty, pool)
-        && let Some(&owner) = own.current_owner.get(&name)
+        && let Some(&owner) = own.owner_at_read.get(&r)
     {
         // First encounter wins (we walk in reverse program order).
         last_use.entry(owner).or_insert(r);
@@ -1223,6 +1245,13 @@ fn visit_expr(
                 // didn't ignore it.
                 own.pending_dead_store.remove(&owner);
                 own.origin.insert(r, Some(owner));
+                // Snapshot owner-at-read so the post-walk
+                // `collect_last_uses` anchors the last-use Free to the
+                // owner that was live *at this read*, not whatever
+                // `current_owner[name]` happens to be at function exit
+                // (which would route pre-rebind reads to the post-
+                // rebind owner — wrong target, double-free).
+                own.owner_at_read.insert(r, owner);
                 if let Some(OwnerState::Moved { moved_at, .. }) = own.states.get(&owner).cloned() {
                     sink.emit(
                         Diag::error(
@@ -1486,6 +1515,72 @@ mod tests {
         assert!(targets.contains(&lb), "expected lb in free_schedule");
         assert!(targets.contains(&cat), "expected cat in free_schedule");
         assert_eq!(sidecar.free_schedule.len(), 3);
+    }
+
+    #[test]
+    fn last_use_uses_pre_rebind_owner_not_post() {
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let n = pool.intern_str("n");
+        let alice = pool.intern_str("Alice");
+        let bob = pool.intern_str("Bob");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main():
+        //     mut n: str = "Alice"
+        //     print(n)        # last-use of "Alice"
+        //     n = "Bob"
+        //     print(n)        # last-use of "Bob"
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let alice_lit = tb.str_const(alice, str_ty, span);
+        let decl = tb.var_decl(n, true, str_ty, alice_lit, span);
+        let read1 = tb.var(n, str_ty, span);
+        let call1 = tb.call(print, &[read1], void, span);
+        let stmt1 = tb.unary(TirTag::ExprStmt, void, call1, span);
+        let bob_lit = tb.str_const(bob, str_ty, span);
+        let assign = tb.assign(n, str_ty, bob_lit, span);
+        let read2 = tb.var(n, str_ty, span);
+        let call2 = tb.call(print, &[read2], void, span);
+        let stmt2 = tb.unary(TirTag::ExprStmt, void, call2, span);
+        let tir = tb.finish(&[decl, stmt1, assign, stmt2]);
+
+        let mut sink = DiagSink::new();
+        let sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(sink.is_empty(), "expected no diagnostics");
+
+        // The Free for "Alice" must come from free_on_reassign[assign],
+        // NOT from last-use scheduling. Last-use should target "Bob"
+        // (anchored after read2), not "Alice".
+        assert_eq!(
+            sidecar.free_on_reassign.get(&assign),
+            Some(&alice_lit),
+            "expected free_on_reassign[assign] = alice_lit"
+        );
+        // free_schedule must not contain a FreePoint with target=alice_lit
+        // anchored at read1 (the bug's signature was wrong-target via post-rebind current_owner).
+        assert!(
+            !sidecar
+                .free_schedule
+                .iter()
+                .any(|fp| fp.after == read1 && fp.target == alice_lit),
+            "expected no last-use Free for Alice anchored at read1 (Alice freed via free_on_reassign): {:?}",
+            sidecar.free_schedule
+        );
+        // Last-use Free for Bob must exist anchored at read2.
+        assert!(
+            sidecar
+                .free_schedule
+                .iter()
+                .any(|fp| fp.after == read2 && fp.target == bob_lit && fp.branch.is_none()),
+            "expected last-use Free for Bob anchored at read2; got: {:?}",
+            sidecar.free_schedule
+        );
     }
 
     #[test]
