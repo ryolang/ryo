@@ -350,13 +350,13 @@ fn analyze_var_decl(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    _sidecar: &mut OwnershipSidecar,
+    sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let view = tir.var_decl_view(r);
     let init = view.initializer;
     let init_ty = tir.inst(init).ty;
-    visit_expr(tir, pool, own, sink, by_name, _sidecar, init);
+    visit_expr(tir, pool, own, sink, by_name, sidecar, init);
     if needs_tracking(init_ty, pool) {
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, init);
@@ -381,12 +381,12 @@ fn analyze_assign(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    _sidecar: &mut OwnershipSidecar,
+    sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let view = tir.assign_view(r);
     let value_ty = tir.inst(view.value).ty;
-    visit_expr(tir, pool, own, sink, by_name, _sidecar, view.value);
+    visit_expr(tir, pool, own, sink, by_name, sidecar, view.value);
     if needs_tracking(value_ty, pool) {
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, view.value);
@@ -406,7 +406,7 @@ fn analyze_return(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    _sidecar: &mut OwnershipSidecar,
+    sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
@@ -415,7 +415,7 @@ fn analyze_return(
         _ => unreachable!("Return must carry TirData::UnOp"),
     };
     let ty = tir.inst(operand).ty;
-    visit_expr(tir, pool, own, sink, by_name, _sidecar, operand);
+    visit_expr(tir, pool, own, sink, by_name, sidecar, operand);
     if !needs_tracking(ty, pool) {
         return;
     }
@@ -797,7 +797,7 @@ fn visit_expr(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    _sidecar: &mut OwnershipSidecar,
+    sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
@@ -819,8 +819,8 @@ fn visit_expr(
                 own.origin.insert(r, None);
             }
             if let TirData::BinOp { lhs, rhs } = inst.data {
-                visit_expr(tir, pool, own, sink, by_name, _sidecar, lhs);
-                visit_expr(tir, pool, own, sink, by_name, _sidecar, rhs);
+                visit_expr(tir, pool, own, sink, by_name, sidecar, lhs);
+                visit_expr(tir, pool, own, sink, by_name, sidecar, rhs);
             }
         }
         TirTag::Call => {
@@ -835,7 +835,7 @@ fn visit_expr(
             // default to borrowing all args.
             let callee_params = by_name.get(&view.name).map(|t| t.params.as_slice());
             for (i, arg) in view.args.iter().enumerate() {
-                visit_expr(tir, pool, own, sink, by_name, _sidecar, *arg);
+                visit_expr(tir, pool, own, sink, by_name, sidecar, *arg);
                 let arg_ty = tir.inst(*arg).ty;
                 if !needs_tracking(arg_ty, pool) {
                     continue;
@@ -896,7 +896,7 @@ fn visit_expr(
         // ---- Everything else: recurse on operands so nested
         // ---- producers/aliases are still observed.
         _ => {
-            recurse_operands(tir, pool, own, sink, by_name, _sidecar, r);
+            recurse_operands(tir, pool, own, sink, by_name, sidecar, r);
         }
     }
 }
@@ -907,15 +907,15 @@ fn recurse_operands(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    _sidecar: &mut OwnershipSidecar,
+    sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
     match inst.data {
-        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, by_name, _sidecar, o),
+        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, by_name, sidecar, o),
         TirData::BinOp { lhs, rhs } => {
-            visit_expr(tir, pool, own, sink, by_name, _sidecar, lhs);
-            visit_expr(tir, pool, own, sink, by_name, _sidecar, rhs);
+            visit_expr(tir, pool, own, sink, by_name, sidecar, lhs);
+            visit_expr(tir, pool, own, sink, by_name, sidecar, rhs);
         }
         // `Extra`-shaped instructions (VarDecl, Assign, Call,
         // IfStmt, WhileLoop, ForRange, CompoundAssign) have
