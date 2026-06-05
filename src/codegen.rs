@@ -642,6 +642,10 @@ impl<M: Module> Codegen<M> {
                     let ValueRepr::Str { ptr, len, cap } = repr else {
                         unreachable!("str-typed assign should produce ValueRepr::Str");
                     };
+                    // `.clone()` releases the &ctx.str_locals borrow before the
+                    // `declare_str_free` call below needs &mut ctx.module.
+                    // StrLocals is three Cranelift `Variable` newtypes; clone is
+                    // three integer copies — cheap.
                     let locals = ctx
                         .str_locals
                         .get(&view.name)
