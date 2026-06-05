@@ -357,12 +357,33 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         scope.insert_binding(param.name, param.ty, false);
     }
 
+    // W0002: warn on `move` annotations applied to Copy-typed
+    // parameters. Copy types (int, float, bool) are duplicated on
+    // every read regardless of the annotation, so `move` is
+    // redundant noise. `move` on `str` (and other heap types) stays
+    // silent — that's the whole reason the keyword exists.
+    for param in &body.params {
+        if param.is_move && sema.pool.is_copy(param.ty) {
+            let name = sema.pool.str(param.name).to_string();
+            let ty_str = sema.pool.display(param.ty).to_string();
+            sema.sink.emit(Diag::warning(
+                param.span,
+                DiagCode::RedundantMove,
+                format!(
+                    "redundant 'move' on Copy-typed parameter '{}': {} values are copied on every read",
+                    name, ty_str,
+                ),
+            ));
+        }
+    }
+
     let params: Vec<TirParam> = body
         .params
         .iter()
         .map(|p| TirParam {
             name: p.name,
             ty: p.ty,
+            is_move: p.is_move,
             span: p.span,
         })
         .collect();

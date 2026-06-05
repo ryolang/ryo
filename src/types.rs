@@ -347,6 +347,19 @@ impl InternPool {
         id.0 == ID_NEVER
     }
 
+    /// True for types whose values are duplicated on `=` without
+    /// invalidating the source. Mirrors Mojo's `Copyable` trait for
+    /// the scalar primitives Ryo currently has: `int`, `float`,
+    /// `bool`. Used by sema (to flag redundant `move` annotations)
+    /// and by the ownership pass (to short-circuit liveness on
+    /// these values — they never enter the lattice).
+    pub fn is_copy(&self, ty: TypeId) -> bool {
+        matches!(
+            self.kind(ty),
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool
+        )
+    }
+
     /// Compatibility predicate that absorbs the `Error` sentinel.
     /// Used anywhere sema would otherwise emit a type-mismatch.
     pub fn compatible(&self, a: TypeId, b: TypeId) -> bool {

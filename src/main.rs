@@ -10,6 +10,7 @@ mod errors;
 mod indent;
 mod lexer;
 mod linker;
+mod ownership;
 mod parser;
 mod pipeline;
 #[allow(dead_code)]

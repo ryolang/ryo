@@ -312,13 +312,16 @@ where
     let type_expr =
         select! { Token::Ident(name) => name }.map_with(|name, e| TypeExpr::new(name, e.span()));
 
-    let param = select! { Token::Ident(name) => name }
-        .map_with(|name, e| Ident::new(name, e.span()))
+    let param = just(Token::Move)
+        .or_not()
+        .map(|m| m.is_some())
+        .then(select! { Token::Ident(name) => name }.map_with(|name, e| Ident::new(name, e.span())))
         .then_ignore(just(Token::Colon))
         .then(type_expr)
-        .map_with(|(name, type_annotation), e| Param {
+        .map_with(|((is_move, name), type_annotation), e| Param {
             name,
             type_annotation,
+            is_move,
             span: e.span(),
         });
 
@@ -1416,5 +1419,34 @@ mod tests {
         let code = "fn main():\n\tfor i in range():\n\t\tprint(i)\n";
         let result = lex_and_parse(code);
         assert!(result.is_err(), "range() should fail with arity error");
+    }
+
+    #[test]
+    fn parse_move_parameter() {
+        let (program, pool) = lex_and_parse("fn consume(move s: str):\n\tprint(s)\n").unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        assert_eq!(func.params.len(), 1);
+        assert!(func.params[0].is_move, "param `s` should be marked move");
+        assert_eq!(pool.str(func.params[0].name.name), "s");
+        assert_eq!(pool.str(func.params[0].type_annotation.name), "str");
+    }
+
+    #[test]
+    fn parse_default_parameter_is_not_move() {
+        let (program, pool) = lex_and_parse("fn read(s: str):\n\tprint(s)\n").unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        assert_eq!(func.params.len(), 1);
+        assert!(
+            !func.params[0].is_move,
+            "bare param `s` should default to is_move=false"
+        );
+        assert_eq!(pool.str(func.params[0].name.name), "s");
+        assert_eq!(pool.str(func.params[0].type_annotation.name), "str");
     }
 }

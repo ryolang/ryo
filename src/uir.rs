@@ -249,6 +249,7 @@ pub struct Inst {
 pub struct UirParam {
     pub name: StringId,
     pub ty: TypeId,
+    pub is_move: bool,
     pub span: Span,
 }
 

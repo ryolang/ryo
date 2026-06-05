@@ -957,6 +957,32 @@ fn ir_emit_tir_prints_partial_tir_with_unreachable_on_sema_error() {
     );
 }
 
+#[test]
+fn test_ryo_ir_surfaces_warnings_on_success() {
+    // I-044 regression: `ryo ir` used to call sema + ownership
+    // against a sink and only render on the error path, so any
+    // warnings (W0001 DeadStore, W0002 RedundantMove) emitted on
+    // a successful run were silently dropped. After the
+    // single-tail-block refactor, `ryo ir` should surface the same
+    // diagnostics on stderr that `ryo run` / `ryo build` already
+    // do (cf. test_redundant_move_on_int_warns).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn f(move x: int):\n\tprint(int_to_str(x))\n\nf(42)";
+    let test_file = create_test_file(temp_dir.path(), "ir_w0002.ryo", code);
+    let output = run_ryo_command(&["ir", "--emit=tir", "ir_w0002.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0002"),
+        "expected W0002 from ryo ir on stderr: {}",
+        stderr
+    );
+}
+
 // ============================================================================
 // Milestone 8b: Conditionals & Logical Operators
 // ============================================================================
@@ -2277,5 +2303,506 @@ fn test_str_shadowed_by_int_assignment_does_not_panic() {
         stdout.contains("hello"),
         "Output should contain 'hello', got: {}",
         stdout
+    );
+}
+
+#[test]
+fn test_redundant_move_on_int_warns() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let code = "fn f(move x: int):\n\tprint(int_to_str(x))\n\nf(42)";
+    let test_file = create_test_file(temp_dir.path(), "redundant_move.ryo", code);
+    let output = run_ryo_command(&["run", "redundant_move.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0002"),
+        "expected W0002 in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_move_on_str_no_warning() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let code = "fn f(move s: str):\n\tprint(s)\n\nf(\"hi\")";
+    let test_file = create_test_file(temp_dir.path(), "move_on_str.ryo", code);
+    let output = run_ryo_command(&["run", "move_on_str.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("W0002"), "unexpected W0002: {}", stderr);
+}
+
+#[test]
+fn test_use_after_move_assignment() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "name: str = \"Alice\"\nother: str = name\nprint(name)";
+    let test_file = create_test_file(temp_dir.path(), "uam_assign.ryo", code);
+    let output = run_ryo_command(&["run", "uam_assign.ryo"], &test_file).expect("run");
+    assert!(!output.status.success(), "expected compile error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0020"),
+        "expected E0020 in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_move_out_of_borrowed_parameter() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn process(data: str):\n\tother: str = data\n\nprocess(\"hi\")";
+    let test_file = create_test_file(temp_dir.path(), "move_borrowed.ryo", code);
+    let output = run_ryo_command(&["run", "move_borrowed.ryo"], &test_file).expect("run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0021"), "expected E0021: {}", stderr);
+}
+
+#[test]
+fn test_move_param_consumed_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn consume(move s: str):\n\tother: str = s\n\nconsume(\"hi\")";
+    let test_file = create_test_file(temp_dir.path(), "move_ok.ryo", code);
+    let output = run_ryo_command(&["run", "move_ok.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_str_concat_then_use_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "a: str = \"hi\"\nb: str = \"there\"\nc: str = a + b\nprint(c)";
+    let test_file = create_test_file(temp_dir.path(), "concat_ok.ryo", code);
+    let output = run_ryo_command(&["run", "concat_ok.ryo"], &test_file).expect("run");
+    assert!(output.status.success());
+}
+
+#[test]
+fn test_str_concat_then_use_after_move_in_concat() {
+    let temp_dir = TempDir::new().expect("temp");
+    // a + b reads a and b as borrows (not moves); a is still valid.
+    let code = "a: str = \"hi\"\nb: str = \"!\"\nc: str = a + b\nprint(a)";
+    let test_file = create_test_file(temp_dir.path(), "concat_borrows.ryo", code);
+    let output = run_ryo_command(&["run", "concat_borrows.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_use_after_move_return() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn make() -> str:\n\ts: str = \"hi\"\n\treturn s\n\nx: str = make()\nprint(x)";
+    let test_file = create_test_file(temp_dir.path(), "ret_ok.ryo", code);
+    let output = run_ryo_command(&["run", "ret_ok.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_return_borrowed_param() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code =
+        "fn passthrough(s: str) -> str:\n\treturn s\n\nx: str = passthrough(\"hi\")\nprint(x)";
+    let test_file = create_test_file(temp_dir.path(), "ret_borrowed.ryo", code);
+    let output = run_ryo_command(&["run", "ret_borrowed.ryo"], &test_file).expect("run");
+    assert!(!output.status.success(), "expected E0022");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0022"), "expected E0022: {}", stderr);
+}
+
+#[test]
+fn test_use_after_move_param() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code =
+        "fn consume(move s: str):\n\tprint(s)\n\nname: str = \"Alice\"\nconsume(name)\nprint(name)";
+    let test_file = create_test_file(temp_dir.path(), "uam_param.ryo", code);
+    let output = run_ryo_command(&["run", "uam_param.ryo"], &test_file).expect("run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0020"), "expected E0020: {}", stderr);
+    let count = stderr.matches("E0020").count();
+    assert_eq!(
+        count, 1,
+        "expected exactly one E0020, got {}: {}",
+        count, stderr
+    );
+}
+
+#[test]
+fn test_use_after_move_in_vardecl_one_diag() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	name: str = "Alice"
+	consume(name)
+	other: str = name
+"#;
+    let test_file = create_test_file(temp_dir.path(), "uam_vardecl_one.ryo", code);
+    let output = run_ryo_command(&["run", "uam_vardecl_one.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "expected compile error, STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let count = stderr.matches("E0020").count();
+    assert_eq!(
+        count, 1,
+        "expected exactly one E0020, got {}: {}",
+        count, stderr
+    );
+}
+
+#[test]
+fn test_use_after_move_in_return_one_diag() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn forward(move s: str) -> str:
+	consume(s)
+	return s
+
+fn main():
+	x: str = forward("hi")
+	print(x)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "uam_ret_one.ryo", code);
+    let output = run_ryo_command(&["run", "uam_ret_one.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "expected compile error, STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let count = stderr.matches("E0020").count();
+    assert_eq!(
+        count, 1,
+        "expected exactly one E0020, got {}: {}",
+        count, stderr
+    );
+}
+
+#[test]
+fn test_e0020_message_includes_binding_name() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	name: str = "Alice"
+	consume(name)
+	print(name)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "e0020_label.ryo", code);
+    let output = run_ryo_command(&["run", "e0020_label.ryo"], &test_file).expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0020"), "stderr: {}", stderr);
+    assert!(
+        stderr.contains("name"),
+        "expected binding name in message: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("moved here") || stderr.contains("moved into"),
+        "expected move-site note: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_borrow_param_then_use_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn print_twice(s: str):\n\tprint(s)\n\tprint(s)\n\nprint_twice(\"hi\")";
+    let test_file = create_test_file(temp_dir.path(), "borrow_ok.ryo", code);
+    let output = run_ryo_command(&["run", "borrow_ok.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_conditional_move_then_use_fails() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	flag: bool = true
+	name: str = "Alice"
+	if flag:
+		consume(name)
+	print(name)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "cond_move.ryo", code);
+    let output = run_ryo_command(&["run", "cond_move.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "expected E0020 — name moved on then-branch"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0020"), "expected E0020: {}", stderr);
+}
+
+#[test]
+fn test_conditional_move_both_branches_fails() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	flag: bool = true
+	name: str = "Alice"
+	if flag:
+		consume(name)
+	else:
+		consume(name)
+	print(name)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "cond_both.ryo", code);
+    let output = run_ryo_command(&["run", "cond_both.ryo"], &test_file).expect("run");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_conditional_use_inside_branch_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn main():
+	flag: bool = true
+	name: str = "Alice"
+	if flag:
+		print(name)
+	else:
+		print(name)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "cond_ok.ryo", code);
+    let output = run_ryo_command(&["run", "cond_ok.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_move_in_while_without_rebind_fails() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	mut name: str = "Alice"
+	mut i: int = 0
+	while i < 3:
+		consume(name)
+		i = i + 1
+"#;
+    let test_file = create_test_file(temp_dir.path(), "loop_move.ryo", code);
+    let output = run_ryo_command(&["run", "loop_move.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "expected E0020 — name moved without rebind"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0020"), "expected E0020: {}", stderr);
+}
+
+#[test]
+fn test_borrow_in_while_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn main():
+	name: str = "Alice"
+	mut i: int = 0
+	while i < 3:
+		print(name)
+		i = i + 1
+"#;
+    let test_file = create_test_file(temp_dir.path(), "loop_borrow.ryo", code);
+    let output = run_ryo_command(&["run", "loop_borrow.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_move_then_rebind_in_loop_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	mut i: int = 0
+	while i < 3:
+		mut name: str = "Alice"
+		consume(name)
+		i = i + 1
+"#;
+    let test_file = create_test_file(temp_dir.path(), "loop_rebind.ryo", code);
+    let output = run_ryo_command(&["run", "loop_rebind.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_conditional_partial_rebind_then_use_fails() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	mut s: str = "hello"
+	flag: bool = true
+	if flag:
+		s = "world"
+		consume(s)
+	else:
+		print("else")
+	print(s)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "cond_partial_rebind.ryo", code);
+    let output = run_ryo_command(&["run", "cond_partial_rebind.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "expected E0020: STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0020"), "expected E0020: {}", stderr);
+}
+
+#[test]
+fn test_loop_consume_then_rebind_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	mut name: str = "Alice"
+	mut i: int = 0
+	while i < 3:
+		consume(name)
+		name = "Bob"
+		i = i + 1
+"#;
+    let test_file = create_test_file(temp_dir.path(), "loop_consume_rebind.ryo", code);
+    let output = run_ryo_command(&["run", "loop_consume_rebind.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_both_branches_consume_and_rebind_ok() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = r#"
+fn consume(move s: str):
+	print(s)
+
+fn main():
+	mut name: str = "Alice"
+	flag: bool = true
+	if flag:
+		consume(name)
+		name = "Bob"
+	else:
+		consume(name)
+		name = "Charlie"
+	print(name)
+"#;
+    let test_file = create_test_file(temp_dir.path(), "both_branches_rebind.ryo", code);
+    let output = run_ryo_command(&["run", "both_branches_rebind.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_dead_store_warning() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "name: str = \"Alice\"\nprint(\"hello\")";
+    let test_file = create_test_file(temp_dir.path(), "dead_store.ryo", code);
+    let output = run_ryo_command(&["run", "dead_store.ryo"], &test_file).expect("run");
+    // Warning, not error — exit success.
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0001"),
+        "expected W0001 in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_no_dead_store_when_used() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "name: str = \"Alice\"\nprint(name)";
+    let test_file = create_test_file(temp_dir.path(), "live_store.ryo", code);
+    let output = run_ryo_command(&["run", "live_store.ryo"], &test_file).expect("run");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("W0001"), "unexpected W0001: {}", stderr);
+}
+
+#[test]
+fn test_dead_store_warning_reassignment() {
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tmut name: str = \"Alice\"\n\tprint(name)\n\tname = \"Bob\"\n\tprint(\"done\")\n";
+    let test_file = create_test_file(temp_dir.path(), "reassign_dead.ryo", code);
+    let output = run_ryo_command(&["run", "reassign_dead.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0001"),
+        "expected W0001 in stderr: {}",
+        stderr
     );
 }

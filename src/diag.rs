@@ -43,7 +43,6 @@ pub struct Diag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
-    #[allow(dead_code)]
     Warning,
     #[allow(dead_code)]
     Note,
@@ -97,6 +96,10 @@ pub enum DiagCode {
     RangeArgType,
     /// User attempted to declare a function or variable with a reserved builtin name.
     ReservedBuiltinName,
+    /// `move` annotation on a Copy-typed parameter (int, float, bool).
+    /// Accepted, but redundant — Copy types are duplicated on
+    /// assignment regardless. W-prefixed because it's a warning.
+    RedundantMove,
 
     /// A declaration's resolution requires its own resolution to be
     /// already complete — e.g. a chain of decls whose types depend
@@ -106,6 +109,16 @@ pub enum DiagCode {
     /// worklist driver in Phase 5 catches the case so future
     /// comptime / inferred-return-type work doesn't stack-overflow.
     CycleInResolution,
+
+    // --- ownership (M8.1b) ---
+    /// Use of a value after it has been moved.
+    UseAfterMove,
+    /// Attempted to move out of a borrowed parameter.
+    MoveOutOfBorrowedParam,
+    /// Attempted to return a borrowed value (Rule 5).
+    ReturnBorrowedValue,
+    /// A Move-typed value is declared (or assigned) but never used.
+    DeadStore,
 
     // --- parser ---
     ParseError,
@@ -140,6 +153,16 @@ impl Diag {
         }
     }
 
+    pub fn warning(span: Span, code: DiagCode, message: impl Into<String>) -> Self {
+        Diag {
+            span,
+            severity: Severity::Warning,
+            code,
+            message: message.into(),
+            notes: Vec::new(),
+        }
+    }
+
     #[allow(dead_code)]
     pub fn with_note(mut self, span: Option<Span>, message: impl Into<String>) -> Self {
         self.notes.push(DiagNote {
@@ -147,6 +170,12 @@ impl Diag {
             message: message.into(),
         });
         self
+    }
+
+    /// Top-level help note (no span). Renders with a "help: " prefix
+    /// so callers don't need to encode the convention.
+    pub fn with_help(self, message: impl Into<String>) -> Self {
+        self.with_note(None, format!("help: {}", message.into()))
     }
 }
 

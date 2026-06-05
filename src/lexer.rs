@@ -46,6 +46,7 @@ pub enum Token {
     Else,
     Return,
     Mut,
+    Move,
     Struct,
     Enum,
     Match,
@@ -116,6 +117,7 @@ impl fmt::Display for Token {
             Self::Else => write!(f, "else"),
             Self::Return => write!(f, "return"),
             Self::Mut => write!(f, "mut"),
+            Self::Move => write!(f, "move"),
             Self::Struct => write!(f, "struct"),
             Self::Enum => write!(f, "enum"),
             Self::Match => write!(f, "match"),
@@ -191,6 +193,8 @@ pub(crate) enum RawToken<'a> {
     Return,
     #[token("mut")]
     Mut,
+    #[token("move")]
+    Move,
     #[token("struct")]
     Struct,
     #[token("enum")]
@@ -423,6 +427,7 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::Else => Token::Else,
         RawToken::Return => Token::Return,
         RawToken::Mut => Token::Mut,
+        RawToken::Move => Token::Move,
         RawToken::Struct => Token::Struct,
         RawToken::Enum => Token::Enum,
         RawToken::Match => Token::Match,
@@ -512,6 +517,13 @@ mod tests {
         assert_eq!(toks[5], Token::Struct);
         assert_eq!(toks[6], Token::Enum);
         assert_eq!(toks[7], Token::Match);
+    }
+
+    #[test]
+    fn lex_move_keyword() {
+        let (toks, _) = lex_strings("move");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0], Token::Move));
     }
 
     #[test]

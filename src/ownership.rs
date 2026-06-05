@@ -1,0 +1,932 @@
+//! Ownership pass — validates move safety on per-`TirRef` lattice.
+//!
+//! Runs between sema and codegen. Walks each `Tir` forward, tracking
+//! ownership state for every Move-typed value. Catches use-after-move,
+//! moves out of borrowed parameters, and returns of borrowed values.
+//! Emits diagnostics into the shared `DiagSink` — does not mutate TIR
+//! and does not insert Free instructions (that lands in M8.1c).
+//!
+//! ## State lattice
+//!
+//! Per-TirRef state, not per-binding. A binding name resolves through
+//! a shadow `current_owner: HashMap<StringId, TirRef>` to whichever
+//! SSA value currently owns the underlying allocation. Anonymous owned
+//! temporaries (concat results, formatter outputs) live in the same
+//! `states` map with no shadow entry.
+//!
+//! See `docs/superpowers/specs/2026-05-20-milestone-8.1-heap-str-and-move-semantics-design.md`
+//! sub-milestone 8.1b for the full algorithm.
+//!
+//! ## Mojo reference
+//!
+//! See `docs/dev/mojo_reference.md`.
+
+use crate::diag::{Diag, DiagCode, DiagSink};
+use crate::tir::{Span, Tir, TirData, TirRef, TirTag};
+use crate::types::{InternPool, StringId, TypeId, TypeKind};
+use std::collections::{HashMap, HashSet};
+
+// ---------- Classification ----------
+
+/// True for types whose values transfer ownership on `=` and must be
+/// tracked through the function body. Today: `str` only. Future heap
+/// types (`List[T]`, `Dict[K, V]`) will join this set.
+pub(crate) fn is_move_type(ty: TypeId, pool: &InternPool) -> bool {
+    matches!(pool.kind(ty), TypeKind::Str)
+}
+
+/// Predicate the ownership walk uses to decide whether a `TirRef`
+/// needs a lattice slot. Currently identical to `is_move_type`, but
+/// kept as its own name so the walk reads correctly when borrows
+/// land and the answer becomes "move OR borrowed-of-move".
+pub(crate) fn needs_tracking(ty: TypeId, pool: &InternPool) -> bool {
+    is_move_type(ty, pool)
+}
+
+// ---------- Lattice ----------
+
+/// Per-`TirRef` ownership state. Anything Copy-typed lives in
+/// `NotTracked` for its whole lifetime (the walk skips it). Move-
+/// typed values start at `Valid` on definition, transition to
+/// `Borrowed` while a borrow is live, and to `Moved` once consumed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OwnerState {
+    NotTracked,
+    Valid,
+    Borrowed,
+    Moved { moved_at: Span },
+}
+
+/// Per-function ownership state. `states` is the lattice itself,
+/// keyed by the `TirRef` that produced the value. `current_owner`
+/// is a shadow map from binding name to whichever SSA value
+/// currently owns the underlying allocation (so reassignment
+/// reseats ownership without disturbing the producing SSA value).
+/// `origin` records, for each tracked `TirRef`, the upstream value
+/// it derives from (or `None` for fresh allocations) — used to walk
+/// back to the root owner when diagnosing a use-after-move.
+#[derive(Default, Clone)]
+pub(crate) struct Ownership {
+    pub states: HashMap<TirRef, OwnerState>,
+    pub current_owner: HashMap<StringId, TirRef>,
+    pub origin: HashMap<TirRef, Option<TirRef>>,
+    /// VarDecls of Move-typed values, keyed by the underlying owner
+    /// `TirRef`. Cleared when the binding is read (`Var`) or consumed
+    /// (move/return). Whatever remains at function end is a dead
+    /// store, surfaced as W0001.
+    pub pending_dead_store: HashMap<TirRef, (StringId, Span)>,
+}
+
+impl Ownership {
+    /// Conservatively merge per-branch lattices into `self`. For each
+    /// tracked `TirRef`, if any branch left it `Moved` the merged
+    /// state is `Moved` — that way a value consumed on only one
+    /// branch is still treated as moved at the join point and a
+    /// post-`if` use trips E0020. Non-`Moved` states pick the first
+    /// observed branch state. `current_owner` entries from any branch
+    /// are preserved so reseats inside a branch survive the join.
+    fn merge_branches(&mut self, branches: &[&Ownership]) {
+        // Snapshot pre-branch (name, owner) pairs before we start
+        // touching `self.states`. After the per-TirRef merge below
+        // we revisit each pre-branch binding and recompute its state
+        // through whichever owner each branch ended on, so a branch
+        // that reseats `current_owner[name]` to a fresh TirRef still
+        // contributes its end-of-branch state to the merged binding.
+        // Without this, post-`if` reads of `name` resolve through the
+        // pre-branch owner whose state reflects only what happened to
+        // *that* TirRef, missing reseats inside branches.
+        let pre_branch_owners: Vec<(StringId, TirRef)> =
+            self.current_owner.iter().map(|(n, t)| (*n, *t)).collect();
+
+        // Rule: any branch Moved → Moved; otherwise first observed
+        // (across branches) wins. Walk each branch once and merge
+        // directly into `self.states` — no intermediate set of keys.
+        for b in branches {
+            for (r, s) in &b.states {
+                self.states
+                    .entry(*r)
+                    .and_modify(|cur| {
+                        if !matches!(cur, OwnerState::Moved { .. })
+                            && matches!(s, OwnerState::Moved { .. })
+                        {
+                            *cur = s.clone();
+                        }
+                    })
+                    .or_insert_with(|| s.clone());
+            }
+        }
+        for b in branches {
+            for (name, owner) in &b.current_owner {
+                self.current_owner.entry(*name).or_insert(*owner);
+            }
+            for (k, v) in &b.origin {
+                self.origin.entry(*k).or_insert(*v);
+            }
+        }
+
+        // Binding-aware override: for each name that existed before
+        // the branches walked, look up where each branch left that
+        // binding (b.current_owner[name]), read that owner's state in
+        // the branch, and merge across branches with the same any-
+        // Moved-wins rule. Write the merged state back onto the
+        // pre-branch owner in `self.states` so post-merge reads of
+        // `name` (which still resolve via `self.current_owner[name]`
+        // = owner_pre) see the union of what each branch did to its
+        // respective end-of-branch owner.
+        for (name, owner_pre) in &pre_branch_owners {
+            let mut merged: Option<OwnerState> = None;
+            for b in branches {
+                let owner_b = b.current_owner.get(name).copied().unwrap_or(*owner_pre);
+                let state_b = b
+                    .states
+                    .get(&owner_b)
+                    .cloned()
+                    .unwrap_or(OwnerState::NotTracked);
+                merged = Some(match (&merged, &state_b) {
+                    (None, _) => state_b,
+                    (Some(OwnerState::Moved { .. }), _) => merged.clone().unwrap(),
+                    (_, OwnerState::Moved { .. }) => state_b,
+                    (Some(_), _) => merged.clone().unwrap(),
+                });
+            }
+            if let Some(state) = merged {
+                self.states.insert(*owner_pre, state);
+            }
+        }
+
+        // Pending dead-store entries: a key falls into one of two
+        // buckets relative to the pre-branch snapshot in `self`.
+        //
+        // (1) Pre-branch entries (already in `self.pending_dead_store`
+        //     before the branches walked): every branch started with
+        //     the entry. If any branch cleared it, the value was
+        //     used somewhere — drop it. Rule: intersect across
+        //     branches.
+        //
+        // (2) Branch-local entries (introduced inside a branch by a
+        //     VarDecl): only the introducing branch has the key. If
+        //     that branch ended with the entry still pending, W0001
+        //     should still fire after the join. Rule: union across
+        //     branches (skipping keys that were pre-branch — those
+        //     are governed by rule (1)).
+        //
+        // Snapshot the pre-branch key set so the union step can
+        // distinguish branch-local keys from pre-branch keys that
+        // (1) may have just dropped.
+        let pre_branch_keys: HashSet<TirRef> = self.pending_dead_store.keys().copied().collect();
+        self.pending_dead_store.retain(|k, _| {
+            branches
+                .iter()
+                .all(|b| b.pending_dead_store.contains_key(k))
+        });
+        for b in branches {
+            for (k, v) in &b.pending_dead_store {
+                if !pre_branch_keys.contains(k) {
+                    self.pending_dead_store.insert(*k, *v);
+                }
+            }
+        }
+    }
+}
+
+/// Validate move safety for every function body. Emits diagnostics
+/// into `sink`. Returns nothing — codegen continues to consume the
+/// unchanged `&[Tir]`.
+pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) {
+    // Name-keyed lookup so call sites can read the callee's per-
+    // parameter `is_move` flags. Builtins (`print`, `assert`,
+    // `int_to_str`) are not in this map and default to borrowing.
+    let by_name: HashMap<StringId, &Tir> = tirs.iter().map(|t| (t.name, t)).collect();
+    for tir in tirs {
+        analyze_function(tir, pool, sink, &by_name);
+    }
+}
+
+fn analyze_function(
+    tir: &Tir,
+    pool: &InternPool,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+) {
+    let mut own = Ownership::default();
+
+    // Initialise per-parameter state. Move-typed params start at
+    // `Valid` (the callee owns them); borrowed params start at
+    // `Borrowed`. Copy-typed params skip the lattice entirely.
+    for param in &tir.params {
+        if !needs_tracking(param.ty, pool) {
+            continue;
+        }
+        let synthetic = synthetic_param_ref(param.name);
+        let state = if param.is_move {
+            OwnerState::Valid
+        } else {
+            OwnerState::Borrowed
+        };
+        own.states.insert(synthetic, state);
+        own.current_owner.insert(param.name, synthetic);
+    }
+
+    for stmt in tir.body_stmts() {
+        analyze_stmt(tir, pool, &mut own, sink, by_name, stmt);
+    }
+
+    // Anything left pending was declared but never read or
+    // consumed — emit W0001 once per surviving binding.
+    for (_owner, (name, span)) in own.pending_dead_store.drain() {
+        sink.emit(Diag::warning(
+            span,
+            DiagCode::DeadStore,
+            format!("value `{}` is declared but never used", pool.str(name)),
+        ));
+    }
+}
+
+/// Build a stable synthetic [`TirRef`] for a parameter so it can
+/// share the `states` map with real instruction refs. Encoded near
+/// `u32::MAX` to keep it well clear of real per-function indices
+/// (which start at 1 and grow with body size). `TirRef` wraps
+/// `NonZeroU32`, so we clamp the lower bound to 1 to defend against
+/// the edge case `name.raw() == u32::MAX` (which would otherwise
+/// panic at `from_raw`). The collision-free property relies on real
+/// instruction refs never reaching `u32::MAX - max_string_id`, which
+/// is structurally impossible for any realistic program.
+fn synthetic_param_ref(name: StringId) -> TirRef {
+    let raw = u32::MAX.saturating_sub(name.raw()).max(1);
+    TirRef::from_raw(raw)
+}
+
+fn analyze_stmt(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    stmt: TirRef,
+) {
+    let inst = *tir.inst(stmt);
+    match inst.tag {
+        TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, by_name, stmt),
+        TirTag::Assign => analyze_assign(tir, pool, own, sink, by_name, stmt),
+        TirTag::Return => analyze_return(tir, pool, own, sink, by_name, stmt),
+        TirTag::ReturnVoid => {}
+        TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, by_name, stmt),
+        TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, by_name, stmt),
+        TirTag::ForRange => analyze_for_range(tir, pool, own, sink, by_name, stmt),
+        TirTag::Break | TirTag::Continue => {
+            // 8.1c attaches Free metadata here; 8.1b is a no-op.
+        }
+        TirTag::CompoundAssign => {
+            // Sema rejects compound-assign on Move-typed values today
+            // (str doesn't support `+=`/`-=`/etc.). Enforce the invariant
+            // here so a future sema relaxation that reaches the ownership
+            // pass without ownership-aware handling trips a debug build
+            // instead of silently falling through to no analysis.
+            // See ISSUES.md I-046.
+            let view = tir.compound_assign_view(stmt);
+            debug_assert!(
+                !needs_tracking(tir.inst(view.value).ty, pool),
+                "compound-assign on Move-typed value reached ownership pass; \
+                 sema should have rejected — see ISSUES.md I-046",
+            );
+        }
+        TirTag::ExprStmt => {
+            if let TirData::UnOp(o) = inst.data {
+                visit_expr(tir, pool, own, sink, by_name, o);
+            }
+        }
+        _ => {
+            visit_expr(tir, pool, own, sink, by_name, stmt);
+        }
+    }
+}
+
+/// Move-typed `VarDecl` is a consumer: the new binding takes
+/// ownership of the initializer's underlying value. If the
+/// initializer aliases a borrowed parameter, this is the E0021
+/// "move out of borrowed parameter" site; if the underlying owner is
+/// already `Moved`, this is the E0020 "use after move" site.
+fn analyze_var_decl(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let view = tir.var_decl_view(r);
+    let init = view.initializer;
+    let init_ty = tir.inst(init).ty;
+    visit_expr(tir, pool, own, sink, by_name, init);
+    if needs_tracking(init_ty, pool) {
+        let span = tir.span(r);
+        let consumed_name = consumed_binding_name(tir, init);
+        consume_for_assignment(pool, own, sink, init, span, consumed_name);
+        rebind_to_init(own, view.name, init);
+        // Register the new binding as pending dead-store. The walk
+        // clears this entry on any later read or consumption; a
+        // surviving entry at function end fires W0001. Keyed by
+        // `init`, the same TirRef `rebind_to_init` stamped Valid.
+        own.pending_dead_store.insert(init, (view.name, span));
+    } else {
+        own.current_owner.insert(view.name, init);
+    }
+}
+
+/// Reassignment to a Move-typed binding. Same consumption rules as
+/// `VarDecl`; the existing binding name is reseated to whichever
+/// SSA value owns the new underlying allocation.
+fn analyze_assign(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let view = tir.assign_view(r);
+    let value_ty = tir.inst(view.value).ty;
+    visit_expr(tir, pool, own, sink, by_name, view.value);
+    if needs_tracking(value_ty, pool) {
+        let span = tir.span(r);
+        let consumed_name = consumed_binding_name(tir, view.value);
+        consume_for_assignment(pool, own, sink, view.value, span, consumed_name);
+        rebind_to_init(own, view.name, view.value);
+        own.pending_dead_store.insert(view.value, (view.name, span));
+    }
+}
+
+/// Move-typed `Return` is a consumer: the returned value flows out of
+/// the function and the caller takes ownership. Borrowed parameters
+/// cannot be returned (E0022). If the underlying owner is already
+/// `Moved`, this is the E0020 "use after move" site.
+fn analyze_return(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let inst = *tir.inst(r);
+    let operand = match inst.data {
+        TirData::UnOp(o) => o,
+        _ => unreachable!("Return must carry TirData::UnOp"),
+    };
+    let ty = tir.inst(operand).ty;
+    visit_expr(tir, pool, own, sink, by_name, operand);
+    if !needs_tracking(ty, pool) {
+        return;
+    }
+    let span = tir.span(r);
+    let consumed_name = consumed_binding_name(tir, operand);
+    consume_underlying(
+        pool,
+        own,
+        sink,
+        operand,
+        span,
+        consumed_name,
+        BorrowedAction::ReturnBorrowed,
+    );
+}
+
+/// Reseat `name` to point at `init` as its current owner. After a
+/// consume, the source binding's underlying value is `Moved`; the
+/// new binding takes a fresh, independent slot in the lattice so
+/// subsequent reads of `name` resolve to a `Valid` owner instead of
+/// tripping over the just-moved underlying. We do this by severing
+/// `init`'s `origin` link (if any) and stamping it `Valid`.
+fn rebind_to_init(own: &mut Ownership, name: StringId, init: TirRef) {
+    own.origin.insert(init, None);
+    own.states.insert(init, OwnerState::Valid);
+    own.current_owner.insert(name, init);
+}
+
+/// Walk back from `init` to whichever SSA value currently owns the
+/// underlying allocation. `visit_expr` is responsible for populating
+/// `origin` for `Var` reads; for fresh producers (`StrConst`,
+/// `StrConcat`, `Call`) `init` is itself the owner.
+fn underlying_owner(own: &Ownership, init: TirRef) -> TirRef {
+    match own.origin.get(&init).copied() {
+        Some(Some(owner)) => owner,
+        _ => init,
+    }
+}
+
+/// Which diagnostic the shared `consume_underlying` helper should
+/// emit on the `Borrowed` arm. `consume_for_assignment` and
+/// `analyze_return` run identical state transitions otherwise — the
+/// only thing that diverges is the error code / wording / help when
+/// the underlying owner is borrowed.
+enum BorrowedAction {
+    /// E0021 — `consume_for_assignment` site (VarDecl / Assign /
+    /// move-typed Call argument).
+    MoveOutOfParam,
+    /// E0022 — `analyze_return` site.
+    ReturnBorrowed,
+}
+
+/// Apply the consumption transition for a Move-typed initializer.
+/// Caller must have already populated origin/state for `init` via
+/// `visit_expr`.
+fn consume_for_assignment(
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    init: TirRef,
+    span: Span,
+    name: Option<StringId>,
+) {
+    consume_underlying(
+        pool,
+        own,
+        sink,
+        init,
+        span,
+        name,
+        BorrowedAction::MoveOutOfParam,
+    );
+}
+
+/// Shared transition for every consume site (assignment, return,
+/// move-typed Call argument). Walks back to the underlying owner,
+/// reads its state, and either:
+///
+/// * `Valid` → stamp `Moved { moved_at: span }` and clear any pending
+///   dead-store entry,
+/// * `Borrowed` → emit E0021 or E0022 per `on_borrowed`,
+/// * `Moved` → silent (the `Var` arm of `visit_expr` already emitted
+///   E0020 for the aliasing read that brought us here; emitting again
+///   would double-report a single fault — see commit 2c5985d),
+/// * `NotTracked` → no-op.
+fn consume_underlying(
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    operand: TirRef,
+    span: Span,
+    name: Option<StringId>,
+    on_borrowed: BorrowedAction,
+) {
+    let underlying = underlying_owner(own, operand);
+    let state = own
+        .states
+        .get(&underlying)
+        .cloned()
+        .unwrap_or(OwnerState::NotTracked);
+    match state {
+        OwnerState::Valid => {
+            own.pending_dead_store.remove(&underlying);
+            own.states
+                .insert(underlying, OwnerState::Moved { moved_at: span });
+        }
+        OwnerState::Borrowed => {
+            let (code, msg, help) = match on_borrowed {
+                BorrowedAction::MoveOutOfParam => (
+                    DiagCode::MoveOutOfBorrowedParam,
+                    format!(
+                        "cannot move out of borrowed parameter {}",
+                        format_binding(name, pool),
+                    ),
+                    "add `move` to the parameter declaration if you need ownership",
+                ),
+                BorrowedAction::ReturnBorrowed => (
+                    DiagCode::ReturnBorrowedValue,
+                    format!(
+                        "cannot return borrowed value {} (Rule 5)",
+                        format_binding(name, pool),
+                    ),
+                    "return a locally-allocated value, or accept the parameter as `move`",
+                ),
+            };
+            sink.emit(Diag::error(span, code, msg).with_help(help));
+        }
+        OwnerState::Moved { .. } => {
+            // No diagnostic here — the `Var` arm in `visit_expr`
+            // already emits E0020 for any aliasing read of a moved
+            // owner, which covers every path that lands here today
+            // (the only operands that reach a consume site with
+            // `Moved` underlying state arrive via `Var`). Direct
+            // producers (StrConst/StrConcat/Call) are stamped
+            // `Valid` in `visit_expr` on a freshly-walked branch and
+            // cannot be `Moved` here. Emitting again would
+            // double-report a single fault.
+            //
+            // If a future producer pattern bypasses `Var` and lands
+            // here in `Moved` state, prefer no diagnostic over a
+            // duplicate; revisit then.
+        }
+        OwnerState::NotTracked => {}
+    }
+}
+
+/// Render a binding name for inclusion in a diagnostic message.
+/// Returns `` `name` `` for known bindings and `value` for anonymous
+/// temporaries (concat results, fresh allocations, etc.).
+fn format_binding(name: Option<StringId>, pool: &InternPool) -> String {
+    match name {
+        Some(n) => format!("`{}`", pool.str(n)),
+        None => "value".to_string(),
+    }
+}
+
+/// If `r` is a direct `Var` read, return the binding name it aliases.
+/// Used at consume sites to thread the source binding name into
+/// E0020/E0021/E0022 messages. Returns `None` for fresh producers
+/// (StrConst, StrConcat, Call), where there's no source binding.
+fn consumed_binding_name(tir: &Tir, r: TirRef) -> Option<StringId> {
+    match tir.inst(r).data {
+        TirData::Var(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// CFG join for `if` / `elif` / `else`. The naïve forward walk
+/// would let a move inside a then-branch persist past the merge
+/// regardless of whether else also moved — wrong for the spec's
+/// guarantee that conditionally-moved values are not safe to use
+/// after the join. Snapshot the lattice before each branch, walk
+/// each branch from the snapshot independently, then merge. If any
+/// branch left a value `Moved`, the post-`if` state is `Moved`;
+/// when no `else` is present, the implicit fall-through branch is
+/// the pre-`if` snapshot itself, so an unconsumed pre-`if` value
+/// stays usable after the join.
+fn analyze_if_stmt(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let view = tir.if_stmt_view(r);
+    visit_expr(tir, pool, own, sink, by_name, view.cond);
+
+    let snapshot = own.clone();
+
+    for stmt in &view.then_stmts {
+        analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+    }
+    let then_state = own.clone();
+
+    let mut branch_results = vec![then_state];
+    for elif in &view.elif_branches {
+        *own = snapshot.clone();
+        visit_expr(tir, pool, own, sink, by_name, elif.cond);
+        for stmt in &elif.body {
+            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+        }
+        branch_results.push(own.clone());
+    }
+
+    if let Some(else_stmts) = &view.else_stmts {
+        *own = snapshot.clone();
+        for stmt in else_stmts {
+            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+        }
+        branch_results.push(own.clone());
+    } else {
+        branch_results.push(snapshot.clone());
+    }
+
+    // Final restore: `snapshot` has no further uses, so move instead
+    // of clone.
+    *own = snapshot;
+    let refs: Vec<&Ownership> = branch_results.iter().collect();
+    own.merge_branches(&refs);
+}
+
+/// 2-pass approximation of a fixed-point ownership analysis for
+/// `while`. Walks the body once from the entry state into a scratch
+/// sink; if no tracked TirRef changed Moved-ness across the back-edge,
+/// the body is loop-invariant for ownership purposes and the scratch
+/// diagnostics are flushed. Otherwise we re-walk from the merged
+/// (entry ⊔ post-body) state and emit diagnostics on the second pass
+/// — a binding moved inside the body without rebinding before the
+/// back-edge surfaces as E0020 on iteration two.
+///
+/// Why two passes suffice for the M8.1 pattern set (instead of a
+/// general fixed-point loop): the merge is monotonic over the
+/// Moved-ness sub-lattice (`Valid → Moved` is the only transition,
+/// and merge takes "any branch Moved → Moved"), and there are no
+/// iteration-count-dependent conditionals — so a TirRef that flips
+/// from `Valid` to `Moved` in pass one stays `Moved` after the
+/// (entry ⊔ post-body) merge and a third walk would observe nothing
+/// new. Original phrasing for traceability:
+/// "Converges in at most 2 iterations for the M8.1 pattern set".
+///
+/// **Maintainer note.** If a future change introduces non-monotonic
+/// merges (e.g., `Moved → Valid` re-entry as a real lattice transition
+/// rather than via rebinding) or iteration-count-dependent control
+/// flow inside the body, revert this to a true fixed-point loop
+/// (iterate until `states_differ` returns false).
+fn analyze_while_loop(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let view = tir.while_loop_view(r);
+    let entry = own.clone();
+
+    // First pass into a scratch sink — diagnostics are kept only if
+    // a single iteration suffices. If the lattice changes we re-walk
+    // and the scratch diags are dropped (the second walk re-emits
+    // anything that's still wrong).
+    let mut scratch_sink = DiagSink::new();
+    visit_expr(tir, pool, own, &mut scratch_sink, by_name, view.cond);
+    for stmt in &view.body {
+        analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, *stmt);
+    }
+    let after_first = own.clone();
+
+    if states_differ(&entry, &after_first) {
+        *own = merge_two(&entry, &after_first);
+        visit_expr(tir, pool, own, sink, by_name, view.cond);
+        for stmt in &view.body {
+            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+        }
+        let after_second = own.clone();
+        *own = merge_two(&entry, &after_second);
+    } else {
+        for d in scratch_sink.into_diags() {
+            sink.emit(d);
+        }
+        *own = merge_two(&entry, &after_first);
+    }
+}
+
+/// `for i in range(start, end)` loop var is `int` (Copy), so the
+/// induction variable never enters the lattice. The body runs the
+/// same fixed-point as `while`.
+fn analyze_for_range(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let view = tir.for_range_view(r);
+    // Start/end are visited unconditionally — they're plain `int`
+    // exprs, so they don't move anything, but they may contain nested
+    // reads we want to record.
+    visit_expr(tir, pool, own, sink, by_name, view.start);
+    visit_expr(tir, pool, own, sink, by_name, view.end);
+
+    let entry = own.clone();
+
+    let mut scratch_sink = DiagSink::new();
+    for stmt in &view.body {
+        analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, *stmt);
+    }
+    let after_first = own.clone();
+
+    if states_differ(&entry, &after_first) {
+        *own = merge_two(&entry, &after_first);
+        for stmt in &view.body {
+            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+        }
+        let after_second = own.clone();
+        *own = merge_two(&entry, &after_second);
+    } else {
+        for d in scratch_sink.into_diags() {
+            sink.emit(d);
+        }
+        *own = merge_two(&entry, &after_first);
+    }
+}
+
+/// Compare two lattices on the Moved-ness of every tracked `TirRef`.
+/// Per the M8.1b plan, the only transition that forces a re-walk is a
+/// `Valid`/`Borrowed` → `Moved` flip across the back-edge — non-Moved
+/// state changes (e.g. fresh definitions added inside the body) are
+/// loop-invariant for the use-after-move check.
+fn states_differ(a: &Ownership, b: &Ownership) -> bool {
+    // Diverge iff some TirRef is Moved in one and not the other.
+    // Walk each side once and check the other's matching entry —
+    // missing entries default to NotTracked, so a Moved with no
+    // counterpart counts as a divergence on its own.
+    for (k, av) in &a.states {
+        let a_moved = matches!(av, OwnerState::Moved { .. });
+        let b_moved = matches!(b.states.get(k), Some(OwnerState::Moved { .. }));
+        if a_moved != b_moved {
+            return true;
+        }
+    }
+    for (k, bv) in &b.states {
+        if !matches!(bv, OwnerState::Moved { .. }) {
+            continue;
+        }
+        // Only need to catch keys exclusive to b that are Moved —
+        // keys present in a were handled in the first loop.
+        if !a.states.contains_key(k) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Merge two lattices by reusing the existing branch-merge join: if
+/// either input has a TirRef `Moved`, the result is `Moved`. Used to
+/// seed the second pass and to compute the post-loop state.
+fn merge_two(a: &Ownership, b: &Ownership) -> Ownership {
+    let mut merged = a.clone();
+    merged.merge_branches(&[a, b]);
+    merged
+}
+
+fn visit_expr(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let inst = *tir.inst(r);
+    match inst.tag {
+        // ---- Allocating instructions ----
+        // `StrConst` materializes a fresh heap string at runtime;
+        // `StrConcat` produces a brand-new allocation from its two
+        // operands. Both enter the lattice as `Valid` with no
+        // upstream origin.
+        TirTag::StrConst => {
+            if needs_tracking(inst.ty, pool) {
+                own.states.insert(r, OwnerState::Valid);
+                own.origin.insert(r, None);
+            }
+        }
+        TirTag::StrConcat => {
+            if needs_tracking(inst.ty, pool) {
+                own.states.insert(r, OwnerState::Valid);
+                own.origin.insert(r, None);
+            }
+            if let TirData::BinOp { lhs, rhs } = inst.data {
+                visit_expr(tir, pool, own, sink, by_name, lhs);
+                visit_expr(tir, pool, own, sink, by_name, rhs);
+            }
+        }
+        TirTag::Call => {
+            // A str-returning call (e.g. `int_to_str`) is a producer.
+            if needs_tracking(inst.ty, pool) {
+                own.states.insert(r, OwnerState::Valid);
+                own.origin.insert(r, None);
+            }
+            let view = tir.call_view(r);
+            // Look up callee parameter conventions. Builtins
+            // (`print`, `assert`, `int_to_str`) have no entry and
+            // default to borrowing all args.
+            let callee_params = by_name.get(&view.name).map(|t| t.params.as_slice());
+            for (i, arg) in view.args.iter().enumerate() {
+                visit_expr(tir, pool, own, sink, by_name, *arg);
+                let arg_ty = tir.inst(*arg).ty;
+                if !needs_tracking(arg_ty, pool) {
+                    continue;
+                }
+                let is_move_param = callee_params
+                    .and_then(|ps| ps.get(i))
+                    .map(|p| p.is_move)
+                    .unwrap_or(false);
+                if is_move_param {
+                    let consumed_name = consumed_binding_name(tir, *arg);
+                    consume_for_assignment(pool, own, sink, *arg, tir.span(r), consumed_name);
+                }
+                // Borrow path: no extra check here. With the current
+                // set of producers (StrConst/StrConcat/Call/Var), every
+                // tracked str argument flows through `Var`, and the
+                // `Var` arm already fires E0020 for use-after-move.
+                // Adding a call-site check would double-report. If a
+                // future producer pattern bypasses `Var` (e.g. passing
+                // a moved Call result directly), revisit this.
+            }
+        }
+        // ---- Aliasing read ----
+        // `Var` is a non-consuming read. Record which SSA value it
+        // currently aliases so a later use-after-move diagnostic can
+        // walk back to the root owner. Per the design spec, an
+        // aliasing read of an already-`Moved` owner is itself an
+        // E0020 use-after-move. Reads of `Borrowed` owners are fine
+        // (Rule 2 — borrowed parameters can be freely read).
+        TirTag::Var => {
+            let name = match inst.data {
+                TirData::Var(n) => n,
+                _ => unreachable!("Var must carry TirData::Var"),
+            };
+            if let Some(&owner) = own.current_owner.get(&name)
+                && needs_tracking(inst.ty, pool)
+            {
+                // Any read counts as "used" for dead-store purposes,
+                // even if it ultimately fires E0020 — once the
+                // programmer's code looked at the value, they
+                // didn't ignore it.
+                own.pending_dead_store.remove(&owner);
+                own.origin.insert(r, Some(owner));
+                if let Some(OwnerState::Moved { moved_at, .. }) = own.states.get(&owner).cloned() {
+                    sink.emit(
+                        Diag::error(
+                            tir.span(r),
+                            DiagCode::UseAfterMove,
+                            format!("use of moved value `{}`", pool.str(name)),
+                        )
+                        .with_note(Some(moved_at), "value moved here")
+                        .with_help(
+                            "consider using the value before the move, or pass by default (borrow) instead of `move`",
+                        ),
+                    );
+                }
+            }
+        }
+        // ---- Everything else: recurse on operands so nested
+        // ---- producers/aliases are still observed.
+        _ => {
+            recurse_operands(tir, pool, own, sink, by_name, r);
+        }
+    }
+}
+
+fn recurse_operands(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    by_name: &HashMap<StringId, &Tir>,
+    r: TirRef,
+) {
+    let inst = *tir.inst(r);
+    match inst.data {
+        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, by_name, o),
+        TirData::BinOp { lhs, rhs } => {
+            visit_expr(tir, pool, own, sink, by_name, lhs);
+            visit_expr(tir, pool, own, sink, by_name, rhs);
+        }
+        // `Extra`-shaped instructions (VarDecl, Assign, Call,
+        // IfStmt, WhileLoop, ForRange, CompoundAssign) have
+        // bespoke decoders. Consumption logic lands in subsequent
+        // tasks; until then their operands are deliberately not
+        // descended into here so we avoid double-visits when those
+        // tasks introduce per-tag handling.
+        TirData::Extra(_) => {}
+        TirData::None
+        | TirData::Int(_)
+        | TirData::Float(_)
+        | TirData::Str(_)
+        | TirData::Bool(_)
+        | TirData::Var(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_types_classified() {
+        let pool = InternPool::new();
+        assert!(pool.is_copy(pool.int()));
+        assert!(pool.is_copy(pool.float()));
+        assert!(pool.is_copy(pool.bool_()));
+        assert!(!pool.is_copy(pool.str_()));
+    }
+
+    #[test]
+    fn move_types_classified() {
+        let pool = InternPool::new();
+        assert!(is_move_type(pool.str_(), &pool));
+        assert!(!is_move_type(pool.int(), &pool));
+        assert!(!is_move_type(pool.bool_(), &pool));
+    }
+
+    #[test]
+    fn needs_tracking_matches_move() {
+        let pool = InternPool::new();
+        assert!(needs_tracking(pool.str_(), &pool));
+        assert!(!needs_tracking(pool.int(), &pool));
+    }
+
+    #[test]
+    fn str_const_walk_no_panic() {
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void: <str_const "hello"> as expr_stmt
+        let mut b = TirBuilder::new(main, vec![], void, span);
+        let s = b.str_const(hello, str_ty, span);
+        let stmt = b.unary(TirTag::ExprStmt, void, s, span);
+        let tir = b.finish(&[stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(sink.is_empty());
+    }
+}
