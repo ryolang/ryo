@@ -106,8 +106,11 @@ pub(crate) struct Ownership {
     /// VarDecls of Move-typed values, keyed by the underlying owner
     /// `TirRef`. Cleared when the binding is read (`Var`) or consumed
     /// (move/return). Whatever remains at function end is a dead
-    /// store, surfaced as W0001.
-    pub pending_dead_store: HashMap<TirRef, (StringId, Span)>,
+    /// store — surfaced as W0001 + a Free anchored after the
+    /// declaring/assigning instruction. The third tuple element is
+    /// the `VarDecl`/`Assign` instruction's own `TirRef`, used as
+    /// the anchor for the dead-store Free.
+    pub pending_dead_store: HashMap<TirRef, (StringId, Span, TirRef /* decl_inst */)>,
 
     /// SSA values that allocated heap-owned strings during the
     /// forward walk: `StrConst`, `StrConcat`, and Move-typed `Call`
@@ -356,14 +359,29 @@ fn analyze_function(
         // codegen's inst_values won't have ptr/cap either).
     }
 
-    // Anything left pending was declared but never read or
-    // consumed — emit W0001 once per surviving binding.
-    for (_owner, (name, span)) in own.pending_dead_store.drain() {
+    // Dead-store survivors: emit W0001 and schedule a Free anchored
+    // after the declaring instruction. Skip owners already covered by
+    // `free_on_reassign` (Task 6) to avoid double-freeing the same
+    // allocation. Today no `free_on_reassign` entries exist; this
+    // guard activates with Task 6.
+    let reassign_targets: HashSet<TirRef> = sidecar.free_on_reassign.values().copied().collect();
+    for (owner, (name, span, decl_inst)) in own.pending_dead_store.drain() {
         sink.emit(Diag::warning(
             span,
             DiagCode::DeadStore,
             format!("value `{}` is declared but never used", pool.str(name)),
         ));
+        if reassign_targets.contains(&owner) {
+            // Task 6's reassignment-Free already covers this owner;
+            // emitting another dead-store Free would double-free.
+            continue;
+        }
+        sidecar.free_schedule.push(FreePoint {
+            after: decl_inst,
+            target: owner,
+            span,
+            branch: None,
+        });
     }
 }
 
@@ -465,7 +483,7 @@ fn analyze_var_decl(
         // clears this entry on any later read or consumption; a
         // surviving entry at function end fires W0001. Keyed by
         // `init`, the same TirRef `rebind_to_init` stamped Valid.
-        own.pending_dead_store.insert(init, (view.name, span));
+        own.pending_dead_store.insert(init, (view.name, span, r));
     } else {
         own.current_owner.insert(view.name, init);
     }
@@ -491,7 +509,8 @@ fn analyze_assign(
         let consumed_name = consumed_binding_name(tir, view.value);
         consume_for_assignment(pool, own, sink, view.value, span, consumed_name);
         rebind_to_init(own, view.name, view.value);
-        own.pending_dead_store.insert(view.value, (view.name, span));
+        own.pending_dead_store
+            .insert(view.value, (view.name, span, r));
     }
 }
 
@@ -1253,6 +1272,59 @@ mod tests {
         let pool = InternPool::new();
         assert!(needs_tracking(pool.str_(), &pool));
         assert!(!needs_tracking(pool.int(), &pool));
+    }
+
+    #[test]
+    fn dead_store_schedules_free_after_decl() {
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s_name = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void: s: str = "hello"   # never read
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s_name, false, str_ty, lit, span);
+        let tir = tb.finish(&[decl]);
+
+        let mut sink = DiagSink::new();
+        let sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+
+        // W0001 fires.
+        let diags = sink.into_diags();
+        assert!(
+            diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "expected DeadStore warning"
+        );
+
+        // Free anchored after the VarDecl, target = the literal's TirRef.
+        assert!(
+            sidecar
+                .free_schedule
+                .iter()
+                .any(|fp| fp.after == decl && fp.target == lit && fp.branch.is_none()),
+            "expected dead-store Free anchored at decl with target=lit; got: {:?}",
+            sidecar.free_schedule
+        );
+
+        // Exactly one Free for `lit` — guards against Task 3/4 ever
+        // double-counting (anonymous-temp pass + dead-store pass both
+        // emitting for the same owner).
+        assert_eq!(
+            sidecar
+                .free_schedule
+                .iter()
+                .filter(|fp| fp.target == lit)
+                .count(),
+            1,
+            "expected exactly one Free for lit"
+        );
     }
 
     #[test]
