@@ -268,6 +268,46 @@ fn analyze_function(
         analyze_stmt(tir, pool, &mut own, sink, by_name, sidecar, stmt);
     }
 
+    // Backward liveness: for every owner still `Valid` at function exit
+    // (i.e., not moved out via return / move-typed call argument /
+    // reassign), find its last reading instruction and schedule a Free
+    // anchored after it. The reverse walk records the *first* time each
+    // owner is observed (which is its last use in program order). The
+    // forward walk's final `current_owner` map encodes "which TirRef
+    // owns the binding at function exit"; reads of a binding in the
+    // body always alias *some* owner that the forward walk classified.
+    // For any owner whose state is `Moved` at function exit (e.g. the
+    // pre-reassign owner of a rebound binding), the final-state filter
+    // below skips it — so anchoring last-use via the final
+    // `current_owner` resolution is sound for the M8.1 pattern set.
+    let body_stmts = tir.body_stmts();
+    let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
+    for &stmt in body_stmts.iter().rev() {
+        collect_last_uses(tir, pool, &own, stmt, &mut last_use);
+    }
+    for (owner, state) in &own.states {
+        if !matches!(state, OwnerState::Valid) {
+            continue;
+        }
+        // Skip parameter synthetic refs (see `synthetic_param_ref`):
+        // borrowed/owned-by-callee parameters are the caller's
+        // responsibility to free, not ours. Synthetic refs encode
+        // names near `u32::MAX`; real instruction refs are
+        // structurally `<< u32::MAX / 2`.
+        if owner.raw() >= u32::MAX / 2 {
+            continue;
+        }
+        if let Some(&after) = last_use.get(owner) {
+            sidecar.free_schedule.push(FreePoint {
+                after,
+                target: *owner,
+                span: tir.span(*owner),
+                branch: None,
+            });
+        }
+        // Owners with no last_use are dead stores — handled in Task 5.
+    }
+
     // Anything left pending was declared but never read or
     // consumed — emit W0001 once per surviving binding.
     for (_owner, (name, span)) in own.pending_dead_store.drain() {
@@ -791,6 +831,107 @@ fn merge_two(a: &Ownership, b: &Ownership) -> Ownership {
     merged
 }
 
+/// Backward walk recording each tracked owner's last reading
+/// instruction. Called from `analyze_function` after the forward walk
+/// completes; iterates statements in reverse program order so the
+/// first observed `Var` read of an owner is its last use in source
+/// order. Recurses into operands of every TIR shape so reads buried
+/// inside calls, loops, and if-arms are still seen.
+fn collect_last_uses(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &Ownership,
+    r: TirRef,
+    last_use: &mut HashMap<TirRef, TirRef>,
+) {
+    let inst = *tir.inst(r);
+    // Record this instruction's own `Var` read, if any. Resolve the
+    // binding name through `current_owner`'s end-of-function state —
+    // sound for the M8.1 pattern set because any binding rebound mid-
+    // function leaves the pre-reassign owner in `Moved` state, which
+    // the caller's `OwnerState::Valid` filter then skips.
+    if let TirTag::Var = inst.tag
+        && let TirData::Var(name) = inst.data
+        && needs_tracking(inst.ty, pool)
+        && let Some(&owner) = own.current_owner.get(&name)
+    {
+        // First encounter wins (we walk in reverse program order).
+        last_use.entry(owner).or_insert(r);
+    }
+    // Recurse into operands. Mirrors the forward walk's structural
+    // recursion so every reachable read is visited exactly once.
+    match inst.data {
+        TirData::UnOp(o) => collect_last_uses(tir, pool, own, o, last_use),
+        TirData::BinOp { lhs, rhs } => {
+            // Operand order doesn't affect program order for last-use
+            // (sema lowered both before this instruction); recurse rhs
+            // first to mirror reverse program order conservatively.
+            collect_last_uses(tir, pool, own, rhs, last_use);
+            collect_last_uses(tir, pool, own, lhs, last_use);
+        }
+        TirData::Extra(_) => match inst.tag {
+            TirTag::Call => {
+                let view = tir.call_view(r);
+                for &arg in view.args.iter().rev() {
+                    collect_last_uses(tir, pool, own, arg, last_use);
+                }
+            }
+            TirTag::VarDecl => {
+                let v = tir.var_decl_view(r);
+                collect_last_uses(tir, pool, own, v.initializer, last_use);
+            }
+            TirTag::Assign => {
+                let v = tir.assign_view(r);
+                collect_last_uses(tir, pool, own, v.value, last_use);
+            }
+            TirTag::CompoundAssign => {
+                let v = tir.compound_assign_view(r);
+                collect_last_uses(tir, pool, own, v.value, last_use);
+            }
+            TirTag::IfStmt => {
+                let v = tir.if_stmt_view(r);
+                if let Some(else_stmts) = &v.else_stmts {
+                    for &s in else_stmts.iter().rev() {
+                        collect_last_uses(tir, pool, own, s, last_use);
+                    }
+                }
+                for elif in v.elif_branches.iter().rev() {
+                    for &s in elif.body.iter().rev() {
+                        collect_last_uses(tir, pool, own, s, last_use);
+                    }
+                    collect_last_uses(tir, pool, own, elif.cond, last_use);
+                }
+                for &s in v.then_stmts.iter().rev() {
+                    collect_last_uses(tir, pool, own, s, last_use);
+                }
+                collect_last_uses(tir, pool, own, v.cond, last_use);
+            }
+            TirTag::WhileLoop => {
+                let v = tir.while_loop_view(r);
+                for &s in v.body.iter().rev() {
+                    collect_last_uses(tir, pool, own, s, last_use);
+                }
+                collect_last_uses(tir, pool, own, v.cond, last_use);
+            }
+            TirTag::ForRange => {
+                let v = tir.for_range_view(r);
+                for &s in v.body.iter().rev() {
+                    collect_last_uses(tir, pool, own, s, last_use);
+                }
+                collect_last_uses(tir, pool, own, v.end, last_use);
+                collect_last_uses(tir, pool, own, v.start, last_use);
+            }
+            _ => {}
+        },
+        TirData::None
+        | TirData::Int(_)
+        | TirData::Float(_)
+        | TirData::Str(_)
+        | TirData::Bool(_)
+        | TirData::Var(_) => {}
+    }
+}
+
 fn visit_expr(
     tir: &Tir,
     pool: &InternPool,
@@ -959,6 +1100,40 @@ mod tests {
         let pool = InternPool::new();
         assert!(needs_tracking(pool.str_(), &pool));
         assert!(!needs_tracking(pool.int(), &pool));
+    }
+
+    #[test]
+    fn last_use_scheduled_for_unmoved_local() {
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let hello = pool.intern_str("hello");
+        let s_name = pool.intern_str("s");
+        let print_name = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void:
+        //     s: str = "hello"
+        //     print(s)
+        let mut b = TirBuilder::new(main, vec![], void, span);
+        let lit = b.str_const(hello, str_ty, span);
+        let decl = b.var_decl(s_name, false, str_ty, lit, span);
+        let var_read = b.var(s_name, str_ty, span);
+        let call = b.call(print_name, &[var_read], void, span);
+        let stmt = b.unary(TirTag::ExprStmt, void, call, span);
+        let tir = b.finish(&[decl, stmt]);
+
+        let mut sink = DiagSink::new();
+        let sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(sink.is_empty(), "expected no diagnostics");
+        assert_eq!(sidecar.free_schedule.len(), 1);
+        assert_eq!(sidecar.free_schedule[0].target, lit);
+        assert_eq!(sidecar.free_schedule[0].after, var_read);
+        assert!(sidecar.free_schedule[0].branch.is_none());
     }
 
     #[test]
