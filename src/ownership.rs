@@ -294,7 +294,7 @@ fn analyze_function(
         // responsibility to free, not ours. Synthetic refs encode
         // names near `u32::MAX`; real instruction refs are
         // structurally `<< u32::MAX / 2`.
-        if owner.raw() >= u32::MAX / 2 {
+        if is_synthetic_param_ref(*owner) {
             continue;
         }
         if let Some(&after) = last_use.get(owner) {
@@ -317,6 +317,17 @@ fn analyze_function(
             format!("value `{}` is declared but never used", pool.str(name)),
         ));
     }
+}
+
+/// Lower bound of the synthetic-param `TirRef` keyspace. Real
+/// instruction refs grow upward from 1; synthetic refs (assigned by
+/// `synthetic_param_ref`) live near `u32::MAX`. Anything at or above
+/// this threshold is a synthetic param. Co-located with
+/// `synthetic_param_ref` so the encoding lives in one place.
+const SYNTHETIC_PARAM_REF_THRESHOLD: u32 = u32::MAX / 2;
+
+fn is_synthetic_param_ref(r: TirRef) -> bool {
+    r.raw() >= SYNTHETIC_PARAM_REF_THRESHOLD
 }
 
 /// Build a stable synthetic [`TirRef`] for a parameter so it can
