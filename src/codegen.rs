@@ -143,6 +143,11 @@ struct FunctionContext<'a, M: Module> {
     /// For str-returning functions: the hidden sret pointer (first block param)
     /// through which the callee writes the (ptr, len, cap) triple.
     sret_ptr: Option<Value>,
+    /// Ownership sidecar: read by Task 7+ Free emission. Plumbed in
+    /// now so codegen has it ready when later tasks start consuming
+    /// `free_schedule` / `free_on_reassign`.
+    #[allow(dead_code)]
+    sidecar: &'a crate::ownership::OwnershipSidecar,
 }
 
 impl<M: Module> Codegen<M> {
@@ -279,7 +284,12 @@ impl<M: Module> Codegen<M> {
         Ok(func_ids)
     }
 
-    pub fn compile(&mut self, tirs: &[Tir], pool: &InternPool) -> Result<FuncId, String> {
+    pub fn compile(
+        &mut self,
+        tirs: &[Tir],
+        pool: &InternPool,
+        sidecar: &crate::ownership::OwnershipSidecar,
+    ) -> Result<FuncId, String> {
         debug_assert!(
             no_unreachable_in(tirs),
             "codegen::compile requires sema to have produced TIR with no Unreachable instructions"
@@ -287,7 +297,7 @@ impl<M: Module> Codegen<M> {
         let func_ids = self.prepare_compilation(tirs, pool)?;
 
         for tir in tirs {
-            self.compile_function(tir, &func_ids, pool)?;
+            self.compile_function(tir, &func_ids, pool, sidecar)?;
         }
 
         // Resolve "main" through the pool. `astgen` always interns
@@ -308,6 +318,7 @@ impl<M: Module> Codegen<M> {
         &mut self,
         tirs: &[Tir],
         pool: &InternPool,
+        sidecar: &crate::ownership::OwnershipSidecar,
     ) -> Result<String, String> {
         debug_assert!(
             no_unreachable_in(tirs),
@@ -317,7 +328,7 @@ impl<M: Module> Codegen<M> {
 
         let mut ir_output = String::new();
         for tir in tirs {
-            ir_output.push_str(&self.compile_function(tir, &func_ids, pool)?);
+            ir_output.push_str(&self.compile_function(tir, &func_ids, pool, sidecar)?);
             ir_output.push('\n');
         }
 
@@ -387,6 +398,7 @@ impl<M: Module> Codegen<M> {
         tir: &Tir,
         func_ids: &HashMap<StringId, FuncId>,
         pool: &InternPool,
+        sidecar: &crate::ownership::OwnershipSidecar,
     ) -> Result<String, String> {
         let func_id = *func_ids
             .get(&tir.name)
@@ -455,6 +467,7 @@ impl<M: Module> Codegen<M> {
                 loop_stack: Vec::new(),
                 str_locals: str_param_locals,
                 sret_ptr,
+                sidecar,
             };
 
             let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;

@@ -26,6 +26,39 @@ use crate::tir::{Span, Tir, TirData, TirRef, TirTag};
 use crate::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
 
+/// Identifies a specific arm of an `IfStmt` (and, future, `Match`).
+/// Assigned by the ownership pass; codegen maps each `BranchId` to a
+/// concrete Cranelift `Block` as it lowers if/else regions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BranchId(pub u32);
+
+/// One scheduled Free. Codegen emits `ryo_str_free(ptr, cap)` after
+/// the instruction at `after`, gated by `branch` (None =
+/// unconditional, Some = only inside that arm or a descendant).
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // fields read by Task 7+ Free emission
+pub struct FreePoint {
+    pub after: TirRef,
+    pub target: TirRef,
+    pub span: Span,
+    pub branch: Option<BranchId>,
+}
+
+/// Side-table produced by the ownership pass alongside diagnostics.
+/// Codegen consults it to decide where to emit `ryo_str_free` calls.
+/// The TIR itself is never mutated — index stability is load-bearing
+/// for `inst_values` memoisation in `codegen.rs`.
+#[derive(Default, Debug, Clone)]
+#[allow(dead_code)] // fields read by Task 7+ Free emission
+pub struct OwnershipSidecar {
+    /// Frees anchored after specific instructions.
+    pub free_schedule: Vec<FreePoint>,
+    /// Reassignment Frees. Key: the `Assign` instruction's `TirRef`.
+    /// Value: the `TirRef` whose buffer must be freed *before* the new
+    /// fat-pointer triple is stored into the binding's `StrLocals`.
+    pub free_on_reassign: HashMap<TirRef, TirRef>,
+}
+
 // ---------- Classification ----------
 
 /// True for types whose values transfer ownership on `=` and must be
@@ -190,16 +223,19 @@ impl Ownership {
 }
 
 /// Validate move safety for every function body. Emits diagnostics
-/// into `sink`. Returns nothing — codegen continues to consume the
-/// unchanged `&[Tir]`.
-pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) {
+/// into `sink`. Returns an [`OwnershipSidecar`] that codegen consults
+/// to decide where to emit `ryo_str_free` calls. The TIR itself is
+/// never mutated.
+pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipSidecar {
     // Name-keyed lookup so call sites can read the callee's per-
     // parameter `is_move` flags. Builtins (`print`, `assert`,
     // `int_to_str`) are not in this map and default to borrowing.
     let by_name: HashMap<StringId, &Tir> = tirs.iter().map(|t| (t.name, t)).collect();
+    let mut sidecar = OwnershipSidecar::default();
     for tir in tirs {
-        analyze_function(tir, pool, sink, &by_name);
+        analyze_function(tir, pool, sink, &by_name, &mut sidecar);
     }
+    sidecar
 }
 
 fn analyze_function(
@@ -207,6 +243,7 @@ fn analyze_function(
     pool: &InternPool,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
+    sidecar: &mut OwnershipSidecar,
 ) {
     let mut own = Ownership::default();
 
@@ -228,7 +265,7 @@ fn analyze_function(
     }
 
     for stmt in tir.body_stmts() {
-        analyze_stmt(tir, pool, &mut own, sink, by_name, stmt);
+        analyze_stmt(tir, pool, &mut own, sink, by_name, sidecar, stmt);
     }
 
     // Anything left pending was declared but never read or
@@ -262,17 +299,18 @@ fn analyze_stmt(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
+    sidecar: &mut OwnershipSidecar,
     stmt: TirRef,
 ) {
     let inst = *tir.inst(stmt);
     match inst.tag {
-        TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, by_name, stmt),
-        TirTag::Assign => analyze_assign(tir, pool, own, sink, by_name, stmt),
-        TirTag::Return => analyze_return(tir, pool, own, sink, by_name, stmt),
+        TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, by_name, sidecar, stmt),
+        TirTag::Assign => analyze_assign(tir, pool, own, sink, by_name, sidecar, stmt),
+        TirTag::Return => analyze_return(tir, pool, own, sink, by_name, sidecar, stmt),
         TirTag::ReturnVoid => {}
-        TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, by_name, stmt),
-        TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, by_name, stmt),
-        TirTag::ForRange => analyze_for_range(tir, pool, own, sink, by_name, stmt),
+        TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, by_name, sidecar, stmt),
+        TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, by_name, sidecar, stmt),
+        TirTag::ForRange => analyze_for_range(tir, pool, own, sink, by_name, sidecar, stmt),
         TirTag::Break | TirTag::Continue => {
             // 8.1c attaches Free metadata here; 8.1b is a no-op.
         }
@@ -292,11 +330,11 @@ fn analyze_stmt(
         }
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {
-                visit_expr(tir, pool, own, sink, by_name, o);
+                visit_expr(tir, pool, own, sink, by_name, sidecar, o);
             }
         }
         _ => {
-            visit_expr(tir, pool, own, sink, by_name, stmt);
+            visit_expr(tir, pool, own, sink, by_name, sidecar, stmt);
         }
     }
 }
@@ -312,12 +350,13 @@ fn analyze_var_decl(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
+    _sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let view = tir.var_decl_view(r);
     let init = view.initializer;
     let init_ty = tir.inst(init).ty;
-    visit_expr(tir, pool, own, sink, by_name, init);
+    visit_expr(tir, pool, own, sink, by_name, _sidecar, init);
     if needs_tracking(init_ty, pool) {
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, init);
@@ -342,11 +381,12 @@ fn analyze_assign(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
+    _sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let view = tir.assign_view(r);
     let value_ty = tir.inst(view.value).ty;
-    visit_expr(tir, pool, own, sink, by_name, view.value);
+    visit_expr(tir, pool, own, sink, by_name, _sidecar, view.value);
     if needs_tracking(value_ty, pool) {
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, view.value);
@@ -366,6 +406,7 @@ fn analyze_return(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
+    _sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
@@ -374,7 +415,7 @@ fn analyze_return(
         _ => unreachable!("Return must carry TirData::UnOp"),
     };
     let ty = tir.inst(operand).ty;
-    visit_expr(tir, pool, own, sink, by_name, operand);
+    visit_expr(tir, pool, own, sink, by_name, _sidecar, operand);
     if !needs_tracking(ty, pool) {
         return;
     }
@@ -558,24 +599,25 @@ fn analyze_if_stmt(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
+    sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let view = tir.if_stmt_view(r);
-    visit_expr(tir, pool, own, sink, by_name, view.cond);
+    visit_expr(tir, pool, own, sink, by_name, sidecar, view.cond);
 
     let snapshot = own.clone();
 
     for stmt in &view.then_stmts {
-        analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+        analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
     }
     let then_state = own.clone();
 
     let mut branch_results = vec![then_state];
     for elif in &view.elif_branches {
         *own = snapshot.clone();
-        visit_expr(tir, pool, own, sink, by_name, elif.cond);
+        visit_expr(tir, pool, own, sink, by_name, sidecar, elif.cond);
         for stmt in &elif.body {
-            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+            analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
         }
         branch_results.push(own.clone());
     }
@@ -583,7 +625,7 @@ fn analyze_if_stmt(
     if let Some(else_stmts) = &view.else_stmts {
         *own = snapshot.clone();
         for stmt in else_stmts {
-            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+            analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
         }
         branch_results.push(own.clone());
     } else {
@@ -627,6 +669,7 @@ fn analyze_while_loop(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
+    sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let view = tir.while_loop_view(r);
@@ -637,17 +680,25 @@ fn analyze_while_loop(
     // and the scratch diags are dropped (the second walk re-emits
     // anything that's still wrong).
     let mut scratch_sink = DiagSink::new();
-    visit_expr(tir, pool, own, &mut scratch_sink, by_name, view.cond);
+    visit_expr(
+        tir,
+        pool,
+        own,
+        &mut scratch_sink,
+        by_name,
+        sidecar,
+        view.cond,
+    );
     for stmt in &view.body {
-        analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, *stmt);
+        analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, sidecar, *stmt);
     }
     let after_first = own.clone();
 
     if states_differ(&entry, &after_first) {
         *own = merge_two(&entry, &after_first);
-        visit_expr(tir, pool, own, sink, by_name, view.cond);
+        visit_expr(tir, pool, own, sink, by_name, sidecar, view.cond);
         for stmt in &view.body {
-            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+            analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
         }
         let after_second = own.clone();
         *own = merge_two(&entry, &after_second);
@@ -668,27 +719,28 @@ fn analyze_for_range(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
+    sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let view = tir.for_range_view(r);
     // Start/end are visited unconditionally — they're plain `int`
     // exprs, so they don't move anything, but they may contain nested
     // reads we want to record.
-    visit_expr(tir, pool, own, sink, by_name, view.start);
-    visit_expr(tir, pool, own, sink, by_name, view.end);
+    visit_expr(tir, pool, own, sink, by_name, sidecar, view.start);
+    visit_expr(tir, pool, own, sink, by_name, sidecar, view.end);
 
     let entry = own.clone();
 
     let mut scratch_sink = DiagSink::new();
     for stmt in &view.body {
-        analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, *stmt);
+        analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, sidecar, *stmt);
     }
     let after_first = own.clone();
 
     if states_differ(&entry, &after_first) {
         *own = merge_two(&entry, &after_first);
         for stmt in &view.body {
-            analyze_stmt(tir, pool, own, sink, by_name, *stmt);
+            analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
         }
         let after_second = own.clone();
         *own = merge_two(&entry, &after_second);
@@ -745,6 +797,7 @@ fn visit_expr(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
+    _sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
@@ -766,8 +819,8 @@ fn visit_expr(
                 own.origin.insert(r, None);
             }
             if let TirData::BinOp { lhs, rhs } = inst.data {
-                visit_expr(tir, pool, own, sink, by_name, lhs);
-                visit_expr(tir, pool, own, sink, by_name, rhs);
+                visit_expr(tir, pool, own, sink, by_name, _sidecar, lhs);
+                visit_expr(tir, pool, own, sink, by_name, _sidecar, rhs);
             }
         }
         TirTag::Call => {
@@ -782,7 +835,7 @@ fn visit_expr(
             // default to borrowing all args.
             let callee_params = by_name.get(&view.name).map(|t| t.params.as_slice());
             for (i, arg) in view.args.iter().enumerate() {
-                visit_expr(tir, pool, own, sink, by_name, *arg);
+                visit_expr(tir, pool, own, sink, by_name, _sidecar, *arg);
                 let arg_ty = tir.inst(*arg).ty;
                 if !needs_tracking(arg_ty, pool) {
                     continue;
@@ -843,7 +896,7 @@ fn visit_expr(
         // ---- Everything else: recurse on operands so nested
         // ---- producers/aliases are still observed.
         _ => {
-            recurse_operands(tir, pool, own, sink, by_name, r);
+            recurse_operands(tir, pool, own, sink, by_name, _sidecar, r);
         }
     }
 }
@@ -854,14 +907,15 @@ fn recurse_operands(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
+    _sidecar: &mut OwnershipSidecar,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
     match inst.data {
-        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, by_name, o),
+        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, by_name, _sidecar, o),
         TirData::BinOp { lhs, rhs } => {
-            visit_expr(tir, pool, own, sink, by_name, lhs);
-            visit_expr(tir, pool, own, sink, by_name, rhs);
+            visit_expr(tir, pool, own, sink, by_name, _sidecar, lhs);
+            visit_expr(tir, pool, own, sink, by_name, _sidecar, rhs);
         }
         // `Extra`-shaped instructions (VarDecl, Assign, Call,
         // IfStmt, WhileLoop, ForRange, CompoundAssign) have
