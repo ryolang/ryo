@@ -330,8 +330,13 @@ fn analyze_function(
         find_consumers(tir, stmt, &mut consumer_of);
     }
     for &temp in &own.temp_owners {
+        // Skip temps that became named-binding owners — Task 3's last-use
+        // pass owns the Free for those. Note: the `Valid`-state filter
+        // below would NOT skip them, because `rebind_to_init` resurrects
+        // the temp's state to `Valid` after `consume_for_assignment` had
+        // stamped it `Moved`. So this `named_owners` filter is
+        // load-bearing, not redundant with the `Valid`-state check.
         if own.named_owners.contains(&temp) {
-            // Last-use pass owns the Free for this one.
             continue;
         }
         if !matches!(own.states.get(&temp), Some(OwnerState::Valid)) {

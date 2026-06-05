@@ -256,6 +256,11 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** Both helpers register a Move-typed binding into `own.pending_dead_store` with `(name, span)` after `rebind_to_init`. The pattern was a single site before commit 20cdd02 added W0001 reassignment coverage; it is now a 2-site duplication. If W0001 ever needs different policy at one site (e.g., distinguishing fresh declaration from reassignment), the duplication will silently allow it.
 **Resolution:** Extract `register_pending_dead_store(own, owner, name, span)`, or fold the registration into `rebind_to_init` (which already takes the binding) and have it accept the span/name pair. Either is a 3-line change.
 
+### I-056 — `collect_last_uses` and `find_consumers` walk the same TIR structure
+**Files:** `src/ownership.rs` (`collect_last_uses`, `find_consumers`)
+**Summary:** The Task 3 last-use pass and the Task 4 anonymous-temp pass both implement the same recursive operand walk over every TIR shape (`UnOp`, `BinOp`, `Call`, `VarDecl`, `Assign`, `CompoundAssign`, `IfStmt`, `WhileLoop`, `ForRange`). They differ only in the per-operand action (record `last_use.entry(owner).or_insert(r)` vs `consumer_of.entry(operand).or_insert(r)`). When new control-flow shapes land (M8.1c Task 9 `BranchId`, Task 10 `break`/`continue`, future `match`), both walkers must be updated in lockstep — drift means missed Frees and silent leaks.
+**Resolution:** Extract a `walk_operands(tir, r, &mut |parent, operand|)` callback-style helper. Each pass passes its own per-operand closure. Single source of truth for TIR-shape coverage.
+
 ---
 
 ## Cross-References
