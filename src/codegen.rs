@@ -217,6 +217,7 @@ impl Codegen<JITModule> {
                 ryo_runtime::ryo_float_to_str as *const u8,
             ),
             ("ryo_bool_to_str", ryo_runtime::ryo_bool_to_str as *const u8),
+            ("ryo_str_free", ryo_runtime::ryo_str_free as *const u8),
         ]);
 
         Ok(Self::from_module(
@@ -1167,6 +1168,28 @@ impl<M: Module> Codegen<M> {
             .declare_function(name, Linkage::Import, &sig)
             .map_err(|e| format!("Failed to declare {}: {}", name, e))?;
         Ok(module.declare_func_in_func(func_id, builder.func))
+    }
+
+    /// Declare `extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64)` for
+    /// the function being built. Returns a `FuncRef` callable via
+    /// `builder.ins().call(_, &[ptr, cap])`. `cap == 0` is a runtime
+    /// no-op (covers static `.rodata` strings emitted by
+    /// `ryo_str_from_literal`).
+    // Used by subsequent M8.1c tasks (Free emission). Allow dead_code
+    // here so this wiring PR doesn't break -Dwarnings clippy.
+    #[allow(dead_code)]
+    fn declare_str_free(
+        module: &mut M,
+        builder: &mut FunctionBuilder,
+        int_type: types::Type,
+    ) -> Result<FuncRef, String> {
+        Self::declare_runtime_fn(
+            module,
+            builder,
+            "ryo_str_free",
+            &[int_type, types::I64],
+            &[],
+        )
     }
 
     /// Materialize a str-typed TIR instruction, returning a
