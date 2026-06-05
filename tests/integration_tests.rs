@@ -2806,3 +2806,61 @@ fn test_dead_store_warning_reassignment() {
         stderr
     );
 }
+
+// Milestone 8.1c Task 7: codegen emits unconditional ryo_str_free
+// calls scheduled by the ownership pass. These tests don't grep
+// the CLIF dump (Cranelift renames runtime functions to opaque
+// `u0:N` identifiers in its text format); they instead exercise
+// the runtime path end-to-end. If a Free fires too early, the
+// `write` syscall reads from freed memory and the printed output
+// is corrupted; if a Free is missed, ASan (Task 11) catches the
+// leak.
+
+#[test]
+fn str_var_assignment_runs_clean() {
+    // Last-use Free anchored after the Var read inside `print(s)`.
+    // The Free must land after the syscall has copied the bytes;
+    // otherwise stdout is garbled.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\ts: str = \"hello\"\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "free_var.ryo", code);
+    let output =
+        run_ryo_command(&["run", "free_var.ryo"], &test_file).expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hello"),
+        "stdout should contain 'hello': {}",
+        stdout
+    );
+}
+
+#[test]
+fn str_concat_runs_clean_after_free() {
+    // Concat allocates a fresh buffer and the schedule frees the
+    // operand temporaries plus the named-binding owner. If any
+    // Free fires before `print` reads the concatenation, the
+    // allocator reuses the slab and `Hello, World!` comes out
+    // garbled.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code =
+        "fn main():\n\ta: str = \"Hello, \"\n\tb: str = \"World!\"\n\tc: str = a + b\n\tprint(c)\n";
+    let test_file = create_test_file(temp_dir.path(), "free_concat.ryo", code);
+    let output = run_ryo_command(&["run", "free_concat.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Hello, World!"),
+        "stdout should contain 'Hello, World!': {}",
+        stdout
+    );
+}

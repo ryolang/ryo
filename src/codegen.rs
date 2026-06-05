@@ -32,7 +32,7 @@ use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
 /// Returns `true` if `ty` resolves to `Str` in the pool.
@@ -138,15 +138,24 @@ struct FunctionContext<'a, M: Module> {
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
     inst_values: HashMap<TirRef, ValueRepr>,
+    /// Indices into `sidecar.free_schedule` whose Frees have already
+    /// been emitted in codegen. A given anchor TirRef can be reached
+    /// through both `eval_inst` and `eval_inst_str` (e.g. a `Var`
+    /// materialized once as scalar and once as fat-pointer), and the
+    /// end-of-stmt sweep can also see anchors that an earlier
+    /// per-eval hook already fired. Without this guard each path
+    /// would emit the Free, double-freeing the allocation.
+    freed_at: HashSet<usize>,
     loop_stack: Vec<LoopContext>,
     str_locals: HashMap<StringId, StrLocals>,
     /// For str-returning functions: the hidden sret pointer (first block param)
     /// through which the callee writes the (ptr, len, cap) triple.
     sret_ptr: Option<Value>,
-    /// Ownership sidecar: read by Task 7+ Free emission. Plumbed in
-    /// now so codegen has it ready when later tasks start consuming
-    /// `free_schedule` / `free_on_reassign`.
-    #[allow(dead_code)]
+    /// Ownership sidecar: consulted after each materialised
+    /// instruction to emit unconditional `ryo_str_free` calls
+    /// scheduled by the ownership pass (Task 7). Branch-gated
+    /// entries are deferred until conditional destruction lands
+    /// (Task 9).
     sidecar: &'a crate::ownership::OwnershipSidecar,
 }
 
@@ -464,6 +473,7 @@ impl<M: Module> Codegen<M> {
                 locals,
                 func_ids,
                 inst_values: HashMap::new(),
+                freed_at: HashSet::new(),
                 loop_stack: Vec::new(),
                 str_locals: str_param_locals,
                 sret_ptr,
@@ -508,6 +518,19 @@ impl<M: Module> Codegen<M> {
                 break;
             }
             block_terminated = Self::emit_stmt(builder, ctx, stmt_ref)?;
+            // Skip Free emission after terminators (e.g. Return): the
+            // current block is sealed and Cranelift rejects any
+            // instruction after a terminator. Returns also transfer
+            // ownership of the returned value to the caller, so
+            // emitting a Free here would be incorrect anyway.
+            if !block_terminated {
+                // Anchor-on-stmt Frees first (e.g. dead-store survivors
+                // anchored after a VarDecl), then a sweep that catches
+                // sub-expression-anchored entries whose consumers have
+                // now finished emitting IR.
+                Self::emit_unconditional_frees(builder, ctx, stmt_ref)?;
+                Self::sweep_unconditional_frees(builder, ctx)?;
+            }
         }
         Ok(block_terminated)
     }
@@ -1183,14 +1206,124 @@ impl<M: Module> Codegen<M> {
         Ok(module.declare_func_in_func(func_id, builder.func))
     }
 
+    /// Emit `ryo_str_free(ptr, cap)` for any unconditional Free whose
+    /// anchor is `tir_ref`. Called at the end of each materialisation
+    /// (`eval_inst` / `eval_inst_str`) so that Task 4's anonymous-
+    /// temporary Frees, anchored on the consuming `Call`, fire after
+    /// the consumer has emitted its IR. Branch-gated entries are
+    /// skipped here — they're handled in Task 9.
+    ///
+    /// Targets cached as `ValueRepr::Scalar` are skipped: those are
+    /// raw `.rodata` pointers (e.g. the StrConst arg of `__ryo_panic`,
+    /// which uses the borrowed-scalar ABI). They don't own a heap
+    /// allocation and `cap` isn't tracked through the scalar path,
+    /// so emitting a Free is both incorrect and impossible.
+    ///
+    /// `freed_at` (a set of `free_schedule` indices) guards against
+    /// double-emission across the eval-end hooks and the end-of-stmt
+    /// sweep.
+    fn emit_unconditional_frees(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        tir_ref: TirRef,
+    ) -> Result<(), String> {
+        // Collect indices first to avoid simultaneous &mut + & on ctx.
+        let pending: Vec<(usize, TirRef)> = ctx
+            .sidecar
+            .free_schedule
+            .iter()
+            .enumerate()
+            .filter(|(idx, fp)| {
+                fp.after == tir_ref && fp.branch.is_none() && !ctx.freed_at.contains(idx)
+            })
+            .map(|(idx, fp)| (idx, fp.target))
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
+        for (idx, target) in pending {
+            // If the target wasn't materialised yet, defer: the
+            // anchor's program point may precede the target's
+            // definition (this happens today for Task 3 entries where
+            // `last_use` resolves to the post-rebind owner of a
+            // binding — see the open ownership-pass interaction
+            // documented in the milestone notes). A later sweep
+            // re-checks once the target is cached.
+            let Some(repr) = ctx.inst_values.get(&target).copied() else {
+                continue;
+            };
+            ctx.freed_at.insert(idx);
+            match repr {
+                ValueRepr::Str { ptr, cap, .. } => {
+                    builder.ins().call(free_ref, &[ptr, cap]);
+                }
+                ValueRepr::Scalar(_) => {
+                    // Scalar-cached str = raw `.rodata` ptr (e.g. the
+                    // StrConst arg of `__ryo_panic`'s borrowed-scalar
+                    // ABI). Not heap-allocated; nothing to free.
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// End-of-statement sweep: fire any unconditional Free whose
+    /// anchor was materialised within the just-emitted statement but
+    /// hasn't been emitted yet. This covers Task 3's last-use Frees
+    /// where `after` is a sub-expression `Var` read — by the time the
+    /// statement finishes, the consumer has already issued its IR, so
+    /// a Free here lands after the consumer's use of the buffer.
+    /// Eager firing during the inner `eval_inst_str(Var)` would have
+    /// dropped the allocation before the consumer (e.g. `print`'s
+    /// `write` syscall) finished reading from it.
+    fn sweep_unconditional_frees(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+    ) -> Result<(), String> {
+        let pending: Vec<(usize, TirRef)> = ctx
+            .sidecar
+            .free_schedule
+            .iter()
+            .enumerate()
+            .filter(|(idx, fp)| {
+                fp.branch.is_none()
+                    && !ctx.freed_at.contains(idx)
+                    && ctx.inst_values.contains_key(&fp.after)
+                    && ctx.inst_values.contains_key(&fp.target)
+            })
+            .map(|(idx, fp)| (idx, fp.target))
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
+        for (idx, target) in pending {
+            let repr = ctx.inst_values.get(&target).copied().ok_or_else(|| {
+                format!(
+                    "ownership pass scheduled Free for %{} but no ValueRepr cached",
+                    target.index()
+                )
+            })?;
+            ctx.freed_at.insert(idx);
+            match repr {
+                ValueRepr::Str { ptr, cap, .. } => {
+                    builder.ins().call(free_ref, &[ptr, cap]);
+                }
+                ValueRepr::Scalar(_) => {
+                    // See `emit_unconditional_frees`: Scalar repr =
+                    // borrowed `.rodata` ptr; nothing to free.
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Declare `extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64)` for
     /// the function being built. Returns a `FuncRef` callable via
     /// `builder.ins().call(_, &[ptr, cap])`. `cap == 0` is a runtime
     /// no-op (covers static `.rodata` strings emitted by
     /// `ryo_str_from_literal`).
-    // Used by subsequent M8.1c tasks (Free emission). Allow dead_code
-    // here so this wiring PR doesn't break -Dwarnings clippy.
-    #[allow(dead_code)]
     fn declare_str_free(
         module: &mut M,
         builder: &mut FunctionBuilder,
