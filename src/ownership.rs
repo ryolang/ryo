@@ -108,6 +108,20 @@ pub(crate) struct Ownership {
     /// (move/return). Whatever remains at function end is a dead
     /// store, surfaced as W0001.
     pub pending_dead_store: HashMap<TirRef, (StringId, Span)>,
+
+    /// SSA values that allocated heap-owned strings during the
+    /// forward walk: `StrConst`, `StrConcat`, and Move-typed `Call`
+    /// results. Used by the anonymous-temporary-free pass to identify
+    /// candidates for scheduling. A temp_owner that ends up bound to
+    /// a `VarDecl`/`Assign` (see `named_owners`) is freed via the
+    /// last-use pass instead.
+    pub temp_owners: HashSet<TirRef>,
+
+    /// Subset of `temp_owners` that became the underlying value of a
+    /// named binding via `VarDecl` or `Assign`. The anonymous-temp
+    /// pass excludes these — they're handled by the named-binding
+    /// last-use pass (Task 3).
+    pub named_owners: HashSet<TirRef>,
 }
 
 impl Ownership {
@@ -308,6 +322,35 @@ fn analyze_function(
         // Owners with no last_use are dead stores — handled in Task 5.
     }
 
+    // Anonymous-temporary frees: temp_owners that didn't become named
+    // bindings and are still Valid at function exit need their own
+    // Free anchored after their single consumer.
+    let mut consumer_of: HashMap<TirRef, TirRef> = HashMap::new();
+    for &stmt in &body_stmts {
+        find_consumers(tir, stmt, &mut consumer_of);
+    }
+    for &temp in &own.temp_owners {
+        if own.named_owners.contains(&temp) {
+            // Last-use pass owns the Free for this one.
+            continue;
+        }
+        if !matches!(own.states.get(&temp), Some(OwnerState::Valid)) {
+            // Already moved (flowed into a `move` arg, return, etc.).
+            continue;
+        }
+        if let Some(&consumer) = consumer_of.get(&temp) {
+            sidecar.free_schedule.push(FreePoint {
+                after: consumer,
+                target: temp,
+                span: tir.span(temp),
+                branch: None,
+            });
+        }
+        // No consumer = unreachable from any body statement; can't
+        // happen in well-formed TIR. Don't emit (no consumer means
+        // codegen's inst_values won't have ptr/cap either).
+    }
+
     // Anything left pending was declared but never read or
     // consumed — emit W0001 once per surviving binding.
     for (_owner, (name, span)) in own.pending_dead_store.drain() {
@@ -493,6 +536,7 @@ fn rebind_to_init(own: &mut Ownership, name: StringId, init: TirRef) {
     own.origin.insert(init, None);
     own.states.insert(init, OwnerState::Valid);
     own.current_owner.insert(name, init);
+    own.named_owners.insert(init);
 }
 
 /// Walk back from `init` to whichever SSA value currently owns the
@@ -943,6 +987,96 @@ fn collect_last_uses(
     }
 }
 
+/// Build a `child_TirRef → parent_TirRef` map. Each temporary owner
+/// has at most one direct parent in the TIR (TIR is tree-shaped per
+/// function), so `or_insert` correctly preserves the first parent
+/// observed. Used by the anonymous-temporary-free pass to anchor
+/// each temp's Free after its single consumer.
+fn find_consumers(tir: &Tir, r: TirRef, consumer_of: &mut HashMap<TirRef, TirRef>) {
+    let inst = *tir.inst(r);
+    match inst.data {
+        TirData::UnOp(o) => {
+            consumer_of.entry(o).or_insert(r);
+            find_consumers(tir, o, consumer_of);
+        }
+        TirData::BinOp { lhs, rhs } => {
+            consumer_of.entry(lhs).or_insert(r);
+            consumer_of.entry(rhs).or_insert(r);
+            find_consumers(tir, lhs, consumer_of);
+            find_consumers(tir, rhs, consumer_of);
+        }
+        TirData::Extra(_) => match inst.tag {
+            TirTag::Call => {
+                let view = tir.call_view(r);
+                for &arg in &view.args {
+                    consumer_of.entry(arg).or_insert(r);
+                    find_consumers(tir, arg, consumer_of);
+                }
+            }
+            TirTag::VarDecl => {
+                let v = tir.var_decl_view(r);
+                consumer_of.entry(v.initializer).or_insert(r);
+                find_consumers(tir, v.initializer, consumer_of);
+            }
+            TirTag::Assign => {
+                let v = tir.assign_view(r);
+                consumer_of.entry(v.value).or_insert(r);
+                find_consumers(tir, v.value, consumer_of);
+            }
+            TirTag::CompoundAssign => {
+                let v = tir.compound_assign_view(r);
+                consumer_of.entry(v.value).or_insert(r);
+                find_consumers(tir, v.value, consumer_of);
+            }
+            TirTag::IfStmt => {
+                let v = tir.if_stmt_view(r);
+                consumer_of.entry(v.cond).or_insert(r);
+                find_consumers(tir, v.cond, consumer_of);
+                for &s in &v.then_stmts {
+                    find_consumers(tir, s, consumer_of);
+                }
+                for elif in &v.elif_branches {
+                    consumer_of.entry(elif.cond).or_insert(r);
+                    find_consumers(tir, elif.cond, consumer_of);
+                    for &s in &elif.body {
+                        find_consumers(tir, s, consumer_of);
+                    }
+                }
+                if let Some(else_stmts) = &v.else_stmts {
+                    for &s in else_stmts {
+                        find_consumers(tir, s, consumer_of);
+                    }
+                }
+            }
+            TirTag::WhileLoop => {
+                let v = tir.while_loop_view(r);
+                consumer_of.entry(v.cond).or_insert(r);
+                find_consumers(tir, v.cond, consumer_of);
+                for &s in &v.body {
+                    find_consumers(tir, s, consumer_of);
+                }
+            }
+            TirTag::ForRange => {
+                let v = tir.for_range_view(r);
+                consumer_of.entry(v.start).or_insert(r);
+                consumer_of.entry(v.end).or_insert(r);
+                find_consumers(tir, v.start, consumer_of);
+                find_consumers(tir, v.end, consumer_of);
+                for &s in &v.body {
+                    find_consumers(tir, s, consumer_of);
+                }
+            }
+            _ => {}
+        },
+        TirData::None
+        | TirData::Int(_)
+        | TirData::Float(_)
+        | TirData::Str(_)
+        | TirData::Bool(_)
+        | TirData::Var(_) => {}
+    }
+}
+
 fn visit_expr(
     tir: &Tir,
     pool: &InternPool,
@@ -963,12 +1097,14 @@ fn visit_expr(
             if needs_tracking(inst.ty, pool) {
                 own.states.insert(r, OwnerState::Valid);
                 own.origin.insert(r, None);
+                own.temp_owners.insert(r);
             }
         }
         TirTag::StrConcat => {
             if needs_tracking(inst.ty, pool) {
                 own.states.insert(r, OwnerState::Valid);
                 own.origin.insert(r, None);
+                own.temp_owners.insert(r);
             }
             if let TirData::BinOp { lhs, rhs } = inst.data {
                 visit_expr(tir, pool, own, sink, by_name, sidecar, lhs);
@@ -980,6 +1116,7 @@ fn visit_expr(
             if needs_tracking(inst.ty, pool) {
                 own.states.insert(r, OwnerState::Valid);
                 own.origin.insert(r, None);
+                own.temp_owners.insert(r);
             }
             let view = tir.call_view(r);
             // Look up callee parameter conventions. Builtins
@@ -1145,6 +1282,43 @@ mod tests {
         assert_eq!(sidecar.free_schedule[0].target, lit);
         assert_eq!(sidecar.free_schedule[0].after, var_read);
         assert!(sidecar.free_schedule[0].branch.is_none());
+    }
+
+    #[test]
+    fn concat_intermediate_freed_after_consumer() {
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+        use std::collections::HashSet;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let print = pool.intern_str("print");
+        let a = pool.intern_str("a");
+        let b = pool.intern_str("b");
+        let span = SimpleSpan::new((), 0..0);
+
+        // print("a" + "b")
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let la = tb.str_const(a, str_ty, span);
+        let lb = tb.str_const(b, str_ty, span);
+        let cat = tb.binary(TirTag::StrConcat, str_ty, la, lb, span);
+        let call = tb.call(print, &[cat], void, span);
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[stmt]);
+
+        let mut sink = DiagSink::new();
+        let sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(sink.is_empty());
+
+        // Three Frees: la, lb, cat. Anchored after consumers (la/lb on
+        // cat, cat on call). Order-independent.
+        let targets: HashSet<TirRef> = sidecar.free_schedule.iter().map(|fp| fp.target).collect();
+        assert!(targets.contains(&la), "expected la in free_schedule");
+        assert!(targets.contains(&lb), "expected lb in free_schedule");
+        assert!(targets.contains(&cat), "expected cat in free_schedule");
+        assert_eq!(sidecar.free_schedule.len(), 3);
     }
 
     #[test]
