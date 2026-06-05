@@ -642,12 +642,30 @@ impl<M: Module> Codegen<M> {
                     let ValueRepr::Str { ptr, len, cap } = repr else {
                         unreachable!("str-typed assign should produce ValueRepr::Str");
                     };
-                    let locals = ctx.str_locals.get(&view.name).ok_or_else(|| {
-                        format!(
-                            "Undefined string variable in assign: '{}'",
-                            ctx.pool.str(view.name)
-                        )
-                    })?;
+                    let locals = ctx
+                        .str_locals
+                        .get(&view.name)
+                        .ok_or_else(|| {
+                            format!(
+                                "Undefined string variable in assign: '{}'",
+                                ctx.pool.str(view.name)
+                            )
+                        })?
+                        .clone();
+                    // Free the old allocation before overwriting locals.
+                    // sidecar.free_on_reassign[r] is set whenever the
+                    // ownership pass observed a Valid old owner at this
+                    // Assign. The old (ptr, cap) live in the binding's
+                    // StrLocals Variables — NOT in inst_values[old_owner],
+                    // which holds the StrConst's original (ptr, cap) at
+                    // the literal's emission point and may be stale
+                    // across reassigns.
+                    if ctx.sidecar.free_on_reassign.contains_key(&r) {
+                        let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
+                        let old_ptr = builder.use_var(locals.ptr);
+                        let old_cap = builder.use_var(locals.cap);
+                        builder.ins().call(free_ref, &[old_ptr, old_cap]);
+                    }
                     builder.def_var(locals.ptr, ptr);
                     builder.def_var(locals.len, len);
                     builder.def_var(locals.cap, cap);

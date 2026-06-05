@@ -2864,3 +2864,43 @@ fn str_concat_runs_clean_after_free() {
         stdout
     );
 }
+
+#[test]
+fn mut_str_reassign_runs_clean() {
+    // Milestone 8.1c Task 8: a `mut` str binding reassigned with a
+    // new literal must free the old allocation before overwriting
+    // the StrLocals triple. If the Free is missing, ASan (Task 11)
+    // catches the leak; if it fires too late or reads from stale
+    // inst_values, stdout is corrupted or the run aborts.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut s: str = \"hello\"\n\ts = \"world\"\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "free_reassign.ryo", code);
+    let output = run_ryo_command(&["run", "free_reassign.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("world"),
+        "stdout should contain 'world': {}",
+        stdout
+    );
+    // The `ryo run` CLI dumps the source program to stdout before
+    // executing, so a naive `!stdout.contains("hello")` check would
+    // false-positive on the echoed source. Instead, look at the
+    // post-`[Codegen]` slice (the runtime's actual output) and
+    // confirm the program printed exactly `"world"` — not the old
+    // `"hello"` value, and not garbled bytes from a use-after-free.
+    let runtime_output = stdout
+        .split("[Codegen]")
+        .nth(1)
+        .expect("CLI trace should include [Codegen] section");
+    assert!(
+        !runtime_output.contains("hello"),
+        "runtime stdout should not leak old value 'hello': {}",
+        runtime_output
+    );
+}
