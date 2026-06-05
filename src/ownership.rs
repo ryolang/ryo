@@ -505,6 +505,22 @@ fn analyze_assign(
     let value_ty = tir.inst(view.value).ty;
     visit_expr(tir, pool, own, sink, by_name, sidecar, view.value);
     if needs_tracking(value_ty, pool) {
+        // Capture the old owner before consume_for_assignment / rebind
+        // overwrite current_owner[name]. Only emit the Free entry if the
+        // old owner is Valid — Borrowed/Moved/missing means there is no
+        // live allocation to release. Codegen (Task 8) consults this map
+        // when lowering Assign.
+        if let Some(&old_owner) = own.current_owner.get(&view.name)
+            && matches!(own.states.get(&old_owner), Some(OwnerState::Valid))
+        {
+            sidecar.free_on_reassign.insert(r, old_owner);
+            // Reassignment runs the old value's destructor (the
+            // free_on_reassign Free above) — that's an observable use,
+            // so the prior VarDecl/Assign isn't a dead store. Drop the
+            // pending_dead_store entry so W0001 doesn't fire and the
+            // drain block doesn't try to schedule a redundant Free.
+            own.pending_dead_store.remove(&old_owner);
+        }
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, view.value);
         consume_for_assignment(pool, own, sink, view.value, span, consumed_name);
@@ -1375,6 +1391,64 @@ mod tests {
         assert_eq!(sidecar.free_schedule[0].target, lit);
         assert_eq!(sidecar.free_schedule[0].after, var_read);
         assert!(sidecar.free_schedule[0].branch.is_none());
+    }
+
+    #[test]
+    fn reassignment_records_free_on_old_owner() {
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let world = pool.intern_str("world");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main():
+        //     mut s: str = "hello"
+        //     s = "world"
+        //     print(s)
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let l1 = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, /* mutable = */ true, str_ty, l1, span);
+        let l2 = tb.str_const(world, str_ty, span);
+        let assign = tb.assign(s, str_ty, l2, span);
+        let var_read = tb.var(s, str_ty, span);
+        let call = tb.call(print, &[var_read], void, span);
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, assign, stmt]);
+
+        let mut sink = DiagSink::new();
+        let sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(sink.is_empty(), "expected no diagnostics");
+
+        // Reassign frees l1 (old owner) keyed on the Assign inst.
+        assert_eq!(
+            sidecar.free_on_reassign.get(&assign),
+            Some(&l1),
+            "expected free_on_reassign[assign] = l1"
+        );
+
+        // Last-use frees l2 (new owner reaches function exit via print(s)).
+        assert!(
+            sidecar
+                .free_schedule
+                .iter()
+                .any(|fp| fp.target == l2 && fp.after == var_read && fp.branch.is_none()),
+            "expected last-use Free for l2; got: {:?}",
+            sidecar.free_schedule
+        );
+
+        // No dead-store Free for l1 — it's covered by free_on_reassign.
+        assert!(
+            !sidecar.free_schedule.iter().any(|fp| fp.target == l1),
+            "l1 must not be in free_schedule (it's in free_on_reassign): {:?}",
+            sidecar.free_schedule
+        );
     }
 
     #[test]
