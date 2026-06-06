@@ -2904,3 +2904,47 @@ fn mut_str_reassign_runs_clean() {
         runtime_output
     );
 }
+
+#[test]
+fn conditional_move_runs_clean() {
+    // Milestone 8.1c Task 9: branch-gated Frees for owners that end
+    // Valid in some arms and Moved in others. With `flag = false`
+    // we take the else-arm: `s` stays Valid through `print(s)` and
+    // must be freed by the conditional Free anchored at the last
+    // statement of the else-arm. The then-arm's `consume(s)` move
+    // means the post-merge state stamps `s` as Moved, so the
+    // function-exit last-use pass does NOT schedule a Free — the
+    // branch-gated entry is the only thing keeping the allocation
+    // from leaking under ASan.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "\
+fn consume(move s: str):
+\tprint(s)
+
+fn main():
+\ts: str = \"hello\"
+\tflag: bool = false
+\tif flag:
+\t\tconsume(s)
+\telse:
+\t\tprint(s)
+";
+    let test_file = create_test_file(temp_dir.path(), "free_cond.ryo", code);
+    let output =
+        run_ryo_command(&["run", "free_cond.ryo"], &test_file).expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let runtime_output = stdout
+        .split("[Codegen]")
+        .nth(1)
+        .expect("CLI trace should include [Codegen] section");
+    assert!(
+        runtime_output.contains("hello"),
+        "runtime stdout should contain 'hello': {}",
+        runtime_output
+    );
+}

@@ -152,11 +152,18 @@ struct FunctionContext<'a, M: Module> {
     /// through which the callee writes the (ptr, len, cap) triple.
     sret_ptr: Option<Value>,
     /// Ownership sidecar: consulted after each materialised
-    /// instruction to emit unconditional `ryo_str_free` calls
-    /// scheduled by the ownership pass (Task 7). Branch-gated
-    /// entries are deferred until conditional destruction lands
-    /// (Task 9).
+    /// instruction to emit `ryo_str_free` calls scheduled by the
+    /// ownership pass. Both unconditional (`branch: None`) and
+    /// branch-gated (`branch: Some(_)`) entries are filtered through
+    /// `branch_active`.
     sidecar: &'a crate::ownership::OwnershipSidecar,
+    /// Active arm stack for conditional destruction (Task 9). Each
+    /// entry is the `BranchId` of an enclosing if/elif/else arm
+    /// currently being lowered. `branch_active` walks this stack to
+    /// gate branch-tagged `FreePoint`s — `contains` (not `last()`)
+    /// so a Free anchored to a parent arm still fires from inside a
+    /// nested child arm of the same parent.
+    branch_stack: Vec<crate::ownership::BranchId>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -478,6 +485,7 @@ impl<M: Module> Codegen<M> {
                 str_locals: str_param_locals,
                 sret_ptr,
                 sidecar,
+                branch_stack: Vec::new(),
             };
 
             let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
@@ -528,8 +536,8 @@ impl<M: Module> Codegen<M> {
                 // anchored after a VarDecl), then a sweep that catches
                 // sub-expression-anchored entries whose consumers have
                 // now finished emitting IR.
-                Self::emit_unconditional_frees(builder, ctx, stmt_ref)?;
-                Self::sweep_unconditional_frees(builder, ctx)?;
+                Self::emit_due_frees(builder, ctx, stmt_ref)?;
+                Self::sweep_due_frees(builder, ctx)?;
             }
         }
         Ok(block_terminated)
@@ -753,6 +761,13 @@ impl<M: Module> Codegen<M> {
         let view = ctx.tir.if_stmt_view(r);
         let merge_block = builder.create_block();
 
+        // Pull the BranchId assignments allocated by the ownership
+        // pass for this if. Default-empty if the sidecar has no entry
+        // (e.g. an if with no Move-typed bindings live across it):
+        // unconditional Frees still fire because their `branch` is
+        // `None`, and there are no branch-gated entries to gate.
+        let branch_ids = ctx.sidecar.if_branches.get(&r).cloned().unwrap_or_default();
+
         let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
         let then_block = builder.create_block();
 
@@ -779,7 +794,13 @@ impl<M: Module> Codegen<M> {
 
         builder.seal_block(then_block);
         builder.switch_to_block(then_block);
-        let then_returns = Self::emit_scoped_body(builder, ctx, &view.then_stmts)?;
+        // Manual push/pop (not RAII) — `?` propagation interacts
+        // poorly with a scope-guard holding `&mut ctx`. We pop on
+        // both Ok and Err paths by binding the result first.
+        ctx.branch_stack.push(branch_ids.then_branch);
+        let then_returns_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
+        ctx.branch_stack.pop();
+        let then_returns = then_returns_result?;
         if !then_returns {
             builder.ins().jump(merge_block, &[]);
         }
@@ -805,7 +826,11 @@ impl<M: Module> Codegen<M> {
 
             builder.seal_block(elif_body_block);
             builder.switch_to_block(elif_body_block);
-            let elif_returns = Self::emit_scoped_body(builder, ctx, &elif.body)?;
+            let elif_branch_id = branch_ids.elif_branches.get(i).copied().unwrap_or_default();
+            ctx.branch_stack.push(elif_branch_id);
+            let elif_returns_result = Self::emit_scoped_body(builder, ctx, &elif.body);
+            ctx.branch_stack.pop();
+            let elif_returns = elif_returns_result?;
             if !elif_returns {
                 builder.ins().jump(merge_block, &[]);
             }
@@ -815,7 +840,11 @@ impl<M: Module> Codegen<M> {
         if let Some(else_stmts) = &view.else_stmts {
             builder.seal_block(else_or_merge);
             builder.switch_to_block(else_or_merge);
-            let else_returns = Self::emit_scoped_body(builder, ctx, else_stmts)?;
+            let else_branch_id = branch_ids.else_branch.unwrap_or_default();
+            ctx.branch_stack.push(else_branch_id);
+            let else_returns_result = Self::emit_scoped_body(builder, ctx, else_stmts);
+            ctx.branch_stack.pop();
+            let else_returns = else_returns_result?;
             if !else_returns {
                 builder.ins().jump(merge_block, &[]);
             }
@@ -1228,12 +1257,29 @@ impl<M: Module> Codegen<M> {
         Ok(module.declare_func_in_func(func_id, builder.func))
     }
 
-    /// Emit `ryo_str_free(ptr, cap)` for any unconditional Free whose
-    /// anchor is `tir_ref`. Called at the end of each materialisation
-    /// (`eval_inst` / `eval_inst_str`) so that Task 4's anonymous-
-    /// temporary Frees, anchored on the consuming `Call`, fire after
-    /// the consumer has emitted its IR. Branch-gated entries are
-    /// skipped here — they're handled in Task 9.
+    /// True if a `FreePoint` with the given `branch` tag is eligible
+    /// to fire at the current point in codegen. Unconditional entries
+    /// (`branch == None`) always pass; branch-gated entries fire only
+    /// when their `BranchId` is on `branch_stack`. We use `contains`
+    /// rather than `last() == Some(&b)` so a Free anchored to a
+    /// parent arm still fires when codegen is inside a nested child
+    /// arm of that parent.
+    fn branch_active(
+        branch: Option<crate::ownership::BranchId>,
+        stack: &[crate::ownership::BranchId],
+    ) -> bool {
+        match branch {
+            None => true,
+            Some(b) => stack.contains(&b),
+        }
+    }
+
+    /// Emit `ryo_str_free(ptr, cap)` for any scheduled Free whose
+    /// anchor is `tir_ref` and whose `branch` tag is active on the
+    /// current `branch_stack`. Called at the end of each
+    /// materialisation (`eval_inst` / `eval_inst_str`) so that Task
+    /// 4's anonymous-temporary Frees, anchored on the consuming
+    /// `Call`, fire after the consumer has emitted its IR.
     ///
     /// Targets cached as `ValueRepr::Scalar` are skipped: those are
     /// raw `.rodata` pointers (e.g. the StrConst arg of `__ryo_panic`,
@@ -1244,7 +1290,7 @@ impl<M: Module> Codegen<M> {
     /// `freed_at` (a set of `free_schedule` indices) guards against
     /// double-emission across the eval-end hooks and the end-of-stmt
     /// sweep.
-    fn emit_unconditional_frees(
+    fn emit_due_frees(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         tir_ref: TirRef,
@@ -1256,7 +1302,9 @@ impl<M: Module> Codegen<M> {
             .iter()
             .enumerate()
             .filter(|(idx, fp)| {
-                fp.after == tir_ref && fp.branch.is_none() && !ctx.freed_at.contains(idx)
+                fp.after == tir_ref
+                    && Self::branch_active(fp.branch, &ctx.branch_stack)
+                    && !ctx.freed_at.contains(idx)
             })
             .map(|(idx, fp)| (idx, fp.target))
             .collect();
@@ -1287,16 +1335,20 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// End-of-statement sweep: fire any unconditional Free whose
-    /// anchor was materialised within the just-emitted statement but
-    /// hasn't been emitted yet. This covers Task 3's last-use Frees
-    /// where `after` is a sub-expression `Var` read — by the time the
-    /// statement finishes, the consumer has already issued its IR, so
-    /// a Free here lands after the consumer's use of the buffer.
+    /// End-of-statement sweep: fire any scheduled Free whose anchor
+    /// was materialised within the just-emitted statement but hasn't
+    /// been emitted yet. This covers Task 3's last-use Frees where
+    /// `after` is a sub-expression `Var` read — by the time the
+    /// statement finishes, the consumer has already issued its IR,
+    /// so a Free here lands after the consumer's use of the buffer.
     /// Eager firing during the inner `eval_inst_str(Var)` would have
     /// dropped the allocation before the consumer (e.g. `print`'s
     /// `write` syscall) finished reading from it.
-    fn sweep_unconditional_frees(
+    ///
+    /// Branch-gated entries are filtered through `branch_active`, so
+    /// only Frees whose `BranchId` is on the current `branch_stack`
+    /// fire here.
+    fn sweep_due_frees(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<(), String> {
@@ -1306,7 +1358,7 @@ impl<M: Module> Codegen<M> {
             .iter()
             .enumerate()
             .filter(|(idx, fp)| {
-                fp.branch.is_none()
+                Self::branch_active(fp.branch, &ctx.branch_stack)
                     && !ctx.freed_at.contains(idx)
                     && ctx.inst_values.contains_key(&fp.after)
                     && ctx.inst_values.contains_key(&fp.target)
@@ -1330,7 +1382,7 @@ impl<M: Module> Codegen<M> {
                     builder.ins().call(free_ref, &[ptr, cap]);
                 }
                 ValueRepr::Scalar(_) => {
-                    // See `emit_unconditional_frees`: Scalar repr =
+                    // See `emit_due_frees`: Scalar repr =
                     // borrowed `.rodata` ptr; nothing to free.
                 }
             }

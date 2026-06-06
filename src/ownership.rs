@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 /// Identifies a specific arm of an `IfStmt` (and, future, `Match`).
 /// Assigned by the ownership pass; codegen maps each `BranchId` to a
 /// concrete Cranelift `Block` as it lowers if/else regions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct BranchId(pub u32);
 
 /// One scheduled Free. Codegen emits `ryo_str_free(ptr, cap)` after
@@ -42,6 +42,18 @@ pub struct FreePoint {
     pub target: TirRef,
     pub span: Span,
     pub branch: Option<BranchId>,
+}
+
+/// Per-`IfStmt` mapping from arm position to its assigned [`BranchId`].
+/// Codegen uses this to push the right `BranchId` onto `branch_stack`
+/// as it lowers each arm, so a branch-gated `FreePoint` only fires
+/// inside the arm that ended with the owner still `Valid`.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // fields read by codegen's branch_stack
+pub struct IfBranchIds {
+    pub then_branch: BranchId,
+    pub elif_branches: Vec<BranchId>,
+    pub else_branch: Option<BranchId>,
 }
 
 /// Side-table produced by the ownership pass alongside diagnostics.
@@ -57,6 +69,10 @@ pub struct OwnershipSidecar {
     /// Value: the `TirRef` whose buffer must be freed *before* the new
     /// fat-pointer triple is stored into the binding's `StrLocals`.
     pub free_on_reassign: HashMap<TirRef, TirRef>,
+    /// `BranchId` assignments per `IfStmt`. Codegen consults this when
+    /// lowering if/elif/else to know which `BranchId` to push onto
+    /// `branch_stack` for each arm.
+    pub if_branches: HashMap<TirRef /* IfStmt inst */, IfBranchIds>,
 }
 
 // ---------- Classification ----------
@@ -134,6 +150,11 @@ pub(crate) struct Ownership {
     /// reassignment to the post-rebind owner. For Move-typed reads
     /// this anchors the last-use Free to the correct allocation.
     pub owner_at_read: HashMap<TirRef, TirRef>,
+
+    /// Monotonic `BranchId` allocator. Bumped each time
+    /// `analyze_if_stmt` enters an arm (then / each elif / else) so
+    /// the resulting ids are unique across the function body.
+    pub next_branch_id: u32,
 }
 
 impl Ownership {
@@ -775,6 +796,32 @@ fn analyze_if_stmt(
     let view = tir.if_stmt_view(r);
     visit_expr(tir, pool, own, sink, by_name, sidecar, view.cond);
 
+    // Allocate fresh BranchIds for this if's arms. Codegen consults
+    // `sidecar.if_branches` when lowering the if so each arm pushes
+    // the right BranchId onto its `branch_stack`.
+    let then_branch = BranchId(own.next_branch_id);
+    own.next_branch_id += 1;
+    let mut elif_branches: Vec<BranchId> = Vec::with_capacity(view.elif_branches.len());
+    for _ in &view.elif_branches {
+        elif_branches.push(BranchId(own.next_branch_id));
+        own.next_branch_id += 1;
+    }
+    let else_branch = if view.else_stmts.is_some() {
+        let id = BranchId(own.next_branch_id);
+        own.next_branch_id += 1;
+        Some(id)
+    } else {
+        None
+    };
+    sidecar.if_branches.insert(
+        r,
+        IfBranchIds {
+            then_branch,
+            elif_branches: elif_branches.clone(),
+            else_branch,
+        },
+    );
+
     let snapshot = own.clone();
 
     for stmt in &view.then_stmts {
@@ -800,6 +847,80 @@ fn analyze_if_stmt(
         branch_results.push(own.clone());
     } else {
         branch_results.push(snapshot.clone());
+    }
+
+    // Schedule branch-gated Frees for owners that diverge across
+    // arms (Valid in some, Moved in others). For each Valid arm,
+    // anchor a Free after that arm's last body statement and gate
+    // it on the arm's BranchId. The post-merge state below stamps
+    // such owners as `Moved` (any-Moved-wins), so the function-exit
+    // last-use pass will skip them — without these conditional
+    // Frees the Valid-arm allocation would leak.
+    //
+    // The `else_stmts.is_none()` path pushes the pre-if snapshot
+    // into `branch_results` for the implicit fall-through. We
+    // deliberately don't schedule conditional Frees against that
+    // pseudo-arm: the post-if last-use pass already covers any
+    // owner whose state remains `Valid` at function exit.
+    struct ArmInfo<'a> {
+        branch_id: BranchId,
+        last_stmt: Option<TirRef>,
+        state: &'a Ownership,
+    }
+
+    let mut arms: Vec<ArmInfo> = Vec::with_capacity(branch_results.len());
+    arms.push(ArmInfo {
+        branch_id: then_branch,
+        last_stmt: view.then_stmts.last().copied(),
+        state: &branch_results[0],
+    });
+    for (i, elif) in view.elif_branches.iter().enumerate() {
+        arms.push(ArmInfo {
+            branch_id: elif_branches[i],
+            last_stmt: elif.body.last().copied(),
+            state: &branch_results[1 + i],
+        });
+    }
+    if let Some(else_stmts) = &view.else_stmts {
+        arms.push(ArmInfo {
+            branch_id: else_branch.expect("else_branch must be Some when else_stmts is Some"),
+            last_stmt: else_stmts.last().copied(),
+            state: branch_results
+                .last()
+                .expect("else snapshot pushed by analyze_if_stmt"),
+        });
+    }
+
+    let mut all_keys: HashSet<TirRef> = HashSet::new();
+    for arm in &arms {
+        for k in arm.state.states.keys() {
+            all_keys.insert(*k);
+        }
+    }
+    for owner in all_keys {
+        if is_synthetic_param_ref(owner) {
+            continue;
+        }
+        let any_moved = arms
+            .iter()
+            .any(|a| matches!(a.state.states.get(&owner), Some(OwnerState::Moved { .. })));
+        if !any_moved {
+            continue;
+        }
+        for arm in &arms {
+            if matches!(arm.state.states.get(&owner), Some(OwnerState::Valid))
+                && let Some(after) = arm.last_stmt
+            {
+                sidecar.free_schedule.push(FreePoint {
+                    after,
+                    target: owner,
+                    span: tir.span(owner),
+                    branch: Some(arm.branch_id),
+                });
+            }
+            // Empty arm or sema-rejected case: skip. The M8.1
+            // grammar forbids empty arms.
+        }
     }
 
     // Final restore: `snapshot` has no further uses, so move instead
