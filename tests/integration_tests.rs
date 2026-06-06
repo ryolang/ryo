@@ -2916,13 +2916,19 @@ fn conditional_move_runs_clean() {
     // function-exit last-use pass does NOT schedule a Free — the
     // branch-gated entry is the only thing keeping the allocation
     // from leaking under ASan.
+    //
+    // Heap-backed initializer (int_to_str returns an owned heap string)
+    // so that ryo_str_free in the else-arm actually frees a real
+    // allocation. A rodata-backed `"hello"` literal would have cap=0,
+    // making ryo_str_free a no-op — the test would pass even if the
+    // conditional-Free emission were missing entirely.
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "\
 fn consume(move s: str):
 \tprint(s)
 
 fn main():
-\ts: str = \"hello\"
+\ts: str = int_to_str(42)
 \tflag: bool = false
 \tif flag:
 \t\tconsume(s)
@@ -2943,8 +2949,8 @@ fn main():
         .nth(1)
         .expect("CLI trace should include [Codegen] section");
     assert!(
-        runtime_output.contains("hello"),
-        "runtime stdout should contain 'hello': {}",
+        runtime_output.contains("42"),
+        "runtime stdout should contain '42': {}",
         runtime_output
     );
 }
