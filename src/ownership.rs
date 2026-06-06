@@ -1417,15 +1417,27 @@ fn schedule_break_continue_frees(
             // body. Last-use Free (Task 3) covers it; mid-iteration
             // break/continue with an inside-loop owner is the M8.1
             // limitation noted in `analyze_function`.
+            //
+            // Note: condition-expression refs (e.g. for `while cond:`)
+            // also have `raw() < body_min` and would fall through this
+            // gate. M8.1 conditions are bool-typed and don't produce
+            // heap owners, so this is currently a non-issue — but if
+            // a future feature lets conditions allocate, revisit.
             continue;
         }
         if let Some(&lu) = last_use.get(owner)
             && lu.raw() > loop_inst.raw()
         {
-            // Last-use is *after* the loop instruction in TirRef
-            // order — i.e., a post-loop read. The post-loop last-use
-            // Free covers this owner; emitting one here would
-            // double-free.
+            // Last-use is *strictly after* the loop instruction in
+            // TirRef order — i.e., a post-loop read. The post-loop
+            // last-use Free covers this owner; emitting one here
+            // would double-free.
+            //
+            // `>` rather than `>=`: `lu.raw() == loop_inst.raw()` is
+            // unreachable (the loop instruction itself is never a
+            // last-use site for an external owner). If a future
+            // refactor attaches last-use directly to the loop inst,
+            // revisit this check.
             continue;
         }
         sidecar.free_schedule.push(FreePoint {
