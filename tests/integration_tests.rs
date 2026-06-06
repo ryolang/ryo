@@ -2954,3 +2954,53 @@ fn main():
         runtime_output
     );
 }
+
+#[test]
+fn break_emits_pre_loop_owner_free() {
+    // Milestone 8.1c Task 10: pre-loop owners still Valid at a
+    // `break` site need a Free emitted before the Cranelift `jump`,
+    // because (1) the post-stmt sweep skips Free emission on
+    // terminating statements, and (2) the post-loop region — where
+    // the function-exit last-use pass would normally fire — is
+    // skipped entirely once we jump out.
+    //
+    // `s` is a pre-loop owner whose only read is inside the loop
+    // body. The `break` short-circuits the rest of the iteration;
+    // without the loop-exit-Free pass the heap allocation would leak.
+    //
+    // Heap-backed initializer (int_to_str returns an owned heap
+    // string) so that ryo_str_free actually frees a real allocation.
+    // A rodata-backed string literal would have cap=0, making
+    // ryo_str_free a no-op — the test would still pass even if the
+    // break-site Free were missing entirely. ASan in Task 11 will
+    // ultimately validate the Free actually happened.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "\
+fn main():
+\ts: str = int_to_str(7)
+\tmut i: int = 0
+\twhile i < 10:
+\t\tprint(s)
+\t\tif i == 0:
+\t\t\tbreak
+\t\ti = i + 1
+";
+    let test_file = create_test_file(temp_dir.path(), "free_break.ryo", code);
+    let output =
+        run_ryo_command(&["run", "free_break.ryo"], &test_file).expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let runtime_output = stdout
+        .split("[Codegen]")
+        .nth(1)
+        .expect("CLI trace should include [Codegen] section");
+    assert!(
+        runtime_output.contains("7"),
+        "runtime stdout should contain '7': {}",
+        runtime_output
+    );
+}

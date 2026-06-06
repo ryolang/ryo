@@ -728,6 +728,14 @@ impl<M: Module> Codegen<M> {
                     ctx.loop_stack.last().is_some(),
                     "break outside loop should be rejected by sema"
                 );
+                // Loop-exit Frees scheduled by the ownership pass are
+                // anchored on this Break instruction and must fire
+                // *before* the Cranelift `jump` terminator: the jump
+                // seals the current block, and the post-stmt sweep in
+                // `emit_body` skips Free emission on terminating
+                // statements. Without this call the Frees would
+                // simply never be emitted.
+                Self::emit_due_frees(builder, ctx, r)?;
                 let Some(loop_ctx) = ctx.loop_stack.last() else {
                     return Err("codegen reached break outside loop".to_string());
                 };
@@ -739,6 +747,9 @@ impl<M: Module> Codegen<M> {
                     ctx.loop_stack.last().is_some(),
                     "continue outside loop should be rejected by sema"
                 );
+                // See Break above for why the Frees must be emitted
+                // here instead of via the post-stmt sweep.
+                Self::emit_due_frees(builder, ctx, r)?;
                 let Some(loop_ctx) = ctx.loop_stack.last() else {
                     return Err("codegen reached continue outside loop".to_string());
                 };
