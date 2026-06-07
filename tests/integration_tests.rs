@@ -3004,3 +3004,45 @@ fn main():
         runtime_output
     );
 }
+
+#[test]
+fn cross_function_str_return_runs_clean() {
+    // Reproduces the bug where program-wide free_schedule caused
+    // frees from one function to fire in another at numerically-
+    // matching TirRefs. The pre-fix output garbled msg's bytes
+    // before print(msg) ran.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "\
+fn greet(name: str) -> str:
+\treturn \"Hello, \" + name + \"!\"
+
+fn main():
+\tuser: str = \"Alice\"
+\tmsg: str = greet(user)
+\tprint(user)
+\tprint(msg)
+";
+    let test_file = create_test_file(temp_dir.path(), "cross_fn_str.ryo", code);
+    let output = run_ryo_command(&["run", "cross_fn_str.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let runtime_output = stdout
+        .split("[Codegen]")
+        .nth(1)
+        .expect("CLI trace should include [Codegen] section");
+    assert!(
+        runtime_output.contains("Alice"),
+        "expected 'Alice' in runtime stdout, got: {:?}",
+        runtime_output
+    );
+    assert!(
+        runtime_output.contains("Hello, Alice!"),
+        "expected 'Hello, Alice!' in runtime stdout, got: {:?}",
+        runtime_output
+    );
+}

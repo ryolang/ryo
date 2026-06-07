@@ -60,9 +60,28 @@ pub struct IfBranchIds {
 /// Codegen consults it to decide where to emit `ryo_str_free` calls.
 /// The TIR itself is never mutated — index stability is load-bearing
 /// for `inst_values` memoisation in `codegen.rs`.
+///
+/// `TirRef`s are scoped per-function (each `Tir` arena restarts at
+/// `TirRef(1)`), so the free schedule and per-instruction maps must
+/// also be per-function — otherwise codegen processing function B
+/// could pick up entries scheduled for function A whose TirRefs
+/// happen to match B's at the same numeric index, emitting wrong/
+/// extra `ryo_str_free` calls. Keyed by function name's `StringId`;
+/// codegen looks up the entry for the current function before
+/// consulting any of the per-function maps.
 #[derive(Default, Debug, Clone)]
 #[allow(dead_code)] // fields read by Task 7+ Free emission
 pub struct OwnershipSidecar {
+    pub functions: HashMap<StringId, FunctionSidecar>,
+}
+
+/// Per-function ownership metadata. Owns the three TirRef-keyed maps
+/// that codegen consults during lowering. Created fresh inside
+/// `analyze_function` and inserted into the parent
+/// [`OwnershipSidecar`] under the function's name.
+#[derive(Default, Debug, Clone)]
+#[allow(dead_code)] // fields read by Task 7+ Free emission
+pub struct FunctionSidecar {
     /// Frees anchored after specific instructions.
     pub free_schedule: Vec<FreePoint>,
     /// Reassignment Frees. Key: the `Assign` instruction's `TirRef`.
@@ -280,7 +299,9 @@ pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipS
     let by_name: HashMap<StringId, &Tir> = tirs.iter().map(|t| (t.name, t)).collect();
     let mut sidecar = OwnershipSidecar::default();
     for tir in tirs {
-        analyze_function(tir, pool, sink, &by_name, &mut sidecar);
+        let mut func_sidecar = FunctionSidecar::default();
+        analyze_function(tir, pool, sink, &by_name, &mut func_sidecar);
+        sidecar.functions.insert(tir.name, func_sidecar);
     }
     sidecar
 }
@@ -290,7 +311,7 @@ fn analyze_function(
     pool: &InternPool,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
 ) {
     let mut own = Ownership::default();
 
@@ -469,7 +490,7 @@ fn analyze_stmt(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     stmt: TirRef,
 ) {
     let inst = *tir.inst(stmt);
@@ -520,7 +541,7 @@ fn analyze_var_decl(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let view = tir.var_decl_view(r);
@@ -551,7 +572,7 @@ fn analyze_assign(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let view = tir.assign_view(r);
@@ -592,7 +613,7 @@ fn analyze_return(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
@@ -803,7 +824,7 @@ fn analyze_if_stmt(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let view = tir.if_stmt_view(r);
@@ -973,7 +994,7 @@ fn analyze_while_loop(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let view = tir.while_loop_view(r);
@@ -1023,7 +1044,7 @@ fn analyze_for_range(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let view = tir.for_range_view(r);
@@ -1302,7 +1323,7 @@ fn find_consumers(tir: &Tir, r: TirRef, consumer_of: &mut HashMap<TirRef, TirRef
 fn schedule_loop_exit_frees_in(
     tir: &Tir,
     own: &Ownership,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     last_use: &HashMap<TirRef, TirRef>,
     stmts: &[TirRef],
     enclosing_loop: Option<TirRef>,
@@ -1375,7 +1396,7 @@ fn schedule_loop_exit_frees_in(
 fn schedule_break_continue_frees(
     tir: &Tir,
     own: &Ownership,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     last_use: &HashMap<TirRef, TirRef>,
     jump_inst: TirRef,
     loop_inst: TirRef,
@@ -1455,7 +1476,7 @@ fn visit_expr(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
@@ -1575,7 +1596,7 @@ fn recurse_operands(
     own: &mut Ownership,
     sink: &mut DiagSink,
     by_name: &HashMap<StringId, &Tir>,
-    sidecar: &mut OwnershipSidecar,
+    sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
@@ -1649,7 +1670,11 @@ mod tests {
         let tir = tb.finish(&[decl]);
 
         let mut sink = DiagSink::new();
-        let sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
 
         // W0001 fires.
         let diags = sink.into_diags();
@@ -1708,7 +1733,11 @@ mod tests {
         let tir = b.finish(&[decl, stmt]);
 
         let mut sink = DiagSink::new();
-        let sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
         assert!(sink.is_empty(), "expected no diagnostics");
         assert_eq!(sidecar.free_schedule.len(), 1);
         assert_eq!(sidecar.free_schedule[0].target, lit);
@@ -1746,7 +1775,11 @@ mod tests {
         let tir = tb.finish(&[decl, assign, stmt]);
 
         let mut sink = DiagSink::new();
-        let sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
         assert!(sink.is_empty(), "expected no diagnostics");
 
         // Reassign frees l1 (old owner) keyed on the Assign inst.
@@ -1799,7 +1832,11 @@ mod tests {
         let tir = tb.finish(&[stmt]);
 
         let mut sink = DiagSink::new();
-        let sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
         assert!(sink.is_empty());
 
         // Three Frees: la, lb, cat. Anchored after consumers (la/lb on
@@ -1845,7 +1882,11 @@ mod tests {
         let tir = tb.finish(&[decl, stmt1, assign, stmt2]);
 
         let mut sink = DiagSink::new();
-        let sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
         assert!(sink.is_empty(), "expected no diagnostics");
 
         // The Free for "Alice" must come from free_on_reassign[assign],
