@@ -495,6 +495,10 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     linker::link_executable(&obj_filename, &exe_filename, &runtime_path)?;
 
     runtime_lib::cleanup_runtime_temp(&runtime_path);
+    // Default: clean up the intermediate object file. Set
+    // `RYO_KEEP_OBJ=1` to retain it — used by tooling that needs to
+    // relink the same object with extra flags (e.g. the ASan smoke
+    // tests in `tests/asan_smoke.rs` re-link with `-fsanitize=address`).
     if std::env::var_os("RYO_KEEP_OBJ").is_none() {
         let _ = fs::remove_file(&obj_filename);
     }

@@ -24,21 +24,38 @@ fn runtime_lib_path() -> PathBuf {
     ryo_root().join("target/debug/libryo_runtime.a")
 }
 
-fn zig_path() -> Option<PathBuf> {
+fn zig_path() -> PathBuf {
     // toolchain.rs installs zig at ~/.ryo/toolchain/zig-<version>/zig.
-    // Probe that directory first; fall back to PATH lookup.
+    // Probe that directory first; fall back to PATH lookup. When
+    // multiple zig-* dirs exist (local dev with stale installs),
+    // pick the lexicographically-largest — semver-compatible for
+    // "zig-0.X.Y" within a major. Determinism matters: read_dir
+    // order is filesystem-dependent.
     if let Ok(home) = std::env::var("HOME") {
         let toolchain_dir = PathBuf::from(home).join(".ryo/toolchain");
         if let Ok(entries) = std::fs::read_dir(&toolchain_dir) {
-            for entry in entries.flatten() {
-                let zig = entry.path().join("zig");
+            let mut candidates: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("zig-"))
+                })
+                .collect();
+            candidates.sort();
+            if let Some(latest) = candidates.last() {
+                let zig = latest.join("zig");
                 if zig.exists() {
-                    return Some(zig);
+                    return zig;
                 }
             }
         }
     }
-    Some(PathBuf::from("zig"))
+    // Final fallback: assume `zig` is on PATH. The downstream
+    // `Command::new(&zig).output()` will surface a clear error if
+    // it isn't.
+    PathBuf::from("zig")
 }
 
 fn run_asan_smoke(source: &str, name: &str) {
@@ -67,8 +84,7 @@ fn run_asan_smoke(source: &str, name: &str) {
         runtime_lib.display()
     );
 
-    let zig =
-        zig_path().expect("zig binary not found — install via `cargo run -- toolchain install`");
+    let zig = zig_path();
     let mut cmd = Command::new(&zig);
     cmd.args(["cc", "-fsanitize=address", "-o"]);
     cmd.arg(&exe);
