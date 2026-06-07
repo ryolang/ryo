@@ -261,6 +261,11 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** The ownership pass treats every `StrConst` whose result is Move-typed as a `temp_owner` and (post-Task 4) schedules a Free for it. But codegen's `__ryo_panic` lowering uses the *borrowed-scalar* ABI for its StrConst arg — passing the raw `.rodata` pointer with `cap=0`. Codegen's `emit_unconditional_frees` and `sweep_unconditional_frees` silently skip these via the `ValueRepr::Scalar` arm. The skip is safe (`ryo_str_free(ptr, 0)` is a runtime no-op for rodata), but it's a band-aid.
 **Resolution:** Teach the ownership pass to recognise StrConst args feeding directly into the borrowed-scalar ABI (today: `__ryo_panic`'s first arg) and exclude them from `temp_owners`. Once the pass stops over-scheduling, the codegen Scalar-skip can be tightened back into a hard error. (Or, alternatively, push the borrowed-scalar ABI handling closer to the ownership pass and unify with the str-triple ABI.)
 
+### I-058 — Inside-loop owners hitting `break`/`continue` mid-iteration aren't freed
+**Files:** `src/ownership.rs` (`schedule_break_continue_frees`)
+**Summary:** M8.1c's break/continue pass schedules Frees only for *pre-loop* owners (those with `TirRef.raw() < body_min`). Owners declared inside the loop body whose only read is past a `break`/`continue` site never get a Free emitted — the natural last-use Free (Task 3) was anchored at a read the jump skips, and the loop-exit pass deliberately excludes inside-loop owners. This is a real leak path for loop bodies that allocate, conditionally short-circuit before reading, and exit. Documented as a known limitation in inline comments at `analyze_function` and `schedule_break_continue_frees`. Not exercised by any current test (because the case currently leaks; ASan would fail).
+**Resolution:** Track the set of inside-loop owners that became `Valid` *before* each break/continue site reached but were not yet read. Schedule a Free at the jump for any such owner. Requires a forward pass over the loop body that walks Valid lifetimes per-statement (not just at function exit), which is a non-trivial refactor of the lattice computation. Practical scope: M8.4 or later, once `&str` slices and richer Move types make the leak surface visibly larger.
+
 ---
 
 ## Cross-References
