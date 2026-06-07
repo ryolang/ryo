@@ -495,7 +495,9 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     linker::link_executable(&obj_filename, &exe_filename, &runtime_path)?;
 
     runtime_lib::cleanup_runtime_temp(&runtime_path);
-    let _ = fs::remove_file(&obj_filename);
+    if std::env::var_os("RYO_KEEP_OBJ").is_none() {
+        let _ = fs::remove_file(&obj_filename);
+    }
 
     println!("Built: {}", exe_filename);
     Ok(())
