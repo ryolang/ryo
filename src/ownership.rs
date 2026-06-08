@@ -1522,8 +1522,23 @@ fn visit_expr(
             // (`print`, `assert`, `int_to_str`) have no entry and
             // default to borrowing all args.
             let callee_params = by_name.get(&view.name).map(|t| t.params.as_slice());
+            // `__ryo_panic` is the only callee using the borrowed-scalar ABI
+            // today: codegen passes its StrConst arg's raw .rodata pointer
+            // with cap=0 and never owns the buffer. Exclude direct StrConst
+            // args from `temp_owners` so the anonymous-temp Free pass does
+            // not schedule a (silently no-op, then post-I-057 hard-error)
+            // Free for them. See I-057.
+            let is_borrowed_scalar_callee = pool.str(view.name) == "__ryo_panic";
             for (i, arg) in view.args.iter().enumerate() {
                 visit_expr(tir, pool, own, sink, by_name, sidecar, *arg);
+                if is_borrowed_scalar_callee && matches!(tir.inst(*arg).tag, TirTag::StrConst) {
+                    // Undo the temp_owners insertion seeded by visit_expr's
+                    // StrConst arm. `states`, `origin`, and `owner_at_read`
+                    // entries are harmless to leave populated — only
+                    // `temp_owners` is consulted by the anonymous-temp Free
+                    // pass. See I-057.
+                    own.temp_owners.remove(arg);
+                }
                 let arg_ty = tir.inst(*arg).ty;
                 if !needs_tracking(arg_ty, pool) {
                     continue;
