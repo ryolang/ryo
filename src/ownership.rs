@@ -384,21 +384,21 @@ fn analyze_function(
         analyze_stmt(tir, pool, &mut own, sink, by_name, sidecar, stmt);
     }
 
-    // Backward liveness: for every owner still `Valid` at function exit
+    // Forward last-use scan: for every owner still `Valid` at function exit
     // (i.e., not moved out via return / move-typed call argument /
     // reassign), find its last reading instruction and schedule a Free
-    // anchored after it. The reverse walk records the *first* time each
-    // owner is observed (which is its last use in program order). The
-    // forward walk's final `current_owner` map encodes "which TirRef
-    // owns the binding at function exit"; reads of a binding in the
-    // body always alias *some* owner that the forward walk classified.
-    // For any owner whose state is `Moved` at function exit (e.g. the
-    // pre-reassign owner of a rebound binding), the final-state filter
-    // below skips it — so anchoring last-use via the final
-    // `current_owner` resolution is sound for the M8.1 pattern set.
+    // anchored after it. The forward walk uses overwriting `insert` so the
+    // *latest* forward-order read across the whole function wins — last
+    // source-order read in the outer-statement-loop and inner-operand-walk
+    // composition. Reads of a binding in the body always alias *some*
+    // owner that the forward walk classified; the per-read
+    // `owner_at_read` snapshot resolves each read to the owner that was
+    // live at that point, regardless of any later rebinds. For any owner
+    // whose state is `Moved` at function exit (e.g. the pre-reassign
+    // owner of a rebound binding), the final-state filter below skips it.
     let body_stmts = tir.body_stmts();
     let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
-    for &stmt in body_stmts.iter().rev() {
+    for &stmt in &body_stmts {
         collect_last_uses(tir, pool, &own, stmt, &mut last_use);
     }
     // Owners already covered by `free_on_reassign` must not be

@@ -2040,6 +2040,36 @@ fn test_int_to_str_builtin() {
 }
 
 #[test]
+fn last_use_across_multiple_top_level_statements() {
+    // Regression test: when an owned heap string is read in multiple
+    // top-level statements, the last-use Free must anchor after the
+    // *final* source-order read. A previous bug iterated the outer
+    // statement loop in reverse while the inner operand walker ran
+    // forward with overwriting `insert`, anchoring the Free after the
+    // first read instead — turning the second read into use-after-free.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\ts: str = int_to_str(42)\n\tprint(s)\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "multi_read.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "multi_read.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let occurrences = stdout.matches("42").count();
+    assert!(
+        occurrences >= 2,
+        "Output should contain '42' at least twice, got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn test_float_to_str_builtin() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\ts: str = float_to_str(2.75)\n\tprint(s)\n";
