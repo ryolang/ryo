@@ -1304,11 +1304,12 @@ impl<M: Module> Codegen<M> {
     /// 4's anonymous-temporary Frees, anchored on the consuming
     /// `Call`, fire after the consumer has emitted its IR.
     ///
-    /// Targets cached as `ValueRepr::Scalar` are skipped: those are
-    /// raw `.rodata` pointers (e.g. the StrConst arg of `__ryo_panic`,
-    /// which uses the borrowed-scalar ABI). They don't own a heap
-    /// allocation and `cap` isn't tracked through the scalar path,
-    /// so emitting a Free is both incorrect and impossible. See I-057.
+    /// Scheduled Frees only target `Str`-cached owners. A
+    /// `Scalar`-cached target is an ownership-pass bug — the
+    /// borrowed-scalar ABI never owns its argument and the ownership
+    /// pass excludes such args from `temp_owners` (see I-057). If a
+    /// `Scalar` target is observed here, this function returns `Err`
+    /// with a diagnostic pointing at I-057.
     ///
     /// `freed_at` (a set of `free_schedule` indices) guards against
     /// double-emission across the eval-end hooks and the end-of-stmt
@@ -1348,10 +1349,12 @@ impl<M: Module> Codegen<M> {
                     builder.ins().call(free_ref, &[ptr, cap]);
                 }
                 ValueRepr::Scalar(_) => {
-                    // Scalar-cached str = raw `.rodata` ptr (e.g. the
-                    // StrConst arg of `__ryo_panic`'s borrowed-scalar
-                    // ABI). Not heap-allocated; nothing to free.
-                    // See I-057.
+                    return Err(format!(
+                        "ownership pass scheduled Free for borrowed-scalar value %{} \
+                         (target of borrowed-scalar ABI, not heap-owned). \
+                         This indicates an ownership-pass bug. See I-057.",
+                        target.index()
+                    ));
                 }
             }
         }
@@ -1405,8 +1408,12 @@ impl<M: Module> Codegen<M> {
                     builder.ins().call(free_ref, &[ptr, cap]);
                 }
                 ValueRepr::Scalar(_) => {
-                    // See `emit_due_frees`: Scalar repr =
-                    // borrowed `.rodata` ptr; nothing to free.
+                    return Err(format!(
+                        "ownership pass scheduled Free for borrowed-scalar value %{} \
+                         (target of borrowed-scalar ABI, not heap-owned). \
+                         This indicates an ownership-pass bug. See I-057.",
+                        target.index()
+                    ));
                 }
             }
         }
