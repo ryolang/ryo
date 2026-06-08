@@ -188,3 +188,47 @@ fn main():
         "break_loop",
     );
 }
+
+#[test]
+fn asan_break_inside_loop_owner_no_double_free() {
+    // Regression for Bug 3 in the M8.1c review.
+    // After Bug 1 & 2 are fixed, an inside-loop `s` gets scheduled
+    // for a last-use Free anchored after `print(s)`. Without the
+    // schedule_break_continue_frees tightening, the break site
+    // also schedules a Free for `s` — double free under ASan.
+    run_asan_smoke(
+        "\
+fn main():
+\tmut i: int = 0
+\twhile i < 3:
+\t\ts: str = int_to_str(i)
+\t\tprint(s)
+\t\tif i == 1:
+\t\t\tbreak
+\t\ti += 1
+",
+        "break_inside_loop_owner",
+    );
+}
+
+#[test]
+fn asan_pre_loop_owner_last_use_inside_loop_no_double_free() {
+    // Regression: the last-use of `s` is the print() inside the
+    // loop body. The post-Task-4 schedule registers a last-use
+    // Free anchored at that print. The break site previously also
+    // freed `s` because schedule_break_continue_frees only guarded
+    // against last-uses *after* the loop instruction.
+    run_asan_smoke(
+        "\
+fn main():
+\ts: str = int_to_str(7)
+\tmut i: int = 0
+\twhile i < 3:
+\t\tprint(s)
+\t\tif i == 0:
+\t\t\tbreak
+\t\ti += 1
+",
+        "pre_loop_owner_last_use_inside_loop",
+    );
+}
