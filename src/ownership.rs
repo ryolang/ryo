@@ -1708,6 +1708,44 @@ mod tests {
     }
 
     #[test]
+    fn inside_loop_temp_is_freed() {
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let print_name = pool.intern_str("print");
+        let inside = pool.intern_str("inside");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void:
+        //     while true:
+        //         print("inside")     # StrConst is the temp under test
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit = tb.str_const(inside, str_ty, span);
+        let print_call = tb.call(print_name, &[lit], void, span);
+        let wl = tb.while_loop(cond, &[print_call], void, span);
+        let tir = tb.finish(&[wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        assert!(
+            sidecar.free_schedule.iter().any(|fp| fp.target == lit),
+            "expected inside-loop StrConst to be scheduled for Free; got: {:?}",
+            sidecar.free_schedule
+        );
+    }
+
+    #[test]
     fn last_use_scheduled_for_unmoved_local() {
         use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
