@@ -1164,12 +1164,13 @@ fn merge_two(a: &Ownership, b: &Ownership) -> Ownership {
     merged
 }
 
-/// Backward walk recording each tracked owner's last reading
-/// instruction. Called from `analyze_function` after the forward walk
-/// completes; iterates statements in reverse program order so the
-/// first observed `Var` read of an owner is its last use in source
-/// order. Recurses into operands of every TIR shape so reads buried
-/// inside calls, loops, and if-arms are still seen.
+/// For every Move-typed owner that has at least one `Var` read,
+/// record the *last* read in forward source order. The map is
+/// populated by overwriting (not `or_insert`), so the latest read
+/// wins — semantically equivalent to the previous reverse-walk +
+/// `or_insert` approach for a tree-shaped IR. Recurses through
+/// `walk_operands` so reads buried inside calls, loops, and if-arms
+/// are still seen.
 fn collect_last_uses(
     tir: &Tir,
     pool: &InternPool,
@@ -1191,81 +1192,13 @@ fn collect_last_uses(
         && needs_tracking(inst.ty, pool)
         && let Some(&owner) = own.owner_at_read.get(&r)
     {
-        // First encounter wins (we walk in reverse program order).
-        last_use.entry(owner).or_insert(r);
+        // Overwriting insert: latest forward-order read wins =
+        // last source-order read.
+        last_use.insert(owner, r);
     }
-    // Recurse into operands. Mirrors the forward walk's structural
-    // recursion so every reachable read is visited exactly once.
-    match inst.data {
-        TirData::UnOp(o) => collect_last_uses(tir, pool, own, o, last_use),
-        TirData::BinOp { lhs, rhs } => {
-            // Operand order doesn't affect program order for last-use
-            // (sema lowered both before this instruction); recurse rhs
-            // first to mirror reverse program order conservatively.
-            collect_last_uses(tir, pool, own, rhs, last_use);
-            collect_last_uses(tir, pool, own, lhs, last_use);
-        }
-        TirData::Extra(_) => match inst.tag {
-            TirTag::Call => {
-                let view = tir.call_view(r);
-                for &arg in view.args.iter().rev() {
-                    collect_last_uses(tir, pool, own, arg, last_use);
-                }
-            }
-            TirTag::VarDecl => {
-                let v = tir.var_decl_view(r);
-                collect_last_uses(tir, pool, own, v.initializer, last_use);
-            }
-            TirTag::Assign => {
-                let v = tir.assign_view(r);
-                collect_last_uses(tir, pool, own, v.value, last_use);
-            }
-            TirTag::CompoundAssign => {
-                let v = tir.compound_assign_view(r);
-                collect_last_uses(tir, pool, own, v.value, last_use);
-            }
-            TirTag::IfStmt => {
-                let v = tir.if_stmt_view(r);
-                if let Some(else_stmts) = &v.else_stmts {
-                    for &s in else_stmts.iter().rev() {
-                        collect_last_uses(tir, pool, own, s, last_use);
-                    }
-                }
-                for elif in v.elif_branches.iter().rev() {
-                    for &s in elif.body.iter().rev() {
-                        collect_last_uses(tir, pool, own, s, last_use);
-                    }
-                    collect_last_uses(tir, pool, own, elif.cond, last_use);
-                }
-                for &s in v.then_stmts.iter().rev() {
-                    collect_last_uses(tir, pool, own, s, last_use);
-                }
-                collect_last_uses(tir, pool, own, v.cond, last_use);
-            }
-            TirTag::WhileLoop => {
-                let v = tir.while_loop_view(r);
-                for &s in v.body.iter().rev() {
-                    collect_last_uses(tir, pool, own, s, last_use);
-                }
-                collect_last_uses(tir, pool, own, v.cond, last_use);
-            }
-            TirTag::ForRange => {
-                let v = tir.for_range_view(r);
-                for &s in v.body.iter().rev() {
-                    collect_last_uses(tir, pool, own, s, last_use);
-                }
-                collect_last_uses(tir, pool, own, v.end, last_use);
-                collect_last_uses(tir, pool, own, v.start, last_use);
-            }
-            _ => {}
-        },
-        TirData::None
-        | TirData::Int(_)
-        | TirData::Float(_)
-        | TirData::Str(_)
-        | TirData::Bool(_)
-        | TirData::Var(_) => {}
-    }
+    walk_operands(tir, r, &mut |_parent, operand| {
+        collect_last_uses(tir, pool, own, operand, last_use);
+    });
 }
 
 /// Build a `child_TirRef → parent_TirRef` map. Each temporary owner
