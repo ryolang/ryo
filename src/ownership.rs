@@ -1358,6 +1358,97 @@ fn find_consumers(tir: &Tir, r: TirRef, consumer_of: &mut HashMap<TirRef, TirRef
     }
 }
 
+/// Visit every direct operand of TIR instruction `r`, invoking
+/// `f(parent, operand)` for each (parent, child) edge in forward
+/// source order, then recurse into each operand. Single source of
+/// truth for TIR-shape coverage across the ownership pass's
+/// post-walk analyses (last-use, consumer-of, …). Adding a new TIR
+/// shape requires updating exactly this function.
+fn walk_operands(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef, TirRef)) {
+    let inst = *tir.inst(r);
+    match inst.data {
+        TirData::UnOp(o) => {
+            f(r, o);
+            walk_operands(tir, o, f);
+        }
+        TirData::BinOp { lhs, rhs } => {
+            f(r, lhs);
+            walk_operands(tir, lhs, f);
+            f(r, rhs);
+            walk_operands(tir, rhs, f);
+        }
+        TirData::Extra(_) => match inst.tag {
+            TirTag::Call => {
+                let view = tir.call_view(r);
+                for &arg in &view.args {
+                    f(r, arg);
+                    walk_operands(tir, arg, f);
+                }
+            }
+            TirTag::VarDecl => {
+                let v = tir.var_decl_view(r);
+                f(r, v.initializer);
+                walk_operands(tir, v.initializer, f);
+            }
+            TirTag::Assign => {
+                let v = tir.assign_view(r);
+                f(r, v.value);
+                walk_operands(tir, v.value, f);
+            }
+            TirTag::CompoundAssign => {
+                let v = tir.compound_assign_view(r);
+                f(r, v.value);
+                walk_operands(tir, v.value, f);
+            }
+            TirTag::IfStmt => {
+                let v = tir.if_stmt_view(r);
+                f(r, v.cond);
+                walk_operands(tir, v.cond, f);
+                for &s in &v.then_stmts {
+                    walk_operands(tir, s, f);
+                }
+                for elif in &v.elif_branches {
+                    f(r, elif.cond);
+                    walk_operands(tir, elif.cond, f);
+                    for &s in &elif.body {
+                        walk_operands(tir, s, f);
+                    }
+                }
+                if let Some(else_stmts) = &v.else_stmts {
+                    for &s in else_stmts {
+                        walk_operands(tir, s, f);
+                    }
+                }
+            }
+            TirTag::WhileLoop => {
+                let v = tir.while_loop_view(r);
+                f(r, v.cond);
+                walk_operands(tir, v.cond, f);
+                for &s in &v.body {
+                    walk_operands(tir, s, f);
+                }
+            }
+            TirTag::ForRange => {
+                let v = tir.for_range_view(r);
+                f(r, v.start);
+                walk_operands(tir, v.start, f);
+                f(r, v.end);
+                walk_operands(tir, v.end, f);
+                for &s in &v.body {
+                    walk_operands(tir, s, f);
+                }
+            }
+            _ => {}
+        },
+        TirData::None
+        | TirData::Int(_)
+        | TirData::Float(_)
+        | TirData::Str(_)
+        | TirData::Bool(_)
+        | TirData::Var(_) => {}
+    }
+}
+
 /// Recursively walk `stmts` and, for every `Break`/`Continue` found
 /// inside a loop body, schedule unconditional Frees for pre-loop
 /// owners still `Valid` at the jump site. `enclosing_loop` is the
