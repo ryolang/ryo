@@ -238,6 +238,16 @@ impl Ownership {
             }
         }
 
+        // Per-read owner snapshots. A given read TirRef is unique in
+        // the TIR (instructions are not shared across blocks), so each
+        // key appears in at most one branch — `or_insert` is correct,
+        // and we don't need any conflict policy.
+        for b in branches {
+            for (&read, &owner) in &b.owner_at_read {
+                self.owner_at_read.entry(read).or_insert(owner);
+            }
+        }
+
         // Binding-aware override: for each name that existed before
         // the branches walked, look up where each branch left that
         // binding (b.current_owner[name]), read that owner's state in
