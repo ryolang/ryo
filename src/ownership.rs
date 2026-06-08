@@ -223,6 +223,21 @@ impl Ownership {
             }
         }
 
+        // Union temp/named owner sets — entries introduced inside a
+        // branch (or loop body) must survive the merge so the
+        // anonymous-temp Free pass and the last-use pass see them at
+        // function-end. Without this, a `StrConst`/`StrConcat`/Call
+        // inside a `while` body is silently dropped from
+        // `temp_owners` when `merge_two` clones the pre-loop entry.
+        for b in branches {
+            for &t in &b.temp_owners {
+                self.temp_owners.insert(t);
+            }
+            for &n in &b.named_owners {
+                self.named_owners.insert(n);
+            }
+        }
+
         // Binding-aware override: for each name that existed before
         // the branches walked, look up where each branch left that
         // binding (b.current_owner[name]), read that owner's state in
