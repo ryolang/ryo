@@ -2048,7 +2048,11 @@ fn last_use_across_multiple_top_level_statements() {
     // forward with overwriting `insert`, anchoring the Free after the
     // first read instead — turning the second read into use-after-free.
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let code = "fn main():\n\ts: str = int_to_str(42)\n\tprint(s)\n\tprint(s)\n";
+    // Compute the printed value (7 * 6 == 42) so the literal "42" never
+    // appears in the source dump that `cargo run --` emits under the
+    // `[Input Source]` heading. That way `stdout.matches("42").count()`
+    // reflects only the two `print(s)` calls, not the echoed source.
+    let code = "fn main():\n\ts: str = int_to_str(7 * 6)\n\tprint(s)\n\tprint(s)\n";
     let test_file = create_test_file(temp_dir.path(), "multi_read.ryo", code);
 
     let output =
@@ -2062,10 +2066,10 @@ fn last_use_across_multiple_top_level_statements() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let occurrences = stdout.matches("42").count();
-    assert!(
-        occurrences >= 2,
-        "Output should contain '42' at least twice, got: {}",
-        stdout
+    assert_eq!(
+        occurrences, 2,
+        "expected '42' to appear exactly twice (once per print) — got {} occurrences. stdout: {}",
+        occurrences, stdout
     );
 }
 
