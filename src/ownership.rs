@@ -1196,7 +1196,7 @@ fn collect_last_uses(
         // last source-order read.
         last_use.insert(owner, r);
     }
-    walk_operands(tir, r, &mut |_parent, operand| {
+    walk_operands(tir, r, &mut |_parent, operand, _kind| {
         collect_last_uses(tir, pool, own, operand, last_use);
     });
 }
@@ -1206,91 +1206,109 @@ fn collect_last_uses(
 /// function), so `or_insert` correctly preserves the first parent
 /// observed. Used by the anonymous-temporary-free pass to anchor
 /// each temp's Free after its single consumer.
+///
+/// Only `Operand`-kinded edges contribute to `consumer_of`: a body
+/// statement nested inside an `if`/`while`/`for` is not a consumer
+/// of the surrounding control-flow instruction, so its Free must
+/// not be anchored on the loop/branch header. Recursion still
+/// descends through `BodyStmt` edges to reach operands buried
+/// inside those nested statements.
 fn find_consumers(tir: &Tir, r: TirRef, consumer_of: &mut HashMap<TirRef, TirRef>) {
-    walk_operands(tir, r, &mut |parent, operand| {
-        consumer_of.entry(operand).or_insert(parent);
+    walk_operands(tir, r, &mut |parent, operand, kind| {
+        if matches!(kind, ChildKind::Operand) {
+            consumer_of.entry(operand).or_insert(parent);
+        }
         find_consumers(tir, operand, consumer_of);
     });
 }
 
-/// Visit every direct operand of TIR instruction `r`, invoking
-/// `f(parent, operand)` for each (parent, child) edge in forward
-/// source order, then recurse into each operand. Single source of
-/// truth for TIR-shape coverage across the ownership pass's
-/// post-walk analyses (last-use, consumer-of, …). Adding a new TIR
-/// shape requires updating exactly this function.
-fn walk_operands(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef, TirRef)) {
+/// Distinguishes the two kinds of (parent, child) edges announced
+/// by [`walk_operands`]:
+///
+/// * [`ChildKind::Operand`] — a direct data dependency (e.g. a
+///   binary-op LHS, a call arg, a `VarDecl`'s initializer, an
+///   `if`/`while`/`for` condition or range bound). Consumer of
+///   the parent.
+/// * [`ChildKind::BodyStmt`] — a statement nested inside an
+///   `if`/`while`/`for` body. Reachable from the parent for
+///   traversal, but not a consumer of the parent.
+#[derive(Clone, Copy)]
+enum ChildKind {
+    Operand,
+    BodyStmt,
+}
+
+/// Visit every direct operand and body-statement edge of TIR
+/// instruction `r`, invoking `f(parent, child, kind)` for each
+/// `(parent, child)` edge in forward source order. **Shallow** —
+/// does not recurse on its own; callers' closures drive recursion
+/// (see [`collect_last_uses`] / [`find_consumers`]). Avoids the
+/// O(2^N) re-walking that an internally-recursive walker would
+/// produce when callers also recurse via their closures.
+///
+/// Single source of truth for TIR-shape coverage across the
+/// ownership pass's post-walk analyses (last-use, consumer-of, …).
+/// Adding a new TIR shape requires updating exactly this function.
+fn walk_operands(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef, TirRef, ChildKind)) {
     let inst = *tir.inst(r);
     match inst.data {
         TirData::UnOp(o) => {
-            f(r, o);
-            walk_operands(tir, o, f);
+            f(r, o, ChildKind::Operand);
         }
         TirData::BinOp { lhs, rhs } => {
-            f(r, lhs);
-            walk_operands(tir, lhs, f);
-            f(r, rhs);
-            walk_operands(tir, rhs, f);
+            f(r, lhs, ChildKind::Operand);
+            f(r, rhs, ChildKind::Operand);
         }
         TirData::Extra(_) => match inst.tag {
             TirTag::Call => {
                 let view = tir.call_view(r);
                 for &arg in &view.args {
-                    f(r, arg);
-                    walk_operands(tir, arg, f);
+                    f(r, arg, ChildKind::Operand);
                 }
             }
             TirTag::VarDecl => {
                 let v = tir.var_decl_view(r);
-                f(r, v.initializer);
-                walk_operands(tir, v.initializer, f);
+                f(r, v.initializer, ChildKind::Operand);
             }
             TirTag::Assign => {
                 let v = tir.assign_view(r);
-                f(r, v.value);
-                walk_operands(tir, v.value, f);
+                f(r, v.value, ChildKind::Operand);
             }
             TirTag::CompoundAssign => {
                 let v = tir.compound_assign_view(r);
-                f(r, v.value);
-                walk_operands(tir, v.value, f);
+                f(r, v.value, ChildKind::Operand);
             }
             TirTag::IfStmt => {
                 let v = tir.if_stmt_view(r);
-                f(r, v.cond);
-                walk_operands(tir, v.cond, f);
+                f(r, v.cond, ChildKind::Operand);
                 for &s in &v.then_stmts {
-                    walk_operands(tir, s, f);
+                    f(r, s, ChildKind::BodyStmt);
                 }
                 for elif in &v.elif_branches {
-                    f(r, elif.cond);
-                    walk_operands(tir, elif.cond, f);
+                    f(r, elif.cond, ChildKind::Operand);
                     for &s in &elif.body {
-                        walk_operands(tir, s, f);
+                        f(r, s, ChildKind::BodyStmt);
                     }
                 }
                 if let Some(else_stmts) = &v.else_stmts {
                     for &s in else_stmts {
-                        walk_operands(tir, s, f);
+                        f(r, s, ChildKind::BodyStmt);
                     }
                 }
             }
             TirTag::WhileLoop => {
                 let v = tir.while_loop_view(r);
-                f(r, v.cond);
-                walk_operands(tir, v.cond, f);
+                f(r, v.cond, ChildKind::Operand);
                 for &s in &v.body {
-                    walk_operands(tir, s, f);
+                    f(r, s, ChildKind::BodyStmt);
                 }
             }
             TirTag::ForRange => {
                 let v = tir.for_range_view(r);
-                f(r, v.start);
-                walk_operands(tir, v.start, f);
-                f(r, v.end);
-                walk_operands(tir, v.end, f);
+                f(r, v.start, ChildKind::Operand);
+                f(r, v.end, ChildKind::Operand);
                 for &s in &v.body {
-                    walk_operands(tir, s, f);
+                    f(r, s, ChildKind::BodyStmt);
                 }
             }
             _ => {}
