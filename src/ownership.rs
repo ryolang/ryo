@@ -429,19 +429,6 @@ fn analyze_function(
         // Owners with no last_use are dead stores — handled in Task 5.
     }
 
-    // Loop-exit Frees: for every `break`/`continue` inside a loop
-    // body, schedule a Free for any pre-loop owner still `Valid` at
-    // the jump site (modulo a post-loop last-use, which already
-    // schedules its own Free).
-    //
-    // Known limitation (M8.1): owners *declared inside* the loop body
-    // that hit `break`/`continue` mid-iteration are NOT handled here.
-    // Their last-use Free (Task 3) is anchored on the last reading
-    // instruction; if the jump skips that read, the Free never fires.
-    // The M8.1 pattern set doesn't exercise this case — revisit if it
-    // arises.
-    schedule_loop_exit_frees_in(tir, &own, sidecar, &last_use, &body_stmts, None);
-
     // Anonymous-temporary frees: temp_owners that didn't become named
     // bindings and are still Valid at function exit need their own
     // Free anchored after their single consumer.
@@ -482,24 +469,29 @@ fn analyze_function(
     // allocation. Today no `free_on_reassign` entries exist; this
     // guard activates with Task 6. (`reassign_targets` was computed
     // above for the last-use pass.)
-    for (owner, (name, span, decl_inst)) in own.pending_dead_store.drain() {
+    for (owner, (name, span, decl_inst)) in &own.pending_dead_store {
         sink.emit(Diag::warning(
-            span,
+            *span,
             DiagCode::DeadStore,
-            format!("value `{}` is declared but never used", pool.str(name)),
+            format!("value `{}` is declared but never used", pool.str(*name)),
         ));
-        if reassign_targets.contains(&owner) {
+        if reassign_targets.contains(owner) {
             // Task 6's reassignment-Free already covers this owner;
             // emitting another dead-store Free would double-free.
             continue;
         }
         sidecar.free_schedule.push(FreePoint {
-            after: decl_inst,
-            target: owner,
-            span,
+            after: *decl_inst,
+            target: *owner,
+            span: *span,
             branch: None,
         });
     }
+
+    // Loop-exit Frees run LAST so they can inspect the now-complete
+    // `free_schedule` and only add jump-anchored Frees for inside-loop
+    // owners that no earlier pass already covered. See I-058.
+    schedule_loop_exit_frees_in(tir, &own, sidecar, &last_use, &body_stmts, None);
 }
 
 /// Lower bound of the synthetic-param `TirRef` keyspace. Real
@@ -1315,16 +1307,14 @@ fn walk_operands(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef, TirRef, ChildK
     }
 }
 
-/// Recursively walk `stmts` and, for every `Break`/`Continue` found
-/// inside a loop body, schedule unconditional Frees for pre-loop
-/// owners still `Valid` at the jump site. `enclosing_loop` is the
-/// nearest enclosing `WhileLoop`/`ForRange` instruction reference,
-/// or `None` at top-level (where `Break`/`Continue` would already
-/// have been rejected by sema).
-///
-/// "Pre-loop owner" is approximated by comparing the owner's
-/// `TirRef` index against the minimum index in the loop's body —
-/// see `schedule_break_continue_frees` for the rationale.
+/// Schedule unconditional Frees on `break`/`continue` paths. Runs after
+/// the last-use, anonymous-temp, and dead-store passes have populated
+/// `sidecar.free_schedule`, so per-jump scheduling can read existing
+/// entries to decide whether an inside-loop owner is already covered
+/// (see `schedule_break_continue_frees`). `enclosing_loop` is the
+/// nearest enclosing `WhileLoop`/`ForRange` instruction reference, or
+/// `None` at top-level (where `Break`/`Continue` would already have
+/// been rejected by sema).
 fn schedule_loop_exit_frees_in(
     tir: &Tir,
     own: &Ownership,
