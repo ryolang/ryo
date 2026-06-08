@@ -177,13 +177,25 @@ pub(crate) struct Ownership {
 }
 
 impl Ownership {
-    /// Conservatively merge per-branch lattices into `self`. For each
-    /// tracked `TirRef`, if any branch left it `Moved` the merged
-    /// state is `Moved` — that way a value consumed on only one
-    /// branch is still treated as moved at the join point and a
-    /// post-`if` use trips E0020. Non-`Moved` states pick the first
-    /// observed branch state. `current_owner` entries from any branch
-    /// are preserved so reseats inside a branch survive the join.
+    /// Conservatively merge per-branch lattices into `self`. Per-field rules:
+    /// - `next_branch_id`: max across self + branches (monotonic; loop merges
+    ///   must not roll the allocator backward).
+    /// - `states`: any branch `Moved` → `Moved`; otherwise first observed
+    ///   wins. So a value consumed on only one branch is still treated as
+    ///   moved at the join point and a post-`if` use trips E0020.
+    /// - `current_owner`, `origin`: first-write-wins across branches; reseats
+    ///   inside a branch survive the join.
+    /// - `temp_owners`, `named_owners`: union (entries minted inside a
+    ///   branch/loop body must survive so the anonymous-temp and last-use
+    ///   passes see them at function exit).
+    /// - `owner_at_read`: union with first-write-wins (read TirRefs are
+    ///   unique per TIR, so collisions don't happen in practice).
+    /// - `pending_dead_store`: pre-branch keys intersect (any branch that
+    ///   read the binding clears the dead-store warning); branch-local keys
+    ///   union.
+    /// - Final pass: per-binding state is recomputed through whichever
+    ///   end-of-branch owner each branch left, so reseats inside a branch
+    ///   contribute their state to the merged binding.
     fn merge_branches(&mut self, branches: &[&Ownership]) {
         // BranchId monotonicity: never let a merge roll the allocator
         // backward. analyze_while_loop and analyze_for_range build
