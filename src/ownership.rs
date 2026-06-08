@@ -237,6 +237,15 @@ impl Ownership {
                     .or_insert_with(|| s.clone());
             }
         }
+        // Union the remaining branch-local fields. `current_owner` /
+        // `origin` use first-wins via `or_insert`. `temp_owners` /
+        // `named_owners` are unioned so entries introduced inside a
+        // branch (or loop body) survive the merge — without this a
+        // `StrConst`/`StrConcat`/Call inside a `while` body is silently
+        // dropped from `temp_owners` when `merge_two` clones the
+        // pre-loop entry. `owner_at_read` keys are unique per TirRef
+        // (instructions aren't shared across blocks), so each key
+        // appears in at most one branch and `or_insert` is correct.
         for b in branches {
             for (name, owner) in &b.current_owner {
                 self.current_owner.entry(*name).or_insert(*owner);
@@ -244,28 +253,8 @@ impl Ownership {
             for (k, v) in &b.origin {
                 self.origin.entry(*k).or_insert(*v);
             }
-        }
-
-        // Union temp/named owner sets — entries introduced inside a
-        // branch (or loop body) must survive the merge so the
-        // anonymous-temp Free pass and the last-use pass see them at
-        // function-end. Without this, a `StrConst`/`StrConcat`/Call
-        // inside a `while` body is silently dropped from
-        // `temp_owners` when `merge_two` clones the pre-loop entry.
-        for b in branches {
-            for &t in &b.temp_owners {
-                self.temp_owners.insert(t);
-            }
-            for &n in &b.named_owners {
-                self.named_owners.insert(n);
-            }
-        }
-
-        // Per-read owner snapshots. A given read TirRef is unique in
-        // the TIR (instructions are not shared across blocks), so each
-        // key appears in at most one branch — `or_insert` is correct,
-        // and we don't need any conflict policy.
-        for b in branches {
+            self.temp_owners.extend(b.temp_owners.iter().copied());
+            self.named_owners.extend(b.named_owners.iter().copied());
             for (&read, &owner) in &b.owner_at_read {
                 self.owner_at_read.entry(read).or_insert(owner);
             }
@@ -289,12 +278,18 @@ impl Ownership {
                     .get(&owner_b)
                     .cloned()
                     .unwrap_or(OwnerState::NotTracked);
-                merged = Some(match (&merged, &state_b) {
-                    (None, _) => state_b,
-                    (Some(OwnerState::Moved { .. }), _) => merged.clone().unwrap(),
-                    (_, OwnerState::Moved { .. }) => state_b,
-                    (Some(_), _) => merged.clone().unwrap(),
-                });
+                // any-Moved-wins, otherwise first observed wins. When
+                // `merged` is already Moved, keep it — preserves the
+                // first-observed Moved span for diagnostics.
+                let take = match (&merged, &state_b) {
+                    (None, _) => true,
+                    (Some(OwnerState::Moved { .. }), _) => false,
+                    (_, OwnerState::Moved { .. }) => true,
+                    _ => false,
+                };
+                if take {
+                    merged = Some(state_b);
+                }
             }
             if let Some(state) = merged {
                 self.states.insert(*owner_pre, state);
@@ -485,8 +480,8 @@ fn analyze_function(
     // after the declaring instruction. Skip owners already covered by
     // `free_on_reassign` (Task 6) to avoid double-freeing the same
     // allocation. Today no `free_on_reassign` entries exist; this
-    // guard activates with Task 6.
-    let reassign_targets: HashSet<TirRef> = sidecar.free_on_reassign.values().copied().collect();
+    // guard activates with Task 6. (`reassign_targets` was computed
+    // above for the last-use pass.)
     for (owner, (name, span, decl_inst)) in own.pending_dead_store.drain() {
         sink.emit(Diag::warning(
             span,
@@ -973,12 +968,10 @@ fn analyze_if_stmt(
         });
     }
 
-    let mut all_keys: HashSet<TirRef> = HashSet::new();
-    for arm in &arms {
-        for k in arm.state.states.keys() {
-            all_keys.insert(*k);
-        }
-    }
+    let all_keys: HashSet<TirRef> = arms
+        .iter()
+        .flat_map(|a| a.state.states.keys().copied())
+        .collect();
     for owner in all_keys {
         if is_synthetic_param_ref(owner) {
             continue;

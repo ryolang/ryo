@@ -1319,7 +1319,6 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         tir_ref: TirRef,
     ) -> Result<(), String> {
-        // Collect indices first to avoid simultaneous &mut + & on ctx.
         let pending: Vec<(usize, TirRef)> = ctx
             .sidecar
             .free_schedule
@@ -1332,33 +1331,7 @@ impl<M: Module> Codegen<M> {
             })
             .map(|(idx, fp)| (idx, fp.target))
             .collect();
-        if pending.is_empty() {
-            return Ok(());
-        }
-        let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
-        for (idx, target) in pending {
-            let repr = ctx.inst_values.get(&target).copied().ok_or_else(|| {
-                format!(
-                    "ownership pass scheduled Free for %{} but no ValueRepr cached",
-                    target.index()
-                )
-            })?;
-            ctx.freed_at.insert(idx);
-            match repr {
-                ValueRepr::Str { ptr, cap, .. } => {
-                    builder.ins().call(free_ref, &[ptr, cap]);
-                }
-                ValueRepr::Scalar(_) => {
-                    return Err(format!(
-                        "ownership pass scheduled Free for borrowed-scalar value %{} \
-                         (target of borrowed-scalar ABI, not heap-owned). \
-                         This indicates an ownership-pass bug. See I-057.",
-                        target.index()
-                    ));
-                }
-            }
-        }
-        Ok(())
+        Self::emit_frees(builder, ctx, pending)
     }
 
     /// End-of-statement sweep: fire any scheduled Free whose anchor
@@ -1391,6 +1364,20 @@ impl<M: Module> Codegen<M> {
             })
             .map(|(idx, fp)| (idx, fp.target))
             .collect();
+        Self::emit_frees(builder, ctx, pending)
+    }
+
+    /// Shared emission body for `emit_due_frees` / `sweep_due_frees`.
+    /// Given the already-filtered `(free_schedule index, target)`
+    /// pairs, declare `ryo_str_free` and emit one call per pair, marking
+    /// each index as fired in `ctx.freed_at`. A `Scalar`-cached target
+    /// is hard-errored with an I-057 pointer (the borrowed-scalar ABI is
+    /// supposed to keep such args out of `temp_owners`).
+    fn emit_frees(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        pending: Vec<(usize, TirRef)>,
+    ) -> Result<(), String> {
         if pending.is_empty() {
             return Ok(());
         }
