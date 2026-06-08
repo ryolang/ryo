@@ -1,53 +1,44 @@
-# Fibonacci Benchmarks
+# Ryo Language Benchmarks
 
-These benchmarks compare a standard recursive calculation of `fibonacci(40)` across different languages using `hyperfine`. 
+This directory contains various benchmarks used to measure, validate, and compare the performance and memory footprint of the **Ryo** programming language compiler and runtime against other languages.
 
-*Note: As of now, Ryo's recursive function capability works perfectly and is extremely fast!*
+We target both execution speed and memory efficiency (specifically focusing on Ryo's Ahead-Of-Time AOT compiler via Cranelift and JIT execution).
 
-## Prerequisites
-Before running the benchmarks, ensure you have the following tools installed and available in your PATH:
-- `rustc`
-- `go`
-- `swiftc`
-- `uv` (for Python 3.14)
-- `bun`
-- `elixir`
-- `ruby` (installed with homebrew)
-- `julia`
-- `kotlinc` and `temurin` (jvm)
-- `hyperfine`
+---
 
-You must also have a built Ryo compiler binary. By default, `run_benchmarks.sh` expects the `ryo` binary to be built in release mode at `../../target/release/ryo`. You can ensure this by running `cargo build --release` from the repository root before starting the benchmarks.
+## Benchmark Directory
 
-## Setup
-In the `benchmarks/fibonacci` directory, run:
+We maintain self-contained, reproducible benchmarks in separate subdirectories:
+
+### 1. [Fibonacci Benchmark](./fibonacci/)
+* **Focus:** Deep function recursion, standard integer arithmetic, and basic execution overhead.
+* **Languages compared:** Rust, Go, Swift, Kotlin, Bun (TypeScript), Julia, Elixir, Python, Ruby, and Ryo.
+* **Highlights:** Ryo AOT is highly competitive in execution speed and achieves the **lightest memory usage of all languages tested** (1.16 MB max resident size).
+
+### 2. [Eager Destruction Benchmark](./eager_destruction/)
+* **Focus:** Eager memory deallocation at last use (Eager Destruction / ASAP Destruction) vs. scope-based (RAII) destruction under deep recursion.
+* **Languages compared:** Rust (Scope-Based vs. Manual Drop) and Ryo.
+* **Highlights:** Ryo AOT uses nearly **2x less heap memory** than standard Rust and is completely immune to stack overflows under deep recursion because deallocations are automatically and eagerly scheduled *before* nested recursive calls.
+
+---
+
+## General Prerequisites
+
+To run these benchmarks, you will need `hyperfine` and a built release binary of the Ryo compiler:
+
 ```bash
+# Build the Ryo compiler in release mode from the repository root
+cargo build --release
+```
+
+Each benchmark directory contains its own `run_benchmarks.sh` wrapper script. Navigate to any subdirectory and execute the script:
+
+```bash
+cd benchmarks/eager_destruction
 ./run_benchmarks.sh
 ```
 
-## Results
-Calculating the 40th Fibonacci number recursively (Time taken):
-
-| Language | Version | Mean Time | Speed vs Rust | Memory (Max Resident) |
-|----------|---------|-----------|---------------|-----------------------|
-| **Rust** | 1.95.0 | ~265.5 ms | 1.00x         | 1.36 MB               |
-| **Kotlin**| 2.3.21 (jvm 26) | ~272.0 ms | 1.02x slower  | 39.50 MB     |
-| **Go**   | 1.26.2 | ~297.5 ms | 1.12x slower  | 3.94 MB               |
-| **Swift**| 6.2.4 | ~340.0 ms | 1.28x slower  | 1.64 MB               |
-| **Ryo (AOT)** | 0.1.0 | ~349.8 ms | 1.38x slower | **1.16 MB**           |
-| **Ryo (JIT)** | 0.1.0 | ~369.3 ms | 1.39x slower | 4.20 MB               |
-| **Bun (TS)**  | 1.3.13 | ~415.0 ms | 1.56x slower | 27.30 MB              |
-| **Julia** | 1.12.6 | ~431.5 ms | 1.63x slower | 216.06 MB             |
-| **Elixir**    | 1.19.5 | ~921.8 ms | 3.47x slower | 88.41 MB              |
-| **Python**| 3.14.4 | ~4.98 s | ~19.60x slower   | 26.64 MB               |
-| **Ruby** | 4.0.3 | ~7.7 s | ~30.4x slower | 16.36 MB              |
-
-*(Measurements executed on macOS, Apple M3 Pro. Ryo is compiled using `--release`)*
-
-### Notes on Memory Usage
-Ryo's Ahead-Of-Time (AOT) compiled binary stands out aggressively in memory footprint—claiming the **lightest memory usage of all languages tested** (1.16 MB vs Rust's 1.31 MB).
-
-Even operating entirely as a JIT script interpreting/compiling source code directly, Ryo's compiler (via Cranelift) maintains an incredibly small memory footprint (~4 MB).
+---
 
 ## Profiling with Samply
 
@@ -58,9 +49,11 @@ First, install `samply`:
 cargo install samply
 ```
 
-Then, you can profile either the JIT execution or the standalone AOT compiled binary. 
+Then, navigate to any benchmark directory, build the benchmark, and profile either the JIT execution or the standalone AOT compiled binary.
 
-**Profile the AOT binary:**
+### Example: Profiling Fibonacci
+
+**Profile the standalone AOT binary:**
 ```bash
 samply record ./fib
 ```
@@ -70,4 +63,5 @@ samply record ./fib
 samply record ../../target/release/ryo run fib.ryo
 ```
 
-`samply` will execute the provided command and automatically open a browser window displaying the flamegraph, allowing you to trace Cranelift codegen overhead versus actual application execution time.
+`samply` will execute the provided command and automatically open a browser window displaying an interactive flamegraph, allowing you to trace Cranelift codegen overhead versus actual application execution time.
+
