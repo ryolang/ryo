@@ -91,7 +91,11 @@ enum ToolchainAction {
     /// Download and install the Zig linker
     Install,
     /// Show toolchain installation status
-    Status,
+    Status {
+        /// Print the absolute path to the Zig binary (ensuring it is installed)
+        #[arg(long)]
+        path: bool,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -108,13 +112,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 toolchain::ensure_zig()?;
                 println!("Toolchain ready.");
             }
-            ToolchainAction::Status => {
-                let status = if toolchain::is_installed() {
-                    "installed"
+            ToolchainAction::Status { path } => {
+                if path {
+                    let zig_path = toolchain::ensure_zig()?;
+                    print!("{}", zig_path.display());
                 } else {
-                    "not installed"
-                };
-                println!("Zig version: {} ({status})", toolchain::pinned_version());
+                    let status = if toolchain::is_installed() {
+                        "installed"
+                    } else {
+                        "not installed"
+                    };
+                    println!("Zig version: {} ({status})", toolchain::pinned_version());
+                }
             }
         },
     }

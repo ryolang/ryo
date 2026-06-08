@@ -146,6 +146,13 @@ struct FunctionContext<'a, M: Module> {
     /// per-eval hook already fired. Without this guard each path
     /// would emit the Free, double-freeing the allocation.
     freed_at: HashSet<usize>,
+    /// Maps an anchor `TirRef` (`after`) to the indices of `sidecar.free_schedule`
+    /// that are anchored on it. Used for O(1) free-lookup at statement-level and
+    /// instruction-level emission.
+    free_by_after: HashMap<TirRef, Vec<usize>>,
+    /// Unfired indices in `sidecar.free_schedule` that still need to be swept.
+    /// Used to avoid O(K * S) quadratic scaling during end-of-statement sweep.
+    pending_sweep: Vec<usize>,
     loop_stack: Vec<LoopContext>,
     str_locals: HashMap<StringId, StrLocals>,
     /// For str-returning functions: the hidden sret pointer (first block param)
@@ -481,6 +488,12 @@ impl<M: Module> Codegen<M> {
                 }
             }
 
+            let mut free_by_after: HashMap<TirRef, Vec<usize>> = HashMap::new();
+            for (idx, fp) in func_sidecar.free_schedule.iter().enumerate() {
+                free_by_after.entry(fp.after).or_default().push(idx);
+            }
+            let pending_sweep: Vec<usize> = (0..func_sidecar.free_schedule.len()).collect();
+
             let mut ctx: FunctionContext<'_, M> = FunctionContext {
                 module: &mut self.module,
                 data_ctx: &mut self.data_ctx,
@@ -493,6 +506,8 @@ impl<M: Module> Codegen<M> {
                 func_ids,
                 inst_values: HashMap::new(),
                 freed_at: HashSet::new(),
+                free_by_after,
+                pending_sweep,
                 loop_stack: Vec::new(),
                 str_locals: str_param_locals,
                 sret_ptr,
@@ -1319,17 +1334,20 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         tir_ref: TirRef,
     ) -> Result<(), String> {
-        let pending: Vec<(usize, TirRef)> = ctx
-            .sidecar
-            .free_schedule
+        if ctx.sidecar.free_schedule.is_empty() {
+            return Ok(());
+        }
+        let Some(indices) = ctx.free_by_after.get(&tir_ref) else {
+            return Ok(());
+        };
+        let pending: Vec<(usize, TirRef)> = indices
             .iter()
-            .enumerate()
-            .filter(|(idx, fp)| {
-                fp.after == tir_ref
-                    && Self::branch_active(fp.branch, &ctx.branch_stack)
-                    && !ctx.freed_at.contains(idx)
+            .copied()
+            .filter(|&idx| {
+                let fp = &ctx.sidecar.free_schedule[idx];
+                Self::branch_active(fp.branch, &ctx.branch_stack) && !ctx.freed_at.contains(&idx)
             })
-            .map(|(idx, fp)| (idx, fp.target))
+            .map(|idx| (idx, ctx.sidecar.free_schedule[idx].target))
             .collect();
         Self::emit_frees(builder, ctx, pending)
     }
@@ -1351,18 +1369,20 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<(), String> {
+        if ctx.pending_sweep.is_empty() {
+            return Ok(());
+        }
         let pending: Vec<(usize, TirRef)> = ctx
-            .sidecar
-            .free_schedule
+            .pending_sweep
             .iter()
-            .enumerate()
-            .filter(|(idx, fp)| {
+            .copied()
+            .filter(|&idx| {
+                let fp = &ctx.sidecar.free_schedule[idx];
                 Self::branch_active(fp.branch, &ctx.branch_stack)
-                    && !ctx.freed_at.contains(idx)
                     && ctx.inst_values.contains_key(&fp.after)
                     && ctx.inst_values.contains_key(&fp.target)
             })
-            .map(|(idx, fp)| (idx, fp.target))
+            .map(|idx| (idx, ctx.sidecar.free_schedule[idx].target))
             .collect();
         Self::emit_frees(builder, ctx, pending)
     }
@@ -1404,6 +1424,7 @@ impl<M: Module> Codegen<M> {
                 }
             }
         }
+        ctx.pending_sweep.retain(|idx| !ctx.freed_at.contains(idx));
         Ok(())
     }
 
