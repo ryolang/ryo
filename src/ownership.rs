@@ -1758,6 +1758,16 @@ mod tests {
             "expected inside-loop StrConst to be scheduled for Free; got: {:?}",
             sidecar.free_schedule
         );
+        assert_eq!(
+            sidecar
+                .free_schedule
+                .iter()
+                .filter(|fp| fp.target == lit)
+                .count(),
+            1,
+            "expected exactly one Free for the inside-loop StrConst; got: {:?}",
+            sidecar.free_schedule
+        );
     }
 
     #[test]
