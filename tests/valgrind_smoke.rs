@@ -104,6 +104,22 @@ fn valgrind_pre_loop_owner_last_use_inside_loop() {
 }
 
 #[test]
+fn valgrind_break_before_last_use() {
+    run_valgrind_smoke(
+        find_fixture("break_before_last_use"),
+        "break_before_last_use",
+    );
+}
+
+#[test]
+fn valgrind_continue_before_last_use() {
+    run_valgrind_smoke(
+        find_fixture("continue_before_last_use"),
+        "continue_before_last_use",
+    );
+}
+
+#[test]
 fn valgrind_concat_chain() {
     run_valgrind_smoke(find_fixture("concat_chain"), "concat_chain");
 }

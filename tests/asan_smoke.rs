@@ -78,6 +78,22 @@ fn asan_pre_loop_owner_last_use_inside_loop_no_double_free() {
 }
 
 #[test]
+fn asan_break_before_last_use() {
+    run_asan_smoke(
+        find_fixture("break_before_last_use"),
+        "break_before_last_use",
+    );
+}
+
+#[test]
+fn asan_continue_before_last_use() {
+    run_asan_smoke(
+        find_fixture("continue_before_last_use"),
+        "continue_before_last_use",
+    );
+}
+
+#[test]
 fn asan_int_to_str_then_print() {
     run_asan_smoke(
         find_fixture("int_to_str_then_print"),
