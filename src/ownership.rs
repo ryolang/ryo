@@ -2149,4 +2149,49 @@ mod tests {
         // `branch_ids_do_not_collide_after_loop` is the stronger
         // guarantee.
     }
+
+    #[test]
+    fn merge_branches_takes_max_next_branch_id() {
+        // Direct regression for Bug 4 in M8.1c. merge_two clones the
+        // pre-loop entry; merge_branches must monotonically advance
+        // next_branch_id so that BranchIds minted inside a loop body
+        // are not reused by post-loop ifs.
+        let mut entry = Ownership {
+            next_branch_id: 0,
+            ..Ownership::default()
+        };
+
+        // inside-loop minted ids 0..=4
+        let after_body = Ownership {
+            next_branch_id: 5,
+            ..Ownership::default()
+        };
+
+        entry.merge_branches(&[&entry.clone(), &after_body]);
+
+        assert_eq!(
+            entry.next_branch_id, 5,
+            "merge_branches must take the max of branch next_branch_id values"
+        );
+    }
+
+    #[test]
+    fn merge_branches_keeps_self_when_self_is_higher() {
+        // Symmetry check: max() also wins when self already has the
+        // higher value (a branch that didn't allocate any BranchIds
+        // shouldn't roll the allocator backward).
+        let mut entry = Ownership {
+            next_branch_id: 7,
+            ..Ownership::default()
+        };
+
+        let other = Ownership::default(); // next_branch_id = 0
+
+        entry.merge_branches(&[&other, &other]);
+
+        assert_eq!(
+            entry.next_branch_id, 7,
+            "merge_branches must not roll next_branch_id backward"
+        );
+    }
 }
