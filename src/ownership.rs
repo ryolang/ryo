@@ -1771,6 +1771,60 @@ mod tests {
     }
 
     #[test]
+    fn pre_loop_owner_read_only_in_loop_is_freed() {
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s_name = pool.intern_str("s");
+        let print_name = pool.intern_str("print");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void:
+        //     s: str = "hello"
+        //     while false:
+        //         print(s)            # only read of `s`, inside the loop
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s_name, false, str_ty, lit, span);
+        let cond = tb.bool_const(false, bool_ty, span);
+        let s_var = tb.var(s_name, str_ty, span);
+        let print_call = tb.call(print_name, &[s_var], void, span);
+        let wl = tb.while_loop(cond, &[print_call], void, span);
+        let tir = tb.finish(&[decl, wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "did not expect DeadStore for `s` (it is read inside the loop): {:?}",
+            diags
+        );
+
+        let count = sidecar
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == lit)
+            .count();
+        assert_eq!(
+            count, 1,
+            "expected exactly one Free for pre-loop owner read only inside loop; got {} schedule={:?}",
+            count, sidecar.free_schedule
+        );
+    }
+
+    #[test]
     fn last_use_scheduled_for_unmoved_local() {
         use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
