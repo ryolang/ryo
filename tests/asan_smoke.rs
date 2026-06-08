@@ -10,18 +10,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn ryo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn runtime_lib_path() -> PathBuf {
-    // Prefer release build (CI's prerequisite step in ci.yml). Fall
-    // back to debug if release isn't there.
-    let release = ryo_root().join("target/release/libryo_runtime.a");
-    if release.exists() {
-        return release;
-    }
-    ryo_root().join("target/debug/libryo_runtime.a")
+    PathBuf::from(env!("RYO_RUNTIME_LIB"))
 }
 
 fn zig_path() -> PathBuf {
