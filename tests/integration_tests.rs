@@ -3046,3 +3046,26 @@ fn main():
         runtime_output
     );
 }
+
+#[test]
+fn branch_ids_do_not_collide_after_loop() {
+    // Regression for Bug 4 (M8.1c): merge_branches must take the
+    // max next_branch_id across branches so that BranchIds minted
+    // inside a loop body's `if` survive the post-loop merge. If the
+    // allocator rolled backward, the post-loop `if` below would
+    // reuse those BranchIds and collide in codegen's branch_blocks
+    // map (or mis-gate Frees), causing either a Cranelift panic or
+    // a runtime double-free.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn consume(move x: str):\n\tprint(x)\n\nfn main():\n\tmut i: int = 0\n\twhile i < 1:\n\t\tif i == 0:\n\t\t\ts1: str = int_to_str(1)\n\t\t\tconsume(s1)\n\t\telse:\n\t\t\ts2: str = int_to_str(2)\n\t\t\tconsume(s2)\n\t\ti += 1\n\tflag: bool = true\n\tif flag:\n\t\ts3: str = int_to_str(3)\n\t\tconsume(s3)\n\telse:\n\t\ts4: str = int_to_str(4)\n\t\tconsume(s4)\n";
+    let test_file = create_test_file(temp_dir.path(), "branch_id_collision.ryo", code);
+
+    let output = run_ryo_command(&["run", "branch_id_collision.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed without branch_blocks collision. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

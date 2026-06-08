@@ -185,6 +185,17 @@ impl Ownership {
     /// observed branch state. `current_owner` entries from any branch
     /// are preserved so reseats inside a branch survive the join.
     fn merge_branches(&mut self, branches: &[&Ownership]) {
+        // BranchId monotonicity: never let a merge roll the allocator
+        // backward. analyze_while_loop and analyze_for_range build
+        // their post-loop state via merge_two(&entry, &after_body),
+        // which clones `entry` — that would discard any BranchIds
+        // minted inside the loop body and let post-loop ifs reuse
+        // them, colliding in codegen's branch_blocks map.
+        self.next_branch_id = std::cmp::max(
+            self.next_branch_id,
+            branches.iter().map(|b| b.next_branch_id).max().unwrap_or(0),
+        );
+
         // Snapshot pre-branch (name, owner) pairs before we start
         // touching `self.states`. After the per-TirRef merge below
         // we revisit each pre-branch binding and recompute its state
