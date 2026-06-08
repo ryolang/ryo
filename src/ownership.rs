@@ -1207,88 +1207,10 @@ fn collect_last_uses(
 /// observed. Used by the anonymous-temporary-free pass to anchor
 /// each temp's Free after its single consumer.
 fn find_consumers(tir: &Tir, r: TirRef, consumer_of: &mut HashMap<TirRef, TirRef>) {
-    let inst = *tir.inst(r);
-    match inst.data {
-        TirData::UnOp(o) => {
-            consumer_of.entry(o).or_insert(r);
-            find_consumers(tir, o, consumer_of);
-        }
-        TirData::BinOp { lhs, rhs } => {
-            consumer_of.entry(lhs).or_insert(r);
-            consumer_of.entry(rhs).or_insert(r);
-            find_consumers(tir, lhs, consumer_of);
-            find_consumers(tir, rhs, consumer_of);
-        }
-        TirData::Extra(_) => match inst.tag {
-            TirTag::Call => {
-                let view = tir.call_view(r);
-                for &arg in &view.args {
-                    consumer_of.entry(arg).or_insert(r);
-                    find_consumers(tir, arg, consumer_of);
-                }
-            }
-            TirTag::VarDecl => {
-                let v = tir.var_decl_view(r);
-                consumer_of.entry(v.initializer).or_insert(r);
-                find_consumers(tir, v.initializer, consumer_of);
-            }
-            TirTag::Assign => {
-                let v = tir.assign_view(r);
-                consumer_of.entry(v.value).or_insert(r);
-                find_consumers(tir, v.value, consumer_of);
-            }
-            TirTag::CompoundAssign => {
-                let v = tir.compound_assign_view(r);
-                consumer_of.entry(v.value).or_insert(r);
-                find_consumers(tir, v.value, consumer_of);
-            }
-            TirTag::IfStmt => {
-                let v = tir.if_stmt_view(r);
-                consumer_of.entry(v.cond).or_insert(r);
-                find_consumers(tir, v.cond, consumer_of);
-                for &s in &v.then_stmts {
-                    find_consumers(tir, s, consumer_of);
-                }
-                for elif in &v.elif_branches {
-                    consumer_of.entry(elif.cond).or_insert(r);
-                    find_consumers(tir, elif.cond, consumer_of);
-                    for &s in &elif.body {
-                        find_consumers(tir, s, consumer_of);
-                    }
-                }
-                if let Some(else_stmts) = &v.else_stmts {
-                    for &s in else_stmts {
-                        find_consumers(tir, s, consumer_of);
-                    }
-                }
-            }
-            TirTag::WhileLoop => {
-                let v = tir.while_loop_view(r);
-                consumer_of.entry(v.cond).or_insert(r);
-                find_consumers(tir, v.cond, consumer_of);
-                for &s in &v.body {
-                    find_consumers(tir, s, consumer_of);
-                }
-            }
-            TirTag::ForRange => {
-                let v = tir.for_range_view(r);
-                consumer_of.entry(v.start).or_insert(r);
-                consumer_of.entry(v.end).or_insert(r);
-                find_consumers(tir, v.start, consumer_of);
-                find_consumers(tir, v.end, consumer_of);
-                for &s in &v.body {
-                    find_consumers(tir, s, consumer_of);
-                }
-            }
-            _ => {}
-        },
-        TirData::None
-        | TirData::Int(_)
-        | TirData::Float(_)
-        | TirData::Str(_)
-        | TirData::Bool(_)
-        | TirData::Var(_) => {}
-    }
+    walk_operands(tir, r, &mut |parent, operand| {
+        consumer_of.entry(operand).or_insert(parent);
+        find_consumers(tir, operand, consumer_of);
+    });
 }
 
 /// Visit every direct operand of TIR instruction `r`, invoking
