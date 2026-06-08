@@ -1419,16 +1419,26 @@ fn schedule_loop_exit_frees_in(
     }
 }
 
-/// Schedule one Free per pre-loop owner that's still `Valid` at the
-/// jump site and isn't already covered by a post-loop last-use.
+/// Schedule one Free per pre-loop owner that has no other Free
+/// scheduled for it elsewhere. Today (M8.1c) every pre-loop
+/// owner falls into one of three covered buckets:
+///   - last-use after the loop  → last-use pass
+///   - last-use before/inside   → last-use pass
+///   - dead store               → pending_dead_store pass
 ///
-/// "Pre-loop" is identified by comparing the owner's `TirRef` index
-/// against the minimum body-statement index of the enclosing loop —
-/// `TirBuilder` emits body statements before the loop instruction
-/// itself, so any owner whose index is below the body's minimum was
-/// definitely defined before the loop started. Owners with index
-/// `>= body_min` were defined inside the body and fall under the
-/// inside-loop limitation documented in `analyze_function`.
+/// so this function emits nothing in practice for M8.1's pattern
+/// set. The dispatch remains in place because future Move-typed
+/// producers (e.g. shared[T]) may introduce owners outside those
+/// three buckets.
+///
+/// "Pre-loop" is identified by comparing the owner's `TirRef`
+/// index against the minimum body-statement index of the
+/// enclosing loop — `TirBuilder` emits body statements before the
+/// loop instruction itself, so any owner whose index is below the
+/// body's minimum was definitely defined before the loop started.
+/// Owners with index `>= body_min` were defined inside the body
+/// and fall under the inside-loop limitation documented in
+/// `analyze_function`.
 fn schedule_break_continue_frees(
     tir: &Tir,
     own: &Ownership,
@@ -1482,21 +1492,23 @@ fn schedule_break_continue_frees(
             // a future feature lets conditions allocate, revisit.
             continue;
         }
-        if let Some(&lu) = last_use.get(owner)
-            && lu.raw() > loop_inst.raw()
-        {
-            // Last-use is *strictly after* the loop instruction in
-            // TirRef order — i.e., a post-loop read. The post-loop
-            // last-use Free covers this owner; emitting one here
-            // would double-free.
-            //
-            // `>` rather than `>=`: `lu.raw() == loop_inst.raw()` is
-            // unreachable (the loop instruction itself is never a
-            // last-use site for an external owner). If a future
-            // refactor attaches last-use directly to the loop inst,
-            // revisit this check.
+        // Pre-loop owner still `Valid` at the jump site. Skip if
+        // another pass already schedules a Free for it:
+        //   - last_use anywhere   → last-use pass schedules at that read
+        //   - pending_dead_store  → dead-store pass schedules at the decl
+        // Emitting an exit-Free here in those cases would double-free.
+        // (Was: only `last_use after loop_inst` was treated as covered;
+        //  that missed last-uses *inside* and *before* the loop, which
+        //  are the failure modes Bug 3 in the M8.1c review describes.)
+        if last_use.contains_key(owner) {
             continue;
         }
+        if own.pending_dead_store.contains_key(owner) {
+            continue;
+        }
+        // No last-use AND no dead-store entry. Under M8.1's invariants
+        // this set should be empty, but emit defensively so a future
+        // producer that bypasses both passes doesn't silently leak.
         sidecar.free_schedule.push(FreePoint {
             after: jump_inst,
             target: *owner,
