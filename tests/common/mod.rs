@@ -167,4 +167,30 @@ fn main():
 \tprint(s)
 ",
     ),
+    (
+        "break_before_last_use",
+        "\
+fn main():
+\tmut i: int = 0
+\twhile i < 3:
+\t\ts: str = int_to_str(i)
+\t\tif i == 1:
+\t\t\tbreak
+\t\tprint(s)
+\t\ti += 1
+",
+    ),
+    (
+        "continue_before_last_use",
+        "\
+fn main():
+\tmut i: int = 0
+\twhile i < 3:
+\t\ts: str = int_to_str(i)
+\t\ti += 1
+\t\tif i == 2:
+\t\t\tcontinue
+\t\tprint(s)
+",
+    ),
 ];
