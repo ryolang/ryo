@@ -1714,6 +1714,49 @@ mod tests {
     }
 
     #[test]
+    fn ryo_panic_str_arg_is_not_temp_owner() {
+        // Regression test for I-057. The StrConst arg of `__ryo_panic`
+        // uses the borrowed-scalar ABI in codegen — codegen passes the
+        // raw .rodata pointer with cap=0 and never owns the buffer.
+        // The ownership pass must therefore exclude it from
+        // `temp_owners` so the anonymous-temp Free pass does not
+        // schedule a Free for it.
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let panic_name = pool.intern_str("__ryo_panic");
+        let msg = pool.intern_str("boom");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void: __ryo_panic("boom", 4)
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let str_arg = tb.str_const(msg, str_ty, span);
+        let len_arg = tb.int_const(4, int_ty, span);
+        let call = tb.call(panic_name, &[str_arg, len_arg], void, span);
+        let tir = tb.finish(&[call]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar_map = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar_map
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        // No scheduled Free should target __ryo_panic's StrConst arg —
+        // codegen's borrowed-scalar ABI never frees it.
+        assert!(
+            sidecar.free_schedule.iter().all(|fp| fp.target != str_arg),
+            "expected no scheduled Free for __ryo_panic's StrConst arg, got: {:?}",
+            sidecar.free_schedule
+        );
+    }
+
+    #[test]
     fn inside_loop_temp_is_freed() {
         use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
