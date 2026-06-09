@@ -208,3 +208,11 @@ fn main():
 ",
     ),
 ];
+
+pub fn find_fixture(name: &str) -> &'static str {
+    RYO_FIXTURES
+        .iter()
+        .find(|&&(n, _)| n == name)
+        .map(|&(_, s)| s)
+        .unwrap_or_else(|| panic!("fixture {name} not found"))
+}

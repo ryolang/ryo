@@ -1356,19 +1356,29 @@ fn schedule_loop_exit_frees_in(
     }
 }
 
+/// Slice of body statements for a `WhileLoop`/`ForRange` instruction,
+/// materialized into an owned `Vec<TirRef>` so the caller can re-borrow
+/// `tir` for recursive walks. Returns `None` for non-loop refs.
+fn loop_body(tir: &Tir, loop_inst: TirRef) -> Option<Vec<TirRef>> {
+    match tir.inst(loop_inst).tag {
+        TirTag::WhileLoop => Some(tir.while_loop_view(loop_inst).body.to_vec()),
+        TirTag::ForRange => Some(tir.for_range_view(loop_inst).body.to_vec()),
+        _ => None,
+    }
+}
+
 /// Collect every `TirRef` reachable from `loop_inst`'s body —
 /// transitive operands AND nested body statements — into `set`.
 /// Used to classify owners as inside-loop vs pre-loop without
 /// relying on the broken `raw()` proxy (producer refs are pushed
 /// before their parent body stmt, so a producer's `raw()` can be
-/// below the loop's body_min even though it's semantically inside).
+/// below the parent body-stmt's `raw()` even though it's
+/// semantically inside).
 ///
 /// `walk_operands` is shallow; this helper drives the recursion.
 fn collect_loop_body_refs(tir: &Tir, loop_inst: TirRef, set: &mut HashSet<TirRef>) {
-    let body: Vec<TirRef> = match tir.inst(loop_inst).tag {
-        TirTag::WhileLoop => tir.while_loop_view(loop_inst).body.to_vec(),
-        TirTag::ForRange => tir.for_range_view(loop_inst).body.to_vec(),
-        _ => return,
+    let Some(body) = loop_body(tir, loop_inst) else {
+        return;
     };
     for stmt in body {
         collect_refs_recursive(tir, stmt, set);
@@ -1460,10 +1470,7 @@ fn collect_jump_path(
                     // Other shapes (ExprStmt, etc.). The stmt's
                     // operands are evaluated as part of reaching
                     // `target`.
-                    set.insert(stmt);
-                    walk_operands(tir, stmt, &mut |_p, c, _k| {
-                        collect_refs_recursive(tir, c, set);
-                    });
+                    collect_refs_recursive(tir, stmt, set);
                     return true;
                 }
             }
@@ -1517,12 +1524,10 @@ fn schedule_break_continue_frees(
     // in this set — purely lexical raw() ordering misclassifies
     // anchors in sibling if-arms.
     let mut on_path: HashSet<TirRef> = HashSet::new();
-    let loop_body: Vec<TirRef> = match tir.inst(loop_inst).tag {
-        TirTag::WhileLoop => tir.while_loop_view(loop_inst).body.to_vec(),
-        TirTag::ForRange => tir.for_range_view(loop_inst).body.to_vec(),
-        _ => return,
+    let Some(body) = loop_body(tir, loop_inst) else {
+        return;
     };
-    let _ = collect_jump_path(tir, &loop_body, jump_inst, &mut on_path);
+    let _ = collect_jump_path(tir, &body, jump_inst, &mut on_path);
 
     // Index sidecar.free_schedule by target.
     //   has_any           — Free scheduled anywhere

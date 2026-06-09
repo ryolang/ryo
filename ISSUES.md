@@ -99,6 +99,11 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** For an if with N arms, `analyze_if_stmt` does N+2 deep clones of the entire `Ownership` value (states, current_owner, origin, temp_owners, named_owners, owner_at_read, pending_dead_store, next_branch_id). The union-only fields (`temp_owners`, `named_owners`, `owner_at_read`, `next_branch_id`) don't need to be saved/restored — they're additively merged after the arms walk. Loop helpers do the same plus a re-walk on non-convergence. Cost scales with nesting × function size, and grew when M8.1c added the four extra fields.
 **Resolution:** Snapshot only the fields that branches mutate non-monotonically (`states`, `current_owner`, `pending_dead_store`). Union-only fields stay live through the arms and are merged by retention. Folds with I-051 (loop helper extraction) — the snapshot/restore shape is shared.
 
+### I-067 — `schedule_break_continue_frees` defensive pre-loop emit fires on `continue` jumps
+**Files:** `src/ownership.rs` (`schedule_break_continue_frees`, "defensive emit" branch)
+**Summary:** The pre-loop owner branch's "no Free anywhere → emit defensively" backstop is intended to cover future producers that bypass last-use AND dead-store passes. Today no producer triggers it. But the branch fires uniformly on `break` AND `continue` jumps — and freeing a pre-loop owner on `continue` is precisely the use-after-free hazard the surrounding code documents (the next iteration would re-read the freed buffer). The earlier `is_break && free_inside_loop` clause guards the `break`-on-pre-loop case correctly; the trailing defensive emit does not have a symmetric `continue` guard.
+**Resolution:** Either (a) gate the defensive emit on `is_break` so it never fires on `continue`, accepting that a future producer hitting both passes' blind spot would leak rather than UAF on continue; or (b) when the first such producer lands, encode the path-relative liveness in the lattice merge so this hand-rolled jump-kind reasoning disappears (folds with the broader altitude concern). (a) is a one-line change today and removes the latent UAF; (b) is the principled long-term direction.
+
 ---
 
 ## 🟢 Cleanup
@@ -265,6 +270,24 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Files:** `src/pipeline.rs` (`parse_source`, `display_tokens`)
 **Summary:** `finalize_diags` consolidates the drain + render + `Err(CompilerError::Diagnostics(_))` shape for the sink-using stages (`lower_and_analyze`, `ir_command`). The lex error paths and `parse_source`'s parse-error branch still hand-roll the same pattern over a `Vec<Diag>` they build directly (no `DiagSink`). Drift risk is real: parse/lex paths skip the `Severity::Error` filter (they assume every diag they emit is an error, which holds today but isn't enforced), and any future change to the rendering convention has to be applied in three places.
 **Resolution:** Generalize `finalize_diags` to take `Vec<Diag>` (or `impl IntoIterator<Item = Diag>`); have `DiagSink::into_diags()` feed the new entry point. Then the three lex/parse error paths become `finalize_diags(vec![diag], input, &name)` and the render+wrap pattern lives in exactly one place. Folds naturally with I-014's lexer-DiagSink migration.
+
+### I-064 — `inside_loop` / `has_any` reachability sets recomputed per jump
+**Files:** `src/ownership.rs` (`schedule_break_continue_frees`, `schedule_loop_exit_frees_in`)
+**Summary:** `schedule_break_continue_frees` rebuilds the `inside_loop` HashSet via `collect_loop_body_refs` on every break/continue jump. `has_any` (which depends only on `sidecar.free_schedule`) is also rebuilt per jump. For a loop with K jumps that's K full traversals of the same loop body and K full scans of `free_schedule`. The same data is invariant across jumps in the same loop. Today's fixtures hit ≤1 jump per loop so the cost is invisible, but `match` and labelled break expand the jump count and the asymmetry will become visible.
+**Resolution:** Lift `inside_loop` and `has_any` to per-loop scope inside `schedule_loop_exit_frees_in`'s `WhileLoop`/`ForRange` arm; pass them down by reference into the per-jump call. `covers_this_jump` and `on_path` stay per-jump (they depend on `jump_inst`).
+
+### I-065 — `collect_jump_path` builds throwaway HashSets per arm for containment
+**Files:** `src/ownership.rs` (`collect_jump_path`)
+**Summary:** For each arm of an `IfStmt` containing the target, the helper builds a fresh `HashSet<TirRef>` via full `collect_refs_recursive` walk just to test `sub.contains(&target)`. The matched arm is then walked AGAIN by the recursive `collect_jump_path` call to populate `set` for real. The non-matching arm's full subtree gets walked into a throwaway set to confirm the jump isn't there. For an N-arm if where the jump is in arm K, the prefix is walked twice; for an N-stmt body where the jump is in stmt N, the prefix gets walked into per-stmt throwaway sets. Worst-case O(N²) in body size.
+**Resolution:** Two options that compose:
+- (a) Replace the per-arm containment probe with a short-circuiting `contains_recursive(tir, root, target) -> bool` that DFS-returns at first hit (no allocation).
+- (b) Precompute, alongside `inside_loop` (see I-064), a `HashMap<TirRef, TirRef>` from each ref to its enclosing top-level loop-body stmt. `collect_jump_path` then does a single lookup to find the chosen arm's containing stmt — no per-stmt walks.
+Option (b) composes naturally with I-064's per-loop precomputation.
+
+### I-066 — TIR reachability helpers belong next to `walk_operands` in `src/tir.rs`
+**Files:** `src/ownership.rs` (`collect_loop_body_refs`, `collect_refs_recursive`, `collect_jump_path`); `src/tir.rs` (`walk_operands`)
+**Summary:** `walk_operands` is documented as the single source of truth for TIR-shape coverage. The three new helpers introduced for I-058 (`collect_loop_body_refs`, `collect_refs_recursive`, `collect_jump_path`) are pure structural reachability over TIR shape — they consult no ownership state, just walk the IR. Today they live as private helpers in `src/ownership.rs` and re-encode the same dispatch on `WhileLoop`/`ForRange`/`IfStmt` that `walk_operands` performs internally. Adding any new control-flow shape (e.g. `match` arms) means editing `walk_operands` plus three call sites in `ownership.rs`. The same pattern keeps reappearing — `find_consumers` and `collect_last_uses` already drive recursion via `walk_operands` closures.
+**Resolution:** Promote a small TIR-reachability surface to `src/tir.rs`. Suggested API: `Tir::collect_reachable(r) -> HashSet<TirRef>` (transitive closure of `walk_operands`) and `Tir::collect_jump_path(body, target) -> Option<HashSet<TirRef>>` (path-set reachability). Ownership-pass scheduling becomes a thin policy layer; future passes (early-return ownership, exception-arm Frees, `match`-arm Frees) reuse the same reachability primitives. Folds with I-051 (loop helper extraction) on the same TIR module.
 
 ---
 
