@@ -1378,96 +1378,218 @@ fn schedule_loop_exit_frees_in(
     }
 }
 
-/// Schedule one Free per pre-loop owner that has no other Free
-/// scheduled for it elsewhere. Today (M8.1c) every pre-loop
-/// owner falls into one of three covered buckets:
-///   - last-use after the loop  → last-use pass
-///   - last-use before/inside   → last-use pass
-///   - dead store               → pending_dead_store pass
+/// Collect every `TirRef` reachable from `loop_inst`'s body —
+/// transitive operands AND nested body statements — into `set`.
+/// Used to classify owners as inside-loop vs pre-loop without
+/// relying on the broken `raw()` proxy (producer refs are pushed
+/// before their parent body stmt, so a producer's `raw()` can be
+/// below the loop's body_min even though it's semantically inside).
 ///
-/// so this function emits nothing in practice for M8.1's pattern
-/// set. The dispatch remains in place because future Move-typed
-/// producers (e.g. shared[T]) may introduce owners outside those
-/// three buckets.
+/// `walk_operands` is shallow; this helper drives the recursion.
+fn collect_loop_body_refs(tir: &Tir, loop_inst: TirRef, set: &mut HashSet<TirRef>) {
+    let body: Vec<TirRef> = match tir.inst(loop_inst).tag {
+        TirTag::WhileLoop => tir.while_loop_view(loop_inst).body.to_vec(),
+        TirTag::ForRange => tir.for_range_view(loop_inst).body.to_vec(),
+        _ => return,
+    };
+    for stmt in body {
+        collect_refs_recursive(tir, stmt, set);
+    }
+}
+
+fn collect_refs_recursive(tir: &Tir, r: TirRef, set: &mut HashSet<TirRef>) {
+    if !set.insert(r) {
+        return;
+    }
+    walk_operands(tir, r, &mut |_parent, child, _kind| {
+        collect_refs_recursive(tir, child, set);
+    });
+}
+
+/// Collect the set of TirRefs evaluated on the path that reaches
+/// `target` (a `break`/`continue` instruction) within `body`. Returns
+/// `true` if `target` was located.
 ///
-/// "Pre-loop" is identified by comparing the owner's `TirRef`
-/// index against the minimum body-statement index of the
-/// enclosing loop — `TirBuilder` emits body statements before the
-/// loop instruction itself, so any owner whose index is below the
-/// body's minimum was definitely defined before the loop started.
-/// Owners with index `>= body_min` were defined inside the body
-/// and fall under the inside-loop limitation documented in
-/// `analyze_function`.
+/// Walk-down rule: a body-stmt that does NOT contain `target` runs
+/// to completion before the jump's stmt is reached, so all of its
+/// operand-reachable refs are on-path. The body-stmt that DOES
+/// contain `target` recurses: into the right `IfStmt` arm, or into
+/// a nested loop's body. For an `IfStmt` we collect the cond
+/// unconditionally (it always runs); we then locate the single arm
+/// (then / a specific elif / else) that contains `target` and only
+/// recurse into that arm — sibling arms are off-path. For elif
+/// arms we also collect each preceding elif's cond (those conds
+/// executed; their bodies were skipped).
+///
+/// Used by `schedule_break_continue_frees` to decide whether an
+/// existing `FreePoint` actually fires on the jump's path. A Free
+/// anchored in a sibling arm has its `after` ref outside this set,
+/// so it's correctly classified as not-covering.
+fn collect_jump_path(
+    tir: &Tir,
+    body: &[TirRef],
+    target: TirRef,
+    set: &mut HashSet<TirRef>,
+) -> bool {
+    for &stmt in body {
+        if stmt == target {
+            set.insert(target);
+            return true;
+        }
+        let mut sub: HashSet<TirRef> = HashSet::new();
+        collect_refs_recursive(tir, stmt, &mut sub);
+        if sub.contains(&target) {
+            // `stmt` contains the jump. Descend along the right arm.
+            match tir.inst(stmt).tag {
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(stmt);
+                    set.insert(stmt);
+                    collect_refs_recursive(tir, view.cond, set);
+                    // Locate the arm containing `target`; only that arm's
+                    // statements are on-path. Earlier elif conds executed
+                    // (their bodies skipped) so collect just the conds up
+                    // to the chosen arm.
+                    let mut then_sub: HashSet<TirRef> = HashSet::new();
+                    for &s in &view.then_stmts {
+                        collect_refs_recursive(tir, s, &mut then_sub);
+                    }
+                    if then_sub.contains(&target) {
+                        return collect_jump_path(tir, &view.then_stmts, target, set);
+                    }
+                    for elif in &view.elif_branches {
+                        collect_refs_recursive(tir, elif.cond, set);
+                        let mut elif_sub: HashSet<TirRef> = HashSet::new();
+                        for &s in &elif.body {
+                            collect_refs_recursive(tir, s, &mut elif_sub);
+                        }
+                        if elif_sub.contains(&target) {
+                            return collect_jump_path(tir, &elif.body, target, set);
+                        }
+                    }
+                    if let Some(else_stmts) = &view.else_stmts {
+                        return collect_jump_path(tir, else_stmts, target, set);
+                    }
+                    return true;
+                }
+                TirTag::WhileLoop | TirTag::ForRange => {
+                    // Inner loop containing the jump. Should not
+                    // happen when called from the innermost-enclosing-
+                    // loop's break-pass — the inner loop runs its own
+                    // schedule_break_continue_frees pass for that jump.
+                    return true;
+                }
+                _ => {
+                    // Other shapes (ExprStmt, etc.). The stmt's
+                    // operands are evaluated as part of reaching
+                    // `target`.
+                    set.insert(stmt);
+                    walk_operands(tir, stmt, &mut |_p, c, _k| {
+                        collect_refs_recursive(tir, c, set);
+                    });
+                    return true;
+                }
+            }
+        }
+        // `stmt` does not contain target — fully evaluated before target.
+        collect_refs_recursive(tir, stmt, set);
+    }
+    false
+}
+
+/// Schedule one Free per `Valid` owner not already covered by a Free
+/// that fires on the jump's path.
+///
+/// Inside-loop owners (in `inside_loop`) — schedule iff no scheduled
+/// Free is anchored on the path that reaches this jump. The next
+/// iteration allocates a fresh buffer, so jump-side Frees are safe.
+///
+/// Pre-loop owners — schedule defensively iff NO Free is scheduled
+/// anywhere. We can't free a pre-loop owner on the jump path: a
+/// `continue` would resurrect the binding for the next iteration,
+/// which would then read freed memory. The defensive emit covers
+/// future producers that bypass last-use AND dead-store passes.
+///
+/// Catches the I-058 leak in two shapes:
+///   - linear: `for: s = alloc(); break; print(s)` — natural Free is
+///     anchored AFTER the break in source order; not on jump path.
+///   - cross-branch: `for: s = alloc(); if cond: print(s) else: break`
+///     — natural Free is anchored INSIDE the then-arm; the else-arm's
+///     break is not on the same path, so the Free doesn't cover it.
+///
+/// `inside_loop` and `on_path` are computed by transitive reachability
+/// from the loop's body — `raw()` comparisons are unsound (producer
+/// refs sit numerically below their parent body stmt, and sibling
+/// if-arms compare lexically but are not on the same control-flow
+/// path).
 fn schedule_break_continue_frees(
     tir: &Tir,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
-    last_use: &HashMap<TirRef, TirRef>,
+    _last_use: &HashMap<TirRef, TirRef>,
     jump_inst: TirRef,
     loop_inst: TirRef,
 ) {
-    let view_body_min = match tir.inst(loop_inst).tag {
-        TirTag::WhileLoop => tir
-            .while_loop_view(loop_inst)
-            .body
-            .iter()
-            .map(|s| s.raw())
-            .min(),
-        TirTag::ForRange => tir
-            .for_range_view(loop_inst)
-            .body
-            .iter()
-            .map(|s| s.raw())
-            .min(),
-        _ => unreachable!("schedule_break_continue_frees called with non-loop TirRef"),
+    // Classify owners by transitive reachability from the loop body.
+    // raw() comparisons are unsound here — producer refs sit
+    // numerically below their parent body stmt.
+    let mut inside_loop: HashSet<TirRef> = HashSet::new();
+    collect_loop_body_refs(tir, loop_inst, &mut inside_loop);
+
+    // Compute the set of TirRefs evaluated on the path that takes
+    // the jump. A Free covers this jump iff its `after` anchor is
+    // in this set — purely lexical raw() ordering misclassifies
+    // anchors in sibling if-arms.
+    let mut on_path: HashSet<TirRef> = HashSet::new();
+    let loop_body: Vec<TirRef> = match tir.inst(loop_inst).tag {
+        TirTag::WhileLoop => tir.while_loop_view(loop_inst).body.to_vec(),
+        TirTag::ForRange => tir.for_range_view(loop_inst).body.to_vec(),
+        _ => return,
     };
-    // Empty loop body cannot contain a `break`/`continue`, so this
-    // function would never be called with an empty body; treat the
-    // unreachable case as "everything counts as inside-loop" for
-    // safety.
-    let body_min = match view_body_min {
-        Some(m) => m,
-        None => return,
-    };
+    let _ = collect_jump_path(tir, &loop_body, jump_inst, &mut on_path);
+
+    // Index sidecar.free_schedule by target.
+    //   has_any           — Free scheduled anywhere
+    //   covers_this_jump  — Free anchored on a TirRef in `on_path`
+    //                       (i.e. fires on the path that takes the jump)
+    let mut has_any: HashSet<TirRef> = HashSet::new();
+    let mut covers_this_jump: HashSet<TirRef> = HashSet::new();
+    for fp in &sidecar.free_schedule {
+        has_any.insert(fp.target);
+        if on_path.contains(&fp.after) {
+            covers_this_jump.insert(fp.target);
+        }
+    }
 
     for (owner, state) in &own.states {
         if is_synthetic_param_ref(*owner) {
             continue;
         }
         if !matches!(state, OwnerState::Valid) {
-            // Already moved or borrowed: nothing to free here.
             continue;
         }
-        if owner.raw() >= body_min {
-            // Inside-loop owner — declared in (or after) the loop's
-            // body. Last-use Free (Task 3) covers it; mid-iteration
-            // break/continue with an inside-loop owner is the M8.1
-            // limitation noted in `analyze_function`.
-            //
-            // Note: condition-expression refs (e.g. for `while cond:`)
-            // also have `raw() < body_min` and would fall through this
-            // gate. M8.1 conditions are bool-typed and don't produce
-            // heap owners, so this is currently a non-issue — but if
-            // a future feature lets conditions allocate, revisit.
+
+        if inside_loop.contains(owner) {
+            // Inside-loop owner: each iteration allocates fresh, so
+            // a jump-anchored Free is safe. Schedule iff no Free
+            // already fires on this jump's path.
+            if covers_this_jump.contains(owner) {
+                continue;
+            }
+            sidecar.free_schedule.push(FreePoint {
+                after: jump_inst,
+                target: *owner,
+                span: tir.span(jump_inst),
+                branch: None,
+            });
             continue;
         }
-        // Pre-loop owner still `Valid` at the jump site. Skip if
-        // another pass already schedules a Free for it:
-        //   - last_use anywhere   → last-use pass schedules at that read
-        //   - pending_dead_store  → dead-store pass schedules at the decl
-        // Emitting an exit-Free here in those cases would double-free.
-        // (Was: only `last_use after loop_inst` was treated as covered;
-        //  that missed last-uses *inside* and *before* the loop, which
-        //  are the failure modes Bug 3 in the M8.1c review describes.)
-        if last_use.contains_key(owner) {
+
+        // Pre-loop owner: cannot free on the jump path — `continue`
+        // would resurrect the binding for the next iteration's read.
+        // Defensive emit only when no Free is scheduled anywhere.
+        if has_any.contains(owner) {
             continue;
         }
-        if own.pending_dead_store.contains_key(owner) {
-            continue;
-        }
-        // No last-use AND no dead-store entry. Under M8.1's invariants
-        // this set should be empty, but emit defensively so a future
-        // producer that bypasses both passes doesn't silently leak.
         sidecar.free_schedule.push(FreePoint {
             after: jump_inst,
             target: *owner,
