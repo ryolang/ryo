@@ -1,12 +1,23 @@
 #!/bin/bash
 set -e
 
+# Check for prerequisites
+if ! command -v rustc &> /dev/null; then
+    echo "Error: 'rustc' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v hyperfine &> /dev/null; then
+    echo "Error: 'hyperfine' is not installed or not in PATH. Please install it to run performance benchmarks."
+    exit 1
+fi
+
 echo "Building benchmarks..."
 rustc -O fib.rs -o fib_rs
 go build -o fib_go fib.go
 swiftc -O fib.swift -o fib_swift
 kotlinc fib.kt -include-runtime -d fib.jar
-cargo build --release > /dev/null 2>&1
+cargo build --release > /dev/null
 ryo_bin="../../target/release/ryo"
 $ryo_bin build fib.ryo > /dev/null
 
@@ -77,7 +88,7 @@ echo "-------------------"
 echo "Running Benchmarks (fib 40) using hyperfine"
 echo "-------------------"
 
-hyperfine --warmup 1 \
+hyperfine --warmup 3 --shell=none \
   './fib_rs' \
   'java -jar fib.jar' \
   './fib_go' \

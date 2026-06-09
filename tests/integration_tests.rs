@@ -2040,6 +2040,40 @@ fn test_int_to_str_builtin() {
 }
 
 #[test]
+fn last_use_across_multiple_top_level_statements() {
+    // Regression test: when an owned heap string is read in multiple
+    // top-level statements, the last-use Free must anchor after the
+    // *final* source-order read. A previous bug iterated the outer
+    // statement loop in reverse while the inner operand walker ran
+    // forward with overwriting `insert`, anchoring the Free after the
+    // first read instead — turning the second read into use-after-free.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // Compute the printed value (7 * 6 == 42) so the literal "42" never
+    // appears in the source dump that `cargo run --` emits under the
+    // `[Input Source]` heading. That way `stdout.matches("42").count()`
+    // reflects only the two `print(s)` calls, not the echoed source.
+    let code = "fn main():\n\ts: str = int_to_str(7 * 6)\n\tprint(s)\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "multi_read.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "multi_read.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let occurrences = stdout.matches("42").count();
+    assert_eq!(
+        occurrences, 2,
+        "expected '42' to appear exactly twice (once per print) — got {} occurrences. stdout: {}",
+        occurrences, stdout
+    );
+}
+
+#[test]
 fn test_float_to_str_builtin() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\ts: str = float_to_str(2.75)\n\tprint(s)\n";
@@ -2804,5 +2838,268 @@ fn test_dead_store_warning_reassignment() {
         stderr.contains("W0001"),
         "expected W0001 in stderr: {}",
         stderr
+    );
+}
+
+// Milestone 8.1c Task 7: codegen emits unconditional ryo_str_free
+// calls scheduled by the ownership pass. These tests don't grep
+// the CLIF dump (Cranelift renames runtime functions to opaque
+// `u0:N` identifiers in its text format); they instead exercise
+// the runtime path end-to-end. If a Free fires too early, the
+// `write` syscall reads from freed memory and the printed output
+// is corrupted; if a Free is missed, ASan (Task 11) catches the
+// leak.
+
+#[test]
+fn str_var_assignment_runs_clean() {
+    // Last-use Free anchored after the Var read inside `print(s)`.
+    // The Free must land after the syscall has copied the bytes;
+    // otherwise stdout is garbled.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\ts: str = \"hello\"\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "free_var.ryo", code);
+    let output =
+        run_ryo_command(&["run", "free_var.ryo"], &test_file).expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hello"),
+        "stdout should contain 'hello': {}",
+        stdout
+    );
+}
+
+#[test]
+fn str_concat_runs_clean_after_free() {
+    // Concat allocates a fresh buffer and the schedule frees the
+    // operand temporaries plus the named-binding owner. If any
+    // Free fires before `print` reads the concatenation, the
+    // allocator reuses the slab and `Hello, World!` comes out
+    // garbled.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code =
+        "fn main():\n\ta: str = \"Hello, \"\n\tb: str = \"World!\"\n\tc: str = a + b\n\tprint(c)\n";
+    let test_file = create_test_file(temp_dir.path(), "free_concat.ryo", code);
+    let output = run_ryo_command(&["run", "free_concat.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Hello, World!"),
+        "stdout should contain 'Hello, World!': {}",
+        stdout
+    );
+}
+
+#[test]
+fn mut_str_reassign_runs_clean() {
+    // Milestone 8.1c Task 8: a `mut` str binding reassigned with a
+    // new literal must free the old allocation before overwriting
+    // the StrLocals triple. If the Free is missing, ASan (Task 11)
+    // catches the leak; if it fires too late or reads from stale
+    // inst_values, stdout is corrupted or the run aborts.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut s: str = \"hello\"\n\ts = \"world\"\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "free_reassign.ryo", code);
+    let output = run_ryo_command(&["run", "free_reassign.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("world"),
+        "stdout should contain 'world': {}",
+        stdout
+    );
+    // The `ryo run` CLI dumps the source program to stdout before
+    // executing, so a naive `!stdout.contains("hello")` check would
+    // false-positive on the echoed source. Instead, look at the
+    // post-`[Codegen]` slice (the runtime's actual output) and
+    // confirm the program printed exactly `"world"` — not the old
+    // `"hello"` value, and not garbled bytes from a use-after-free.
+    let runtime_output = stdout
+        .split("[Codegen]")
+        .nth(1)
+        .expect("CLI trace should include [Codegen] section");
+    assert!(
+        !runtime_output.contains("hello"),
+        "runtime stdout should not leak old value 'hello': {}",
+        runtime_output
+    );
+}
+
+#[test]
+fn conditional_move_runs_clean() {
+    // Milestone 8.1c Task 9: branch-gated Frees for owners that end
+    // Valid in some arms and Moved in others. With `flag = false`
+    // we take the else-arm: `s` stays Valid through `print(s)` and
+    // must be freed by the conditional Free anchored at the last
+    // statement of the else-arm. The then-arm's `consume(s)` move
+    // means the post-merge state stamps `s` as Moved, so the
+    // function-exit last-use pass does NOT schedule a Free — the
+    // branch-gated entry is the only thing keeping the allocation
+    // from leaking under ASan.
+    //
+    // Heap-backed initializer (int_to_str returns an owned heap string)
+    // so that ryo_str_free in the else-arm actually frees a real
+    // allocation. A rodata-backed `"hello"` literal would have cap=0,
+    // making ryo_str_free a no-op — the test would pass even if the
+    // conditional-Free emission were missing entirely.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "\
+fn consume(move s: str):
+\tprint(s)
+
+fn main():
+\ts: str = int_to_str(42)
+\tflag: bool = false
+\tif flag:
+\t\tconsume(s)
+\telse:
+\t\tprint(s)
+";
+    let test_file = create_test_file(temp_dir.path(), "free_cond.ryo", code);
+    let output =
+        run_ryo_command(&["run", "free_cond.ryo"], &test_file).expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let runtime_output = stdout
+        .split("[Codegen]")
+        .nth(1)
+        .expect("CLI trace should include [Codegen] section");
+    assert!(
+        runtime_output.contains("42"),
+        "runtime stdout should contain '42': {}",
+        runtime_output
+    );
+}
+
+#[test]
+fn break_emits_pre_loop_owner_free() {
+    // Milestone 8.1c Task 10: pre-loop owners still Valid at a
+    // `break` site need a Free emitted before the Cranelift `jump`,
+    // because (1) the post-stmt sweep skips Free emission on
+    // terminating statements, and (2) the post-loop region — where
+    // the function-exit last-use pass would normally fire — is
+    // skipped entirely once we jump out.
+    //
+    // `s` is a pre-loop owner whose only read is inside the loop
+    // body. The `break` short-circuits the rest of the iteration;
+    // without the loop-exit-Free pass the heap allocation would leak.
+    //
+    // Heap-backed initializer (int_to_str returns an owned heap
+    // string) so that ryo_str_free actually frees a real allocation.
+    // A rodata-backed string literal would have cap=0, making
+    // ryo_str_free a no-op — the test would still pass even if the
+    // break-site Free were missing entirely. ASan in Task 11 will
+    // ultimately validate the Free actually happened.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "\
+fn main():
+\ts: str = int_to_str(7)
+\tmut i: int = 0
+\twhile i < 10:
+\t\tprint(s)
+\t\tif i == 0:
+\t\t\tbreak
+\t\ti = i + 1
+";
+    let test_file = create_test_file(temp_dir.path(), "free_break.ryo", code);
+    let output =
+        run_ryo_command(&["run", "free_break.ryo"], &test_file).expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let runtime_output = stdout
+        .split("[Codegen]")
+        .nth(1)
+        .expect("CLI trace should include [Codegen] section");
+    assert!(
+        runtime_output.contains("7"),
+        "runtime stdout should contain '7': {}",
+        runtime_output
+    );
+}
+
+#[test]
+fn cross_function_str_return_runs_clean() {
+    // Reproduces the bug where program-wide free_schedule caused
+    // frees from one function to fire in another at numerically-
+    // matching TirRefs. The pre-fix output garbled msg's bytes
+    // before print(msg) ran.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "\
+fn greet(name: str) -> str:
+\treturn \"Hello, \" + name + \"!\"
+
+fn main():
+\tuser: str = \"Alice\"
+\tmsg: str = greet(user)
+\tprint(user)
+\tprint(msg)
+";
+    let test_file = create_test_file(temp_dir.path(), "cross_fn_str.ryo", code);
+    let output = run_ryo_command(&["run", "cross_fn_str.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "ryo run should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let runtime_output = stdout
+        .split("[Codegen]")
+        .nth(1)
+        .expect("CLI trace should include [Codegen] section");
+    assert!(
+        runtime_output.contains("Alice"),
+        "expected 'Alice' in runtime stdout, got: {:?}",
+        runtime_output
+    );
+    assert!(
+        runtime_output.contains("Hello, Alice!"),
+        "expected 'Hello, Alice!' in runtime stdout, got: {:?}",
+        runtime_output
+    );
+}
+
+#[test]
+fn branch_ids_do_not_collide_after_loop() {
+    // Regression for Bug 4 (M8.1c): merge_branches must take the
+    // max next_branch_id across branches so that BranchIds minted
+    // inside a loop body's `if` survive the post-loop merge. If the
+    // allocator rolled backward, the post-loop `if` below would
+    // reuse those BranchIds and collide in codegen's branch_blocks
+    // map (or mis-gate Frees), causing either a Cranelift panic or
+    // a runtime double-free.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn consume(move x: str):\n\tprint(x)\n\nfn main():\n\tmut i: int = 0\n\twhile i < 1:\n\t\tif i == 0:\n\t\t\ts1: str = int_to_str(1)\n\t\t\tconsume(s1)\n\t\telse:\n\t\t\ts2: str = int_to_str(2)\n\t\t\tconsume(s2)\n\t\ti += 1\n\tflag: bool = true\n\tif flag:\n\t\ts3: str = int_to_str(3)\n\t\tconsume(s3)\n\telse:\n\t\ts4: str = int_to_str(4)\n\t\tconsume(s4)\n";
+    let test_file = create_test_file(temp_dir.path(), "branch_id_collision.ryo", code);
+
+    let output = run_ryo_command(&["run", "branch_id_collision.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "ryo run should succeed without branch_blocks collision. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }

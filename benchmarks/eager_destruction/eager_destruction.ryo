@@ -1,0 +1,10 @@
+fn recursive(x: int):
+	if x == 0:
+		return
+	s: str = int_to_str(x)
+	if s.len() == 0:
+		return
+	recursive(x - 1)
+
+fn main():
+	recursive(50000)

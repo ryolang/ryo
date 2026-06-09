@@ -21,7 +21,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
   - [x] [Milestone 8a — Void Type & `main()` Signature [alpha]](#milestone-8a-void-type--main-signature-alpha)
   - [x] [Milestone 8b — Conditionals & Logical Operators [alpha] ✅ COMPLETE](#milestone-8b-conditionals--logical-operators-alpha--complete)
   - [x] [Milestone 8c — Loops & Loop Control [alpha] ✅ COMPLETE](#milestone-8c-loops--loop-control-alpha--complete)
-- [ ] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha)
+- [x] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha) ✅
 - [ ] [Milestone 8.2 — Immutable Borrows (`&T`) [alpha]](#milestone-82-immutable-borrows-t-alpha)
 - [ ] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha]](#milestone-83-mutable-borrows-inout-alpha)
 - [ ] [Milestone 8.4 — String Slices (`&str`) [alpha]](#milestone-84-string-slices-str-alpha)
@@ -884,10 +884,15 @@ fn main():
 - `break`/`continue` affect the **innermost loop only**. No labeled breaks in v0.1.
 - Dependencies: Milestone 8b (block-emission infrastructure, branch lowering), Milestone 7 (ordering comparisons in loop conditions and `range` bounds).
 
-### Milestone 8.1: Heap-Allocated `str` Type & Move Semantics [alpha]
+### Milestone 8.1: Heap-Allocated `str` Type & Move Semantics [alpha] ✅ COMPLETE
 **Goal:** Promote string literals from read-only data to a real heap-allocated `str` type, introduce the ownership-tracking pass that catches use-after-move on named bindings, and land the **implicit immutable borrow** for function parameters (spec Rule 2) together with the **`move` keyword** that opts into ownership transfer (spec Rule 4). Explicit `&T` / `inout T` borrow syntax and string slices (`&str`) follow in M8.2–M8.4.
 
-**Status:** ⏳ Planned
+**Status:** ✅ COMPLETE
+
+**Completed:**
+- ✅ [M8.1a: Runtime crate + heap `str` type](../superpowers/plans/2026-05-20-milestone-8.1a-runtime-heap-str.md) (May 2026)
+- ✅ [M8.1b: Ownership pass + move tracking](../superpowers/plans/2026-06-03-milestone-8.1b-ownership-pass.md) (June 2026)
+- ✅ [M8.1c: ASAP destruction (Free insertion)](../superpowers/plans/2026-06-05-milestone-8.1c-asap-destruction.md) (June 2026)
 
 **Why this comes before M8.5 (and the rest of Phase 2):**
 Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching, error types) uses `str` in its examples and signatures — `error NotFound(path: str)`, `Result.Error("...")`, struct fields with string names. Landing strings and the borrow checker here makes those milestones implementable as written, instead of forward-referencing features. It also means the move-tracking pass exists before structs and tuples, so their move semantics are checked from day one.
