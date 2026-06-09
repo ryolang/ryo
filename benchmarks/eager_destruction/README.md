@@ -66,17 +66,17 @@ Because `fn1` is called before `fn2`, the string is freed instantly and `fn2` is
 
 To allow direct comparison and capture memory (RSS) metrics across all candidates, the benchmark is configured to run at a recursion depth of **50,000** by default (the limit before Rust's stack frame overhead causes a crash on typical OS configurations).
 
-Measurements executed on **macOS 15.2 (Apple M3 Pro, 11-core)** at **50,000** depth:
+Measurements executed on **macOS 26.5.1 (Build 25F80)** at **50,000** depth:
 
 | Benchmark Candidate | Language | Execution Strategy | Max Resident Memory (RSS) | Memory Efficiency | Result at 80,000 Depth (Stack Limit) |
 |---------------------|----------|--------------------|---------------------------|-------------------|--------------------------------------|
-| **Ryo (AOT)** | Ryo 0.1.0 | Standalone Binary (Eager) | **4.44 MB** | **1.87x more efficient** | **Succeeds (0.00s)** |
-| **Ryo (JIT)** | Ryo 0.1.0 | JIT Compiler (Eager) | **7.42 MB** | 1.12x more efficient | **Succeeds (0.00s)** |
-| **Rust (Manual Drop)** | Rust 1.95.0 | AOT Compiled (Manual `drop(s)`) | **6.83 MB** | 1.22x less efficient | **Stack Overflow (Crash)** |
-| **Rust (Scope-Based)** | Rust 1.95.0 | AOT Compiled (Scope RAII) | **8.33 MB** | 1.87x less efficient | **Stack Overflow (Crash)** |
+| **Ryo (AOT)** | Ryo 0.1.0 | Standalone Binary (Eager) | **4.42 MB** | **1.88x more efficient** | **Succeeds (0.00s)** |
+| **Ryo (JIT)** | Ryo 0.1.0 | JIT Compiler (Eager) | **7.50 MB** | 1.11x more efficient | **Succeeds (0.00s)** |
+| **Rust (Manual Drop)** | Rust 1.96.0 | AOT Compiled (Manual `drop(s)`) | **6.81 MB** | 1.22x less efficient | **Stack Overflow (Crash)** |
+| **Rust (Scope-Based)** | Rust 1.96.0 | AOT Compiled (Scope RAII) | **8.33 MB** | 1.88x less efficient | **Stack Overflow (Crash)** |
 
 ### Key Takeaways
-1. **Unrivaled Memory Performance:** Ryo's Ahead-Of-Time (AOT) compiled binary achieves the **lowest memory footprint** (4.44 MB), outperforming even Rust's manual `drop` version.
+1. **Unrivaled Memory Performance:** Ryo's Ahead-Of-Time (AOT) compiled binary achieves the **lowest memory footprint** (4.42 MB), outperforming even Rust's manual `drop` version.
 2. **Stack Safety under Deep Recursion:** While Rust **crashes with a stack overflow** at 80,000 recursive calls (even with release-level optimizations `-O` and manual `drop` due to conservative LLVM tail call heuristics), **Ryo runs completely clean to completion** because of its deterministic and guaranteed eager-destruction generation.
 3. **Observing the Crash:** To observe the stack overflow in Rust and Ryo's stack-safety first-hand, edit the `main()` function in `eager_destruction.ryo`, `eager_destruction.rs`, and `eager_destruction_manual_drop.rs` to change `50000` to `80000` (or higher depending on your system's stack size limits), then re-run `./run_benchmarks.sh`.
 
