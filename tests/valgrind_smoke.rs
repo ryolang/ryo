@@ -10,8 +10,7 @@
 //! Cranelift output is not ASan-instrumented (no `__asan_init`, no
 //! `.preinit_array` entry, no stack-root reporting). Valgrind
 //! dynamically translates the binary at runtime so it sees every
-//! `malloc`/`free` call regardless of how the binary was compiled. See
-//! ISSUES.md (I-058 entry) for the full diagnostic.
+//! `malloc`/`free` call regardless of how the binary was compiled.
 //!
 //! This harness is Linux-only — Valgrind on macOS lags upstream by
 //! several years and is unreliable on recent Darwin releases.
