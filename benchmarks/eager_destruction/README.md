@@ -68,8 +68,8 @@ To allow direct comparison and capture memory (RSS) metrics across all candidate
 
 Measurements executed on **macOS 26.5.1 (Build 25F80)** at **50,000** depth:
 
-| Benchmark Candidate | Language | Execution Strategy | Max Resident Memory (RSS) | Memory Efficiency | Result at 80,000 Depth (Stack Limit) |
-|---------------------|----------|--------------------|---------------------------|-------------------|--------------------------------------|
+| Benchmark Candidate | Language | Execution Strategy | Max Resident Memory (RSS) | Memory Efficiency | Result at 74,556+ Depth (Stack Limit) |
+|---------------------|----------|--------------------|---------------------------|-------------------|---------------------------------------|
 | **Ryo (AOT)** | Ryo 0.1.0 | Standalone Binary (Eager) | **4.42 MB** | **1.88x more efficient** | **Succeeds (0.00s)** |
 | **Ryo (JIT)** | Ryo 0.1.0 | JIT Compiler (Eager) | **7.50 MB** | 1.11x more efficient | **Succeeds (0.00s)** |
 | **Rust (Manual Drop)** | Rust 1.96.0 | AOT Compiled (Manual `drop(s)`) | **6.81 MB** | 1.22x less efficient | **Stack Overflow (Crash)** |
@@ -77,8 +77,9 @@ Measurements executed on **macOS 26.5.1 (Build 25F80)** at **50,000** depth:
 
 ### Key Takeaways
 1. **Unrivaled Memory Performance:** Ryo's Ahead-Of-Time (AOT) compiled binary achieves the **lowest memory footprint** (4.42 MB), outperforming even Rust's manual `drop` version.
-2. **Stack Safety under Deep Recursion:** While Rust **crashes with a stack overflow** at 80,000 recursive calls (even with release-level optimizations `-O` and manual `drop` due to conservative LLVM tail call heuristics), **Ryo runs completely clean to completion** because of its deterministic and guaranteed eager-destruction generation.
-3. **Observing the Crash:** To observe the stack overflow in Rust and Ryo's stack-safety first-hand, edit the `main()` function in `eager_destruction.ryo`, `eager_destruction.rs`, and `eager_destruction_manual_drop.rs` to change `50000` to `80000` (or higher depending on your system's stack size limits), then re-run `./run_benchmarks.sh`.
+2. **Stack Safety under Deep Recursion:** While Rust **crashes with a stack overflow at exactly 74,556 recursive calls** (even with release-level optimizations `-O` and manual `drop` due to conservative LLVM tail call heuristics), **Ryo runs completely clean up to 260,000 recursive calls** (3.5x deeper than Rust) before reaching the OS stack limit.
+3. **The Power of Compact Stack Frames:** In recursive scope-based RAII, Rust must keep active references, drop flags, and landing pads in each stack frame until the recursion unwinds. By contrast, Ryo's **Milestone 8.1 Eager Destruction** statically frees the string allocation *before* entering recursion, leaving the stack frame incredibly compact.
+4. **Observing the Crash:** To observe the stack overflow in Rust and Ryo's stack-safety first-hand, edit the `main()` function in `eager_destruction.ryo` and `eager_destruction.rs` to change `50000` to `74556` (or higher), then re-run `./run_benchmarks.sh`. To see Ryo's extreme limits, increase its depth to `260000`.
 
 ---
 
