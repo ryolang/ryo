@@ -491,7 +491,7 @@ fn analyze_function(
     // Loop-exit Frees run LAST so they can inspect the now-complete
     // `free_schedule` and only add jump-anchored Frees for inside-loop
     // owners that no earlier pass already covered. See I-058.
-    schedule_loop_exit_frees_in(tir, &own, sidecar, &last_use, &body_stmts, None);
+    schedule_loop_exit_frees_in(tir, &own, sidecar, &body_stmts, None);
 }
 
 /// Lower bound of the synthetic-param `TirRef` keyspace. Real
@@ -1319,7 +1319,6 @@ fn schedule_loop_exit_frees_in(
     tir: &Tir,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
-    last_use: &HashMap<TirRef, TirRef>,
     stmts: &[TirRef],
     enclosing_loop: Option<TirRef>,
 ) {
@@ -1328,7 +1327,7 @@ fn schedule_loop_exit_frees_in(
         match inst.tag {
             TirTag::Break | TirTag::Continue => {
                 if let Some(loop_ref) = enclosing_loop {
-                    schedule_break_continue_frees(tir, own, sidecar, last_use, r, loop_ref);
+                    schedule_break_continue_frees(tir, own, sidecar, r, loop_ref);
                 }
                 // Else: outside any loop — sema rejects this with a
                 // dedicated diagnostic, so well-formed TIR never
@@ -1336,41 +1335,20 @@ fn schedule_loop_exit_frees_in(
             }
             TirTag::WhileLoop => {
                 let view = tir.while_loop_view(r);
-                schedule_loop_exit_frees_in(tir, own, sidecar, last_use, &view.body, Some(r));
+                schedule_loop_exit_frees_in(tir, own, sidecar, &view.body, Some(r));
             }
             TirTag::ForRange => {
                 let view = tir.for_range_view(r);
-                schedule_loop_exit_frees_in(tir, own, sidecar, last_use, &view.body, Some(r));
+                schedule_loop_exit_frees_in(tir, own, sidecar, &view.body, Some(r));
             }
             TirTag::IfStmt => {
                 let view = tir.if_stmt_view(r);
-                schedule_loop_exit_frees_in(
-                    tir,
-                    own,
-                    sidecar,
-                    last_use,
-                    &view.then_stmts,
-                    enclosing_loop,
-                );
+                schedule_loop_exit_frees_in(tir, own, sidecar, &view.then_stmts, enclosing_loop);
                 for elif in &view.elif_branches {
-                    schedule_loop_exit_frees_in(
-                        tir,
-                        own,
-                        sidecar,
-                        last_use,
-                        &elif.body,
-                        enclosing_loop,
-                    );
+                    schedule_loop_exit_frees_in(tir, own, sidecar, &elif.body, enclosing_loop);
                 }
                 if let Some(else_stmts) = &view.else_stmts {
-                    schedule_loop_exit_frees_in(
-                        tir,
-                        own,
-                        sidecar,
-                        last_use,
-                        else_stmts,
-                        enclosing_loop,
-                    );
+                    schedule_loop_exit_frees_in(tir, own, sidecar, else_stmts, enclosing_loop);
                 }
             }
             _ => {}
@@ -1525,7 +1503,6 @@ fn schedule_break_continue_frees(
     tir: &Tir,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
-    _last_use: &HashMap<TirRef, TirRef>,
     jump_inst: TirRef,
     loop_inst: TirRef,
 ) {
