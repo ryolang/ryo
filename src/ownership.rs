@@ -1530,12 +1530,18 @@ fn schedule_break_continue_frees(
     //                       (i.e. fires on the path that takes the jump)
     let mut has_any: HashSet<TirRef> = HashSet::new();
     let mut covers_this_jump: HashSet<TirRef> = HashSet::new();
+    let mut free_inside_loop: HashSet<TirRef> = HashSet::new();
     for fp in &sidecar.free_schedule {
         has_any.insert(fp.target);
         if on_path.contains(&fp.after) {
             covers_this_jump.insert(fp.target);
         }
+        if inside_loop.contains(&fp.after) {
+            free_inside_loop.insert(fp.target);
+        }
     }
+
+    let is_break = matches!(tir.inst(jump_inst).tag, TirTag::Break);
 
     for (owner, state) in &own.states {
         if is_synthetic_param_ref(*owner) {
@@ -1561,8 +1567,23 @@ fn schedule_break_continue_frees(
             continue;
         }
 
-        // Pre-loop owner: cannot free on the jump path — `continue`
+        // Pre-loop owner: cannot free on continue path — `continue`
         // would resurrect the binding for the next iteration's read.
+        // But on break path, if its last-use is inside the loop (which
+        // we bypassed), we must free it as we exit the loop.
+        if is_break && free_inside_loop.contains(owner) {
+            if covers_this_jump.contains(owner) {
+                continue;
+            }
+            sidecar.free_schedule.push(FreePoint {
+                after: jump_inst,
+                target: *owner,
+                span: tir.span(jump_inst),
+                branch: None,
+            });
+            continue;
+        }
+
         // Defensive emit only when no Free is scheduled anywhere.
         if has_any.contains(owner) {
             continue;
@@ -1916,6 +1937,130 @@ mod tests {
             1,
             "expected exactly one Free for the inside-loop StrConst; got: {:?}",
             sidecar.free_schedule
+        );
+    }
+
+    #[test]
+    fn pre_loop_owner_break_before_last_use_schedules_free_on_break() {
+        // A pre-loop owner whose last-use is inside a loop must be
+        // freed on a `break` path that bypasses that last-use, as we
+        // are exiting the loop and will never reach the last-use again.
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s_name = pool.intern_str("s");
+        let int_to_str = pool.intern_str("int_to_str");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void:
+        //     s: str = int_to_str(0)
+        //     while true:
+        //         if true:
+        //             break
+        //         print(s)
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
+
+        let cond_w = tb.bool_const(true, bool_ty, span);
+        let cond_i = tb.bool_const(true, bool_ty, span);
+        let brk = tb.break_stmt(void, span);
+        let if_inside = tb.if_stmt(cond_i, &[brk], &[], None, void, span);
+        let s_var = tb.var(s_name, str_ty, span);
+        let print_call = tb.call(print, &[s_var], void, span);
+        let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
+        let wl = tb.while_loop(cond_w, &[if_inside, print_stmt], void, span);
+        let tir = tb.finish(&[decl, wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        assert!(
+            sidecar
+                .free_schedule
+                .iter()
+                .any(|fp| fp.after == brk && fp.target == alloc),
+            "expected pre-loop owner whose last-use is in the loop to be freed on break; got: {:?}",
+            sidecar.free_schedule
+        );
+    }
+
+    #[test]
+    fn pre_loop_owner_continue_before_last_use_does_not_free_on_continue() {
+        // A pre-loop owner whose last-use is inside a loop must NOT be
+        // freed on a `continue` path, as we will loop back and might
+        // read it in the next iteration (causing use-after-free).
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s_name = pool.intern_str("s");
+        let int_to_str = pool.intern_str("int_to_str");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void:
+        //     s: str = int_to_str(0)
+        //     while true:
+        //         if true:
+        //             continue
+        //         print(s)
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
+
+        let cond_w = tb.bool_const(true, bool_ty, span);
+        let cond_i = tb.bool_const(true, bool_ty, span);
+        let cont = tb.continue_stmt(void, span);
+        let if_inside = tb.if_stmt(cond_i, &[cont], &[], None, void, span);
+        let s_var = tb.var(s_name, str_ty, span);
+        let print_call = tb.call(print, &[s_var], void, span);
+        let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
+        let wl = tb.while_loop(cond_w, &[if_inside, print_stmt], void, span);
+        let tir = tb.finish(&[decl, wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        // The only Free for `alloc` must be anchored on `print_call`,
+        // and we must NOT have any Free anchored on `cont`.
+        let frees_for_alloc: Vec<_> = sidecar
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == alloc)
+            .collect();
+        assert_eq!(
+            frees_for_alloc.len(),
+            1,
+            "expected exactly one Free for `alloc`; got: {:?}",
+            sidecar.free_schedule
+        );
+        assert_ne!(
+            frees_for_alloc[0].after, cont,
+            "Free for pre-loop owner must not be anchored on continue; got: {:?}",
+            frees_for_alloc[0]
         );
     }
 
