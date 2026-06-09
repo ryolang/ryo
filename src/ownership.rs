@@ -1943,6 +1943,255 @@ mod tests {
     }
 
     #[test]
+    fn break_before_last_use_schedules_jump_free() {
+        // Regression for I-058. A `break` taken before the `print(s)`
+        // last-use must trigger a Free anchored on the break instr —
+        // otherwise the inside-loop allocation leaks on the break path.
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s_name = pool.intern_str("s");
+        let int_to_str = pool.intern_str("int_to_str");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void:
+        //     while true:
+        //         s: str = int_to_str(0)
+        //         if true:
+        //             break
+        //         print(s)
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let cond_w = tb.bool_const(true, bool_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
+        let cond_i = tb.bool_const(true, bool_ty, span);
+        let brk = tb.break_stmt(void, span);
+        let if_inside = tb.if_stmt(cond_i, &[brk], &[], None, void, span);
+        let s_var = tb.var(s_name, str_ty, span);
+        let print_call = tb.call(print, &[s_var], void, span);
+        let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
+        let wl = tb.while_loop(cond_w, &[decl, if_inside, print_stmt], void, span);
+        let tir = tb.finish(&[wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        assert!(
+            sidecar
+                .free_schedule
+                .iter()
+                .any(|fp| fp.after == brk && fp.target == alloc),
+            "expected a Free for the inside-loop owner anchored on break; got: {:?}",
+            sidecar.free_schedule
+        );
+    }
+
+    #[test]
+    fn break_after_last_use_does_not_double_schedule() {
+        // The `break_inside_loop_owner` shape: print(s) is before
+        // break, so the natural last-use Free fires before the jump
+        // on any path that reaches it. The break/continue scheduler
+        // must NOT add a redundant Free anchored on break, or codegen
+        // would double-free.
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s_name = pool.intern_str("s");
+        let int_to_str = pool.intern_str("int_to_str");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void:
+        //     while true:
+        //         s: str = int_to_str(0)
+        //         print(s)
+        //         if true:
+        //             break
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let cond_w = tb.bool_const(true, bool_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
+        let s_var = tb.var(s_name, str_ty, span);
+        let print_call = tb.call(print, &[s_var], void, span);
+        let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
+        let cond_i = tb.bool_const(true, bool_ty, span);
+        let brk = tb.break_stmt(void, span);
+        let if_inside = tb.if_stmt(cond_i, &[brk], &[], None, void, span);
+        let wl = tb.while_loop(cond_w, &[decl, print_stmt, if_inside], void, span);
+        let tir = tb.finish(&[wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        // Exactly one Free for `alloc`, anchored on `print_call` (the
+        // last-use), not on `brk`.
+        let frees_for_alloc: Vec<_> = sidecar
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == alloc)
+            .collect();
+        assert_eq!(
+            frees_for_alloc.len(),
+            1,
+            "expected exactly one Free for `alloc`; got: {:?}",
+            sidecar.free_schedule
+        );
+        assert_ne!(
+            frees_for_alloc[0].after, brk,
+            "Free for `alloc` must not be anchored on break; got: {:?}",
+            frees_for_alloc[0]
+        );
+    }
+
+    #[test]
+    fn break_in_else_arm_sibling_print_schedules_jump_free() {
+        // Cross-branch I-058 regression. The natural last-use Free for
+        // `alloc` anchors on `print(s)` inside the THEN arm; the break
+        // sits in the ELSE arm. Lexical raw() ordering would put the
+        // print's anchor before the break, but on the break path the
+        // print never ran — so the buffer leaks unless we schedule a
+        // jump-anchored Free here.
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s_name = pool.intern_str("s");
+        let int_to_str = pool.intern_str("int_to_str");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void:
+        //     while true:
+        //         s: str = int_to_str(0)
+        //         if true:
+        //             print(s)        # natural last-use, then-arm
+        //         else:
+        //             break           # cross-branch leak site
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let cond_w = tb.bool_const(true, bool_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
+        let cond_i = tb.bool_const(true, bool_ty, span);
+        let s_var = tb.var(s_name, str_ty, span);
+        let print_call = tb.call(print, &[s_var], void, span);
+        let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
+        let brk = tb.break_stmt(void, span);
+        let if_inside = tb.if_stmt(cond_i, &[print_stmt], &[], Some(&[brk]), void, span);
+        let wl = tb.while_loop(cond_w, &[decl, if_inside], void, span);
+        let tir = tb.finish(&[wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        // Two Frees expected: one anchored on s_var (the Var read in
+        // the then-arm — collect_last_uses anchors on Var reads, not
+        // their wrapping Call), one anchored on brk (cross-branch
+        // leak fix).
+        let frees_for_alloc: Vec<_> = sidecar
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == alloc)
+            .collect();
+        assert!(
+            frees_for_alloc.iter().any(|fp| fp.after == s_var),
+            "expected then-arm last-use Free anchored on s_var (the Var read); got: {:?}",
+            sidecar.free_schedule
+        );
+        assert!(
+            frees_for_alloc.iter().any(|fp| fp.after == brk),
+            "expected cross-branch jump-anchored Free on break; got: {:?}",
+            sidecar.free_schedule
+        );
+    }
+
+    #[test]
+    fn continue_before_last_use_schedules_jump_free() {
+        // Symmetric I-058 regression for `continue` instead of `break`.
+        use crate::tir::TirBuilder;
+        use chumsky::span::{SimpleSpan, Span as _};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s_name = pool.intern_str("s");
+        let int_to_str = pool.intern_str("int_to_str");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        // fn main() -> void:
+        //     while true:
+        //         s: str = int_to_str(0)
+        //         if true:
+        //             continue
+        //         print(s)
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let cond_w = tb.bool_const(true, bool_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
+        let cond_i = tb.bool_const(true, bool_ty, span);
+        let cont = tb.continue_stmt(void, span);
+        let if_inside = tb.if_stmt(cond_i, &[cont], &[], None, void, span);
+        let s_var = tb.var(s_name, str_ty, span);
+        let print_call = tb.call(print, &[s_var], void, span);
+        let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
+        let wl = tb.while_loop(cond_w, &[decl, if_inside, print_stmt], void, span);
+        let tir = tb.finish(&[wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        assert!(
+            sidecar
+                .free_schedule
+                .iter()
+                .any(|fp| fp.after == cont && fp.target == alloc),
+            "expected a Free for the inside-loop owner anchored on continue; got: {:?}",
+            sidecar.free_schedule
+        );
+    }
+
+    #[test]
     fn pre_loop_owner_read_only_in_loop_is_freed() {
         use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
