@@ -193,4 +193,18 @@ fn main():
 \t\tprint(s)
 ",
     ),
+    (
+        "break_in_else_arm_sibling_use",
+        "\
+fn main():
+\tmut i: int = 0
+\twhile i < 3:
+\t\ts: str = int_to_str(i)
+\t\tif i < 2:
+\t\t\tprint(s)
+\t\telse:
+\t\t\tbreak
+\t\ti += 1
+",
+    ),
 ];

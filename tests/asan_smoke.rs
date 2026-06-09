@@ -94,6 +94,14 @@ fn asan_continue_before_last_use() {
 }
 
 #[test]
+fn asan_break_in_else_arm_sibling_use() {
+    run_asan_smoke(
+        find_fixture("break_in_else_arm_sibling_use"),
+        "break_in_else_arm_sibling_use",
+    );
+}
+
+#[test]
 fn asan_int_to_str_then_print() {
     run_asan_smoke(
         find_fixture("int_to_str_then_print"),

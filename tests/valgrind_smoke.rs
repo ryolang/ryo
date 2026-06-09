@@ -120,6 +120,14 @@ fn valgrind_continue_before_last_use() {
 }
 
 #[test]
+fn valgrind_break_in_else_arm_sibling_use() {
+    run_valgrind_smoke(
+        find_fixture("break_in_else_arm_sibling_use"),
+        "break_in_else_arm_sibling_use",
+    );
+}
+
+#[test]
 fn valgrind_concat_chain() {
     run_valgrind_smoke(find_fixture("concat_chain"), "concat_chain");
 }
