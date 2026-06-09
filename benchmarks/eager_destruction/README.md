@@ -66,7 +66,7 @@ Because `fn1` is called before `fn2`, the string is freed instantly and `fn2` is
 
 To allow direct comparison and capture memory (RSS) metrics across all candidates, the benchmark is configured to run at a recursion depth of **50,000** by default (the limit before Rust's stack frame overhead causes a crash on typical OS configurations).
 
-Measurements executed on **macOS 26.5.1 (Build 25F80)** at **50,000** depth:
+Measurements executed on **macOS 26.5.1 (Build 25F80) on a MacBook Pro (Apple M3 Pro, 18 GB RAM)** at **50,000** depth:
 
 | Benchmark Candidate | Language | Execution Strategy | Max Resident Memory (RSS) | Memory Efficiency | Result at 74,556+ Depth (Stack Limit) |
 |---------------------|----------|--------------------|---------------------------|-------------------|---------------------------------------|
