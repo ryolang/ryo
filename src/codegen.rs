@@ -32,7 +32,7 @@ use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
 /// Returns `true` if `ty` resolves to `Str` in the pool.
@@ -138,11 +138,42 @@ struct FunctionContext<'a, M: Module> {
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
     inst_values: HashMap<TirRef, ValueRepr>,
+    /// Indices into `sidecar.free_schedule` whose Frees have already
+    /// been emitted in codegen. A given anchor TirRef can be reached
+    /// through both `eval_inst` and `eval_inst_str` (e.g. a `Var`
+    /// materialized once as scalar and once as fat-pointer), and the
+    /// end-of-stmt sweep can also see anchors that an earlier
+    /// per-eval hook already fired. Without this guard each path
+    /// would emit the Free, double-freeing the allocation.
+    freed_at: HashSet<usize>,
+    /// Maps an anchor `TirRef` (`after`) to the indices of `sidecar.free_schedule`
+    /// that are anchored on it. Used for O(1) free-lookup at statement-level and
+    /// instruction-level emission.
+    free_by_after: HashMap<TirRef, Vec<usize>>,
+    /// Unfired indices in `sidecar.free_schedule` that still need to be swept.
+    /// Used to avoid O(K * S) quadratic scaling during end-of-statement sweep.
+    pending_sweep: Vec<usize>,
     loop_stack: Vec<LoopContext>,
     str_locals: HashMap<StringId, StrLocals>,
     /// For str-returning functions: the hidden sret pointer (first block param)
     /// through which the callee writes the (ptr, len, cap) triple.
     sret_ptr: Option<Value>,
+    /// Ownership sidecar for the function currently being lowered.
+    /// `TirRef`s are scoped per-function — each `Tir`'s arena restarts
+    /// at `TirRef(1)` — so codegen must consult only the entry that
+    /// belongs to this function. `compile_function` looks up
+    /// `sidecar.functions[&tir.name]` and threads the resulting
+    /// per-function entry here. Both unconditional (`branch: None`) and
+    /// branch-gated (`branch: Some(_)`) entries are filtered through
+    /// `branch_active`.
+    sidecar: &'a crate::ownership::FunctionSidecar,
+    /// Active arm stack for conditional destruction (Task 9). Each
+    /// entry is the `BranchId` of an enclosing if/elif/else arm
+    /// currently being lowered. `branch_active` walks this stack to
+    /// gate branch-tagged `FreePoint`s — `contains` (not `last()`)
+    /// so a Free anchored to a parent arm still fires from inside a
+    /// nested child arm of the same parent.
+    branch_stack: Vec<crate::ownership::BranchId>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -217,6 +248,7 @@ impl Codegen<JITModule> {
                 ryo_runtime::ryo_float_to_str as *const u8,
             ),
             ("ryo_bool_to_str", ryo_runtime::ryo_bool_to_str as *const u8),
+            ("ryo_str_free", ryo_runtime::ryo_str_free as *const u8),
         ]);
 
         Ok(Self::from_module(
@@ -278,7 +310,12 @@ impl<M: Module> Codegen<M> {
         Ok(func_ids)
     }
 
-    pub fn compile(&mut self, tirs: &[Tir], pool: &InternPool) -> Result<FuncId, String> {
+    pub fn compile(
+        &mut self,
+        tirs: &[Tir],
+        pool: &InternPool,
+        sidecar: &crate::ownership::OwnershipSidecar,
+    ) -> Result<FuncId, String> {
         debug_assert!(
             no_unreachable_in(tirs),
             "codegen::compile requires sema to have produced TIR with no Unreachable instructions"
@@ -286,7 +323,7 @@ impl<M: Module> Codegen<M> {
         let func_ids = self.prepare_compilation(tirs, pool)?;
 
         for tir in tirs {
-            self.compile_function(tir, &func_ids, pool)?;
+            self.compile_function(tir, &func_ids, pool, sidecar)?;
         }
 
         // Resolve "main" through the pool. `astgen` always interns
@@ -307,6 +344,7 @@ impl<M: Module> Codegen<M> {
         &mut self,
         tirs: &[Tir],
         pool: &InternPool,
+        sidecar: &crate::ownership::OwnershipSidecar,
     ) -> Result<String, String> {
         debug_assert!(
             no_unreachable_in(tirs),
@@ -316,7 +354,7 @@ impl<M: Module> Codegen<M> {
 
         let mut ir_output = String::new();
         for tir in tirs {
-            ir_output.push_str(&self.compile_function(tir, &func_ids, pool)?);
+            ir_output.push_str(&self.compile_function(tir, &func_ids, pool, sidecar)?);
             ir_output.push('\n');
         }
 
@@ -386,10 +424,20 @@ impl<M: Module> Codegen<M> {
         tir: &Tir,
         func_ids: &HashMap<StringId, FuncId>,
         pool: &InternPool,
+        sidecar: &crate::ownership::OwnershipSidecar,
     ) -> Result<String, String> {
         let func_id = *func_ids
             .get(&tir.name)
             .ok_or_else(|| format!("Function '{}' not declared", pool.str(tir.name)))?;
+
+        // Pick the per-function sidecar entry. `TirRef`s are scoped
+        // per-function (each `Tir` arena restarts at `TirRef(1)`), so
+        // threading the program-wide sidecar would let frees scheduled
+        // for one function fire at numerically-matching TirRefs in
+        // another. The `unwrap_or` arm covers compiler-emitted helpers
+        // (e.g. `__ryo_panic`) that the ownership pass never sees.
+        let empty_sidecar = crate::ownership::FunctionSidecar::default();
+        let func_sidecar = sidecar.functions.get(&tir.name).unwrap_or(&empty_sidecar);
 
         self.ctx.func.signature = self.build_signature(tir, pool);
 
@@ -440,6 +488,12 @@ impl<M: Module> Codegen<M> {
                 }
             }
 
+            let mut free_by_after: HashMap<TirRef, Vec<usize>> = HashMap::new();
+            for (idx, fp) in func_sidecar.free_schedule.iter().enumerate() {
+                free_by_after.entry(fp.after).or_default().push(idx);
+            }
+            let pending_sweep: Vec<usize> = (0..func_sidecar.free_schedule.len()).collect();
+
             let mut ctx: FunctionContext<'_, M> = FunctionContext {
                 module: &mut self.module,
                 data_ctx: &mut self.data_ctx,
@@ -451,9 +505,14 @@ impl<M: Module> Codegen<M> {
                 locals,
                 func_ids,
                 inst_values: HashMap::new(),
+                freed_at: HashSet::new(),
+                free_by_after,
+                pending_sweep,
                 loop_stack: Vec::new(),
                 str_locals: str_param_locals,
                 sret_ptr,
+                sidecar: func_sidecar,
+                branch_stack: Vec::new(),
             };
 
             let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
@@ -494,6 +553,19 @@ impl<M: Module> Codegen<M> {
                 break;
             }
             block_terminated = Self::emit_stmt(builder, ctx, stmt_ref)?;
+            // Skip Free emission after terminators (e.g. Return): the
+            // current block is sealed and Cranelift rejects any
+            // instruction after a terminator. Returns also transfer
+            // ownership of the returned value to the caller, so
+            // emitting a Free here would be incorrect anyway.
+            if !block_terminated {
+                // Anchor-on-stmt Frees first (e.g. dead-store survivors
+                // anchored after a VarDecl), then a sweep that catches
+                // sub-expression-anchored entries whose consumers have
+                // now finished emitting IR.
+                Self::emit_due_frees(builder, ctx, stmt_ref)?;
+                Self::sweep_due_frees(builder, ctx)?;
+            }
         }
         Ok(block_terminated)
     }
@@ -570,9 +642,11 @@ impl<M: Module> Codegen<M> {
                     builder.ins().store(MemFlags::trusted(), ptr, sret, 0);
                     builder.ins().store(MemFlags::trusted(), len, sret, 8);
                     builder.ins().store(MemFlags::trusted(), cap, sret, 16);
+                    Self::emit_due_frees(builder, ctx, r)?;
                     builder.ins().return_(&[]);
                 } else {
                     let val = Self::eval_inst(builder, ctx, operand)?;
+                    Self::emit_due_frees(builder, ctx, r)?;
                     builder.ins().return_(&[val]);
                 }
                 Ok(true)
@@ -583,8 +657,10 @@ impl<M: Module> Codegen<M> {
                 let is_main = ctx.pool.str(ctx.tir.name) == "main";
                 if is_main {
                     let zero = builder.ins().iconst(ctx.int_type, 0);
+                    Self::emit_due_frees(builder, ctx, r)?;
                     builder.ins().return_(&[zero]);
                 } else {
+                    Self::emit_due_frees(builder, ctx, r)?;
                     builder.ins().return_(&[]);
                 }
                 Ok(true)
@@ -605,12 +681,34 @@ impl<M: Module> Codegen<M> {
                     let ValueRepr::Str { ptr, len, cap } = repr else {
                         unreachable!("str-typed assign should produce ValueRepr::Str");
                     };
-                    let locals = ctx.str_locals.get(&view.name).ok_or_else(|| {
-                        format!(
-                            "Undefined string variable in assign: '{}'",
-                            ctx.pool.str(view.name)
-                        )
-                    })?;
+                    // `.clone()` releases the &ctx.str_locals borrow before the
+                    // `declare_str_free` call below needs &mut ctx.module.
+                    // StrLocals is three Cranelift `Variable` newtypes; clone is
+                    // three integer copies — cheap.
+                    let locals = ctx
+                        .str_locals
+                        .get(&view.name)
+                        .ok_or_else(|| {
+                            format!(
+                                "Undefined string variable in assign: '{}'",
+                                ctx.pool.str(view.name)
+                            )
+                        })?
+                        .clone();
+                    // Free the old allocation before overwriting locals.
+                    // sidecar.free_on_reassign[r] is set whenever the
+                    // ownership pass observed a Valid old owner at this
+                    // Assign. The old (ptr, cap) live in the binding's
+                    // StrLocals Variables — NOT in inst_values[old_owner],
+                    // which holds the StrConst's original (ptr, cap) at
+                    // the literal's emission point and may be stale
+                    // across reassigns.
+                    if ctx.sidecar.free_on_reassign.contains_key(&r) {
+                        let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
+                        let old_ptr = builder.use_var(locals.ptr);
+                        let old_cap = builder.use_var(locals.cap);
+                        builder.ins().call(free_ref, &[old_ptr, old_cap]);
+                    }
                     builder.def_var(locals.ptr, ptr);
                     builder.def_var(locals.len, len);
                     builder.def_var(locals.cap, cap);
@@ -661,6 +759,14 @@ impl<M: Module> Codegen<M> {
                     ctx.loop_stack.last().is_some(),
                     "break outside loop should be rejected by sema"
                 );
+                // Loop-exit Frees scheduled by the ownership pass are
+                // anchored on this Break instruction and must fire
+                // *before* the Cranelift `jump` terminator: the jump
+                // seals the current block, and the post-stmt sweep in
+                // `emit_body` skips Free emission on terminating
+                // statements. Without this call the Frees would
+                // simply never be emitted.
+                Self::emit_due_frees(builder, ctx, r)?;
                 let Some(loop_ctx) = ctx.loop_stack.last() else {
                     return Err("codegen reached break outside loop".to_string());
                 };
@@ -672,6 +778,9 @@ impl<M: Module> Codegen<M> {
                     ctx.loop_stack.last().is_some(),
                     "continue outside loop should be rejected by sema"
                 );
+                // See Break above for why the Frees must be emitted
+                // here instead of via the post-stmt sweep.
+                Self::emit_due_frees(builder, ctx, r)?;
                 let Some(loop_ctx) = ctx.loop_stack.last() else {
                     return Err("codegen reached continue outside loop".to_string());
                 };
@@ -693,6 +802,13 @@ impl<M: Module> Codegen<M> {
     ) -> Result<bool, String> {
         let view = ctx.tir.if_stmt_view(r);
         let merge_block = builder.create_block();
+
+        // Pull the BranchId assignments allocated by the ownership
+        // pass for this if. Default-empty if the sidecar has no entry
+        // (e.g. an if with no Move-typed bindings live across it):
+        // unconditional Frees still fire because their `branch` is
+        // `None`, and there are no branch-gated entries to gate.
+        let branch_ids = ctx.sidecar.if_branches.get(&r).cloned().unwrap_or_default();
 
         let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
         let then_block = builder.create_block();
@@ -720,7 +836,13 @@ impl<M: Module> Codegen<M> {
 
         builder.seal_block(then_block);
         builder.switch_to_block(then_block);
-        let then_returns = Self::emit_scoped_body(builder, ctx, &view.then_stmts)?;
+        // Manual push/pop (not RAII) — `?` propagation interacts
+        // poorly with a scope-guard holding `&mut ctx`. We pop on
+        // both Ok and Err paths by binding the result first.
+        ctx.branch_stack.push(branch_ids.then_branch);
+        let then_returns_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
+        ctx.branch_stack.pop();
+        let then_returns = then_returns_result?;
         if !then_returns {
             builder.ins().jump(merge_block, &[]);
         }
@@ -746,7 +868,11 @@ impl<M: Module> Codegen<M> {
 
             builder.seal_block(elif_body_block);
             builder.switch_to_block(elif_body_block);
-            let elif_returns = Self::emit_scoped_body(builder, ctx, &elif.body)?;
+            let elif_branch_id = branch_ids.elif_branches.get(i).copied().unwrap_or_default();
+            ctx.branch_stack.push(elif_branch_id);
+            let elif_returns_result = Self::emit_scoped_body(builder, ctx, &elif.body);
+            ctx.branch_stack.pop();
+            let elif_returns = elif_returns_result?;
             if !elif_returns {
                 builder.ins().jump(merge_block, &[]);
             }
@@ -756,7 +882,11 @@ impl<M: Module> Codegen<M> {
         if let Some(else_stmts) = &view.else_stmts {
             builder.seal_block(else_or_merge);
             builder.switch_to_block(else_or_merge);
-            let else_returns = Self::emit_scoped_body(builder, ctx, else_stmts)?;
+            let else_branch_id = branch_ids.else_branch.unwrap_or_default();
+            ctx.branch_stack.push(else_branch_id);
+            let else_returns_result = Self::emit_scoped_body(builder, ctx, else_stmts);
+            ctx.branch_stack.pop();
+            let else_returns = else_returns_result?;
             if !else_returns {
                 builder.ins().jump(merge_block, &[]);
             }
@@ -1167,6 +1297,158 @@ impl<M: Module> Codegen<M> {
             .declare_function(name, Linkage::Import, &sig)
             .map_err(|e| format!("Failed to declare {}: {}", name, e))?;
         Ok(module.declare_func_in_func(func_id, builder.func))
+    }
+
+    /// True if a `FreePoint` with the given `branch` tag is eligible
+    /// to fire at the current point in codegen. Unconditional entries
+    /// (`branch == None`) always pass; branch-gated entries fire only
+    /// when their `BranchId` is on `branch_stack`. We use `contains`
+    /// rather than `last() == Some(&b)` so a Free anchored to a
+    /// parent arm still fires when codegen is inside a nested child
+    /// arm of that parent.
+    fn branch_active(
+        branch: Option<crate::ownership::BranchId>,
+        stack: &[crate::ownership::BranchId],
+    ) -> bool {
+        match branch {
+            None => true,
+            Some(b) => stack.contains(&b),
+        }
+    }
+
+    /// Emit `ryo_str_free(ptr, cap)` for any scheduled Free whose
+    /// anchor is `tir_ref` and whose `branch` tag is active on the
+    /// current `branch_stack`. Called at the end of each
+    /// materialisation (`eval_inst` / `eval_inst_str`) so that Task
+    /// 4's anonymous-temporary Frees, anchored on the consuming
+    /// `Call`, fire after the consumer has emitted its IR.
+    ///
+    /// Scheduled Frees only target `Str`-cached owners. A
+    /// `Scalar`-cached target is an ownership-pass bug — the
+    /// borrowed-scalar ABI never owns its argument and the ownership
+    /// pass excludes such args from `temp_owners` (see I-057). If a
+    /// `Scalar` target is observed here, this function returns `Err`
+    /// with a diagnostic pointing at I-057.
+    ///
+    /// `freed_at` (a set of `free_schedule` indices) guards against
+    /// double-emission across the eval-end hooks and the end-of-stmt
+    /// sweep.
+    fn emit_due_frees(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        tir_ref: TirRef,
+    ) -> Result<(), String> {
+        if ctx.sidecar.free_schedule.is_empty() {
+            return Ok(());
+        }
+        let Some(indices) = ctx.free_by_after.get(&tir_ref) else {
+            return Ok(());
+        };
+        let pending: Vec<(usize, TirRef)> = indices
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                let fp = &ctx.sidecar.free_schedule[idx];
+                Self::branch_active(fp.branch, &ctx.branch_stack) && !ctx.freed_at.contains(&idx)
+            })
+            .map(|idx| (idx, ctx.sidecar.free_schedule[idx].target))
+            .collect();
+        Self::emit_frees(builder, ctx, pending)
+    }
+
+    /// End-of-statement sweep: fire any scheduled Free whose anchor
+    /// was materialised within the just-emitted statement but hasn't
+    /// been emitted yet. This covers Task 3's last-use Frees where
+    /// `after` is a sub-expression `Var` read — by the time the
+    /// statement finishes, the consumer has already issued its IR,
+    /// so a Free here lands after the consumer's use of the buffer.
+    /// Eager firing during the inner `eval_inst_str(Var)` would have
+    /// dropped the allocation before the consumer (e.g. `print`'s
+    /// `write` syscall) finished reading from it.
+    ///
+    /// Branch-gated entries are filtered through `branch_active`, so
+    /// only Frees whose `BranchId` is on the current `branch_stack`
+    /// fire here.
+    fn sweep_due_frees(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+    ) -> Result<(), String> {
+        if ctx.pending_sweep.is_empty() {
+            return Ok(());
+        }
+        let pending: Vec<(usize, TirRef)> = ctx
+            .pending_sweep
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                let fp = &ctx.sidecar.free_schedule[idx];
+                Self::branch_active(fp.branch, &ctx.branch_stack)
+                    && ctx.inst_values.contains_key(&fp.after)
+                    && ctx.inst_values.contains_key(&fp.target)
+            })
+            .map(|idx| (idx, ctx.sidecar.free_schedule[idx].target))
+            .collect();
+        Self::emit_frees(builder, ctx, pending)
+    }
+
+    /// Shared emission body for `emit_due_frees` / `sweep_due_frees`.
+    /// Given the already-filtered `(free_schedule index, target)`
+    /// pairs, declare `ryo_str_free` and emit one call per pair, marking
+    /// each index as fired in `ctx.freed_at`. A `Scalar`-cached target
+    /// is hard-errored with an I-057 pointer (the borrowed-scalar ABI is
+    /// supposed to keep such args out of `temp_owners`).
+    fn emit_frees(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        pending: Vec<(usize, TirRef)>,
+    ) -> Result<(), String> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
+        for (idx, target) in pending {
+            let repr = ctx.inst_values.get(&target).copied().ok_or_else(|| {
+                format!(
+                    "ownership pass scheduled Free for %{} but no ValueRepr cached",
+                    target.index()
+                )
+            })?;
+            ctx.freed_at.insert(idx);
+            match repr {
+                ValueRepr::Str { ptr, cap, .. } => {
+                    builder.ins().call(free_ref, &[ptr, cap]);
+                }
+                ValueRepr::Scalar(_) => {
+                    return Err(format!(
+                        "ownership pass scheduled Free for borrowed-scalar value %{} \
+                         (target of borrowed-scalar ABI, not heap-owned). \
+                         This indicates an ownership-pass bug. See I-057.",
+                        target.index()
+                    ));
+                }
+            }
+        }
+        ctx.pending_sweep.retain(|idx| !ctx.freed_at.contains(idx));
+        Ok(())
+    }
+
+    /// Declare `extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64)` for
+    /// the function being built. Returns a `FuncRef` callable via
+    /// `builder.ins().call(_, &[ptr, cap])`. `cap == 0` is a runtime
+    /// no-op (covers static `.rodata` strings emitted by
+    /// `ryo_str_from_literal`).
+    fn declare_str_free(
+        module: &mut M,
+        builder: &mut FunctionBuilder,
+        int_type: types::Type,
+    ) -> Result<FuncRef, String> {
+        Self::declare_runtime_fn(
+            module,
+            builder,
+            "ryo_str_free",
+            &[int_type, types::I64],
+            &[],
+        )
     }
 
     /// Materialize a str-typed TIR instruction, returning a

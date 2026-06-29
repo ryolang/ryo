@@ -298,7 +298,7 @@ pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerE
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
     let tirs = sema::analyze(&uir, &mut pool, &mut sink, &input, file);
-    crate::ownership::check(&tirs, &pool, &mut sink);
+    let sidecar = crate::ownership::check(&tirs, &pool, &mut sink);
 
     if want.tir {
         display_tir(&tirs, &pool);
@@ -312,7 +312,7 @@ pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerE
         if sink.has_errors() {
             return finalize_diags(sink, &input, &name);
         }
-        generate_and_display_ir(&tirs, &pool)?;
+        generate_and_display_ir(&tirs, &pool, &sidecar)?;
     }
 
     // Tail block: drains the sink whether sema/ownership were
@@ -406,28 +406,32 @@ fn lower_and_analyze(
     input: &str,
     source_name: &str,
     file_path: &Path,
-) -> Result<Vec<Tir>, CompilerError> {
+) -> Result<(Vec<Tir>, crate::ownership::OwnershipSidecar), CompilerError> {
     let mut sink = DiagSink::new();
     let uir = astgen::generate(program, pool, &mut sink);
     // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
     let tirs = sema::analyze(&uir, pool, &mut sink, input, file_path);
-    crate::ownership::check(&tirs, pool, &mut sink);
+    let sidecar = crate::ownership::check(&tirs, pool, &mut sink);
     // Single tail block: render-if-non-empty, Err iff any errors.
     // Same shape as `ir_command` so warnings (`W0001` DeadStore,
     // `W0002` RedundantMove, …) surface on the success path
     // without a separate render block that could drift from the
     // error path.
     finalize_diags(sink, input, source_name)?;
-    Ok(tirs)
+    Ok((tirs, sidecar))
 }
 
-fn generate_and_display_ir(tirs: &[Tir], pool: &InternPool) -> Result<(), CompilerError> {
+fn generate_and_display_ir(
+    tirs: &[Tir],
+    pool: &InternPool,
+    sidecar: &crate::ownership::OwnershipSidecar,
+) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     let ir = codegen
-        .compile_and_dump_ir(tirs, pool)
+        .compile_and_dump_ir(tirs, pool, sidecar)
         .map_err(CompilerError::CodegenError)?;
 
     println!("[Cranelift IR]");
@@ -448,12 +452,12 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program, &pool);
     println!();
 
-    let tirs = lower_and_analyze(&program, &mut pool, &input, &name, file)?;
+    let (tirs, sidecar) = lower_and_analyze(&program, &mut pool, &input, &name, file)?;
 
     println!("[Codegen]");
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
     let main_id = codegen
-        .compile(&tirs, &pool)
+        .compile(&tirs, &pool, &sidecar)
         .map_err(CompilerError::CodegenError)?;
     let result = codegen
         .execute(main_id)
@@ -469,7 +473,7 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
     let name = source_name(file);
     let program = parse_source(&input, &mut pool, &name)?;
-    let tirs = lower_and_analyze(&program, &mut pool, &input, &name, file)?;
+    let (tirs, sidecar) = lower_and_analyze(&program, &mut pool, &input, &name, file)?;
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 
@@ -477,7 +481,7 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     codegen
-        .compile(&tirs, &pool)
+        .compile(&tirs, &pool, &sidecar)
         .map_err(CompilerError::CodegenError)?;
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
@@ -491,7 +495,13 @@ pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
     linker::link_executable(&obj_filename, &exe_filename, &runtime_path)?;
 
     runtime_lib::cleanup_runtime_temp(&runtime_path);
-    let _ = fs::remove_file(&obj_filename);
+    // Default: clean up the intermediate object file. Set
+    // `RYO_KEEP_OBJ=1` to retain it — used by tooling that needs to
+    // relink the same object with extra flags (e.g. the ASan smoke
+    // tests in `tests/asan_smoke.rs` re-link with `-fsanitize=address`).
+    if std::env::var_os("RYO_KEEP_OBJ").is_none() {
+        let _ = fs::remove_file(&obj_filename);
+    }
 
     println!("Built: {}", exe_filename);
     Ok(())

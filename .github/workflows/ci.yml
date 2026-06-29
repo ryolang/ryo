@@ -14,6 +14,9 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
 
+permissions:
+  contents: read
+
 jobs:
   fmt:
     name: Format
@@ -56,7 +59,7 @@ jobs:
         id: zig-version
         run: |
           VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Cache Zig toolchain
         id: zig-cache
         uses: actions/cache@v4
@@ -68,3 +71,65 @@ jobs:
         run: cargo run -- toolchain install
       - run: cargo build -p ryo-runtime --release
       - run: cargo test
+
+  asan:
+    name: ASan leak check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: asan
+      - name: Get Zig version
+        id: zig-version
+        run: |
+          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' src/toolchain.rs | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Cache Zig toolchain
+        id: zig-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ryo/toolchain
+          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Install Zig toolchain
+        if: steps.zig-cache.outputs.cache-hit != 'true'
+        run: cargo run -- toolchain install
+      - run: cargo build -p ryo-runtime --release
+      - run: cargo test --test asan_smoke
+
+  valgrind:
+    name: Valgrind leak check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: valgrind
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Get Zig version
+        id: zig-version
+        run: |
+          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' src/toolchain.rs | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Cache Zig toolchain
+        id: zig-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ryo/toolchain
+          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Install Zig toolchain
+        if: steps.zig-cache.outputs.cache-hit != 'true'
+        run: cargo run -- toolchain install
+      - run: cargo build -p ryo-runtime --release
+      - run: cargo test --test valgrind_smoke
