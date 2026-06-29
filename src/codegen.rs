@@ -642,9 +642,11 @@ impl<M: Module> Codegen<M> {
                     builder.ins().store(MemFlags::trusted(), ptr, sret, 0);
                     builder.ins().store(MemFlags::trusted(), len, sret, 8);
                     builder.ins().store(MemFlags::trusted(), cap, sret, 16);
+                    Self::emit_due_frees(builder, ctx, r)?;
                     builder.ins().return_(&[]);
                 } else {
                     let val = Self::eval_inst(builder, ctx, operand)?;
+                    Self::emit_due_frees(builder, ctx, r)?;
                     builder.ins().return_(&[val]);
                 }
                 Ok(true)
@@ -655,8 +657,10 @@ impl<M: Module> Codegen<M> {
                 let is_main = ctx.pool.str(ctx.tir.name) == "main";
                 if is_main {
                     let zero = builder.ins().iconst(ctx.int_type, 0);
+                    Self::emit_due_frees(builder, ctx, r)?;
                     builder.ins().return_(&[zero]);
                 } else {
+                    Self::emit_due_frees(builder, ctx, r)?;
                     builder.ins().return_(&[]);
                 }
                 Ok(true)

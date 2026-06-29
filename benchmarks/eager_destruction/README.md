@@ -68,12 +68,12 @@ To allow direct comparison and capture memory (RSS) metrics across all candidate
 
 Measurements executed on **macOS 26.5.1 (Build 25F80) on a MacBook Pro (Apple M3 Pro, 18 GB RAM)** at **50,000** depth:
 
-| Benchmark Candidate | Language | Execution Strategy | Max Resident Memory (RSS) | Memory Efficiency | Result at 74,556+ Depth (Stack Limit) |
-|---------------------|----------|--------------------|---------------------------|-------------------|---------------------------------------|
-| **Ryo (AOT)** | Ryo 0.1.0 | Standalone Binary (Eager) | **4.42 MB** | **1.88x more efficient** | **Succeeds (0.00s)** |
-| **Ryo (JIT)** | Ryo 0.1.0 | JIT Compiler (Eager) | **7.50 MB** | 1.11x more efficient | **Succeeds (0.00s)** |
-| **Rust (Manual Drop)** | Rust 1.96.0 | AOT Compiled (Manual `drop(s)`) | **6.81 MB** | 1.22x less efficient | **Stack Overflow (Crash)** |
-| **Rust (Scope-Based)** | Rust 1.96.0 | AOT Compiled (Scope RAII) | **8.33 MB** | 1.88x less efficient | **Stack Overflow (Crash)** |
+| Benchmark Candidate | Language | Execution Strategy | Max Resident Memory (RSS) | Memory Efficiency | Result at 50,000 Depth |
+|---------------------|----------|--------------------|---------------------------|-------------------|-------------------|
+| **Ryo (AOT)** | Ryo 0.1.0 | Standalone Binary (Eager) | **4.42 MB** | **1.88x more efficient** | **Succeeds** |
+| **Ryo (JIT)** | Ryo 0.1.0 | JIT Compiler (Eager) | **7.50 MB** | 1.11x more efficient | **Succeeds** |
+| **Rust (Manual Drop)** | Rust 1.96.0 | AOT Compiled (Manual `drop(s)`) | **6.81 MB** | 1.22x less efficient | **Succeeds** |
+| **Rust (Scope-Based)** | Rust 1.96.0 | AOT Compiled (Scope RAII) | **8.33 MB** | 1.88x less efficient | **Succeeds** |
 
 ### Key Takeaways
 1. **Unrivaled Memory Performance:** Ryo's Ahead-Of-Time (AOT) compiled binary achieves the **lowest memory footprint** (4.42 MB), outperforming even Rust's manual `drop` version.

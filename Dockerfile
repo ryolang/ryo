@@ -11,7 +11,7 @@ FROM rust:latest
 
 # libunwind: required for linking Ryo JIT/AOT binaries on Linux.
 # valgrind:  runtime leak detector used by tests/valgrind_smoke.rs.
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libunwind-dev \
     valgrind \
     && rm -rf /var/lib/apt/lists/*

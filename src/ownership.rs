@@ -1032,6 +1032,7 @@ fn analyze_while_loop(
 ) {
     let view = tir.while_loop_view(r);
     let entry = own.clone();
+    let sidecar_entry = sidecar.clone();
 
     // First pass into a scratch sink — diagnostics are kept only if
     // a single iteration suffices. If the lattice changes we re-walk
@@ -1054,6 +1055,7 @@ fn analyze_while_loop(
 
     if states_differ(&entry, &after_first) {
         *own = merge_two(&entry, &after_first);
+        *sidecar = sidecar_entry;
         visit_expr(tir, pool, own, sink, by_name, sidecar, view.cond);
         for stmt in &view.body {
             analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
@@ -1088,6 +1090,7 @@ fn analyze_for_range(
     visit_expr(tir, pool, own, sink, by_name, sidecar, view.end);
 
     let entry = own.clone();
+    let sidecar_entry = sidecar.clone();
 
     let mut scratch_sink = DiagSink::new();
     for stmt in &view.body {
@@ -1097,6 +1100,7 @@ fn analyze_for_range(
 
     if states_differ(&entry, &after_first) {
         *own = merge_two(&entry, &after_first);
+        *sidecar = sidecar_entry;
         for stmt in &view.body {
             analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
         }

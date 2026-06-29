@@ -15,7 +15,7 @@ fi
 echo "Building benchmarks..."
 rustc -O eager_destruction.rs -o eager_destruction_rs
 rustc -O eager_destruction_manual_drop.rs -o eager_destruction_manual_drop_rs
-cargo build --release > /dev/null
+(cd ../.. && cargo build --release > /dev/null)
 ryo_bin="../../target/release/ryo"
 $ryo_bin build eager_destruction.ryo > /dev/null
 

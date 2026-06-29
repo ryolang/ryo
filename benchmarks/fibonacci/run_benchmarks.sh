@@ -12,6 +12,51 @@ if ! command -v hyperfine &> /dev/null; then
     exit 1
 fi
 
+if ! command -v go &> /dev/null; then
+    echo "Error: 'go' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v swiftc &> /dev/null; then
+    echo "Error: 'swiftc' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v kotlinc &> /dev/null; then
+    echo "Error: 'kotlinc' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v java &> /dev/null; then
+    echo "Error: 'java' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v uv &> /dev/null; then
+    echo "Error: 'uv' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v elixir &> /dev/null; then
+    echo "Error: 'elixir' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v ruby &> /dev/null; then
+    echo "Error: 'ruby' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v julia &> /dev/null; then
+    echo "Error: 'julia' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v bun &> /dev/null && [ ! -f "$HOME/.bun/bin/bun" ]; then
+    echo "Error: 'bun' is not installed or not in PATH."
+    exit 1
+fi
+
 echo "Building benchmarks..."
 rustc -O fib.rs -o fib_rs
 go build -o fib_go fib.go
