@@ -9,7 +9,10 @@ fn main() {
     let git_head_path = root_dir.join(".git/HEAD");
     println!("cargo:rerun-if-changed={}", git_head_path.display());
     if let Some(git_ref) = resolve_git_ref(&root_dir) {
-        println!("cargo:rerun-if-changed={}", root_dir.join(git_ref).display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            root_dir.join(git_ref).display()
+        );
     }
     let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
     let short_hash = get_git_short_hash();
