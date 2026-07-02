@@ -5,7 +5,16 @@
 ## Tech Stack & Layout
 
 **Stack:** Rust compiler with Cranelift backend, Zig linker, Logos lexer, Chumsky parser.
-**Layout:** `src/` (compiler), `docs/` (spec, roadmap, examples), `experimental/` (design work), `.github/` (CI).
+**Layout:** Cargo workspace consisting of:
+- `ryo/` (CLI binary crate)
+- `ryo-core/` (shared models: AST, IRs (UIR, TIR), types, diagnostics, and errors)
+- `ryo-frontend/` (lexer, indent preprocessor, parser, AST lowering, semantic analysis, builtins, ownership analysis)
+- `ryo-backend/` (Cranelift code generation, Zig linking, toolchain management, runtime extraction)
+- `ryo-driver/` (pipeline compilation orchestration driver)
+- `runtime/` (Ryo static runtime library)
+- `docs/` (spec, roadmap, examples)
+- `experimental/` (design work)
+- `.github/` (CI)
 
 ---
 
