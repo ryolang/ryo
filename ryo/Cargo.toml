@@ -1,0 +1,15 @@
+[package]
+name = "ryo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ryo-driver = { workspace = true }
+ryo-backend = { workspace = true }
+clap = { workspace = true }
+
+[build-dependencies]
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

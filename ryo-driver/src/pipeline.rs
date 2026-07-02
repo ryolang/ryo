@@ -1,4 +1,15 @@
-use crate::EmitKind;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum EmitKind {
+    /// Pretty-printed AST (parser output).
+    Ast,
+    /// Untyped IR (astgen output, Zig-style ZIR analogue).
+    Uir,
+    /// Typed IR (sema output, Zig-style AIR analogue).
+    Tir,
+    /// Cranelift IR (codegen output).
+    Clif,
+}
+
 use ryo_core::ast;
 use ryo_frontend::astgen;
 use ryo_backend::codegen;
@@ -32,7 +43,7 @@ fn get_output_filenames(input_file: &Path) -> (String, String) {
     (obj_filename, exe_filename)
 }
 
-pub(crate) fn lex_command(file: &Path) -> Result<(), CompilerError> {
+pub fn lex_command(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     display_tokens(&input, file)
 }
@@ -71,7 +82,7 @@ fn display_tokens(input: &str, file: &Path) -> Result<(), CompilerError> {
     Ok(())
 }
 
-pub(crate) fn parse_command(file: &Path) -> Result<(), CompilerError> {
+pub fn parse_command(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
@@ -258,7 +269,7 @@ fn display_ast(program: &ast::Program, pool: &InternPool) {
 /// (AST → UIR → TIR → CLIF) so flag order is irrelevant. Stages
 /// run only as far as the deepest requested section requires; an
 /// `--emit=uir` invocation never reaches sema.
-pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
+pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let name = source_name(file);
     let mut pool = InternPool::new();
@@ -440,7 +451,7 @@ fn generate_and_display_ir(
     Ok(())
 }
 
-pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
+pub fn run_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
@@ -468,7 +479,7 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     Ok(())
 }
 
-pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
+pub fn build_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);

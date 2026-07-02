@@ -4,17 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ryo-core = { path = "../ryo-core" }
-ryo-runtime = { path = "../runtime" }
-cranelift = "0.131"
-cranelift-jit = "0.131"
-cranelift-module = "0.131"
-cranelift-object = "0.131"
-target-lexicon = "0.13.5"
-ureq = "3"
-tar = "0.4"
-xz2 = "0.1"
-dirs = "6"
+ryo-core = { workspace = true }
+ryo-runtime = { workspace = true }
+cranelift = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-object = { workspace = true }
+target-lexicon = { workspace = true }
+ureq = { workspace = true }
+tar = { workspace = true }
+xz2 = { workspace = true }
+dirs = { workspace = true }
 
 [build-dependencies]
-sha2 = "0.10"
+sha2 = { workspace = true }

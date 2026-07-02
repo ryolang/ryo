@@ -1,10 +1,11 @@
 use sha2::{Digest, Sha256};
 use std::env;
+use std::path::PathBuf;
 
 fn main() {
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=../.git/HEAD");
     if let Some(git_ref) = resolve_git_ref() {
-        println!("cargo:rerun-if-changed={git_ref}");
+        println!("cargo:rerun-if-changed=../{git_ref}");
     }
     let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
     let short_hash = get_git_short_hash();
@@ -16,22 +17,18 @@ fn main() {
     };
     println!("cargo:rustc-env=RYO_VERSION={version}");
 
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let root_dir = PathBuf::from(&manifest_dir).parent().unwrap().to_path_buf();
+
     // Runtime archive path. Honor RYO_RUNTIME_LIB if set (used by downstream
     // packagers). Otherwise build it on demand using the current cargo profile
     // in a separate target directory to avoid cargo lock deadlocks.
     let runtime_path = env::var("RYO_RUNTIME_LIB").unwrap_or_else(|_| {
-        let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
         let target_dir =
-            env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| format!("{manifest_dir}/target"));
+            env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
+                root_dir.join("target").to_string_lossy().to_string()
+            });
         let raw_profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-        // Mapping rules for Cargo profile resolution:
-        // - Known "release", "production", and "prod" profiles map to "release".
-        // - Known "debug" and "dev" profiles map to "debug".
-        // - For unrecognized/custom profiles, we consult OPT_LEVEL and treat any
-        //   non-"0" optimization level as "release" (since custom optimized profiles
-        //   typically build under optimized target layouts).
-        // NOTE: Custom profiles with debug = true but OPT_LEVEL > 0 (e.g., opt-level = 1, 2, 3)
-        // will be classified as "release", avoiding build directory mismatch surprises.
         let profile = match raw_profile.as_str() {
             "release" | "production" | "prod" => "release",
             "debug" | "dev" => "debug",
@@ -40,13 +37,12 @@ fn main() {
                 if opt_level != "0" { "release" } else { "debug" }
             }
         };
-        let mut path = std::path::PathBuf::from(&target_dir)
+        let mut path = PathBuf::from(&target_dir)
             .join(profile)
             .join("libryo_runtime.a");
         if !path.exists() {
             // Build the runtime archive in-process in a separate target directory to avoid deadlocks.
-            let custom_target_dir =
-                std::path::PathBuf::from(&manifest_dir).join("target/runtime-build");
+            let custom_target_dir = root_dir.join("target/runtime-build");
             let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
             let mut cmd = std::process::Command::new(&cargo);
             cmd.arg("build")
@@ -96,13 +92,12 @@ fn main() {
     let hash_string = format!("{:x}", hash_result);
     println!("cargo:rustc-env=RYO_RUNTIME_HASH={hash_string}");
 
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let runtime_src = std::path::PathBuf::from(&manifest_dir).join("runtime/src");
+    let runtime_src = root_dir.join("runtime/src");
     println!("cargo:rerun-if-changed={}", runtime_src.display());
 }
 
 fn resolve_git_ref() -> Option<String> {
-    let head = std::fs::read_to_string(".git/HEAD").ok()?;
+    let head = std::fs::read_to_string("../.git/HEAD").ok()?;
     let head = head.trim();
     head.strip_prefix("ref: ")
         .map(|refpath| format!(".git/{refpath}"))

@@ -1,37 +1,18 @@
 [workspace]
-members = ["runtime", "ryo-core", "ryo-frontend", "ryo-backend"]
+resolver = "3"
+members = [
+    "runtime",
+    "ryo-core",
+    "ryo-frontend",
+    "ryo-backend",
+    "ryo-driver",
+    "ryo",
+]
+default-members = ["ryo"]
 
-# Without `panic = "abort"`, Rust emits unwinding metadata (`_Unwind_*`
-# symbols) that zig cc cannot resolve when linking user binaries.
-# These settings live at the workspace root because profile configuration
-# isn't permitted in workspace member manifests.
-[profile.release]
-panic = "abort"
-
-[profile.dev]
-panic = "abort"
-
-[package]
-name = "ryo"
-version = "0.1.0"
-edition = "2024"
-
-[build-dependencies]
-sha2 = "0.10"
-
-[dependencies]
-ryo-core = { path = "ryo-core" }
-ryo-frontend = { path = "ryo-frontend" }
-ryo-backend = { path = "ryo-backend" }
-ryo-runtime = { path = "runtime" }
-
+[workspace.dependencies]
 ariadne = "0.6"
 chumsky = "0.12"
-# Direct dep so InternPool can use `HashTable` for borrow-keyed
-# lookups (stable Rust's `std::collections::HashMap` doesn't
-# expose `raw_entry_mut`). Pinned to 0.17 — the latest stable and
-# already in the build graph via regalloc2, so the pin doesn't
-# add a crate to compile.
 hashbrown = "0.17"
 clap = { version = "4.6", features = ["derive"] }
 cranelift = "0.131"
@@ -44,6 +25,16 @@ tar = "0.4"
 target-lexicon = "0.13.5"
 ureq = "3"
 dirs = "6"
-
-[dev-dependencies]
+sha2 = "0.10"
 tempfile = "3.27"
+ryo-runtime = { path = "runtime" }
+ryo-core = { path = "ryo-core" }
+ryo-frontend = { path = "ryo-frontend" }
+ryo-backend = { path = "ryo-backend" }
+ryo-driver = { path = "ryo-driver" }
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
