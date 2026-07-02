@@ -283,7 +283,7 @@ The ownership pass:
 3. Inserts destructor calls (`__del__`) at last-use points (ASAP destruction).
 4. Reports diagnostics if a value is used after being moved or if an `inout` borrow conflicts.
 
-Ryo's analog: `Sema → TIR → src/ownership.rs → Codegen`. The ownership pass mutates the per-function `Tir` in place, inserting `TirTag::Free` instructions and reporting diagnostics through the existing `DiagSink`.
+Ryo's analog: `Sema → TIR → ryo-frontend/src/ownership.rs → Codegen`. The ownership pass mutates the per-function `Tir` in place, inserting `TirTag::Free` instructions and reporting diagnostics through the existing `DiagSink`.
 
 ### Argument Conventions
 

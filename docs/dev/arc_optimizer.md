@@ -1,16 +1,16 @@
 **Status:** Design (Draft — v0.1)
 
-# ARC Optimizer Pass (`src/arc_optimizer.rs`)
+# ARC Optimizer Pass (`ryo-driver/src/arc_optimizer.rs` or `ryo-frontend/src/arc_optimizer.rs`)
 
 > Draft. The pass does not exist yet; this doc is the design sketch that will be referenced when the pass lands. Milestone TBD — likely sequenced with M11 (structs) or M15 (`shared[T]` stdlib type), whichever introduces refcounted values first.
 
 This pass is the compiler-engineering investment that makes `shared[T]`'s performance story (spec 5.6) credible. Without it, every implicit retain/release on assignment fires an atomic op, and `shared[T]` overhead dominates application code. With it, retain/release pairs that bracket regions where the value cannot be deallocated are elided before codegen, matching the Swift model the spec commits to.
 
-The pass is conceptually distinct from the ownership pass (`src/ownership.rs`):
+The pass is conceptually distinct from the ownership pass (`ryo-frontend/src/ownership.rs`):
 
 | Pass | Concern | Soundness vs perf |
 |---|---|---|
-| `src/ownership.rs` (M8.1) | Move semantics, use-after-move, `Free` insertion for owned types like `str` | Soundness: rejects programs |
+| `ryo-frontend/src/ownership.rs` (M8.1) | Move semantics, use-after-move, `Free` insertion for owned types like `str` | Soundness: rejects programs |
 | `src/arc_optimizer.rs` (this doc) | Elide redundant retain/release on `shared[T]` values | Perf only: never changes program meaning |
 
 Both passes run on TIR (post-sema, pre-codegen). The ownership pass must run first because its inserted `Free` instructions are inputs to the ARC pass's "what's the last use of this value?" analysis.
@@ -194,7 +194,7 @@ A plausible milestone slot is **M11.5** (after structs, before tasks) so the pas
 
 ## Testing strategy
 
-- **Unit tests** in `src/arc_optimizer.rs`: hand-built TIRs with known retain/release patterns, assert the pass elides the expected pairs and leaves the rest alone.
+- **Unit tests** in `ryo-frontend/src/arc_optimizer.rs` or `ryo-driver/src/arc_optimizer.rs`: hand-built TIRs with known retain/release patterns, assert the pass elides the expected pairs and leaves the rest alone.
 - **Differential tests** against a "no optimization" baseline: same program, compare both behaviour (must be identical) and refcount op counts (must decrease).
 - **Microbenchmarks** for representative patterns: tight loops over `shared[T]`, builder chains over COW collections, observer-pattern fan-out. Each should land within a small multiple of an equivalent Rust `&T` baseline; if not, the pass is missing cases.
 - **Soundness fuzzing**: random TIRs with synthetic retain/release pairs; assert elision never removes a pair whose dataflow analysis says "non-redundant." This catches algorithmic bugs that unit tests miss.

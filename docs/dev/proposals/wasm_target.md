@@ -32,19 +32,19 @@ The original "WASM Target Plumbing" milestone was sold as "1 week of plumbing" o
 If WASM is revived, the realistic path is **Option α — `wasm-encoder` parallel codegen**:
 
 - [`wasm-encoder`](https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder) (bytecodealliance) is the production-grade low-level WASM module builder. It is the emission layer underneath wasm-bindgen, walrus, and most production WASM toolchains. Mature, idiomatic Rust, well-shaped API (function/section/data builders, encode-to-bytes finalization).
-- Ryo would gain a second backend (e.g. `src/codegen_wasm.rs`) parallel to the existing Cranelift backend in [codegen.rs](../../../src/codegen.rs). Both backends consume the same TIR; the dispatch happens at codegen entry.
+- Ryo would gain a second backend (e.g. `ryo-backend/src/codegen_wasm.rs`) parallel to the existing Cranelift backend in [codegen.rs](../../../ryo-backend/src/codegen.rs). Both backends consume the same TIR; the dispatch happens at codegen entry.
 
 ### Architectural implications
 
 - **Stack machine vs SSA.** Cranelift IR is SSA: `let v = ins().iadd(a, b)`. WASM is a structured stack machine: `local.get a; local.get b; i32.add`. The two backends are different mental models for codegen, not different syntaxes for the same thing. TIR→WASM lowering is its own discipline.
-- **No relocatable-object → linker stage.** `wasm-encoder` produces a complete module directly. The current [linker.rs](../../../src/linker.rs) abstraction (`zig cc` linking native objects) doesn't apply on WASM — the pipeline branches earlier into "emit module bytes; done."
+- **No relocatable-object → linker stage.** `wasm-encoder` produces a complete module directly. The current [linker.rs](../../../ryo-backend/src/linker.rs) abstraction (`zig cc` linking native objects) doesn't apply on WASM — the pipeline branches earlier into "emit module bytes; done."
 - **No JIT story on WASM.** Acceptable; embedding wasmtime to JIT-execute WASM is a separable later decision.
 - **Static data layout differs.** String literals currently lower to `.rodata` via Cranelift's `DataDescription`. On WASM they live in a memory data segment, addressed via `wasm-encoder`'s `MemorySection` / `DataSection` builders. Parallel infrastructure.
 - **WASI imports replace libc calls.** `print()` on native lowers to a `write()` libc call; on WASM it imports `wasi_snapshot_preview1::fd_write` and writes through a wasm-encoder-declared import.
 
 ### Scope estimate
 
-- **Initial backend** for the current language surface (M8c complete: int, bool, float, arithmetic, comparisons, if/else, while, for-range, function calls, returns, read-only strings, top-level `print` via WASI `fd_write`): ~800–1500 LOC. Comparable to the current [codegen.rs](../../../src/codegen.rs).
+- **Initial backend** for the current language surface (M8c complete: int, bool, float, arithmetic, comparisons, if/else, while, for-range, function calls, returns, read-only strings, top-level `print` via WASI `fd_write`): ~800–1500 LOC. Comparable to the current [codegen.rs](../../../ryo-backend/src/codegen.rs).
 - **Per future language feature:** roughly 1.5× codegen work going forward — every new `TirTag` needs handling in both backends. Heap allocation (M8.1), fat pointers, ownership intrinsics, structs (M9), enums (M11) — all parallel implementations.
 - **CI:** new job that builds programs for WASM, executes under `wasmtime`, asserts behavioral parity with the native backend. New dep on `wasmtime` in the CI environment.
 - **Testing:** cross-backend behavioral tests for every language feature. The existing integration suite effectively runs twice (once per backend), with a thin parity-checking wrapper.

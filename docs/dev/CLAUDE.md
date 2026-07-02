@@ -8,7 +8,7 @@ Rules for agents editing developer documentation in docs/dev/.
 
 Files in docs/dev/ are implementation notes, architectural decisions, and design explorations for the Ryo compiler and runtime. These are working documents for contributors — not user-facing docs.
 
-**Not covered here:** Compiler source code (see src/CLAUDE.md), user-facing docs (see docs/CLAUDE.md), or language design (see root CLAUDE.md).
+**Not covered here:** Compiler source code and architecture (see root CLAUDE.md), user-facing docs (see docs/CLAUDE.md), or language design (see root CLAUDE.md).
 
 ---
 

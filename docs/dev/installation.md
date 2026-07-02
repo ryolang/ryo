@@ -94,7 +94,7 @@ A **Deployment** milestone is needed to ensure this is ready for launch.
         *   `aarch64-apple-darwin`
         *   `x86_64-pc-windows-msvc`
     *   **The Script:** Write `install.sh` and `install.ps1`.
-    *   **Zig Logic:** ✅ Implemented in `src/toolchain.rs` — auto-downloads pinned Zig version on first use.
+    *   **Zig Logic:** ✅ Implemented in `ryo-backend/src/toolchain.rs` — auto-downloads pinned Zig version on first use.
     *   **The Site:** A simple landing page with the `curl` command.
 
 ### Summary
