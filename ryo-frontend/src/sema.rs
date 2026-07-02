@@ -45,8 +45,8 @@
 //! decide whether to proceed to codegen — codegen itself must never
 //! see an `Unreachable`.
 
-use ryo_core::ast::CompoundOp;
 use crate::builtins;
+use ryo_core::ast::CompoundOp;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
@@ -1715,10 +1715,10 @@ mod tests {
     use crate::astgen;
     use crate::lexer::lex;
     use crate::parser::program_parser;
-    use ryo_core::tir::{Tir, TirData};
     use chumsky::Parser;
     use chumsky::input::Input;
     use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::tir::{Tir, TirData};
 
     fn sp() -> Span {
         SimpleSpan::new((), 0..0)

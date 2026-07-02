@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use ryo_driver::pipeline::{self, EmitKind};
 use ryo_backend::toolchain;
+use ryo_driver::pipeline::{self, EmitKind};
 
 #[derive(Parser)]
 #[command(name = "ryo")]
@@ -55,8 +55,6 @@ enum Commands {
         action: ToolchainAction,
     },
 }
-
-
 
 #[derive(Subcommand)]
 enum ToolchainAction {

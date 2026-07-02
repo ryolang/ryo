@@ -22,9 +22,6 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use ryo_core::ast::CompoundOp;
-use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use cranelift::codegen::ir::{ArgumentPurpose, BlockArg, FuncRef};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
@@ -32,6 +29,9 @@ use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use ryo_core::ast::CompoundOp;
+use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
+use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 

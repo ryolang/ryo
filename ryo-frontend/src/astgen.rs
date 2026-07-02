@@ -18,11 +18,11 @@
 //! threads it directly into `sema::analyze` and from there into
 //! `codegen::compile`; there is no intermediate tree-shaped IR.
 
+use chumsky::span::{SimpleSpan, Span as _};
 use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::types::{InternPool, StringId, TypeId};
 use ryo_core::uir::{InstRef, InstTag, Uir, UirBuilder, UirParam};
-use chumsky::span::{SimpleSpan, Span as _};
 
 type Span = SimpleSpan;
 
@@ -404,9 +404,9 @@ mod tests {
     use super::*;
     use crate::lexer::lex;
     use crate::parser::program_parser;
-    use ryo_core::uir::InstData;
     use chumsky::Parser;
     use chumsky::input::Input;
+    use ryo_core::uir::InstData;
 
     fn parse_and_lower(input: &str) -> Result<(Uir, InternPool), Vec<Diag>> {
         // Phase-2 lex pipeline: logos + indent + intern in one

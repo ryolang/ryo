@@ -10,22 +10,22 @@ pub enum EmitKind {
     Clif,
 }
 
-use ryo_core::ast;
-use ryo_frontend::astgen;
-use ryo_backend::codegen;
-use ryo_core::diag::{Diag, DiagCode, DiagSink, Severity};
-use ryo_core::errors::CompilerError;
-use ryo_frontend::lexer::{self, Token};
-use ryo_backend::linker;
-use ryo_frontend::parser::program_parser;
-use ryo_backend::runtime_lib;
-use ryo_frontend::sema;
-use ryo_core::tir::{self, Tir};
-use ryo_core::types::InternPool;
-use ryo_core::uir::Uir;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::span::Span as _;
 use chumsky::{Parser, prelude::*};
+use ryo_backend::codegen;
+use ryo_backend::linker;
+use ryo_backend::runtime_lib;
+use ryo_core::ast;
+use ryo_core::diag::{Diag, DiagCode, DiagSink, Severity};
+use ryo_core::errors::CompilerError;
+use ryo_core::tir::{self, Tir};
+use ryo_core::types::InternPool;
+use ryo_core::uir::Uir;
+use ryo_frontend::astgen;
+use ryo_frontend::lexer::{self, Token};
+use ryo_frontend::parser::program_parser;
+use ryo_frontend::sema;
 use std::fs;
 use std::path::Path;
 use target_lexicon::Triple;

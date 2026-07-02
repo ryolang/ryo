@@ -22,9 +22,11 @@
 //! See `docs/dev/mojo_reference.md`.
 
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
+pub use ryo_core::ownership::{
+    BranchId, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
+};
 use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
-pub use ryo_core::ownership::{BranchId, FreePoint, IfBranchIds, OwnershipSidecar, FunctionSidecar};
 use std::collections::{HashMap, HashSet};
 
 // ---------- Classification ----------
@@ -1736,8 +1738,8 @@ mod tests {
 
     #[test]
     fn dead_store_schedules_free_after_decl() {
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -1799,8 +1801,8 @@ mod tests {
         // The ownership pass must therefore exclude it from
         // `temp_owners` so the anonymous-temp Free pass does not
         // schedule a Free for it.
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -1836,8 +1838,8 @@ mod tests {
 
     #[test]
     fn inside_loop_temp_is_freed() {
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -1887,8 +1889,8 @@ mod tests {
         // A pre-loop owner whose last-use is inside a loop must be
         // freed on a `break` path that bypasses that last-use, as we
         // are exiting the loop and will never reach the last-use again.
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -1944,8 +1946,8 @@ mod tests {
         // A pre-loop owner whose last-use is inside a loop must NOT be
         // freed on a `continue` path, as we will loop back and might
         // read it in the next iteration (causing use-after-free).
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2011,8 +2013,8 @@ mod tests {
         // Regression for I-058. A `break` taken before the `print(s)`
         // last-use must trigger a Free anchored on the break instr —
         // otherwise the inside-loop allocation leaks on the break path.
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2069,8 +2071,8 @@ mod tests {
         // on any path that reaches it. The break/continue scheduler
         // must NOT add a redundant Free anchored on break, or codegen
         // would double-free.
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2138,8 +2140,8 @@ mod tests {
         // print's anchor before the break, but on the break path the
         // print never ran — so the buffer leaks unless we schedule a
         // jump-anchored Free here.
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2204,8 +2206,8 @@ mod tests {
     #[test]
     fn continue_before_last_use_schedules_jump_free() {
         // Symmetric I-058 regression for `continue` instead of `break`.
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2257,8 +2259,8 @@ mod tests {
 
     #[test]
     fn pre_loop_owner_read_only_in_loop_is_freed() {
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2311,8 +2313,8 @@ mod tests {
 
     #[test]
     fn last_use_scheduled_for_unmoved_local() {
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2349,8 +2351,8 @@ mod tests {
 
     #[test]
     fn reassignment_records_free_on_old_owner() {
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2411,8 +2413,8 @@ mod tests {
 
     #[test]
     fn concat_intermediate_freed_after_consumer() {
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
         use std::collections::HashSet;
 
         let mut pool = InternPool::new();
@@ -2452,8 +2454,8 @@ mod tests {
 
     #[test]
     fn last_use_uses_pre_rebind_owner_not_post() {
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2522,8 +2524,8 @@ mod tests {
 
     #[test]
     fn str_const_walk_no_panic() {
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2545,8 +2547,8 @@ mod tests {
 
     #[test]
     fn branch_ids_unique_across_post_loop_if() {
-        use ryo_core::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
