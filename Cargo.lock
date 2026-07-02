@@ -1043,6 +1043,7 @@ dependencies = [
  "dirs",
  "hashbrown 0.17.1",
  "logos",
+ "ryo-backend",
  "ryo-core",
  "ryo-frontend",
  "ryo-runtime",
@@ -1050,6 +1051,24 @@ dependencies = [
  "tar",
  "target-lexicon",
  "tempfile",
+ "ureq",
+ "xz2",
+]
+
+[[package]]
+name = "ryo-backend"
+version = "0.1.0"
+dependencies = [
+ "cranelift",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-object",
+ "dirs",
+ "ryo-core",
+ "ryo-runtime",
+ "sha2",
+ "tar",
+ "target-lexicon",
  "ureq",
  "xz2",
 ]

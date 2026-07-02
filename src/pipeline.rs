@@ -1,13 +1,13 @@
 use crate::EmitKind;
 use ryo_core::ast;
 use ryo_frontend::astgen;
-use crate::codegen;
+use ryo_backend::codegen;
 use ryo_core::diag::{Diag, DiagCode, DiagSink, Severity};
 use ryo_core::errors::CompilerError;
 use ryo_frontend::lexer::{self, Token};
-use crate::linker;
+use ryo_backend::linker;
 use ryo_frontend::parser::program_parser;
-use crate::runtime_lib;
+use ryo_backend::runtime_lib;
 use ryo_frontend::sema;
 use ryo_core::tir::{self, Tir};
 use ryo_core::types::InternPool;

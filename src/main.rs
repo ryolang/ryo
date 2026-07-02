@@ -1,12 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-mod codegen;
-mod linker;
+use ryo_backend::toolchain;
+
 mod pipeline;
-#[allow(dead_code)]
-mod runtime_lib;
-mod toolchain;
 
 #[derive(Parser)]
 #[command(name = "ryo")]

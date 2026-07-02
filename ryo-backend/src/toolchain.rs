@@ -5,7 +5,7 @@ use xz2::read::XzDecoder;
 
 const ZIG_VERSION: &str = "0.16.0";
 
-pub(crate) fn ensure_zig() -> Result<PathBuf, CompilerError> {
+pub fn ensure_zig() -> Result<PathBuf, CompilerError> {
     let zig_path = zig_binary_path()?;
     if zig_path.exists() {
         return Ok(zig_path);
@@ -20,11 +20,11 @@ pub(crate) fn ensure_zig() -> Result<PathBuf, CompilerError> {
     }
 }
 
-pub(crate) fn is_installed() -> bool {
+pub fn is_installed() -> bool {
     zig_binary_path().is_ok_and(|p| p.exists())
 }
 
-pub(crate) fn pinned_version() -> &'static str {
+pub fn pinned_version() -> &'static str {
     ZIG_VERSION
 }
 

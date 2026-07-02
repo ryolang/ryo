@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 
-pub(crate) fn link_executable(
+pub fn link_executable(
     obj_file: &str,
     exe_file: &str,
     runtime_lib: &Path,
