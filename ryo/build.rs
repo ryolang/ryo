@@ -3,9 +3,13 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    println!("cargo:rerun-if-changed=../.git/HEAD");
-    if let Some(git_ref) = resolve_git_ref() {
-        println!("cargo:rerun-if-changed=../{git_ref}");
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let root_dir = PathBuf::from(&manifest_dir).parent().unwrap().to_path_buf();
+
+    let git_head_path = root_dir.join(".git/HEAD");
+    println!("cargo:rerun-if-changed={}", git_head_path.display());
+    if let Some(git_ref) = resolve_git_ref(&root_dir) {
+        println!("cargo:rerun-if-changed={}", root_dir.join(git_ref).display());
     }
     let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
     let short_hash = get_git_short_hash();
@@ -16,9 +20,6 @@ fn main() {
         _ => pkg_version,
     };
     println!("cargo:rustc-env=RYO_VERSION={version}");
-
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let root_dir = PathBuf::from(&manifest_dir).parent().unwrap().to_path_buf();
 
     // Runtime archive path. Honor RYO_RUNTIME_LIB if set (used by downstream
     // packagers). Otherwise build it on demand using the current cargo profile
@@ -96,8 +97,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", runtime_src.display());
 }
 
-fn resolve_git_ref() -> Option<String> {
-    let head = std::fs::read_to_string("../.git/HEAD").ok()?;
+fn resolve_git_ref(root_dir: &std::path::Path) -> Option<String> {
+    let head = std::fs::read_to_string(root_dir.join(".git/HEAD")).ok()?;
     let head = head.trim();
     head.strip_prefix("ref: ")
         .map(|refpath| format!(".git/{refpath}"))
