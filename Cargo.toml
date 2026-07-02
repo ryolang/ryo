@@ -1,5 +1,5 @@
 [workspace]
-members = ["runtime"]
+members = ["runtime", "ryo-core"]
 
 # Without `panic = "abort"`, Rust emits unwinding metadata (`_Unwind_*`
 # symbols) that zig cc cannot resolve when linking user binaries.
@@ -20,6 +20,7 @@ edition = "2024"
 sha2 = "0.10"
 
 [dependencies]
+ryo-core = { path = "ryo-core" }
 ryo-runtime = { path = "runtime" }
 
 ariadne = "0.6"

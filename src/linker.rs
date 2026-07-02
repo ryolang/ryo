@@ -1,4 +1,4 @@
-use crate::errors::CompilerError;
+use ryo_core::errors::CompilerError;
 use crate::toolchain;
 use std::ffi::OsStr;
 use std::path::Path;

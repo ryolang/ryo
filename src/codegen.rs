@@ -22,9 +22,9 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use crate::ast::CompoundOp;
-use crate::tir::{Tir, TirData, TirRef, TirTag};
-use crate::types::{InternPool, StringId, TypeId, TypeKind};
+use ryo_core::ast::CompoundOp;
+use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
+use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use cranelift::codegen::ir::{ArgumentPurpose, BlockArg, FuncRef};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};

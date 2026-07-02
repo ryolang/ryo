@@ -1043,6 +1043,7 @@ dependencies = [
  "dirs",
  "hashbrown 0.17.1",
  "logos",
+ "ryo-core",
  "ryo-runtime",
  "sha2",
  "tar",
@@ -1050,6 +1051,15 @@ dependencies = [
  "tempfile",
  "ureq",
  "xz2",
+]
+
+[[package]]
+name = "ryo-core"
+version = "0.1.0"
+dependencies = [
+ "ariadne",
+ "chumsky",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]

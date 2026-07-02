@@ -7,7 +7,7 @@
 
 use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan};
 
-use crate::ast::*;
+use ryo_core::ast::*;
 use crate::lexer::Token;
 
 /// Helper: skip zero or more newline tokens.
@@ -583,7 +583,7 @@ where
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::types::InternPool;
+    use ryo_core::types::InternPool;
     use chumsky::Parser;
     use chumsky::input::Input;
 

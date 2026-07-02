@@ -45,12 +45,12 @@
 //! decide whether to proceed to codegen — codegen itself must never
 //! see an `Unreachable`.
 
-use crate::ast::CompoundOp;
+use ryo_core::ast::CompoundOp;
 use crate::builtins;
-use crate::diag::{Diag, DiagCode, DiagSink};
-use crate::tir::{Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
-use crate::types::{InternPool, StringId, TypeId, TypeKind};
-use crate::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
+use ryo_core::diag::{Diag, DiagCode, DiagSink};
+use ryo_core::tir::{Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
+use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
+use ryo_core::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
@@ -1715,7 +1715,7 @@ mod tests {
     use crate::astgen;
     use crate::lexer::lex;
     use crate::parser::program_parser;
-    use crate::tir::{Tir, TirData};
+    use ryo_core::tir::{Tir, TirData};
     use chumsky::Parser;
     use chumsky::input::Input;
     use chumsky::span::{SimpleSpan, Span as _};
@@ -2110,7 +2110,7 @@ mod tests {
         let mut sink = DiagSink::new();
         let main_id = pool.intern_str("main");
 
-        let mut b = crate::uir::UirBuilder::new();
+        let mut b = ryo_core::uir::UirBuilder::new();
         let zero = b.int_literal(0, sp());
         let ret = b.unary(InstTag::Return, zero, sp());
         b.add_function(main_id, vec![], pool.int(), &[ret], sp());
