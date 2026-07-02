@@ -166,14 +166,14 @@ struct FunctionContext<'a, M: Module> {
     /// per-function entry here. Both unconditional (`branch: None`) and
     /// branch-gated (`branch: Some(_)`) entries are filtered through
     /// `branch_active`.
-    sidecar: &'a crate::ownership::FunctionSidecar,
+    sidecar: &'a ryo_core::ownership::FunctionSidecar,
     /// Active arm stack for conditional destruction (Task 9). Each
     /// entry is the `BranchId` of an enclosing if/elif/else arm
     /// currently being lowered. `branch_active` walks this stack to
     /// gate branch-tagged `FreePoint`s — `contains` (not `last()`)
     /// so a Free anchored to a parent arm still fires from inside a
     /// nested child arm of the same parent.
-    branch_stack: Vec<crate::ownership::BranchId>,
+    branch_stack: Vec<ryo_core::ownership::BranchId>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -314,7 +314,7 @@ impl<M: Module> Codegen<M> {
         &mut self,
         tirs: &[Tir],
         pool: &InternPool,
-        sidecar: &crate::ownership::OwnershipSidecar,
+        sidecar: &ryo_core::ownership::OwnershipSidecar,
     ) -> Result<FuncId, String> {
         debug_assert!(
             no_unreachable_in(tirs),
@@ -344,7 +344,7 @@ impl<M: Module> Codegen<M> {
         &mut self,
         tirs: &[Tir],
         pool: &InternPool,
-        sidecar: &crate::ownership::OwnershipSidecar,
+        sidecar: &ryo_core::ownership::OwnershipSidecar,
     ) -> Result<String, String> {
         debug_assert!(
             no_unreachable_in(tirs),
@@ -424,7 +424,7 @@ impl<M: Module> Codegen<M> {
         tir: &Tir,
         func_ids: &HashMap<StringId, FuncId>,
         pool: &InternPool,
-        sidecar: &crate::ownership::OwnershipSidecar,
+        sidecar: &ryo_core::ownership::OwnershipSidecar,
     ) -> Result<String, String> {
         let func_id = *func_ids
             .get(&tir.name)
@@ -436,7 +436,7 @@ impl<M: Module> Codegen<M> {
         // for one function fire at numerically-matching TirRefs in
         // another. The `unwrap_or` arm covers compiler-emitted helpers
         // (e.g. `__ryo_panic`) that the ownership pass never sees.
-        let empty_sidecar = crate::ownership::FunctionSidecar::default();
+        let empty_sidecar = ryo_core::ownership::FunctionSidecar::default();
         let func_sidecar = sidecar.functions.get(&tir.name).unwrap_or(&empty_sidecar);
 
         self.ctx.func.signature = self.build_signature(tir, pool);
@@ -1307,8 +1307,8 @@ impl<M: Module> Codegen<M> {
     /// parent arm still fires when codegen is inside a nested child
     /// arm of that parent.
     fn branch_active(
-        branch: Option<crate::ownership::BranchId>,
-        stack: &[crate::ownership::BranchId],
+        branch: Option<ryo_core::ownership::BranchId>,
+        stack: &[ryo_core::ownership::BranchId],
     ) -> bool {
         match branch {
             None => true,

@@ -1044,6 +1044,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "logos",
  "ryo-core",
+ "ryo-frontend",
  "ryo-runtime",
  "sha2",
  "tar",
@@ -1060,6 +1061,16 @@ dependencies = [
  "ariadne",
  "chumsky",
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "ryo-frontend"
+version = "0.1.0"
+dependencies = [
+ "chumsky",
+ "hashbrown 0.17.1",
+ "logos",
+ "ryo-core",
 ]
 
 [[package]]

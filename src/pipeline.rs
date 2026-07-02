@@ -1,14 +1,14 @@
 use crate::EmitKind;
 use ryo_core::ast;
-use crate::astgen;
+use ryo_frontend::astgen;
 use crate::codegen;
 use ryo_core::diag::{Diag, DiagCode, DiagSink, Severity};
 use ryo_core::errors::CompilerError;
-use crate::lexer::{self, Token};
+use ryo_frontend::lexer::{self, Token};
 use crate::linker;
-use crate::parser::program_parser;
+use ryo_frontend::parser::program_parser;
 use crate::runtime_lib;
-use crate::sema;
+use ryo_frontend::sema;
 use ryo_core::tir::{self, Tir};
 use ryo_core::types::InternPool;
 use ryo_core::uir::Uir;
@@ -298,7 +298,7 @@ pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerE
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
     let tirs = sema::analyze(&uir, &mut pool, &mut sink, &input, file);
-    let sidecar = crate::ownership::check(&tirs, &pool, &mut sink);
+    let sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut sink);
 
     if want.tir {
         display_tir(&tirs, &pool);
@@ -406,14 +406,14 @@ fn lower_and_analyze(
     input: &str,
     source_name: &str,
     file_path: &Path,
-) -> Result<(Vec<Tir>, crate::ownership::OwnershipSidecar), CompilerError> {
+) -> Result<(Vec<Tir>, ryo_core::ownership::OwnershipSidecar), CompilerError> {
     let mut sink = DiagSink::new();
     let uir = astgen::generate(program, pool, &mut sink);
     // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
     let tirs = sema::analyze(&uir, pool, &mut sink, input, file_path);
-    let sidecar = crate::ownership::check(&tirs, pool, &mut sink);
+    let sidecar = ryo_frontend::ownership::check(&tirs, pool, &mut sink);
     // Single tail block: render-if-non-empty, Err iff any errors.
     // Same shape as `ir_command` so warnings (`W0001` DeadStore,
     // `W0002` RedundantMove, …) surface on the success path
@@ -426,7 +426,7 @@ fn lower_and_analyze(
 fn generate_and_display_ir(
     tirs: &[Tir],
     pool: &InternPool,
-    sidecar: &crate::ownership::OwnershipSidecar,
+    sidecar: &ryo_core::ownership::OwnershipSidecar,
 ) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;

@@ -1,0 +1,10 @@
+[package]
+name = "ryo-frontend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ryo-core = { path = "../ryo-core" }
+logos = "0.16"
+chumsky = "0.12"
+hashbrown = "0.17"

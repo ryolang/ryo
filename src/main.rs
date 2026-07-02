@@ -1,18 +1,11 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-mod astgen;
-mod builtins;
 mod codegen;
-mod indent;
-mod lexer;
 mod linker;
-mod ownership;
-mod parser;
 mod pipeline;
 #[allow(dead_code)]
 mod runtime_lib;
-mod sema;
 mod toolchain;
 
 #[derive(Parser)]
