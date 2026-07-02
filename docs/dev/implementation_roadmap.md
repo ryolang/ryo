@@ -960,6 +960,17 @@ fn main():
 - Detailed design: see [2026-05-20-milestone-8.1-heap-str-and-move-semantics-design.md](../superpowers/specs/2026-05-20-milestone-8.1-heap-str-and-move-semantics-design.md).
 - Dependencies: Milestone 8 (control flow blocks shape the dataflow regions the move tracker walks).
 
+> 💡 **Architectural Note (Cargo Workspace Transition)**
+>
+> In July 2026, the Ryo monolithic compiler was refactored into a modular five-crate Cargo workspace to enforce clean unidirectional boundaries and support future toolchain growth:
+> - **`ryo-core`**: Defines the shared models (AST, IRs (UIR, TIR), types, diagnostics, and errors).
+> - **`ryo-frontend`**: Contains parsing, lexing, AST lowering (`astgen`), semantic analysis, and the ownership validator.
+> - **`ryo-backend`**: Contains Cranelift JIT/AOT code generation, Zig linking, and the native toolchain manager.
+> - **`ryo-driver`**: Orchestrates compiler pipeline execution.
+> - **`ryo`**: The CLI binary executable.
+>
+> For future milestones (from Milestone 8.2 onwards), development tasks, modules, and tests are structured within this Cargo workspace rather than a flat `src/` directory. For up-to-date guidelines on adding compiler features under this architecture, see the root `CLAUDE.md`.
+
 ### Milestone 8.2: Immutable Borrows (`&T`) [alpha]
 **Goal:** Add immutable references and the corresponding borrow-checking rules, building on M8.1's move tracker.
 
