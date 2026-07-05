@@ -907,7 +907,7 @@ Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching,
 - Add stdlib helpers for non-string formatting: `int_to_str(x)`, `float_to_str(x)`, `bool_to_str(b)`
 - **F-strings (`f"Value: {x}"`) are deferred to v0.2** — see Phase 5: F-strings & String Interpolation. v0.1 uses `+` concatenation with the `*_to_str` helpers above.
 - Parser/AST: accept the **`move` keyword** as a prefix on parameter declarations (`fn consume(move s: str)`). Without `move`, parameters borrow. Sema records the convention on the function signature (type-only; ownership lives elsewhere).
-- Add a **new pipeline stage `src/ownership.rs`** between Sema and Codegen — modeled on Mojo's MLIR-based lifetime/ASAP-destruction passes (Zig stops being a useful compiler reference for the borrow checker; see [mojo_reference.md](mojo_reference.md)). The pass mutates each `Tir` in place: inserts `TirTag::Free`, tracks per-`TirRef` ownership state, and reports diagnostics.
+- Add a **new pipeline stage `ryo-frontend/src/ownership.rs`** between Sema and Codegen — modeled on Mojo's MLIR-based lifetime/ASAP-destruction passes (Zig stops being a useful compiler reference for the borrow checker; see [mojo_reference.md](mojo_reference.md)). The pass mutates each `Tir` in place: inserts `TirTag::Free`, tracks per-`TirRef` ownership state, and reports diagnostics.
   - Per-`TirRef` (SSA value) state lattice: `NotTracked` / `Valid` / `Borrowed` / `Moved { moved_at, kind }`
   - `current_owner: HashMap<StringId, TirRef>` shadow table for named bindings (resolves binding-read sites and feeds diagnostics)
   - Implicit immutable borrow for function parameters (Rule 2); `move` opts into ownership transfer (Rule 4)

@@ -11,7 +11,7 @@ The pass is conceptually distinct from the ownership pass (`ryo-frontend/src/own
 | Pass | Concern | Soundness vs perf |
 |---|---|---|
 | `ryo-frontend/src/ownership.rs` (M8.1) | Move semantics, use-after-move, `Free` insertion for owned types like `str` | Soundness: rejects programs |
-| `src/arc_optimizer.rs` (this doc) | Elide redundant retain/release on `shared[T]` values | Perf only: never changes program meaning |
+| `ryo-driver/src/arc_optimizer.rs` or `ryo-frontend/src/arc_optimizer.rs` (this doc) | Elide redundant retain/release on `shared[T]` values | Perf only: never changes program meaning |
 
 Both passes run on TIR (post-sema, pre-codegen). The ownership pass must run first because its inserted `Free` instructions are inputs to the ARC pass's "what's the last use of this value?" analysis.
 

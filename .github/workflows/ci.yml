@@ -26,7 +26,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --check
+      - run: cargo fmt --all --check
 
   clippy:
     name: Clippy
@@ -40,7 +40,7 @@ jobs:
         with:
           prefix-key: clippy
       - run: cargo build -p ryo-runtime --release
-      - run: cargo clippy --all-targets
+      - run: cargo clippy --workspace --all-targets
 
   test:
     name: Test (${{ matrix.os }})
@@ -58,7 +58,7 @@ jobs:
       - name: Get Zig version
         id: zig-version
         run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' src/toolchain.rs | cut -d'"' -f2)
+          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Cache Zig toolchain
         id: zig-cache
@@ -70,7 +70,7 @@ jobs:
         if: steps.zig-cache.outputs.cache-hit != 'true'
         run: cargo run -- toolchain install
       - run: cargo build -p ryo-runtime --release
-      - run: cargo test
+      - run: cargo test --workspace
 
   asan:
     name: ASan leak check
@@ -88,7 +88,7 @@ jobs:
       - name: Get Zig version
         id: zig-version
         run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' src/toolchain.rs | cut -d'"' -f2)
+          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Cache Zig toolchain
         id: zig-cache
@@ -120,7 +120,7 @@ jobs:
       - name: Get Zig version
         id: zig-version
         run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' src/toolchain.rs | cut -d'"' -f2)
+          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Cache Zig toolchain
         id: zig-cache

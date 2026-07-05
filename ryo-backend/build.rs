@@ -2,6 +2,15 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::path::PathBuf;
 
+// TODO(dedup): the runtime-resolution logic below (RYO_RUNTIME_LIB
+// fallback, profile mapping, in-process `cargo build -p ryo-runtime`
+// into target/runtime-build) is duplicated verbatim in `ryo/build.rs`.
+// Both build scripts need it because each sets RYO_RUNTIME_LIB/HASH for
+// its own crate (`ryo-backend` for runtime_lib.rs's `include_bytes!`,
+// `ryo` for its integration tests). When this is touched next, extract
+// the shared logic into a small `build-support` crate (or a snippet
+// `include!`d by both) instead of maintaining two copies.
+
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let root_dir = PathBuf::from(&manifest_dir).parent().unwrap().to_path_buf();
