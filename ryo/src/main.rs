@@ -1,25 +1,8 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-mod ast;
-mod astgen;
-mod builtins;
-mod codegen;
-mod diag;
-mod errors;
-mod indent;
-mod lexer;
-mod linker;
-mod ownership;
-mod parser;
-mod pipeline;
-#[allow(dead_code)]
-mod runtime_lib;
-mod sema;
-mod tir;
-mod toolchain;
-mod types;
-mod uir;
+use ryo_backend::toolchain;
+use ryo_driver::pipeline::{self, EmitKind};
 
 #[derive(Parser)]
 #[command(name = "ryo")]
@@ -71,19 +54,6 @@ enum Commands {
         #[command(subcommand)]
         action: ToolchainAction,
     },
-}
-
-/// Which IR section(s) `ryo ir --emit=...` should print.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum EmitKind {
-    /// Pretty-printed AST (parser output).
-    Ast,
-    /// Untyped IR (astgen output, Zig-style ZIR analogue).
-    Uir,
-    /// Typed IR (sema output, Zig-style AIR analogue).
-    Tir,
-    /// Cranelift IR (codegen output).
-    Clif,
 }
 
 #[derive(Subcommand)]

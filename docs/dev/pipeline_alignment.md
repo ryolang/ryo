@@ -61,7 +61,7 @@ Phases 1 and 2 can land in any order or in parallel branches. Phases 3, 4, 5 are
 
 **Goal:** replace `Result<_, String>` in the middle-end with a structured `Diag { span, severity, code, message }` and let analysis collect multiple diagnostics before returning.
 
-### 1.1 New module: `src/diag.rs`
+### 1.1 New module: `ryo-core/src/diag.rs`
 
 ```rust
 // Public API sketch — design, not final code.
@@ -230,7 +230,7 @@ This is the change that lets UIR (Phase 3) be a pure `Vec<u32>`-shaped thing ins
 ### 3.1 Shape
 
 ```rust
-// src/uir.rs
+// ryo-core/src/uir.rs
 pub struct Uir {
     pub instructions: Vec<Inst>,        // (tag, data) pairs
     pub extra: Vec<u32>,                // variable-size payloads
@@ -267,7 +267,7 @@ pub struct InstRef(NonZeroU32);     // index into `instructions`
 
 ### 3.2 `astgen` produces UIR
 
-`src/ast_lower.rs` is renamed `src/astgen.rs` and rewritten to produce UIR. Its responsibilities are unchanged from middle_end_refactor.md §2.4:
+`ryo-frontend/src/astgen.rs` is rewritten to produce UIR. Its responsibilities are unchanged from middle_end_refactor.md §2.4:
 
 - Pure structural translation.
 - Resolves syntactic type annotations to `TypeId`.
@@ -307,7 +307,7 @@ Codegen's traversal becomes index-driven (`for inst in uir.instructions[func.bod
 ### 4.1 Shape
 
 ```rust
-// src/tir.rs
+// ryo-core/src/tir.rs
 pub struct Tir {
     pub instructions: Vec<TypedInst>,   // (tag, ty, data)
     pub extra: Vec<u32>,
@@ -376,7 +376,8 @@ Codegen is now a near-mechanical TIR-to-Cranelift translator. No type lookups (e
 ### 5.1 Shape
 
 ```rust
-// src/sema.rs (rewritten)
+// ryo-frontend/src/sema.rs (rewritten)
+pub struct Sema<'a> {
 pub struct Sema<'a> {
     pool: &'a mut InternPool,
     uir: &'a Uir,

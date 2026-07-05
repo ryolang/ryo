@@ -21,78 +21,13 @@
 //!
 //! See `docs/dev/mojo_reference.md`.
 
-use crate::diag::{Diag, DiagCode, DiagSink};
-use crate::tir::{Span, Tir, TirData, TirRef, TirTag};
-use crate::types::{InternPool, StringId, TypeId, TypeKind};
+use ryo_core::diag::{Diag, DiagCode, DiagSink};
+pub use ryo_core::ownership::{
+    BranchId, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
+};
+use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
+use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
-
-/// Identifies a specific arm of an `IfStmt` (and, future, `Match`).
-/// Assigned by the ownership pass; codegen maps each `BranchId` to a
-/// concrete Cranelift `Block` as it lowers if/else regions.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct BranchId(pub u32);
-
-/// One scheduled Free. Codegen emits `ryo_str_free(ptr, cap)` after
-/// the instruction at `after`, gated by `branch` (None =
-/// unconditional, Some = only inside that arm or a descendant).
-#[derive(Clone, Debug)]
-#[allow(dead_code)] // fields read by Task 7+ Free emission
-pub struct FreePoint {
-    pub after: TirRef,
-    pub target: TirRef,
-    pub span: Span,
-    pub branch: Option<BranchId>,
-}
-
-/// Per-`IfStmt` mapping from arm position to its assigned [`BranchId`].
-/// Codegen uses this to push the right `BranchId` onto `branch_stack`
-/// as it lowers each arm, so a branch-gated `FreePoint` only fires
-/// inside the arm that ended with the owner still `Valid`.
-#[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // fields read by codegen's branch_stack
-pub struct IfBranchIds {
-    pub then_branch: BranchId,
-    pub elif_branches: Vec<BranchId>,
-    pub else_branch: Option<BranchId>,
-}
-
-/// Side-table produced by the ownership pass alongside diagnostics.
-/// Codegen consults it to decide where to emit `ryo_str_free` calls.
-/// The TIR itself is never mutated — index stability is load-bearing
-/// for `inst_values` memoisation in `codegen.rs`.
-///
-/// `TirRef`s are scoped per-function (each `Tir` arena restarts at
-/// `TirRef(1)`), so the free schedule and per-instruction maps must
-/// also be per-function — otherwise codegen processing function B
-/// could pick up entries scheduled for function A whose TirRefs
-/// happen to match B's at the same numeric index, emitting wrong/
-/// extra `ryo_str_free` calls. Keyed by function name's `StringId`;
-/// codegen looks up the entry for the current function before
-/// consulting any of the per-function maps.
-#[derive(Default, Debug, Clone)]
-#[allow(dead_code)] // fields read by Task 7+ Free emission
-pub struct OwnershipSidecar {
-    pub functions: HashMap<StringId, FunctionSidecar>,
-}
-
-/// Per-function ownership metadata. Owns the three TirRef-keyed maps
-/// that codegen consults during lowering. Created fresh inside
-/// `analyze_function` and inserted into the parent
-/// [`OwnershipSidecar`] under the function's name.
-#[derive(Default, Debug, Clone)]
-#[allow(dead_code)] // fields read by Task 7+ Free emission
-pub struct FunctionSidecar {
-    /// Frees anchored after specific instructions.
-    pub free_schedule: Vec<FreePoint>,
-    /// Reassignment Frees. Key: the `Assign` instruction's `TirRef`.
-    /// Value: the `TirRef` whose buffer must be freed *before* the new
-    /// fat-pointer triple is stored into the binding's `StrLocals`.
-    pub free_on_reassign: HashMap<TirRef, TirRef>,
-    /// `BranchId` assignments per `IfStmt`. Codegen consults this when
-    /// lowering if/elif/else to know which `BranchId` to push onto
-    /// `branch_stack` for each arm.
-    pub if_branches: HashMap<TirRef /* IfStmt inst */, IfBranchIds>,
-}
 
 // ---------- Classification ----------
 
@@ -1803,8 +1738,8 @@ mod tests {
 
     #[test]
     fn dead_store_schedules_free_after_decl() {
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -1866,8 +1801,8 @@ mod tests {
         // The ownership pass must therefore exclude it from
         // `temp_owners` so the anonymous-temp Free pass does not
         // schedule a Free for it.
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -1903,8 +1838,8 @@ mod tests {
 
     #[test]
     fn inside_loop_temp_is_freed() {
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -1954,8 +1889,8 @@ mod tests {
         // A pre-loop owner whose last-use is inside a loop must be
         // freed on a `break` path that bypasses that last-use, as we
         // are exiting the loop and will never reach the last-use again.
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2011,8 +1946,8 @@ mod tests {
         // A pre-loop owner whose last-use is inside a loop must NOT be
         // freed on a `continue` path, as we will loop back and might
         // read it in the next iteration (causing use-after-free).
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2078,8 +2013,8 @@ mod tests {
         // Regression for I-058. A `break` taken before the `print(s)`
         // last-use must trigger a Free anchored on the break instr —
         // otherwise the inside-loop allocation leaks on the break path.
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2136,8 +2071,8 @@ mod tests {
         // on any path that reaches it. The break/continue scheduler
         // must NOT add a redundant Free anchored on break, or codegen
         // would double-free.
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2205,8 +2140,8 @@ mod tests {
         // print's anchor before the break, but on the break path the
         // print never ran — so the buffer leaks unless we schedule a
         // jump-anchored Free here.
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2271,8 +2206,8 @@ mod tests {
     #[test]
     fn continue_before_last_use_schedules_jump_free() {
         // Symmetric I-058 regression for `continue` instead of `break`.
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2324,8 +2259,8 @@ mod tests {
 
     #[test]
     fn pre_loop_owner_read_only_in_loop_is_freed() {
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2378,8 +2313,8 @@ mod tests {
 
     #[test]
     fn last_use_scheduled_for_unmoved_local() {
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2416,8 +2351,8 @@ mod tests {
 
     #[test]
     fn reassignment_records_free_on_old_owner() {
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2478,8 +2413,8 @@ mod tests {
 
     #[test]
     fn concat_intermediate_freed_after_consumer() {
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
         use std::collections::HashSet;
 
         let mut pool = InternPool::new();
@@ -2519,8 +2454,8 @@ mod tests {
 
     #[test]
     fn last_use_uses_pre_rebind_owner_not_post() {
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2589,8 +2524,8 @@ mod tests {
 
     #[test]
     fn str_const_walk_no_panic() {
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
@@ -2612,8 +2547,8 @@ mod tests {
 
     #[test]
     fn branch_ids_unique_across_post_loop_if() {
-        use crate::tir::TirBuilder;
         use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
 
         let mut pool = InternPool::new();
         let str_ty = pool.str_();

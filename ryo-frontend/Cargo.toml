@@ -1,0 +1,9 @@
+[package]
+name = "ryo-frontend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ryo-core = { workspace = true }
+logos = { workspace = true }
+chumsky = { workspace = true }

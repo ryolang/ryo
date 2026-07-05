@@ -10,9 +10,9 @@
 //! parses integer/string literals into their final form, so callers
 //! get a stream the parser can consume directly.
 
-use crate::types::{InternPool, StringId};
 use chumsky::span::{SimpleSpan, Span as _};
 use logos::Logos;
+use ryo_core::types::{InternPool, StringId};
 use std::fmt;
 
 pub type Span = SimpleSpan;

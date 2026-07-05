@@ -907,7 +907,7 @@ Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching,
 - Add stdlib helpers for non-string formatting: `int_to_str(x)`, `float_to_str(x)`, `bool_to_str(b)`
 - **F-strings (`f"Value: {x}"`) are deferred to v0.2** — see Phase 5: F-strings & String Interpolation. v0.1 uses `+` concatenation with the `*_to_str` helpers above.
 - Parser/AST: accept the **`move` keyword** as a prefix on parameter declarations (`fn consume(move s: str)`). Without `move`, parameters borrow. Sema records the convention on the function signature (type-only; ownership lives elsewhere).
-- Add a **new pipeline stage `src/ownership.rs`** between Sema and Codegen — modeled on Mojo's MLIR-based lifetime/ASAP-destruction passes (Zig stops being a useful compiler reference for the borrow checker; see [mojo_reference.md](mojo_reference.md)). The pass mutates each `Tir` in place: inserts `TirTag::Free`, tracks per-`TirRef` ownership state, and reports diagnostics.
+- Add a **new pipeline stage `ryo-frontend/src/ownership.rs`** between Sema and Codegen — modeled on Mojo's MLIR-based lifetime/ASAP-destruction passes (Zig stops being a useful compiler reference for the borrow checker; see [mojo_reference.md](mojo_reference.md)). The pass mutates each `Tir` in place: inserts `TirTag::Free`, tracks per-`TirRef` ownership state, and reports diagnostics.
   - Per-`TirRef` (SSA value) state lattice: `NotTracked` / `Valid` / `Borrowed` / `Moved { moved_at, kind }`
   - `current_owner: HashMap<StringId, TirRef>` shadow table for named bindings (resolves binding-read sites and feeds diagnostics)
   - Implicit immutable borrow for function parameters (Rule 2); `move` opts into ownership transfer (Rule 4)
@@ -959,6 +959,17 @@ fn main():
 - Allocator failure surfaces as a panic in v0.1; allocation-fallible APIs ship alongside error unions (M13).
 - Detailed design: see [2026-05-20-milestone-8.1-heap-str-and-move-semantics-design.md](../superpowers/specs/2026-05-20-milestone-8.1-heap-str-and-move-semantics-design.md).
 - Dependencies: Milestone 8 (control flow blocks shape the dataflow regions the move tracker walks).
+
+> 💡 **Architectural Note (Cargo Workspace Transition)**
+>
+> In July 2026, the Ryo monolithic compiler was refactored into a modular five-crate Cargo workspace to enforce clean unidirectional boundaries and support future toolchain growth:
+> - **`ryo-core`**: Defines the shared models (AST, IRs (UIR, TIR), types, diagnostics, and errors).
+> - **`ryo-frontend`**: Contains parsing, lexing, AST lowering (`astgen`), semantic analysis, and the ownership validator.
+> - **`ryo-backend`**: Contains Cranelift JIT/AOT code generation, Zig linking, and the native toolchain manager.
+> - **`ryo-driver`**: Orchestrates compiler pipeline execution.
+> - **`ryo`**: The CLI binary executable.
+>
+> For future milestones (from Milestone 8.2 onwards), development tasks, modules, and tests are structured within this Cargo workspace rather than a flat `src/` directory. For up-to-date guidelines on adding compiler features under this architecture, see the root `CLAUDE.md`.
 
 ### Milestone 8.2: Immutable Borrows (`&T`) [alpha]
 **Goal:** Add immutable references and the corresponding borrow-checking rules, building on M8.1's move tracker.

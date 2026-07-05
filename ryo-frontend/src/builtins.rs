@@ -1,4 +1,4 @@
-use crate::types::{InternPool, TypeId};
+use ryo_core::types::{InternPool, TypeId};
 
 pub struct BuiltinFunction {
     pub name: &'static str,

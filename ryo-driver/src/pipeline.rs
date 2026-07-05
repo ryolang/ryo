@@ -1,20 +1,31 @@
-use crate::EmitKind;
-use crate::ast;
-use crate::astgen;
-use crate::codegen;
-use crate::diag::{Diag, DiagCode, DiagSink, Severity};
-use crate::errors::CompilerError;
-use crate::lexer::{self, Token};
-use crate::linker;
-use crate::parser::program_parser;
-use crate::runtime_lib;
-use crate::sema;
-use crate::tir::{self, Tir};
-use crate::types::InternPool;
-use crate::uir::Uir;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum EmitKind {
+    /// Pretty-printed AST (parser output).
+    Ast,
+    /// Untyped IR (astgen output, Zig-style ZIR analogue).
+    Uir,
+    /// Typed IR (sema output, Zig-style AIR analogue).
+    Tir,
+    /// Cranelift IR (codegen output).
+    Clif,
+}
+
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::span::Span as _;
 use chumsky::{Parser, prelude::*};
+use ryo_backend::codegen;
+use ryo_backend::linker;
+use ryo_backend::runtime_lib;
+use ryo_core::ast;
+use ryo_core::diag::{Diag, DiagCode, DiagSink, Severity};
+use ryo_core::errors::CompilerError;
+use ryo_core::tir::{self, Tir};
+use ryo_core::types::InternPool;
+use ryo_core::uir::Uir;
+use ryo_frontend::astgen;
+use ryo_frontend::lexer::{self, Token};
+use ryo_frontend::parser::program_parser;
+use ryo_frontend::sema;
 use std::fs;
 use std::path::Path;
 use target_lexicon::Triple;
@@ -32,7 +43,7 @@ fn get_output_filenames(input_file: &Path) -> (String, String) {
     (obj_filename, exe_filename)
 }
 
-pub(crate) fn lex_command(file: &Path) -> Result<(), CompilerError> {
+pub fn lex_command(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     display_tokens(&input, file)
 }
@@ -71,7 +82,7 @@ fn display_tokens(input: &str, file: &Path) -> Result<(), CompilerError> {
     Ok(())
 }
 
-pub(crate) fn parse_command(file: &Path) -> Result<(), CompilerError> {
+pub fn parse_command(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
@@ -258,7 +269,7 @@ fn display_ast(program: &ast::Program, pool: &InternPool) {
 /// (AST → UIR → TIR → CLIF) so flag order is irrelevant. Stages
 /// run only as far as the deepest requested section requires; an
 /// `--emit=uir` invocation never reaches sema.
-pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
+pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let name = source_name(file);
     let mut pool = InternPool::new();
@@ -298,7 +309,7 @@ pub(crate) fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerE
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
     let tirs = sema::analyze(&uir, &mut pool, &mut sink, &input, file);
-    let sidecar = crate::ownership::check(&tirs, &pool, &mut sink);
+    let sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut sink);
 
     if want.tir {
         display_tir(&tirs, &pool);
@@ -406,14 +417,14 @@ fn lower_and_analyze(
     input: &str,
     source_name: &str,
     file_path: &Path,
-) -> Result<(Vec<Tir>, crate::ownership::OwnershipSidecar), CompilerError> {
+) -> Result<(Vec<Tir>, ryo_core::ownership::OwnershipSidecar), CompilerError> {
     let mut sink = DiagSink::new();
     let uir = astgen::generate(program, pool, &mut sink);
     // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
     let tirs = sema::analyze(&uir, pool, &mut sink, input, file_path);
-    let sidecar = crate::ownership::check(&tirs, pool, &mut sink);
+    let sidecar = ryo_frontend::ownership::check(&tirs, pool, &mut sink);
     // Single tail block: render-if-non-empty, Err iff any errors.
     // Same shape as `ir_command` so warnings (`W0001` DeadStore,
     // `W0002` RedundantMove, …) surface on the success path
@@ -426,7 +437,7 @@ fn lower_and_analyze(
 fn generate_and_display_ir(
     tirs: &[Tir],
     pool: &InternPool,
-    sidecar: &crate::ownership::OwnershipSidecar,
+    sidecar: &ryo_core::ownership::OwnershipSidecar,
 ) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
@@ -440,7 +451,7 @@ fn generate_and_display_ir(
     Ok(())
 }
 
-pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
+pub fn run_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
@@ -468,7 +479,7 @@ pub(crate) fn run_file(file: &Path) -> Result<(), CompilerError> {
     Ok(())
 }
 
-pub(crate) fn build_file(file: &Path) -> Result<(), CompilerError> {
+pub fn build_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);

@@ -18,11 +18,11 @@
 //! threads it directly into `sema::analyze` and from there into
 //! `codegen::compile`; there is no intermediate tree-shaped IR.
 
-use crate::ast;
-use crate::diag::{Diag, DiagCode, DiagSink};
-use crate::types::{InternPool, StringId, TypeId};
-use crate::uir::{InstRef, InstTag, Uir, UirBuilder, UirParam};
 use chumsky::span::{SimpleSpan, Span as _};
+use ryo_core::ast;
+use ryo_core::diag::{Diag, DiagCode, DiagSink};
+use ryo_core::types::{InternPool, StringId, TypeId};
+use ryo_core::uir::{InstRef, InstTag, Uir, UirBuilder, UirParam};
 
 type Span = SimpleSpan;
 
@@ -404,9 +404,9 @@ mod tests {
     use super::*;
     use crate::lexer::lex;
     use crate::parser::program_parser;
-    use crate::uir::InstData;
     use chumsky::Parser;
     use chumsky::input::Input;
+    use ryo_core::uir::InstData;
 
     fn parse_and_lower(input: &str) -> Result<(Uir, InternPool), Vec<Diag>> {
         // Phase-2 lex pipeline: logos + indent + intern in one
@@ -431,7 +431,7 @@ mod tests {
     }
 
     /// Find a function body by name through the `InternPool`.
-    fn body_named<'a>(uir: &'a Uir, pool: &InternPool, name: &str) -> &'a crate::uir::FuncBody {
+    fn body_named<'a>(uir: &'a Uir, pool: &InternPool, name: &str) -> &'a ryo_core::uir::FuncBody {
         let id = pool.find_str(name).expect("name should be interned");
         uir.func_bodies
             .iter()
@@ -440,7 +440,7 @@ mod tests {
     }
 
     /// Top-level statement at index `i` in `body`'s execution order.
-    fn stmt_at(uir: &Uir, body: &crate::uir::FuncBody, i: usize) -> InstRef {
+    fn stmt_at(uir: &Uir, body: &ryo_core::uir::FuncBody, i: usize) -> InstRef {
         uir.body_stmts(body)[i]
     }
 
@@ -665,7 +665,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert!(matches!(
             uir.inst(stmts[0]).tag,
-            crate::uir::InstTag::AssignOrDecl
+            ryo_core::uir::InstTag::AssignOrDecl
         ));
         let v = uir.assign_or_decl_view(stmts[0]);
         assert_eq!(pool.str(v.name), "x");
@@ -700,11 +700,11 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         assert!(matches!(
             uir.inst(stmts[1]).tag,
-            crate::uir::InstTag::CompoundAssign
+            ryo_core::uir::InstTag::CompoundAssign
         ));
         let v = uir.compound_assign_view(stmts[1]);
         assert_eq!(pool.str(v.name), "x");
-        assert_eq!(v.op, crate::ast::CompoundOp::Add);
+        assert_eq!(v.op, ryo_core::ast::CompoundOp::Add);
     }
 
     #[test]

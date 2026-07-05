@@ -1,0 +1,13 @@
+[package]
+name = "ryo-driver"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ryo-core = { workspace = true }
+ryo-frontend = { workspace = true }
+ryo-backend = { workspace = true }
+clap = { workspace = true }
+ariadne = { workspace = true }
+chumsky = { workspace = true }
+target-lexicon = { workspace = true }

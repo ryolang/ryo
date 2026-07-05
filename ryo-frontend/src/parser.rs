@@ -7,8 +7,8 @@
 
 use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan};
 
-use crate::ast::*;
 use crate::lexer::Token;
+use ryo_core::ast::*;
 
 /// Helper: skip zero or more newline tokens.
 fn skip_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
@@ -583,9 +583,9 @@ where
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::types::InternPool;
     use chumsky::Parser;
     use chumsky::input::Input;
+    use ryo_core::types::InternPool;
 
     fn lex_and_parse(input: &str) -> Result<(Program, InternPool), Vec<Rich<'static, Token>>> {
         let mut pool = InternPool::new();
