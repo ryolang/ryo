@@ -49,14 +49,15 @@ parse_and_print_commits() {
     local lines
     lines=$(echo "$commits_json" | jq -r '
         .[] | select(. != null) | 
-        "\(.sha)|\(.commit.committer.date)|\(.commit.author.name)|\(.commit.message | split("\n")[0])"
+        "\(.sha)\t\(.commit.committer.date)\t\(.commit.author.name)\t\(.commit.message | split("\n")[0])"
     ')
 
     for line in $lines; do
-        local sha=$(echo "$line" | cut -d'|' -f1)
-        local date=$(echo "$line" | cut -d'|' -f2 | cut -d'T' -f1)
-        local author=$(echo "$line" | cut -d'|' -f3)
-        local msg=$(echo "$line" | cut -d'|' -f4)
+        local sha date author msg
+        sha=$(echo "$line" | cut -d$'\t' -f1)
+        date=$(echo "$line" | cut -d$'\t' -f2 | cut -d'T' -f1)
+        author=$(echo "$line" | cut -d$'\t' -f3)
+        msg=$(echo "$line" | cut -d$'\t' -f4)
         
         local short_sha="${sha:0:7}"
         
@@ -81,7 +82,7 @@ fetch_api() {
     if [ -n "${GITHUB_TOKEN:-}" ]; then
         headers+=("-H" "Authorization: Bearer $GITHUB_TOKEN")
     fi
-    curl -s "${headers[@]}" "$url"
+    curl -s --fail --max-time 30 "${headers[@]}" "$url"
 }
 
 main() {
@@ -150,8 +151,15 @@ main() {
     fi
 
     echo "Fetching starting commit history to find branch common ancestors..." >&2
-    local stop_shas
-    stop_shas=$(fetch_api "https://api.github.com/repos/bytecodealliance/wasmtime/commits?path=cranelift&sha=${start_sha}&per_page=100" | jq -r '.[].sha' | tr '\n' ' ')
+    local stop_shas=""
+    local stop_page=1
+    local page_shas=""
+    while true; do
+        page_shas=$(fetch_api "https://api.github.com/repos/bytecodealliance/wasmtime/commits?path=cranelift&sha=${start_sha}&per_page=100&page=${stop_page}" | jq -r 'if (type == "array" and length > 0) then .[].sha else empty end' | tr '\n' ' ') || page_shas=""
+        [ -z "$page_shas" ] && break
+        stop_shas+="$page_shas"
+        stop_page=$((stop_page + 1))
+    done
 
     if [ -z "$stop_shas" ]; then
         echo "Error: Failed to fetch commit history for starting SHA $start_sha." >&2
