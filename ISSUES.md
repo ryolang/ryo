@@ -249,6 +249,8 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** The runtime staticlib only uses `std::alloc`, `std::process::abort()`, and `eprintln!`, yet linking against precompiled `std` bundles objects with `_Unwind_*` symbol references. This forces the linker to pass `-lunwind` on Linux (workaround in `ryo-backend/src/linker.rs`). Migrating to `#![no_std]` with `extern crate alloc` eliminates the dependency entirely.
 **Resolution:** Replace `std::alloc` with `alloc::alloc` (identical API). Replace `eprintln!` + `process::abort()` with `extern "C" { fn abort() -> !; }`. Add `#[panic_handler]` that aborts. Keep the `rlib` crate-type for `cargo test` via a `#[cfg(test)]` std gate. `ryu` already supports `no_std`. Benefits: smaller archive, faster link times, no hidden unwind dependency, simpler cross-compilation.
 
+**Note:** `no_std` scopes only the core floor; OS-backed modules (`net`/`fs`/`time`) are linked on reachability, not forced into `no_std` — see `docs/dev/built_in.md` (`no_std` scope).
+
 ### I-045 — Loop fixed-point uses a scratch sink and re-walks the body to suppress duplicates
 
 **Files:** `ryo-frontend/src/ownership.rs` (`analyze_while_loop`, `analyze_for_range`)

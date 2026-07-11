@@ -9,59 +9,66 @@ Since Ryo targets **General Purpose** use (Web, CLI, Scripts), the standard libr
 **The Challenge:** Serde relies on Rust macros (`#[derive(Serialize)]`). Ryo cannot use Rust macros directly.
 **The Strategy:** Use the "DOM" approach (Dynamic Object Model). Map Ryo maps/lists to the crate's `Value` type.
 
-*   **`serde_json`:** The industry standard for JSON.
-    *   *Usage:* Implement `json.parse(str) -> !Value` and `json.stringify(Value) -> str`.
-    *   *Why:* Fast, correct, and handles edge cases perfectly.
-*   **`basic-toml` (or `toml`):**
-    *   *Usage:* Essential because Ryo uses `ryo.toml`. Needed to parse config files.
-    *   *Why:* `basic-toml` is a lighter dependency than the full `toml` crate, sufficient for 99% of config needs.
+* **`serde_json`:** The industry standard for JSON.
+  * *Usage:* Implement `json.parse(str) -> !Value` and `json.stringify(Value) -> str`.
+  * *Why:* Fast, correct, and handles edge cases perfectly.
+* **`basic-toml` (or `toml`):**
+  * *Usage:* Essential because Ryo uses `ryo.toml`. Needed to parse config files.
+  * *Why:* `basic-toml` is a lighter dependency than the full `toml` crate, sufficient for 99% of config needs.
 
 ### 2. The Networking Layer (`std.net.http`)
 
 **The Challenge:** Ryo v0.1/v0.2 is single-threaded/blocking. v0.4 is Green Threaded.
 **The Strategy:** Start with a **Blocking Client** wrapped in `#[blocking]` so it can be offloaded to a thread pool later.
 
-*   **`ureq` (Recommended for v0.1):**
-    *   *Why:* Pure Rust, blocking I/O, minimal dependencies (no Tokio). Extremely easy to wrap via FFI.
-    *   *Features:* HTTPS (via `rustls`), JSON support, simple API.
-*   **`reqwest` (blocking feature):**
-    *   *Why:* The heavy hitter. Support it later if `ureq` proves insufficient. It brings in many dependencies.
+* **`ureq` (Recommended for v0.1):**
+  * *Why:* Pure Rust, blocking I/O, minimal dependencies (no Tokio). Extremely easy to wrap via FFI.
+  * *Features:* HTTPS (via `rustls`), JSON support, simple API.
+* **`reqwest` (blocking feature):**
+  * *Why:* The heavy hitter. Support it later if `ureq` proves insufficient. It brings in many dependencies.
+
+**Gating & lifecycle (net):**
+
+* **Post-alpha.** The ergonomic `http.get(url) -> Response` surface needs M9 (structs), M13 (error types), and M17 (methods) — all **beta** — plus M6 (module system) so the Rust platform layer is bundled by reachability, not paid by every binary.
+* **No Tokio before v0.4.** Ryo's concurrency runtime is v0.4+. A blocking `ureq` call is a plain `extern "C"` invocation today; do **not** pull an async runtime into Ryo binaries before Ryo has its own scheduler. A native async net stack, when it lands, *replaces* the blocking client rather than preceding it.
+* **Binary size.** `ureq` + `rustls` + `webpki-roots` are linked only when `std.net` is imported, so programs that don't do networking pay zero. TLS is ~90% of the weight; the HTTP code is trivial. (This is why the `no_std` floor and batteries-included don't conflict — see [`built_in.md`](built_in.md), `no_std` scope.)
+* **Toolchain pinning.** The runtime pins `ureq` / `rustls` / `webpki-roots` per Ryo release; security backports flow through compiler releases (the Go model). Keeping `std.net`'s surface small lets version-volatile heavyweights (DB drivers, cloud SDKs) live in the package registry instead — see [`official_pkg.md`](official_pkg.md).
 
 ### 3. Text Processing (`std.regex`)
 
 **The Challenge:** Parsing strings safely and fast.
 
-*   **`regex`:**
-    *   *Why:* The gold standard. Guaranteed O(N) time complexity (safe against ReDoS attacks).
-    *   *Usage:* `regex.new(pattern).match(text)`.
-*   **`unicode-segmentation`:**
-    *   *Why:* Since `str` is UTF-8, users will need operations like "reverse a string with Emojis."
-    *   *Usage:* `str.graphemes()` implementation. Unicode is too complex to implement from scratch.
+* **`regex`:**
+  * *Why:* The gold standard. Guaranteed O(N) time complexity (safe against ReDoS attacks).
+  * *Usage:* `regex.new(pattern).match(text)`.
+* **`unicode-segmentation`:**
+  * *Why:* Since `str` is UTF-8, users will need operations like "reverse a string with Emojis."
+  * *Usage:* `str.graphemes()` implementation. Unicode is too complex to implement from scratch.
 
 ### 4. Time & Date (`std.time`)
 
 **The Challenge:** Timezones and leap seconds.
 
-*   **`chrono`:**
-    *   *Why:* The most feature-rich library for formatting (`%Y-%m-%d`), parsing, and timezone arithmetic.
-    *   *Usage:* `Time.now()`, `Duration.seconds(5)`.
+* **`chrono`:**
+  * *Why:* The most feature-rich library for formatting (`%Y-%m-%d`), parsing, and timezone arithmetic.
+  * *Usage:* `Time.now()`, `Duration.seconds(5)`.
 
 ### 5. Randomness & Crypto (`std.rand`, `std.crypto`)
 
-*   **`rand`:**
-    *   *Why:* Cryptographically secure random number generation (CSPRNG) by default.
-    *   *Usage:* `rand.int()`, `rand.shuffle(list)`.
-*   **`sha2` / `blake3`:**
-    *   *Why:* Basic hashing is needed for cache keys, signatures, etc.
+* **`rand`:**
+  * *Why:* Cryptographically secure random number generation (CSPRNG) by default.
+  * *Usage:* `rand.int()`, `rand.shuffle(list)`.
+* **`sha2` / `blake3`:**
+  * *Why:* Basic hashing is needed for cache keys, signatures, etc.
 
 ---
 
 ### 6. System & Filesystem (`std.fs`, `std.path`)
 
-*   **`glob`:**
-    *   *Why:* Expanding `*.txt` is a common scripting need.
-*   **`walkdir`:**
-    *   *Why:* Recursive directory traversal is hard to write correctly (symlink loops, permissions). Wrap this crate to provide `fs.walk(path)`.
+* **`glob`:**
+  * *Why:* Expanding `*.txt` is a common scripting need.
+* **`walkdir`:**
+  * *Why:* Recursive directory traversal is hard to write correctly (symlink loops, permissions). Wrap this crate to provide `fs.walk(path)`.
 
 ---
 
@@ -72,6 +79,7 @@ These crates should be bundled as **Static Rust Libraries** linked into the runt
 #### Example: `std.json` Wrapper
 
 **1. Rust Shim (`runtime/src/lib.rs`)**
+
 ```rust
 use serde_json::Value;
 use std::ffi::{CStr, CString};
@@ -89,6 +97,7 @@ pub extern "C" fn ryo_json_parse(input: *const i8) -> *mut Value {
 ```
 
 **2. Ryo Standard Library (`std/json.ryo`)**
+
 ```ryo
 package struct SysValue:
     _ptr: *void
