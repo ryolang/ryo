@@ -1,3 +1,7 @@
+# Critical
+
+Be brief.
+
 # Ryo Programming Language - Repository Conventions
 
 **Ryo** is a pre-alpha statically-typed, compiled (AOT/JIT) programming language implemented in Rust. See README.md for language philosophy and design goals.
