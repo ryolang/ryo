@@ -3,8 +3,8 @@
 # ASan and LeakSanitizer smoke tests) in a native Linux Docker container.
 set -e
 
-# Change directory to the workspace root
-cd "$(dirname "$0")"
+# Change directory to the workspace root (this script lives in scripts/)
+cd "$(dirname "$0")/.."
 
 echo "========================================================"
 echo "🐳 Building Ryo Linux test image..."

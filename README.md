@@ -89,7 +89,7 @@ curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh -s
 
 ### From Source
 
-Requires **Rust 1.92+** ([Install Rust](https://rustup.rs/)). Zig linker is managed automatically.
+Requires **Rust 1.97.0+** ([Install Rust](https://rustup.rs/)). Zig linker is managed automatically.
 
 ```bash
 git clone https://github.com/ryolang/ryo.git
@@ -97,6 +97,14 @@ cd ryo
 cargo build --release
 cargo run -- run examples/hello.ryo
 ```
+
+### Tracking Cranelift Release Changes
+
+Since Ryo is built on top of the Cranelift compiler backend, you can check what changed in Cranelift between the version currently used in Ryo (parsed from `Cargo.lock`) and any other version (e.g., the latest available release) by running:
+```bash
+./scripts/check_cranelift.sh
+```
+This utility automatically resolves Ryo's Cranelift dependency version, queries crates.io and the GitHub API, resolves the exact Git commit SHAs, and displays a clean history of compiler commits that changed the `cranelift/` directory, gracefully handling parallel release branch history tracking.
 
 **Next steps:** [Getting Started](docs/getting_started.md)
 
