@@ -2771,9 +2771,9 @@ mod tests {
         // s = "a"   (temp_a bound to s)
         // s = "b"   (reassign: free_on_reassign covers temp_a; s -> temp_b)
         // At exit, temp_a is Valid (resurrected by rebind) and NOT in
-        // current_owner.values() (s moved to temp_b). Without the
-        // reassign_targets filter, the anon-temp pass would schedule a
-        // second Free for temp_a -> double-free. It must be filtered.
+        // current_owner.values() (s moved to temp_b). Without `named_inits`
+        // containing temp_a, the anon-temp pass would schedule a second
+        // Free for it -> double-free. It must be classified.
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::TirBuilder;
 
@@ -2812,6 +2812,14 @@ mod tests {
         assert_eq!(
             a_frees, 0,
             "temp_a must not be in free_schedule (it's in free_on_reassign); got {sc:?}"
+        );
+        // Positive half: temp_a must actually be recorded in
+        // free_on_reassign (mirrors `reassignment_records_free_on_old_owner`).
+        // Without this the test would pass on a leak (temp_a never freed).
+        assert_eq!(
+            sc.free_on_reassign.get(&assign),
+            Some(&lit_a),
+            "temp_a must be freed once via free_on_reassign (not leaked); got {sc:?}",
         );
         // lit_b is never read, so it is a dead store and is freed exactly
         // once via the dead-store pass (anchored at the Assign).
