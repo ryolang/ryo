@@ -60,6 +60,24 @@ pub(crate) enum OwnerState {
     Moved { moved_at: Span },
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Owner {
+    Param(StringId),
+    Inst(TirRef),
+}
+
+impl Owner {
+    /// Return the underlying `TirRef` for an `Inst` owner, or `None`
+    /// for a `Param`. Used wherever a Free target / codegen lookup is
+    /// needed (FreePoint.target, free_on_reassign values, inst_values).
+    fn inst_tirref(self) -> Option<TirRef> {
+        match self {
+            Owner::Inst(r) => Some(r),
+            Owner::Param(_) => None,
+        }
+    }
+}
+
 /// Per-function ownership state. `states` is the lattice itself,
 /// keyed by the `TirRef` that produced the value. `current_owner`
 /// is a shadow map from binding name to whichever SSA value
@@ -70,9 +88,9 @@ pub(crate) enum OwnerState {
 /// back to the root owner when diagnosing a use-after-move.
 #[derive(Default, Clone)]
 pub(crate) struct Ownership {
-    pub states: HashMap<TirRef, OwnerState>,
-    pub current_owner: HashMap<StringId, TirRef>,
-    pub origin: HashMap<TirRef, Option<TirRef>>,
+    pub states: HashMap<Owner, OwnerState>,
+    pub current_owner: HashMap<StringId, Owner>,
+    pub origin: HashMap<TirRef, Option<Owner>>,
     /// VarDecls of Move-typed values, keyed by the underlying owner
     /// `TirRef`. Cleared when the binding is read (`Var`) or consumed
     /// (move/return). Whatever remains at function end is a dead
@@ -80,7 +98,7 @@ pub(crate) struct Ownership {
     /// declaring/assigning instruction. The third tuple element is
     /// the `VarDecl`/`Assign` instruction's own `TirRef`, used as
     /// the anchor for the dead-store Free.
-    pub pending_dead_store: HashMap<TirRef, (StringId, Span, TirRef /* decl_inst */)>,
+    pub pending_dead_store: HashMap<Owner, (StringId, Span, TirRef /* decl_inst */)>,
 
     /// SSA values that allocated heap-owned strings during the
     /// forward walk: `StrConst`, `StrConcat`, and Move-typed `Call`
@@ -88,7 +106,7 @@ pub(crate) struct Ownership {
     /// candidates for scheduling. A temp_owner that ends up bound to
     /// a `VarDecl`/`Assign` (see `named_owners`) is freed via the
     /// last-use pass instead.
-    pub temp_owners: HashSet<TirRef>,
+    pub temp_owners: HashSet<Owner>,
 
     /// Subset of `temp_owners` that became the underlying value of a
     /// named binding via `VarDecl` or `Assign`. The anonymous-temp
@@ -103,7 +121,7 @@ pub(crate) struct Ownership {
     /// state — which would misroute reads that precede a `mut`
     /// reassignment to the post-rebind owner. For Move-typed reads
     /// this anchors the last-use Free to the correct allocation.
-    pub owner_at_read: HashMap<TirRef, TirRef>,
+    pub owner_at_read: HashMap<TirRef, Owner>,
 
     /// Monotonic `BranchId` allocator. Bumped each time
     /// `analyze_if_stmt` enters an arm (then / each elif / else) so
@@ -152,7 +170,7 @@ impl Ownership {
         // Without this, post-`if` reads of `name` resolve through the
         // pre-branch owner whose state reflects only what happened to
         // *that* TirRef, missing reseats inside branches.
-        let pre_branch_owners: Vec<(StringId, TirRef)> =
+        let pre_branch_owners: Vec<(StringId, Owner)> =
             self.current_owner.iter().map(|(n, t)| (*n, *t)).collect();
 
         // Rule: any branch Moved → Moved; otherwise first observed
@@ -250,7 +268,7 @@ impl Ownership {
         // Snapshot the pre-branch key set so the union step can
         // distinguish branch-local keys from pre-branch keys that
         // (1) may have just dropped.
-        let pre_branch_keys: HashSet<TirRef> = self.pending_dead_store.keys().copied().collect();
+        let pre_branch_keys: HashSet<Owner> = self.pending_dead_store.keys().copied().collect();
         self.pending_dead_store.retain(|k, _| {
             branches
                 .iter()
@@ -300,14 +318,14 @@ fn analyze_function(
         if !needs_tracking(param.ty, pool) {
             continue;
         }
-        let synthetic = synthetic_param_ref(param.name);
+        let owner = Owner::Param(param.name);
         let state = if param.is_move {
             OwnerState::Valid
         } else {
             OwnerState::Borrowed
         };
-        own.states.insert(synthetic, state);
-        own.current_owner.insert(param.name, synthetic);
+        own.states.insert(owner, state);
+        own.current_owner.insert(param.name, owner);
     }
 
     for stmt in tir.body_stmts() {
@@ -337,27 +355,26 @@ fn analyze_function(
     // last_use after the `owner_at_read` snapshot fix; without this
     // guard a pre-rebind owner would receive both a reassign-Free and
     // a last-use-Free.)
-    let reassign_targets: HashSet<TirRef> = sidecar.free_on_reassign.values().copied().collect();
+    let reassign_targets: HashSet<Owner> = sidecar
+        .free_on_reassign
+        .values()
+        .map(|t| Owner::Inst(*t))
+        .collect();
     for (owner, state) in &own.states {
         if !matches!(state, OwnerState::Valid) {
             continue;
         }
-        // Skip parameter synthetic refs (see `synthetic_param_ref`):
-        // borrowed/owned-by-callee parameters are the caller's
-        // responsibility to free, not ours. Synthetic refs encode
-        // names near `u32::MAX`; real instruction refs are
-        // structurally `<< u32::MAX / 2`.
-        if is_synthetic_param_ref(*owner) {
+        if owner.inst_tirref().is_none() {
             continue;
         }
         if reassign_targets.contains(owner) {
             continue;
         }
-        if let Some(&after) = last_use.get(owner) {
+        if let Some(&after) = last_use.get(&owner.inst_tirref().unwrap()) {
             sidecar.free_schedule.push(FreePoint {
                 after,
-                target: *owner,
-                span: tir.span(*owner),
+                target: owner.inst_tirref().unwrap(),
+                span: tir.span(owner.inst_tirref().unwrap()),
                 branch: None,
             });
         }
@@ -378,18 +395,21 @@ fn analyze_function(
         // the temp's state to `Valid` after `consume_for_assignment` had
         // stamped it `Moved`. So this `named_owners` filter is
         // load-bearing, not redundant with the `Valid`-state check.
-        if own.named_owners.contains(&temp) {
+        let temp_r = temp
+            .inst_tirref()
+            .expect("temp_owners cannot contain Param");
+        if own.named_owners.contains(&temp_r) {
             continue;
         }
         if !matches!(own.states.get(&temp), Some(OwnerState::Valid)) {
             // Already moved (flowed into a `move` arg, return, etc.).
             continue;
         }
-        if let Some(&consumer) = consumer_of.get(&temp) {
+        if let Some(&consumer) = consumer_of.get(&temp_r) {
             sidecar.free_schedule.push(FreePoint {
                 after: consumer,
-                target: temp,
-                span: tir.span(temp),
+                target: temp_r,
+                span: tir.span(temp_r),
                 branch: None,
             });
         }
@@ -417,7 +437,7 @@ fn analyze_function(
         }
         sidecar.free_schedule.push(FreePoint {
             after: *decl_inst,
-            target: *owner,
+            target: owner.inst_tirref().unwrap(),
             span: *span,
             branch: None,
         });
@@ -427,31 +447,6 @@ fn analyze_function(
     // `free_schedule` and only add jump-anchored Frees for inside-loop
     // owners that no earlier pass already covered. See I-058.
     schedule_loop_exit_frees_in(tir, &own, sidecar, &body_stmts, None);
-}
-
-/// Lower bound of the synthetic-param `TirRef` keyspace. Real
-/// instruction refs grow upward from 1; synthetic refs (assigned by
-/// `synthetic_param_ref`) live near `u32::MAX`. Anything at or above
-/// this threshold is a synthetic param. Co-located with
-/// `synthetic_param_ref` so the encoding lives in one place.
-const SYNTHETIC_PARAM_REF_THRESHOLD: u32 = u32::MAX / 2;
-
-fn is_synthetic_param_ref(r: TirRef) -> bool {
-    r.raw() >= SYNTHETIC_PARAM_REF_THRESHOLD
-}
-
-/// Build a stable synthetic [`TirRef`] for a parameter so it can
-/// share the `states` map with real instruction refs. Encoded near
-/// `u32::MAX` to keep it well clear of real per-function indices
-/// (which start at 1 and grow with body size). `TirRef` wraps
-/// `NonZeroU32`, so we clamp the lower bound to 1 to defend against
-/// the edge case `name.raw() == u32::MAX` (which would otherwise
-/// panic at `from_raw`). The collision-free property relies on real
-/// instruction refs never reaching `u32::MAX - max_string_id`, which
-/// is structurally impossible for any realistic program.
-fn synthetic_param_ref(name: StringId) -> TirRef {
-    let raw = u32::MAX.saturating_sub(name.raw()).max(1);
-    TirRef::from_raw(raw)
 }
 
 fn analyze_stmt(
@@ -529,7 +524,7 @@ fn analyze_var_decl(
         // `init`, the same TirRef `rebind_to_init` stamped Valid.
         register_pending_dead_store(own, init, view.name, span, r);
     } else {
-        own.current_owner.insert(view.name, init);
+        own.current_owner.insert(view.name, Owner::Inst(init));
     }
 }
 
@@ -557,7 +552,12 @@ fn analyze_assign(
         if let Some(&old_owner) = own.current_owner.get(&view.name)
             && matches!(own.states.get(&old_owner), Some(OwnerState::Valid))
         {
-            sidecar.free_on_reassign.insert(r, old_owner);
+            sidecar.free_on_reassign.insert(
+                r,
+                old_owner
+                    .inst_tirref()
+                    .expect("param cannot be a Free target in reassign"),
+            );
             // Reassignment runs the old value's destructor (the
             // free_on_reassign Free above) — that's an observable use,
             // so the prior VarDecl/Assign isn't a dead store. Drop the
@@ -617,8 +617,8 @@ fn analyze_return(
 /// `init`'s `origin` link (if any) and stamping it `Valid`.
 fn rebind_to_init(own: &mut Ownership, name: StringId, init: TirRef) {
     own.origin.insert(init, None);
-    own.states.insert(init, OwnerState::Valid);
-    own.current_owner.insert(name, init);
+    own.states.insert(Owner::Inst(init), OwnerState::Valid);
+    own.current_owner.insert(name, Owner::Inst(init));
     own.named_owners.insert(init);
 }
 
@@ -636,17 +636,17 @@ fn register_pending_dead_store(
     decl_inst: TirRef,
 ) {
     own.pending_dead_store
-        .insert(owner, (name, span, decl_inst));
+        .insert(Owner::Inst(owner), (name, span, decl_inst));
 }
 
 /// Walk back from `init` to whichever SSA value currently owns the
 /// underlying allocation. `visit_expr` is responsible for populating
 /// `origin` for `Var` reads; for fresh producers (`StrConst`,
 /// `StrConcat`, `Call`) `init` is itself the owner.
-fn underlying_owner(own: &Ownership, init: TirRef) -> TirRef {
+fn underlying_owner(own: &Ownership, init: TirRef) -> Owner {
     match own.origin.get(&init).copied() {
         Some(Some(owner)) => owner,
-        _ => init,
+        _ => Owner::Inst(init),
     }
 }
 
@@ -895,12 +895,12 @@ fn analyze_if_stmt(
         });
     }
 
-    let all_keys: HashSet<TirRef> = arms
+    let all_keys: HashSet<Owner> = arms
         .iter()
         .flat_map(|a| a.state.states.keys().copied())
         .collect();
     for owner in all_keys {
-        if is_synthetic_param_ref(owner) {
+        if owner.inst_tirref().is_none() {
             continue;
         }
         let any_moved = arms
@@ -915,8 +915,8 @@ fn analyze_if_stmt(
             {
                 sidecar.free_schedule.push(FreePoint {
                     after,
-                    target: owner,
-                    span: tir.span(owner),
+                    target: owner.inst_tirref().unwrap(),
+                    span: tir.span(owner.inst_tirref().unwrap()),
                     branch: Some(arm.branch_id),
                 });
             }
@@ -1118,7 +1118,9 @@ fn collect_last_uses(
     {
         // Overwriting insert: latest forward-order read wins =
         // last source-order read.
-        last_use.insert(owner, r);
+        if let Some(r_owner) = owner.inst_tirref() {
+            last_use.insert(r_owner, r);
+        }
     }
     walk_operands(tir, r, &mut |_parent, operand, _kind| {
         collect_last_uses(tir, pool, own, operand, last_use);
@@ -1488,23 +1490,24 @@ fn schedule_break_continue_frees(
     let is_break = matches!(tir.inst(jump_inst).tag, TirTag::Break);
 
     for (owner, state) in &own.states {
-        if is_synthetic_param_ref(*owner) {
-            continue;
-        }
+        let r = match owner.inst_tirref() {
+            Some(r) => r,
+            None => continue,
+        };
         if !matches!(state, OwnerState::Valid) {
             continue;
         }
 
-        if inside_loop.contains(owner) {
+        if inside_loop.contains(&r) {
             // Inside-loop owner: each iteration allocates fresh, so
             // a jump-anchored Free is safe. Schedule iff no Free
             // already fires on this jump's path.
-            if covers_this_jump.contains(owner) {
+            if covers_this_jump.contains(&r) {
                 continue;
             }
             sidecar.free_schedule.push(FreePoint {
                 after: jump_inst,
-                target: *owner,
+                target: r,
                 span: tir.span(jump_inst),
                 branch: None,
             });
@@ -1515,13 +1518,13 @@ fn schedule_break_continue_frees(
         // would resurrect the binding for the next iteration's read.
         // But on break path, if its last-use is inside the loop (which
         // we bypassed), we must free it as we exit the loop.
-        if is_break && free_inside_loop.contains(owner) {
-            if covers_this_jump.contains(owner) {
+        if is_break && free_inside_loop.contains(&r) {
+            if covers_this_jump.contains(&r) {
                 continue;
             }
             sidecar.free_schedule.push(FreePoint {
                 after: jump_inst,
-                target: *owner,
+                target: r,
                 span: tir.span(jump_inst),
                 branch: None,
             });
@@ -1529,12 +1532,12 @@ fn schedule_break_continue_frees(
         }
 
         // Defensive emit only when no Free is scheduled anywhere.
-        if has_any.contains(owner) {
+        if has_any.contains(&r) {
             continue;
         }
         sidecar.free_schedule.push(FreePoint {
             after: jump_inst,
-            target: *owner,
+            target: r,
             span: tir.span(jump_inst),
             branch: None,
         });
@@ -1559,16 +1562,16 @@ fn visit_expr(
         // upstream origin.
         TirTag::StrConst => {
             if needs_tracking(inst.ty, pool) {
-                own.states.insert(r, OwnerState::Valid);
+                own.states.insert(Owner::Inst(r), OwnerState::Valid);
                 own.origin.insert(r, None);
-                own.temp_owners.insert(r);
+                own.temp_owners.insert(Owner::Inst(r));
             }
         }
         TirTag::StrConcat => {
             if needs_tracking(inst.ty, pool) {
-                own.states.insert(r, OwnerState::Valid);
+                own.states.insert(Owner::Inst(r), OwnerState::Valid);
                 own.origin.insert(r, None);
-                own.temp_owners.insert(r);
+                own.temp_owners.insert(Owner::Inst(r));
             }
             if let TirData::BinOp { lhs, rhs } = inst.data {
                 visit_expr(tir, pool, own, sink, by_name, sidecar, lhs);
@@ -1578,9 +1581,9 @@ fn visit_expr(
         TirTag::Call => {
             // A str-returning call (e.g. `int_to_str`) is a producer.
             if needs_tracking(inst.ty, pool) {
-                own.states.insert(r, OwnerState::Valid);
+                own.states.insert(Owner::Inst(r), OwnerState::Valid);
                 own.origin.insert(r, None);
-                own.temp_owners.insert(r);
+                own.temp_owners.insert(Owner::Inst(r));
             }
             let view = tir.call_view(r);
             // Look up callee parameter conventions. Builtins
@@ -1602,7 +1605,7 @@ fn visit_expr(
                     // entries are harmless to leave populated — only
                     // `temp_owners` is consulted by the anonymous-temp Free
                     // pass. See I-057.
-                    own.temp_owners.remove(arg);
+                    own.temp_owners.remove(&Owner::Inst(*arg));
                 }
                 let arg_ty = tir.inst(*arg).ty;
                 if !needs_tracking(arg_ty, pool) {
@@ -2659,5 +2662,27 @@ mod tests {
             entry.next_branch_id, 7,
             "merge_branches must not roll next_branch_id backward"
         );
+    }
+
+    #[test]
+    fn borrowed_param_resolves_under_owner_param_as_borrowed() {
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let read = pool.intern_str("read");   // fn read(s: str) -> void  (borrowed param)
+        let s_name = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(read, vec![TirParam { name: s_name, ty: str_ty, is_move: false, span }], void, span);
+        let v = tb.var(s_name, str_ty, span);
+        let tir = tb.finish(&[v]);
+        let mut sink = DiagSink::new();
+        // check() initialises the param lattice under Owner::Param(s_name) as
+        // Borrowed. Assert that reading the borrowed param does NOT trip E0020
+        // — the Owner::Param + Borrowed init is load-bearing for the enum migration.
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(sink.into_diags().iter().all(|d| !matches!(d.code, DiagCode::UseAfterMove)),
+            "borrowed param read must not trip UAM; the Owner::Param+Borrowed init is load-bearing");
     }
 }
