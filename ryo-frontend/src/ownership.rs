@@ -1781,6 +1781,14 @@ fn recurse_operands(
 mod tests {
     use super::*;
 
+    /// Build an all-`Borrow` modes slice matching the length of an
+    /// argument list. The ownership pass still keys off `by_name` so
+    /// the exact mode is not yet consumed here; `Borrow` is the safe
+    /// default for builtin/test calls.
+    fn all_borrow(args: &[TirRef]) -> Vec<ryo_core::tir::ParamMode> {
+        vec![ryo_core::tir::ParamMode::Borrow; args.len()]
+    }
+
     #[test]
     fn copy_types_classified() {
         let pool = InternPool::new();
@@ -1886,7 +1894,13 @@ mod tests {
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let str_arg = tb.str_const(msg, str_ty, span);
         let len_arg = tb.int_const(4, int_ty, span);
-        let call = tb.call(panic_name, &[str_arg, len_arg], void, span);
+        let call = tb.call(
+            panic_name,
+            &[str_arg, len_arg],
+            &all_borrow(&[str_arg, len_arg]),
+            void,
+            span,
+        );
         let tir = tb.finish(&[call]);
 
         let mut sink = DiagSink::new();
@@ -1925,7 +1939,7 @@ mod tests {
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let cond = tb.bool_const(true, bool_ty, span);
         let lit = tb.str_const(inside, str_ty, span);
-        let print_call = tb.call(print_name, &[lit], void, span);
+        let print_call = tb.call(print_name, &[lit], &all_borrow(&[lit]), void, span);
         let wl = tb.while_loop(cond, &[print_call], void, span);
         let tir = tb.finish(&[wl]);
 
@@ -1980,7 +1994,7 @@ mod tests {
         //         print(s)
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let zero = tb.int_const(0, int_ty, span);
-        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
         let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
 
         let cond_w = tb.bool_const(true, bool_ty, span);
@@ -1988,7 +2002,7 @@ mod tests {
         let brk = tb.break_stmt(void, span);
         let if_inside = tb.if_stmt(cond_i, &[brk], &[], None, void, span);
         let s_var = tb.var(s_name, str_ty, span);
-        let print_call = tb.call(print, &[s_var], void, span);
+        let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
         let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
         let wl = tb.while_loop(cond_w, &[if_inside, print_stmt], void, span);
         let tir = tb.finish(&[decl, wl]);
@@ -2037,7 +2051,7 @@ mod tests {
         //         print(s)
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let zero = tb.int_const(0, int_ty, span);
-        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
         let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
 
         let cond_w = tb.bool_const(true, bool_ty, span);
@@ -2045,7 +2059,7 @@ mod tests {
         let cont = tb.continue_stmt(void, span);
         let if_inside = tb.if_stmt(cond_i, &[cont], &[], None, void, span);
         let s_var = tb.var(s_name, str_ty, span);
-        let print_call = tb.call(print, &[s_var], void, span);
+        let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
         let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
         let wl = tb.while_loop(cond_w, &[if_inside, print_stmt], void, span);
         let tir = tb.finish(&[decl, wl]);
@@ -2105,13 +2119,13 @@ mod tests {
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let cond_w = tb.bool_const(true, bool_ty, span);
         let zero = tb.int_const(0, int_ty, span);
-        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
         let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
         let cond_i = tb.bool_const(true, bool_ty, span);
         let brk = tb.break_stmt(void, span);
         let if_inside = tb.if_stmt(cond_i, &[brk], &[], None, void, span);
         let s_var = tb.var(s_name, str_ty, span);
-        let print_call = tb.call(print, &[s_var], void, span);
+        let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
         let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
         let wl = tb.while_loop(cond_w, &[decl, if_inside, print_stmt], void, span);
         let tir = tb.finish(&[wl]);
@@ -2163,10 +2177,10 @@ mod tests {
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let cond_w = tb.bool_const(true, bool_ty, span);
         let zero = tb.int_const(0, int_ty, span);
-        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
         let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
         let s_var = tb.var(s_name, str_ty, span);
-        let print_call = tb.call(print, &[s_var], void, span);
+        let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
         let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
         let cond_i = tb.bool_const(true, bool_ty, span);
         let brk = tb.break_stmt(void, span);
@@ -2233,11 +2247,11 @@ mod tests {
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let cond_w = tb.bool_const(true, bool_ty, span);
         let zero = tb.int_const(0, int_ty, span);
-        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
         let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
         let cond_i = tb.bool_const(true, bool_ty, span);
         let s_var = tb.var(s_name, str_ty, span);
-        let print_call = tb.call(print, &[s_var], void, span);
+        let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
         let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
         let brk = tb.break_stmt(void, span);
         let if_inside = tb.if_stmt(cond_i, &[print_stmt], &[], Some(&[brk]), void, span);
@@ -2298,13 +2312,13 @@ mod tests {
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let cond_w = tb.bool_const(true, bool_ty, span);
         let zero = tb.int_const(0, int_ty, span);
-        let alloc = tb.call(int_to_str, &[zero], str_ty, span);
+        let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
         let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
         let cond_i = tb.bool_const(true, bool_ty, span);
         let cont = tb.continue_stmt(void, span);
         let if_inside = tb.if_stmt(cond_i, &[cont], &[], None, void, span);
         let s_var = tb.var(s_name, str_ty, span);
-        let print_call = tb.call(print, &[s_var], void, span);
+        let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
         let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
         let wl = tb.while_loop(cond_w, &[decl, if_inside, print_stmt], void, span);
         let tir = tb.finish(&[wl]);
@@ -2350,7 +2364,7 @@ mod tests {
         let decl = tb.var_decl(s_name, false, str_ty, lit, span);
         let cond = tb.bool_const(false, bool_ty, span);
         let s_var = tb.var(s_name, str_ty, span);
-        let print_call = tb.call(print_name, &[s_var], void, span);
+        let print_call = tb.call(print_name, &[s_var], &all_borrow(&[s_var]), void, span);
         let wl = tb.while_loop(cond, &[print_call], void, span);
         let tir = tb.finish(&[decl, wl]);
 
@@ -2401,7 +2415,13 @@ mod tests {
         let lit = b.str_const(hello, str_ty, span);
         let decl = b.var_decl(s_name, false, str_ty, lit, span);
         let var_read = b.var(s_name, str_ty, span);
-        let call = b.call(print_name, &[var_read], void, span);
+        let call = b.call(
+            print_name,
+            &[var_read],
+            &all_borrow(&[var_read]),
+            void,
+            span,
+        );
         let stmt = b.unary(TirTag::ExprStmt, void, call, span);
         let tir = b.finish(&[decl, stmt]);
 
@@ -2443,7 +2463,7 @@ mod tests {
         let l2 = tb.str_const(world, str_ty, span);
         let assign = tb.assign(s, str_ty, l2, span);
         let var_read = tb.var(s, str_ty, span);
-        let call = tb.call(print, &[var_read], void, span);
+        let call = tb.call(print, &[var_read], &all_borrow(&[var_read]), void, span);
         let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
         let tir = tb.finish(&[decl, assign, stmt]);
 
@@ -2500,7 +2520,7 @@ mod tests {
         let la = tb.str_const(a, str_ty, span);
         let lb = tb.str_const(b, str_ty, span);
         let cat = tb.binary(TirTag::StrConcat, str_ty, la, lb, span);
-        let call = tb.call(print, &[cat], void, span);
+        let call = tb.call(print, &[cat], &all_borrow(&[cat]), void, span);
         let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
         let tir = tb.finish(&[stmt]);
 
@@ -2545,12 +2565,12 @@ mod tests {
         let alice_lit = tb.str_const(alice, str_ty, span);
         let decl = tb.var_decl(n, true, str_ty, alice_lit, span);
         let read1 = tb.var(n, str_ty, span);
-        let call1 = tb.call(print, &[read1], void, span);
+        let call1 = tb.call(print, &[read1], &all_borrow(&[read1]), void, span);
         let stmt1 = tb.unary(TirTag::ExprStmt, void, call1, span);
         let bob_lit = tb.str_const(bob, str_ty, span);
         let assign = tb.assign(n, str_ty, bob_lit, span);
         let read2 = tb.var(n, str_ty, span);
-        let call2 = tb.call(print, &[read2], void, span);
+        let call2 = tb.call(print, &[read2], &all_borrow(&[read2]), void, span);
         let stmt2 = tb.unary(TirTag::ExprStmt, void, call2, span);
         let tir = tb.finish(&[decl, stmt1, assign, stmt2]);
 
@@ -2649,13 +2669,13 @@ mod tests {
         let cond_w = tb.bool_const(false, bool_ty, span);
         let cond_i1 = tb.bool_const(true, bool_ty, span);
         let s_a = tb.str_const(lit_a, str_ty, span);
-        let print_a = tb.call(print_name, &[s_a], void, span);
+        let print_a = tb.call(print_name, &[s_a], &all_borrow(&[s_a]), void, span);
         let if_inside = tb.if_stmt(cond_i1, &[print_a], &[], None, void, span);
         let wl = tb.while_loop(cond_w, &[if_inside], void, span);
 
         let cond_i2 = tb.bool_const(true, bool_ty, span);
         let s_b = tb.str_const(lit_b, str_ty, span);
-        let print_b = tb.call(print_name, &[s_b], void, span);
+        let print_b = tb.call(print_name, &[s_b], &all_borrow(&[s_b]), void, span);
         let if_post = tb.if_stmt(cond_i2, &[print_b], &[], None, void, span);
 
         let tir = tb.finish(&[wl, if_post]);
@@ -2852,7 +2872,7 @@ mod tests {
         let lit = tb.str_const(a, str_ty, span);
         let decl = tb.var_decl(s, false, str_ty, lit, span);
         let v = tb.var(s, str_ty, span);
-        let call = tb.call(print, &[v], void, span);
+        let call = tb.call(print, &[v], &all_borrow(&[v]), void, span);
         let tir = tb.finish(&[decl, call]);
         let mut sink = DiagSink::new();
         let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
