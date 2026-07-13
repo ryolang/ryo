@@ -104,15 +104,11 @@ pub(crate) struct Ownership {
     /// forward walk: `StrConst`, `StrConcat`, and Move-typed `Call`
     /// results. Used by the anonymous-temporary-free pass to identify
     /// candidates for scheduling. A temp_owner that ends up bound to
-    /// a `VarDecl`/`Assign` (see `named_owners`) is freed via the
-    /// last-use pass instead.
+    /// a `VarDecl`/`Assign` is a "named init" and is skipped by the
+    /// anon-temp pass (classified statically via `collect_named_inits`,
+    /// I-060) — it is freed via the last-use / dead-store /
+    /// `free_on_reassign` / loop-exit pass instead.
     pub temp_owners: HashSet<Owner>,
-
-    /// Subset of `temp_owners` that became the underlying value of a
-    /// named binding via `VarDecl` or `Assign`. The anonymous-temp
-    /// pass excludes these — they're handled by the named-binding
-    /// last-use pass (Task 3).
-    pub named_owners: HashSet<TirRef>,
 
     /// Per-`Var`-read snapshot of the owner that was live at the
     /// program point of the read. Populated during the forward walk
@@ -138,9 +134,9 @@ impl Ownership {
     ///   moved at the join point and a post-`if` use trips E0020.
     /// - `current_owner`, `origin`: first-write-wins across branches; reseats
     ///   inside a branch survive the join.
-    /// - `temp_owners`, `named_owners`: union (entries minted inside a
-    ///   branch/loop body must survive so the anonymous-temp and last-use
-    ///   passes see them at function exit).
+    /// - `temp_owners`: union (entries minted inside a branch/loop body
+    ///   must survive so the anonymous-temp pass sees them at function
+    ///   exit).
     /// - `owner_at_read`: union with first-write-wins (read TirRefs are
     ///   unique per TIR, so collisions don't happen in practice).
     /// - `pending_dead_store`: pre-branch keys intersect (any branch that
@@ -191,14 +187,14 @@ impl Ownership {
             }
         }
         // Union the remaining branch-local fields. `current_owner` /
-        // `origin` use first-wins via `or_insert`. `temp_owners` /
-        // `named_owners` are unioned so entries introduced inside a
-        // branch (or loop body) survive the merge — without this a
-        // `StrConst`/`StrConcat`/Call inside a `while` body is silently
-        // dropped from `temp_owners` when `merge_two` clones the
-        // pre-loop entry. `owner_at_read` keys are unique per TirRef
-        // (instructions aren't shared across blocks), so each key
-        // appears in at most one branch and `or_insert` is correct.
+        // `origin` use first-wins via `or_insert`. `temp_owners` is
+        // unioned so entries introduced inside a branch (or loop body)
+        // survive the merge — without this a `StrConst`/`StrConcat`/Call
+        // inside a `while` body is silently dropped from `temp_owners`
+        // when `merge_two` clones the pre-loop entry. `owner_at_read`
+        // keys are unique per TirRef (instructions aren't shared across
+        // blocks), so each key appears in at most one branch and
+        // `or_insert` is correct.
         for b in branches {
             for (name, owner) in &b.current_owner {
                 self.current_owner.entry(*name).or_insert(*owner);
@@ -207,7 +203,6 @@ impl Ownership {
                 self.origin.entry(*k).or_insert(*v);
             }
             self.temp_owners.extend(b.temp_owners.iter().copied());
-            self.named_owners.extend(b.named_owners.iter().copied());
             for (&read, &owner) in &b.owner_at_read {
                 self.owner_at_read.entry(read).or_insert(owner);
             }
@@ -302,6 +297,67 @@ pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipS
     sidecar
 }
 
+/// Collect the init/value `TirRef` of every `VarDecl`/`Assign` anywhere
+/// in `stmts`, recursing into nested control flow. These are the
+/// "named" producers whose Free is owned by the last-use / dead-store /
+/// `free_on_reassign` / loop-exit pass; the anon-temp pass skips them to
+/// avoid a double-free. Stateless replacement (I-060) for the old
+/// sticky side-set that formerly lived on `Ownership` and accumulated
+/// named-init TirRefs during the forward walk. Unlike a
+/// `current_owner.values()` derivation this is merge-immune: a temp
+/// reassigned inside a loop body is statically the loop-body `Assign`'s
+/// value regardless of any loop-merge state.
+fn collect_named_inits(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
+    let mut set = HashSet::new();
+    for &s in stmts {
+        collect_named_inits_rec(tir, s, &mut set);
+    }
+    set
+}
+
+/// Recursive core of [`collect_named_inits`]. Dispatches on the
+/// statement tag, records each `VarDecl`/`Assign` producer, and
+/// recurses into `IfStmt` arms / `WhileLoop` body / `ForRange` body so
+/// named initializers buried in nested control flow are still
+/// classified as named inits.
+fn collect_named_inits_rec(tir: &Tir, r: TirRef, set: &mut HashSet<TirRef>) {
+    match tir.inst(r).tag {
+        TirTag::VarDecl => {
+            set.insert(tir.var_decl_view(r).initializer);
+        }
+        TirTag::Assign => {
+            set.insert(tir.assign_view(r).value);
+        }
+        TirTag::IfStmt => {
+            let v = tir.if_stmt_view(r);
+            for &s in &v.then_stmts {
+                collect_named_inits_rec(tir, s, set);
+            }
+            for arm in &v.elif_branches {
+                for &s in &arm.body {
+                    collect_named_inits_rec(tir, s, set);
+                }
+            }
+            if let Some(else_stmts) = v.else_stmts.as_deref() {
+                for &s in else_stmts {
+                    collect_named_inits_rec(tir, s, set);
+                }
+            }
+        }
+        TirTag::WhileLoop => {
+            for &s in tir.while_loop_view(r).body.iter() {
+                collect_named_inits_rec(tir, s, set);
+            }
+        }
+        TirTag::ForRange => {
+            for &s in tir.for_range_view(r).body.iter() {
+                collect_named_inits_rec(tir, s, set);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn analyze_function(
     tir: &Tir,
     pool: &InternPool,
@@ -381,35 +437,46 @@ fn analyze_function(
         // Owners with no last_use are dead stores — handled in Task 5.
     }
 
-    // Anonymous-temporary frees: temp_owners that didn't become named
-    // bindings and are still Valid at function exit need their own
-    // Free anchored after their single consumer.
+    // Anonymous-temporary frees: temp_owners still Valid at function
+    // exit need their own Free anchored after their single consumer —
+    // UNLESS the temp was ever a named binding's initializer/value, in
+    // which case its Free is owned by the last-use / dead-store /
+    // free_on_reassign / loop-exit pass and must be skipped here to
+    // avoid a double-free.
+    //
+    // This "was a named init" predicate is a TIR-shape fact, not a
+    // lattice-state fact, so it is derived statically via
+    // `collect_named_inits` (I-060). The old implementation carried a
+    // walk; the static set is merge-immune where a
+    // `current_owner.values()` derivation would not be (it drops a
+    // loop-rebound temp at the loop merge but the temp is still freed
+    // by the loop-exit pass, so the dynamic classifier would schedule
+    // a spurious second Free). The static set is provably equivalent
+    // to the old sticky set across all cases.
+    let named_inits: HashSet<TirRef> = collect_named_inits(tir, &body_stmts);
     let mut consumer_of: HashMap<TirRef, TirRef> = HashMap::new();
     for &stmt in &body_stmts {
         find_consumers(tir, stmt, &mut consumer_of);
     }
     for &temp in &own.temp_owners {
-        // Skip temps that became named-binding owners — Task 3's last-use
-        // pass owns the Free for those. Note: the `Valid`-state filter
-        // below would NOT skip them, because `rebind_to_init` resurrects
-        // the temp's state to `Valid` after `consume_for_assignment` had
-        // stamped it `Moved`. So this `named_owners` filter is
-        // load-bearing, not redundant with the `Valid`-state check.
-        let temp_r = temp
-            .inst_tirref()
-            .expect("temp_owners cannot contain Param");
-        if own.named_owners.contains(&temp_r) {
+        // Temps are always `Inst` owners, never `Param`.
+        let Some(t) = temp.inst_tirref() else {
+            continue;
+        };
+        if named_inits.contains(&t) {
+            // Freed by the last-use / dead-store / free_on_reassign /
+            // loop-exit pass — skip to avoid a double-free.
             continue;
         }
         if !matches!(own.states.get(&temp), Some(OwnerState::Valid)) {
             // Already moved (flowed into a `move` arg, return, etc.).
             continue;
         }
-        if let Some(&consumer) = consumer_of.get(&temp_r) {
+        if let Some(&consumer) = consumer_of.get(&t) {
             sidecar.free_schedule.push(FreePoint {
                 after: consumer,
-                target: temp_r,
-                span: tir.span(temp_r),
+                target: t,
+                span: tir.span(t),
                 branch: None,
             });
         }
@@ -619,7 +686,6 @@ fn rebind_to_init(own: &mut Ownership, name: StringId, init: TirRef) {
     own.origin.insert(init, None);
     own.states.insert(Owner::Inst(init), OwnerState::Valid);
     own.current_owner.insert(name, Owner::Inst(init));
-    own.named_owners.insert(init);
 }
 
 /// Register a Move-typed binding into `pending_dead_store`. The owner
@@ -2671,10 +2737,20 @@ mod tests {
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
         let void = pool.void();
-        let read = pool.intern_str("read");   // fn read(s: str) -> void  (borrowed param)
+        let read = pool.intern_str("read"); // fn read(s: str) -> void  (borrowed param)
         let s_name = pool.intern_str("s");
         let span = SimpleSpan::new((), 0..0);
-        let mut tb = TirBuilder::new(read, vec![TirParam { name: s_name, ty: str_ty, is_move: false, span }], void, span);
+        let mut tb = TirBuilder::new(
+            read,
+            vec![TirParam {
+                name: s_name,
+                ty: str_ty,
+                is_move: false,
+                span,
+            }],
+            void,
+            span,
+        );
         let v = tb.var(s_name, str_ty, span);
         let tir = tb.finish(&[v]);
         let mut sink = DiagSink::new();
@@ -2682,7 +2758,167 @@ mod tests {
         // Borrowed. Assert that reading the borrowed param does NOT trip E0020
         // — the Owner::Param + Borrowed init is load-bearing for the enum migration.
         let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        assert!(sink.into_diags().iter().all(|d| !matches!(d.code, DiagCode::UseAfterMove)),
-            "borrowed param read must not trip UAM; the Owner::Param+Borrowed init is load-bearing");
+        assert!(
+            sink.into_diags()
+                .iter()
+                .all(|d| !matches!(d.code, DiagCode::UseAfterMove)),
+            "borrowed param read must not trip UAM; the Owner::Param+Borrowed init is load-bearing"
+        );
+    }
+
+    #[test]
+    fn rebind_then_reassign_does_not_double_free() {
+        // s = "a"   (temp_a bound to s)
+        // s = "b"   (reassign: free_on_reassign covers temp_a; s -> temp_b)
+        // At exit, temp_a is Valid (resurrected by rebind) and NOT in
+        // current_owner.values() (s moved to temp_b). Without the
+        // reassign_targets filter, the anon-temp pass would schedule a
+        // second Free for temp_a -> double-free. It must be filtered.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s_name = pool.intern_str("s");
+        let a = pool.intern_str("a");
+        let b = pool.intern_str("b");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(a, str_ty, span);
+        let decl = tb.var_decl(s_name, true, str_ty, lit_a, span);
+        let lit_b = tb.str_const(b, str_ty, span);
+        let assign = tb.assign(s_name, str_ty, lit_b, span);
+        let tir = tb.finish(&[decl, assign]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+
+        // temp_a (lit_a) is released via `free_on_reassign` (codegen lowers
+        // its destructor at the Assign), so it must NOT also appear in
+        // `free_schedule` — that would be a double-free. The anon-temp pass
+        // skips it because it is a named init (the VarDecl initializer);
+        // if that filter were missing the anon-temp pass would schedule a
+        // second Free here. See I-060 and the sibling invariant in
+        // `reassignment_records_free_on_old_owner`.
+        let a_frees = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == lit_a)
+            .count();
+        assert_eq!(
+            a_frees, 0,
+            "temp_a must not be in free_schedule (it's in free_on_reassign); got {sc:?}"
+        );
+        // lit_b is never read, so it is a dead store and is freed exactly
+        // once via the dead-store pass (anchored at the Assign).
+        let b_frees = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == lit_b)
+            .count();
+        assert_eq!(
+            b_frees, 1,
+            "temp_b freed exactly once via dead-store; got {sc:?}"
+        );
+        let _ = assign;
+    }
+
+    #[test]
+    fn rebind_then_read_no_double_free() {
+        // s = "a"; print(s)  -> temp_a backed by s, last-use frees it once.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let a = pool.intern_str("a");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(a, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let v = tb.var(s, str_ty, span);
+        let call = tb.call(print, &[v], void, span);
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sc.functions.remove(&main).unwrap();
+        let lit_frees = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == lit)
+            .count();
+        assert_eq!(
+            lit_frees, 1,
+            "backed temp freed exactly once via last-use; got {sc:?}"
+        );
+    }
+
+    #[test]
+    fn rebind_in_loop_converges_no_spurious_free() {
+        // s = "a"; while c: s = "a"   (rebind each iteration)
+        //
+        // The loop-body temp `body_lit` is a named init (the Assign's
+        // value), so the anon-temp pass must SKIP it (I-060 static
+        // classifier) and let the dead-store pass own its single Free.
+        // The rejected dynamic `current_owner.values()` classifier would
+        // NOT skip it: at the loop merge the entry-state owner (lit) wins
+        // via first-write-wins, so body_lit drops out of
+        // current_owner.values() and the anon-temp pass schedules a
+        // spurious second Free -> double-free. Assert body_lit is
+        // scheduled exactly once (static) rather than twice (dynamic).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let bool_ty = pool.bool_();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let a = pool.intern_str("a");
+        let c = pool.intern_str("c");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(a, str_ty, span);
+        let decl = tb.var_decl(s, true, str_ty, lit, span);
+        let cond = tb.var(c, bool_ty, span);
+        let body_lit = tb.str_const(a, str_ty, span);
+        let body_assign = tb.assign(s, str_ty, body_lit, span);
+        let lp = tb.while_loop(cond, &[body_assign], void, span);
+        let tir = tb.finish(&[decl, lp]);
+        let mut sink = DiagSink::new();
+        let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sc.functions.remove(&main).unwrap();
+        // body_lit must be scheduled exactly once (dead-store pass owns
+        // it; anon-temp skips it as a named init). The dynamic
+        // current_owner.values() classifier would schedule it twice
+        // (anon-temp + dead-store) -> the double-free this test guards.
+        let body_lit_frees = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == body_lit)
+            .count();
+        assert_eq!(
+            body_lit_frees, 1,
+            "loop-rebound temp must be freed exactly once (static classifier skips it in anon-temp); got {sc:?}"
+        );
+        // lit (the decl init) is freed via free_on_reassign at the
+        // loop-body Assign, so it must NOT also appear in free_schedule.
+        let lit_frees = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == lit)
+            .count();
+        assert_eq!(
+            lit_frees, 0,
+            "decl-init temp must not be in free_schedule (it's in free_on_reassign); got {sc:?}"
+        );
+        let _ = (body_assign, lp);
     }
 }
