@@ -326,8 +326,8 @@ impl Tir {
 ///
 /// `modes` is stamped by sema from each callee parameter's `is_move`
 /// flag (user functions) or all-`Borrow` (builtins). The ownership
-/// pass currently keys off `by_name`; Task A4 will switch it to these
-/// modes. Until then the slot is encoded but not consumed there.
+/// pass consumes these modes directly from the `CallView` payload to
+/// determine parameter move/borrow conventions.
 pub mod call_extra {
     pub const NAME: usize = 0;
     pub const ARGC: usize = 1;

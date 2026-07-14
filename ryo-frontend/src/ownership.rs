@@ -778,6 +778,7 @@ fn consume_for_assignment(
 /// * `Borrowed` → emit E0021 or E0022 per `on_borrowed`,
 /// * `Moved` → now a use-after-move check authority (I-050).
 /// * `NotTracked` → no-op.
+#[allow(clippy::too_many_arguments)]
 fn consume_underlying(
     tir: &Tir,
     pool: &InternPool,
@@ -1156,7 +1157,7 @@ fn analyze_for_range(
 /// state changes (e.g. fresh definitions added inside the body) are
 /// loop-invariant for the use-after-move check.
 fn states_differ_snapshot(a: &HashMap<Owner, OwnerState>, b: &HashMap<Owner, OwnerState>) -> bool {
-    // Diverge iff some TirRef is Moved in one and not the other.
+    // Diverge iff some Owner is Moved in one and not the other.
     // Walk each side once and check the other's matching entry —
     // missing entries default to NotTracked, so a Moved with no
     // counterpart counts as a divergence on its own.
