@@ -4,6 +4,10 @@ Context for agents editing files in `docs/`.
 
 ---
 
+## Scratch files
+
+* `docs/dev/superpowers/`  tree is scratch space for the agent/developer, not a committed artifact.
+
 ## When Writing Specification
 
 * Ryo is a general programming language — no system programming features needed
