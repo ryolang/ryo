@@ -1692,16 +1692,21 @@ fn schedule_break_continue_frees(
             continue;
         }
 
-        // Defensive emit only when no Free is scheduled anywhere.
-        if has_any.contains(&r) {
+        // Defensive emit only when no Free is scheduled anywhere — AND only on
+        // break. On `continue` the next iteration would re-read the freed buffer
+        // (UAF); the principled fix is path-relative liveness, but until then we
+        // accept a potential leak over a UAF. See I-067.
+        if is_break && has_any.contains(&r) {
             continue;
         }
-        sidecar.free_schedule.push(FreePoint {
-            after: jump_inst,
-            target: r,
-            span: tir.span(jump_inst),
-            branch: None,
-        });
+        if is_break {
+            sidecar.free_schedule.push(FreePoint {
+                after: jump_inst,
+                target: r,
+                span: tir.span(jump_inst),
+                branch: None,
+            });
+        }
     }
 }
 
@@ -2187,6 +2192,92 @@ mod tests {
             frees_for_alloc[0].after, cont,
             "Free for pre-loop owner must not be anchored on continue; got: {:?}",
             frees_for_alloc[0]
+        );
+    }
+
+    #[test]
+    fn continue_jump_does_not_free_pre_loop_owner_uaf_guard() {
+        // Pre-loop owner read only inside the loop, with a `continue` before
+        // its last use. The defensive emit must NOT fire on continue (would
+        // free the buffer the next iteration reads -> UAF). break still frees.
+        // Construct: s = "x"; while c: if d: continue; print(s)
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let bool_ty = pool.bool_();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let c = pool.intern_str("c");
+        let d = pool.intern_str("d");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("x"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let cond = tb.var(c, bool_ty, span);
+        let cont = tb.continue_stmt(void, span);
+        let sv = tb.var(s, str_ty, span);
+        let pcall = tb.call(
+            print,
+            &[sv],
+            &[ryo_core::tir::ParamMode::Borrow],
+            void,
+            span,
+        );
+        let ifcond = tb.var(d, bool_ty, span);
+        let ifstmt = tb.if_stmt(ifcond, &[cont], &[], Some(&[pcall]), void, span);
+        let lp = tb.while_loop(cond, &[ifstmt], void, span);
+        let tir = tb.finish(&[decl, lp]);
+        let mut sink = DiagSink::new();
+        let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sc.functions.remove(&main).unwrap();
+        // No Free for `lit` anchored on the continue jump:
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == lit && fp.after == cont),
+            "continue must not free the pre-loop owner (UAF); got {sc:?}"
+        );
+    }
+
+    #[test]
+    fn continue_jump_does_not_free_pre_loop_owner_uaf_guard_reassigned() {
+        // Construct: s = "x"; while c: if d: continue; s = "y"
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let bool_ty = pool.bool_();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let c = pool.intern_str("c");
+        let d = pool.intern_str("d");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit1 = tb.str_const(pool.intern_str("x"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit1, span);
+        let cond = tb.var(c, bool_ty, span);
+        let cont = tb.continue_stmt(void, span);
+        let ifcond = tb.var(d, bool_ty, span);
+        let ifstmt = tb.if_stmt(ifcond, &[cont], &[], None, void, span);
+        let lit2 = tb.str_const(pool.intern_str("y"), str_ty, span);
+        let assign = tb.assign(s, str_ty, lit2, span);
+        let lp = tb.while_loop(cond, &[ifstmt, assign], void, span);
+        let tir = tb.finish(&[decl, lp]);
+        let mut sink = DiagSink::new();
+        let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sc.functions.remove(&main).unwrap();
+        // Under the buggy compiler, `lit1` is defensively freed on `cont`:
+        let freed_on_cont = sc
+            .free_schedule
+            .iter()
+            .any(|fp| fp.target == lit1 && fp.after == cont);
+        assert!(
+            !freed_on_cont,
+            "continue must not free the pre-loop owner (UAF); got {sc:?}"
         );
     }
 
