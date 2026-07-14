@@ -25,7 +25,7 @@ use ryo_core::diag::{Diag, DiagCode, DiagSink};
 pub use ryo_core::ownership::{
     BranchId, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
 };
-use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{ParamMode, Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
 
@@ -284,14 +284,10 @@ impl Ownership {
 /// to decide where to emit `ryo_str_free` calls. The TIR itself is
 /// never mutated.
 pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipSidecar {
-    // Name-keyed lookup so call sites can read the callee's per-
-    // parameter `is_move` flags. Builtins (`print`, `assert`,
-    // `int_to_str`) are not in this map and default to borrowing.
-    let by_name: HashMap<StringId, &Tir> = tirs.iter().map(|t| (t.name, t)).collect();
     let mut sidecar = OwnershipSidecar::default();
     for tir in tirs {
         let mut func_sidecar = FunctionSidecar::default();
-        analyze_function(tir, pool, sink, &by_name, &mut func_sidecar);
+        analyze_function(tir, pool, sink, &mut func_sidecar);
         sidecar.functions.insert(tir.name, func_sidecar);
     }
     sidecar
@@ -362,7 +358,6 @@ fn analyze_function(
     tir: &Tir,
     pool: &InternPool,
     sink: &mut DiagSink,
-    by_name: &HashMap<StringId, &Tir>,
     sidecar: &mut FunctionSidecar,
 ) {
     let mut own = Ownership::default();
@@ -385,7 +380,7 @@ fn analyze_function(
     }
 
     for stmt in tir.body_stmts() {
-        analyze_stmt(tir, pool, &mut own, sink, by_name, sidecar, stmt);
+        analyze_stmt(tir, pool, &mut own, sink, sidecar, stmt);
     }
 
     // Forward last-use scan: for every owner still `Valid` at function exit
@@ -521,19 +516,18 @@ fn analyze_stmt(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    by_name: &HashMap<StringId, &Tir>,
     sidecar: &mut FunctionSidecar,
     stmt: TirRef,
 ) {
     let inst = *tir.inst(stmt);
     match inst.tag {
-        TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, by_name, sidecar, stmt),
-        TirTag::Assign => analyze_assign(tir, pool, own, sink, by_name, sidecar, stmt),
-        TirTag::Return => analyze_return(tir, pool, own, sink, by_name, sidecar, stmt),
+        TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, sidecar, stmt),
+        TirTag::Assign => analyze_assign(tir, pool, own, sink, sidecar, stmt),
+        TirTag::Return => analyze_return(tir, pool, own, sink, sidecar, stmt),
         TirTag::ReturnVoid => {}
-        TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, by_name, sidecar, stmt),
-        TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, by_name, sidecar, stmt),
-        TirTag::ForRange => analyze_for_range(tir, pool, own, sink, by_name, sidecar, stmt),
+        TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, sidecar, stmt),
+        TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, sidecar, stmt),
+        TirTag::ForRange => analyze_for_range(tir, pool, own, sink, sidecar, stmt),
         TirTag::Break | TirTag::Continue => {
             // 8.1c attaches Free metadata here; 8.1b is a no-op.
         }
@@ -553,11 +547,11 @@ fn analyze_stmt(
         }
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {
-                visit_expr(tir, pool, own, sink, by_name, sidecar, o);
+                visit_expr(tir, pool, own, sink, sidecar, o);
             }
         }
         _ => {
-            visit_expr(tir, pool, own, sink, by_name, sidecar, stmt);
+            visit_expr(tir, pool, own, sink, sidecar, stmt);
         }
     }
 }
@@ -572,14 +566,13 @@ fn analyze_var_decl(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    by_name: &HashMap<StringId, &Tir>,
     sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let view = tir.var_decl_view(r);
     let init = view.initializer;
     let init_ty = tir.inst(init).ty;
-    visit_expr(tir, pool, own, sink, by_name, sidecar, init);
+    visit_expr(tir, pool, own, sink, sidecar, init);
     if needs_tracking(init_ty, pool) {
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, init);
@@ -603,13 +596,12 @@ fn analyze_assign(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    by_name: &HashMap<StringId, &Tir>,
     sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let view = tir.assign_view(r);
     let value_ty = tir.inst(view.value).ty;
-    visit_expr(tir, pool, own, sink, by_name, sidecar, view.value);
+    visit_expr(tir, pool, own, sink, sidecar, view.value);
     if needs_tracking(value_ty, pool) {
         // Capture the old owner before consume_for_assignment / rebind
         // overwrite current_owner[name]. Only emit the Free entry if the
@@ -649,7 +641,6 @@ fn analyze_return(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    by_name: &HashMap<StringId, &Tir>,
     sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
@@ -659,7 +650,7 @@ fn analyze_return(
         _ => unreachable!("Return must carry TirData::UnOp"),
     };
     let ty = tir.inst(operand).ty;
-    visit_expr(tir, pool, own, sink, by_name, sidecar, operand);
+    visit_expr(tir, pool, own, sink, sidecar, operand);
     if !needs_tracking(ty, pool) {
         return;
     }
@@ -859,12 +850,11 @@ fn analyze_if_stmt(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    by_name: &HashMap<StringId, &Tir>,
     sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let view = tir.if_stmt_view(r);
-    visit_expr(tir, pool, own, sink, by_name, sidecar, view.cond);
+    visit_expr(tir, pool, own, sink, sidecar, view.cond);
 
     // Allocate fresh BranchIds for this if's arms. Codegen consults
     // `sidecar.if_branches` when lowering the if so each arm pushes
@@ -895,16 +885,16 @@ fn analyze_if_stmt(
     let snapshot = own.clone();
 
     for stmt in &view.then_stmts {
-        analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
+        analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
     }
     let then_state = own.clone();
 
     let mut branch_results = vec![then_state];
     for elif in &view.elif_branches {
         *own = snapshot.clone();
-        visit_expr(tir, pool, own, sink, by_name, sidecar, elif.cond);
+        visit_expr(tir, pool, own, sink, sidecar, elif.cond);
         for stmt in &elif.body {
-            analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
+            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
         }
         branch_results.push(own.clone());
     }
@@ -912,7 +902,7 @@ fn analyze_if_stmt(
     if let Some(else_stmts) = &view.else_stmts {
         *own = snapshot.clone();
         for stmt in else_stmts {
-            analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
+            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
         }
         branch_results.push(own.clone());
     } else {
@@ -1027,7 +1017,6 @@ fn analyze_while_loop(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    by_name: &HashMap<StringId, &Tir>,
     sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
@@ -1040,26 +1029,18 @@ fn analyze_while_loop(
     // and the scratch diags are dropped (the second walk re-emits
     // anything that's still wrong).
     let mut scratch_sink = DiagSink::new();
-    visit_expr(
-        tir,
-        pool,
-        own,
-        &mut scratch_sink,
-        by_name,
-        sidecar,
-        view.cond,
-    );
+    visit_expr(tir, pool, own, &mut scratch_sink, sidecar, view.cond);
     for stmt in &view.body {
-        analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, sidecar, *stmt);
+        analyze_stmt(tir, pool, own, &mut scratch_sink, sidecar, *stmt);
     }
     let after_first = own.clone();
 
     if states_differ(&entry, &after_first) {
         *own = merge_two(&entry, &after_first);
         *sidecar = sidecar_entry;
-        visit_expr(tir, pool, own, sink, by_name, sidecar, view.cond);
+        visit_expr(tir, pool, own, sink, sidecar, view.cond);
         for stmt in &view.body {
-            analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
+            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
         }
         let after_second = own.clone();
         *own = merge_two(&entry, &after_second);
@@ -1079,7 +1060,6 @@ fn analyze_for_range(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    by_name: &HashMap<StringId, &Tir>,
     sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
@@ -1087,15 +1067,15 @@ fn analyze_for_range(
     // Start/end are visited unconditionally — they're plain `int`
     // exprs, so they don't move anything, but they may contain nested
     // reads we want to record.
-    visit_expr(tir, pool, own, sink, by_name, sidecar, view.start);
-    visit_expr(tir, pool, own, sink, by_name, sidecar, view.end);
+    visit_expr(tir, pool, own, sink, sidecar, view.start);
+    visit_expr(tir, pool, own, sink, sidecar, view.end);
 
     let entry = own.clone();
     let sidecar_entry = sidecar.clone();
 
     let mut scratch_sink = DiagSink::new();
     for stmt in &view.body {
-        analyze_stmt(tir, pool, own, &mut scratch_sink, by_name, sidecar, *stmt);
+        analyze_stmt(tir, pool, own, &mut scratch_sink, sidecar, *stmt);
     }
     let after_first = own.clone();
 
@@ -1103,7 +1083,7 @@ fn analyze_for_range(
         *own = merge_two(&entry, &after_first);
         *sidecar = sidecar_entry;
         for stmt in &view.body {
-            analyze_stmt(tir, pool, own, sink, by_name, sidecar, *stmt);
+            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
         }
         let after_second = own.clone();
         *own = merge_two(&entry, &after_second);
@@ -1615,7 +1595,6 @@ fn visit_expr(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    by_name: &HashMap<StringId, &Tir>,
     sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
@@ -1640,8 +1619,8 @@ fn visit_expr(
                 own.temp_owners.insert(Owner::Inst(r));
             }
             if let TirData::BinOp { lhs, rhs } = inst.data {
-                visit_expr(tir, pool, own, sink, by_name, sidecar, lhs);
-                visit_expr(tir, pool, own, sink, by_name, sidecar, rhs);
+                visit_expr(tir, pool, own, sink, sidecar, lhs);
+                visit_expr(tir, pool, own, sink, sidecar, rhs);
             }
         }
         TirTag::Call => {
@@ -1652,10 +1631,6 @@ fn visit_expr(
                 own.temp_owners.insert(Owner::Inst(r));
             }
             let view = tir.call_view(r);
-            // Look up callee parameter conventions. Builtins
-            // (`print`, `assert`, `int_to_str`) have no entry and
-            // default to borrowing all args.
-            let callee_params = by_name.get(&view.name).map(|t| t.params.as_slice());
             // `__ryo_panic` is the only callee using the borrowed-scalar ABI
             // today: codegen passes its StrConst arg's raw .rodata pointer
             // with cap=0 and never owns the buffer. Exclude direct StrConst
@@ -1664,7 +1639,7 @@ fn visit_expr(
             // Free for them. See I-057.
             let is_borrowed_scalar_callee = pool.str(view.name) == "__ryo_panic";
             for (i, arg) in view.args.iter().enumerate() {
-                visit_expr(tir, pool, own, sink, by_name, sidecar, *arg);
+                visit_expr(tir, pool, own, sink, sidecar, *arg);
                 if is_borrowed_scalar_callee && matches!(tir.inst(*arg).tag, TirTag::StrConst) {
                     // Undo the temp_owners insertion seeded by visit_expr's
                     // StrConst arm. `states`, `origin`, and `owner_at_read`
@@ -1677,11 +1652,8 @@ fn visit_expr(
                 if !needs_tracking(arg_ty, pool) {
                     continue;
                 }
-                let is_move_param = callee_params
-                    .and_then(|ps| ps.get(i))
-                    .map(|p| p.is_move)
-                    .unwrap_or(false);
-                if is_move_param {
+                let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+                if mode == ParamMode::Move {
                     let consumed_name = consumed_binding_name(tir, *arg);
                     consume_for_assignment(pool, own, sink, *arg, tir.span(r), consumed_name);
                 }
@@ -1740,7 +1712,7 @@ fn visit_expr(
         // ---- Everything else: recurse on operands so nested
         // ---- producers/aliases are still observed.
         _ => {
-            recurse_operands(tir, pool, own, sink, by_name, sidecar, r);
+            recurse_operands(tir, pool, own, sink, sidecar, r);
         }
     }
 }
@@ -1750,16 +1722,15 @@ fn recurse_operands(
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    by_name: &HashMap<StringId, &Tir>,
     sidecar: &mut FunctionSidecar,
     r: TirRef,
 ) {
     let inst = *tir.inst(r);
     match inst.data {
-        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, by_name, sidecar, o),
+        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, sidecar, o),
         TirData::BinOp { lhs, rhs } => {
-            visit_expr(tir, pool, own, sink, by_name, sidecar, lhs);
-            visit_expr(tir, pool, own, sink, by_name, sidecar, rhs);
+            visit_expr(tir, pool, own, sink, sidecar, lhs);
+            visit_expr(tir, pool, own, sink, sidecar, rhs);
         }
         // `Extra`-shaped instructions (VarDecl, Assign, Call,
         // IfStmt, WhileLoop, ForRange, CompoundAssign) have
@@ -1782,9 +1753,9 @@ mod tests {
     use super::*;
 
     /// Build an all-`Borrow` modes slice matching the length of an
-    /// argument list. The ownership pass still keys off `by_name` so
-    /// the exact mode is not yet consumed here; `Borrow` is the safe
-    /// default for builtin/test calls.
+    /// argument list. The ownership pass reads `view.modes` directly,
+    /// so test/builtin call sites pass all-`Borrow` to avoid
+    /// accidentally moving arguments.
     fn all_borrow(args: &[TirRef]) -> Vec<ryo_core::tir::ParamMode> {
         vec![ryo_core::tir::ParamMode::Borrow; args.len()]
     }
