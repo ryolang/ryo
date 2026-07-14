@@ -577,7 +577,7 @@ fn analyze_var_decl(
     if needs_tracking(init_ty, pool) {
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, init);
-        consume_for_assignment(pool, own, sink, init, span, consumed_name);
+        consume_for_assignment(tir, pool, own, sink, init, span, consumed_name);
         rebind_to_init(own, view.name, init);
         // Register the new binding as pending dead-store. The walk
         // clears this entry on any later read or consumption; a
@@ -627,7 +627,7 @@ fn analyze_assign(
         }
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, view.value);
-        consume_for_assignment(pool, own, sink, view.value, span, consumed_name);
+        consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name);
         rebind_to_init(own, view.name, view.value);
         register_pending_dead_store(own, view.value, view.name, span, r);
     }
@@ -658,6 +658,7 @@ fn analyze_return(
     let span = tir.span(r);
     let consumed_name = consumed_binding_name(tir, operand);
     consume_underlying(
+        tir,
         pool,
         own,
         sink,
@@ -708,6 +709,29 @@ fn underlying_owner(own: &Ownership, init: TirRef) -> Owner {
     }
 }
 
+/// Use-site use-after-move authority (I-050). Resolve the operand's
+/// underlying owner and emit E0020 if it is `Moved`. Called from every
+/// use site: consume sites, borrow-arg paths, and operand-read sites.
+fn check_use_moved(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &Ownership,
+    sink: &mut DiagSink,
+    operand: TirRef,
+    span: Span,
+) {
+    let owner = underlying_owner(own, operand);
+    if let Some(OwnerState::Moved { moved_at }) = own.states.get(&owner).cloned() {
+        let name = consumed_binding_name(tir, operand);
+        sink.emit(
+            Diag::error(span, DiagCode::UseAfterMove,
+                format!("use of moved value {}", format_binding(name, pool)))
+                .with_note(Some(moved_at), "value moved here")
+                .with_help("consider using the value before the move, or pass by default (borrow) instead of `move`"),
+        );
+    }
+}
+
 /// Which diagnostic the shared `consume_underlying` helper should
 /// emit on the `Borrowed` arm. `consume_for_assignment` and
 /// `analyze_return` run identical state transitions otherwise — the
@@ -725,6 +749,7 @@ enum BorrowedAction {
 /// Caller must have already populated origin/state for `init` via
 /// `visit_expr`.
 fn consume_for_assignment(
+    tir: &Tir,
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
@@ -733,6 +758,7 @@ fn consume_for_assignment(
     name: Option<StringId>,
 ) {
     consume_underlying(
+        tir,
         pool,
         own,
         sink,
@@ -750,11 +776,10 @@ fn consume_for_assignment(
 /// * `Valid` → stamp `Moved { moved_at: span }` and clear any pending
 ///   dead-store entry,
 /// * `Borrowed` → emit E0021 or E0022 per `on_borrowed`,
-/// * `Moved` → silent (the `Var` arm of `visit_expr` already emitted
-///   E0020 for the aliasing read that brought us here; emitting again
-///   would double-report a single fault — see commit 2c5985d),
+/// * `Moved` → now a use-after-move check authority (I-050).
 /// * `NotTracked` → no-op.
 fn consume_underlying(
+    tir: &Tir,
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
@@ -797,19 +822,7 @@ fn consume_underlying(
             sink.emit(Diag::error(span, code, msg).with_help(help));
         }
         OwnerState::Moved { .. } => {
-            // No diagnostic here — the `Var` arm in `visit_expr`
-            // already emits E0020 for any aliasing read of a moved
-            // owner, which covers every path that lands here today
-            // (the only operands that reach a consume site with
-            // `Moved` underlying state arrive via `Var`). Direct
-            // producers (StrConst/StrConcat/Call) are stamped
-            // `Valid` in `visit_expr` on a freshly-walked branch and
-            // cannot be `Moved` here. Emitting again would
-            // double-report a single fault.
-            //
-            // If a future producer pattern bypasses `Var` and lands
-            // here in `Moved` state, prefer no diagnostic over a
-            // duplicate; revisit then.
+            check_use_moved(tir, pool, own, sink, operand, span);
         }
         OwnerState::NotTracked => {}
     }
@@ -1622,6 +1635,11 @@ fn visit_expr(
             if let TirData::BinOp { lhs, rhs } = inst.data {
                 visit_expr(tir, pool, own, sink, sidecar, lhs);
                 visit_expr(tir, pool, own, sink, sidecar, rhs);
+                for op in [lhs, rhs] {
+                    if needs_tracking(tir.inst(op).ty, pool) {
+                        check_use_moved(tir, pool, own, sink, op, tir.span(op));
+                    }
+                }
             }
         }
         TirTag::Call => {
@@ -1660,24 +1678,17 @@ fn visit_expr(
                 let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
                 if mode == ParamMode::Move {
                     let consumed_name = consumed_binding_name(tir, *arg);
-                    consume_for_assignment(pool, own, sink, *arg, tir.span(r), consumed_name);
+                    consume_for_assignment(tir, pool, own, sink, *arg, tir.span(r), consumed_name);
+                } else {
+                    check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
                 }
-                // Borrow path: no extra check here. With the current
-                // set of producers (StrConst/StrConcat/Call/Var), every
-                // tracked str argument flows through `Var`, and the
-                // `Var` arm already fires E0020 for use-after-move.
-                // Adding a call-site check would double-report. If a
-                // future producer pattern bypasses `Var` (e.g. passing
-                // a moved Call result directly), revisit this.
             }
         }
         // ---- Aliasing read ----
         // `Var` is a non-consuming read. Record which SSA value it
         // currently aliases so a later use-after-move diagnostic can
-        // walk back to the root owner. Per the design spec, an
-        // aliasing read of an already-`Moved` owner is itself an
-        // E0020 use-after-move. Reads of `Borrowed` owners are fine
-        // (Rule 2 — borrowed parameters can be freely read).
+        // walk back to the root owner. Reads of `Borrowed` owners are
+        // fine (Rule 2 — borrowed parameters can be freely read).
         TirTag::Var => {
             let name = match inst.data {
                 TirData::Var(n) => n,
@@ -1699,19 +1710,6 @@ fn visit_expr(
                 // (which would route pre-rebind reads to the post-
                 // rebind owner — wrong target, double-free).
                 own.owner_at_read.insert(r, owner);
-                if let Some(OwnerState::Moved { moved_at, .. }) = own.states.get(&owner).cloned() {
-                    sink.emit(
-                        Diag::error(
-                            tir.span(r),
-                            DiagCode::UseAfterMove,
-                            format!("use of moved value `{}`", pool.str(name)),
-                        )
-                        .with_note(Some(moved_at), "value moved here")
-                        .with_help(
-                            "consider using the value before the move, or pass by default (borrow) instead of `move`",
-                        ),
-                    );
-                }
             }
         }
         // ---- Everything else: recurse on operands so nested
@@ -1732,10 +1730,21 @@ fn recurse_operands(
 ) {
     let inst = *tir.inst(r);
     match inst.data {
-        TirData::UnOp(o) => visit_expr(tir, pool, own, sink, sidecar, o),
+        TirData::UnOp(o) => {
+            visit_expr(tir, pool, own, sink, sidecar, o);
+            if needs_tracking(tir.inst(o).ty, pool) {
+                check_use_moved(tir, pool, own, sink, o, tir.span(o));
+            }
+        }
         TirData::BinOp { lhs, rhs } => {
             visit_expr(tir, pool, own, sink, sidecar, lhs);
+            if needs_tracking(tir.inst(lhs).ty, pool) {
+                check_use_moved(tir, pool, own, sink, lhs, tir.span(lhs));
+            }
             visit_expr(tir, pool, own, sink, sidecar, rhs);
+            if needs_tracking(tir.inst(rhs).ty, pool) {
+                check_use_moved(tir, pool, own, sink, rhs, tir.span(rhs));
+            }
         }
         // `Extra`-shaped instructions (VarDecl, Assign, Call,
         // IfStmt, WhileLoop, ForRange, CompoundAssign) have
@@ -2937,5 +2946,59 @@ mod tests {
             "decl-init temp must not be in free_schedule (it's in free_on_reassign); got {sc:?}"
         );
         let _ = (body_assign, lp);
+    }
+
+    #[test]
+    fn double_consume_reports_uam_once_via_consume_authority() {
+        // x = "v"; take(x); take(x)  -- the second take consumes an
+        // already-moved binding. Pre-I-050 the Var arm emitted E0020;
+        // post-I-050 the consume site (consume_underlying) is the authority
+        // and must emit exactly once.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{TirBuilder, ParamMode};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_(); let void = pool.void();
+        let main = pool.intern_str("main");
+        let x = pool.intern_str("x"); let take = pool.intern_str("take");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let decl = tb.var_decl(x, false, str_ty, lit, span);
+        let xv1 = tb.var(x, str_ty, span);
+        let take1 = tb.call(take, &[xv1], &[ParamMode::Move], void, span);
+        let xv2 = tb.var(x, str_ty, span);
+        let take2 = tb.call(take, &[xv2], &[ParamMode::Move], void, span);
+        let tir = tb.finish(&[decl, take1, take2]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let uam = sink.into_diags().iter()
+            .filter(|d| matches!(d.code, DiagCode::UseAfterMove)).count();
+        assert_eq!(uam, 1, "double-consume reports UAM exactly once; got {uam}");
+    }
+
+    #[test]
+    fn borrow_of_moved_value_still_reports_uam() {
+        // print(moved_x) — borrow of a moved value, no consume. After the
+        // Var arm is demoted, the borrow-arg check_use_moved must still fire.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{TirBuilder, ParamMode};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_(); let void = pool.void();
+        let main = pool.intern_str("main"); let x = pool.intern_str("x");
+        let take = pool.intern_str("take"); let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let decl = tb.var_decl(x, false, str_ty, lit, span);
+        let xv = tb.var(x, str_ty, span);
+        let take_call = tb.call(take, &[xv], &[ParamMode::Move], void, span); // moves x
+        let xv2 = tb.var(x, str_ty, span);
+        let print_call = tb.call(print, &[xv2], &[ParamMode::Borrow], void, span); // borrow of moved
+        let tir = tb.finish(&[decl, take_call, print_call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(diags.iter().any(|d| matches!(d.code, DiagCode::UseAfterMove)),
+            "borrow of moved value must still report E0020 via borrow-arg path; got {diags:?}");
     }
 }
