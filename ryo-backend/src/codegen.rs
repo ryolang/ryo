@@ -515,6 +515,19 @@ impl<M: Module> Codegen<M> {
                 branch_stack: Vec::new(),
             };
 
+            for (idx, param) in tir.params.iter().enumerate() {
+                if is_str_type(param.ty, pool) {
+                    let locals = ctx.str_locals.get(&param.name).unwrap();
+                    let virtual_ref = TirRef::param(idx);
+                    let repr = ValueRepr::Str {
+                        ptr: builder.use_var(locals.ptr),
+                        len: builder.use_var(locals.len),
+                        cap: builder.use_var(locals.cap),
+                    };
+                    ctx.inst_values.insert(virtual_ref, repr);
+                }
+            }
+
             let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
 
             if !has_return {
@@ -1395,8 +1408,9 @@ impl<M: Module> Codegen<M> {
     /// Given the already-filtered `(free_schedule index, target)`
     /// pairs, declare `ryo_str_free` and emit one call per pair, marking
     /// each index as fired in `ctx.freed_at`. A `Scalar`-cached target
-    /// is hard-errored with an I-057 pointer (the borrowed-scalar ABI is
-    /// supposed to keep such args out of `temp_owners`).
+    /// (borrowed-scalar ABI, never heap-owned) returns an error and aborts
+    /// code generation — the ABI registry is supposed to keep such args out
+    /// of `temp_owners`. See I-057/I-059.
     fn emit_frees(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1420,9 +1434,7 @@ impl<M: Module> Codegen<M> {
                 }
                 ValueRepr::Scalar(_) => {
                     return Err(format!(
-                        "ownership pass scheduled Free for borrowed-scalar value %{} \
-                         (target of borrowed-scalar ABI, not heap-owned). \
-                         This indicates an ownership-pass bug. See I-057.",
+                        "ownership pass scheduled Free for borrowed-scalar value %{}; the ABI registry should have excluded it. See I-057/I-059.",
                         target.index()
                     ));
                 }

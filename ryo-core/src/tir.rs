@@ -76,6 +76,10 @@ impl TirRef {
     pub fn from_raw(raw: u32) -> Self {
         TirRef(NonZeroU32::new(raw).expect("TirRef raw must be non-zero"))
     }
+
+    pub fn param(idx: usize) -> Self {
+        Self::from_raw(u32::MAX - idx as u32)
+    }
 }
 
 // ---------- ExtraRange ----------
@@ -216,6 +220,30 @@ pub enum TirTag {
     Unreachable,
 }
 
+// ---------- Per-argument call convention ----------
+
+/// Per-argument call convention, stamped by sema and read by the
+/// ownership pass. M8.3 adds `Inout` (mutable borrow, call-site `&x`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ParamMode {
+    Borrow = 0,
+    Move = 1,
+}
+
+impl ParamMode {
+    fn to_u32(self) -> u32 {
+        self as u32
+    }
+
+    fn from_u32(v: u32) -> Self {
+        match v {
+            1 => ParamMode::Move,
+            _ => ParamMode::Borrow,
+        }
+    }
+}
+
 // ---------- Instruction data ----------
 
 /// Per-instruction inline payload. Same shape as UIR's
@@ -294,14 +322,21 @@ impl Tir {
 /// Layout in `extra` for [`TirTag::Call`]:
 ///
 /// ```text
-///   [0]  name:  StringId
-///   [1]  argc:  u32
-///   [2..2+argc] args: TirRef.raw()
+///   [0]         name:  StringId
+///   [1]         argc:  u32
+///   [2..2+argc] args:  TirRef.raw()
+///   [2+argc..2+2*argc] modes: ParamMode (one u32 per arg)
 /// ```
+///
+/// `modes` is stamped by sema from each callee parameter's `is_move`
+/// flag (user functions) or all-`Borrow` (builtins). The ownership
+/// pass consumes these modes directly from the `CallView` payload to
+/// determine parameter move/borrow conventions.
 pub mod call_extra {
     pub const NAME: usize = 0;
     pub const ARGC: usize = 1;
     pub const ARGS: usize = 2;
+    // MODES occupies ARGS+argc .. ARGS+2*argc (one u32 per arg).
 }
 
 /// Layout in `extra` for [`TirTag::VarDecl`]:
@@ -534,16 +569,33 @@ impl TirBuilder {
         }
     }
 
-    /// Emit a `Call` with name and arg list packed into `extra`.
-    /// `ty` is the call's *return* type.
-    pub fn call(&mut self, name: StringId, args: &[TirRef], ty: TypeId, span: Span) -> TirRef {
+    /// Emit a `Call` with name, arg list, and per-arg call conventions
+    /// packed into `extra`. `ty` is the call's *return* type.
+    /// `modes` carries one [`ParamMode`] per argument (borrow vs move),
+    /// stamped by sema from the callee signature.
+    pub fn call(
+        &mut self,
+        name: StringId,
+        args: &[TirRef],
+        modes: &[ParamMode],
+        ty: TypeId,
+        span: Span,
+    ) -> TirRef {
+        assert_eq!(
+            modes.len(),
+            args.len(),
+            "TirBuilder::call: one ParamMode per arg"
+        );
         let offset = self.extra_offset();
         self.extra.push(name.raw());
         self.extra.push(Self::len_u32(args.len()));
         for a in args {
             self.extra.push(a.raw());
         }
-        let len = Self::len_u32(call_extra::ARGS + args.len());
+        for m in modes {
+            self.extra.push(m.to_u32());
+        }
+        let len = Self::len_u32(call_extra::ARGS + 2 * args.len());
         self.push(
             TirTag::Call,
             ty,
@@ -742,6 +794,9 @@ impl TirBuilder {
 pub struct CallView {
     pub name: StringId,
     pub args: Vec<TirRef>,
+    /// Per-argument call convention, parallel to `args`. Stamped by
+    /// sema from each callee parameter's `is_move` flag.
+    pub modes: Vec<ParamMode>,
 }
 
 pub struct VarDeclView {
@@ -801,7 +856,12 @@ impl Tir {
             .copied()
             .map(TirRef::from_raw)
             .collect();
-        CallView { name, args }
+        let modes = slice[call_extra::ARGS + argc..call_extra::ARGS + 2 * argc]
+            .iter()
+            .copied()
+            .map(ParamMode::from_u32)
+            .collect();
+        CallView { name, args, modes }
     }
 
     pub fn var_decl_view(&self, r: TirRef) -> VarDeclView {
@@ -1174,13 +1234,17 @@ mod tests {
         let mut b = TirBuilder::new(main, vec![], int_ty, sp());
         let a = b.int_const(1, int_ty, sp());
         let bb = b.int_const(2, int_ty, sp());
-        let call = b.call(foo, &[a, bb], int_ty, sp());
+        // Mixed modes: first arg borrowed, second moved — exercises both
+        // encodings through the extra arena and back through CallView.
+        let modes = [ParamMode::Borrow, ParamMode::Move];
+        let call = b.call(foo, &[a, bb], &modes, int_ty, sp());
         let ret = b.unary(TirTag::Return, pool.void(), call, sp());
         let tir = b.finish(&[ret]);
 
         let view = tir.call_view(call);
         assert_eq!(view.name, foo);
         assert_eq!(view.args, vec![a, bb]);
+        assert_eq!(view.modes, vec![ParamMode::Borrow, ParamMode::Move]);
     }
 
     #[test]

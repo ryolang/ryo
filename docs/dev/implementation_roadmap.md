@@ -24,7 +24,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
   - [x] [Milestone 8b — Conditionals & Logical Operators [alpha] ✅ COMPLETE](#milestone-8b-conditionals--logical-operators-alpha--complete)
   - [x] [Milestone 8c — Loops & Loop Control [alpha] ✅ COMPLETE](#milestone-8c-loops--loop-control-alpha--complete)
 - [x] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type-and-move-semantics-alpha) ✅
-- [ ] [Milestone 8.2 — Immutable Borrows (`&T`) [alpha]](#milestone-82-immutable-borrows-t-alpha)
+- [x] [Milestone 8.2 — Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE](#milestone-82-implicit-borrow-liveness--ownership-pass-refactors-alpha)
 - [ ] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha]](#milestone-83-mutable-borrows-inout-alpha)
 - [ ] [Milestone 8.4 — String Slices (`&str`) [alpha]](#milestone-84-string-slices-str-alpha)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
@@ -861,8 +861,7 @@ for f in tests/*.ryo; do
 done
 ```
 
-That single primitive unlocks the rest of your milestone validation work — every future feature gets tested with the same tool
----
+## That single primitive unlocks the rest of your milestone validation work — every future feature gets tested with the same tool
 
 ### Milestone 8c: Loops & Loop Control [alpha] ✅ COMPLETE
 
@@ -885,13 +884,13 @@ That single primitive unlocks the rest of your milestone validation work — eve
   - `StmtKind::Break`, `StmtKind::Continue`
 - **Parser:**
   - `while <expr>:` block
-  - `for <ident> in range(<expr>):` and `for <ident> in range(<start>, <end>):` — parser recognizes the two `range(...)` arities specifically; calling `range` outside a `for` header is a compile error in v0.1 (it is a loop construct, not a first-class iterator)
+  - `for <ident> in range(<start>, <end>):` — parser recognizes the `range(start, end)` arity specifically; calling `range` outside a `for` header is a compile error in v0.1 (it is a loop construct, not a first-class iterator)
   - `break` / `continue` parse as bare statements
   - General `for <ident> in <iterable>:` over collections is **deferred** to M22 (Collections) — until lists exist there is nothing else to iterate over
 - **`range()` builtin (loop-header-only in v0.1):**
-  - `range(end)` → `0..end` exclusive
   - `range(start, end)` → `start..end` exclusive
   - Both args must be `int`; result is the loop-header's iteration domain (no first-class range value yet)
+  - Note: `range(end)` (implied start=0) is a planned extension for a future milestone (see ISSUES.md I-040).
 - **HIR / Sema:**
   - `while` condition must be `Type::Bool`
   - `for` loop variable is **immutable** and **block-scoped** to the loop body (consistent with Ryo's default; not visible after the loop)
@@ -904,7 +903,7 @@ That single primitive unlocks the rest of your milestone validation work — eve
   - `break` → unconditional jump to the innermost loop's exit block; `continue` → unconditional jump to the innermost loop's header (or increment block, for `for`)
   - Maintain a loop-context stack in codegen so nested loops route `break`/`continue` to the correct block
 - **Tests:**
-  - Parser: `while`, both `range` arities, `break`/`continue` parsing, `for x in foo()` rejected with a clear "only `range(...)` is supported in v0.1" error
+  - Parser: `while`, `range(start, end)` arity, `break`/`continue` parsing, `for x in foo()` rejected with a clear "only `range(...)` is supported in v0.1" error
   - Sema: `break`/`continue` outside a loop rejected; loop variable immutability enforced; loop variable not visible after the loop
   - Codegen integration: counter loops, nested loops with `break`/`continue` targeting the inner loop, `while` with mutable counter, early-exit search pattern
 
@@ -920,7 +919,7 @@ fn count_down():
   n = n - 1
 
 fn first_multiple_of_3(limit: int) -> int:
- for i in range(limit):
+ for i in range(0, limit):
   if i > 0 and i % 3 == 0:
    return i
  return -1
@@ -1036,47 +1035,47 @@ fn main():
 >
 > For future milestones (from Milestone 8.2 onwards), development tasks, modules, and tests are structured within this Cargo workspace rather than a flat `src/` directory. For up-to-date guidelines on adding compiler features under this architecture, see the root `CLAUDE.md`.
 
-### Milestone 8.2: Immutable Borrows (`&T`) [alpha]
+### Milestone 8.2: Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE
 
-**Goal:** Add immutable references and the corresponding borrow-checking rules, building on M8.1's move tracker.
+**Goal:** Implement implicit borrow liveness tracking (under Rule 2) and major ownership-pass architectural refactors, enabling safe multi-phase borrow evaluation and preventing moves while borrowed in calls (E0023).
 
-**Status:** ⏳ Planned
+**Status:** ✅ COMPLETE (2026-07-11)
 
 **Tasks:**
 
-- Add `&` operator to lexer/parser for borrow expressions (and `&T` in type annotations)
-- Extend type system: `Type::Ref(Box<Type>)`
-- Parse:
-  - Type annotations: `&str`, `&User`, `&int`
-  - Borrow expressions: `&value`
-- Extend the M8.1 ownership pass with borrow tracking:
-  - Multiple immutable borrows of the same value are allowed
-  - A value cannot be moved while immutable borrows are live
-  - Borrows must not outlive the borrowed value (scope-based, no explicit lifetimes)
-- Codegen: take address, pass pointer, automatic dereference at use sites
-- See [borrow_checker.md](borrow_checker.md) for the algorithm sketch
+- Implement implicit borrow liveness tracking (Rule 2): parameters borrow by default, with automatic `Free` generation at their last use or re-assignment.
+- Refactor owner identification: replace informal `synthetic_param_ref` encoding with a clean and robust `Owner` enum (representing either a parameter or an instruction).
+- Restructure ownership state tracking: replace `named_owners` with a unified two-part classifier (`owner_is_named` and `owner_underlying`) based strictly on instruction classification.
+- Unify parameter modes: introduce `ParamMode` to represent the compile-time ABI contract (borrow vs. move) in the TIR ABI registry and codegen, eliminating string-matching hacks like `__ryo_panic`.
+- Refactor the ownership walker structure: extract common loop processing logic to a shared loop-body helper, and optimize branch/loop analysis to deep-clone only mutable state fields rather than the full `Ownership` struct.
+- Prevent move-while-borrowed-in-calls (E0023): implement safe multi-phase call argument evaluation, ensuring arguments are not moved if they have active/pending borrows in other parameters within the same call.
 
-**Visible Progress:** Functions can accept arguments without moving them. Multiple readers, no mutation.
+**Visible Progress:** Robust dataflow analysis with correct implicit borrow-liveness, automatic resource tracking, and compilation errors for invalid use-after-move or move-while-borrowed actions in multi-argument call structures.
 
 **Example:**
 
 ```ryo
-fn length(s: &str) -> int:
- return s.len()
+fn print_message(s: str):
+	print(s)
+
+fn consume_and_print(move s: str, other: str):
+	print(s)
+	print(other)
 
 fn main():
- name: str = "Alice"
- n1 = length(&name)            # name borrowed, not moved
- n2 = length(&name)            # ok — still readable
- print(name)                   # ok — name still owned here
+	msg: str = "Hello"
+	# Implicitly borrowed (Rule 2) here since it is read but its lifetime continues
+	print_message(msg)
+	
+	# E0023 compile error: cannot move 'msg' into 'consume_and_print' while it's also implicitly borrowed
+	consume_and_print(msg, msg)
 ```
 
 **Implementation Notes:**
 
-- Borrows are **non-nullable** (always point to valid data)
-- Lifetime tracking is **simplified** — no explicit lifetime annotations, scope-based analysis
-- Many borrows are **implicit** at call sites once method receivers (M17) ship
-- Dependencies: Milestone 8.1 (move tracker provides the dataflow infrastructure)
+- Explicit `&` syntax, `&T` references, and explicit pointer dereferencing tasks have been moved to **Milestone 8.3** per the finalized compiler pipeline spec.
+- Ownership and dataflow algorithms have been thoroughly hardened with comprehensive regression tests.
+- Dependencies: Milestone 8.1 (move tracker provides the initial ownership framework)
 
 ### Milestone 8.3: Mutable Borrows (`inout`) [alpha]
 
@@ -1145,7 +1144,7 @@ fn main():
 
 ```ryo
 fn first_word(text: &str) -> &str:
- for i in range(text.len()):
+ for i in range(0, text.len()):
   if text[i] == ' ':
    return text[0:i]      # slice into text, no copy
  return text
@@ -1162,7 +1161,7 @@ fn main():
 - `&str` is a **borrowed view** (immutable, fixed-length); the owning `str` remains the source of truth
 - UTF-8 validity is checked at slice creation, not on every read — so iteration is allocation-free
 - Array slices `&[T]` are **not** included here; they ship in M21 alongside list literal syntax
-- Dependencies: Milestone 8.2 (immutable borrows provide the reference machinery)
+- Dependencies: Milestone 8.2 (immutable borrows provide the reference machinery), Milestone 8.3 (explicit borrow syntax)
 
 ### Milestone 8.5: Default Parameters & Named Arguments
 
@@ -1673,7 +1672,7 @@ fn main():
 
 ### Milestone 21: Array Slices (`&[T]`)
 
-**Goal:** Borrowed views into arrays — zero-copy iteration over sub-ranges. (String slices `&str` already shipped in **M8.4**.)
+**Goal:** Borrowed views into arrays — zero-copy iteration over sub-ranges. (String slices `&str` are planned in M8.4.)
 
 **Tasks:**
 
@@ -1995,7 +1994,6 @@ fn main():
   - Add comprehensive platform detection and conditional compilation
   - Abstract platform differences in standard library
 - Standard library is **written in Ryo** (using FFI for OS calls)
-- **Batteries modules** (`net.http`, `json`, `regex`, `time`, `rand`): wrap curated Rust crates per [`std_ext.md`](std_ext.md); each is an OS-backed module following the `std.sys` recipe in [`built_in.md`](built_in.md). These are **beta** (post-alpha) scope — `net.http` is blocking-first via `ureq`/`rustls`; a native async net stack is deferred to the v0.4 concurrency runtime
 - Error types defined in respective modules (e.g., `io.Error`)
 - All I/O operations return error unions (explicit error handling)
 - UTF-8 string support throughout
@@ -2125,20 +2123,20 @@ note: run with `RYOLANG_BACKTRACE=1` for full backtrace
 /// assert(result == 120)
 /// ```
 fn factorial(n: int) -> int:
-    if n <= 1:
-        return 1
-    return n * factorial(n - 1)
+	if n <= 1:
+		return 1
+	return n * factorial(n - 1)
 
 #[test]
 fn test_factorial():
-    assert_eq(factorial(0), 1, "0! = 1")
-    assert_eq(factorial(1), 1, "1! = 1")
-    assert_eq(factorial(5), 120, "5! = 120")
+	assert_eq(factorial(0), 1, "0! = 1")
+	assert_eq(factorial(1), 1, "1! = 1")
+	assert_eq(factorial(5), 120, "5! = 120")
 
 #[test]
 fn test_factorial_large():
-    result = factorial(10)
-    assert(result == 3628800, "10! calculation")
+	result = factorial(10)
+	assert(result == 3628800, "10! calculation")
 ```
 
 **Running tests:**
@@ -2277,24 +2275,24 @@ Acceptance criteria, this code must run well with version v0.1
 error NotFound
 
 fn find_user(id: int) -> NotFound!str:
- if id == 0:
-  return NotFound
- return f"user_{id}"
+	if id == 0:
+		return NotFound
+	return "user_" + int_to_str(id)
 
 fn main():
- # Immutable by default — no `let` keyword
- greeting = "Welcome to Ryo"
+	# Immutable by default — no `let` keyword
+	greeting = "Welcome to Ryo"
 
- # Optionals — no null pointer exceptions
- maybe: ?str = "Alice"
- name = maybe orelse "guest"
+	# Optionals — no null pointer exceptions
+	maybe: ?str = "Alice"
+	name = maybe orelse "guest"
 
- # Explicit, type-safe error handling
- user = find_user(42) catch |err|:
-  match err:
-   NotFound: "unknown"
+	# Explicit, type-safe error handling
+	user = match find_user(42):
+		NotFound: "unknown"
+		u: u
 
- print(f"{greeting}, {name} → {user}")
+	print(greeting + ", " + name + " → " + user)
 ```
 
 **Visible Progress:** Ryo v0.1.0 is production-ready!
@@ -2551,15 +2549,15 @@ fn main():
   
   task.scope |s|:
    # Spawn workers
-   for _ in range(4):
+   for _ in range(0, 4):
     s.spawn(fn(): worker(rx_in.clone(), tx_out.clone()))
    
    # Send work
-   for i in range(100):
+   for i in range(0, 100):
     tx_in.send(i)
    
    # Collect results
-   for _ in range(100):
+   for _ in range(0, 100):
     result = rx_out.recv()
     print(result)
  )
@@ -3400,6 +3398,6 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 o
 
 ## References
 
-- Spec: `docs/specification.md` — canonical language specification; this roadmap schedules its delivery
-- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [middle_end_refactor.md](middle_end_refactor.md) — implementation plans linked from milestones
+- Spec: [specification.md](../specification.md) — canonical language specification; this roadmap schedules its delivery
+- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md) — implementation plans linked from milestones
 - Milestone: alpha milestones tagged `[alpha]` inline; see [alpha_scope.md](alpha_scope.md) for the alpha delivery slice

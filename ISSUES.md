@@ -81,34 +81,6 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** Each branch of an if/elif/else creates a child scope. Variables declared inside a branch are dropped when the branch scope ends. There is no "variable promotion" — even if all branches declare `x: int`, `x` is not available after the if statement. This is the correct scoping semantics for now, but may surprise users expecting Python-style scoping where if-branches don't create a new scope.
 **Resolution:** This is intentional for M8b. If user feedback requests Python-style flat scoping, revisit as a language design decision (requires approval per CLAUDE.md escalation rules).
 
-### I-059 — `__ryo_panic` borrowed-scalar ABI is recognised by name-string match in ownership pass
-
-**Files:** `ryo-frontend/src/ownership.rs` (Call arm of `visit_expr`), `ryo-backend/src/codegen.rs` (`emit_frees`)
-**Summary:** The ownership pass excludes `__ryo_panic`'s `StrConst` argument from `temp_owners` by string-comparing `pool.str(view.name) == "__ryo_panic"`, retroactively undoing the insert that the `StrConst` arm just performed. Codegen carries the partner tripwire — a hard `Err("...See I-057.")` when a `Scalar`-cached target reaches `emit_frees`. The next callee that wants the borrowed-scalar ABI (or any future ABI variant) will need a second name-string match, growing this into a list. Folds with I-048 (per-arg call convention in TIR).
-**Resolution:** Carry the ABI shape on the callee record. The same registry that decides "borrowed-scalar" in codegen should expose `is_borrowed_scalar_param(name, idx) -> bool` (or, better, populate per-arg `ParamMode` on TIR `Call` per I-048) so ownership asks the registry instead of name-matching. The downstream codegen tripwire becomes a `debug_assert!` once the upstream classification is robust.
-
-### I-060 — `rebind_to_init` resurrects consumed-temp lattice state, forcing a `named_owners` filter at function exit
-
-**Files:** `ryo-frontend/src/ownership.rs` (`rebind_to_init`, anonymous-temp Free pass in `analyze_function`)
-**Summary:** After `consume_for_assignment` stamps a `StrConst`/`StrConcat` temp `Moved`, `rebind_to_init` resurrects the same `TirRef`'s state to `Valid` so subsequent reads of the new binding succeed. Consequence: the function-exit anonymous-temp Free pass cannot use `Valid`-state alone to decide which temps need a Free — it must filter by `named_owners` first to skip rebound temps (whose Free is already covered by the last-use pass). The load-bearing comment at the filter explicitly flags this. An entire `named_owners: HashSet<TirRef>` field exists on `Ownership` solely to undo the lattice corruption that `rebind_to_init` introduces.
-**Resolution:** Either (a) `rebind_to_init` mints a fresh post-rebind owner ref (or leaves the consumed temp `Moved` and tracks the new owner via a separate map), so `Valid`-state becomes a sound classifier and `named_owners` can disappear; or (b) document the invariant tightly and keep the current shape. Track alongside I-049 — both touch the owner identity model.
-
-### I-061 — Ownership branch / loop analysis deep-clones the full `Ownership` struct per arm
-
-**Files:** `ryo-frontend/src/ownership.rs` (`analyze_if_stmt`, `analyze_while_loop`, `analyze_for_range`)
-**Summary:** For an if with N arms, `analyze_if_stmt` does N+2 deep clones of the entire `Ownership` value (states, current_owner, origin, temp_owners, named_owners, owner_at_read, pending_dead_store, next_branch_id). The union-only fields (`temp_owners`, `named_owners`, `owner_at_read`, `next_branch_id`) don't need to be saved/restored — they're additively merged after the arms walk. Loop helpers do the same plus a re-walk on non-convergence. Cost scales with nesting × function size, and grew when M8.1c added the four extra fields.
-**Resolution:** Snapshot only the fields that branches mutate non-monotonically (`states`, `current_owner`, `pending_dead_store`). Union-only fields stay live through the arms and are merged by retention. Folds with I-051 (loop helper extraction) — the snapshot/restore shape is shared.
-
-### I-067 — `schedule_break_continue_frees` defensive pre-loop emit fires on `continue` jumps
-
-**Files:** `ryo-frontend/src/ownership.rs` (`schedule_break_continue_frees`, "defensive emit" branch)
-**Summary:** The pre-loop owner branch's "no Free anywhere → emit defensively" backstop is intended to cover future producers that bypass last-use AND dead-store passes. Today no producer triggers it. But the branch fires uniformly on `break` AND `continue` jumps — and freeing a pre-loop owner on `continue` is precisely the use-after-free hazard the surrounding code documents (the next iteration would re-read the freed buffer). The earlier `is_break && free_inside_loop` clause guards the `break`-on-pre-loop case correctly; the trailing defensive emit does not have a symmetric `continue` guard.
-**Resolution:** Either (a) gate the defensive emit on `is_break` so it never fires on `continue`, accepting that a future producer hitting both passes' blind spot would leak rather than UAF on continue; or (b) when the first such producer lands, encode the path-relative liveness in the lattice merge so this hand-rolled jump-kind reasoning disappears (folds with the broader altitude concern). (a) is a one-line change today and removes the latent UAF; (b) is the principled long-term direction.
-
----
-
-## 🟢 Cleanup
-
 ### I-011 — Manual error enum where `thiserror` would suffice
 
 **Files:** `ryo-core/src/errors.rs` (33 lines)
@@ -262,30 +234,6 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Files:** `ryo-core/src/uir.rs` (`UirParam`), `ryo-frontend/src/astgen.rs`, `ryo-frontend/src/sema.rs`
 **Summary:** `is_move` is threaded lexer → parser → AST → UIR → TIR. The UIR copy is never read: astgen propagates the AST flag in, sema reads it back out into `TirParam`, and no UIR pass inspects it. UIR is structural lowering with no semantic meaning, so `UirParam::is_move` is dead weight that exists only to bridge two layers it shouldn't.
 **Resolution:** Drop `UirParam::is_move`. Sema can read the flag straight from the AST `FuncBody` (or via a side-channel keyed by FuncBody) when it constructs `TirParam`. Wait until any other UIR-level pass needs the flag before re-introducing it.
-
-### I-048 — Ownership pass looks up call conventions by name at every Call site
-
-**Files:** `ryo-frontend/src/ownership.rs` (`visit_expr` Call arm), `ryo-frontend/src/sema.rs`
-**Summary:** For every `Call` instruction, the ownership walker rebuilds a `by_name: HashMap<StringId, &Tir>` over all functions and indexes `params[i].is_move` to decide whether each arg should consume or borrow. The map is threaded through nine functions, and builtins need a special "no entry → all borrow" branch. Sema already knows the callee signature when it lowers the call; encoding the per-arg convention into TIR there would let ownership read it directly.
-**Resolution:** Add an `arg_modes: ExtraRange` (or a per-arg `ParamMode` enum) alongside `args` in the TIR `Call` view, populated by sema. Ownership then reads `tir.call_view(r).arg_modes[i]` and the `by_name` plumbing disappears. Builtins become uniform (sema stamps `Borrow` for them). Also gives a place to put future indirect-call / fn-pointer conventions.
-
-### I-049 — `synthetic_param_ref` encoding is informal; model `Owner` as an enum
-
-**Files:** `ryo-frontend/src/ownership.rs` (`synthetic_param_ref`, `Ownership::states`/`origin`)
-**Summary:** Parameters live in the same `states: HashMap<TirRef, OwnerState>` as instruction refs by encoding their key as `u32::MAX - name.raw()`. Correctness depends on real per-function `TirRef`s never approaching `u32::MAX/2` and on `name.raw()` never being zero — neither asserted, both relying on convention. A future change to either `TirRef` numbering or `StringId` interning silently breaks the assumption. Cleaner shape: model owners as an explicit `enum Owner { Param(StringId), Inst(TirRef) }` and key the lattice maps on `Owner`.
-**Resolution:** Introduce `Owner` and migrate `Ownership::states`/`origin`/`pending_dead_store` and `current_owner` value types over to it. Drops the `synthetic_param_ref` helper, the implicit numbering coupling, and gives a clean place to add `Owner::Borrow(...)` once real borrow expressions land.
-
-### I-050 — Var-arm holds UAM detection; consume sites are silent by policy
-
-**Files:** `ryo-frontend/src/ownership.rs` (`visit_expr` Var arm, `consume_for_assignment`, `analyze_return`, Call arm)
-**Summary:** Use-after-move detection only fires in the `Var` arm of `visit_expr`. The four consume sites (VarDecl, Assign, Return, move-Call) all carry comments explaining why they *don't* re-emit, and the policy works only because every consumable operand currently flows through `Var`. Three reviewers (and one bug fix during M8.1b) flagged this as the wrong altitude: any future producer pattern that bypasses `Var` (e.g., a directly-passed `Call` result that was already moved upstream) silently sidesteps the check.
-**Resolution:** Invert responsibility. The consume helper becomes the single authority on UAM (it already inspects `underlying_owner` + state); the `Var` arm restricts itself to bookkeeping (origin link + dead-store clear). Pair the change with regression coverage that exercises a non-Var operand path so the new authority is observably tested.
-
-### I-051 — `analyze_while_loop` / `analyze_for_range` are 90% identical
-
-**Files:** `ryo-frontend/src/ownership.rs`
-**Summary:** After their distinct preludes (visit `cond` vs visit `start` + `end`), the bodies are byte-for-byte the same — entry snapshot, scratch-sink walk, `states_differ` check, optional re-walk, final `merge_two`. Two near-clones of a non-trivial fixed-point loop is exactly where divergence creeps in (only one gets a fix when behavior needs to change).
-**Resolution:** Extract `analyze_loop_body(tir, pool, own, sink, by_name, body: &[TirRef])` after the caller has visited the loop's prelude. Folds with I-045 (propagate-only + check pass) — both refactors touch the same bodies.
 
 ### I-053 — `OwnerState::Borrowed` is currently parameter-only
 

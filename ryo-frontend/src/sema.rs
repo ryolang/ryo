@@ -48,7 +48,7 @@
 use crate::builtins;
 use ryo_core::ast::CompoundOp;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::tir::{Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
+use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use ryo_core::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
 use std::collections::{HashMap, VecDeque};
@@ -1340,7 +1340,14 @@ fn check_call(
             return fcx.builder.unreachable(sema.pool.error_type(), span);
         }
     };
-    let _ = callee;
+    // Snapshot the callee's per-parameter move flags from its UIR
+    // body so we can stamp `ParamMode`s without holding a borrow on
+    // `sema` through the per-argument diagnostics below.
+    let callee_move_flags: Vec<bool> = sema.uir.func_bodies[callee.index()]
+        .params
+        .iter()
+        .map(|p| p.is_move)
+        .collect();
 
     let sig = sema
         .signatures
@@ -1351,6 +1358,24 @@ fn check_call(
     // borrow on `sema` before emitting per-argument diagnostics.
     let expected: Vec<TypeId> = sig.params.clone();
     let return_type = sig.return_type;
+    // One mode per call-site argument, stamped from the callee
+    // signature's `is_move` flags. When the arity mismatches we
+    // fall back to all-Borrow over the actual argument count so the
+    // encoded payload stays well-formed on the error path.
+    let modes: Vec<ParamMode> = if view.args.len() == callee_move_flags.len() {
+        callee_move_flags
+            .iter()
+            .map(|&is_move| {
+                if is_move {
+                    ParamMode::Move
+                } else {
+                    ParamMode::Borrow
+                }
+            })
+            .collect()
+    } else {
+        vec![ParamMode::Borrow; view.args.len()]
+    };
 
     if view.args.len() != expected.len() {
         sema.sink.emit(Diag::error(
@@ -1387,7 +1412,8 @@ fn check_call(
             }
         }
     }
-    fcx.builder.call(name_id, arg_tirs, return_type, span)
+    fcx.builder
+        .call(name_id, arg_tirs, &modes, return_type, span)
 }
 
 /// Front-end validation for builtin calls.
@@ -1401,13 +1427,16 @@ fn emit_builtin_call(
     builtin: &'static crate::builtins::BuiltinFunction,
 ) -> TirRef {
     let name = sema.pool.str(view.name);
+    // Builtins never take ownership of their arguments — every arg
+    // is borrowed regardless of declared type.
+    let modes = vec![ParamMode::Borrow; arg_tirs.len()];
     match name {
         "print" => {
             if !check_print_args(sema, fcx, view, arg_tirs, span) {
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         "panic" => emit_panic(sema, fcx, view, span),
         "assert" => emit_assert(sema, fcx, view, arg_tirs, span),
@@ -1439,7 +1468,7 @@ fn emit_builtin_call(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         "float_to_str" => {
             if view.args.len() != 1 {
@@ -1469,7 +1498,7 @@ fn emit_builtin_call(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         "bool_to_str" => {
             if view.args.len() != 1 {
@@ -1499,11 +1528,11 @@ fn emit_builtin_call(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         _ => {
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, ret_ty, span)
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
     }
 }
@@ -1616,8 +1645,13 @@ fn build_panic_call(
     let str_ref = fcx.builder.str_const(formatted_id, sema.pool.str_(), span);
     let len_ref = fcx.builder.int_const(msg_len, sema.pool.int(), span);
     let panic_name = sema.pool.intern_str("__ryo_panic");
-    fcx.builder
-        .call(panic_name, &[str_ref, len_ref], sema.pool.never(), span)
+    fcx.builder.call(
+        panic_name,
+        &[str_ref, len_ref],
+        &[ParamMode::Borrow, ParamMode::Borrow],
+        sema.pool.never(),
+        span,
+    )
 }
 
 fn check_print_args(
