@@ -1,3 +1,7 @@
+# Critical
+
+Be brief.
+
 # Ryo Programming Language - Repository Conventions
 
 **Ryo** is a pre-alpha statically-typed, compiled (AOT/JIT) programming language implemented in Rust. See README.md for language philosophy and design goals.
@@ -52,7 +56,7 @@ Standard cargo commands work fully out-of-the-box (even on a clean checkout) bec
 cargo build                      # Automatically builds the runtime (if missing) and then compiles the compiler
 cargo check                      # Check compiler for errors
 cargo test                       # Run all unit + integration tests
-./run_linux_tests.sh             # Build Docker image and run entire test suite in Linux (ASan + Valgrind leak detection)
+./scripts/run_linux_tests.sh             # Build Docker image and run entire test suite in Linux (ASan + Valgrind leak detection)
 cargo run -- run <file>          # JIT compile and execute
 cargo run -- build <file>        # AOT compile to binary
 cargo run -- toolchain install   # Download Zig linker
