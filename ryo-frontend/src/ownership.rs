@@ -82,7 +82,11 @@ impl Owner {
         match self {
             Owner::Inst(r) => r,
             Owner::Param(name) => {
-                let idx = tir.params.iter().position(|p| p.name == name).expect("param exists");
+                let idx = tir
+                    .params
+                    .iter()
+                    .position(|p| p.name == name)
+                    .expect("param exists");
                 TirRef::from_raw(u32::MAX - idx as u32)
             }
         }
@@ -442,7 +446,11 @@ fn analyze_function(
             }
             Owner::Param(name) => {
                 if let Some(&after) = body_stmts.last() {
-                    let idx = tir.params.iter().position(|p| p.name == *name).expect("param exists");
+                    let idx = tir
+                        .params
+                        .iter()
+                        .position(|p| p.name == *name)
+                        .expect("param exists");
                     sidecar.free_schedule.push(FreePoint {
                         after,
                         target: owner.tirref(tir),
@@ -1014,7 +1022,11 @@ fn analyze_if_stmt(
         let is_tracked = match owner {
             Owner::Inst(_) => true,
             Owner::Param(name) => {
-                let idx = tir.params.iter().position(|p| p.name == name).expect("param exists");
+                let idx = tir
+                    .params
+                    .iter()
+                    .position(|p| p.name == name)
+                    .expect("param exists");
                 needs_tracking(tir.params[idx].ty, pool)
             }
         };
@@ -1034,7 +1046,11 @@ fn analyze_if_stmt(
                 let span = match owner {
                     Owner::Inst(r) => tir.span(r),
                     Owner::Param(name) => {
-                        let idx = tir.params.iter().position(|p| p.name == name).expect("param exists");
+                        let idx = tir
+                            .params
+                            .iter()
+                            .position(|p| p.name == name)
+                            .expect("param exists");
                         tir.params[idx].span
                     }
                 };
@@ -3091,7 +3107,11 @@ mod tests {
         let sc = sidecar.functions.remove(&consume).expect("sidecar");
 
         let virtual_ref = TirRef::from_raw(u32::MAX);
-        let fp = sc.free_schedule.iter().find(|fp| fp.target == virtual_ref).expect("free scheduled");
+        let fp = sc
+            .free_schedule
+            .iter()
+            .find(|fp| fp.target == virtual_ref)
+            .expect("free scheduled");
         assert_eq!(fp.after, ret);
     }
 
@@ -3136,14 +3156,7 @@ mod tests {
         let s_val_else = tb.var(s_name, str_ty, span);
         let call_else = tb.call(take, &[s_val_else], &[ParamMode::Borrow], void, span);
 
-        let if_stmt = tb.if_stmt(
-            cond_val,
-            &[call_then],
-            &[],
-            Some(&[call_else]),
-            void,
-            span,
-        );
+        let if_stmt = tb.if_stmt(cond_val, &[call_then], &[], Some(&[call_else]), void, span);
 
         let tir = tb.finish(&[if_stmt]);
         let mut sink = DiagSink::new();
