@@ -21,6 +21,7 @@
 //!
 //! See `docs/dev/mojo_reference.md`.
 
+use crate::builtins::is_borrowed_scalar_param;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 pub use ryo_core::ownership::{
     BranchId, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
@@ -1631,16 +1632,20 @@ fn visit_expr(
                 own.temp_owners.insert(Owner::Inst(r));
             }
             let view = tir.call_view(r);
-            // `__ryo_panic` is the only callee using the borrowed-scalar ABI
-            // today: codegen passes its StrConst arg's raw .rodata pointer
-            // with cap=0 and never owns the buffer. Exclude direct StrConst
-            // args from `temp_owners` so the anonymous-temp Free pass does
-            // not schedule a (silently no-op, then post-I-057 hard-error)
-            // Free for them. See I-057.
-            let is_borrowed_scalar_callee = pool.str(view.name) == "__ryo_panic";
+            // A callee using the borrowed-scalar ABI (today only
+            // `__ryo_panic`, per the `builtins` ABI registry) passes a
+            // direct StrConst arg's raw .rodata pointer with cap=0 and
+            // never owns the buffer. Exclude such args from
+            // `temp_owners` so the anonymous-temp Free pass does not
+            // schedule a (silently no-op, then post-I-057 hard-error)
+            // Free for them. The check is per-(arg, idx) via the
+            // registry rather than a whole-callee name-match. See
+            // I-057/I-059.
             for (i, arg) in view.args.iter().enumerate() {
                 visit_expr(tir, pool, own, sink, sidecar, *arg);
-                if is_borrowed_scalar_callee && matches!(tir.inst(*arg).tag, TirTag::StrConst) {
+                if is_borrowed_scalar_param(view.name, pool, i)
+                    && matches!(tir.inst(*arg).tag, TirTag::StrConst)
+                {
                     // Undo the temp_owners insertion seeded by visit_expr's
                     // StrConst arm. `states`, `origin`, and `owner_at_read`
                     // entries are harmless to leave populated — only
@@ -1842,13 +1847,14 @@ mod tests {
     }
 
     #[test]
-    fn ryo_panic_str_arg_is_not_temp_owner() {
-        // Regression test for I-057. The StrConst arg of `__ryo_panic`
+    fn ryo_panic_str_arg_excluded_via_abi_registry() {
+        // Regression test for I-057/I-059. The StrConst arg of `__ryo_panic`
         // uses the borrowed-scalar ABI in codegen — codegen passes the
-        // raw .rodata pointer with cap=0 and never owns the buffer.
-        // The ownership pass must therefore exclude it from
-        // `temp_owners` so the anonymous-temp Free pass does not
-        // schedule a Free for it.
+        // raw .rodata pointer with cap=0 and never owns the buffer. The
+        // ownership pass excludes it from `temp_owners` by consulting the
+        // `builtins` ABI registry (`is_borrowed_scalar_param`) rather than
+        // a `pool.str(name) == "__ryo_panic"` name-match, so the
+        // anonymous-temp Free pass does not schedule a Free for it.
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::TirBuilder;
 
@@ -1887,6 +1893,18 @@ mod tests {
             sidecar.free_schedule.iter().all(|fp| fp.target != str_arg),
             "expected no scheduled Free for __ryo_panic's StrConst arg, got: {:?}",
             sidecar.free_schedule
+        );
+
+        // I-059: the exclusion is driven by the ABI registry. `__ryo_panic`
+        // passes param 0 (the message) via the borrowed-scalar ABI, but not
+        // param 1 (the length) or any out-of-range index.
+        assert!(
+            is_borrowed_scalar_param(panic_name, &pool, 0),
+            "__ryo_panic param 0 must be flagged borrowed-scalar by the registry"
+        );
+        assert!(
+            !is_borrowed_scalar_param(panic_name, &pool, 1),
+            "__ryo_panic param 1 must not be flagged borrowed-scalar"
         );
     }
 

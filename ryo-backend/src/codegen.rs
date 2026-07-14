@@ -1395,8 +1395,9 @@ impl<M: Module> Codegen<M> {
     /// Given the already-filtered `(free_schedule index, target)`
     /// pairs, declare `ryo_str_free` and emit one call per pair, marking
     /// each index as fired in `ctx.freed_at`. A `Scalar`-cached target
-    /// is hard-errored with an I-057 pointer (the borrowed-scalar ABI is
-    /// supposed to keep such args out of `temp_owners`).
+    /// (borrowed-scalar ABI, never heap-owned) trips a `debug_assert!` and
+    /// is skipped rather than aborting codegen — the ABI registry is
+    /// supposed to keep such args out of `temp_owners`. See I-057/I-059.
     fn emit_frees(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1419,12 +1420,13 @@ impl<M: Module> Codegen<M> {
                     builder.ins().call(free_ref, &[ptr, cap]);
                 }
                 ValueRepr::Scalar(_) => {
-                    return Err(format!(
-                        "ownership pass scheduled Free for borrowed-scalar value %{} \
-                         (target of borrowed-scalar ABI, not heap-owned). \
-                         This indicates an ownership-pass bug. See I-057.",
+                    debug_assert!(
+                        false,
+                        "ownership pass scheduled Free for borrowed-scalar value %{}; \
+                         the ABI registry should have excluded it. See I-057/I-059.",
                         target.index()
-                    ));
+                    );
+                    continue; // skip rather than abort codegen
                 }
             }
         }
