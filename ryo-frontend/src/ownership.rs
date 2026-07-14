@@ -896,7 +896,9 @@ fn analyze_if_stmt(
         },
     );
 
-    let snapshot = own.clone();
+    let snap_states = own.states.clone();
+    let snap_current_owner = own.current_owner.clone();
+    let snap_pending_dead_store = own.pending_dead_store.clone();
 
     for stmt in &view.then_stmts {
         analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
@@ -905,7 +907,10 @@ fn analyze_if_stmt(
 
     let mut branch_results = vec![then_state];
     for elif in &view.elif_branches {
-        *own = snapshot.clone();
+        own.states = snap_states.clone();
+        own.current_owner = snap_current_owner.clone();
+        own.pending_dead_store = snap_pending_dead_store.clone();
+
         visit_expr(tir, pool, own, sink, sidecar, elif.cond);
         for stmt in &elif.body {
             analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
@@ -914,13 +919,20 @@ fn analyze_if_stmt(
     }
 
     if let Some(else_stmts) = &view.else_stmts {
-        *own = snapshot.clone();
+        own.states = snap_states.clone();
+        own.current_owner = snap_current_owner.clone();
+        own.pending_dead_store = snap_pending_dead_store.clone();
+
         for stmt in else_stmts {
             analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
         }
         branch_results.push(own.clone());
     } else {
-        branch_results.push(snapshot.clone());
+        let mut else_snap = own.clone();
+        else_snap.states = snap_states.clone();
+        else_snap.current_owner = snap_current_owner.clone();
+        else_snap.pending_dead_store = snap_pending_dead_store.clone();
+        branch_results.push(else_snap);
     }
 
     // Schedule branch-gated Frees for owners that diverge across
@@ -995,11 +1007,83 @@ fn analyze_if_stmt(
         }
     }
 
-    // Final restore: `snapshot` has no further uses, so move instead
-    // of clone.
-    *own = snapshot;
+    // Final restore: restore only the non-monotone fields.
+    own.states = snap_states;
+    own.current_owner = snap_current_owner;
+    own.pending_dead_store = snap_pending_dead_store;
     let refs: Vec<&Ownership> = branch_results.iter().collect();
     own.merge_branches(&refs);
+}
+
+/// Shared loop-body fixed-point (I-051). Caller has already visited the
+/// prelude (cond / start+end). Walks the body once into a scratch sink,
+/// compares entry vs post-body Moved-ness, and either replays (converged)
+/// or re-walks from the merged state against the real sink.
+fn analyze_loop_body(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    sidecar: &mut FunctionSidecar,
+    body: &[TirRef],
+) {
+    // I-061: snapshot ONLY the non-monotone fields (see Step 2).
+    let snap_states = own.states.clone();
+    let snap_current_owner = own.current_owner.clone();
+    let snap_pending_dead_store = own.pending_dead_store.clone();
+
+    let mut scratch = DiagSink::new();
+    for stmt in body {
+        analyze_stmt(tir, pool, own, &mut scratch, sidecar, *stmt);
+    }
+    let after = (
+        own.states.clone(),
+        own.current_owner.clone(),
+        own.pending_dead_store.clone(),
+    );
+
+    if states_differ_snapshot(&snap_states, &after.0) {
+        // merge the non-monotone fields and re-walk against the real sink
+        merge_non_monotone(
+            own,
+            &snap_states,
+            &after.0,
+            &snap_current_owner,
+            &after.1,
+            &snap_pending_dead_store,
+            &after.2,
+        );
+        for stmt in body {
+            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
+        }
+        // final merge with entry
+        let own_states_clone = own.states.clone();
+        let own_current_owner_clone = own.current_owner.clone();
+        let own_pending_dead_store_clone = own.pending_dead_store.clone();
+        merge_non_monotone(
+            own,
+            &snap_states,
+            &own_states_clone,
+            &snap_current_owner,
+            &own_current_owner_clone,
+            &snap_pending_dead_store,
+            &own_pending_dead_store_clone,
+        );
+    } else {
+        for d in scratch.into_diags() {
+            sink.emit(d);
+        }
+        // restore union-only fields are already live; reset non-monotone to entry-merged
+        merge_non_monotone(
+            own,
+            &snap_states,
+            &after.0,
+            &snap_current_owner,
+            &after.1,
+            &snap_pending_dead_store,
+            &after.2,
+        );
+    }
 }
 
 /// 2-pass approximation of a fixed-point ownership analysis for
@@ -1025,7 +1109,7 @@ fn analyze_if_stmt(
 /// merges (e.g., `Moved → Valid` re-entry as a real lattice transition
 /// rather than via rebinding) or iteration-count-dependent control
 /// flow inside the body, revert this to a true fixed-point loop
-/// (iterate until `states_differ` returns false).
+/// (iterate until `states_differ_snapshot` returns false).
 fn analyze_while_loop(
     tir: &Tir,
     pool: &InternPool,
@@ -1035,35 +1119,8 @@ fn analyze_while_loop(
     r: TirRef,
 ) {
     let view = tir.while_loop_view(r);
-    let entry = own.clone();
-    let sidecar_entry = sidecar.clone();
-
-    // First pass into a scratch sink — diagnostics are kept only if
-    // a single iteration suffices. If the lattice changes we re-walk
-    // and the scratch diags are dropped (the second walk re-emits
-    // anything that's still wrong).
-    let mut scratch_sink = DiagSink::new();
-    visit_expr(tir, pool, own, &mut scratch_sink, sidecar, view.cond);
-    for stmt in &view.body {
-        analyze_stmt(tir, pool, own, &mut scratch_sink, sidecar, *stmt);
-    }
-    let after_first = own.clone();
-
-    if states_differ(&entry, &after_first) {
-        *own = merge_two(&entry, &after_first);
-        *sidecar = sidecar_entry;
-        visit_expr(tir, pool, own, sink, sidecar, view.cond);
-        for stmt in &view.body {
-            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
-        }
-        let after_second = own.clone();
-        *own = merge_two(&entry, &after_second);
-    } else {
-        for d in scratch_sink.into_diags() {
-            sink.emit(d);
-        }
-        *own = merge_two(&entry, &after_first);
-    }
+    visit_expr(tir, pool, own, sink, sidecar, view.cond);
+    analyze_loop_body(tir, pool, own, sink, sidecar, &view.body);
 }
 
 /// `for i in range(start, end)` loop var is `int` (Copy), so the
@@ -1083,30 +1140,7 @@ fn analyze_for_range(
     // reads we want to record.
     visit_expr(tir, pool, own, sink, sidecar, view.start);
     visit_expr(tir, pool, own, sink, sidecar, view.end);
-
-    let entry = own.clone();
-    let sidecar_entry = sidecar.clone();
-
-    let mut scratch_sink = DiagSink::new();
-    for stmt in &view.body {
-        analyze_stmt(tir, pool, own, &mut scratch_sink, sidecar, *stmt);
-    }
-    let after_first = own.clone();
-
-    if states_differ(&entry, &after_first) {
-        *own = merge_two(&entry, &after_first);
-        *sidecar = sidecar_entry;
-        for stmt in &view.body {
-            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
-        }
-        let after_second = own.clone();
-        *own = merge_two(&entry, &after_second);
-    } else {
-        for d in scratch_sink.into_diags() {
-            sink.emit(d);
-        }
-        *own = merge_two(&entry, &after_first);
-    }
+    analyze_loop_body(tir, pool, own, sink, sidecar, &view.body);
 }
 
 /// Compare two lattices on the Moved-ness of every tracked `TirRef`.
@@ -1114,38 +1148,105 @@ fn analyze_for_range(
 /// `Valid`/`Borrowed` → `Moved` flip across the back-edge — non-Moved
 /// state changes (e.g. fresh definitions added inside the body) are
 /// loop-invariant for the use-after-move check.
-fn states_differ(a: &Ownership, b: &Ownership) -> bool {
+fn states_differ_snapshot(a: &HashMap<Owner, OwnerState>, b: &HashMap<Owner, OwnerState>) -> bool {
     // Diverge iff some TirRef is Moved in one and not the other.
     // Walk each side once and check the other's matching entry —
     // missing entries default to NotTracked, so a Moved with no
     // counterpart counts as a divergence on its own.
-    for (k, av) in &a.states {
+    for (k, av) in a {
         let a_moved = matches!(av, OwnerState::Moved { .. });
-        let b_moved = matches!(b.states.get(k), Some(OwnerState::Moved { .. }));
+        let b_moved = matches!(b.get(k), Some(OwnerState::Moved { .. }));
         if a_moved != b_moved {
             return true;
         }
     }
-    for (k, bv) in &b.states {
+    for (k, bv) in b {
         if !matches!(bv, OwnerState::Moved { .. }) {
             continue;
         }
         // Only need to catch keys exclusive to b that are Moved —
         // keys present in a were handled in the first loop.
-        if !a.states.contains_key(k) {
+        if !a.contains_key(k) {
             return true;
         }
     }
     false
 }
 
-/// Merge two lattices by reusing the existing branch-merge join: if
-/// either input has a TirRef `Moved`, the result is `Moved`. Used to
-/// seed the second pass and to compute the post-loop state.
-fn merge_two(a: &Ownership, b: &Ownership) -> Ownership {
-    let mut merged = a.clone();
-    merged.merge_branches(&[a, b]);
-    merged
+/// Merge only the non-monotone fields of two states (represented by their snapshots)
+/// into `own`'s corresponding fields, leaving the monotone fields intact.
+fn merge_non_monotone(
+    own: &mut Ownership,
+    snap_states: &HashMap<Owner, OwnerState>,
+    after_states: &HashMap<Owner, OwnerState>,
+    snap_current_owner: &HashMap<StringId, Owner>,
+    after_current_owner: &HashMap<StringId, Owner>,
+    snap_pending_dead_store: &HashMap<Owner, (StringId, Span, TirRef)>,
+    after_pending_dead_store: &HashMap<Owner, (StringId, Span, TirRef)>,
+) {
+    // 1. Merge states: any branch Moved -> Moved; otherwise first observed (snap_states) wins.
+    let mut merged_states = snap_states.clone();
+    for (r, s) in after_states {
+        merged_states
+            .entry(*r)
+            .and_modify(|cur| {
+                if !matches!(cur, OwnerState::Moved { .. }) && matches!(s, OwnerState::Moved { .. })
+                {
+                    *cur = s.clone();
+                }
+            })
+            .or_insert_with(|| s.clone());
+    }
+
+    // Binding-aware override
+    for (&name, &owner_pre) in snap_current_owner {
+        let owner_snap = owner_pre;
+        let owner_after = after_current_owner.get(&name).copied().unwrap_or(owner_pre);
+
+        let state_snap = snap_states
+            .get(&owner_snap)
+            .cloned()
+            .unwrap_or(OwnerState::NotTracked);
+        let state_after = after_states
+            .get(&owner_after)
+            .cloned()
+            .unwrap_or(OwnerState::NotTracked);
+
+        let mut merged: Option<OwnerState> = None;
+        for state_b in &[state_snap, state_after] {
+            let take = match (&merged, state_b) {
+                (None, _) => true,
+                (Some(OwnerState::Moved { .. }), _) => false,
+                (_, OwnerState::Moved { .. }) => true,
+                _ => false,
+            };
+            if take {
+                merged = Some(state_b.clone());
+            }
+        }
+        if let Some(state) = merged {
+            merged_states.insert(owner_pre, state);
+        }
+    }
+
+    // 2. Merge current_owner: first-wins via or_insert.
+    let mut merged_current_owner = snap_current_owner.clone();
+    for (&name, &owner) in after_current_owner {
+        merged_current_owner.entry(name).or_insert(owner);
+    }
+
+    // 3. Merge pending_dead_store: pre-branch keys intersect; branch-local keys union.
+    let mut merged_pending_dead_store = snap_pending_dead_store.clone();
+    merged_pending_dead_store.retain(|k, _| after_pending_dead_store.contains_key(k));
+    for (k, v) in after_pending_dead_store {
+        if !snap_pending_dead_store.contains_key(k) {
+            merged_pending_dead_store.insert(*k, *v);
+        }
+    }
+
+    own.states = merged_states;
+    own.current_owner = merged_current_owner;
+    own.pending_dead_store = merged_pending_dead_store;
 }
 
 /// For every Move-typed owner that has at least one `Var` read,
@@ -2955,11 +3056,13 @@ mod tests {
         // post-I-050 the consume site (consume_underlying) is the authority
         // and must emit exactly once.
         use chumsky::span::{SimpleSpan, Span as _};
-        use ryo_core::tir::{TirBuilder, ParamMode};
+        use ryo_core::tir::{ParamMode, TirBuilder};
         let mut pool = InternPool::new();
-        let str_ty = pool.str_(); let void = pool.void();
+        let str_ty = pool.str_();
+        let void = pool.void();
         let main = pool.intern_str("main");
-        let x = pool.intern_str("x"); let take = pool.intern_str("take");
+        let x = pool.intern_str("x");
+        let take = pool.intern_str("take");
         let span = SimpleSpan::new((), 0..0);
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
@@ -2971,8 +3074,11 @@ mod tests {
         let tir = tb.finish(&[decl, take1, take2]);
         let mut sink = DiagSink::new();
         let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let uam = sink.into_diags().iter()
-            .filter(|d| matches!(d.code, DiagCode::UseAfterMove)).count();
+        let uam = sink
+            .into_diags()
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::UseAfterMove))
+            .count();
         assert_eq!(uam, 1, "double-consume reports UAM exactly once; got {uam}");
     }
 
@@ -2981,11 +3087,14 @@ mod tests {
         // print(moved_x) — borrow of a moved value, no consume. After the
         // Var arm is demoted, the borrow-arg check_use_moved must still fire.
         use chumsky::span::{SimpleSpan, Span as _};
-        use ryo_core::tir::{TirBuilder, ParamMode};
+        use ryo_core::tir::{ParamMode, TirBuilder};
         let mut pool = InternPool::new();
-        let str_ty = pool.str_(); let void = pool.void();
-        let main = pool.intern_str("main"); let x = pool.intern_str("x");
-        let take = pool.intern_str("take"); let print = pool.intern_str("print");
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let x = pool.intern_str("x");
+        let take = pool.intern_str("take");
+        let print = pool.intern_str("print");
         let span = SimpleSpan::new((), 0..0);
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
@@ -2998,7 +3107,99 @@ mod tests {
         let mut sink = DiagSink::new();
         let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
         let diags = sink.into_diags();
-        assert!(diags.iter().any(|d| matches!(d.code, DiagCode::UseAfterMove)),
-            "borrow of moved value must still report E0020 via borrow-arg path; got {diags:?}");
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::UseAfterMove)),
+            "borrow of moved value must still report E0020 via borrow-arg path; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn three_arm_if_with_conditional_move_and_loop_rebind() {
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        use std::collections::HashSet;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let x = pool.intern_str("x");
+        let s = pool.intern_str("s");
+        let take = pool.intern_str("take");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_v = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let decl_x = tb.var_decl(x, false, str_ty, lit_v, span);
+
+        let lit_mut = tb.str_const(pool.intern_str("initial"), str_ty, span);
+        let decl_mut = tb.var_decl(s, true, str_ty, lit_mut, span);
+
+        let cond_then = tb.bool_const(true, bool_ty, span);
+        let read_then = tb.var(x, str_ty, span);
+        let call_then = tb.call(print, &[read_then], &[ParamMode::Borrow], void, span);
+
+        let cond_elif = tb.bool_const(false, bool_ty, span);
+        let read_elif = tb.var(x, str_ty, span);
+        let call_elif = tb.call(take, &[read_elif], &[ParamMode::Move], void, span);
+
+        let read_else = tb.var(x, str_ty, span);
+        let call_else = tb.call(print, &[read_else], &[ParamMode::Borrow], void, span);
+
+        let if_stmt = tb.if_stmt(
+            cond_then,
+            &[call_then],
+            &[(cond_elif, vec![call_elif])],
+            Some(&[call_else]),
+            void,
+            span,
+        );
+
+        let cond_w = tb.bool_const(false, bool_ty, span);
+        let body_lit = tb.str_const(pool.intern_str("new_val"), str_ty, span);
+        let body_assign = tb.assign(s, str_ty, body_lit, span);
+        let wl = tb.while_loop(cond_w, &[body_assign], void, span);
+
+        let read_post = tb.var(x, str_ty, span);
+        let call_post = tb.call(print, &[read_post], &[ParamMode::Borrow], void, span);
+
+        let tir = tb.finish(&[decl_x, decl_mut, if_stmt, wl, call_post]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        // (a) Assert no next_branch_id collision in sidecar.if_branches
+        let mut ids = HashSet::new();
+        for ib in sidecar.if_branches.values() {
+            assert!(
+                ids.insert(ib.then_branch.0),
+                "duplicate branch id {}",
+                ib.then_branch.0
+            );
+            for b in &ib.elif_branches {
+                assert!(ids.insert(b.0), "duplicate branch id {}", b.0);
+            }
+            if let Some(b) = ib.else_branch {
+                assert!(ids.insert(b.0), "duplicate branch id {}", b.0);
+            }
+        }
+
+        // (b) Assert a post-if read of the conditionally-moved binding emits exactly one DiagCode::UseAfterMove
+        let uam = sink
+            .into_diags()
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::UseAfterMove))
+            .count();
+        assert_eq!(
+            uam, 1,
+            "post-if read of conditionally-moved binding must report UAM exactly once; got {uam}"
+        );
     }
 }
