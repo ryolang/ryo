@@ -243,7 +243,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::UseAfterMove => "E0020",
         DiagCode::MoveOutOfBorrowedParam => "E0021",
         DiagCode::ReturnBorrowedValue => "E0022",
-        DiagCode::MoveWhileBorrowedInCall => "E0023",
+        DiagCode::MoveWhileBorrowedInCall => "E0031",
         DiagCode::DeadStore => "W0001",
         DiagCode::CycleInResolution => "E0016",
         DiagCode::ParseError => "E0100",

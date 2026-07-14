@@ -77,6 +77,16 @@ impl Owner {
             Owner::Param(_) => None,
         }
     }
+
+    pub(crate) fn tirref(self, tir: &Tir) -> TirRef {
+        match self {
+            Owner::Inst(r) => r,
+            Owner::Param(name) => {
+                let idx = tir.params.iter().position(|p| p.name == name).expect("param exists");
+                TirRef::from_raw(u32::MAX - idx as u32)
+            }
+        }
+    }
 }
 
 /// Per-function ownership state. `states` is the lattice itself,
@@ -416,21 +426,32 @@ fn analyze_function(
         if !matches!(state, OwnerState::Valid) {
             continue;
         }
-        if owner.inst_tirref().is_none() {
-            continue;
+        match owner {
+            Owner::Inst(r) => {
+                if reassign_targets.contains(owner) {
+                    continue;
+                }
+                if let Some(&after) = last_use.get(r) {
+                    sidecar.free_schedule.push(FreePoint {
+                        after,
+                        target: *r,
+                        span: tir.span(*r),
+                        branch: None,
+                    });
+                }
+            }
+            Owner::Param(name) => {
+                if let Some(&after) = body_stmts.last() {
+                    let idx = tir.params.iter().position(|p| p.name == *name).expect("param exists");
+                    sidecar.free_schedule.push(FreePoint {
+                        after,
+                        target: owner.tirref(tir),
+                        span: tir.params[idx].span,
+                        branch: None,
+                    });
+                }
+            }
         }
-        if reassign_targets.contains(owner) {
-            continue;
-        }
-        if let Some(&after) = last_use.get(&owner.inst_tirref().unwrap()) {
-            sidecar.free_schedule.push(FreePoint {
-                after,
-                target: owner.inst_tirref().unwrap(),
-                span: tir.span(owner.inst_tirref().unwrap()),
-                branch: None,
-            });
-        }
-        // Owners with no last_use are dead stores — handled in Task 5.
     }
 
     // Anonymous-temporary frees: temp_owners still Valid at function
@@ -990,7 +1011,14 @@ fn analyze_if_stmt(
         .flat_map(|a| a.state.states.keys().copied())
         .collect();
     for owner in all_keys {
-        if owner.inst_tirref().is_none() {
+        let is_tracked = match owner {
+            Owner::Inst(_) => true,
+            Owner::Param(name) => {
+                let idx = tir.params.iter().position(|p| p.name == name).expect("param exists");
+                needs_tracking(tir.params[idx].ty, pool)
+            }
+        };
+        if !is_tracked {
             continue;
         }
         let any_moved = arms
@@ -1003,10 +1031,17 @@ fn analyze_if_stmt(
             if matches!(arm.state.states.get(&owner), Some(OwnerState::Valid))
                 && let Some(after) = arm.last_stmt
             {
+                let span = match owner {
+                    Owner::Inst(r) => tir.span(r),
+                    Owner::Param(name) => {
+                        let idx = tir.params.iter().position(|p| p.name == name).expect("param exists");
+                        tir.params[idx].span
+                    }
+                };
                 sidecar.free_schedule.push(FreePoint {
                     after,
-                    target: owner.inst_tirref().unwrap(),
-                    span: tir.span(owner.inst_tirref().unwrap()),
+                    target: owner.tirref(tir),
+                    span,
                     branch: Some(arm.branch_id),
                 });
             }
@@ -3028,6 +3063,104 @@ mod tests {
     }
 
     #[test]
+    fn unconsumed_move_param_schedules_free_at_function_end() {
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let consume = pool.intern_str("consume"); // fn consume(move s: str) -> void
+        let s_name = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            consume,
+            vec![TirParam {
+                name: s_name,
+                ty: str_ty,
+                is_move: true,
+                span,
+            }],
+            void,
+            span,
+        );
+        // Just return, do not consume `s`.
+        let ret = tb.return_void(void, span);
+        let tir = tb.finish(&[ret]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&consume).expect("sidecar");
+
+        let virtual_ref = TirRef::from_raw(u32::MAX);
+        let fp = sc.free_schedule.iter().find(|fp| fp.target == virtual_ref).expect("free scheduled");
+        assert_eq!(fp.after, ret);
+    }
+
+    #[test]
+    fn conditional_move_param_schedules_branch_gated_free() {
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let consume_cond = pool.intern_str("consume_cond");
+        let s_name = pool.intern_str("s");
+        let cond_name = pool.intern_str("cond");
+        let take = pool.intern_str("take");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(
+            consume_cond,
+            vec![
+                TirParam {
+                    name: s_name,
+                    ty: str_ty,
+                    is_move: true,
+                    span,
+                },
+                TirParam {
+                    name: cond_name,
+                    ty: bool_ty,
+                    is_move: false,
+                    span,
+                },
+            ],
+            void,
+            span,
+        );
+
+        let cond_val = tb.var(cond_name, bool_ty, span);
+        let s_val_then = tb.var(s_name, str_ty, span);
+        let call_then = tb.call(take, &[s_val_then], &[ParamMode::Move], void, span);
+
+        let s_val_else = tb.var(s_name, str_ty, span);
+        let call_else = tb.call(take, &[s_val_else], &[ParamMode::Borrow], void, span);
+
+        let if_stmt = tb.if_stmt(
+            cond_val,
+            &[call_then],
+            &[],
+            Some(&[call_else]),
+            void,
+            span,
+        );
+
+        let tir = tb.finish(&[if_stmt]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&consume_cond).expect("sidecar");
+
+        let virtual_ref = TirRef::from_raw(u32::MAX);
+        // We expect a branch-gated free for the parameter in the else branch!
+        let fp = sc
+            .free_schedule
+            .iter()
+            .find(|fp| fp.target == virtual_ref && fp.branch.is_some())
+            .expect("branch-gated free scheduled");
+        assert_eq!(fp.after, call_else);
+    }
+
+    #[test]
     fn rebind_then_reassign_does_not_double_free() {
         // s = "a"   (temp_a bound to s)
         // s = "b"   (reassign: free_on_reassign covers temp_a; s -> temp_b)
@@ -3394,7 +3527,7 @@ mod tests {
             .count();
         assert_eq!(
             e0023_count1, 1,
-            "Expected exactly one MoveWhileBorrowedInCall (E0023) in first-move ordering; got {diags1:?}"
+            "Expected exactly one MoveWhileBorrowedInCall (E0031) in first-move ordering; got {diags1:?}"
         );
 
         // Ordering 2: Borrow first, then Move
@@ -3413,7 +3546,7 @@ mod tests {
             .count();
         assert_eq!(
             e0023_count2, 1,
-            "Expected exactly one MoveWhileBorrowedInCall (E0023) in borrow-first ordering; got {diags2:?}"
+            "Expected exactly one MoveWhileBorrowedInCall (E0031) in borrow-first ordering; got {diags2:?}"
         );
     }
 
@@ -3504,7 +3637,7 @@ mod tests {
                 .into_diags()
                 .iter()
                 .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
-            "a single move arg must not trip E0023"
+            "a single move arg must not trip E0031"
         );
     }
 
@@ -3538,7 +3671,7 @@ mod tests {
                 .into_diags()
                 .iter()
                 .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
-            "untracked int arg must not trigger a false E0023"
+            "untracked int arg must not trigger a false E0031"
         );
     }
 
@@ -3570,7 +3703,7 @@ mod tests {
                 .into_diags()
                 .iter()
                 .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
-            "borrow and move in sequential statements must not trigger E0023"
+            "borrow and move in sequential statements must not trigger E0031"
         );
     }
 }

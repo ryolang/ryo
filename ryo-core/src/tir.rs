@@ -577,7 +577,7 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        debug_assert_eq!(
+        assert_eq!(
             modes.len(),
             args.len(),
             "TirBuilder::call: one ParamMode per arg"

@@ -515,6 +515,19 @@ impl<M: Module> Codegen<M> {
                 branch_stack: Vec::new(),
             };
 
+            for (idx, param) in tir.params.iter().enumerate() {
+                if is_str_type(param.ty, pool) {
+                    let locals = ctx.str_locals.get(&param.name).unwrap();
+                    let virtual_ref = TirRef::from_raw(u32::MAX - idx as u32);
+                    let repr = ValueRepr::Str {
+                        ptr: builder.use_var(locals.ptr),
+                        len: builder.use_var(locals.len),
+                        cap: builder.use_var(locals.cap),
+                    };
+                    ctx.inst_values.insert(virtual_ref, repr);
+                }
+            }
+
             let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
 
             if !has_return {
@@ -1420,13 +1433,10 @@ impl<M: Module> Codegen<M> {
                     builder.ins().call(free_ref, &[ptr, cap]);
                 }
                 ValueRepr::Scalar(_) => {
-                    debug_assert!(
-                        false,
-                        "ownership pass scheduled Free for borrowed-scalar value %{}; \
-                         the ABI registry should have excluded it. See I-057/I-059.",
+                    return Err(format!(
+                        "ownership pass scheduled Free for borrowed-scalar value %{}; the ABI registry should have excluded it. See I-057/I-059.",
                         target.index()
-                    );
-                    continue; // skip rather than abort codegen
+                    ));
                 }
             }
         }
