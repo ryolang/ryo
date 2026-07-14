@@ -117,6 +117,8 @@ pub enum DiagCode {
     MoveOutOfBorrowedParam,
     /// Attempted to return a borrowed value (Rule 5).
     ReturnBorrowedValue,
+    /// Attempted to move a value while it is borrowed as an argument in the same call.
+    MoveWhileBorrowedInCall,
     /// A Move-typed value is declared (or assigned) but never used.
     DeadStore,
 
