@@ -849,6 +849,13 @@ fn consumed_binding_name(tir: &Tir, r: TirRef) -> Option<StringId> {
     }
 }
 
+fn owner_name_for_diag(owner: Owner, tir: &Tir, pool: &InternPool) -> String {
+    match owner {
+        Owner::Param(name) => format!("`{}`", pool.str(name)),
+        Owner::Inst(r) => format_binding(consumed_binding_name(tir, r), pool),
+    }
+}
+
 /// CFG join for `if` / `elif` / `else`. The naïve forward walk
 /// would let a move inside a then-branch persist past the merge
 /// regardless of whether else also moved — wrong for the spec's
@@ -1756,17 +1763,16 @@ fn visit_expr(
                 own.temp_owners.insert(Owner::Inst(r));
             }
             let view = tir.call_view(r);
-            // A callee using the borrowed-scalar ABI (today only
-            // `__ryo_panic`, per the `builtins` ABI registry) passes a
-            // direct StrConst arg's raw .rodata pointer with cap=0 and
-            // never owns the buffer. Exclude such args from
-            // `temp_owners` so the anonymous-temp Free pass does not
-            // schedule a (silently no-op, then post-I-057 hard-error)
-            // Free for them. The check is per-(arg, idx) via the
-            // registry rather than a whole-callee name-match. See
-            // I-057/I-059.
-            for (i, arg) in view.args.iter().enumerate() {
+
+            // Phase 1 — materialise every arg's owner/state.
+            for arg in &view.args {
                 visit_expr(tir, pool, own, sink, sidecar, *arg);
+            }
+
+            // Phase 2 — use-safety check + borrow/move partition.
+            let mut borrowed: HashSet<Owner> = HashSet::new();
+            let mut moved: HashSet<Owner> = HashSet::new();
+            for (i, arg) in view.args.iter().enumerate() {
                 if is_borrowed_scalar_param(view.name, pool, i)
                     && matches!(tir.inst(*arg).tag, TirTag::StrConst)
                 {
@@ -1781,12 +1787,34 @@ fn visit_expr(
                 if !needs_tracking(arg_ty, pool) {
                     continue;
                 }
+                let owner = underlying_owner(own, *arg);
                 let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
-                if mode == ParamMode::Move {
+                if mode == ParamMode::Borrow {
+                    check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
+                    borrowed.insert(owner);
+                } else {
+                    moved.insert(owner);
+                }
+            }
+            // Overlap — same owner borrowed AND moved in one call.
+            for owner in borrowed.intersection(&moved) {
+                let name = owner_name_for_diag(*owner, tir, pool);
+                sink.emit(
+                    Diag::error(
+                        tir.span(r),
+                        DiagCode::MoveWhileBorrowedInCall,
+                        format!("cannot move {} while it is borrowed in the same call", name),
+                    )
+                    .with_help("borrows are live for the whole call; pass by `move` on a separate statement, or borrow in both positions")
+                );
+            }
+
+            // Phase 3 — commit the moves.
+            for (i, arg) in view.args.iter().enumerate() {
+                let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+                if mode == ParamMode::Move && needs_tracking(tir.inst(*arg).ty, pool) {
                     let consumed_name = consumed_binding_name(tir, *arg);
                     consume_for_assignment(tir, pool, own, sink, *arg, tir.span(r), consumed_name);
-                } else {
-                    check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
                 }
             }
         }
@@ -3291,6 +3319,235 @@ mod tests {
         assert_eq!(
             uam, 1,
             "post-if read of conditionally-moved binding must report UAM exactly once; got {uam}"
+        );
+    }
+
+    #[test]
+    fn move_and_borrow_of_same_owner_in_one_call_e0023_both_orderings() {
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        use ryo_core::types::TypeId;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let x = pool.intern_str("x");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+
+        fn build(
+            tir: &mut TirBuilder,
+            x: StringId,
+            str_ty: TypeId,
+            void: TypeId,
+            f: StringId,
+            first_move: bool,
+            span: Span,
+        ) -> (TirRef, TirRef, TirRef) {
+            let xv1 = tir.var(x, str_ty, span);
+            let xv2 = tir.var(x, str_ty, span);
+            let modes = if first_move {
+                vec![ParamMode::Move, ParamMode::Borrow]
+            } else {
+                vec![ParamMode::Borrow, ParamMode::Move]
+            };
+            let call = tir.call(f, &[xv1, xv2], &modes, void, span);
+            (xv1, xv2, call)
+        }
+
+        // Ordering 1: Move first, then Borrow
+        let mut tb1 = TirBuilder::new(main, vec![], void, span);
+        let lit1 = tb1.str_const(pool.intern_str("v"), str_ty, span);
+        let decl1 = tb1.var_decl(x, false, str_ty, lit1, span);
+        let (_xv1, _xv2, call1) = build(&mut tb1, x, str_ty, void, f, true, span);
+        let tir1 = tb1.finish(&[decl1, call1]);
+
+        let mut sink1 = DiagSink::new();
+        let _sc1 = check(std::slice::from_ref(&tir1), &pool, &mut sink1);
+        let diags1 = sink1.into_diags();
+        let e0023_count1 = diags1
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall))
+            .count();
+        assert_eq!(
+            e0023_count1, 1,
+            "Expected exactly one MoveWhileBorrowedInCall (E0023) in first-move ordering; got {diags1:?}"
+        );
+
+        // Ordering 2: Borrow first, then Move
+        let mut tb2 = TirBuilder::new(main, vec![], void, span);
+        let lit2 = tb2.str_const(pool.intern_str("v"), str_ty, span);
+        let decl2 = tb2.var_decl(x, false, str_ty, lit2, span);
+        let (_xv3, _xv4, call2) = build(&mut tb2, x, str_ty, void, f, false, span);
+        let tir2 = tb2.finish(&[decl2, call2]);
+
+        let mut sink2 = DiagSink::new();
+        let _sc2 = check(std::slice::from_ref(&tir2), &pool, &mut sink2);
+        let diags2 = sink2.into_diags();
+        let e0023_count2 = diags2
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall))
+            .count();
+        assert_eq!(
+            e0023_count2, 1,
+            "Expected exactly one MoveWhileBorrowedInCall (E0023) in borrow-first ordering; got {diags2:?}"
+        );
+    }
+
+    #[test]
+    fn two_borrows_of_one_owner_ok() {
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let x = pool.intern_str("x");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let decl = tb.var_decl(x, false, str_ty, lit, span);
+        let xv1 = tb.var(x, str_ty, span);
+        let xv2 = tb.var(x, str_ty, span);
+        let modes = vec![ParamMode::Borrow, ParamMode::Borrow];
+        let call = tb.call(f, &[xv1, xv2], &modes, void, span);
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
+            "two borrows of one owner is fine (Rule 7 many readers); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn borrow_and_move_of_distinct_owners_ok() {
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let a = pool.intern_str("a");
+        let b = pool.intern_str("b");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let la = tb.str_const(pool.intern_str("va"), str_ty, span);
+        let lb = tb.str_const(pool.intern_str("vb"), str_ty, span);
+        let da = tb.var_decl(a, false, str_ty, la, span);
+        let db = tb.var_decl(b, false, str_ty, lb, span);
+        let av = tb.var(a, str_ty, span);
+        let bv = tb.var(b, str_ty, span);
+        let modes = vec![ParamMode::Borrow, ParamMode::Move];
+        let call = tb.call(f, &[av, bv], &modes, void, span);
+        let tir = tb.finish(&[da, db, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            !sink
+                .into_diags()
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
+            "borrow + move of DISTINCT owners is fine"
+        );
+    }
+
+    #[test]
+    fn single_move_arg_no_e0023() {
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let x = pool.intern_str("x");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let decl = tb.var_decl(x, false, str_ty, lit, span);
+        let xv = tb.var(x, str_ty, span);
+        let call = tb.call(f, &[xv], &[ParamMode::Move], void, span);
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            !sink
+                .into_diags()
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
+            "a single move arg must not trip E0023"
+        );
+    }
+
+    #[test]
+    fn copy_args_untracked_no_false_positive() {
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let n = pool.intern_str("n");
+        let x = pool.intern_str("x");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ic = tb.int_const(1, int_ty, span);
+        let dn = tb.var_decl(n, false, int_ty, ic, span);
+        let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let dx = tb.var_decl(x, false, str_ty, lit, span);
+        let nv = tb.var(n, int_ty, span);
+        let xv = tb.var(x, str_ty, span);
+        let modes = vec![ParamMode::Borrow, ParamMode::Move];
+        let call = tb.call(f, &[nv, xv], &modes, void, span);
+        let tir = tb.finish(&[dn, dx, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            !sink
+                .into_diags()
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
+            "untracked int arg must not trigger a false E0023"
+        );
+    }
+
+    #[test]
+    fn borrow_and_move_in_sequential_statements_ok() {
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let x = pool.intern_str("x");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let decl = tb.var_decl(x, false, str_ty, lit, span);
+        // first statement: f(borrow x)
+        let xv1 = tb.var(x, str_ty, span);
+        let call1 = tb.call(f, &[xv1], &[ParamMode::Borrow], void, span);
+        // second statement: f(move x)
+        let xv2 = tb.var(x, str_ty, span);
+        let call2 = tb.call(f, &[xv2], &[ParamMode::Move], void, span);
+        let tir = tb.finish(&[decl, call1, call2]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            !sink
+                .into_diags()
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
+            "borrow and move in sequential statements must not trigger E0023"
         );
     }
 }
