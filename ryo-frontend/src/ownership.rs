@@ -87,7 +87,7 @@ impl Owner {
                     .iter()
                     .position(|p| p.name == name)
                     .expect("param exists");
-                TirRef::from_raw(u32::MAX - idx as u32)
+                TirRef::param(idx)
             }
         }
     }
@@ -3106,7 +3106,7 @@ mod tests {
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
         let sc = sidecar.functions.remove(&consume).expect("sidecar");
 
-        let virtual_ref = TirRef::from_raw(u32::MAX);
+        let virtual_ref = TirRef::param(0);
         let fp = sc
             .free_schedule
             .iter()
@@ -3163,7 +3163,7 @@ mod tests {
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
         let sc = sidecar.functions.remove(&consume_cond).expect("sidecar");
 
-        let virtual_ref = TirRef::from_raw(u32::MAX);
+        let virtual_ref = TirRef::param(0);
         // We expect a branch-gated free for the parameter in the else branch!
         let fp = sc
             .free_schedule

@@ -518,7 +518,7 @@ impl<M: Module> Codegen<M> {
             for (idx, param) in tir.params.iter().enumerate() {
                 if is_str_type(param.ty, pool) {
                     let locals = ctx.str_locals.get(&param.name).unwrap();
-                    let virtual_ref = TirRef::from_raw(u32::MAX - idx as u32);
+                    let virtual_ref = TirRef::param(idx);
                     let repr = ValueRepr::Str {
                         ptr: builder.use_var(locals.ptr),
                         len: builder.use_var(locals.len),
@@ -1408,9 +1408,9 @@ impl<M: Module> Codegen<M> {
     /// Given the already-filtered `(free_schedule index, target)`
     /// pairs, declare `ryo_str_free` and emit one call per pair, marking
     /// each index as fired in `ctx.freed_at`. A `Scalar`-cached target
-    /// (borrowed-scalar ABI, never heap-owned) trips a `debug_assert!` and
-    /// is skipped rather than aborting codegen — the ABI registry is
-    /// supposed to keep such args out of `temp_owners`. See I-057/I-059.
+    /// (borrowed-scalar ABI, never heap-owned) returns an error and aborts
+    /// code generation — the ABI registry is supposed to keep such args out
+    /// of `temp_owners`. See I-057/I-059.
     fn emit_frees(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,

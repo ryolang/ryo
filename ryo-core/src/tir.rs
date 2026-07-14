@@ -76,6 +76,10 @@ impl TirRef {
     pub fn from_raw(raw: u32) -> Self {
         TirRef(NonZeroU32::new(raw).expect("TirRef raw must be non-zero"))
     }
+
+    pub fn param(idx: usize) -> Self {
+        Self::from_raw(u32::MAX - idx as u32)
+    }
 }
 
 // ---------- ExtraRange ----------
