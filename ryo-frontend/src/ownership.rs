@@ -1799,14 +1799,36 @@ fn visit_expr(
             // Overlap — same owner borrowed AND moved in one call.
             for owner in borrowed.intersection(&moved) {
                 let name = owner_name_for_diag(*owner, tir, pool);
-                sink.emit(
-                    Diag::error(
-                        tir.span(r),
-                        DiagCode::MoveWhileBorrowedInCall,
-                        format!("cannot move {} while it is borrowed in the same call", name),
-                    )
-                    .with_help("borrows are live for the whole call; pass by `move` on a separate statement, or borrow in both positions")
+
+                // Find spans of the conflicting arguments for this owner
+                let mut borrow_span = None;
+                let mut move_span = None;
+                for (i, arg) in view.args.iter().enumerate() {
+                    if needs_tracking(tir.inst(*arg).ty, pool)
+                        && underlying_owner(own, *arg) == *owner
+                    {
+                        let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+                        if mode == ParamMode::Borrow {
+                            borrow_span = Some(tir.span(*arg));
+                        } else {
+                            move_span = Some(tir.span(*arg));
+                        }
+                    }
+                }
+
+                let mut diag = Diag::error(
+                    tir.span(r),
+                    DiagCode::MoveWhileBorrowedInCall,
+                    format!("cannot move {} while it is borrowed in the same call", name),
                 );
+                if let Some(b_span) = borrow_span {
+                    diag = diag.with_note(Some(b_span), "borrowed here");
+                }
+                if let Some(m_span) = move_span {
+                    diag = diag.with_note(Some(m_span), "moved here");
+                }
+                diag = diag.with_help("borrows are live for the whole call; pass by `move` on a separate statement, or borrow in both positions");
+                sink.emit(diag);
             }
 
             // Phase 3 — commit the moves.
