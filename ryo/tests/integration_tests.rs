@@ -3103,3 +3103,57 @@ fn branch_ids_do_not_collide_after_loop() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn test_benchmark_files_aot_compile_and_run() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+
+    // Locate the benchmark files relative to the workspace root.
+    // CARGO_MANIFEST_DIR is ryo/ package directory, so its parent is the workspace root.
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent().expect("workspace root");
+
+    let fib_file = workspace_root.join("benchmarks/fibonacci/fib.ryo");
+    let eager_file = workspace_root.join("benchmarks/eager_destruction/eager_destruction.ryo");
+
+    assert!(fib_file.exists(), "fib.ryo not found at {:?}", fib_file);
+    assert!(
+        eager_file.exists(),
+        "eager_destruction.ryo not found at {:?}",
+        eager_file
+    );
+
+    // 1. Compile and run fibonacci
+    let fib_build = run_ryo_build(&fib_file, temp_dir.path());
+    assert!(
+        fib_build.status.success(),
+        "fib.ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&fib_build.stderr)
+    );
+    let fib_exe = temp_dir.path().join("fib");
+    let fib_run = Command::new(&fib_exe)
+        .output()
+        .expect("Failed to run compiled fib");
+    assert!(
+        fib_run.status.success(),
+        "compiled fib run failed. STDERR: {}",
+        String::from_utf8_lossy(&fib_run.stderr)
+    );
+
+    // 2. Compile and run eager_destruction
+    let eager_build = run_ryo_build(&eager_file, temp_dir.path());
+    assert!(
+        eager_build.status.success(),
+        "eager_destruction.ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&eager_build.stderr)
+    );
+    let eager_exe = temp_dir.path().join("eager_destruction");
+    let eager_run = Command::new(&eager_exe)
+        .output()
+        .expect("Failed to run compiled eager_destruction");
+    assert!(
+        eager_run.status.success(),
+        "compiled eager_destruction run failed. STDERR: {}",
+        String::from_utf8_lossy(&eager_run.stderr)
+    );
+}

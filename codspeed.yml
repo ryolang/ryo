@@ -1,0 +1,5 @@
+benchmarks:
+  - name: fibonacci-aot
+    exec: ./benchmarks/fibonacci/fib
+  - name: eager-destruction-aot
+    exec: ./benchmarks/eager_destruction/eager_destruction
