@@ -131,37 +131,39 @@ fn parse_program(src: &str) -> (ryo_core::ast::Program, InternPool) {
 #[divan::bench(args = [("fizzbuzz", FIZZBUZZ), ("fibonacci", FIBONACCI)])]
 fn sema_snippet(bencher: divan::Bencher, case: (&str, &str)) {
     let src = case.1;
-    bencher.bench(|| {
-        let (program, mut pool) = parse_program(src);
-        let mut sink = ryo_core::diag::DiagSink::new();
-        let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
-        let mut sema_sink = ryo_core::diag::DiagSink::new();
-        let tirs = ryo_frontend::sema::analyze(
-            &uir,
-            &mut pool,
-            &mut sema_sink,
-            src,
-            std::path::Path::new("bench.ryo"),
-        );
-        divan::black_box(tirs);
-    });
+    bencher
+        .with_inputs(|| parse_program(src))
+        .bench_values(|(program, mut pool)| {
+            let mut sink = ryo_core::diag::DiagSink::new();
+            let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
+            let mut sema_sink = ryo_core::diag::DiagSink::new();
+            let tirs = ryo_frontend::sema::analyze(
+                &uir,
+                &mut pool,
+                &mut sema_sink,
+                src,
+                std::path::Path::new("bench.ryo"),
+            );
+            divan::black_box(tirs);
+        });
 }
 
 #[divan::bench(args = [16, 64, 256])]
 fn sema_large(bencher: divan::Bencher, functions: usize) {
     let src = large_source(functions);
-    bencher.bench(|| {
-        let (program, mut pool) = parse_program(&src);
-        let mut sink = ryo_core::diag::DiagSink::new();
-        let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
-        let mut sema_sink = ryo_core::diag::DiagSink::new();
-        let tirs = ryo_frontend::sema::analyze(
-            &uir,
-            &mut pool,
-            &mut sema_sink,
-            &src,
-            std::path::Path::new("bench.ryo"),
-        );
-        divan::black_box(tirs);
-    });
+    bencher
+        .with_inputs(|| parse_program(&src))
+        .bench_values(|(program, mut pool)| {
+            let mut sink = ryo_core::diag::DiagSink::new();
+            let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
+            let mut sema_sink = ryo_core::diag::DiagSink::new();
+            let tirs = ryo_frontend::sema::analyze(
+                &uir,
+                &mut pool,
+                &mut sema_sink,
+                &src,
+                std::path::Path::new("bench.ryo"),
+            );
+            divan::black_box(tirs);
+        });
 }
