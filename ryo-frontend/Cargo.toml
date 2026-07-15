@@ -8,3 +8,10 @@ rust-version.workspace = true
 ryo-core = { workspace = true }
 logos = { workspace = true }
 chumsky = { workspace = true }
+
+[dev-dependencies]
+divan = { version = "5.0.1", package = "codspeed-divan-compat" }
+
+[[bench]]
+name = "frontend"
+harness = false
