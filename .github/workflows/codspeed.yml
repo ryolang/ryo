@@ -68,3 +68,32 @@ jobs:
         with:
           mode: walltime
           run: codspeed run
+
+  aot-benchmarks-memory:
+    name: Run AOT Memory Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: codspeed-aot-memory
+      - name: Build Ryo compiler
+        run: cargo build --release
+      - name: Compile Ryo AOT binaries
+        run: |
+          ./target/release/ryo build benchmarks/fibonacci/fib.ryo
+          mv fib benchmarks/fibonacci/fib
+          rm -f fib.o
+          ./target/release/ryo build benchmarks/eager_destruction/eager_destruction.ryo
+          mv eager_destruction benchmarks/eager_destruction/eager_destruction
+          rm -f eager_destruction.o
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+      - name: Run E2E AOT memory benchmarks
+        uses: CodSpeedHQ/action@v4
+        with:
+          mode: memory
+          run: codspeed run
