@@ -6,6 +6,7 @@
     <img src="https://img.shields.io/badge/status-pre--alpha-orange?style=for-the-badge" alt="Status">
     <img src="https://img.shields.io/github/actions/workflow/status/ryolang/ryo/ci.yml?branch=main&style=for-the-badge" alt="Build">
     <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="License">
+    <a href="https://app.codspeed.io/ryolang/ryo?utm_source=badge"><img src="https://img.shields.io/endpoint?url=https://codspeed.io/badge.json" alt="CodSpeed"/></a>
   </p>
 </div>
 
