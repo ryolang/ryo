@@ -53,8 +53,12 @@ jobs:
         run: cargo build --release
       - name: Compile Ryo AOT binaries
         run: |
-          ./target/release/ryo build benchmarks/fibonacci/fib.ryo -o benchmarks/fibonacci/fib
-          ./target/release/ryo build benchmarks/eager_destruction/eager_destruction.ryo -o benchmarks/eager_destruction/eager_destruction
+          ./target/release/ryo build benchmarks/fibonacci/fib.ryo
+          mv fib benchmarks/fibonacci/fib
+          rm -f fib.o
+          ./target/release/ryo build benchmarks/eager_destruction/eager_destruction.ryo
+          mv eager_destruction benchmarks/eager_destruction/eager_destruction
+          rm -f eager_destruction.o
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:
