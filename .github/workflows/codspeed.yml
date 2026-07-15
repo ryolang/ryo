@@ -68,9 +68,6 @@ jobs:
         with:
           mode: walltime
           run: codspeed run
-        env:
-          CODSPEED_PROFILER_ENABLED: "false"
-          CODSPEED_PERF_ENABLED: "false"
 
   aot-benchmarks-memory:
     name: Run AOT Memory Benchmarks
