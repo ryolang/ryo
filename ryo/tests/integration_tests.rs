@@ -3117,7 +3117,11 @@ fn test_benchmark_files_aot_compile_and_run() {
     let eager_file = workspace_root.join("benchmarks/eager_destruction/eager_destruction.ryo");
 
     assert!(fib_file.exists(), "fib.ryo not found at {:?}", fib_file);
-    assert!(eager_file.exists(), "eager_destruction.ryo not found at {:?}", eager_file);
+    assert!(
+        eager_file.exists(),
+        "eager_destruction.ryo not found at {:?}",
+        eager_file
+    );
 
     // 1. Compile and run fibonacci
     let fib_build = run_ryo_build(&fib_file, temp_dir.path());
@@ -3127,7 +3131,9 @@ fn test_benchmark_files_aot_compile_and_run() {
         String::from_utf8_lossy(&fib_build.stderr)
     );
     let fib_exe = temp_dir.path().join("fib");
-    let fib_run = Command::new(&fib_exe).output().expect("Failed to run compiled fib");
+    let fib_run = Command::new(&fib_exe)
+        .output()
+        .expect("Failed to run compiled fib");
     assert!(
         fib_run.status.success(),
         "compiled fib run failed. STDERR: {}",
@@ -3142,7 +3148,9 @@ fn test_benchmark_files_aot_compile_and_run() {
         String::from_utf8_lossy(&eager_build.stderr)
     );
     let eager_exe = temp_dir.path().join("eager_destruction");
-    let eager_run = Command::new(&eager_exe).output().expect("Failed to run compiled eager_destruction");
+    let eager_run = Command::new(&eager_exe)
+        .output()
+        .expect("Failed to run compiled eager_destruction");
     assert!(
         eager_run.status.success(),
         "compiled eager_destruction run failed. STDERR: {}",
