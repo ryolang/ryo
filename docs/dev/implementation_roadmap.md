@@ -1085,16 +1085,16 @@ fn main():
 
 **Tasks:**
 
-- Add `inout` syntax to lexer/parser
-- Extend type system: `Type::MutRef(Box<Type>)`
+- Add `inout` keyword to lexer/parser
+- Add the third `ParamMode::Inout` variant (M8.2 reserved the slot) — a **calling convention**, not a new type. Per Rule 3, mutable borrows are parameter conventions only, so there is no `Type::MutRef` / `TypeKind::Ref` (see M8.2 design, "Why no `Owner::Borrow`").
 - Parse:
   - Type annotations: `inout User`
-  - Borrow expressions: `&value`
-- Extend the borrow checker with exclusion rules:
-  - **At most one mutable borrow** at any point
+  - Call-site borrow: `&value` (new `&` token + `ExprKind::Borrow`)
+- Extend the borrow checker with exclusion rules (Rule 7), reusing M8.2's intra-call borrowed/moved partition:
+  - **At most one mutable borrow** of a value at any point
   - **No immutable borrows while a mutable borrow is live**
   - Mutable borrows still cannot outlive the borrowed value
-- Codegen: mutable pointers with write access, dereference for assignment
+- Codegen: pass a pointer to the caller's slot; the callee mutates through it and writes back on return
 
 **Visible Progress:** Mutation through references is safe and aliasing-free. Foundations for `inout self` methods (M17) and in-place collection updates (M22) are in place.
 
@@ -1102,25 +1102,24 @@ fn main():
 
 ```ryo
 fn increment(x: inout int):
- *x += 1
+ x += 1                       # mutate by name — no deref operator
 
 fn main():
  mut count = 0
- increment(&count)
+ increment(&count)            # `&` marks the mutation at the call site
  print(int_to_str(count))     # 1
 
- # Aliasing prevented:
- # r1 = &count
- # r2 = &count                # compile error: cannot borrow as mutable twice
- # r3 = &count                # compile error: shared while mutable borrow live
+ # Aliasing prevented within a single call (Rule 7):
+ # swap(&count, &count)       # compile error: cannot borrow `count` as mutable twice
+ # f(&count, count)           # compile error: shared while mutable borrow live
 ```
 
 **Implementation Notes:**
 
 - Aliasing exclusion is enforced at compile time (no runtime overhead)
-- Explicit `*x` dereference for primitive mutation; method calls auto-dereference once M17 lands
-- Edge cases (reborrowing, two-phase borrows) documented in [borrow_checker.md](borrow_checker.md) §5
-- Dependencies: Milestone 8.2 (immutable borrows establish the reference machinery)
+- No deref operator: an `inout` parameter is mutated by name, like Swift/Mojo `inout` and unlike C/Rust `&mut`. Rule 3 keeps mutable borrows a parameter convention, not a first-class reference type, so there is nothing to dereference.
+- Rule 7 exclusion builds on M8.2's intra-call borrowed/moved partition (`ryo-frontend/src/ownership.rs`); edge cases to be documented in the M8.3 design doc
+- Dependencies: Milestone 8.2 (intra-call borrowed/moved partition and `ParamMode` plumbing that `inout` extends)
 
 ### Milestone 8.4: String Slices (`&str`) [alpha]
 

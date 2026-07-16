@@ -1095,7 +1095,8 @@ call-site readability, not performance.
 ##### Concurrency constraint
 
 Values that cross task boundaries cannot be `inout` borrowed —
-borrows do not survive across tasks (Rule 5). The choice for data
+borrows do not survive across tasks (Rule 7: borrows are scoped to
+calls). The choice for data
 crossing concurrent code is between `move` (task owns the value) and
 `shared[T]` (multiple tasks share access). `inout` is not an option.
 
