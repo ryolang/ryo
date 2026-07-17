@@ -1102,16 +1102,16 @@ fn main():
 
 ```ryo
 fn increment(x: inout int):
- x += 1                       # mutate by name — no deref operator
+	x += 1                       # mutate by name — no deref operator
 
 fn main():
- mut count = 0
- increment(&count)            # `&` marks the mutation at the call site
- print(int_to_str(count))     # 1
+	mut count = 0
+	increment(&count)            # `&` marks the mutation at the call site
+	print(int_to_str(count))     # 1
 
- # Aliasing prevented within a single call (Rule 7):
- # swap(&count, &count)       # compile error: cannot borrow `count` as mutable twice
- # f(&count, count)           # compile error: shared while mutable borrow live
+	# Aliasing prevented within a single call (Rule 7):
+	# swap(&count, &count)       # compile error: cannot borrow `count` as mutable twice
+	# f(&count, count)           # compile error: shared while mutable borrow live
 ```
 
 **Implementation Notes:**
