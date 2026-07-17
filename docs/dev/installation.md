@@ -1,3 +1,5 @@
+**Status:** Design (v0.1+)
+
 # Installation Architecture
 
 Adhering to the **DX-First** philosophy, installation must be **instant, dependency-free, and isolated**.
@@ -103,3 +105,6 @@ A **Deployment** milestone is needed to ensure this is ready for launch.
 2.  **Start with `install.sh`** (Shell script) for v0.1. Cheap and effective.
 3.  **Use `ryo upgrade`** for updates. Keep it simple.
 4.  **Windows is critical:** The PowerShell script must work seamlessly on Day 1.
+
+## References
+- Roadmap: `docs/dev/implementation_roadmap.md` (installer / toolchain milestone)

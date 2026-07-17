@@ -1,3 +1,5 @@
+**Status:** Design (v0.4)
+
 # Ryo v0.4 Concurrency Implementation Plan
 > Task / Future / Channel — Green Thread M:N Runtime
 
@@ -778,3 +780,8 @@ browser target is a stated product priority.
 | 4 | Channels, `select`, `task.scope`, async-drop semantics | Full spec compliance |
 | 5 | Hardening, observability, Loom + soak testing | Production readiness |
 | 6 | `with` enforcement, inferred-effect lock safety, ARC lint | Static deadlock prevention without coloring |
+
+## References
+- Spec: `docs/specification.md` §9 (Concurrency)
+- Dev: `docs/dev/concurrency_loom_kt.md` (alternative proposal), `docs/dev/go_reference.md` (inspiration)
+- Roadmap: `docs/dev/implementation_roadmap.md` (concurrency, v0.4)

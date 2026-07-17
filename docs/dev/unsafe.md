@@ -1,3 +1,5 @@
+**Status:** Design (v0.2+)
+
 # Unsafe Code Architecture
 
 The core design problem: **how to allow dangerous operations (which are necessary) without letting the average user cause memory safety violations.**
@@ -108,3 +110,8 @@ The Standard Library (`std`) is effectively the "Root System Package."
 *   It exposes **Safe** structs (`File`, `Socket`) to the user.
 
 This proves the model works: the user interacts with `std` safely, never knowing it contains `unsafe` code internally.
+
+## References
+- Spec: `docs/specification.md` §17 (FFI & unsafe)
+- Dev: `docs/dev/built_in.md` (std.sys hidden layer)
+- Roadmap: `docs/dev/implementation_roadmap.md`

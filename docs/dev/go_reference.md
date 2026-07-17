@@ -2,6 +2,8 @@
 
 # Go Programming Language
 
+**Status:** Reference
+
 Last updated on Dec 18, 2025 (Commit: [cfc024d](https://github.com/golang/go/commit/cfc024d))
 
 [View on GitHub](https://github.com/golang/go)
@@ -658,3 +660,8 @@ The `debug` package provides symbol and binary format support:
 Use `go tool objdump` to disassemble binaries and `go tool addr2line` to map addresses to source locations.
 
 * * *
+
+## References
+- Dev: `docs/dev/concurrency.md` (Ryo's Go-inspired concurrency model)
+- Spec: `docs/specification.md` §9 (Concurrency)
+- Upstream: <https://github.com/golang/go>

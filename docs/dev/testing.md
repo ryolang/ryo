@@ -1,3 +1,5 @@
+**Status:** Design (v0.2+)
+
 # Testing Framework
 
 The current roadmap (Milestone 26) proposes a standard "Cargo-like" or "Go-like" implementation (`#[test]`, `assert_eq`). While functional, **it is too bare-bones for a modern "DX-First" language.**
@@ -162,3 +164,7 @@ Formalize the `tests/` directory in the package structure.
 3.  **Benchmarks:** Add `#[bench]` to validate performance claims.
 4.  **Integration Tests:** Define the `tests/` folder structure for black-box testing.
 5.  **Dependency Injection:** Since Dynamic Dispatch is missing in v0.1, provide a standard library helper or documentation on mocking via **Function Pointers** (e.g., struct fields that hold `fn` types) so users are not blocked on testing DB interactions.
+
+## References
+- Spec: `docs/specification.md` (testing section, when written)
+- Roadmap: `docs/dev/implementation_roadmap.md` (Milestone 26)

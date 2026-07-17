@@ -1,3 +1,5 @@
+**Status:** Design (v0.2+)
+
 # Standard Library Extensions: Rust Crate Wrapping
 
 A curated list of "Best-in-Class" Rust crates to wrap for a powerful, "Batteries-Included" Standard Library.
@@ -122,3 +124,8 @@ pub fn parse(input: str) -> !JsonValue:
 | **`std.simd`** | (Cranelift) | Use compiler intrinsics, not a crate. |
 
 This list provides a feature-rich standard library with lightweight implementation effort (wrapping existing code).
+
+## References
+- Spec: `docs/specification.md` §13 (Standard Library)
+- Dev: `docs/dev/std.md`, `docs/dev/official_pkg.md`
+- Roadmap: `docs/dev/implementation_roadmap.md`

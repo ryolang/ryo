@@ -1,3 +1,5 @@
+**Status:** Design (future concerns)
+
 # Production Considerations
 
 To transition from a prototype to a production-ready language (especially one targeting Web Services and Data Science), the following **operational** and **ecosystem** realities must be addressed.
@@ -57,3 +59,7 @@ Ryo defines `str` as UTF-8.
 2.  **Observability:** Spec the `Runtime` to support OTel Context Propagation.
 3.  **Debugging:** Compiler must eventually emit **DWARF** data.
 4.  **Unicode:** Explicitly state that Ryo is **UTF-8 Only**. Non-UTF-8 file paths are unsupported (or require raw byte access via unsafe `std.sys`).
+
+## References
+- Spec: `docs/specification.md` (target sections as each item is absorbed)
+- Roadmap: `docs/dev/implementation_roadmap.md`

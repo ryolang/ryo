@@ -1,3 +1,5 @@
+**Status:** Design (v0.2+)
+
 # Official Packages
 
 For a language targeting **Web Backends** and **CLI Tools**, three critical gaps remain after `sqlite`, `json`, and `uuid`.
@@ -102,3 +104,7 @@ The **Official Packages** list (managed by the core team) for a credible ecosyst
 | `pkg:zip` | Utils | `zip` | Low |
 
 **Strategic Note:** These should not be placed in the Standard Library (`std`). Keeping `std` small (I/O, FS, Net, Core) and putting these in the registry allows updating the Postgres driver version without forcing users to upgrade their Ryo Compiler.
+
+## References
+- Dev: `docs/dev/pkg_manager.md` (registry + manifest), `docs/dev/std_ext.md` (crate wrapping)
+- Roadmap: `docs/dev/implementation_roadmap.md` (v0.2 packages)

@@ -1,3 +1,5 @@
+**Status:** Design (v0.3+)
+
 # Dynamic Dispatch
 
 ---
@@ -103,3 +105,8 @@ impl Database:
 3.  **Phase 5 (Future):** Add true `dyn Trait` (Dynamic Dispatch) for cases where Enums are too rigid (e.g., user-defined plugins).
 
 **Verdict:** Do **not** add `dyn Trait` / Vtables to the v0.1 roadmap. Use **Enums** to solve the user need instead.
+
+## References
+- Spec: `docs/specification.md` §7 (Traits / interfaces)
+- Dev: `docs/dev/closure_representation.md` (shared fat-pointer dispatch)
+- Roadmap: `docs/dev/implementation_roadmap.md` (dyn Trait, v0.3+)

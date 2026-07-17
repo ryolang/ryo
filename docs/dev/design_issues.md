@@ -1,3 +1,5 @@
+**Status:** Design (open questions)
+
 # Ryo Language Design Issues & Recommendations
 
 This document identifies design inconsistencies, open questions, and recommendations for the Ryo language specification and roadmap. Issues are categorized by status.
@@ -144,3 +146,7 @@ These are underspecified aspects that will confuse developers if left undefined.
 - [ ] Reserve variadic functions for built-ins only
 - [ ] Resolve `!` operator conflict
 - [ ] Track Loop-as-an-Expression and Safe `continue` (Issue 17)
+
+## References
+- Spec: `docs/specification.md` (each resolved issue lands in its relevant section)
+- Roadmap: `docs/dev/implementation_roadmap.md`
