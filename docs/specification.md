@@ -1095,7 +1095,8 @@ call-site readability, not performance.
 ##### Concurrency constraint
 
 Values that cross task boundaries cannot be `inout` borrowed —
-borrows do not survive across tasks (Rule 5). The choice for data
+borrows do not survive across tasks (Rule 7: borrows are scoped to
+calls). The choice for data
 crossing concurrent code is between `move` (task owns the value) and
 `shared[T]` (multiple tasks share access). `inout` is not an option.
 
@@ -1156,7 +1157,9 @@ fn main():
 	print(scores)                # [95, 90, 100]
 ```
 
-*(Rationale: "Read is implicit, Write is explicit." Immutable borrows are the common case and should be frictionless. Mutable borrows are the exception and should be visible. The signature uses `inout` (Swift / Mojo idiom) rather than `&mut Type` to avoid reading like a first-class reference type — in Ryo, mutable borrows are parameter conventions only (Rules 5 and 6 forbid storing or returning them). The call-site `&` keeps mutation visible to readers and grep-able for code review.)*
+`inout` is a **mutable borrow**: mutations the function makes are visible to the caller immediately. The `&` at the call site marks exactly that visible mutation.
+
+*(Rationale: "Read is implicit, Write is explicit." Immutable borrows are the common case and should be frictionless. Mutable borrows are the exception and should be visible. The signature uses `inout` (Swift idiom) rather than `&mut Type` to avoid reading like a first-class reference type — in Ryo, mutable borrows are parameter conventions only (Rules 5 and 6 forbid storing or returning them). The call-site `&` keeps mutation visible to readers and grep-able for code review.)*
 
 #### Rule 4: Move Parameters Override the Default
 
@@ -3844,7 +3847,6 @@ Future features and extensions are listed in this section below.
 ## See Also
 
 - **[Code Examples](examples/)** - Practical examples demonstrating the features described in this specification
-- **[Executive Summary](executive_summary.md)** - Quick 2-page overview of Ryo's design and features
 
 > **Note**: More code examples, getting started guide, and standard library documentation will be available as the project progresses.
 

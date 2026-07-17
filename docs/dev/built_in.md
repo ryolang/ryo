@@ -1,3 +1,5 @@
+**Status:** Design (v0.1+)
+
 # Built-in vs Standard Library
 
 The distinction between built-in and standard library is critical for Ryo's "General Purpose" and "DX-First" goals.
@@ -113,3 +115,7 @@ Use this checklist when implementing a feature:
 1. **Compiler (Built-in):** Parses `[1, 2, 3]`. Allocates memory for 3 integers. Generates a `list` struct.
 2. **Runtime (Rust):** `extern "C" fn ryo_list_push(...)`.
 3. **Stdlib (Ryo):** `impl list { fn append() { unsafe { call_rust } } }`.
+
+## References
+- Spec: `docs/specification.md` §4 (Types), §14 (Standard Library)
+- Roadmap: `docs/dev/implementation_roadmap.md`

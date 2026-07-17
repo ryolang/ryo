@@ -310,8 +310,8 @@ _ = print("Second\n")
 - Lexer: `Arrow` (`->`), `Newline`, synthetic `Indent`/`Dedent` tokens
 - AST: `StmtKind::FunctionDef`, `StmtKind::Return`, `StmtKind::ExprStmt`, `ExprKind::Ident`
 - Parser: function definitions (`fn name(params) -> type:`), return statements, expression statements, variable references
-- HIR layer (`src/hir.rs`, `src/lower.rs`): post-analysis IR with full type resolution, scope checking, and implicit main wrapping — analogous to Zig's AIR
-- Codegen: refactored to consume HIR (not AST), two-pass compilation (declare-then-define) for forward references, `FunctionContext` struct, Cranelift `Variable` storage for locals/params, user function calls
+- Post-analysis IR with full type resolution, scope checking, and implicit main wrapping — analogous to Zig's AIR. (Originally a single tree-shaped HIR; since split into the flat UIR/TIR streams — see pipeline_alignment.md.)
+- Codegen: refactored to consume the typed IR (not AST), two-pass compilation (declare-then-define) for forward references, `FunctionContext` struct, Cranelift `Variable` storage for locals/params, user function calls
 - Builtin function registry (`src/builtins.rs`) for `print()` and future builtins
 - `ryo ir` command now displays actual Cranelift IR
 - `main.rs` split into focused modules: `errors.rs`, `linker.rs`, `pipeline.rs`
@@ -366,7 +366,7 @@ fn main() -> int:
 4. **Documentation Created**:
    - `docs/specification.md` Section 11: Complete module system specification (270+ lines)
    - `docs/specification.md` Section 2: Added `package` keyword to language keywords
-   - `docs/proposals.md`: 8 future enhancement proposals (re-exports, workspaces, etc.)
+   - `docs/dev/proposals.md`: 8 future enhancement proposals (re-exports, workspaces, etc.)
    - `docs/dev/design_issues.md`: Comprehensive design rationale and trade-off analysis
    - Module tutorial examples in `examples/future/modules/`
    - `examples/future/modules/`: 6 practical examples demonstrating all features
@@ -505,7 +505,7 @@ The module system will be **implemented** in:
 
 - `docs/specification.md` Section 11 - Complete specification
 - `docs/dev/design_issues.md` - Design rationale and trade-offs
-- `docs/proposals.md` - Future enhancements
+- `docs/dev/proposals.md` - Future enhancements
 - `examples/future/modules/` - Practical examples
 - `docs/getting_started.md` - Installation and first program
 - `CLAUDE.md` - Architecture guidelines
@@ -529,7 +529,7 @@ Milestone 6 (Implementation) is scheduled at the **start of Phase 4** — after 
 - Added `true` and `false` keyword tokens and `==` / `!=` operator tokens to the lexer
 - Extended AST with `Literal::Bool` and `BinaryOperator::Eq` / `NotEq`
 - Parse boolean literals and equality expressions (non-associative, below additive precedence)
-- Extended HIR with `Type::Bool`, `HirExprKind::BoolLiteral`, and equality `BinaryOp` variants
+- Extended the typed IR with `Type::Bool`, a bool-literal instruction, and equality `BinaryOp` variants
 - Type-check equality: same-type operands; supported on `int` and `bool`; `str` and `void` rejected
 - Codegen: maps `Type::Bool` to Cranelift `I8`; emits `icmp` for equality; `cranelift_type_for` helper makes variable declaration type-aware
 - Unit tests across lexer, parser, lowering, and codegen layers
@@ -606,8 +606,7 @@ remainder = a % b     # 1
 
 ---
 
-Note: Review [Project Structure](project_structure) and make the first split before M8
----
+> **Note:** Review the workspace crate layout (see root `CLAUDE.md`) and make the first split before M8.
 
 ### Milestone 8: Control Flow & Booleans [alpha]
 
@@ -713,7 +712,7 @@ fn main():                  # no args, no return type (Go-style)
   - `if <expr>:` block, optional `elif <expr>:` blocks, optional `else:` block — all using the existing indent/dedent machinery
   - Operator precedence: `not` (unary, tighter than `and`); `and` tighter than `or`; the whole logical layer sits below equality (`==`, `!=`)
   - Conditions must be `bool` (no truthy-coercion of `int` / `str` — Zig-style)
-- **HIR / Sema:**
+- **Sema / TIR:**
   - Type-check: condition expressions must be `Type::Bool`; `and`/`or` operands must both be `Type::Bool` and the result is `Type::Bool`; `not` operand must be `Type::Bool`
   - Block scoping: variables declared inside an if/elif/else branch are not visible after the branch ends
   - Return-flow analysis: if every branch (including `else`) of an `if` chain returns, the chain itself counts as returning — required so non-void functions can satisfy "all paths return" using `if/else` only
@@ -873,7 +872,7 @@ done
 
 - ✅ M8c1: Variable reassignment & mut enforcement (December 2024)
 - ✅ M8c2: While loops with break/continue (January 2026)
-- ✅ [M8c3: `for i in range(start, end)`](../superpowers/plans/2026-05-04-milestone-8c3-for-range.md)
+- ✅ M8c3: `for i in range(start, end)`
 
 **Tasks:**
 
@@ -891,7 +890,7 @@ done
   - `range(start, end)` → `start..end` exclusive
   - Both args must be `int`; result is the loop-header's iteration domain (no first-class range value yet)
   - Note: `range(end)` (implied start=0) is a planned extension for a future milestone (see ISSUES.md I-040).
-- **HIR / Sema:**
+- **Sema / TIR:**
   - `while` condition must be `Type::Bool`
   - `for` loop variable is **immutable** and **block-scoped** to the loop body (consistent with Ryo's default; not visible after the loop)
   - `while` loops can mutate externally declared `mut` variables (this is the canonical pattern)
@@ -1085,16 +1084,16 @@ fn main():
 
 **Tasks:**
 
-- Add `inout` syntax to lexer/parser
-- Extend type system: `Type::MutRef(Box<Type>)`
+- Add `inout` keyword to lexer/parser
+- Add the third `ParamMode::Inout` variant (M8.2 reserved the slot) — a **calling convention**, not a new type. Per Rule 3, mutable borrows are parameter conventions only, so there is no `Type::MutRef` / `TypeKind::Ref` (see M8.2 design, "Why no `Owner::Borrow`").
 - Parse:
   - Type annotations: `inout User`
-  - Borrow expressions: `&value`
-- Extend the borrow checker with exclusion rules:
-  - **At most one mutable borrow** at any point
+  - Call-site borrow: `&value` (new `&` token + `ExprKind::Borrow`)
+- Extend the borrow checker with exclusion rules (Rule 7), reusing M8.2's intra-call borrowed/moved partition:
+  - **At most one mutable borrow** of a value at any point
   - **No immutable borrows while a mutable borrow is live**
   - Mutable borrows still cannot outlive the borrowed value
-- Codegen: mutable pointers with write access, dereference for assignment
+- Codegen: pass a pointer to the caller's slot; the callee mutates through it and writes back on return
 
 **Visible Progress:** Mutation through references is safe and aliasing-free. Foundations for `inout self` methods (M17) and in-place collection updates (M22) are in place.
 
@@ -1102,25 +1101,24 @@ fn main():
 
 ```ryo
 fn increment(x: inout int):
- *x += 1
+	x += 1                       # mutate by name — no deref operator
 
 fn main():
- mut count = 0
- increment(&count)
- print(int_to_str(count))     # 1
+	mut count = 0
+	increment(&count)            # `&` marks the mutation at the call site
+	print(int_to_str(count))     # 1
 
- # Aliasing prevented:
- # r1 = &count
- # r2 = &count                # compile error: cannot borrow as mutable twice
- # r3 = &count                # compile error: shared while mutable borrow live
+	# Aliasing prevented within a single call (Rule 7):
+	# swap(&count, &count)       # compile error: cannot borrow `count` as mutable twice
+	# f(&count, count)           # compile error: shared while mutable borrow live
 ```
 
 **Implementation Notes:**
 
 - Aliasing exclusion is enforced at compile time (no runtime overhead)
-- Explicit `*x` dereference for primitive mutation; method calls auto-dereference once M17 lands
-- Edge cases (reborrowing, two-phase borrows) documented in [borrow_checker.md](borrow_checker.md) §5
-- Dependencies: Milestone 8.2 (immutable borrows establish the reference machinery)
+- No deref operator: an `inout` parameter is mutated by name, like Swift/Mojo `inout` and unlike C/Rust `&mut`. Rule 3 keeps mutable borrows a parameter convention, not a first-class reference type, so there is nothing to dereference.
+- Rule 7 exclusion builds on M8.2's intra-call borrowed/moved partition (`ryo-frontend/src/ownership.rs`); edge cases to be documented in the M8.3 design doc
+- Dependencies: Milestone 8.2 (intra-call borrowed/moved partition and `ParamMode` plumbing that `inout` extends)
 
 ### Milestone 8.4: String Slices (`&str`) [alpha]
 
@@ -1188,7 +1186,7 @@ fn main():
    - Add `default: Option<Expression>` and `positional: bool` to function parameter nodes
    - Add `name: Option<String>` to call argument nodes to represent `CallArg { name, value }`
 
-3. **HIR/Lowering:**
+3. **Sema / Lowering:**
    - Validate: defaults must be trailing (no `fn f(a: int = 1, b: int)` — compile error)
    - Validate: named args match parameter names
    - Validate: positional args can only target `_`-marked params
@@ -3026,7 +3024,7 @@ ContractViolation: precondition failed: amount > 0
 - Guaranteed elision (G1-G4): local returns, literal construction, last-use moves, tail chains
 - Permitted elision (P1-P4): branch returns, match arms, loop exits, struct field moves
 - Hidden output pointer calling convention for eligible return sites
-- Integration with HIR lowering pipeline
+- Integration with the TIR lowering pipeline
 
 **Implementation Details:** See [copy_elision.md](copy_elision.md) for the full G/P/F classification and algorithm sketch.
 
@@ -3394,7 +3392,7 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 o
 4. Release v0.1.0 and gather community feedback
 5. Iterate on Phase 5 features based on real-world needs
 
-**Join us in building Ryo!** See [CONTRIBUTING.md](../CONTRIBUTING.md) for how to get involved.
+**Join us in building Ryo!** See the repository README for how to get involved.
 
 ## References
 

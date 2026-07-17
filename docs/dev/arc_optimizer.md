@@ -208,7 +208,7 @@ A plausible milestone slot is **M11.5** (after structs, before tasks) so the pas
 ## References
 
 - Spec: `docs/specification.md` Section 5.6 (Shared Ownership)
-- Dev: `docs/dev/borrow_checker.md` (ownership-pass infrastructure this pass extends)
+- Dev: `ryo-frontend/src/ownership.rs` (ownership-pass infrastructure this pass extends)
 - Dev: `docs/dev/mojo_reference.md` (ownership-pass inspiration)
 - Dev: `docs/dev/rust_reference.md` (comparison against Rust's `Arc<T>` model)
 - Upstream prior art: Swift's SIL ARC optimizer (`swift/lib/SILOptimizer/ARC/`), Apple's WWDC talks on Swift performance.

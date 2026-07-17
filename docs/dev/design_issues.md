@@ -1,8 +1,10 @@
+**Status:** Design (open questions)
+
 # Ryo Language Design Issues & Recommendations
 
 This document identifies design inconsistencies, open questions, and recommendations for the Ryo language specification and roadmap. Issues are categorized by status.
 
-**Last updated:** 2026-04-20 (full-tree consistency sweep after spec coherence plan).
+**Last updated:** 2026-07-17 (resolved-item sweep: closed Issue 15, trimmed Issue 16 to its open runtime piece after M8.1/M8.2 landed).
 
 ---
 
@@ -93,18 +95,17 @@ These are underspecified aspects that will confuse developers if left undefined.
 *   `print` is variadic. Can users define them?
 *   **Proposal: Reserve for built-ins only (v0.1).** Users accept lists: `fn log(msgs: list[str])`.
 
-### 15. Global Mutable State
+### 15. Global Mutable State — RESOLVED
 
-*   No mechanism defined for application-wide state (e.g., DB pool).
-*   **Proposal:** Allow `const` at module level (compile-time constant). For mutable state, use `Shared[T]` as defined in spec section 5.6. No module-level `mut` variables — shared state must be explicit.
+*   **Was:** No mechanism defined for application-wide state (e.g., DB pool).
+*   **Resolution:** Settled in the spec — module-level `const` for compile-time constants; `shared[T]` (spec §5.6) for mutable shared state. No module-level `mut` variables; shared state must be explicit. Nothing further to decide.
 
 ---
 
-### 16. Iterator Invalidation — PARTIALLY RESOLVED
+### 16. Iterator Invalidation — OPEN (runtime piece only)
 
-*   **Was:** Modifying a list while iterating causes use-after-free without Rust's strict borrow checker.
-*   **Resolution (compile-time):** Scope-locked views (spec 5.7) prevent iterators from escaping their block. Rule 7 (one writer OR many readers) prevents simultaneous mutation and iteration in concurrent contexts.
-*   **Remaining (runtime):** For sequential code where mutation happens *inside* the loop body (e.g., `list.append()` during `for n in list`), **Versioned Iterators** are still needed as a runtime safety net:
+*   **Compile-time half resolved:** Scope-locked views (spec §5.7) prevent iterators from escaping their block, and Rule 7 (one writer OR many readers) prevents simultaneous mutation and iteration in concurrent contexts. Both shipped with the ownership pass (M8.1/M8.2).
+*   **Open (runtime):** For sequential code where mutation happens *inside* the loop body (e.g., `list.append()` during `for n in list`), **Versioned Iterators** are still needed as a runtime safety net:
     *   Every collection has an internal `mod_count` that increments on modification.
     *   Iterators capture `expected_mod` at creation and check on every `next()`.
     *   Mismatch triggers a panic with a clear message: `"collection modified during iteration"`.
@@ -144,3 +145,7 @@ These are underspecified aspects that will confuse developers if left undefined.
 - [ ] Reserve variadic functions for built-ins only
 - [ ] Resolve `!` operator conflict
 - [ ] Track Loop-as-an-Expression and Safe `continue` (Issue 17)
+
+## References
+- Spec: `docs/specification.md` (each resolved issue lands in its relevant section)
+- Roadmap: `docs/dev/implementation_roadmap.md`

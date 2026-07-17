@@ -1,3 +1,5 @@
+**Status:** Design (future concerns)
+
 # Production Considerations
 
 To transition from a prototype to a production-ready language (especially one targeting Web Services and Data Science), the following **operational** and **ecosystem** realities must be addressed.
@@ -48,6 +50,7 @@ Ryo defines `str` as UTF-8.
     *   **The "Go" Approach:** Treat paths as strings, but handle conversion errors at the syscall boundary. This is DX-First.
     *   **The "Rust" Approach:** Create `OsString`. Correct but annoying.
     *   **Decision:** Stick to `str` (UTF-8) for DX. If a file path is not valid UTF-8, Ryo simply **cannot open it**. This is an acceptable trade-off for a general-purpose language (most paths are UTF-8 now), but it must be documented.
+    *   **Status:** `str` is UTF-8 is already in the spec (§4, string types). The path-handling behavior above is a `std.fs` API rule with no home until the fs module is designed — absorb it into the spec's fs section (and off this list) when that milestone lands, not before.
 
 ---
 
@@ -57,3 +60,7 @@ Ryo defines `str` as UTF-8.
 2.  **Observability:** Spec the `Runtime` to support OTel Context Propagation.
 3.  **Debugging:** Compiler must eventually emit **DWARF** data.
 4.  **Unicode:** Explicitly state that Ryo is **UTF-8 Only**. Non-UTF-8 file paths are unsupported (or require raw byte access via unsafe `std.sys`).
+
+## References
+- Spec: `docs/specification.md` (target sections as each item is absorbed)
+- Roadmap: `docs/dev/implementation_roadmap.md`

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# check_cranelift.sh — show what changed in Cranelift between the version Ryo
+# currently uses (parsed from Cargo.lock) and any other version (default: the
+# latest release). Resolves Ryo's Cranelift dependency version, queries
+# crates.io and the GitHub API for the exact commit SHAs, and prints the
+# history of commits touching the cranelift/ directory (handling parallel
+# release-branch history). Usage: ./scripts/check_cranelift.sh [target-version]
+
 # Extract cranelift version from Cargo.lock string
 get_cranelift_version_from_lockfile() {
     local lock_content="$1"

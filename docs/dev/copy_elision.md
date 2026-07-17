@@ -79,10 +79,13 @@ copy.
 Not directly possible in Ryo's current design, but can occur via
 `shared[T]` references in future designs.
 
-### F2: Return of a binding whose address was taken
-If the binding's storage address has been shared (e.g., passed as
-`inout` to a function that stores the address), elision would change
-observable behavior.
+### F2: Return of a binding whose address is aliased
+If the binding's storage is aliased so that another live handle can
+observe it (e.g., wrapped in `shared[T]`, whose refcounted cell may
+outlive the binding), elision would change observable behavior.
+(Note: `inout` cannot create such an alias — a mutable borrow cannot
+be stored or returned under Rules 5 and 6, so it never survives the
+call.)
 
 ### F3: Conditional return where different paths produce different bindings with incompatible storage
 When different branches return different bindings that were allocated
@@ -91,9 +94,10 @@ a single destination slot.
 
 ## Algorithm Sketch
 
-The copy elision pass runs after HIR lowering and before codegen:
+The copy elision pass runs on TIR (after Sema and the ownership pass,
+before codegen):
 
-1. **Identify return sites.** Walk the HIR to find all `return` statements.
+1. **Identify return sites.** Walk the TIR to find all `return` statements.
 2. **Classify each return site.** For each return:
    a. If the returned value is a local binding with no post-return uses → G1.
    b. If the returned value is a literal/constructor → G2.
@@ -107,9 +111,9 @@ The copy elision pass runs after HIR lowering and before codegen:
 4. **Verify safety.** Confirm that no alias to the binding's original
    storage survives the rewrite.
 
-This pass integrates with the existing lowering pipeline described in
-`compilation_pipeline.md` — it runs between HIR construction and
-Cranelift IR generation.
+This pass integrates with the compilation pipeline described in the
+root `CLAUDE.md` — it runs between TIR construction (Sema) and
+Cranelift IR generation (codegen).
 
 ## Interaction with Ownership Lite
 
@@ -132,5 +136,5 @@ substitutes storage locations, not ownership semantics.
 ## References
 - Spec: Section 5.9 (user-facing guarantees)
 - Spec: Section 5.4 (Drop / RAII)
-- Dev: compilation_pipeline.md
+- Dev: compilation pipeline — see root `CLAUDE.md`
 - Milestone: Copy Elision & NRVO (Phase 5, v0.2+) — see implementation_roadmap.md

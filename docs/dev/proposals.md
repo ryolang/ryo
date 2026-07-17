@@ -279,52 +279,7 @@ result = data.iter()
 	.collect[list[ProcessedItem]]()  # Evaluation happens here
 ```
 
-### **Error Handling System** ✅ IMPLEMENTED
-
-**Core Feature: Error Union Types**
-
-Error handling is fully implemented in the core language with automatic error composition via error unions. This eliminates the "wrapper problem" where developers previously had to manually create wrapper types to compose functions with different error types.
-
-#### **Key Features (Implemented)**
-
-1. **Single-Variant Errors Only** - Simple, unified syntax:
-```ryo
-error Timeout                          # Unit error
-error NotFound(str)                    # Message-only error
-error HttpError(status: int, message: str)  # Structured error
-```
-
-2. **Module-Based Error Grouping** - Organize related errors:
-```ryo
-# File: io/errors.ryo
-error NotFound(path: str)
-error PermissionDenied(path: str)
-error ReadFailed(reason: str)
-
-# File: parse/errors.ryo
-error InvalidSyntax(line: int, column: int)
-error UnexpectedToken(expected: str, got: str)
-
-# File: main.ryo
-import io
-import parse
-```
-
-3. **Automatic Error Composition** - Error unions inferred from `try` expressions:
-```ryo
-# Explicit union - manually specified
-fn process_file(path: str) -> (io.NotFound | io.PermissionDenied | parse.InvalidSyntax)!ProcessedData:
-	content = try files.read_text(path)
-	config = try parse_config(content)
-	return process(config)
-
-# Inferred union - compiler automatically determines the union
-fn process_file(path: str) -> !ProcessedData:
-	content = try files.read_text(path)    # io errors
-	config = try parse_config(content)     # parse errors
-	return process(config)
-# Compiler infers: (io.NotFound | io.PermissionDenied | parse.InvalidSyntax | ...)!ProcessedData
-```
+> **Error handling has shipped** and is no longer a proposal — the error-union model (single-variant `error` decls, module-based grouping, `try`, inferred unions) is part of the core language. See `docs/specification.md` §7 (Error Handling) for the specification. This section was removed from the proposals backlog on merge.
 
 ### **Attribute System**
 
@@ -843,150 +798,11 @@ fn main():
 
 ### **Dynamic Dispatch (Trait Objects)**
 
-Currently, Ryo only supports static dispatch for traits, but dynamic dispatch is planned to enable more flexible polymorphism patterns.
-
-**Trait Objects**
-```ryo
-# Future syntax for dynamic dispatch
-trait Drawable:
-	fn draw(&self)
-	fn area(&self) -> float
-
-struct Circle:
-	radius: float
-
-struct Rectangle:
-	width: float
-	height: float
-
-impl Drawable for Circle:
-	fn draw(&self):
-		print(f"Drawing circle with radius {self.radius}")
-	fn area(&self) -> float:
-		return 3.14159 * self.radius * self.radius
-
-impl Drawable for Rectangle:
-	fn draw(&self):
-		print(f"Drawing rectangle {self.width}x{self.height}")
-	fn area(&self) -> float:
-		return self.width * self.height
-
-# Dynamic dispatch with trait objects
-fn process_shapes(shapes: list[&dyn Drawable]):
-	for shape in shapes:
-		shape.draw()  # Dynamic dispatch - runtime polymorphism
-		print(f"Area: {shape.area()}")
-
-# Usage
-circle = Circle(radius=5.0)
-rectangle = Rectangle(width=10.0, height=8.0)
-
-shapes = [&circle as &dyn Drawable, &rectangle as &dyn Drawable]
-process_shapes(shapes)
-```
-
-**Object Safety Rules**
-- Traits used as trait objects must be "object safe"
-- No associated types in object-safe traits initially
-- No generic methods in object-safe traits initially
-- Methods must use `&self`, `inout self`, or `self` (no arbitrary self types)
-
-**Performance Considerations**
-- Dynamic dispatch has runtime cost (virtual function calls)
-- Slightly larger memory footprint (fat pointers)
-- Cannot be inlined across trait boundaries
-- Still safer than traditional function pointers due to type system
+> Moved to its own design doc — see [`dyn_trait.md`](dyn_trait.md), which covers static-vs-dynamic dispatch, the enum-dispatch pattern recommended for v0.1, vtable roadmap placement, and the `&dyn Trait` surface (syntax, object-safety rules, performance).
 
 ### **Foreign Function Interface (FFI) & Unsafe Code**
 
-For interoperability with existing native code and systems programming, Ryo plans to support C FFI and unsafe operations.
-
-#### **C FFI Support**
-
-```ryo
-# Future FFI capabilities
-extern "C":
-	fn malloc(size: usize) -> *mut void
-	fn free(ptr: *mut void)
-	fn printf(format: *const c_char, ...) -> c_int
-
-#[repr(C)]
-struct Point:
-	x: f64
-	y: f64
-
-#[no_mangle]
-pub extern "C" fn process_point(p: *const Point) -> f64:
-	unsafe:
-		point = &*p  # Dereference raw pointer
-		return (point.x * point.x + point.y * point.y).sqrt()
-```
-
-#### **Type Mapping and Utilities**
-
-**Primitive Mappings:**
-- Ryo primitives map directly to C equivalents
-- `*const T`/`*mut T` for raw pointers
-- `#[repr(C)]` structs for C-compatible layout
-
-**String Handling:**
-```ryo
-# Future string FFI utilities
-fn ryo_str_to_c(s: &str) -> (*const c_char, usize):
-	return (s.as_ptr(), s.len())
-
-# File: conversion/errors.ryo
-error InvalidUtf8
-error NullPointer
-
-# File: main.ryo
-import conversion
-
-fn c_str_to_ryo(ptr: *const c_char) -> conversion.InvalidUtf8!str:
-	unsafe:
-		# Safe conversion with validation
-		return try ffi.cstr_to_string(ptr)
-```
-
-**Complex Types:**
-- Complex types passed via opaque pointers
-- Callbacks via compatible `extern "C"` function pointers
-- Helper functions in optional `ffi` standard library package
-
-#### **Unsafe Operations**
-
-**Unsafe Blocks and Functions:**
-```ryo
-# Future unsafe functionality
-unsafe fn manipulate_raw_memory(ptr: *mut u8, len: usize):
-	for i in range(len):
-		*ptr.offset(i) = 0  # Raw pointer arithmetic and dereference
-
-fn safe_wrapper(data: inout [u8]):
-	unsafe:
-		manipulate_raw_memory(data.as_mut_ptr(), data.len())
-```
-
-**Required for Unsafe:**
-- Raw pointer dereference and arithmetic
-- FFI function calls
-- Calling other `unsafe fn`
-- Accessing `static mut` variables
-- Unsafe trait implementations
-- Low-level memory operations
-
-**Safety Responsibility:**
-Programmer must manually uphold safety invariants when using `unsafe`. The type system cannot provide guarantees within unsafe blocks.
-
-#### **Rationale**
-
-FFI and unsafe operations are necessary escape hatches for:
-- Interoperating with existing C libraries
-- Systems programming and embedded development
-- Performance-critical operations requiring manual optimization
-- Platform-specific functionality
-
-However, these features are advanced and should be used sparingly, with safety as the primary responsibility of the developer.
+> Moved to its own design doc — see [`unsafe.md`](unsafe.md), which owns the capability-based (`kind = "system"`) gatekeeper model, the `unsafe`/`extern "C"` syntax, the C type mapping, and the set of operations that require `unsafe`. The full `extern`/bindgen workflow is specified in `docs/specification.md` §4.11 / §17.
 
 ### **Runtime Permissions (Sandboxing for AI-Generated Code)**
 
@@ -1140,14 +956,7 @@ Adopting Deno's model rather than Zero's is the load-bearing decision: it preser
 
 ### **SIMD Support**
 
-**Vector Operations**
-```ryo
-# Future SIMD support
-import simd
-
-fn parallel_add(a: simd.f32x4, b: simd.f32x4) -> simd.f32x4:
-	return a + b  # Vectorized addition
-```
+> Moved to [`std_ext.md`](std_ext.md) (`std.simd` entry) — vector types are backed by Cranelift intrinsics, with the `simd.f32x4` operator surface documented there.
 
 ---
 
@@ -1251,7 +1060,7 @@ These language proposals are open for discussion and contribution:
 3. **Use Case Analysis**: Share your use cases that would benefit from these features
 4. **Performance Analysis**: Help benchmark and optimize these features
 
-See our [Contributing Guide](../CONTRIBUTING.md) for more details on how to get involved in shaping Ryo's future.
+Contributions are welcome — see the repository README for how to get involved in shaping Ryo's future.
 
 ---
 
@@ -1496,3 +1305,8 @@ Attribute System → Compile-Time Reflection
 - Performance-critical applications possible
 - Advanced metaprogramming capabilities available
 - Platform-specific and embedded development supported
+
+## References
+- Spec: `docs/specification.md` (accepted proposals migrate into their relevant sections)
+- Roadmap: `docs/dev/implementation_roadmap.md`
+- Sub-proposal: `docs/dev/proposals/wasm_target.md`

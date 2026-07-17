@@ -1,3 +1,5 @@
+**Status:** Design (v0.2+)
+
 # Standard Library Extensions: Rust Crate Wrapping
 
 A curated list of "Best-in-Class" Rust crates to wrap for a powerful, "Batteries-Included" Standard Library.
@@ -122,3 +124,19 @@ pub fn parse(input: str) -> !JsonValue:
 | **`std.simd`** | (Cranelift) | Use compiler intrinsics, not a crate. |
 
 This list provides a feature-rich standard library with lightweight implementation effort (wrapping existing code).
+
+### `std.simd` Surface
+
+Vector types (`f32x4`, `i32x4`, …) are backed by Cranelift SIMD intrinsics, not a wrapped crate. The user-facing surface is ordinary operators on vector types:
+
+```ryo
+import std.simd
+
+fn parallel_add(a: simd.f32x4, b: simd.f32x4) -> simd.f32x4:
+	return a + b   # vectorized addition
+```
+
+## References
+- Spec: `docs/specification.md` §14 (Standard Library)
+- Dev: `docs/dev/std.md`, `docs/dev/official_pkg.md`
+- Roadmap: `docs/dev/implementation_roadmap.md`

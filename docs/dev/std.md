@@ -1,3 +1,5 @@
+**Status:** Design (v0.2+)
+
 # First Standard Library Module: `std.io`
 
 The first standard library implementation should be **`std.io`** (Console Input/Output), backed by a hidden **`std.sys`** (C Bindings). This choice validates the "System Package" architecture and the "Ownership Lite" model.
@@ -91,3 +93,8 @@ This dictates the **second** stdlib module: **`std.mem`**.
 3.  **Third:** `std.mem` (Public/Private, Allocator for Strings/Lists).
 
 This order delivers "Hello World" first (high morale), then immediately forces resolution of memory management (the core architecture).
+
+## References
+- Spec: `docs/specification.md` §14 (Standard Library)
+- Dev: `docs/dev/built_in.md` (built-in vs stdlib boundary), `docs/dev/std_ext.md`
+- Roadmap: `docs/dev/implementation_roadmap.md`

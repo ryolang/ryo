@@ -6,72 +6,29 @@
     <img src="https://img.shields.io/badge/status-pre--alpha-orange?style=for-the-badge" alt="Status">
     <img src="https://img.shields.io/github/actions/workflow/status/ryolang/ryo/ci.yml?branch=main&style=for-the-badge" alt="Build">
     <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="License">
-    <a href="https://app.codspeed.io/ryolang/ryo?utm_source=badge"><img src="https://img.shields.io/endpoint?url=https://codspeed.io/badge.json" alt="CodSpeed"/></a>
+    <a href="https://app.codspeed.io/ryolang/ryo?utm_source=badge"><img src="https://img.shields.io/endpoint?url=https://codspeed.io/badge.json&style=for-the-badge" alt="CodSpeed"/></a>
   </p>
 </div>
 
 <br>
 
-**Ryo** is a statically-typed language designed for high **Developer Experience**. It combines the ergonomics of Python, the memory safety of Rust ("Ownership Lite"), and the concurrency model of Go.
-
-It targets web backends, CLI tools, and scripting/notebook environments via AOT and JIT compilation.
+**Ryo** is a statically-typed language designed for high **Developer Experience**. It pairs a Pythonic, indentation-based syntax with Rust-style memory safety ("Ownership Lite" — borrow by default, move on assignment, no garbage collector), Go-style "colorless" green-thread concurrency, and Zig-style error unions (`!T`). It targets web backends, CLI tools, and scripting/notebook environments, compiling to native code via **Cranelift** (AOT and JIT).
 
 > [!WARNING]
 > Ryo is in **pre-alpha**. The language design is stabilizing but the compiler is under active construction. Not yet ready for production use.
 
-## Key Features
-
-*   **Pythonic Syntax:** Indentation-based, readable, and concise.
-*   **Ownership Lite:** No Garbage Collector. Memory safety via Mojo-style borrowing (functions borrow by default, assignments move).
-*   **Green Threads:** "Colorless" concurrency with a work-stealing scheduler. No `async`/`await` needed.
-*   **Rich Errors:** Zig-style Error Unions (`!T`) with payload data.
-*   **Fast:** Built on **Cranelift** for instant compile times and native performance.
-
-## Quick Example
+## Example
 
 ```ryo
 fn main():
 	print("Hello, World!\n")
 ```
 
-```ryo
-fn classify(n: int) -> int:
-	if n < 0:
-		return -1
-	elif n == 0:
-		return 0
-	else:
-		return 1
-
-fn in_range(x: int, lo: int, hi: int) -> bool:
-	return x >= lo and x <= hi
-
-fn main():
-	c = classify(5)
-	if in_range(c, 0, 1):
-		print("positive\n")
-```
-
 ```bash
-cargo run -- run examples/classify.ryo
+cargo run -- run examples/hello.ryo
 ```
 
-**More examples:** [`examples/`](examples/)
-
-## Current Status (Milestone 8c)
-
-The compiler implements through **Milestone 8c: Loops & Loop Control**:
-
-- **Types:** `int`, `float`, `bool`, `str` (literals)
-- **Operators:** arithmetic, comparison, logical, unary negation
-- **Variables:** immutable by default, `mut`, type annotations, type inference
-- **Functions:** definitions, calls, forward references, recursion
-- **Control flow:** `if`/`elif`/`else`, short-circuit `and`/`or`, `while` loops, `for i in range()` loops, `break`, `continue`
-- **Builtins:** `print()`, `panic()`, `assert()`, `range()`
-- **Compilation:** AOT (native binary) and JIT via Cranelift
-- **Tooling:** `ryo run`, `ryo build`, `ryo lex`, `ryo parse`, `ryo ir --emit=uir|tir|clif`
-
-See the [Implementation Roadmap](docs/dev/implementation_roadmap.md) for what's next.
+More examples in [`examples/`](examples/). For what the compiler implements today and what's next, see the [Implementation Roadmap](docs/dev/implementation_roadmap.md).
 
 ## Installation
 
@@ -99,27 +56,15 @@ cargo build --release
 cargo run -- run examples/hello.ryo
 ```
 
-### Tracking Cranelift Release Changes
-
-Since Ryo is built on top of the Cranelift compiler backend, you can check what changed in Cranelift between the version currently used in Ryo (parsed from `Cargo.lock`) and any other version (e.g., the latest available release) by running:
-```bash
-./scripts/check_cranelift.sh
-```
-This utility automatically resolves Ryo's Cranelift dependency version, queries crates.io and the GitHub API, resolves the exact Git commit SHAs, and displays a clean history of compiler commits that changed the `cranelift/` directory, gracefully handling parallel release branch history tracking.
-
 **Next steps:** [Getting Started](docs/getting_started.md)
 
 ## Language Inspirations
 
-*   **Python** — Clean syntax with colons and indentation, f-strings, type inference
-*   **Rust** — Ownership model, algebraic data types, pattern matching, traits
-*   **Mojo** — Simplified ownership without lifetimes, value semantics
-*   **Go** — Simplicity as a core value, fast compilation, CSP concurrency
-*   **Zig** — Comptime execution, explicit error handling, readable-by-default design
+Python (syntax, type inference), Rust (ownership, ADTs, pattern matching, traits), Mojo (lifetime-free ownership, value semantics), Go (simplicity, fast compilation, CSP concurrency), and Zig (comptime, explicit error handling).
 
-## Contributing
+## Getting Help & Contributing
 
-We welcome contributions — compiler development, standard library, tooling, documentation, language design, and examples. Check out the [open issues](https://github.com/ryolang/ryo/issues).
+Questions, bugs, and proposals go through the [issue tracker](https://github.com/ryolang/ryo/issues). Contributions are welcome across the compiler, standard library, tooling, documentation, and examples.
 
 ## Documentation
 

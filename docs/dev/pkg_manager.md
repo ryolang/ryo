@@ -1,3 +1,5 @@
+**Status:** Design (v0.2+)
+
 # Ryo Package Manager
 
 Let's design a package manager for Ryo, taking inspiration from both Cargo and Go Modules, but tailored to Ryo's philosophy of being Python-like yet safe and performant. We'll lean more towards the Cargo style for its robustness, but aim for some Go Modules-inspired simplicity where possible.
@@ -235,3 +237,7 @@ For the initial version of `ryo`, it's wise to start with a **simplified but fun
 This Cargo-style `ryo` package manager design, with a central registry, TOML manifest, and a set of clear CLI commands, provides a strong and well-structured foundation for managing Ryo packages and projects. It balances robustness with relative simplicity for users, and sets the stage for a healthy and growing Ryo ecosystem.
 
 The addition of task runner functionality (similar to `make` or `just`) provides developers with a convenient way to define and execute common development tasks directly through the `ryo` CLI, reducing the need for external build tools and scripts.
+
+## References
+- Dev: `docs/dev/official_pkg.md` (recommended packages)
+- Roadmap: `docs/dev/implementation_roadmap.md` (package-manager milestone)

@@ -1,3 +1,5 @@
+**Status:** Design (v0.3+)
+
 # Dynamic Dispatch
 
 ---
@@ -103,3 +105,39 @@ impl Database:
 3.  **Phase 5 (Future):** Add true `dyn Trait` (Dynamic Dispatch) for cases where Enums are too rigid (e.g., user-defined plugins).
 
 **Verdict:** Do **not** add `dyn Trait` / Vtables to the v0.1 roadmap. Use **Enums** to solve the user need instead.
+
+---
+
+### 5. `dyn Trait` Surface (when Option A lands)
+
+The trait-object syntax and its constraints, for when true `dyn Trait` is added in Phase 5.
+
+```ryo
+trait Drawable:
+	fn draw(&self)
+	fn area(&self) -> float
+
+# Heterogeneous collection of trait objects
+fn process_shapes(shapes: list[&dyn Drawable]):
+	for shape in shapes:
+		shape.draw()               # dynamic dispatch — runtime polymorphism
+		print(f"Area: {shape.area()}")
+
+circle = Circle(radius=5.0)
+rectangle = Rectangle(width=10.0, height=8.0)
+shapes = [&circle as &dyn Drawable, &rectangle as &dyn Drawable]
+process_shapes(shapes)
+```
+
+**Object-safety rules.** A trait can be used as `&dyn Trait` only if it is *object safe*:
+
+- No associated types (initially).
+- No generic methods (initially).
+- Methods take `&self`, `inout self`, or `self` — no arbitrary self types.
+
+**Performance.** Dynamic dispatch costs a virtual call (no inlining across the trait boundary) and a fat pointer (data ptr + vtable ptr) — larger than a bare reference, still safer than raw function pointers because the type system tracks the trait.
+
+## References
+- Spec: `docs/specification.md` §8 (Traits / interfaces)
+- Dev: `docs/dev/closure_representation.md` (shared fat-pointer dispatch)
+- Roadmap: `docs/dev/implementation_roadmap.md` (dyn Trait, v0.3+)

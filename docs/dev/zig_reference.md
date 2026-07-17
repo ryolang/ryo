@@ -2,6 +2,8 @@
 
 # Zig Programming Language Compiler & Toolchain
 
+**Status:** Reference
+
 Last updated on Nov 26, 2025 (Commit: [738d2be](https://github.com/ziglang/zig/commit/738d2be))
 
 [View on GitHub](https://github.com/ziglang/zig)
@@ -508,3 +510,8 @@ zig build test-incremental       # Incremental compilation tests
 The test runner supports filtering by name and can be seeded for reproducible fuzzing. Tests report pass/skip/fail status and exit with appropriate codes for CI integration.
 
 * * *
+
+## References
+- Dev: `docs/dev/pipeline_alignment.md` (Ryo's UIR/TIR pipeline modelled on Zig's ZIR/AIR)
+- Root `CLAUDE.md` (compiler-architecture Zig mapping)
+- Upstream: <https://github.com/ziglang/zig>

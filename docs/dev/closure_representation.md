@@ -1,3 +1,5 @@
+**Status:** Design (Draft — v0.2+)
+
 # Closure Representation and ABI
 
 > Draft (v0.2+) — implementation-level detail extracted from specification.md Section 6.2.
@@ -93,3 +95,8 @@ fn share_state():
 ```
 
 *(Rationale: Closure representation must balance performance — zero-cost for the common no-capture case — with safety guarantees for concurrent and FFI contexts. The fat-pointer model aligns with the planned `dyn Trait` representation (see `docs/dev/dyn_trait.md`), enabling future unification of closure trait objects and general trait objects under a single dispatch mechanism.)*
+
+## References
+- Spec: `docs/specification.md` §6.2 (Closures)
+- Dev: `docs/dev/dyn_trait.md` (shared dispatch representation)
+- Roadmap: `docs/dev/implementation_roadmap.md` (closures, v0.2+)
