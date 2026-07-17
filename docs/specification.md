@@ -1157,7 +1157,9 @@ fn main():
 	print(scores)                # [95, 90, 100]
 ```
 
-*(Rationale: "Read is implicit, Write is explicit." Immutable borrows are the common case and should be frictionless. Mutable borrows are the exception and should be visible. The signature uses `inout` (Swift / Mojo idiom) rather than `&mut Type` to avoid reading like a first-class reference type — in Ryo, mutable borrows are parameter conventions only (Rules 5 and 6 forbid storing or returning them). The call-site `&` keeps mutation visible to readers and grep-able for code review.)*
+`inout` is a **mutable borrow — pass-by-pointer, not copy-in/copy-out.** Mutations are visible to the caller immediately; there is no local copy written back on return. The `&` at the call site marks exactly that visible mutation.
+
+*(Rationale: "Read is implicit, Write is explicit." Immutable borrows are the common case and should be frictionless. Mutable borrows are the exception and should be visible. The signature uses `inout` (Swift idiom) rather than `&mut Type` to avoid reading like a first-class reference type — in Ryo, mutable borrows are parameter conventions only (Rules 5 and 6 forbid storing or returning them). The call-site `&` keeps mutation visible to readers and grep-able for code review.)*
 
 #### Rule 4: Move Parameters Override the Default
 
