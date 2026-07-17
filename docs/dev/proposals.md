@@ -279,52 +279,7 @@ result = data.iter()
 	.collect[list[ProcessedItem]]()  # Evaluation happens here
 ```
 
-### **Error Handling System** ✅ IMPLEMENTED
-
-**Core Feature: Error Union Types**
-
-Error handling is fully implemented in the core language with automatic error composition via error unions. This eliminates the "wrapper problem" where developers previously had to manually create wrapper types to compose functions with different error types.
-
-#### **Key Features (Implemented)**
-
-1. **Single-Variant Errors Only** - Simple, unified syntax:
-```ryo
-error Timeout                          # Unit error
-error NotFound(str)                    # Message-only error
-error HttpError(status: int, message: str)  # Structured error
-```
-
-2. **Module-Based Error Grouping** - Organize related errors:
-```ryo
-# File: io/errors.ryo
-error NotFound(path: str)
-error PermissionDenied(path: str)
-error ReadFailed(reason: str)
-
-# File: parse/errors.ryo
-error InvalidSyntax(line: int, column: int)
-error UnexpectedToken(expected: str, got: str)
-
-# File: main.ryo
-import io
-import parse
-```
-
-3. **Automatic Error Composition** - Error unions inferred from `try` expressions:
-```ryo
-# Explicit union - manually specified
-fn process_file(path: str) -> (io.NotFound | io.PermissionDenied | parse.InvalidSyntax)!ProcessedData:
-	content = try files.read_text(path)
-	config = try parse_config(content)
-	return process(config)
-
-# Inferred union - compiler automatically determines the union
-fn process_file(path: str) -> !ProcessedData:
-	content = try files.read_text(path)    # io errors
-	config = try parse_config(content)     # parse errors
-	return process(config)
-# Compiler infers: (io.NotFound | io.PermissionDenied | parse.InvalidSyntax | ...)!ProcessedData
-```
+> **Error handling has shipped** and is no longer a proposal — the error-union model (single-variant `error` decls, module-based grouping, `try`, inferred unions) is part of the core language. See `docs/specification.md` §6 (Error Handling) for the specification. This section was removed from the proposals backlog on merge.
 
 ### **Attribute System**
 
@@ -1496,3 +1451,8 @@ Attribute System → Compile-Time Reflection
 - Performance-critical applications possible
 - Advanced metaprogramming capabilities available
 - Platform-specific and embedded development supported
+
+## References
+- Spec: `docs/specification.md` (accepted proposals migrate into their relevant sections)
+- Roadmap: `docs/dev/implementation_roadmap.md`
+- Sub-proposal: `docs/dev/proposals/wasm_target.md`
