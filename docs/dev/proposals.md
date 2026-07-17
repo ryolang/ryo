@@ -1251,7 +1251,7 @@ These language proposals are open for discussion and contribution:
 3. **Use Case Analysis**: Share your use cases that would benefit from these features
 4. **Performance Analysis**: Help benchmark and optimize these features
 
-See our [Contributing Guide](../CONTRIBUTING.md) for more details on how to get involved in shaping Ryo's future.
+Contributions are welcome — see the repository README for how to get involved in shaping Ryo's future.
 
 ---
 

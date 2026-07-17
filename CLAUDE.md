@@ -138,7 +138,7 @@ This section is for agents extending the Ryo compiler.
 Source → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema → TIR → Ownership → TIR' → Codegen → Linker → Executable
 ```
 
-(The **Ownership** stage lands in M8.1 — see `docs/dev/mojo_reference.md` and `docs/superpowers/specs/2026-05-11-milestone-8.1-heap-str-and-move-semantics-design.md`. Before M8.1 the pipeline goes straight from Sema to Codegen.)
+(The **Ownership** stage lands in M8.1 — see `docs/dev/mojo_reference.md` and `ryo-frontend/src/ownership.rs`. Before M8.1 the pipeline goes straight from Sema to Codegen.)
 
 The middle-end is split into two flat-arena IRs modeled after Zig's ZIR/AIR:
 

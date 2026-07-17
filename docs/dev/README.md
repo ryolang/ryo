@@ -8,9 +8,6 @@ This directory contains implementation notes, architectural decisions, and desig
 
 ### Compiler Implementation Guides
 
-| File | Content | Next Action |
-|---|---|---|
-| [project_structure.md](project_structure.md) | Rust workspace crate organization (ryo-core, ryo-parser, ryo-codegen, etc.) | **Delete** when workspace structure is stable — a top-level `ARCHITECTURE.md` or cargo workspace layout is sufficient |
 
 ### Architecture & Design Decisions
 

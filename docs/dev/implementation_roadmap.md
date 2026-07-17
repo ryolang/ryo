@@ -366,7 +366,7 @@ fn main() -> int:
 4. **Documentation Created**:
    - `docs/specification.md` Section 11: Complete module system specification (270+ lines)
    - `docs/specification.md` Section 2: Added `package` keyword to language keywords
-   - `docs/proposals.md`: 8 future enhancement proposals (re-exports, workspaces, etc.)
+   - `docs/dev/proposals.md`: 8 future enhancement proposals (re-exports, workspaces, etc.)
    - `docs/dev/design_issues.md`: Comprehensive design rationale and trade-off analysis
    - Module tutorial examples in `examples/future/modules/`
    - `examples/future/modules/`: 6 practical examples demonstrating all features
@@ -505,7 +505,7 @@ The module system will be **implemented** in:
 
 - `docs/specification.md` Section 11 - Complete specification
 - `docs/dev/design_issues.md` - Design rationale and trade-offs
-- `docs/proposals.md` - Future enhancements
+- `docs/dev/proposals.md` - Future enhancements
 - `examples/future/modules/` - Practical examples
 - `docs/getting_started.md` - Installation and first program
 - `CLAUDE.md` - Architecture guidelines
@@ -606,7 +606,7 @@ remainder = a % b     # 1
 
 ---
 
-Note: Review [Project Structure](project_structure) and make the first split before M8
+Note: Review the workspace crate layout (see root `CLAUDE.md`) and make the first split before M8
 ---
 
 ### Milestone 8: Control Flow & Booleans [alpha]
@@ -873,7 +873,7 @@ done
 
 - ✅ M8c1: Variable reassignment & mut enforcement (December 2024)
 - ✅ M8c2: While loops with break/continue (January 2026)
-- ✅ [M8c3: `for i in range(start, end)`](../superpowers/plans/2026-05-04-milestone-8c3-for-range.md)
+- ✅ M8c3: `for i in range(start, end)`
 
 **Tasks:**
 
@@ -3393,7 +3393,7 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 o
 4. Release v0.1.0 and gather community feedback
 5. Iterate on Phase 5 features based on real-world needs
 
-**Join us in building Ryo!** See [CONTRIBUTING.md](../CONTRIBUTING.md) for how to get involved.
+**Join us in building Ryo!** See the repository README for how to get involved.
 
 ## References
 

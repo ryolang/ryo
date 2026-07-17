@@ -3847,7 +3847,6 @@ Future features and extensions are listed in this section below.
 ## See Also
 
 - **[Code Examples](examples/)** - Practical examples demonstrating the features described in this specification
-- **[Executive Summary](executive_summary.md)** - Quick 2-page overview of Ryo's design and features
 
 > **Note**: More code examples, getting started guide, and standard library documentation will be available as the project progresses.
 

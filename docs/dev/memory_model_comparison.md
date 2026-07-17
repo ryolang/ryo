@@ -165,7 +165,7 @@ Ryo deliberately picks: Mojo's argument conventions, Mojo's ASAP destruction, Sw
 - Dev: `docs/dev/rust_reference.md` (deeper Rust comparison)
 - Dev: `docs/dev/mojo_reference.md` (Mojo as ownership-pass inspiration)
 - Dev: `docs/dev/arc_optimizer.md` (Swift-style refcount elision design)
-- Dev: `docs/superpowers/specs/2026-07-11-milestone-8.2-implicit-borrow-liveness-design.md` (shipped ownership-pass model); implemented in `ryo-frontend/src/ownership.rs`
+- Dev: `ryo-frontend/src/ownership.rs` (the shipped ownership pass); Spec: `docs/specification.md` §5 (Memory Management)
 - Dev: `docs/dev/concurrency.md` (Ryo's concurrency model)
 - Dev: `docs/dev/proposals/wasm_target.md` (WASM target — deferred proposal)
 - Milestone: `docs/dev/implementation_roadmap.md`

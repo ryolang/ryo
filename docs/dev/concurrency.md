@@ -272,8 +272,9 @@ and undefined behavior. The Phase 6 enforcements catch the most common
 locking mistakes; the memory model defines what "correct" code is allowed
 to assume.
 
-A separate `concurrency-memory-model.md` document will spell this out
-precisely. This phase only commits to the high-level shape.
+A dedicated concurrency memory-model document will spell this out
+precisely when the concurrency milestone is designed. This phase only
+commits to the high-level shape.
 
 ### 3.7 Test Strategy
 
