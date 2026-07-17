@@ -1,17 +1,17 @@
-**Status:** Design (v0.2+)
+**Status:** Phases 1–4 Complete (shipped) | Phase 5 Design (v0.2+)
 
-# Pipeline Alignment with Zig: UIR/TIR Split, Deeper InternPool, Structured Diagnostics (Draft — v0.2+)
+# Pipeline Alignment with Zig: UIR/TIR Split, Deeper InternPool, Structured Diagnostics
 
-A multi-phase plan that closes the gaps between Ryo's current middle-end and the Zig-style pipeline it was modelled after. Each phase is independently mergeable and pays off on its own; together they put the foundation in place for the language features queued in the roadmap that the current shape can't comfortably absorb — most importantly **compile-time execution (comptime)**, **generics with monomorphization**, and **inline expansion of closures**.
+The multi-phase plan that moved Ryo's middle-end onto the Zig-style pipeline it was modelled after. **Phases 1–4 have shipped** — the compiler today runs `Lexer → Indent → Parser → AstGen → UIR → Sema → TIR → Ownership → Codegen` (see root `CLAUDE.md` for the authoritative pipeline map). This document is kept as a design reference: it records *why* each stage has the shape it does and *how* each maps to the Zig compiler, so a contributor can cross-check the source against the design intent. The remaining **Phase 5** (lazy/worklist Sema) is still forward-looking and unblocks the roadmap features the current shape can't yet absorb — **compile-time execution (comptime)**, **generics with monomorphization**, and **inline expansion of closures**.
 
-This plan picks up where [middle_end_refactor.md](middle_end_refactor.md) left off. Read that first; it explains why we have an `InternPool`, an `ast_lower → sema → codegen` pipeline, and a HIR with `HirExpr.ty: Option<TypeId>`. Everything below is incremental on top of that branch.
+> **Reading this doc.** Phases 1–4 read as the original design plan, but they have all shipped — the Phase Map below names the module that realises each (`ryo-core/src/diag.rs`, `types.rs`, `uir.rs`, `tir.rs`, `ryo-frontend/src/astgen.rs`, `sema.rs`), so treat the plan text as the *design rationale* for code that now exists. Where implementation revised a decision, an inline note points at the `ISSUES.md` entry recording the deviation (most notably I-018 for `TypeId`). Phase 5 remains a plan.
 
 ## Motivation
 
-The middle-end refactor adopted the *intent* of the Zig pipeline (interned types, structural-then-semantic split) but kept the *form* small: one tree-shaped HIR mutated in place, one type-only InternPool, and `String` errors. That trade-off was correct for the size of the language at the time. Three planned features will outgrow it:
+Ryo's middle-end started with the *intent* of the Zig pipeline (interned types, structural-then-semantic split) but a smaller *form*: one tree-shaped HIR mutated in place, one type-only InternPool, and `String` errors. That trade-off was correct for the size of the language at the time. Three planned features would have outgrown it — the reason Phases 3–5 replaced the HIR with the UIR/TIR split:
 
 1. **Comptime** is fundamentally an evaluator. Evaluating a tree-shaped HIR by recursive descent works for pure expressions, but comptime must drive resolution lazily (one declaration at a time, with cycles), suspend on dependencies, and substitute values back into instructions. That requires a flat instruction stream and a value/decl pool, not a tree.
-2. **Generics** require monomorphization: one generic UIR body becomes N typed TIR bodies, one per instantiation. With our current "Sema mutates HIR in place" shape there's no place to *put* those N copies — the HIR has only one set of slots.
+2. **Generics** require monomorphization: one generic UIR body becomes N typed TIR bodies, one per instantiation. A "Sema mutates HIR in place" shape has no place to *put* those N copies — the HIR has only one set of slots.
 3. **Inline expansion** (closures, `@inline` calls, comptime-evaluated calls) is one-instruction-becomes-many. Mutating a tree node in place can't represent that; emitting into a fresh TIR stream can.
 
 A fourth concern is diagnostics. Once Sema becomes lazy, errors no longer happen at a single textual call site — they happen mid-evaluation, possibly multiple at once, possibly in code that originated from a different file via `comptime`. `Result<_, String>` short-circuits the first error; `Module.errors: Vec<ErrorMsg>` doesn't.
@@ -29,7 +29,7 @@ Why not just call them ZIR and AIR?
 
 - **ZIR is internal to the Zig compiler.** Its on-disk shape, instruction set, and encoding are an implementation detail of `zig` and change between versions. Ryo neither produces nor consumes Zig's ZIR — we use Zig only as a linker driver — and adopting the name would falsely imply an interchange format.
 - **Symmetry.** Renaming only ZIR while keeping AIR breaks the pair; renaming both to descriptive names (Untyped / Typed) keeps the staircase obvious and parallels Rust's HIR / THIR / MIR convention.
-- **Avoiding collision.** A bare "RIR" ("Ryo IR") is ambiguous — HIR is also a Ryo IR today. UIR / TIR each say what they are.
+- **Avoiding collision.** A bare "RIR" ("Ryo IR") is ambiguous — at the time of the split, the HIR was still a Ryo IR too. UIR / TIR each say what they are.
 
 Throughout the rest of this document, **UIR works exactly like Zig's ZIR** (untyped, produced by `astgen`, consumed by Sema) and **TIR works exactly like Zig's AIR** (typed, per-function-body, produced by Sema, consumed by codegen). Where this plan cites `Zir.zig`, `Air.zig`, `Air.Liveness`, or `Air.Legalize`, those remain Zig file references — they describe the *upstream design* we're borrowing from, not a Ryo module name.
 
@@ -43,17 +43,15 @@ Throughout the rest of this document, **UIR works exactly like Zig's ZIR** (unty
 
 ## Phase Map
 
-| # | Name | Unblocks | Risk | Effort |
+| # | Name | Status | Realised by | Unblocks |
 |---|---|---|---|---|
-| 1 | Structured Diagnostics | every later phase's testability and UX | Low | ~1 day |
-| 2 | InternPool Deepening | tuples, funcs, structs, UIR strings | Low | ~1.5 days |
-| 3 | UIR — Untyped Instruction Stream | comptime evaluation surface | Medium | ~3 days |
-| 4 | TIR — Typed Instruction Stream | monomorphization, inline expansion | Medium | ~3 days |
-| 5 | Lazy Sema / Worklist Driver | comptime, generics | High | ~3–4 days |
+| 1 | Structured Diagnostics | ✅ Shipped | `ryo-core/src/diag.rs` | every later phase's testability and UX |
+| 2 | InternPool Deepening | ✅ Shipped (see I-018) | `ryo-core/src/types.rs` | tuples, funcs, structs, UIR strings |
+| 3 | UIR — Untyped Instruction Stream | ✅ Shipped | `ryo-core/src/uir.rs`, `ryo-frontend/src/astgen.rs` | comptime evaluation surface |
+| 4 | TIR — Typed Instruction Stream | ✅ Shipped | `ryo-core/src/tir.rs`, `ryo-frontend/src/sema.rs` | monomorphization, inline expansion |
+| 5 | Lazy Sema / Worklist Driver | ⏳ Design | (partial: decl `Unresolved→InProgress→Resolved/Failed` in `sema.rs`) | comptime, generics |
 
-Total: **~11–13 working days** for one implementer, including review.
-
-Phases 1 and 2 can land in any order or in parallel branches. Phases 3, 4, 5 are sequenced.
+Phases 1–4 landed as sequenced `refactor:` PRs; the interim HIR was deleted at the end of Phase 3. Phase 5 remains.
 
 ---
 
@@ -170,9 +168,11 @@ struct Item { tag: Tag, data: u32 } // `data` is either inline payload or an `ex
 
 Dedup of e.g. `Tuple([T1, T2, T3])` keys on `(Tag::Tuple, hash([T1.0, T2.0, T3.0]))`, not on cloning a `Box<[TypeId]>`. **This is the change that gets harder if deferred** — every later type variant pays the clone cost otherwise.
 
-### 2.2 Sub-step B — `TypeId` becomes a typed enum with named primitive variants
+### 2.2 Sub-step B — `TypeId` primitive encoding (considered enum, shipped newtype)
 
-Replace the plain `TypeId(u32)` newtype with:
+> **Shipped as a plain newtype — see ISSUES.md I-018.** The design below proposed replacing `TypeId(u32)` with a typed enum so primitive matches are exhaustive at compile time. During implementation the enum encoding fought the borrow checker (mostly around `pool.kind` returning a value that itself contains a `TypeId`), so the risk-register fallback was taken: `TypeId` shipped as `pub struct TypeId(u32)` and primitive access still goes through `TypeKind` (which *is* exhaustive) and the `pool.int()`-style accessors. The enum idea is recorded here as considered-and-deferred; I-018 tracks a possible re-attempt.
+
+The proposed encoding was:
 
 ```rust
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -189,12 +189,10 @@ pub enum TypeId {
 }
 ```
 
-(Exact representation TBD; Zig uses `enum(u32)` with sentinel high values, Rust will need a manual `transmute`-or-match scheme. The interface is what matters: pattern-matching on primitives is exhaustive at compile time.)
+Intended payoffs (not realised — the newtype keeps the pre-split ergonomics):
 
-Two payoffs:
-
-- `match` on `TypeId` for primitive cases is exhaustive — adding a primitive forces every consumer to update, just like adding a `TypeKind` variant does today.
-- `pool.int()` accessor disappears. `TypeId::Int` *is* the int. One less indirection, one fewer way to be wrong.
+- `match` on `TypeId` for primitive cases would be exhaustive — adding a primitive would force every consumer to update, just like adding a `TypeKind` variant does today.
+- `pool.int()` accessor would disappear. `TypeId::Int` *would be* the int.
 
 ### 2.3 Sub-step C — Strings interned in the same pool
 
@@ -267,7 +265,7 @@ pub struct InstRef(NonZeroU32);     // index into `instructions`
 
 ### 3.2 `astgen` produces UIR
 
-`ryo-frontend/src/astgen.rs` is rewritten to produce UIR. Its responsibilities are unchanged from middle_end_refactor.md §2.4:
+`ryo-frontend/src/astgen.rs` produces UIR. Its responsibilities are purely structural:
 
 - Pure structural translation.
 - Resolves syntactic type annotations to `TypeId`.
@@ -476,7 +474,7 @@ For one implementer, including review cycles. Phases 1 and 2 can run in parallel
 ## References
 
 - Spec: §4 (Types), §10 (Compile-time evaluation — when written) — the type and comptime systems this work enables.
-- Dev: [middle_end_refactor.md](middle_end_refactor.md) — the predecessor plan this builds on; [compilation_pipeline.md](compilation_pipeline.md), [parser.rs.md](parser.rs.md).
+- Dev: root `CLAUDE.md` — the authoritative map of the shipped `Lexer → … → UIR → Sema → TIR → Ownership → Codegen` pipeline this plan produced. Source: `ryo-core/src/{uir,tir,types,diag}.rs`, `ryo-frontend/src/{astgen,sema}.rs`.
 - Milestone/Roadmap: Phases 3–5 prerequisite *Compile-time Execution (comptime)* and *Full Generics System* in [implementation_roadmap.md](implementation_roadmap.md) (Phase 5, v0.2+).
 - Issues: [../../ISSUES.md](../../ISSUES.md) — Phases 1, 2, 3 collectively close I-008 (token lifetime), and Phase 4 makes I-006 (print to runtime) a one-day follow-up.
 - Inspiration: Zig's `src/InternPool.zig` (sidecar `extra` array, named primitive indices, single pool for types/strings/values), `src/AstGen.zig` → `src/Sema.zig` separation, `src/Zir.zig` and `src/Air.zig` shapes, `src/Module.zig`'s decl worklist.
