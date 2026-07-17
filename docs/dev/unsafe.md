@@ -111,6 +111,26 @@ The Standard Library (`std`) is effectively the "Root System Package."
 
 This proves the model works: the user interacts with `std` safely, never knowing it contains `unsafe` code internally.
 
+### 7. FFI Type Mapping & the Unsafe Operation Set
+
+Reference detail for binding authors (folded in from the former proposals FFI section).
+
+**C type mapping.**
+- Ryo primitives map directly to their C equivalents.
+- Raw pointers: `*const T` / `*mut T`.
+- `#[repr(C)]` on a struct guarantees C-compatible layout.
+- Complex types cross the boundary via opaque pointers; callbacks via compatible `extern "C"` function pointers.
+- String conversion helpers (`&str` ↔ `*const c_char`, with UTF-8 validation returning an error) live in an optional `ffi` stdlib package, not the language.
+
+**Operations that require `unsafe`** (and are therefore only reachable in `kind = "system"` packages):
+- Raw-pointer dereference and pointer arithmetic.
+- Calling an `extern "C"` / FFI function.
+- Calling another `unsafe fn`.
+- Accessing `static mut` variables.
+- `unsafe` trait implementations.
+
+The programmer is responsible for upholding safety invariants inside an `unsafe` block — the type system makes no guarantees there. See spec §4.11 for the full `extern`/bindgen workflow.
+
 ## References
 - Spec: `docs/specification.md` §17 (FFI & unsafe)
 - Dev: `docs/dev/built_in.md` (std.sys hidden layer)

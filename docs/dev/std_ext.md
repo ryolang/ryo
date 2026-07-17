@@ -125,6 +125,17 @@ pub fn parse(input: str) -> !JsonValue:
 
 This list provides a feature-rich standard library with lightweight implementation effort (wrapping existing code).
 
+### `std.simd` Surface
+
+Vector types (`f32x4`, `i32x4`, …) are backed by Cranelift SIMD intrinsics, not a wrapped crate. The user-facing surface is ordinary operators on vector types:
+
+```ryo
+import simd
+
+fn parallel_add(a: simd.f32x4, b: simd.f32x4) -> simd.f32x4:
+	return a + b   # vectorized addition
+```
+
 ## References
 - Spec: `docs/specification.md` §13 (Standard Library)
 - Dev: `docs/dev/std.md`, `docs/dev/official_pkg.md`

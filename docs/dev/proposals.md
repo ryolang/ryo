@@ -798,150 +798,11 @@ fn main():
 
 ### **Dynamic Dispatch (Trait Objects)**
 
-Currently, Ryo only supports static dispatch for traits, but dynamic dispatch is planned to enable more flexible polymorphism patterns.
-
-**Trait Objects**
-```ryo
-# Future syntax for dynamic dispatch
-trait Drawable:
-	fn draw(&self)
-	fn area(&self) -> float
-
-struct Circle:
-	radius: float
-
-struct Rectangle:
-	width: float
-	height: float
-
-impl Drawable for Circle:
-	fn draw(&self):
-		print(f"Drawing circle with radius {self.radius}")
-	fn area(&self) -> float:
-		return 3.14159 * self.radius * self.radius
-
-impl Drawable for Rectangle:
-	fn draw(&self):
-		print(f"Drawing rectangle {self.width}x{self.height}")
-	fn area(&self) -> float:
-		return self.width * self.height
-
-# Dynamic dispatch with trait objects
-fn process_shapes(shapes: list[&dyn Drawable]):
-	for shape in shapes:
-		shape.draw()  # Dynamic dispatch - runtime polymorphism
-		print(f"Area: {shape.area()}")
-
-# Usage
-circle = Circle(radius=5.0)
-rectangle = Rectangle(width=10.0, height=8.0)
-
-shapes = [&circle as &dyn Drawable, &rectangle as &dyn Drawable]
-process_shapes(shapes)
-```
-
-**Object Safety Rules**
-- Traits used as trait objects must be "object safe"
-- No associated types in object-safe traits initially
-- No generic methods in object-safe traits initially
-- Methods must use `&self`, `inout self`, or `self` (no arbitrary self types)
-
-**Performance Considerations**
-- Dynamic dispatch has runtime cost (virtual function calls)
-- Slightly larger memory footprint (fat pointers)
-- Cannot be inlined across trait boundaries
-- Still safer than traditional function pointers due to type system
+> Moved to its own design doc — see [`dyn_trait.md`](dyn_trait.md), which covers static-vs-dynamic dispatch, the enum-dispatch pattern recommended for v0.1, vtable roadmap placement, and the `&dyn Trait` surface (syntax, object-safety rules, performance).
 
 ### **Foreign Function Interface (FFI) & Unsafe Code**
 
-For interoperability with existing native code and systems programming, Ryo plans to support C FFI and unsafe operations.
-
-#### **C FFI Support**
-
-```ryo
-# Future FFI capabilities
-extern "C":
-	fn malloc(size: usize) -> *mut void
-	fn free(ptr: *mut void)
-	fn printf(format: *const c_char, ...) -> c_int
-
-#[repr(C)]
-struct Point:
-	x: f64
-	y: f64
-
-#[no_mangle]
-pub extern "C" fn process_point(p: *const Point) -> f64:
-	unsafe:
-		point = &*p  # Dereference raw pointer
-		return (point.x * point.x + point.y * point.y).sqrt()
-```
-
-#### **Type Mapping and Utilities**
-
-**Primitive Mappings:**
-- Ryo primitives map directly to C equivalents
-- `*const T`/`*mut T` for raw pointers
-- `#[repr(C)]` structs for C-compatible layout
-
-**String Handling:**
-```ryo
-# Future string FFI utilities
-fn ryo_str_to_c(s: &str) -> (*const c_char, usize):
-	return (s.as_ptr(), s.len())
-
-# File: conversion/errors.ryo
-error InvalidUtf8
-error NullPointer
-
-# File: main.ryo
-import conversion
-
-fn c_str_to_ryo(ptr: *const c_char) -> conversion.InvalidUtf8!str:
-	unsafe:
-		# Safe conversion with validation
-		return try ffi.cstr_to_string(ptr)
-```
-
-**Complex Types:**
-- Complex types passed via opaque pointers
-- Callbacks via compatible `extern "C"` function pointers
-- Helper functions in optional `ffi` standard library package
-
-#### **Unsafe Operations**
-
-**Unsafe Blocks and Functions:**
-```ryo
-# Future unsafe functionality
-unsafe fn manipulate_raw_memory(ptr: *mut u8, len: usize):
-	for i in range(len):
-		*ptr.offset(i) = 0  # Raw pointer arithmetic and dereference
-
-fn safe_wrapper(data: inout [u8]):
-	unsafe:
-		manipulate_raw_memory(data.as_mut_ptr(), data.len())
-```
-
-**Required for Unsafe:**
-- Raw pointer dereference and arithmetic
-- FFI function calls
-- Calling other `unsafe fn`
-- Accessing `static mut` variables
-- Unsafe trait implementations
-- Low-level memory operations
-
-**Safety Responsibility:**
-Programmer must manually uphold safety invariants when using `unsafe`. The type system cannot provide guarantees within unsafe blocks.
-
-#### **Rationale**
-
-FFI and unsafe operations are necessary escape hatches for:
-- Interoperating with existing C libraries
-- Systems programming and embedded development
-- Performance-critical operations requiring manual optimization
-- Platform-specific functionality
-
-However, these features are advanced and should be used sparingly, with safety as the primary responsibility of the developer.
+> Moved to its own design doc — see [`unsafe.md`](unsafe.md), which owns the capability-based (`kind = "system"`) gatekeeper model, the `unsafe`/`extern "C"` syntax, the C type mapping, and the set of operations that require `unsafe`. The full `extern`/bindgen workflow is specified in `docs/specification.md` §4.11 / §17.
 
 ### **Runtime Permissions (Sandboxing for AI-Generated Code)**
 
@@ -1095,14 +956,7 @@ Adopting Deno's model rather than Zero's is the load-bearing decision: it preser
 
 ### **SIMD Support**
 
-**Vector Operations**
-```ryo
-# Future SIMD support
-import simd
-
-fn parallel_add(a: simd.f32x4, b: simd.f32x4) -> simd.f32x4:
-	return a + b  # Vectorized addition
-```
+> Moved to [`std_ext.md`](std_ext.md) (`std.simd` entry) — vector types are backed by Cranelift intrinsics, with the `simd.f32x4` operator surface documented there.
 
 ---
 
