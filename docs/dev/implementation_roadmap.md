@@ -606,8 +606,7 @@ remainder = a % b     # 1
 
 ---
 
-Note: Review the workspace crate layout (see root `CLAUDE.md`) and make the first split before M8
----
+> **Note:** Review the workspace crate layout (see root `CLAUDE.md`) and make the first split before M8.
 
 ### Milestone 8: Control Flow & Booleans [alpha]
 

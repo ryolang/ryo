@@ -95,6 +95,6 @@ This dictates the **second** stdlib module: **`std.mem`**.
 This order delivers "Hello World" first (high morale), then immediately forces resolution of memory management (the core architecture).
 
 ## References
-- Spec: `docs/specification.md` §13 (Standard Library)
+- Spec: `docs/specification.md` §14 (Standard Library)
 - Dev: `docs/dev/built_in.md` (built-in vs stdlib boundary), `docs/dev/std_ext.md`
 - Roadmap: `docs/dev/implementation_roadmap.md`

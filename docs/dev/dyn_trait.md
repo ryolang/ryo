@@ -138,6 +138,6 @@ process_shapes(shapes)
 **Performance.** Dynamic dispatch costs a virtual call (no inlining across the trait boundary) and a fat pointer (data ptr + vtable ptr) — larger than a bare reference, still safer than raw function pointers because the type system tracks the trait.
 
 ## References
-- Spec: `docs/specification.md` §7 (Traits / interfaces)
+- Spec: `docs/specification.md` §8 (Traits / interfaces)
 - Dev: `docs/dev/closure_representation.md` (shared fat-pointer dispatch)
 - Roadmap: `docs/dev/implementation_roadmap.md` (dyn Trait, v0.3+)

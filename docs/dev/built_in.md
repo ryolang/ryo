@@ -117,5 +117,5 @@ Use this checklist when implementing a feature:
 3. **Stdlib (Ryo):** `impl list { fn append() { unsafe { call_rust } } }`.
 
 ## References
-- Spec: `docs/specification.md` §4 (Types), §13 (Standard Library)
+- Spec: `docs/specification.md` §4 (Types), §14 (Standard Library)
 - Roadmap: `docs/dev/implementation_roadmap.md`

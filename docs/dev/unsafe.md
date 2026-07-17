@@ -113,7 +113,7 @@ This proves the model works: the user interacts with `std` safely, never knowing
 
 ### 7. FFI Type Mapping & the Unsafe Operation Set
 
-Reference detail for binding authors (folded in from the former proposals FFI section).
+Reference detail for binding authors (folded in from the former FFI section in proposals.md).
 
 **C type mapping.**
 - Ryo primitives map directly to their C equivalents.

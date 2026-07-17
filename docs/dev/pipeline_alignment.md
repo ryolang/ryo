@@ -202,7 +202,7 @@ This is the change that lets UIR (Phase 3) be a pure `Vec<u32>`-shaped thing ins
 
 ### 2.4 Sub-step D — Cached primitive-only fast path stays
 
-`pool.void()`, `pool.int()` etc. remain as `const fn` returning `TypeId::Void`, `TypeId::Int`. They become trivial; existing call sites don't have to change. Eventually we'd remove them but it's not required for this phase.
+`pool.void()`, `pool.int()` etc. remain as accessors returning the interned primitive `TypeId`s. Since the enum encoding of §2.2 was deferred (the newtype shipped — see I-018), these accessors stayed as the primary way to obtain a primitive type; existing call sites don't have to change.
 
 ### 2.5 Commits
 

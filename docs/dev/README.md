@@ -33,9 +33,9 @@ This directory contains implementation notes, architectural decisions, and desig
 |---|---|---|
 | [alpha_scope.md](alpha_scope.md) | Defines the v0.0.x alpha as a delivery slice of v0.1.0 | **Delete** when the alpha closes |
 | [design_issues.md](design_issues.md) | Open language-design questions, inconsistencies, and grey areas | **Resolve into spec** item by item — then delete |
-| [built_in.md](built_in.md) | Compiler magic types vs stdlib boundary (what the compiler must know vs what's a library) | **Move to spec** §4 (Types) or §13 (Stdlib) — then delete |
-| [std.md](std.md) | Rust runtime + Ryo wrapper strategy for stdlib (`std.sys` hidden layer + `std.io` public API) | **Move to spec** §13 (Standard Library) — then delete |
-| [std_ext.md](std_ext.md) | Curated Rust crates to wrap for stdlib (serde_json, ureq, regex, chrono, rand) | **Move to spec** §13 or a dedicated stdlib contributor guide — then delete |
+| [built_in.md](built_in.md) | Compiler magic types vs stdlib boundary (what the compiler must know vs what's a library) | **Move to spec** §4 (Types) or §14 (Stdlib) — then delete |
+| [std.md](std.md) | Rust runtime + Ryo wrapper strategy for stdlib (`std.sys` hidden layer + `std.io` public API) | **Move to spec** §14 (Standard Library) — then delete |
+| [std_ext.md](std_ext.md) | Curated Rust crates to wrap for stdlib (serde_json, ureq, regex, chrono, rand) | **Move to spec** §14 or a dedicated stdlib contributor guide — then delete |
 | [unsafe.md](unsafe.md) | `kind = "system"` gatekeeper pattern for unsafe blocks in `ryo.toml` | **Move to spec** §17 (FFI & unsafe) — then delete |
 
 ### Concurrency

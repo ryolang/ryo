@@ -279,7 +279,7 @@ result = data.iter()
 	.collect[list[ProcessedItem]]()  # Evaluation happens here
 ```
 
-> **Error handling has shipped** and is no longer a proposal — the error-union model (single-variant `error` decls, module-based grouping, `try`, inferred unions) is part of the core language. See `docs/specification.md` §6 (Error Handling) for the specification. This section was removed from the proposals backlog on merge.
+> **Error handling has shipped** and is no longer a proposal — the error-union model (single-variant `error` decls, module-based grouping, `try`, inferred unions) is part of the core language. See `docs/specification.md` §7 (Error Handling) for the specification. This section was removed from the proposals backlog on merge.
 
 ### **Attribute System**
 
