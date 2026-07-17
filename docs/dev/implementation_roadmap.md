@@ -310,8 +310,8 @@ _ = print("Second\n")
 - Lexer: `Arrow` (`->`), `Newline`, synthetic `Indent`/`Dedent` tokens
 - AST: `StmtKind::FunctionDef`, `StmtKind::Return`, `StmtKind::ExprStmt`, `ExprKind::Ident`
 - Parser: function definitions (`fn name(params) -> type:`), return statements, expression statements, variable references
-- HIR layer (`src/hir.rs`, `src/lower.rs`): post-analysis IR with full type resolution, scope checking, and implicit main wrapping — analogous to Zig's AIR
-- Codegen: refactored to consume HIR (not AST), two-pass compilation (declare-then-define) for forward references, `FunctionContext` struct, Cranelift `Variable` storage for locals/params, user function calls
+- Post-analysis IR with full type resolution, scope checking, and implicit main wrapping — analogous to Zig's AIR. (Originally a single tree-shaped HIR; since split into the flat UIR/TIR streams — see pipeline_alignment.md.)
+- Codegen: refactored to consume the typed IR (not AST), two-pass compilation (declare-then-define) for forward references, `FunctionContext` struct, Cranelift `Variable` storage for locals/params, user function calls
 - Builtin function registry (`src/builtins.rs`) for `print()` and future builtins
 - `ryo ir` command now displays actual Cranelift IR
 - `main.rs` split into focused modules: `errors.rs`, `linker.rs`, `pipeline.rs`
@@ -529,7 +529,7 @@ Milestone 6 (Implementation) is scheduled at the **start of Phase 4** — after 
 - Added `true` and `false` keyword tokens and `==` / `!=` operator tokens to the lexer
 - Extended AST with `Literal::Bool` and `BinaryOperator::Eq` / `NotEq`
 - Parse boolean literals and equality expressions (non-associative, below additive precedence)
-- Extended HIR with `Type::Bool`, `HirExprKind::BoolLiteral`, and equality `BinaryOp` variants
+- Extended the typed IR with `Type::Bool`, a bool-literal instruction, and equality `BinaryOp` variants
 - Type-check equality: same-type operands; supported on `int` and `bool`; `str` and `void` rejected
 - Codegen: maps `Type::Bool` to Cranelift `I8`; emits `icmp` for equality; `cranelift_type_for` helper makes variable declaration type-aware
 - Unit tests across lexer, parser, lowering, and codegen layers
@@ -713,7 +713,7 @@ fn main():                  # no args, no return type (Go-style)
   - `if <expr>:` block, optional `elif <expr>:` blocks, optional `else:` block — all using the existing indent/dedent machinery
   - Operator precedence: `not` (unary, tighter than `and`); `and` tighter than `or`; the whole logical layer sits below equality (`==`, `!=`)
   - Conditions must be `bool` (no truthy-coercion of `int` / `str` — Zig-style)
-- **HIR / Sema:**
+- **Sema / TIR:**
   - Type-check: condition expressions must be `Type::Bool`; `and`/`or` operands must both be `Type::Bool` and the result is `Type::Bool`; `not` operand must be `Type::Bool`
   - Block scoping: variables declared inside an if/elif/else branch are not visible after the branch ends
   - Return-flow analysis: if every branch (including `else`) of an `if` chain returns, the chain itself counts as returning — required so non-void functions can satisfy "all paths return" using `if/else` only
@@ -891,7 +891,7 @@ done
   - `range(start, end)` → `start..end` exclusive
   - Both args must be `int`; result is the loop-header's iteration domain (no first-class range value yet)
   - Note: `range(end)` (implied start=0) is a planned extension for a future milestone (see ISSUES.md I-040).
-- **HIR / Sema:**
+- **Sema / TIR:**
   - `while` condition must be `Type::Bool`
   - `for` loop variable is **immutable** and **block-scoped** to the loop body (consistent with Ryo's default; not visible after the loop)
   - `while` loops can mutate externally declared `mut` variables (this is the canonical pattern)
@@ -1187,7 +1187,7 @@ fn main():
    - Add `default: Option<Expression>` and `positional: bool` to function parameter nodes
    - Add `name: Option<String>` to call argument nodes to represent `CallArg { name, value }`
 
-3. **HIR/Lowering:**
+3. **Sema / Lowering:**
    - Validate: defaults must be trailing (no `fn f(a: int = 1, b: int)` — compile error)
    - Validate: named args match parameter names
    - Validate: positional args can only target `_`-marked params
@@ -3025,7 +3025,7 @@ ContractViolation: precondition failed: amount > 0
 - Guaranteed elision (G1-G4): local returns, literal construction, last-use moves, tail chains
 - Permitted elision (P1-P4): branch returns, match arms, loop exits, struct field moves
 - Hidden output pointer calling convention for eligible return sites
-- Integration with HIR lowering pipeline
+- Integration with the TIR lowering pipeline
 
 **Implementation Details:** See [copy_elision.md](copy_elision.md) for the full G/P/F classification and algorithm sketch.
 
