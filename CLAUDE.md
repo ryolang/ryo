@@ -57,6 +57,7 @@ cargo build                      # Automatically builds the runtime (if missing)
 cargo check                      # Check compiler for errors
 cargo test                       # Run all unit + integration tests
 ./scripts/run_linux_tests.sh             # Build Docker image and run entire test suite in Linux (ASan + Valgrind leak detection)
+./scripts/check_cranelift.sh [version]   # Diff Ryo's Cranelift version (from Cargo.lock) against another (default: latest) — see below
 cargo run -- run <file>          # JIT compile and execute
 cargo run -- build <file>        # AOT compile to binary
 cargo run -- toolchain install   # Download Zig linker
@@ -64,6 +65,8 @@ cargo run -- toolchain status    # Check Zig status
 cargo clippy --all-targets       # Lint (warnings are errors)
 cargo fmt --check                # Check code formatting style
 ```
+
+**Tracking Cranelift changes.** Ryo is built on the Cranelift backend, so upstream changes can affect codegen. `./scripts/check_cranelift.sh` resolves Ryo's Cranelift version from `Cargo.lock`, queries crates.io and the GitHub API for the exact commit SHAs, and prints the history of commits touching Cranelift's `cranelift/` directory between that version and a target version (default: latest release), handling parallel release-branch history. Pass a version argument to diff against a specific release instead of latest. Use it before bumping the Cranelift dependency to review what changed.
 
 **File extensions:** `.ryo` (source), `.md` (docs), `.rs` (Rust), `.o`/`.obj` (generated)
 
