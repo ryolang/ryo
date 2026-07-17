@@ -1157,7 +1157,7 @@ fn main():
 	print(scores)                # [95, 90, 100]
 ```
 
-`inout` is a **mutable borrow — pass-by-pointer, not copy-in/copy-out.** Mutations are visible to the caller immediately; there is no local copy written back on return. The `&` at the call site marks exactly that visible mutation.
+`inout` is a **mutable borrow**: mutations the function makes are visible to the caller immediately. The `&` at the call site marks exactly that visible mutation.
 
 *(Rationale: "Read is implicit, Write is explicit." Immutable borrows are the common case and should be frictionless. Mutable borrows are the exception and should be visible. The signature uses `inout` (Swift idiom) rather than `&mut Type` to avoid reading like a first-class reference type — in Ryo, mutable borrows are parameter conventions only (Rules 5 and 6 forbid storing or returning them). The call-site `&` keeps mutation visible to readers and grep-able for code review.)*
 
