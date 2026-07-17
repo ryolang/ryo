@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 echo "========================================================"
 echo "🐳 Building Ryo Linux test image..."
 echo "========================================================"
-docker build -t ryo-linux-test -f Dockerfile .
+docker build -t ryo-linux-test -f scripts/Dockerfile .
 
 echo ""
 echo "========================================================"
