@@ -14,6 +14,20 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 
 ---
 
+## 🔴 Blocking
+
+### I-112 — Ownership pass has no model of the `inout str` write-back escape (UAF + double-free)
+
+**Files:** `ryo-frontend/src/ownership.rs` (:390-393, :520-537, :642-643, Call-arm inout branch ~:1864-1870), `ryo-backend/src/codegen.rs` (`emit_inout_writeback` :659-688, `emit_frees` :1519-1528, `reload_inout_args` :1996-2030), `runtime/src/lib.rs` (`__ryo_str_push` :156-216)
+**Summary:** The write-back ABI lets an `inout str` callee replace the caller's buffer, but the ownership lattice treats both sides as if nothing escaped. Three confirmed consequences (each verified against the emitted Cranelift IR; probes in `target/tmp/m83_review/`):
+- **Callee-side UAF.** `fn set(inout s: str): s = "new"` — the reassigned value is never read in the callee, so the dead-store pass emits W0001 *and* a Free anchored after the Assign (:520-537). In the IR the `ryo_str_free` of the new buffer sits immediately before the write-back stores: the caller receives a dangling fat pointer and its next read is a use-after-free. Any last-use free of an inout-str-bound value has the same problem (it precedes the write-back).
+- **Missing drop of the old pointee.** Reassigning an `inout str` param never frees the caller's old buffer: `free_on_reassign` requires the old owner `Valid` (:642-643), but an inout param is `Borrowed` (:390-393). Rust/Swift semantics (`*x = new` drops the old value) require the callee to drop it.
+- **Caller-side stale free → double-free.** After `str_push(&s, suffix)`, the caller's last-use Free emits the *pre-call* triple (`inst_values[init]` at :1519-1528), while `__ryo_str_push` already freed that pointer via `realloc` when growing. IR shows `ryo_str_free(original_ptr, original_cap)` right after the call. The shipped integration test passes only because `realloc(2→8)` extends in place on macOS; any growth that moves is a double-free.
+Invisible to the current suite: no user-fn `inout str` test exists, the ASan suite has no `str_push` fixture, and `zig cc -fsanitize=address` cannot link the ASan runtime on macOS (`undefined symbol: ___asan_init`), so local sanitizer runs are vacuous — only `./scripts/run_linux_tests.sh` is a real gate.
+**Resolution:** Model the escape in the ownership pass. Callee-side: a value bound to an `inout str` param must be treated as escaping at function exit (like a return — no last-use/dead-store free, no W0001), and reassigning the param must drop the old pointee (extend the `free_on_reassign` path to inout/`Borrowed` owners). Caller-side: reseat the binding's owner across an inout call (owner = the call inst, like a reassign) so the last-use Free targets the reloaded triple. Add a user-fn `inout str` integration test and a `str_push`-with-growth fixture to the ASan suite; verify with `run_linux_tests.sh` before closing.
+
+---
+
 ## 🟡 Correctness / Hygiene
 
 ### I-006 — `print` is special-cased in codegen
@@ -395,6 +409,24 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
 **Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
 
+### I-113 — Runtime static archive is never rebuilt once present (stale-symbol AOT link failures)
+
+**Files:** `ryo/build.rs` (:47-51), `ryo-backend/build.rs` (:38-42)
+**Summary:** Both build scripts compile the `ryo-runtime` staticlib only `if !path.exists()`. Any checkout that already has `target/runtime-build/**/libryo_runtime.a` keeps it forever: after M8.3 added `__ryo_str_push`, the pre-existing release archive (built days earlier) lacked the symbol and `ryo build` failed at link with `undefined symbol: ___ryo_str_push`. Verified locally; fixed by a manual `cargo build -p ryo-runtime --release --target-dir target/runtime-build`. Clean checkouts are unaffected, which is why CI didn't see it.
+**Resolution:** Rebuild on source change, not just absence: stamp the archive with a hash/mtime of `runtime/src` and rebuild when stale, or invoke the cargo build unconditionally and let cargo's own change detection no-op.
+
+### I-114 — `&` is accepted outside call-argument position as a silent no-op
+
+**Files:** `ryo-frontend/src/sema.rs` (`Borrow` arm :1060-1066, `check_call` agreement :1420-1461), `ryo-frontend/src/parser.rs` (:418-424)
+**Summary:** The parser accepts `&ident` as a general expression atom, and sema's `Borrow` arm lowers it to the inner value's `TirRef` unconditionally. The `&`/`inout` agreement and lvalue checks only run in `check_call` (and the `str_push` dispatch), so `x = &c`, `return &c`, `1 + &c`, `print(&c)` all compile with the `&` silently discarded — probe-verified: `mut c = 5; x = &c` prints `5`. Misleading syntax: it advertises call-site mutation semantics where none exist.
+**Resolution:** Reject `InstTag::Borrow` anywhere except directly as a call argument (one check in the UIR-instruction walk, message along the lines of "`&` is only valid as an argument to an `inout` parameter").
+
+### I-115 — Shipped `inout` param syntax contradicts the specification (prefix vs postfix)
+
+**Files:** `ryo-frontend/src/parser.rs` (:316-332), `docs/specification.md` (:1005, :1031, :1150), `docs/CLAUDE.md` (:95), `docs/superpowers/specs/2026-07-17-milestone-8.3-mutable-borrows-inout-design.md` (:84)
+**Summary:** The compiler parses the prefix form `fn f(inout x: int)`; the specification, the M8.3 design doc's user-facing examples, and the docs gotcha note all document the postfix form `x: inout int` / `data: inout Type`. The design doc is internally inconsistent (prose postfix, parser sketch prefix), and the implementation followed the sketch. Per the design-change-escalation rule in the root `CLAUDE.md`, resolving this is a language-design decision, not a coherence fix.
+**Resolution:** Human decision required: either update `specification.md` + companions to the shipped prefix form, or change the parser to the documented postfix form. Until decided, the roadmap entry documents the shipped form.
+
 ---
 
 ## 🟢 Cleanup
@@ -536,6 +568,12 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken` :176-300, `Token` :30-103, `intern_token` :392-495, `Display` :105-170)
 **Summary:** Adding a token means editing `RawToken`, `Token`, the giant manual `intern_token` match, and `Display` (plus the parser downstream) — ~45 non-payload variants of pure boilerplate.
 **Resolution:** Generate the quadruple from a single macro table (variant name, logos pattern, payload kind).
+
+### I-116 — E0032 diagnostics lose the binding name for locals
+
+**Files:** `ryo-frontend/src/ownership.rs` (`owner_name_for_diag` :883-888, E0032 block :1902-1953)
+**Summary:** `swap(&c, &c)` reports "cannot borrow **value** as mutable more than once in the same call" (probe-verified) — `owner_name_for_diag` resolves `Owner::Inst(init)` through `consumed_binding_name`, but `init` is the binding's *initializer* (an IntConst/StrConst), not a `Var`, so the name is lost for locals. Params render correctly (`Owner::Param`). The spec's rendered example shows the backticked name.
+**Resolution:** In the E0032 block, prefer the `TirData::Var` name of the inout/borrow arg reads (already collected in `inout_uses`) over `owner_name_for_diag` when the owner came from a local; fall back to `owner_name_for_diag` otherwise.
 
 ---
 
