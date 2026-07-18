@@ -2061,6 +2061,49 @@ fn inout_scalar_writeback() {
 }
 
 #[test]
+fn inout_float_writeback() {
+    // M8.3: `inout float` — exercises a non-int scalar width through
+    // the write-back ABI (f64).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn scale(inout x: float):\n\tx += 1.5\n\nfn main():\n\tmut f = 1.0\n\tscale(&f)\n\tprint(float_to_str(f))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_float.ryo", code);
+    let output = run_ryo_command(&["run", "inout_float.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n2.5[Result]"),
+        "inout float write-back should print 2.5, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_early_return_still_writes_back() {
+    // M8.3: the write-back chokepoint must fire on an EARLY `return`
+    // (ReturnVoid) too, not just function fallthrough. Here `bump` exits
+    // via `return` inside the `if` arm, so `a` must be 0+1+10 == 11.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn bump(inout x: int, cond: bool):\n\tx += 1\n\tif cond:\n\t\tx += 10\n\t\treturn\n\tx += 100\n\nfn main():\n\tmut a = 0\n\tbump(&a, true)\n\tprint(int_to_str(a))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_early_ret.ryo", code);
+    let output = run_ryo_command(&["run", "inout_early_ret.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n11[Result]"),
+        "inout early-return write-back should print 11, got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn last_use_across_multiple_top_level_statements() {
     // Regression test: when an owned heap string is read in multiple
     // top-level statements, the last-use Free must anchor after the
