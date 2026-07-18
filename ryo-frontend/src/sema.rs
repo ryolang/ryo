@@ -1323,7 +1323,7 @@ fn check_call(
     // `name_to_decl`, so signature resolution and the worklist
     // never see them.
     if let Some(builtin) = builtins::lookup(sema.pool.str(name_id)) {
-        return emit_builtin_call(sema, fcx, view, arg_tirs, span, builtin);
+        return emit_builtin_call(sema, fcx, scope, view, arg_tirs, span, builtin);
     }
 
     if check_reserved_builtin(
@@ -1492,6 +1492,7 @@ fn borrow_target_reason(sema: &Sema<'_>, scope: &Scope, inner: InstRef) -> Optio
 fn emit_builtin_call(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
+    scope: &Scope,
     view: &CallView,
     arg_tirs: &[TirRef],
     span: Span,
@@ -1598,6 +1599,59 @@ fn emit_builtin_call(
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
+        "str_push" => {
+            // str_push(s: inout str, suffix: str) -> void. Builtins
+            // bypass `check_call`, so the `&`/`inout` agreement +
+            // mutable-lvalue checks are replayed here against arg 0.
+            if view.args.len() != 2 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "str_push() takes exactly 2 arguments, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let a0 = view.args[0];
+            let t0 = fcx.builder.ty_of(arg_tirs[0]);
+            let t1 = fcx.builder.ty_of(arg_tirs[1]);
+            if !matches!(sema.pool.kind(t0), TypeKind::Str)
+                || !matches!(sema.pool.kind(t1), TypeKind::Str)
+            {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(a0),
+                    DiagCode::TypeMismatch,
+                    "str_push(s: inout str, suffix: str): both arguments must be str".to_string(),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            // arg 0 must be `&<mut str>`: a Borrow whose target is an
+            // assignable lvalue (Task 6's helper).
+            let inner = match sema.uir.inst(a0).data {
+                InstData::Borrow(i) => i,
+                _ => {
+                    sema.sink.emit(Diag::error(
+                        sema.uir.span(a0),
+                        DiagCode::BorrowMismatch,
+                        "str_push's first argument is `inout str` and requires `&`".to_string(),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+            };
+            if let Some(reason) = borrow_target_reason(sema, scope, inner) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(a0),
+                    DiagCode::BorrowMismatch,
+                    format!("cannot borrow this expression as mutable: {}", reason),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let modes = vec![ParamMode::Inout, ParamMode::Borrow];
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }

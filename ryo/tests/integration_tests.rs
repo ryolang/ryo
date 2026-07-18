@@ -2104,6 +2104,27 @@ fn inout_early_return_still_writes_back() {
 }
 
 #[test]
+fn str_push_inout_str_builtin() {
+    // M8.3: str_push(s: inout str, suffix: str) appends in place via the
+    // __ryo_str_push runtime + the inout str write-back ABI.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, \" there\")\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "str_push.ryo", code);
+    let output = run_ryo_command(&["run", "str_push.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\nhi there[Result]"),
+        "str_push should append ' there' -> 'hi there', got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn last_use_across_multiple_top_level_statements() {
     // Regression test: when an owned heap string is read in multiple
     // top-level statements, the last-use Free must anchor after the

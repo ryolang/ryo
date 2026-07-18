@@ -248,6 +248,7 @@ impl Codegen<JITModule> {
             ),
             ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
             ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
+            ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
             ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
             ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
             (
@@ -478,22 +479,40 @@ impl<M: Module> Codegen<M> {
                 if param.mode == ParamMode::Inout {
                     // inout param: a single pointer to the caller's slot,
                     // regardless of pointee type. Load the current value
-                    // into a Variable so the body's existing read/mutate
+                    // into Variables so the body's existing read/mutate
                     // codegen is unchanged; remember the pointer for the
                     // write-back chokepoint before each `return_`.
                     let ptr = builder.block_params(entry_block)[block_idx];
                     block_idx += 1;
                     if is_str_type(param.ty, pool) {
-                        // str inout lands in Task 9; no scalar test reaches
-                        // this arm yet (sema allows it but only str_push uses
-                        // it, which is not wired until Task 9).
-                        todo!("inout str write-back ABI (Task 9)");
+                        // str inout: load the fat-pointer triple into
+                        // StrLocals so the body reads/mutates it like any
+                        // str local; write all three fields back before
+                        // each return_.
+                        let p = builder.ins().load(int_type, MemFlags::trusted(), ptr, 0);
+                        let l = builder.ins().load(types::I64, MemFlags::trusted(), ptr, 8);
+                        let c = builder.ins().load(types::I64, MemFlags::trusted(), ptr, 16);
+                        let var_ptr = builder.declare_var(int_type);
+                        let var_len = builder.declare_var(types::I64);
+                        let var_cap = builder.declare_var(types::I64);
+                        builder.def_var(var_ptr, p);
+                        builder.def_var(var_len, l);
+                        builder.def_var(var_cap, c);
+                        str_param_locals.insert(
+                            param.name,
+                            StrLocals {
+                                ptr: var_ptr,
+                                len: var_len,
+                                cap: var_cap,
+                            },
+                        );
+                    } else {
+                        let cl_ty = cranelift_type_for(param.ty, pool, int_type);
+                        let cur = builder.ins().load(cl_ty, MemFlags::trusted(), ptr, 0);
+                        let var = builder.declare_var(cl_ty);
+                        builder.def_var(var, cur);
+                        locals.insert(param.name, var);
                     }
-                    let cl_ty = cranelift_type_for(param.ty, pool, int_type);
-                    let cur = builder.ins().load(cl_ty, MemFlags::trusted(), ptr, 0);
-                    let var = builder.declare_var(cl_ty);
-                    builder.def_var(var, cur);
-                    locals.insert(param.name, var);
                     inout_ptrs.insert(param.name, (ptr, param.ty));
                     continue;
                 }
@@ -642,19 +661,28 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<(), String> {
         for (name, (ptr, ty)) in ctx.inout_ptrs.iter() {
-            // Scalar pointee: a single store at offset 0. (str pointee,
-            // which stores three fields, lands in Task 9.)
             if is_str_type(*ty, ctx.pool) {
-                continue; // Task 9 fills this in; no scalar path reaches it.
+                // str pointee: store all three fat-pointer fields.
+                let sl = ctx.str_locals.get(name).ok_or_else(|| {
+                    format!("inout str '{}' has no StrLocals", ctx.pool.str(*name))
+                })?;
+                let p = builder.use_var(sl.ptr);
+                let l = builder.use_var(sl.len);
+                let c = builder.use_var(sl.cap);
+                builder.ins().store(MemFlags::trusted(), p, *ptr, 0);
+                builder.ins().store(MemFlags::trusted(), l, *ptr, 8);
+                builder.ins().store(MemFlags::trusted(), c, *ptr, 16);
+            } else {
+                // Scalar pointee: a single store at offset 0.
+                let var = ctx.locals.get(name).ok_or_else(|| {
+                    format!(
+                        "inout scalar '{}' has no local Variable",
+                        ctx.pool.str(*name)
+                    )
+                })?;
+                let val = builder.use_var(*var);
+                builder.ins().store(MemFlags::trusted(), val, *ptr, 0);
             }
-            let var = ctx.locals.get(name).ok_or_else(|| {
-                format!(
-                    "inout scalar '{}' has no local Variable",
-                    ctx.pool.str(*name)
-                )
-            })?;
-            let val = builder.use_var(*var);
-            builder.ins().store(MemFlags::trusted(), val, *ptr, 0);
         }
         Ok(())
     }
@@ -1795,32 +1823,103 @@ impl<M: Module> Codegen<M> {
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
+        if name_str == "str_push" {
+            // str_push(&s, suffix): spill s's fat pointer to a 24-byte
+            // slot, call __ryo_str_push(slot_addr, suffix_ptr, suffix_len),
+            // then reload the mutated triple back into s's StrLocals.
+            // arg 0 is `&s` (lowered to Var(s)); arg 1 is the suffix str.
+            let s_ref = view.args[0];
+            let suffix_ref = view.args[1];
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                24,
+                3,
+            ));
+            let s_addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            let s_repr = Self::eval_inst_str(builder, ctx, s_ref)?;
+            let ValueRepr::Str { ptr, len, cap } = s_repr else {
+                unreachable!("str_push target must be a str");
+            };
+            builder.ins().store(MemFlags::trusted(), ptr, s_addr, 0);
+            builder.ins().store(MemFlags::trusted(), len, s_addr, 8);
+            builder.ins().store(MemFlags::trusted(), cap, s_addr, 16);
+            let suf = Self::eval_inst_str(builder, ctx, suffix_ref)?;
+            let (suf_ptr, suf_len) = match suf {
+                ValueRepr::Str { ptr, len, .. } => (ptr, len),
+                _ => unreachable!("str_push suffix must be a str"),
+            };
+            let func_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                "__ryo_str_push",
+                &[ctx.int_type, ctx.int_type, types::I64],
+                &[],
+            )?;
+            builder.ins().call(func_ref, &[s_addr, suf_ptr, suf_len]);
+            // Reload the mutated fat pointer back into the caller's StrLocals.
+            let np = builder
+                .ins()
+                .load(ctx.int_type, MemFlags::trusted(), s_addr, 0);
+            let nl = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), s_addr, 8);
+            let nc = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), s_addr, 16);
+            if let Some(name) = Self::local_name_of(ctx, s_ref)
+                && let Some(sl) = ctx.str_locals.get(&name).cloned()
+            {
+                builder.def_var(sl.ptr, np);
+                builder.def_var(sl.len, nl);
+                builder.def_var(sl.cap, nc);
+            }
+            return Ok(builder.ins().iconst(ctx.int_type, 0));
+        }
+
         let callee_id = *ctx
             .func_ids
             .get(&name_id)
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
         let mut arg_values = Vec::with_capacity(view.args.len() * 3 + 1);
-        // inout scalar args: spill the current value to a stack slot,
-        // pass the slot address, then reload after the call.
-        let mut inout_reloads: Vec<(TirRef, StackSlot, types::Type)> = Vec::new();
+        // inout args: spill the current value to a stack slot, pass the
+        // slot address, then reload after the call. Scalar spills one
+        // field; str spills the fat-pointer triple.
+        let mut inout_reloads: Vec<(TirRef, StackSlot)> = Vec::new();
         for (i, arg) in view.args.iter().enumerate() {
             let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
             let arg_ty = ctx.tir.inst(*arg).ty;
             if mode == ParamMode::Inout {
-                // Scalar inout only here; str inout lands in Task 9.
-                let cl_ty = cranelift_type_for(arg_ty, ctx.pool, ctx.int_type);
-                let bytes = cl_ty.bytes().max(8);
-                let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    bytes,
-                    3,
-                ));
-                let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-                let cur = Self::eval_inst(builder, ctx, *arg)?;
-                builder.ins().store(MemFlags::trusted(), cur, addr, 0);
-                arg_values.push(addr);
-                inout_reloads.push((*arg, slot, cl_ty));
+                if is_str_type(arg_ty, ctx.pool) {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        24,
+                        3,
+                    ));
+                    let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                    let repr = Self::eval_inst_str(builder, ctx, *arg)?;
+                    let ValueRepr::Str { ptr, len, cap } = repr else {
+                        unreachable!("inout str arg must produce ValueRepr::Str");
+                    };
+                    builder.ins().store(MemFlags::trusted(), ptr, addr, 0);
+                    builder.ins().store(MemFlags::trusted(), len, addr, 8);
+                    builder.ins().store(MemFlags::trusted(), cap, addr, 16);
+                    arg_values.push(addr);
+                    inout_reloads.push((*arg, slot));
+                } else {
+                    let cl_ty = cranelift_type_for(arg_ty, ctx.pool, ctx.int_type);
+                    let bytes = cl_ty.bytes().max(8);
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        bytes,
+                        3,
+                    ));
+                    let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                    let cur = Self::eval_inst(builder, ctx, *arg)?;
+                    builder.ins().store(MemFlags::trusted(), cur, addr, 0);
+                    arg_values.push(addr);
+                    inout_reloads.push((*arg, slot));
+                }
             } else if is_str_type(arg_ty, ctx.pool) {
                 let repr = Self::eval_inst_str(builder, ctx, *arg)?;
                 match repr {
@@ -1888,22 +1987,43 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// Reload each inout scalar slot after a call and write the updated
-    /// value back into the caller's local `Variable`. The inout arg was
-    /// sema-lowered to its inner `Var(name)` ref, so `*arg_ref` is that
-    /// `Var` inst — read its binding name to find the local.
+    /// Reload each inout slot after a call and write the updated value
+    /// back into the caller's local. The inout arg was sema-lowered to
+    /// its inner `Var(name)` ref, so `*arg_ref` is that `Var` inst —
+    /// read its binding name to find the local. Scalar args reload one
+    /// field into `locals`; str args reload the fat-pointer triple into
+    /// `str_locals`.
     fn reload_inout_args(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        reloads: &[(TirRef, StackSlot, types::Type)],
+        reloads: &[(TirRef, StackSlot)],
     ) -> Result<(), String> {
-        for (arg_ref, slot, cl_ty) in reloads {
+        for (arg_ref, slot) in reloads {
             let addr = builder.ins().stack_addr(ctx.int_type, *slot, 0);
-            let updated = builder.ins().load(*cl_ty, MemFlags::trusted(), addr, 0);
-            if let Some(name) = Self::local_name_of(ctx, *arg_ref)
-                && let Some(var) = ctx.locals.get(&name).copied()
-            {
-                builder.def_var(var, updated);
+            let arg_ty = ctx.tir.inst(*arg_ref).ty;
+            if is_str_type(arg_ty, ctx.pool) {
+                let np = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlags::trusted(), addr, 0);
+                let nl = builder.ins().load(types::I64, MemFlags::trusted(), addr, 8);
+                let nc = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), addr, 16);
+                if let Some(name) = Self::local_name_of(ctx, *arg_ref)
+                    && let Some(sl) = ctx.str_locals.get(&name).cloned()
+                {
+                    builder.def_var(sl.ptr, np);
+                    builder.def_var(sl.len, nl);
+                    builder.def_var(sl.cap, nc);
+                }
+            } else {
+                let cl_ty = cranelift_type_for(arg_ty, ctx.pool, ctx.int_type);
+                let updated = builder.ins().load(cl_ty, MemFlags::trusted(), addr, 0);
+                if let Some(name) = Self::local_name_of(ctx, *arg_ref)
+                    && let Some(var) = ctx.locals.get(&name).copied()
+                {
+                    builder.def_var(var, updated);
+                }
             }
         }
         Ok(())
