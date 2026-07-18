@@ -25,7 +25,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
   - [x] [Milestone 8c — Loops & Loop Control [alpha] ✅ COMPLETE](#milestone-8c-loops--loop-control-alpha--complete)
 - [x] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type-and-move-semantics-alpha) ✅
 - [x] [Milestone 8.2 — Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE](#milestone-82-implicit-borrow-liveness--ownership-pass-refactors-alpha)
-- [ ] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha]](#milestone-83-mutable-borrows-inout-alpha)
+- [x] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha] ✅ COMPLETE](#milestone-83-mutable-borrows-inout-alpha)
 - [ ] [Milestone 8.4 — String Slices (`&str`) [alpha]](#milestone-84-string-slices-str-alpha)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
@@ -1076,31 +1076,30 @@ fn main():
 - Ownership and dataflow algorithms have been thoroughly hardened with comprehensive regression tests.
 - Dependencies: Milestone 8.1 (move tracker provides the initial ownership framework)
 
-### Milestone 8.3: Mutable Borrows (`inout`) [alpha]
+### Milestone 8.3: Mutable Borrows (`inout`) [alpha] ✅ COMPLETE
 
 **Goal:** Add mutable references with aliasing exclusion, completing the v0.1 borrow checker.
 
-**Status:** ⏳ Planned
+**Status:** ✅ COMPLETE (2026-07-18)
 
-**Tasks:**
+**What was implemented:**
 
-- Add `inout` keyword to lexer/parser
-- Add the third `ParamMode::Inout` variant (M8.2 reserved the slot) — a **calling convention**, not a new type. Per Rule 3, mutable borrows are parameter conventions only, so there is no `Type::MutRef` / `TypeKind::Ref` (see M8.2 design, "Why no `Owner::Borrow`").
-- Parse:
-  - Type annotations: `inout User`
-  - Call-site borrow: `&value` (new `&` token + `ExprKind::Borrow`)
-- Extend the borrow checker with exclusion rules (Rule 7), reusing M8.2's intra-call borrowed/moved partition:
+- `inout` keyword and `&` token in the lexer; parser support for the param mode selector (`inout x: int`) and the call-site borrow `&value` (`ExprKind::Borrow`, lowered to a UIR `Borrow` inst).
+- The third `ParamMode::Inout` variant (M8.2 reserved the slot) — a **calling convention**, not a new type. Per Rule 3, mutable borrows are parameter conventions only, so there is no `Type::MutRef` / `TypeKind::Ref` (see M8.2 design, "Why no `Owner::Borrow`"). Replaced the old `is_move: bool` param field with `mode: ParamMode` across AST/UIR/TIR.
+- Sema: `inout` params bind as mutable in the callee scope; `&`⟺`inout` agreement and mutable-lvalue validation (E0033 `BorrowMismatch`); `str_push(s: inout str, suffix: str)` builtin dispatch with `[Inout, Borrow]` modes.
+- Codegen: sret-style write-back ABI — the callee receives a pointer, mutates through locals, and stores back before **every** `return`; the caller spills its slot, passes the address, and reloads after the call. Scalars (`int`/`float`/`bool`) and `str` (24-byte fat-pointer slot) are supported; the runtime `__ryo_str_push` backs the builtin.
+- Extended the borrow checker with exclusion rules (Rule 7), reusing M8.2's intra-call borrowed/moved partition with a third `inout` set (E0032 `MutableAliasingViolation`):
   - **At most one mutable borrow** of a value at any point
   - **No immutable borrows while a mutable borrow is live**
   - Mutable borrows still cannot outlive the borrowed value
-- Codegen: pass a pointer to the caller's slot; the callee mutates through it and writes back on return
+- `inout` accepts scalars and `str` only; `inout` on aggregates (`[T]`, structs) is deferred to M22.
 
 **Visible Progress:** Mutation through references is safe and aliasing-free. Foundations for `inout self` methods (M17) and in-place collection updates (M22) are in place.
 
 **Example:**
 
 ```ryo
-fn increment(x: inout int):
+fn increment(inout x: int):
 	x += 1                       # mutate by name — no deref operator
 
 fn main():
@@ -1109,8 +1108,8 @@ fn main():
 	print(int_to_str(count))     # 1
 
 	# Aliasing prevented within a single call (Rule 7):
-	# swap(&count, &count)       # compile error: cannot borrow `count` as mutable twice
-	# f(&count, count)           # compile error: shared while mutable borrow live
+	# swap(&count, &count)       # E0032: cannot borrow `count` as mutable more than once in the same call
+	# f(&count, count)           # E0032: immutable borrow while mutably borrowed
 ```
 
 **Implementation Notes:**
