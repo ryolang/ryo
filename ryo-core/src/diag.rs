@@ -122,6 +122,9 @@ pub enum DiagCode {
     /// Call-site `&`/`inout` disagreement, or `&` applied to a
     /// non-assignable lvalue (M8.3).
     BorrowMismatch,
+    /// Rule 7 violation: a value has more than one mutable borrow, or a
+    /// mutable and an immutable/moved use, in the same call (M8.3).
+    MutableAliasingViolation,
     /// A Move-typed value is declared (or assigned) but never used.
     DeadStore,
 

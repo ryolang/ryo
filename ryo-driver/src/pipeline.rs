@@ -245,6 +245,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::ReturnBorrowedValue => "E0022",
         DiagCode::MoveWhileBorrowedInCall => "E0031",
         DiagCode::BorrowMismatch => "E0033",
+        DiagCode::MutableAliasingViolation => "E0032",
         DiagCode::DeadStore => "W0001",
         DiagCode::CycleInResolution => "E0016",
         DiagCode::ParseError => "E0100",
