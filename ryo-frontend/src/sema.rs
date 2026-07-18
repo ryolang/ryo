@@ -363,7 +363,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     // redundant noise. `move` on `str` (and other heap types) stays
     // silent — that's the whole reason the keyword exists.
     for param in &body.params {
-        if param.is_move && sema.pool.is_copy(param.ty) {
+        if param.mode == ParamMode::Move && sema.pool.is_copy(param.ty) {
             let name = sema.pool.str(param.name).to_string();
             let ty_str = sema.pool.display(param.ty).to_string();
             sema.sink.emit(Diag::warning(
@@ -383,7 +383,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         .map(|p| TirParam {
             name: p.name,
             ty: p.ty,
-            is_move: p.is_move,
+            mode: p.mode,
             span: p.span,
         })
         .collect();
@@ -1340,13 +1340,13 @@ fn check_call(
             return fcx.builder.unreachable(sema.pool.error_type(), span);
         }
     };
-    // Snapshot the callee's per-parameter move flags from its UIR
+    // Snapshot the callee's per-parameter modes from its UIR
     // body so we can stamp `ParamMode`s without holding a borrow on
     // `sema` through the per-argument diagnostics below.
-    let callee_move_flags: Vec<bool> = sema.uir.func_bodies[callee.index()]
+    let callee_modes: Vec<ParamMode> = sema.uir.func_bodies[callee.index()]
         .params
         .iter()
-        .map(|p| p.is_move)
+        .map(|p| p.mode)
         .collect();
 
     let sig = sema
@@ -1359,20 +1359,11 @@ fn check_call(
     let expected: Vec<TypeId> = sig.params.clone();
     let return_type = sig.return_type;
     // One mode per call-site argument, stamped from the callee
-    // signature's `is_move` flags. When the arity mismatches we
+    // signature's parameter modes. When the arity mismatches we
     // fall back to all-Borrow over the actual argument count so the
     // encoded payload stays well-formed on the error path.
-    let modes: Vec<ParamMode> = if view.args.len() == callee_move_flags.len() {
-        callee_move_flags
-            .iter()
-            .map(|&is_move| {
-                if is_move {
-                    ParamMode::Move
-                } else {
-                    ParamMode::Borrow
-                }
-            })
-            .collect()
+    let modes: Vec<ParamMode> = if view.args.len() == callee_modes.len() {
+        callee_modes.clone()
     } else {
         vec![ParamMode::Borrow; view.args.len()]
     };

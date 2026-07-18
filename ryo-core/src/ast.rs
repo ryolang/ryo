@@ -5,6 +5,7 @@
 //! printing and Display impls accept a pool reference so they can
 //! resolve those handles back to source text.
 
+use crate::tir::ParamMode;
 use crate::types::{InternPool, StringId};
 use chumsky::span::SimpleSpan;
 use std::fmt;
@@ -77,11 +78,15 @@ impl Statement {
                 println!("{}FunctionDef: {}", prefix, pool.str(func.name.name));
                 let inner = format!("{}  ", prefix);
                 for param in &func.params {
-                    let move_prefix = if param.is_move { "move " } else { "" };
+                    let mode_prefix = match param.mode {
+                        ParamMode::Move => "move ",
+                        ParamMode::Inout => "inout ",
+                        ParamMode::Borrow => "",
+                    };
                     println!(
                         "{}├── param: {}{}: {}",
                         inner,
-                        move_prefix,
+                        mode_prefix,
                         pool.str(param.name.name),
                         pool.str(param.type_annotation.name),
                     );
@@ -257,7 +262,7 @@ pub struct FunctionDef {
 pub struct Param {
     pub name: Ident,
     pub type_annotation: TypeExpr,
-    pub is_move: bool,
+    pub mode: ParamMode,
     pub span: SimpleSpan,
 }
 

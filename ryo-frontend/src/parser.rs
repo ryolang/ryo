@@ -9,6 +9,7 @@ use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan};
 
 use crate::lexer::Token;
 use ryo_core::ast::*;
+use ryo_core::tir::ParamMode;
 
 /// Helper: skip zero or more newline tokens.
 fn skip_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
@@ -314,14 +315,20 @@ where
 
     let param = just(Token::Move)
         .or_not()
-        .map(|m| m.is_some())
+        .map(|m| {
+            if m.is_some() {
+                ParamMode::Move
+            } else {
+                ParamMode::Borrow
+            }
+        })
         .then(select! { Token::Ident(name) => name }.map_with(|name, e| Ident::new(name, e.span())))
         .then_ignore(just(Token::Colon))
         .then(type_expr)
-        .map_with(|((is_move, name), type_annotation), e| Param {
+        .map_with(|((mode, name), type_annotation), e| Param {
             name,
             type_annotation,
-            is_move,
+            mode,
             span: e.span(),
         });
 
@@ -1429,7 +1436,10 @@ mod tests {
             other => panic!("expected FunctionDef, got {:?}", other),
         };
         assert_eq!(func.params.len(), 1);
-        assert!(func.params[0].is_move, "param `s` should be marked move");
+        assert!(
+            func.params[0].mode == ParamMode::Move,
+            "param `s` should be marked move"
+        );
         assert_eq!(pool.str(func.params[0].name.name), "s");
         assert_eq!(pool.str(func.params[0].type_annotation.name), "str");
     }
@@ -1443,8 +1453,8 @@ mod tests {
         };
         assert_eq!(func.params.len(), 1);
         assert!(
-            !func.params[0].is_move,
-            "bare param `s` should default to is_move=false"
+            func.params[0].mode == ParamMode::Borrow,
+            "bare param `s` should default to Borrow mode"
         );
         assert_eq!(pool.str(func.params[0].name.name), "s");
         assert_eq!(pool.str(func.params[0].type_annotation.name), "str");

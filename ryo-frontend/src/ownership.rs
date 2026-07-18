@@ -378,17 +378,18 @@ fn analyze_function(
     let mut own = Ownership::default();
 
     // Initialise per-parameter state. Move-typed params start at
-    // `Valid` (the callee owns them); borrowed params start at
-    // `Borrowed`. Copy-typed params skip the lattice entirely.
+    // `Valid` (the callee owns them); borrowed and inout params start
+    // at `Borrowed` (the callee does not own the buffer — inout adds
+    // mutability, not ownership). Copy-typed params skip the lattice
+    // entirely.
     for param in &tir.params {
         if !needs_tracking(param.ty, pool) {
             continue;
         }
         let owner = Owner::Param(param.name);
-        let state = if param.is_move {
-            OwnerState::Valid
-        } else {
-            OwnerState::Borrowed
+        let state = match param.mode {
+            ParamMode::Move => OwnerState::Valid,
+            ParamMode::Borrow | ParamMode::Inout => OwnerState::Borrowed,
         };
         own.states.insert(owner, state);
         own.current_owner.insert(param.name, owner);
@@ -3045,7 +3046,7 @@ mod tests {
     #[test]
     fn borrowed_param_resolves_under_owner_param_as_borrowed() {
         use chumsky::span::{SimpleSpan, Span as _};
-        use ryo_core::tir::{TirBuilder, TirParam};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
         let void = pool.void();
@@ -3057,7 +3058,7 @@ mod tests {
             vec![TirParam {
                 name: s_name,
                 ty: str_ty,
-                is_move: false,
+                mode: ParamMode::Borrow,
                 span,
             }],
             void,
@@ -3081,7 +3082,7 @@ mod tests {
     #[test]
     fn unconsumed_move_param_schedules_free_at_function_end() {
         use chumsky::span::{SimpleSpan, Span as _};
-        use ryo_core::tir::{TirBuilder, TirParam};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
         let void = pool.void();
@@ -3093,7 +3094,7 @@ mod tests {
             vec![TirParam {
                 name: s_name,
                 ty: str_ty,
-                is_move: true,
+                mode: ParamMode::Move,
                 span,
             }],
             void,
@@ -3135,13 +3136,13 @@ mod tests {
                 TirParam {
                     name: s_name,
                     ty: str_ty,
-                    is_move: true,
+                    mode: ParamMode::Move,
                     span,
                 },
                 TirParam {
                     name: cond_name,
                     ty: bool_ty,
-                    is_move: false,
+                    mode: ParamMode::Borrow,
                     span,
                 },
             ],

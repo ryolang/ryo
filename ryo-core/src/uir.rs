@@ -43,6 +43,7 @@
 //! mirrors Zig's `Zir.Inst.Index` / `Zir.Inst.OptionalIndex` pair.
 
 use crate::ast::CompoundOp;
+use crate::tir::ParamMode;
 use crate::types::{InternPool, StringId, TypeId};
 use chumsky::span::{SimpleSpan, Span as _};
 use std::fmt;
@@ -249,7 +250,7 @@ pub struct Inst {
 pub struct UirParam {
     pub name: StringId,
     pub ty: TypeId,
-    pub is_move: bool,
+    pub mode: ParamMode,
     pub span: Span,
 }
 
