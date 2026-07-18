@@ -2125,6 +2125,47 @@ fn str_push_inout_str_builtin() {
 }
 
 #[test]
+fn inout_aliasing_same_owner_rejected() {
+    // M8.3b Rule 7: swap(&c, &c) passes one owner as two mutable borrows
+    // in the same call — the ownership pass must reject with E0032.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn swap(inout a: int, inout b: int):\n\tmut t = a\n\ta = b\n\tb = t\n\nfn main():\n\tmut c = 5\n\tswap(&c, &c)\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_alias_bad.ryo", code);
+    let output = run_ryo_command(&["run", "inout_alias_bad.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "swap(&c, &c) must be rejected as a Rule 7 violation"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0032"),
+        "expected E0032 in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn inout_aliasing_distinct_owners_ok() {
+    // M8.3b Rule 7: swap(&a, &b) with distinct owners compiles and the
+    // write-back ABI actually swaps the values.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn swap(inout a: int, inout b: int):\n\tmut t = a\n\ta = b\n\tb = t\n\nfn main():\n\tmut x = 5\n\tmut y = 7\n\tswap(&x, &y)\n\tprint(int_to_str(x))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_alias_ok.ryo", code);
+    let output = run_ryo_command(&["run", "inout_alias_ok.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n7[Result]"),
+        "swap(&x, &y) should leave x == 7, got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn last_use_across_multiple_top_level_statements() {
     // Regression test: when an owned heap string is read in multiple
     // top-level statements, the last-use Free must anchor after the

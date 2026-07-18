@@ -739,6 +739,26 @@ fn underlying_owner(own: &Ownership, init: TirRef) -> Owner {
     }
 }
 
+/// Aliasing identity of an `inout` (or Copy borrow) call argument for the
+/// Rule 7 overlap check (M8.3). Tracked (Move-typed) args resolve to the
+/// usual underlying owner. Copy scalars never enter the lattice, so their
+/// stable identity is the binding's `current_owner` slot (seeded at the
+/// VarDecl) — two `&c` reads of one `mut c` must collide even though each
+/// read is its own SSA value. An unregistered name (a Copy-typed
+/// parameter, which the param loop skips) falls back to
+/// `Owner::Param(name)` — the correct per-binding key for exactly that
+/// case.
+fn inout_owner(own: &Ownership, tir: &Tir, arg: TirRef) -> Owner {
+    match tir.inst(arg).data {
+        TirData::Var(name) => own
+            .current_owner
+            .get(&name)
+            .copied()
+            .unwrap_or(Owner::Param(name)),
+        _ => underlying_owner(own, arg),
+    }
+}
+
 /// Use-site use-after-move authority (I-050). Resolve the operand's
 /// underlying owner and emit E0020 if it is `Moved`. Called from every
 /// use site: consume sites, borrow-arg paths, and operand-read sites.
@@ -1822,9 +1842,12 @@ fn visit_expr(
                 visit_expr(tir, pool, own, sink, sidecar, *arg);
             }
 
-            // Phase 2 — use-safety check + borrow/move partition.
+            // Phase 2 — use-safety check + borrow/move/inout partition.
             let mut borrowed: HashSet<Owner> = HashSet::new();
             let mut moved: HashSet<Owner> = HashSet::new();
+            // inout occurrences: (owner, arg span) — a Vec, not a Set, so
+            // a double-inout of one owner is detectable by count (Rule 7).
+            let mut inout_uses: Vec<(Owner, Span)> = Vec::new();
             for (i, arg) in view.args.iter().enumerate() {
                 if is_borrowed_scalar_param(view.name, pool, i)
                     && matches!(tir.inst(*arg).tag, TirTag::StrConst)
@@ -1836,17 +1859,97 @@ fn visit_expr(
                     // pass. See I-057.
                     own.temp_owners.remove(&Owner::Inst(*arg));
                 }
+                let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
                 let arg_ty = tir.inst(*arg).ty;
+                if mode == ParamMode::Inout {
+                    // Rule 7 (M8.3): resolve an aliasing identity even for
+                    // Copy scalars, which never enter the lattice.
+                    let owner = inout_owner(own, tir, *arg);
+                    check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
+                    inout_uses.push((owner, tir.span(*arg)));
+                    continue;
+                }
                 if !needs_tracking(arg_ty, pool) {
+                    // A Copy borrow is a no-op for liveness, but it still
+                    // aliases an `inout` of the same binding in this call —
+                    // record Var reads by name for the Rule 7 overlap check.
+                    // (A Copy `move` arg is rejected by sema's RedundantMove,
+                    // so only the Borrow arm is reachable from real code.)
+                    if mode == ParamMode::Borrow && matches!(tir.inst(*arg).tag, TirTag::Var) {
+                        borrowed.insert(inout_owner(own, tir, *arg));
+                    }
                     continue;
                 }
                 let owner = underlying_owner(own, *arg);
-                let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
                 if mode == ParamMode::Borrow {
                     check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
                     borrowed.insert(owner);
                 } else {
                     moved.insert(owner);
+                }
+            }
+            // Rule 7 (M8.3): at most one mutable borrow per owner in a call,
+            // and no immutable borrow / move alongside it. Each DISTINCT
+            // inout owner is handled exactly once (the `seen_owners` guard)
+            // so cases 2/3 don't re-fire per occurrence.
+            let mut seen_owners: HashSet<Owner> = HashSet::new();
+            for (owner, _span) in &inout_uses {
+                if !seen_owners.insert(*owner) {
+                    continue;
+                }
+                let name = owner_name_for_diag(*owner, tir, pool);
+
+                // (1) The same owner is mutably borrowed more than once.
+                // Collect every occurrence so the two notes point at
+                // DISTINCT arg spans — the loop item's own span is
+                // occurrence 0, so reusing it for the "second" note would
+                // duplicate the "first" note's span.
+                let occurrences: Vec<Span> = inout_uses
+                    .iter()
+                    .filter(|(o, _)| o == owner)
+                    .map(|(_, s)| *s)
+                    .collect();
+                if occurrences.len() > 1 {
+                    let mut diag = Diag::error(
+                        tir.span(r),
+                        DiagCode::MutableAliasingViolation,
+                        format!(
+                            "cannot borrow {} as mutable more than once in the same call",
+                            name
+                        ),
+                    );
+                    diag = diag.with_note(Some(occurrences[0]), "first mutable borrow here");
+                    diag = diag.with_note(Some(occurrences[1]), "second mutable borrow here");
+                    diag = diag.with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)");
+                    sink.emit(diag);
+                }
+                // (2) inout ∩ borrowed.
+                if borrowed.contains(owner) {
+                    sink.emit(
+                        Diag::error(
+                            tir.span(r),
+                            DiagCode::MutableAliasingViolation,
+                            format!(
+                                "cannot borrow {} as immutable while it is mutably borrowed in the same call",
+                                name
+                            ),
+                        )
+                        .with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)"),
+                    );
+                }
+                // (3) inout ∩ moved.
+                if moved.contains(owner) {
+                    sink.emit(
+                        Diag::error(
+                            tir.span(r),
+                            DiagCode::MutableAliasingViolation,
+                            format!(
+                                "cannot move {} while it is mutably borrowed in the same call",
+                                name
+                            ),
+                        )
+                        .with_help("finish the mutable borrow before moving the value"),
+                    );
                 }
             }
             // Overlap — same owner borrowed AND moved in one call.
@@ -1861,10 +1964,12 @@ fn visit_expr(
                         && underlying_owner(own, *arg) == *owner
                     {
                         let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
-                        if mode == ParamMode::Borrow {
-                            borrow_span = Some(tir.span(*arg));
-                        } else {
-                            move_span = Some(tir.span(*arg));
+                        match mode {
+                            ParamMode::Borrow => borrow_span = Some(tir.span(*arg)),
+                            ParamMode::Move => move_span = Some(tir.span(*arg)),
+                            // inout overlaps are reported as E0032 above —
+                            // never as the "moved here" half of E0031.
+                            ParamMode::Inout => {}
                         }
                     }
                 }
@@ -3718,6 +3823,202 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
             "borrow and move in sequential statements must not trigger E0031"
+        );
+    }
+
+    #[test]
+    fn inout_same_owner_twice_rejected() {
+        // swap(&c, &c) — two mutable borrows of one int owner in the same
+        // call (Rule 7 case 1). The int args never enter the lattice, so
+        // this exercises the name-based inout owner resolution.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let c = pool.intern_str("c");
+        let swap = pool.intern_str("swap");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ic = tb.int_const(1, int_ty, span);
+        let decl = tb.var_decl(c, false, int_ty, ic, span);
+        let cv1 = tb.var(c, int_ty, span);
+        let cv2 = tb.var(c, int_ty, span);
+        let call = tb.call(
+            swap,
+            &[cv1, cv2],
+            &[ParamMode::Inout, ParamMode::Inout],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        let e0032_count = diags
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::MutableAliasingViolation))
+            .count();
+        assert_eq!(
+            e0032_count, 1,
+            "Expected exactly one MutableAliasingViolation (E0032) for swap(&c, &c); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_and_borrow_same_owner_rejected() {
+        // f(&c, c) — mutable borrow plus immutable borrow of one int owner
+        // in the same call (Rule 7 case 2).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let c = pool.intern_str("c");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ic = tb.int_const(1, int_ty, span);
+        let decl = tb.var_decl(c, false, int_ty, ic, span);
+        let cv1 = tb.var(c, int_ty, span);
+        let cv2 = tb.var(c, int_ty, span);
+        let call = tb.call(
+            f,
+            &[cv1, cv2],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        let e0032_count = diags
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::MutableAliasingViolation))
+            .count();
+        assert_eq!(
+            e0032_count, 1,
+            "Expected exactly one MutableAliasingViolation (E0032) for f(&c, c); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_and_move_same_owner_rejected() {
+        // f(&x, move x) — mutable borrow plus move of one str owner in the
+        // same call (Rule 7 case 3). The tracked str args exercise the
+        // lattice-backed path of the overlap check.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let x = pool.intern_str("x");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let decl = tb.var_decl(x, false, str_ty, lit, span);
+        let xv1 = tb.var(x, str_ty, span);
+        let xv2 = tb.var(x, str_ty, span);
+        let call = tb.call(
+            f,
+            &[xv1, xv2],
+            &[ParamMode::Inout, ParamMode::Move],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        let e0032_count = diags
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::MutableAliasingViolation))
+            .count();
+        assert_eq!(
+            e0032_count, 1,
+            "Expected exactly one MutableAliasingViolation (E0032) for f(&x, move x); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_distinct_owners_ok() {
+        // swap(&a, &b) — mutable borrows of DISTINCT int owners: no E0032.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let a = pool.intern_str("a");
+        let b = pool.intern_str("b");
+        let swap = pool.intern_str("swap");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ia = tb.int_const(1, int_ty, span);
+        let ib = tb.int_const(2, int_ty, span);
+        let da = tb.var_decl(a, false, int_ty, ia, span);
+        let db = tb.var_decl(b, false, int_ty, ib, span);
+        let av = tb.var(a, int_ty, span);
+        let bv = tb.var(b, int_ty, span);
+        let call = tb.call(
+            swap,
+            &[av, bv],
+            &[ParamMode::Inout, ParamMode::Inout],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[da, db, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MutableAliasingViolation)),
+            "mutable borrows of DISTINCT owners are fine (Rule 7); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn two_immutable_borrows_ok() {
+        // f(c, c) — two immutable borrows of one int owner: no E0032
+        // (Rule 7 many readers). Guards the untracked-Borrow recording
+        // against false positives.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let c = pool.intern_str("c");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ic = tb.int_const(1, int_ty, span);
+        let decl = tb.var_decl(c, false, int_ty, ic, span);
+        let cv1 = tb.var(c, int_ty, span);
+        let cv2 = tb.var(c, int_ty, span);
+        let call = tb.call(
+            f,
+            &[cv1, cv2],
+            &[ParamMode::Borrow, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MutableAliasingViolation)),
+            "two immutable borrows of one owner are fine (Rule 7 many readers); got {diags:?}"
         );
     }
 }
