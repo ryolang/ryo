@@ -313,15 +313,14 @@ where
     let type_expr =
         select! { Token::Ident(name) => name }.map_with(|name, e| TypeExpr::new(name, e.span()));
 
-    let param = just(Token::Move)
-        .or_not()
-        .map(|m| {
-            if m.is_some() {
-                ParamMode::Move
-            } else {
-                ParamMode::Borrow
-            }
-        })
+    let param_mode = choice((
+        just(Token::Move).to(ParamMode::Move),
+        just(Token::Inout).to(ParamMode::Inout),
+    ))
+    .or_not()
+    .map(|m| m.unwrap_or(ParamMode::Borrow));
+
+    let param = param_mode
         .then(select! { Token::Ident(name) => name }.map_with(|name, e| Ident::new(name, e.span())))
         .then_ignore(just(Token::Colon))
         .then(type_expr)
@@ -416,11 +415,18 @@ where
             let ident_expr = select! { Token::Ident(name) => name }
                 .map_with(|name, e| Expression::new(ExprKind::Ident(name), e.span()));
 
+            // `&ident` — call-site mutable-borrow marker (M8.3). Restricted to
+            // a bare identifier in v0.1; sema validates the target is an
+            // assignable lvalue (`mut` local or `inout` param).
+            let borrow = just(Token::Amp)
+                .ignore_then(ident_expr)
+                .map_with(|inner, e| Expression::new(ExprKind::Borrow(Box::new(inner)), e.span()));
+
             let parenthesized = expr
                 .clone()
                 .delimited_by(just(Token::LParen), just(Token::RParen));
 
-            call.or(ident_expr).or(literal).or(parenthesized)
+            borrow.or(call).or(ident_expr).or(literal).or(parenthesized)
         };
 
         let postfix = atom
@@ -1458,5 +1464,43 @@ mod tests {
         );
         assert_eq!(pool.str(func.params[0].name.name), "s");
         assert_eq!(pool.str(func.params[0].type_annotation.name), "str");
+    }
+
+    #[test]
+    fn parse_inout_param() {
+        let (program, _pool) = lex_and_parse("fn f(inout x: int):\n\tx += 1\n").unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        assert_eq!(func.params.len(), 1);
+        assert_eq!(
+            func.params[0].mode,
+            ParamMode::Inout,
+            "param `x` should be marked inout"
+        );
+    }
+
+    #[test]
+    fn parse_borrow_arg() {
+        let (program, _pool) = lex_and_parse("fn main():\n\tmut c = 0\n\tf(&c)\n").unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        // body[1] is the `f(&c)` expression statement.
+        let expr = match &func.body[1].kind {
+            StmtKind::ExprStmt(e) => e,
+            other => panic!("expected ExprStmt, got {:?}", other),
+        };
+        let args = match &expr.kind {
+            ExprKind::Call(_name, args) => args,
+            other => panic!("expected Call, got {:?}", other),
+        };
+        assert_eq!(args.len(), 1);
+        assert!(
+            matches!(args[0].kind, ExprKind::Borrow(_)),
+            "call argument should be a Borrow expression"
+        );
     }
 }

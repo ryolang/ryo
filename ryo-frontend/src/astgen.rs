@@ -396,6 +396,10 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
             let arg_refs: Vec<InstRef> = args.iter().map(|a| gen_expr(b, a)).collect();
             b.method_call(receiver_ref, *method, &arg_refs, span)
         }
+        ast::ExprKind::Borrow(inner) => {
+            let inner_ref = gen_expr(b, inner);
+            b.borrow(inner_ref, span)
+        }
     }
 }
 
@@ -451,6 +455,35 @@ mod tests {
         let stmts = uir.body_stmts(main);
         let v = uir.var_decl_view(stmts[0]);
         assert!(matches!(uir.inst(v.initializer).tag, InstTag::FloatLiteral));
+    }
+
+    #[test]
+    fn astgen_lowers_borrow() {
+        let (uir, pool) = parse_and_lower("fn main():\n\tmut c = 0\n\tf(&c)\n").unwrap();
+        let main = body_named(&uir, &pool, "main");
+        // body is [VarDecl(c), ExprStmt(Call)]; the call's first arg
+        // should be a Borrow inst whose operand is the Var(c) read.
+        let stmts = uir.body_stmts(main);
+        let expr_stmt = uir.inst(stmts[1]);
+        let call_ref = match expr_stmt.data {
+            InstData::UnOp(o) => o,
+            _ => panic!("expected ExprStmt to carry UnOp"),
+        };
+        let view = uir.call_view(call_ref);
+        assert_eq!(view.args.len(), 1);
+        let arg = view.args[0];
+        assert!(
+            matches!(uir.inst(arg).tag, InstTag::Borrow),
+            "call arg should lower to a Borrow inst"
+        );
+        let inner = match uir.inst(arg).data {
+            InstData::Borrow(i) => i,
+            _ => panic!("expected Borrow data"),
+        };
+        assert!(
+            matches!(uir.inst(inner).tag, InstTag::Var),
+            "borrow operand should be a Var read"
+        );
     }
 
     #[test]

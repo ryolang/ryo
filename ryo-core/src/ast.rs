@@ -348,6 +348,7 @@ impl Expression {
             ExprKind::MethodCall { method, .. } => {
                 format!("MethodCall(.{})", pool.str(*method))
             }
+            ExprKind::Borrow(_) => "Borrow".to_string(),
         };
 
         println!(
@@ -380,6 +381,9 @@ impl Expression {
                     arg.pretty_print(&format!("{}{}", new_prefix, prefix_char), pool);
                 }
             }
+            ExprKind::Borrow(inner) => {
+                inner.pretty_print(&format!("{}└── ", new_prefix), pool);
+            }
         }
     }
 }
@@ -396,6 +400,9 @@ pub enum ExprKind {
         method: StringId,
         args: Vec<Expression>,
     },
+    /// Call-site mutable borrow marker: `&expr` (M8.3). The inner
+    /// expression must resolve to an assignable lvalue (checked in sema).
+    Borrow(Box<Expression>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
