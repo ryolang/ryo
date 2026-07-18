@@ -3396,5 +3396,5 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 o
 ## References
 
 - Spec: [specification.md](../specification.md) — canonical language specification; this roadmap schedules its delivery
-- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md) — implementation plans linked from milestones
+- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [architecture_analysis.md](architecture_analysis.md) — implementation plans linked from milestones; architecture_analysis.md holds the verified codebase snapshot + improvement roadmap
 - Milestone: alpha milestones tagged `[alpha]` inline; see [alpha_scope.md](alpha_scope.md) for the alpha delivery slice
