@@ -354,7 +354,10 @@ impl<'a> Sema<'a> {
 fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     let mut scope = Scope::new();
     for param in &body.params {
-        scope.insert_binding(param.name, param.ty, false);
+        // An `inout` parameter is mutable inside the callee body (like a
+        // `mut` local); `move` and borrowed params are immutable.
+        let is_mutable = param.mode == ParamMode::Inout;
+        scope.insert_binding(param.name, param.ty, is_mutable);
     }
 
     // W0002: warn on `move` annotations applied to Copy-typed
@@ -1053,6 +1056,17 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
             }
+        }
+        InstTag::Borrow => {
+            let inner = match inst.data {
+                InstData::Borrow(inner) => inner,
+                _ => unreachable!("Borrow must carry InstData::Borrow"),
+            };
+            // The `&` is a marker, not an op: lower to the inner value's
+            // TirRef. Codegen decides pass-by-pointer from the callee's
+            // `ParamMode::Inout`. (&/inout agreement + lvalue validation
+            // are enforced in `check_call`, not here.)
+            analyze_expr(sema, fcx, scope, inner)
         }
         other => panic!(
             "analyze_expr: instruction at %{} is not an expression (tag={:?})",
@@ -1809,6 +1823,30 @@ mod tests {
 
     fn stmt_at(tir: &Tir, i: usize) -> TirRef {
         tir.body_stmts()[i]
+    }
+
+    #[test]
+    fn inout_param_is_assignable() {
+        // Mutating an inout param by name must NOT raise ImmutableAssign.
+        let (_tirs, diags, _pool) = run_with_errors("fn inc(inout x: int):\n\tx += 1\n");
+        assert!(
+            !any_code(&diags, DiagCode::ImmutableAssign),
+            "inout param must be mutable; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_typechecks_to_inner_type() {
+        // &c where c: int and callee expects inout int — no type error.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn inc(inout x: int):\n\tx += 1\nfn main():\n\tmut c = 0\n\tinc(&c)\n",
+        );
+        assert!(
+            !any_code(&diags, DiagCode::TypeMismatch),
+            "&c into inout int must typecheck; got {:?}",
+            diags
+        );
     }
 
     #[test]
