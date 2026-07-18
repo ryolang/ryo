@@ -2040,6 +2040,27 @@ fn test_int_to_str_builtin() {
 }
 
 #[test]
+fn inout_scalar_writeback() {
+    // M8.3: an `inout int` parameter is mutated in the callee and the
+    // change is visible to the caller via the write-back ABI.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn inc(inout x: int):\n\tx += 1\n\nfn main():\n\tmut c = 0\n\tinc(&c)\n\tinc(&c)\n\tprint(int_to_str(c))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_scalar.ryo", code);
+    let output = run_ryo_command(&["run", "inout_scalar.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n2[Result]"),
+        "inout write-back should print 2, got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn last_use_across_multiple_top_level_statements() {
     // Regression test: when an owned heap string is read in multiple
     // top-level statements, the last-use Free must anchor after the
