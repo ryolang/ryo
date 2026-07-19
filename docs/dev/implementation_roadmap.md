@@ -29,6 +29,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [ ] [Milestone 8.4 — String Slices (`&str`) [alpha]](#milestone-84-string-slices-str-alpha)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
+- [ ] [Milestone 9.1 — Synthesized Eq & Debug for Structs](#milestone-91-synthesized-eq--debug-for-structs)
 - [ ] [Milestone 10 — Tuples](#milestone-10-tuples)
 - [ ] [Milestone 11 — Enums (Algebraic Data Types) [alpha]](#milestone-11-enums-algebraic-data-types-alpha)
 - [ ] [Milestone 12 — Pattern Matching [alpha]](#milestone-12-pattern-matching-alpha)
@@ -1303,12 +1304,57 @@ fn main():
 **Implementation Notes:**
 
 - Structs are **moved by default** (ownership semantics)
-- Field order matters (affects memory layout)
+- Default layout is **unspecified** — the compiler may reorder fields to minimize padding (source-invisible; field access is by name). `#[repr(C)]` opts into declaration-order C layout (added in Milestone 9.1, consumed by FFI in v0.2)
 - No default values for fields (all must be initialized)
 - No methods yet (added in Milestone 17)
 - Parentheses with named arguments used for struct literals: `Point(x=1, y=2)`, reuses `name=value` parsing infrastructure from Milestone 8.5
 - Braces reserved exclusively for f-string interpolation
 - Dependencies: Milestone 4 (functions for passing structs), Milestone 8.5 (named argument parsing)
+
+### Milestone 9.1: Synthesized Eq & Debug for Structs
+
+**Goal:** Generate equality and debug representations for structs without user boilerplate
+
+> **Design Note (2026-07):** The split follows Swift's own line — printing is universal, equality is opt-in. A debug rendering of fields cannot be semantically wrong, so Debug is always-on; equality is a semantic claim (meaningless comparisons on future Move-only/`Drop` types, IEEE NaN behavior), so Eq requires explicit opt-in. Implemented as compiler-known synthesis in v0.1; `comptime` (unscheduled, Phase 5) may later become the implementation mechanism with no surface change.
+
+**Tasks:**
+
+- Parse one-off attributes on struct definitions: `#[derive(Eq)]`, `#[repr(C)]` (the general attribute system formalizes at Milestone 26)
+- **Debug (always-on):** synthesize a debug string for every struct
+  - Format mirrors the literal syntax: `Point(x=1.0, y=2.0)`, fields in declaration order
+  - Recursive: nested structs render through their own Debug
+  - Extend `print()` to accept any struct value via this path
+  - Lazy emission: generate Debug code only for structs that are actually printed (no bloat)
+- **Eq (opt-in):** `#[derive(Eq)]` enables `==` / `!=` on values of the struct
+  - Synthesis condition: every field type must be Eq-capable (primitives, `str`, other derived structs — recursive)
+  - Derive-site error names the offending field when a field is not Eq-capable
+  - Memberwise comparison; float fields use IEEE `==` (a struct containing NaN never equals itself — documented, same as Swift/Rust)
+- Diagnostic for `==` on a struct without the derive, with fix-it: `` binary operator `==` requires `Point` to be `Eq`; add `#[derive(Eq)]` to `Point` ``
+- Honor `#[repr(C)]` in layout: declaration order, standard C padding (consumed by FFI/`ryo-bindgen` in v0.2)
+- Write tests: derived equality (equal/unequal/nested), print output format, derive on struct with non-Eq-capable field (error), missing-derive diagnostic, NaN behavior, `#[repr(C)]` field offsets
+
+**Visible Progress:** Structs print usefully everywhere and compare with `==` when opted in
+
+**Example:**
+
+```ryo
+#[derive(Eq)]
+struct Point:
+ x: float
+ y: float
+
+fn main():
+ p = Point(x=1.0, y=2.0)
+ print(p)                          # "Point(x=1.0, y=2.0)" — always-on Debug
+ print(p == Point(x=3.0, y=4.0))   # false — enabled by #[derive(Eq)]
+```
+
+**Implementation Notes:**
+
+- `Eq`/`Debug` are **compiler-known interfaces** — the fourth instance of the established v0.1 pattern (Copy marker M8.1, `.message()` M13, `Drop` M23). When traits land in v0.2/v0.3 they promote to real traits with identical surface syntax; when `impl` blocks land (M17) manual implementations become possible and derive degrades gracefully to an overridable default
+- `print()` on a struct borrows it (Rule 2) — no ownership transfer for printing
+- Enums (M11) get the same derive/Debug treatment as a follow-up; out of scope here
+- Dependencies: Milestone 9 (structs)
 
 ### Milestone 10: Tuples
 
