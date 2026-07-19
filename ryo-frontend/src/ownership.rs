@@ -2044,7 +2044,7 @@ fn visit_expr(
                                 name
                             ),
                         )
-                        .with_help("finish the mutable borrow before moving the value"),
+                        .with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)"),
                     );
                 }
             }

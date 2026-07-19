@@ -543,12 +543,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** Adding a token means editing `RawToken`, `Token`, the giant manual `intern_token` match, and `Display` (plus the parser downstream) — ~45 non-payload variants of pure boilerplate.
 **Resolution:** Generate the quadruple from a single macro table (variant name, logos pattern, payload kind).
 
-### I-116 — E0032 diagnostics lose the binding name for locals
-
-**Files:** `ryo-frontend/src/ownership.rs` (`owner_name_for_diag` :883-888, E0032 block :1902-1953)
-**Summary:** `swap(&c, &c)` reports "cannot borrow **value** as mutable more than once in the same call" (probe-verified) — `owner_name_for_diag` resolves `Owner::Inst(init)` through `consumed_binding_name`, but `init` is the binding's *initializer* (an IntConst/StrConst), not a `Var`, so the name is lost for locals. Params render correctly (`Owner::Param`). The spec's rendered example shows the backticked name.
-**Resolution:** In the E0032 block, prefer the `TirData::Var` name of the inout/borrow arg reads (already collected in `inout_uses`) over `owner_name_for_diag` when the owner came from a local; fall back to `owner_name_for_diag` otherwise.
-
 ---
 
 ## Cross-References
