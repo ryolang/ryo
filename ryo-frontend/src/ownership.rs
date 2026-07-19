@@ -327,6 +327,160 @@ impl Ownership {
     }
 }
 
+/// Outermost loop statement (`WhileLoop`/`ForRange`) whose body
+/// contains `target`, or `None` when `target` is not inside any loop.
+/// Walks the body's statements tracking the loop stack; if/elif/else
+/// arms are transparent (an if inside a loop does not reset the stack).
+/// Used by the I-118 dead-store re-anchor.
+fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
+    fn walk(
+        tir: &Tir,
+        stmts: &[TirRef],
+        target: TirRef,
+        stack: &mut Vec<TirRef>,
+    ) -> Option<TirRef> {
+        for &r in stmts {
+            if r == target {
+                return stack.first().copied();
+            }
+            match tir.inst(r).tag {
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(r);
+                    if let Some(found) = walk(tir, &view.then_stmts, target, stack) {
+                        return Some(found);
+                    }
+                    for elif in &view.elif_branches {
+                        if let Some(found) = walk(tir, &elif.body, target, stack) {
+                            return Some(found);
+                        }
+                    }
+                    if let Some(else_stmts) = &view.else_stmts
+                        && let Some(found) = walk(tir, else_stmts, target, stack)
+                    {
+                        return Some(found);
+                    }
+                }
+                TirTag::WhileLoop => {
+                    stack.push(r);
+                    let found = walk(tir, &tir.while_loop_view(r).body, target, stack);
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                TirTag::ForRange => {
+                    stack.push(r);
+                    let found = walk(tir, &tir.for_range_view(r).body, target, stack);
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    walk(tir, &tir.body_stmts(), target, &mut Vec::new())
+}
+
+/// True if `name` is declared by a `VarDecl` anywhere before `stop` in
+/// program order (any nesting depth). Guards the I-118 re-anchor: only
+/// bindings that exist BEFORE their outermost reseating loop may move
+/// their Free to the loop anchor — a loop-local value's `StrLocals`
+/// don't exist on the zero-iteration path.
+fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> bool {
+    fn walk(
+        tir: &Tir,
+        stmts: &[TirRef],
+        name: StringId,
+        stop: TirRef,
+        found: &mut bool,
+        stopped: &mut bool,
+    ) {
+        for &r in stmts {
+            if *found || *stopped {
+                return;
+            }
+            if r == stop {
+                *stopped = true;
+                return;
+            }
+            match tir.inst(r).tag {
+                TirTag::VarDecl => {
+                    if tir.var_decl_view(r).name == name {
+                        *found = true;
+                        return;
+                    }
+                }
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(r);
+                    walk(tir, &view.then_stmts, name, stop, found, stopped);
+                    for elif in &view.elif_branches {
+                        walk(tir, &elif.body, name, stop, found, stopped);
+                    }
+                    if let Some(else_stmts) = &view.else_stmts {
+                        walk(tir, else_stmts, name, stop, found, stopped);
+                    }
+                }
+                TirTag::WhileLoop => {
+                    walk(
+                        tir,
+                        &tir.while_loop_view(r).body,
+                        name,
+                        stop,
+                        found,
+                        stopped,
+                    );
+                }
+                TirTag::ForRange => {
+                    walk(tir, &tir.for_range_view(r).body, name, stop, found, stopped);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut found = false;
+    let mut stopped = false;
+    walk(tir, &tir.body_stmts(), name, stop, &mut found, &mut stopped);
+    found
+}
+
+/// True if any statement in `stmts` (any depth) is a `Return` /
+/// `ReturnVoid` — a body that may leave the function early, where an
+/// after-loop Free would be unreachable (I-118).
+fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
+    for &r in stmts {
+        match tir.inst(r).tag {
+            TirTag::Return | TirTag::ReturnVoid => return true,
+            TirTag::IfStmt => {
+                let view = tir.if_stmt_view(r);
+                if body_may_return(tir, &view.then_stmts)
+                    || view
+                        .elif_branches
+                        .iter()
+                        .any(|e| body_may_return(tir, &e.body))
+                    || view
+                        .else_stmts
+                        .as_ref()
+                        .is_some_and(|es| body_may_return(tir, es))
+                {
+                    return true;
+                }
+            }
+            TirTag::WhileLoop | TirTag::ForRange => {
+                if let Some(body) = loop_body(tir, r)
+                    && body_may_return(tir, &body)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Validate move safety for every function body. Emits diagnostics
 /// into `sink`. Returns an [`OwnershipSidecar`] that codegen consults
 /// to decide where to emit `ryo_str_free` calls. The TIR itself is
@@ -602,12 +756,46 @@ fn analyze_function(
             // emitting another dead-store Free would double-free.
             continue;
         }
+        // I-118: a dead reassign INSIDE A LOOP for a binding declared
+        // before that loop: anchor the Free after the outermost loop
+        // rather than after the in-loop assign. The in-loop anchor
+        // fires only when the body executes — the zero-iteration path
+        // leaks the pre-loop buffer. The after-loop anchor emits the
+        // binding's CURRENT StrLocals (I-112 map): the final iteration's
+        // value on taken paths, the pre-loop value on zero iterations.
+        // When the body may `return`, keep the in-loop Free too — the
+        // after-loop anchor is unreachable on the return path.
+        let (anchor, also_in_body) = match outermost_loop_of(tir, *decl_inst) {
+            Some(loop_stmt) if declared_before_stmt(tir, *name, loop_stmt) => {
+                let may_return = match tir.inst(loop_stmt).tag {
+                    TirTag::WhileLoop => {
+                        let view = tir.while_loop_view(loop_stmt);
+                        body_may_return(tir, &view.body)
+                    }
+                    TirTag::ForRange => {
+                        let view = tir.for_range_view(loop_stmt);
+                        body_may_return(tir, &view.body)
+                    }
+                    _ => unreachable!("outermost_loop_of returns loops"),
+                };
+                (loop_stmt, may_return)
+            }
+            _ => (*decl_inst, false),
+        };
         sidecar.free_schedule.push(FreePoint {
-            after: *decl_inst,
+            after: anchor,
             target: owner.inst_tirref().unwrap(),
             span: *span,
             branch: None,
         });
+        if also_in_body {
+            sidecar.free_schedule.push(FreePoint {
+                after: *decl_inst,
+                target: owner.inst_tirref().unwrap(),
+                span: *span,
+                branch: None,
+            });
+        }
     }
 
     // I-117: convert honored reseat records into arm-gated
@@ -4733,6 +4921,130 @@ mod tests {
             sc.conditional_dead_drops.is_empty(),
             "all arms reseated — no untouched path, no ConditionalDeadDrop; got {:?}",
             sc.conditional_dead_drops
+        );
+    }
+
+    #[test]
+    fn loop_dead_reassign_anchors_after_loop() {
+        // I-118: `mut s = "a"; while c: s = "b"` with s never read
+        // after. The dead-store Free must anchor AFTER THE LOOP (not
+        // after the in-loop assign): the in-loop anchor never fires on
+        // the zero-iteration path, leaking the pre-loop buffer. The
+        // after-loop anchor emits the binding's current StrLocals —
+        // final value on taken paths, pre-loop value on zero iterations.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit_b, span);
+        let wl = tb.while_loop(cond, &[asg], void, span);
+        let tir = tb.finish(&[decl, wl]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == wl && fp.target == lit_b),
+            "expected a Free anchored after the loop for the binding's value; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == asg && fp.target == lit_b),
+            "the in-loop dead-store Free must move to the loop anchor (it never fires on zero iterations); schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn loop_dead_reassign_with_return_keeps_in_body_free() {
+        // I-118: when the loop body can `return`, the after-loop anchor
+        // is unreachable on the return path — the in-body Free must stay
+        // alongside the after-loop one.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit_b, span);
+        let ret = tb.return_void(void, span);
+        let wl = tb.while_loop(cond, &[asg, ret], void, span);
+        let tir = tb.finish(&[decl, wl]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == wl && fp.target == lit_b),
+            "expected the after-loop Free; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == asg && fp.target == lit_b),
+            "a returning body keeps the in-body Free (return path); schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn loop_local_dead_value_keeps_in_body_anchor() {
+        // I-118 guard: a value DECLARED inside the loop body is not a
+        // pre-loop binding — its Free must stay anchored in the body
+        // (the binding's StrLocals don't exist on the zero-iteration
+        // path).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let t = pool.intern_str("t");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_x = tb.str_const(pool.intern_str("x"), str_ty, span);
+        let decl = tb.var_decl(t, false, str_ty, lit_x, span);
+        let wl = tb.while_loop(cond, &[decl], void, span);
+        let tir = tb.finish(&[wl]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == decl && fp.target == lit_x),
+            "loop-local dead value keeps its in-body Free; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule.iter().any(|fp| fp.after == wl),
+            "loop-local value must NOT be re-anchored after the loop; schedule = {:?}",
+            sc.free_schedule
         );
     }
 

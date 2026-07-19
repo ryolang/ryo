@@ -395,12 +395,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
 **Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
 
-### I-118 — Conditional dead reassign inside a loop leaks on the zero-iteration / loop-exit paths
-
-**Files:** `ryo-frontend/src/ownership.rs` (`merge_non_monotone` ~:1238-1310, `schedule_loop_exit_frees_in`, dead-store drain ~:582-650), `ryo-backend/src/codegen.rs` (`generate_while_loop`)
-**Summary:** The loop twin of I-117. `mut s = "a"; while c: s = "b"` with `s` never read after the loop: iterations that execute drop the old buffer via `free_on_reassign`, and the dead-store drain frees the newest value — but when the loop body never executes (zero iterations), the pre-loop buffer is never freed. I-117's arm-gated `ConditionalDeadDrop` mechanism covers if/elif/else arms via `IfBranchIds`; loops have no equivalent "arm" — the zero-iteration path (and break/continue exits mid-sequence) are the untouched paths. Verified shape: `mut s = "a"; c = false; while c: s = "b"`.
-**Resolution:** Extend the conditional-dead-drop machinery to loops: record conditional reseats in loop bodies during the fixed-point walk (`analyze_loop_body` / `merge_non_monotone`), and gate the pre-loop owner's Free on the zero-iteration path and the loop's exits (`schedule_loop_exit_frees_in` already anchors jump-target Frees for inside-loop owners). Cover with ASan/valgrind fixtures (`while` body reassigns, no read after: zero-iteration and ≥1-iteration variants).
-
 ---
 
 ## 🟢 Cleanup

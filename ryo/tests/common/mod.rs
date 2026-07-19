@@ -286,6 +286,44 @@ fn main():
 \t\ts = \"b\"
 ",
     ),
+    (
+        // I-118: dead reassign in a loop body, taken path — every
+        // iteration's old buffer drops via free_on_reassign, and the
+        // final value is freed by the after-loop anchor (not a second
+        // in-body Free).
+        "dead_reassign_while_taken",
+        "\
+fn main():
+\tmut s = \"a\"
+\tmut i = 0
+\twhile i < 2:
+\t\ts = \"b\"
+\t\ti += 1
+",
+    ),
+    (
+        // I-118: dead reassign in a loop body, ZERO iterations — the
+        // pre-loop buffer must still be freed by the after-loop anchor.
+        "dead_reassign_while_zero",
+        "\
+fn main():
+\tmut s = \"a\"
+\tc = false
+\twhile c:
+\t\ts = \"b\"
+",
+    ),
+    (
+        // I-118: same shape through a for-range loop with an empty
+        // range (zero iterations).
+        "dead_reassign_for_zero",
+        "\
+fn main():
+\tmut s = \"a\"
+\tfor i in range(0, 0):
+\t\ts = \"b\"
+",
+    ),
 ];
 
 pub fn find_fixture(name: &str) -> &'static str {

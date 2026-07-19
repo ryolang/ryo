@@ -177,3 +177,27 @@ fn valgrind_dead_reassign_if_fallthrough() {
         "dead_reassign_if_fallthrough",
     );
 }
+
+#[test]
+fn valgrind_dead_reassign_while_taken() {
+    run_valgrind_smoke(
+        common::find_fixture("dead_reassign_while_taken"),
+        "dead_reassign_while_taken",
+    );
+}
+
+#[test]
+fn valgrind_dead_reassign_while_zero() {
+    run_valgrind_smoke(
+        common::find_fixture("dead_reassign_while_zero"),
+        "dead_reassign_while_zero",
+    );
+}
+
+#[test]
+fn valgrind_dead_reassign_for_zero() {
+    run_valgrind_smoke(
+        common::find_fixture("dead_reassign_for_zero"),
+        "dead_reassign_for_zero",
+    );
+}
