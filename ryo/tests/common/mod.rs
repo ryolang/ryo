@@ -349,6 +349,24 @@ fn main():
 \t\tprint(s)
 ",
     ),
+    (
+        // Return-epilogue: the else path returns while `s` is still
+        // live and its last-use Free anchors in the sibling arm. The
+        // early return must destroy the function's locals on ITS path.
+        "early_return_live_local",
+        "\
+fn f():
+\tmut s = \"a\"
+\td = false
+\tif d:
+\t\tprint(s)
+\telse:
+\t\treturn
+
+fn main():
+\tf()
+",
+    ),
 ];
 
 pub fn find_fixture(name: &str) -> &'static str {

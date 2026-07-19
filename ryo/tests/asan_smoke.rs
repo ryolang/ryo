@@ -182,3 +182,11 @@ fn asan_last_use_in_if_fallthrough() {
         "last_use_in_if_fallthrough",
     );
 }
+
+#[test]
+fn asan_early_return_live_local() {
+    run_asan_smoke(
+        common::find_fixture("early_return_live_local"),
+        "early_return_live_local",
+    );
+}

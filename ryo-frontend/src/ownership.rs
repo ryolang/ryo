@@ -156,6 +156,16 @@ pub(crate) struct Ownership {
     /// matching entries into arm-gated `ConditionalDeadDrop`s so the
     /// pre-branch buffer is also freed on the untouched paths.
     pub reseat_drops: Vec<ReseatDrop>,
+
+    /// Owners still `Valid` at each `Return`/`ReturnVoid`, snapshotted
+    /// mid-walk while the lattice state is path-correct for that exit
+    /// point. The function must destroy those values on that path —
+    /// they are dead at the return, but the last-use / temp / drain
+    /// passes (which run at function exit) anchor their Frees on OTHER
+    /// paths or program points the early return never reaches.
+    /// Monotone-accumulating; loop convergence re-walks may record the
+    /// same return twice — deduped at scheduling time.
+    pub return_epilogue: Vec<(TirRef, Vec<Owner>)>,
 }
 
 /// One conditional-reseat observation (I-117), recorded by
@@ -566,6 +576,66 @@ fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
         None
     }
     walk(tir, &tir.body_stmts(), target, &mut Vec::new())
+}
+
+/// All branch statements (`IfStmt`/`WhileLoop`/`ForRange`) containing
+/// `target`, outermost first. A Free anchored after any of these never
+/// fires on a return path that exits through `target` — the branch
+/// statement does not complete before the return leaves the function.
+/// Used by the return-epilogue dedup.
+fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
+    fn walk(
+        tir: &Tir,
+        stmts: &[TirRef],
+        target: TirRef,
+        stack: &mut Vec<TirRef>,
+    ) -> Option<Vec<TirRef>> {
+        for &r in stmts {
+            if r == target {
+                return Some(stack.clone());
+            }
+            let mut sub: HashSet<TirRef> = HashSet::new();
+            collect_refs_recursive(tir, r, &mut sub);
+            if !sub.contains(&target) {
+                continue;
+            }
+            match tir.inst(r).tag {
+                TirTag::IfStmt => {
+                    stack.push(r);
+                    let view = tir.if_stmt_view(r);
+                    let mut found = walk(tir, &view.then_stmts, target, stack);
+                    for elif in &view.elif_branches {
+                        if found.is_none() {
+                            found = walk(tir, &elif.body, target, stack);
+                        }
+                    }
+                    if found.is_none()
+                        && let Some(else_stmts) = &view.else_stmts
+                    {
+                        found = walk(tir, else_stmts, target, stack);
+                    }
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                TirTag::WhileLoop | TirTag::ForRange => {
+                    stack.push(r);
+                    let found = match loop_body(tir, r) {
+                        Some(body) => walk(tir, &body, target, stack),
+                        None => None,
+                    };
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                _ => return Some(stack.clone()),
+            }
+        }
+        None
+    }
+    walk(tir, &tir.body_stmts(), target, &mut Vec::new()).unwrap_or_default()
 }
 
 /// The binding name whose initializer (`VarDecl`) or value (`Assign`)
@@ -985,6 +1055,48 @@ fn analyze_function(
     // `free_schedule` and only add jump-anchored Frees for inside-loop
     // owners that no earlier pass already covered. See I-058.
     schedule_loop_exit_frees_in(tir, &own, sidecar, &body_stmts, None);
+
+    // Return epilogue: destroy locals still live at an early return.
+    // Runs LAST so every other Free pass has populated `free_schedule`
+    // and we can dedup against it — a value is skipped when another
+    // Free already fires on the return's path, or the dead-store drain
+    // owns it (its after-decl Free covers every path). Codegen emits
+    // due Frees before every `return_`, so anchoring at the return
+    // statement itself fires exactly on that exit path.
+    let mut epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
+    for (return_stmt, owners) in &own.return_epilogue {
+        let mut on_path: HashSet<TirRef> = HashSet::new();
+        let _ = collect_jump_path(tir, &body_stmts, *return_stmt, &mut on_path);
+        // A Free anchored after a branch CONTAINING the return never
+        // fires on the return's path — the branch statement does not
+        // complete before the return exits. Exclude ancestors from the
+        // covering set (the path walk counts them as "passed through",
+        // which is true for evaluation but false for after-anchoring).
+        let ancestors: HashSet<TirRef> = ancestor_branches_of(tir, *return_stmt)
+            .into_iter()
+            .collect();
+        for owner in owners {
+            if own.pending_dead_store.contains_key(owner) {
+                continue;
+            }
+            let r = owner.tirref(tir);
+            if !epilogue_emitted.insert((*return_stmt, r)) {
+                continue;
+            }
+            let covered = sidecar.free_schedule.iter().any(|fp| {
+                fp.target == r && on_path.contains(&fp.after) && !ancestors.contains(&fp.after)
+            });
+            if covered {
+                continue;
+            }
+            sidecar.free_schedule.push(FreePoint {
+                after: *return_stmt,
+                target: r,
+                span: tir.span(*return_stmt),
+                branch: None,
+            });
+        }
+    }
 }
 
 fn analyze_stmt(
@@ -999,8 +1111,11 @@ fn analyze_stmt(
     match inst.tag {
         TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, sidecar, stmt),
         TirTag::Assign => analyze_assign(tir, pool, own, sink, sidecar, stmt),
-        TirTag::Return => analyze_return(tir, pool, own, sink, sidecar, stmt),
-        TirTag::ReturnVoid => {}
+        TirTag::Return => {
+            analyze_return(tir, pool, own, sink, sidecar, stmt);
+            record_return_epilogue(own, stmt);
+        }
+        TirTag::ReturnVoid => record_return_epilogue(own, stmt),
         TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, sidecar, stmt),
         TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, sidecar, stmt),
         TirTag::ForRange => analyze_for_range(tir, pool, own, sink, sidecar, stmt),
@@ -1112,6 +1227,23 @@ fn analyze_assign(
         consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name);
         rebind_to_init(own, view.name, view.value);
         register_pending_dead_store(own, view.value, view.name, span, r);
+    }
+}
+
+/// Snapshot the owners still `Valid` at a return — values the function
+/// must destroy on that exit path (see `Ownership::return_epilogue`).
+/// The returned value itself is already `Moved` by `analyze_return`,
+/// so it is naturally excluded; inout-escape owners are excluded too —
+/// they leave through the write-back pointer, not through destruction.
+fn record_return_epilogue(own: &mut Ownership, return_stmt: TirRef) {
+    let live: Vec<Owner> = own
+        .states
+        .iter()
+        .filter(|(o, s)| matches!(s, OwnerState::Valid) && !inout_escape_owner(own, **o))
+        .map(|(o, _)| *o)
+        .collect();
+    if !live.is_empty() {
+        own.return_epilogue.push((return_stmt, live));
     }
 }
 
@@ -5292,6 +5424,149 @@ mod tests {
                 .iter()
                 .any(|fp| fp.after == if_s && fp.target == lit_a),
             "the last-use Free must anchor after the if (in-arm anchoring leaks on the not-taken path); schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn return_epilogue_frees_live_local() {
+        // Return-epilogue: `mut s = "a"; if d: print(s) else: return`.
+        // On the else path, `s` is still live at the return and nothing
+        // freed it — the last-use Free anchors in the sibling then-arm,
+        // which the else path never reaches. An early return must
+        // destroy the function's still-owned locals on ITS path.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sv = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
+        let ret = tb.return_void(void, span);
+        let if_s = tb.if_stmt(cond, &[pr], &[], Some(&[ret]), void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == ret && fp.target == lit_a),
+            "the still-live local must be freed on the early-return path; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn return_epilogue_skips_consumed_return_value() {
+        // `fn f() -> str: s = "a"; return s` — the returned value moved
+        // out; an epilogue Free for it would be a use-after-free in the
+        // caller.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{TirBuilder, TirData, TirTag};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let f = pool.intern_str("f");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(f, vec![], str_ty, span);
+        let lit = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let sv = tb.var(s, str_ty, span);
+        let ret = tb.push_typed(TirTag::Return, TirData::UnOp(sv), str_ty, span);
+        let tir = tb.finish(&[decl, ret]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == lit && fp.after == ret),
+            "the returned value moved out — no epilogue Free for it; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn return_epilogue_skips_dead_store_owned() {
+        // `mut s = "a"; if d: return` with s never read: the dead-store
+        // drain already frees `s` right after its declaration (covering
+        // every path), so no epilogue Free may be added for it.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let ret = tb.return_void(void, span);
+        let if_s = tb.if_stmt(cond, &[ret], &[], None, void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == lit_a && fp.after == ret),
+            "dead-store-owned value is already freed at its decl — no epilogue Free; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn return_epilogue_covers_move_param() {
+        // `fn f(move s: str): if d: return` — the owned param is still
+        // Valid at the early return; the callee must destroy it there
+        // (the exit-time param Free anchors after the last body stmt,
+        // which the early-return path never reaches).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s,
+                ty: str_ty,
+                mode: ParamMode::Move,
+                span,
+            }],
+            void,
+            span,
+        );
+        let cond = tb.bool_const(true, bool_ty, span);
+        let ret = tb.return_void(void, span);
+        let if_s = tb.if_stmt(cond, &[ret], &[], None, void, span);
+        let tir = tb.finish(&[if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == ret && fp.target == TirRef::param(0)),
+            "an owned param must be destroyed on the early-return path; schedule = {:?}",
             sc.free_schedule
         );
     }

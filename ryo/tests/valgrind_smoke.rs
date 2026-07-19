@@ -214,3 +214,11 @@ fn valgrind_last_use_in_if_fallthrough() {
         "last_use_in_if_fallthrough",
     );
 }
+
+#[test]
+fn valgrind_early_return_live_local() {
+    run_valgrind_smoke(
+        common::find_fixture("early_return_live_local"),
+        "early_return_live_local",
+    );
+}
