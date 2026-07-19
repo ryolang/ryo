@@ -469,10 +469,10 @@
                 <span class="filename">logic.ryo</span>
                 <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
               </div>
-              <pre><code class="language-ryo">fn is_valid(x: int) -> bool:
-	return x > 0 and x < 100
+              <pre><code class="language-ryo">fn is_valid(x: int) -&gt; bool:
+	return x &gt; 0 and x &lt; 100
 
-fn check_access(is_admin: bool, is_owner: bool) -> bool:
+fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
 	return is_admin or is_owner</code></pre>
             </div>
           </section>
@@ -591,8 +591,8 @@ fn check_access(is_admin: bool, is_owner: bool) -> bool:
                 <span class="filename">control_flow.ryo</span>
                 <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
               </div>
-              <pre><code class="language-ryo">fn classify(n: int) -> str:
-	if n > 0:
+              <pre><code class="language-ryo">fn classify(n: int) -&gt; str:
+	if n &gt; 0:
 		return "positive"
 	elif n == 0:
 		return "zero"
@@ -601,7 +601,7 @@ fn check_access(is_admin: bool, is_owner: bool) -> bool:
 
 fn main():
 	mut i = 3
-	while i > 0:
+	while i &gt; 0:
 		print("countdown\n")
 		i -= 1
 
@@ -637,7 +637,7 @@ fn main():
                 <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
               </div>
               <pre><code class="language-ryo"># Two int inputs, returns int.
-fn add(x: int, y: int) -> int:
+fn add(x: int, y: int) -&gt; int:
 	return x + y
 
 # No return value — return type omitted.
