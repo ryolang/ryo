@@ -132,3 +132,32 @@ fn valgrind_conditional_move() {
 fn valgrind_break_loop() {
     run_valgrind_smoke(common::find_fixture("break_loop"), "break_loop");
 }
+
+#[test]
+fn valgrind_inout_str_reassign_in_callee() {
+    run_valgrind_smoke(
+        common::find_fixture("inout_str_reassign_in_callee"),
+        "inout_str_reassign_in_callee",
+    );
+}
+
+#[test]
+fn valgrind_inout_str_reborrow() {
+    run_valgrind_smoke(
+        common::find_fixture("inout_str_reborrow"),
+        "inout_str_reborrow",
+    );
+}
+
+#[test]
+fn valgrind_str_push_growth() {
+    run_valgrind_smoke(common::find_fixture("str_push_growth"), "str_push_growth");
+}
+
+#[test]
+fn valgrind_reassign_inside_if() {
+    run_valgrind_smoke(
+        common::find_fixture("reassign_inside_if"),
+        "reassign_inside_if",
+    );
+}

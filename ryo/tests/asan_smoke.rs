@@ -100,3 +100,32 @@ fn asan_int_to_str_then_print() {
         "int_to_str_then_print",
     );
 }
+
+#[test]
+fn asan_inout_str_reassign_in_callee() {
+    run_asan_smoke(
+        common::find_fixture("inout_str_reassign_in_callee"),
+        "inout_str_reassign_in_callee",
+    );
+}
+
+#[test]
+fn asan_inout_str_reborrow() {
+    run_asan_smoke(
+        common::find_fixture("inout_str_reborrow"),
+        "inout_str_reborrow",
+    );
+}
+
+#[test]
+fn asan_str_push_growth() {
+    run_asan_smoke(common::find_fixture("str_push_growth"), "str_push_growth");
+}
+
+#[test]
+fn asan_reassign_inside_if() {
+    run_asan_smoke(
+        common::find_fixture("reassign_inside_if"),
+        "reassign_inside_if",
+    );
+}

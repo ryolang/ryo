@@ -138,6 +138,15 @@ pub(crate) struct Ownership {
     /// `analyze_if_stmt` enters an arm (then / each elif / else) so
     /// the resulting ids are unique across the function body.
     pub next_branch_id: u32,
+
+    /// Names of `inout` parameters whose type is Move-tracked (i.e.
+    /// `str` in v0.1). The value bound to such a param ESCAPES through
+    /// the write-back pointer at function exit, so it must not be freed
+    /// by the callee (no last-use/dead-store Free, no W0001) and must
+    /// not be moved out — but reassigning the param drops the old
+    /// pointee. Constant per function (derived from `tir.params`), so
+    /// branch merges need no per-field rule for it.
+    pub inout_str_params: HashSet<StringId>,
 }
 
 impl Ownership {
@@ -393,6 +402,9 @@ fn analyze_function(
         };
         own.states.insert(owner, state);
         own.current_owner.insert(param.name, owner);
+        if param.mode == ParamMode::Inout {
+            own.inout_str_params.insert(param.name);
+        }
     }
 
     for stmt in tir.body_stmts() {
@@ -422,10 +434,28 @@ fn analyze_function(
     // last_use after the `owner_at_read` snapshot fix; without this
     // guard a pre-rebind owner would receive both a reassign-Free and
     // a last-use-Free.)
+    //
+    // EXCEPTION: a reassign target that is STILL its binding's current
+    // owner at function exit needs the last-use Free after all. That
+    // happens when the reseat was branch-divergent: the merge keeps the
+    // pre-branch owner (a reseat inside one arm does not survive the
+    // join), so on the not-taken path the binding still owns the
+    // pre-reassign allocation. Codegen emits the Free from the binding's
+    // current `StrLocals` (I-112), which is the path-correct buffer.
     let reassign_targets: HashSet<Owner> = sidecar
         .free_on_reassign
         .values()
         .map(|t| Owner::Inst(*t))
+        .collect();
+    let live_binding_owners: HashSet<Owner> = own.current_owner.values().copied().collect();
+    // Owners that escape through an `inout str` param's write-back
+    // pointer at function exit: whatever value is CURRENTLY bound to each
+    // inout param name leaves the function alive, so neither the last-use
+    // pass nor the dead-store drain may free it (or warn about it).
+    let inout_escape_owners: HashSet<Owner> = own
+        .inout_str_params
+        .iter()
+        .filter_map(|n| own.current_owner.get(n).copied())
         .collect();
     for (owner, state) in &own.states {
         if !matches!(state, OwnerState::Valid) {
@@ -433,7 +463,9 @@ fn analyze_function(
         }
         match owner {
             Owner::Inst(r) => {
-                if reassign_targets.contains(owner) {
+                let stale_reassign_target =
+                    reassign_targets.contains(owner) && !live_binding_owners.contains(owner);
+                if stale_reassign_target || inout_escape_owners.contains(owner) {
                     continue;
                 }
                 if let Some(&after) = last_use.get(r) {
@@ -446,6 +478,12 @@ fn analyze_function(
                 }
             }
             Owner::Param(name) => {
+                // An `inout str` param's value escapes through the
+                // write-back pointer — never freed by the callee, even
+                // if a branch merge left its owner stamped Valid.
+                if own.inout_str_params.contains(name) {
+                    continue;
+                }
                 if let Some(&after) = body_stmts.last() {
                     let idx = tir
                         .params
@@ -518,6 +556,18 @@ fn analyze_function(
     // guard activates with Task 6. (`reassign_targets` was computed
     // above for the last-use pass.)
     for (owner, (name, span, decl_inst)) in &own.pending_dead_store {
+        // Bound to an `inout str` param: the value escapes through the
+        // write-back — it IS used, just not by any TIR instruction the
+        // pass can see. Checked by NAME (not by current owner): a rebind
+        // inside a branch is discarded by the merge, leaving the entry
+        // keyed by a branch-local owner the exit-time escape set can't
+        // see. No W0001, no Free.
+        if own.inout_str_params.contains(name) {
+            continue;
+        }
+        if inout_escape_owners.contains(owner) {
+            continue;
+        }
         sink.emit(Diag::warning(
             *span,
             DiagCode::DeadStore,
@@ -637,23 +687,30 @@ fn analyze_assign(
         // Capture the old owner before consume_for_assignment / rebind
         // overwrite current_owner[name]. Only emit the Free entry if the
         // old owner is Valid — Borrowed/Moved/missing means there is no
-        // live allocation to release. Codegen (Task 8) consults this map
-        // when lowering Assign.
-        if let Some(&old_owner) = own.current_owner.get(&view.name)
-            && matches!(own.states.get(&old_owner), Some(OwnerState::Valid))
-        {
-            sidecar.free_on_reassign.insert(
-                r,
-                old_owner
-                    .inst_tirref()
-                    .expect("param cannot be a Free target in reassign"),
-            );
-            // Reassignment runs the old value's destructor (the
-            // free_on_reassign Free above) — that's an observable use,
-            // so the prior VarDecl/Assign isn't a dead store. Drop the
-            // pending_dead_store entry so W0001 doesn't fire and the
-            // drain block doesn't try to schedule a redundant Free.
-            own.pending_dead_store.remove(&old_owner);
+        // live allocation to release. EXCEPTION: an `inout str` param's
+        // current owner is Borrowed, yet the callee must drop the old
+        // pointee when reassigning the param (the write-back ABI hands
+        // the caller whatever triple the param holds at exit — like
+        // `*x = new` dropping the old value in Rust). Codegen (Task 8)
+        // consults this map when lowering Assign.
+        if let Some(&old_owner) = own.current_owner.get(&view.name) {
+            let old_droppable = match own.states.get(&old_owner) {
+                Some(OwnerState::Valid) => true,
+                Some(OwnerState::Borrowed) => own.inout_str_params.contains(&view.name),
+                _ => false,
+            };
+            if old_droppable {
+                // `tirref` (not `inst_tirref`): an inout param's old owner
+                // is a `Param`, resolved here to its virtual ref — codegen
+                // caches that ref's repr at the prologue.
+                sidecar.free_on_reassign.insert(r, old_owner.tirref(tir));
+                // Reassignment runs the old value's destructor (the
+                // free_on_reassign Free above) — that's an observable use,
+                // so the prior VarDecl/Assign isn't a dead store. Drop the
+                // pending_dead_store entry so W0001 doesn't fire and the
+                // drain block doesn't try to schedule a redundant Free.
+                own.pending_dead_store.remove(&old_owner);
+            }
         }
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, view.value);
@@ -759,6 +816,17 @@ fn inout_owner(own: &Ownership, tir: &Tir, arg: TirRef) -> Owner {
     }
 }
 
+/// True if `owner` is the value currently bound to an `inout str`
+/// parameter name. That value ESCAPES through the write-back pointer at
+/// function exit, so it can be reassigned (dropping the old pointee) but
+/// never moved out of the function — not even after a reassign replaced
+/// the original (Borrowed) param owner with a fresh Valid one.
+fn inout_escape_owner(own: &Ownership, owner: Owner) -> bool {
+    own.inout_str_params
+        .iter()
+        .any(|n| own.current_owner.get(n) == Some(&owner))
+}
+
 /// Use-site use-after-move authority (I-050). Resolve the operand's
 /// underlying owner and emit E0020 if it is `Moved`. Called from every
 /// use site: consume sites, borrow-arg paths, and operand-read sites.
@@ -840,11 +908,17 @@ fn consume_underlying(
     on_borrowed: BorrowedAction,
 ) {
     let underlying = underlying_owner(own, operand);
-    let state = own
+    let mut state = own
         .states
         .get(&underlying)
         .cloned()
         .unwrap_or(OwnerState::NotTracked);
+    // A Valid value currently bound to an `inout str` param still escapes
+    // through the write-back pointer — moving it out would leave the slot
+    // holding a stale triple. Treat it as borrowed at consume sites.
+    if matches!(state, OwnerState::Valid) && inout_escape_owner(own, underlying) {
+        state = OwnerState::Borrowed;
+    }
     match state {
         OwnerState::Valid => {
             own.pending_dead_store.remove(&underlying);
@@ -1997,6 +2071,14 @@ fn visit_expr(
                     consume_for_assignment(tir, pool, own, sink, *arg, tir.span(r), consumed_name);
                 }
             }
+
+            // `inout` args need no ownership transition: the callee only
+            // borrows the slot, and the binding keeps its pre-call owner.
+            // The stale-triple hazard (callee realloc'd/replaced the
+            // buffer) is handled in CODEGEN, where named-binding Frees
+            // emit the binding's CURRENT `StrLocals` instead of the
+            // producing inst's cached repr (I-112) — the same pattern
+            // `free_on_reassign` already used.
         }
         // ---- Aliasing read ----
         // `Var` is a non-consuming read. Record which SSA value it
@@ -2014,8 +2096,12 @@ fn visit_expr(
                 // Any read counts as "used" for dead-store purposes,
                 // even if it ultimately fires E0020 — once the
                 // programmer's code looked at the value, they
-                // didn't ignore it.
-                own.pending_dead_store.remove(&owner);
+                // didn't ignore it. Clear by NAME, not by current-owner
+                // key: a reseat inside a branch (Assign) is discarded
+                // by the branch merge, so the pending entry can survive
+                // under a branch-local owner key while the binding
+                // itself is provably read afterwards.
+                own.pending_dead_store.retain(|_, (n, _, _)| *n != name);
                 own.origin.insert(r, Some(owner));
                 // Snapshot owner-at-read so the post-walk
                 // `collect_last_uses` anchors the last-use Free to the
@@ -4019,6 +4105,380 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d.code, DiagCode::MutableAliasingViolation)),
             "two immutable borrows of one owner are fine (Rule 7 many readers); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_str_param_reassign_escapes_no_dead_store_no_free() {
+        // I-112 callee side: `fn set(inout s: str): s = "new"`. The
+        // replacement value escapes through the write-back pointer, so the
+        // pass must NOT emit W0001 or free the new value; the OLD pointee
+        // (the incoming buffer) must be dropped at the reassign.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let set = pool.intern_str("set");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            set,
+            vec![TirParam {
+                name: s,
+                ty: str_ty,
+                mode: ParamMode::Inout,
+                span,
+            }],
+            void,
+            span,
+        );
+        let lit = tb.str_const(pool.intern_str("new"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit, span);
+        let tir = tb.finish(&[asg]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "inout param reassignment must not warn dead-store — the value escapes via write-back; got {diags:?}"
+        );
+        let sc = sidecar.functions.remove(&set).expect("sidecar");
+        assert_eq!(
+            sc.free_on_reassign.get(&asg),
+            Some(&TirRef::param(0)),
+            "reassigning an inout str param must drop the incoming buffer at the reassign; free_on_reassign = {:?}",
+            sc.free_on_reassign
+        );
+        assert!(
+            !sc.free_schedule.iter().any(|fp| fp.target == lit),
+            "the reassigned value escapes to the caller — no Free may target it; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn inout_str_param_reassign_inside_if_escapes() {
+        // I-112: `fn g(inout s: str): if c: s = "b"`. The rebind is
+        // branch-divergent — the merge keeps `Param(s)` as the binding's
+        // owner and can stamp it Valid — but the bound value still
+        // escapes via the write-back: no W0001, no Free for the rebound
+        // value or the param, while the taken arm still drops the
+        // incoming buffer.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let g = pool.intern_str("g");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            g,
+            vec![TirParam {
+                name: s,
+                ty: str_ty,
+                mode: ParamMode::Inout,
+                span,
+            }],
+            void,
+            span,
+        );
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit, span);
+        let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
+        let tir = tb.finish(&[if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "inout param reassignment escapes — no dead-store warning, even branch-divergent; got {diags:?}"
+        );
+        let sc = sidecar.functions.remove(&g).expect("sidecar");
+        assert!(
+            sc.free_on_reassign.contains_key(&asg),
+            "the taken arm must drop the incoming buffer; free_on_reassign = {:?}",
+            sc.free_on_reassign
+        );
+        assert!(
+            !sc.free_schedule.iter().any(|fp| fp.target == lit),
+            "the rebound value escapes to the caller — no Free may target it; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == TirRef::param(0)),
+            "the inout param's value escapes — no callee Free for the param owner; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn inout_str_param_move_out_after_reassign_rejected() {
+        // I-112: the value bound to an inout str param escapes via the
+        // write-back, so moving it out (even after a reassign made it a
+        // fresh, Valid owner) must still be an error.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let g = pool.intern_str("g");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s,
+                ty: str_ty,
+                mode: ParamMode::Inout,
+                span,
+            }],
+            void,
+            span,
+        );
+        let lit = tb.str_const(pool.intern_str("new"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit, span);
+        let sv = tb.var(s, str_ty, span);
+        let call = tb.call(g, &[sv], &[ParamMode::Move], void, span);
+        let tir = tb.finish(&[asg, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MoveOutOfBorrowedParam)),
+            "moving out of an inout param after reassign must be E0021; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_str_param_return_after_reassign_rejected() {
+        // I-112: returning the value currently bound to an inout str param
+        // double-owns it (it also escapes via the write-back) — E0022.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirData, TirParam, TirTag};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s,
+                ty: str_ty,
+                mode: ParamMode::Inout,
+                span,
+            }],
+            str_ty,
+            span,
+        );
+        let lit = tb.str_const(pool.intern_str("new"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit, span);
+        let sv = tb.var(s, str_ty, span);
+        let ret = tb.push_typed(TirTag::Return, TirData::UnOp(sv), str_ty, span);
+        let _ = void;
+        let tir = tb.finish(&[asg, ret]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::ReturnBorrowedValue)),
+            "returning an inout param's bound value must be E0022; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_call_keeps_owner_and_frees_current_buffer() {
+        // I-112 caller side: `mut s = "hi"; set(&s); print(s)`. An inout
+        // call is a pure borrow of the slot: the binding KEEPS its
+        // pre-call owner (no reseat, no Moved, no dead-store churn), and
+        // the freshness of the freed buffer is codegen's job — it emits
+        // the Free from the binding's current `StrLocals` (which hold the
+        // write-back triple after the reload), never the stale pre-call
+        // repr. Assert the lattice invariants: owner unchanged, exactly
+        // one Free for it, no diagnostics.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let set = pool.intern_str("set");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("hi"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let sv1 = tb.var(s, str_ty, span);
+        let call = tb.call(set, &[sv1], &[ParamMode::Inout], void, span);
+        let sv2 = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
+        let tir = tb.finish(&[decl, call, pr]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            diags.is_empty(),
+            "inout call on a str local must produce no diagnostics; got {diags:?}"
+        );
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        let frees: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == lit)
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the binding's owner; codegen emits it from the current StrLocals; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn inout_call_inside_if_no_false_dead_store() {
+        // I-112 follow-up: `mut s = "a"; if c: set(&s); print(s)` — the
+        // reseat happens inside the if-arm; the post-if read must clear
+        // the dead-store entry across the branch merge.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let set = pool.intern_str("set");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sv1 = tb.var(s, str_ty, span);
+        let call = tb.call(set, &[sv1], &[ParamMode::Inout], void, span);
+        let if_s = tb.if_stmt(cond, &[call], &[], None, void, span);
+        let sv2 = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
+        let tir = tb.finish(&[decl, if_s, pr]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "s is read after the if — no dead-store warning may survive the merge; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_call_inside_loop_no_false_dead_store() {
+        // I-112 follow-up: `mut s = ""; while i < 3: str_push(&s, "x") ...
+        // print(s)` — same merge concern through the loop fixed point.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let set = pool.intern_str("set");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str(""), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sv1 = tb.var(s, str_ty, span);
+        let call = tb.call(set, &[sv1], &[ParamMode::Inout], void, span);
+        let wl = tb.while_loop(cond, &[call], void, span);
+        let sv2 = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
+        let tir = tb.finish(&[decl, wl, pr]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "s is read after the loop — no dead-store warning may survive the loop merge; got {diags:?}"
+        );
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert_eq!(
+            sc.free_schedule
+                .iter()
+                .filter(|fp| fp.target == lit)
+                .count(),
+            1,
+            "exactly one Free for the binding's owner after the loop; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn reassign_inside_if_still_frees_binding_at_last_use() {
+        // Pre-existing M8.1 bug exposed by I-112: `mut s = "a"; if c:
+        // s = "b"; print(s)`. The merge keeps the pre-branch owner, so the
+        // reassign-target guard must not skip its last-use Free — on the
+        // not-taken path the binding still owns `lit_a`. Codegen emits the
+        // Free from the binding's current StrLocals (path-correct buffer).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit_b, span);
+        let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
+        let sv = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
+        let tir = tb.finish(&[decl, if_s, pr]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "s is read after the if — no dead-store warning; got {diags:?}"
+        );
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_on_reassign.contains_key(&asg),
+            "the taken arm must drop the pre-reassign buffer; free_on_reassign = {:?}",
+            sc.free_on_reassign
+        );
+        assert_eq!(
+            sc.free_schedule
+                .iter()
+                .filter(|fp| fp.target == lit_a)
+                .count(),
+            1,
+            "the binding's owner must still get its last-use Free (covers the not-taken path); schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule.iter().any(|fp| fp.target == lit_b),
+            "lit_b's buffer is freed through the binding's current StrLocals (same buffer as lit_a's Free on the taken path) — a second Free would double-free; schedule = {:?}",
+            sc.free_schedule
         );
     }
 }

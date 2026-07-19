@@ -155,6 +155,12 @@ struct FunctionContext<'a, M: Module> {
     pending_sweep: Vec<usize>,
     loop_stack: Vec<LoopContext>,
     str_locals: HashMap<StringId, StrLocals>,
+    /// Free-target (initializer / Assign value / str-param virtual ref)
+    /// → binding-name map, built once per function by
+    /// `build_free_binding_names`. `emit_frees` uses it to release a
+    /// named binding's CURRENT `StrLocals` rather than the producing
+    /// inst's possibly-stale cached repr (I-112).
+    free_binding_names: HashMap<TirRef, StringId>,
     /// M8.3 inout parameters: maps each inout param's name to the
     /// caller-provided slot address (a function-entry block param)
     /// and its pointee `TypeId`. The write-back chokepoint stores each
@@ -563,6 +569,7 @@ impl<M: Module> Codegen<M> {
                 pending_sweep,
                 loop_stack: Vec::new(),
                 str_locals: str_param_locals,
+                free_binding_names: Self::build_free_binding_names(tir, pool),
                 inout_ptrs,
                 sret_ptr,
                 sidecar: func_sidecar,
@@ -1506,6 +1513,14 @@ impl<M: Module> Codegen<M> {
     /// (borrowed-scalar ABI, never heap-owned) returns an error and aborts
     /// code generation — the ABI registry is supposed to keep such args out
     /// of `temp_owners`. See I-057/I-059.
+    ///
+    /// When the target is a named binding's initializer/value (or a str
+    /// param's virtual ref), the Free is emitted from the binding's
+    /// CURRENT `StrLocals` instead of the producing inst's cached repr:
+    /// after a reassign, a branch merge, or an `inout` write-back the
+    /// cached triple may be stale (freed/replaced), while the binding's
+    /// `Variable`s are SSA-correct at every program point (I-112 — the
+    /// same reasoning the `free_on_reassign` path documents).
     fn emit_frees(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1516,13 +1531,23 @@ impl<M: Module> Codegen<M> {
         }
         let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
         for (idx, target) in pending {
+            ctx.freed_at.insert(idx);
+            let binding = ctx
+                .free_binding_names
+                .get(&target)
+                .and_then(|name| ctx.str_locals.get(name).cloned());
+            if let Some(sl) = binding {
+                let ptr = builder.use_var(sl.ptr);
+                let cap = builder.use_var(sl.cap);
+                builder.ins().call(free_ref, &[ptr, cap]);
+                continue;
+            }
             let repr = ctx.inst_values.get(&target).copied().ok_or_else(|| {
                 format!(
                     "ownership pass scheduled Free for %{} but no ValueRepr cached",
                     target.index()
                 )
             })?;
-            ctx.freed_at.insert(idx);
             match repr {
                 ValueRepr::Str { ptr, cap, .. } => {
                     builder.ins().call(free_ref, &[ptr, cap]);
@@ -1537,6 +1562,48 @@ impl<M: Module> Codegen<M> {
         }
         ctx.pending_sweep.retain(|idx| !ctx.freed_at.contains(idx));
         Ok(())
+    }
+
+    /// Map every str-producing named initializer to its binding: VarDecl
+    /// initializers, Assign values, and str params' virtual refs. Built
+    /// once per function; `emit_frees` consults it to free a binding's
+    /// current `StrLocals` rather than a stale cached repr (I-112).
+    fn build_free_binding_names(tir: &Tir, pool: &InternPool) -> HashMap<TirRef, StringId> {
+        fn walk(tir: &Tir, stmts: &[TirRef], map: &mut HashMap<TirRef, StringId>) {
+            for &r in stmts {
+                match tir.inst(r).tag {
+                    TirTag::VarDecl => {
+                        let view = tir.var_decl_view(r);
+                        map.insert(view.initializer, view.name);
+                    }
+                    TirTag::Assign => {
+                        let view = tir.assign_view(r);
+                        map.insert(view.value, view.name);
+                    }
+                    TirTag::IfStmt => {
+                        let view = tir.if_stmt_view(r);
+                        walk(tir, &view.then_stmts, map);
+                        for elif in &view.elif_branches {
+                            walk(tir, &elif.body, map);
+                        }
+                        if let Some(else_stmts) = &view.else_stmts {
+                            walk(tir, else_stmts, map);
+                        }
+                    }
+                    TirTag::WhileLoop => walk(tir, &tir.while_loop_view(r).body, map),
+                    TirTag::ForRange => walk(tir, &tir.for_range_view(r).body, map),
+                    _ => {}
+                }
+            }
+        }
+        let mut map = HashMap::new();
+        for (idx, param) in tir.params.iter().enumerate() {
+            if is_str_type(param.ty, pool) {
+                map.insert(TirRef::param(idx), param.name);
+            }
+        }
+        walk(tir, &tir.body_stmts(), &mut map);
+        map
     }
 
     /// Declare `extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64)` for

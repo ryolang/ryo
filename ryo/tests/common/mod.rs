@@ -207,6 +207,59 @@ fn main():
 \t\ti += 1
 ",
     ),
+    (
+        // I-112: the callee reassigns the inout str param; the replacement
+        // escapes via the write-back (callee must not free it), and the
+        // caller's old buffer is dropped exactly once.
+        "inout_str_reassign_in_callee",
+        "\
+fn set(inout s: str):
+\ts = \"new\"
+
+fn main():
+\tmut s = \"old\"
+\tset(&s)
+\tprint(s)
+",
+    ),
+    (
+        // I-112: user-fn inout str + reborrow through str_push.
+        "inout_str_reborrow",
+        "\
+fn app(inout s: str):
+\tstr_push(&s, \"!\")
+
+fn main():
+\tmut s = \"hi\"
+\tapp(&s)
+\tprint(s)
+",
+    ),
+    (
+        // I-112: growth forces a realloc move; the caller must free the
+        // write-back triple, not the stale pre-call one (double-free).
+        "str_push_growth",
+        "\
+fn main():
+\tmut s = \"hi\"
+\tstr_push(&s, \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\")
+\tprint(s)
+",
+    ),
+    (
+        // I-112 / pre-existing M8.1 bug: reassignment inside a branch,
+        // read after the join. The taken arm drops the old buffer
+        // (free_on_reassign); the merged value is freed at last use.
+        "reassign_inside_if",
+        "\
+fn main():
+\tmut s = \"a\"
+\tc = true
+\tif c:
+\t\ts = \"b\"
+\tprint(s)
+",
+    ),
 ];
 
 pub fn find_fixture(name: &str) -> &'static str {

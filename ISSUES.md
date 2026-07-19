@@ -14,20 +14,6 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 
 ---
 
-## 🔴 Blocking
-
-### I-112 — Ownership pass has no model of the `inout str` write-back escape (UAF + double-free)
-
-**Files:** `ryo-frontend/src/ownership.rs` (:390-393, :520-537, :642-643, Call-arm inout branch ~:1864-1870), `ryo-backend/src/codegen.rs` (`emit_inout_writeback` :659-688, `emit_frees` :1519-1528, `reload_inout_args` :1996-2030), `runtime/src/lib.rs` (`__ryo_str_push` :156-216)
-**Summary:** The write-back ABI lets an `inout str` callee replace the caller's buffer, but the ownership lattice treats both sides as if nothing escaped. Three confirmed consequences (each verified against the emitted Cranelift IR; probes in `target/tmp/m83_review/`):
-- **Callee-side UAF.** `fn set(inout s: str): s = "new"` — the reassigned value is never read in the callee, so the dead-store pass emits W0001 *and* a Free anchored after the Assign (:520-537). In the IR the `ryo_str_free` of the new buffer sits immediately before the write-back stores: the caller receives a dangling fat pointer and its next read is a use-after-free. Any last-use free of an inout-str-bound value has the same problem (it precedes the write-back).
-- **Missing drop of the old pointee.** Reassigning an `inout str` param never frees the caller's old buffer: `free_on_reassign` requires the old owner `Valid` (:642-643), but an inout param is `Borrowed` (:390-393). Rust/Swift semantics (`*x = new` drops the old value) require the callee to drop it.
-- **Caller-side stale free → double-free.** After `str_push(&s, suffix)`, the caller's last-use Free emits the *pre-call* triple (`inst_values[init]` at :1519-1528), while `__ryo_str_push` already freed that pointer via `realloc` when growing. IR shows `ryo_str_free(original_ptr, original_cap)` right after the call. The shipped integration test passes only because `realloc(2→8)` extends in place on macOS; any growth that moves is a double-free.
-Invisible to the current suite: no user-fn `inout str` test exists, the ASan suite has no `str_push` fixture, and `zig cc -fsanitize=address` cannot link the ASan runtime on macOS (`undefined symbol: ___asan_init`), so local sanitizer runs are vacuous — only `./scripts/run_linux_tests.sh` is a real gate.
-**Resolution:** Model the escape in the ownership pass. Callee-side: a value bound to an `inout str` param must be treated as escaping at function exit (like a return — no last-use/dead-store free, no W0001), and reassigning the param must drop the old pointee (extend the `free_on_reassign` path to inout/`Borrowed` owners). Caller-side: reseat the binding's owner across an inout call (owner = the call inst, like a reassign) so the last-use Free targets the reloaded triple. Add a user-fn `inout str` integration test and a `str_push`-with-growth fixture to the ASan suite; verify with `run_linux_tests.sh` before closing.
-
----
-
 ## 🟡 Correctness / Hygiene
 
 ### I-006 — `print` is special-cased in codegen

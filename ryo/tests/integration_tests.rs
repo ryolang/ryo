@@ -2166,6 +2166,106 @@ fn inout_aliasing_distinct_owners_ok() {
 }
 
 #[test]
+fn inout_str_reassign_in_callee_writeback() {
+    // I-112: reassigning an inout str param inside the callee replaces the
+    // caller's buffer. The replacement escapes via the write-back — it must
+    // NOT be freed by the callee (UAF) nor flagged W0001, and the caller's
+    // old buffer must be dropped exactly once.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn set(inout s: str):\n\ts = \"new\"\n\nfn main():\n\tmut s = \"old\"\n\tset(&s)\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_str_set.ryo", code);
+    let output = run_ryo_command(&["run", "inout_str_set.ryo"], &test_file).expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "STDERR: {}", stderr);
+    assert!(
+        !stderr.contains("W0001"),
+        "inout param reassignment escapes — no dead-store warning expected: {}",
+        stderr
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\nnew[Result]"),
+        "inout str reassignment should write back 'new', got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_str_user_fn_and_reborrow_writeback() {
+    // I-112: a user function taking `inout str`, mutating it via str_push
+    // (a reborrow of the inout param). Exercises the general str inout ABI
+    // plus the nested inout call inside the callee.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn app(inout s: str):\n\tstr_push(&s, \"!\")\n\nfn main():\n\tmut s = \"hi\"\n\tapp(&s)\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_str_app.ryo", code);
+    let output = run_ryo_command(&["run", "inout_str_app.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\nhi![Result]"),
+        "user-fn inout str write-back should print 'hi!', got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn str_push_growth_beyond_capacity() {
+    // I-112: growing past capacity forces a realloc MOVE inside the
+    // runtime — the caller's old buffer is freed there, so the caller must
+    // not free the stale pre-call triple (double-free). Behavioral half of
+    // the check; the sanitizer half is the `str_push_growth` ASan fixture.
+    let temp_dir = TempDir::new().expect("temp");
+    let suffix = "x".repeat(200);
+    let code = format!(
+        "fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, \"{}\")\n\tprint(s)\n",
+        suffix
+    );
+    let test_file = create_test_file(temp_dir.path(), "str_push_grow.ryo", &code);
+    let output = run_ryo_command(&["run", "str_push_grow.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = format!("hi{}", suffix);
+    assert!(
+        stdout.contains(&expected),
+        "str_push growth should print the full concatenated string, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn str_reassign_inside_if_no_false_dead_store() {
+    // I-112 follow-up (pre-existing M8.1 bug): a str reassignment inside
+    // a branch, read after the join, must not warn W0001 and must free
+    // both buffers correctly (sanitizer half: `reassign_inside_if` ASan
+    // fixture).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tmut s = \"a\"\n\tc = true\n\tif c:\n\t\ts = \"b\"\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "reassign_if.ryo", code);
+    let output = run_ryo_command(&["run", "reassign_if.ryo"], &test_file).expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "STDERR: {}", stderr);
+    assert!(
+        !stderr.contains("W0001"),
+        "s is read after the if — no dead-store warning expected: {}",
+        stderr
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\nb[Result]"),
+        "reassigned value should print 'b', got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn last_use_across_multiple_top_level_statements() {
     // Regression test: when an owned heap string is read in multiple
     // top-level statements, the last-use Free must anchor after the
