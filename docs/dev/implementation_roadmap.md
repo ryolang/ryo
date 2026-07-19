@@ -1314,6 +1314,8 @@ fn main():
 
 **Goal:** Implement tuple types for multiple return values and grouping
 
+> **Decision Review (before implementation):** Reconsider whether this milestone ships a distinct tuple *type* at all. Candidate direction (preferred as of 2026-07): **remove tuples and use anonymous structs** — Zig's model — both for structural grouping and for wrapping multi-value returns (wrapped struct return, not a Go-style multi-return convention). Rationale: one product-type mechanism (simplicity goal), no second ABI/ownership path, kills the positional swap-bug class (`(int, str)` vs `(str, int)`), and error unions (`!T`, M13) absorb the main tuple use case. Cost: loses the Python-familiar `(a, b)` literal/unpack syntax; needs spec edits (`specification.md` literal list, "return single value (can be tuple)") and deletes the `types.rs` tuple interning stubs. Cheap to decide now, expensive after M10/M12 land — revisit here before starting.
+
 **Tasks:**
 
 - Add tuple syntax to lexer/parser
