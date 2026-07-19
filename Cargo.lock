@@ -147,6 +147,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "build-support"
+version = "0.1.0"
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1184,6 +1188,7 @@ dependencies = [
 name = "ryo"
 version = "0.1.0"
 dependencies = [
+ "build-support",
  "clap",
  "ryo-backend",
  "ryo-driver",
@@ -1195,6 +1200,7 @@ dependencies = [
 name = "ryo-backend"
 version = "0.1.0"
 dependencies = [
+ "build-support",
  "cranelift",
  "cranelift-jit",
  "cranelift-module",

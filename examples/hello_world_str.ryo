@@ -2,7 +2,7 @@
 # Basic Hello World example demonstrating Ryo syntax
 
 fn greet(name: str):
-	print(f"Hello, {name}!")
+	print("Hello, " + name + "!")
 
 fn main():
 	greet("World")

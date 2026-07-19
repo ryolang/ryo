@@ -15,7 +15,7 @@ fn greet_person(person: Person):
 	# Implicit immutable borrow — can read but not modify
 	print(f"Hello, {person.name}! You are {person.age} years old.")
 
-fn have_birthday(person: inout Person):
+fn have_birthday(inout person: Person):
 	# Mutable borrow — can modify the person
 	person.age += 1
 	print(f"Happy birthday, {person.name}! Now you are {person.age}.")
@@ -70,7 +70,7 @@ fn main():
 	print_first(numbers)
 
 	# Explicit `inout` for modification, `&` at call site
-	fn double_first(list: inout list[int]):
+	fn double_first(inout list: list[int]):
 		if not list.is_empty():
 			list[0] *= 2
 

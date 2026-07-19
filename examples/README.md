@@ -1,19 +1,22 @@
 # Ryo Examples
 
-## Working Examples (Milestone 8b)
+## Working Examples
 
 These compile and run with the current compiler.
 
 | File | Features |
 |------|----------|
 | [hello.ryo](hello.ryo) | `print()` |
-| [multiline.ryo](multiline.ryo) | Multiple statements |
+| [multiple_statements.ryo](multiple_statements.ryo) | Multiple statements |
 | [calculator.ryo](calculator.ryo) | Arithmetic, operator precedence |
 | [square.ryo](square.ryo) | Function definition, return types |
 | [fizzbuzz.ryo](fizzbuzz.ryo) | `if`/`elif`/`else`, modulo |
 | [classify.ryo](classify.ryo) | Conditionals, logical operators, `and`/`not` |
 | [booleans.ryo](booleans.ryo) | `bool` type, equality operators |
 | [floats_and_ordering.ryo](floats_and_ordering.ryo) | `float` type, comparison, integer division |
+| [type_inference.ryo](type_inference.ryo) | Type inference, `int_to_str` |
+| [hello_world_str.ryo](hello_world_str.ryo) | `str` parameters, string concatenation |
+| [ownership.ryo](ownership.ryo) | Ownership: implicit borrow, `inout` + `&`, `move` |
 
 ### Running
 

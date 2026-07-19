@@ -5,6 +5,7 @@
 //! printing and Display impls accept a pool reference so they can
 //! resolve those handles back to source text.
 
+use crate::tir::ParamMode;
 use crate::types::{InternPool, StringId};
 use chumsky::span::SimpleSpan;
 use std::fmt;
@@ -77,11 +78,15 @@ impl Statement {
                 println!("{}FunctionDef: {}", prefix, pool.str(func.name.name));
                 let inner = format!("{}  ", prefix);
                 for param in &func.params {
-                    let move_prefix = if param.is_move { "move " } else { "" };
+                    let mode_prefix = match param.mode {
+                        ParamMode::Move => "move ",
+                        ParamMode::Inout => "inout ",
+                        ParamMode::Borrow => "",
+                    };
                     println!(
                         "{}├── param: {}{}: {}",
                         inner,
-                        move_prefix,
+                        mode_prefix,
                         pool.str(param.name.name),
                         pool.str(param.type_annotation.name),
                     );
@@ -257,7 +262,7 @@ pub struct FunctionDef {
 pub struct Param {
     pub name: Ident,
     pub type_annotation: TypeExpr,
-    pub is_move: bool,
+    pub mode: ParamMode,
     pub span: SimpleSpan,
 }
 
@@ -279,24 +284,6 @@ pub struct Ident {
 impl Ident {
     pub fn new(name: StringId, span: SimpleSpan) -> Self {
         Ident { name, span }
-    }
-
-    /// Display adapter that resolves `name` through `pool`.
-    #[allow(dead_code)]
-    pub fn display<'a>(&'a self, pool: &'a InternPool) -> impl fmt::Display + 'a {
-        struct D<'a> {
-            pool: &'a InternPool,
-            id: StringId,
-        }
-        impl fmt::Display for D<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.pool.str(self.id))
-            }
-        }
-        D {
-            pool,
-            id: self.name,
-        }
     }
 }
 
@@ -343,6 +330,7 @@ impl Expression {
             ExprKind::MethodCall { method, .. } => {
                 format!("MethodCall(.{})", pool.str(*method))
             }
+            ExprKind::Borrow(_) => "Borrow".to_string(),
         };
 
         println!(
@@ -375,6 +363,9 @@ impl Expression {
                     arg.pretty_print(&format!("{}{}", new_prefix, prefix_char), pool);
                 }
             }
+            ExprKind::Borrow(inner) => {
+                inner.pretty_print(&format!("{}└── ", new_prefix), pool);
+            }
         }
     }
 }
@@ -391,6 +382,9 @@ pub enum ExprKind {
         method: StringId,
         args: Vec<Expression>,
     },
+    /// Call-site mutable borrow marker: `&expr` (M8.3). The inner
+    /// expression must resolve to an assignable lvalue (checked in sema).
+    Borrow(Box<Expression>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -16,6 +16,7 @@ Be brief.
 - `ryo-backend/` (Cranelift code generation, Zig linking, toolchain management, runtime extraction)
 - `ryo-driver/` (pipeline compilation orchestration driver)
 - `runtime/` (Ryo static runtime library)
+- `build-support/` (shared build-script helpers, e.g. the ryo-runtime archive build used by `ryo/build.rs` and `ryo-backend/build.rs`)
 
 Non-member repository areas (not part of the Cargo workspace):
 - `docs/` (spec, roadmap, examples)

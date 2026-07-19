@@ -2040,6 +2040,296 @@ fn test_int_to_str_builtin() {
 }
 
 #[test]
+fn inout_scalar_writeback() {
+    // M8.3: an `inout int` parameter is mutated in the callee and the
+    // change is visible to the caller via the write-back ABI.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn inc(inout x: int):\n\tx += 1\n\nfn main():\n\tmut c = 0\n\tinc(&c)\n\tinc(&c)\n\tprint(int_to_str(c))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_scalar.ryo", code);
+    let output = run_ryo_command(&["run", "inout_scalar.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n2[Result]"),
+        "inout write-back should print 2, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_float_writeback() {
+    // M8.3: `inout float` — exercises a non-int scalar width through
+    // the write-back ABI (f64).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn scale(inout x: float):\n\tx += 1.5\n\nfn main():\n\tmut f = 1.0\n\tscale(&f)\n\tprint(float_to_str(f))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_float.ryo", code);
+    let output = run_ryo_command(&["run", "inout_float.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n2.5[Result]"),
+        "inout float write-back should print 2.5, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_early_return_still_writes_back() {
+    // M8.3: the write-back chokepoint must fire on an EARLY `return`
+    // (ReturnVoid) too, not just function fallthrough. Here `bump` exits
+    // via `return` inside the `if` arm, so `a` must be 0+1+10 == 11.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn bump(inout x: int, cond: bool):\n\tx += 1\n\tif cond:\n\t\tx += 10\n\t\treturn\n\tx += 100\n\nfn main():\n\tmut a = 0\n\tbump(&a, true)\n\tprint(int_to_str(a))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_early_ret.ryo", code);
+    let output = run_ryo_command(&["run", "inout_early_ret.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n11[Result]"),
+        "inout early-return write-back should print 11, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn str_push_inout_str_builtin() {
+    // M8.3: str_push(s: inout str, suffix: str) appends in place via the
+    // __ryo_str_push runtime + the inout str write-back ABI.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, \" there\")\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "str_push.ryo", code);
+    let output = run_ryo_command(&["run", "str_push.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\nhi there[Result]"),
+        "str_push should append ' there' -> 'hi there', got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_aliasing_same_owner_rejected() {
+    // M8.3b Rule 7: swap(&c, &c) passes one owner as two mutable borrows
+    // in the same call — the ownership pass must reject with E0032.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn swap(inout a: int, inout b: int):\n\tmut t = a\n\ta = b\n\tb = t\n\nfn main():\n\tmut c = 5\n\tswap(&c, &c)\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_alias_bad.ryo", code);
+    let output = run_ryo_command(&["run", "inout_alias_bad.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "swap(&c, &c) must be rejected as a Rule 7 violation"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0032"),
+        "expected E0032 in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn inout_aliasing_distinct_owners_ok() {
+    // M8.3b Rule 7: swap(&a, &b) with distinct owners compiles and the
+    // write-back ABI actually swaps the values.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn swap(inout a: int, inout b: int):\n\tmut t = a\n\ta = b\n\tb = t\n\nfn main():\n\tmut x = 5\n\tmut y = 7\n\tswap(&x, &y)\n\tprint(int_to_str(x))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_alias_ok.ryo", code);
+    let output = run_ryo_command(&["run", "inout_alias_ok.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n7[Result]"),
+        "swap(&x, &y) should leave x == 7, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_str_reassign_in_callee_writeback() {
+    // Reassigning an inout str param inside the callee replaces the
+    // caller's buffer. The replacement escapes via the write-back — it must
+    // NOT be freed by the callee (UAF) nor flagged W0001, and the caller's
+    // old buffer must be dropped exactly once.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn set(inout s: str):\n\ts = \"new\"\n\nfn main():\n\tmut s = \"old\"\n\tset(&s)\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_str_set.ryo", code);
+    let output = run_ryo_command(&["run", "inout_str_set.ryo"], &test_file).expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "STDERR: {}", stderr);
+    assert!(
+        !stderr.contains("W0001"),
+        "inout param reassignment escapes — no dead-store warning expected: {}",
+        stderr
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\nnew[Result]"),
+        "inout str reassignment should write back 'new', got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_str_user_fn_and_reborrow_writeback() {
+    // A user function taking `inout str`, mutating it via str_push
+    // (a reborrow of the inout param). Exercises the general str inout ABI
+    // plus the nested inout call inside the callee.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn app(inout s: str):\n\tstr_push(&s, \"!\")\n\nfn main():\n\tmut s = \"hi\"\n\tapp(&s)\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_str_app.ryo", code);
+    let output = run_ryo_command(&["run", "inout_str_app.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\nhi![Result]"),
+        "user-fn inout str write-back should print 'hi!', got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn str_push_growth_beyond_capacity() {
+    // Growing past capacity forces a realloc MOVE inside the
+    // runtime — the caller's old buffer is freed there, so the caller must
+    // not free the stale pre-call triple (double-free). Behavioral half of
+    // the check; the sanitizer half is the `str_push_growth` ASan fixture.
+    let temp_dir = TempDir::new().expect("temp");
+    let suffix = "x".repeat(200);
+    let code = format!(
+        "fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, \"{}\")\n\tprint(s)\n",
+        suffix
+    );
+    let test_file = create_test_file(temp_dir.path(), "str_push_grow.ryo", &code);
+    let output = run_ryo_command(&["run", "str_push_grow.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = format!("hi{}", suffix);
+    assert!(
+        stdout.contains(&expected),
+        "str_push growth should print the full concatenated string, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_bool_writeback() {
+    // Review coverage gap: `inout bool` — exercises the i8 scalar width
+    // through the write-back ABI.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn set(inout b: bool):\n\tb = true\n\nfn main():\n\tmut b = false\n\tset(&b)\n\tprint(bool_to_str(b))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_bool.ryo", code);
+    let output = run_ryo_command(&["run", "inout_bool.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\ntrue[Result]"),
+        "inout bool write-back should print true, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_int_reborrow_chain() {
+    // Review coverage gap: an inout param is itself a valid `&` target —
+    // `twice` reborrows its own inout param into `inc`, twice.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn inc(inout x: int):\n\tx += 1\n\nfn twice(inout x: int):\n\tinc(&x)\n\tinc(&x)\n\nfn main():\n\tmut c = 0\n\ttwice(&c)\n\tprint(int_to_str(c))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_reborrow.ryo", code);
+    let output = run_ryo_command(&["run", "inout_reborrow.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n2[Result]"),
+        "reborrowed inout chain should print 2, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_fallthrough_return_writes_back() {
+    // Review coverage gap: the multi-return-site test only exercised the
+    // EARLY return. The fallthrough exit must write back too:
+    // bump(&b, false) takes the fallthrough path, so b == 0+1+100 == 101.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn bump(inout x: int, cond: bool):\n\tx += 1\n\tif cond:\n\t\tx += 10\n\t\treturn\n\tx += 100\n\nfn main():\n\tmut b = 0\n\tbump(&b, false)\n\tprint(int_to_str(b))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_fallthrough.ryo", code);
+    let output = run_ryo_command(&["run", "inout_fallthrough.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n101[Result]"),
+        "fallthrough-return write-back should print 101, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn str_reassign_inside_if_no_false_dead_store() {
+    // Follow-up (pre-existing M8.1 bug): a str reassignment inside
+    // a branch, read after the join, must not warn W0001 and must free
+    // both buffers correctly (sanitizer half: `reassign_inside_if` ASan
+    // fixture).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tmut s = \"a\"\n\tc = true\n\tif c:\n\t\ts = \"b\"\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "reassign_if.ryo", code);
+    let output = run_ryo_command(&["run", "reassign_if.ryo"], &test_file).expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "STDERR: {}", stderr);
+    assert!(
+        !stderr.contains("W0001"),
+        "s is read after the if — no dead-store warning expected: {}",
+        stderr
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\nb[Result]"),
+        "reassigned value should print 'b', got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn last_use_across_multiple_top_level_statements() {
     // Regression test: when an owned heap string is read in multiple
     // top-level statements, the last-use Free must anchor after the

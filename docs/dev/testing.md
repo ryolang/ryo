@@ -137,7 +137,7 @@ fn test_addition():
 Add `#[bench]` attribute for v0.1.
 ```ryo
 #[bench]
-fn bench_parsing(b: inout Bencher):
+fn bench_parsing(inout b: Bencher):
     for _ in b.iter():
         parse_heavy_json()
 ```

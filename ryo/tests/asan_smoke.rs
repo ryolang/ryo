@@ -100,3 +100,93 @@ fn asan_int_to_str_then_print() {
         "int_to_str_then_print",
     );
 }
+
+#[test]
+fn asan_inout_str_reassign_in_callee() {
+    run_asan_smoke(
+        common::find_fixture("inout_str_reassign_in_callee"),
+        "inout_str_reassign_in_callee",
+    );
+}
+
+#[test]
+fn asan_inout_str_reborrow() {
+    run_asan_smoke(
+        common::find_fixture("inout_str_reborrow"),
+        "inout_str_reborrow",
+    );
+}
+
+#[test]
+fn asan_str_push_growth() {
+    run_asan_smoke(common::find_fixture("str_push_growth"), "str_push_growth");
+}
+
+#[test]
+fn asan_reassign_inside_if() {
+    run_asan_smoke(
+        common::find_fixture("reassign_inside_if"),
+        "reassign_inside_if",
+    );
+}
+
+#[test]
+fn asan_dead_reassign_if_taken() {
+    run_asan_smoke(
+        common::find_fixture("dead_reassign_if_taken"),
+        "dead_reassign_if_taken",
+    );
+}
+
+#[test]
+fn asan_dead_reassign_if_fallthrough() {
+    run_asan_smoke(
+        common::find_fixture("dead_reassign_if_fallthrough"),
+        "dead_reassign_if_fallthrough",
+    );
+}
+
+#[test]
+fn asan_dead_reassign_while_taken() {
+    run_asan_smoke(
+        common::find_fixture("dead_reassign_while_taken"),
+        "dead_reassign_while_taken",
+    );
+}
+
+#[test]
+fn asan_dead_reassign_while_zero() {
+    run_asan_smoke(
+        common::find_fixture("dead_reassign_while_zero"),
+        "dead_reassign_while_zero",
+    );
+}
+
+#[test]
+fn asan_dead_reassign_for_zero() {
+    run_asan_smoke(
+        common::find_fixture("dead_reassign_for_zero"),
+        "dead_reassign_for_zero",
+    );
+}
+
+#[test]
+fn asan_last_use_in_loop() {
+    run_asan_smoke(common::find_fixture("last_use_in_loop"), "last_use_in_loop");
+}
+
+#[test]
+fn asan_last_use_in_if_fallthrough() {
+    run_asan_smoke(
+        common::find_fixture("last_use_in_if_fallthrough"),
+        "last_use_in_if_fallthrough",
+    );
+}
+
+#[test]
+fn asan_early_return_live_local() {
+    run_asan_smoke(
+        common::find_fixture("early_return_live_local"),
+        "early_return_live_local",
+    );
+}

@@ -369,7 +369,6 @@ impl InternPool {
     /// Intern a tuple type. Dedups on element-id sequence with no
     /// per-call key allocation: the probe hashes `elems` directly
     /// and compares it against each candidate's slice in `extra`.
-    #[allow(dead_code)]
     pub fn tuple(&mut self, elems: &[TypeId]) -> TypeId {
         let hash = hash_typeids(&self.hasher, elems);
 
@@ -422,7 +421,6 @@ impl InternPool {
     /// Only used today by `Display` for diagnostic formatting and
     /// by tests, neither of which is hot. Tracked as a follow-up
     /// in ISSUES.md if it ever shows up in a profile.
-    #[allow(dead_code)]
     pub fn tuple_elements_vec(&self, id: TypeId) -> Vec<TypeId> {
         let item = self.items[id.0 as usize];
         debug_assert!(matches!(item.tag, Tag::Tuple));

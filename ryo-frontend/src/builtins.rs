@@ -60,6 +60,11 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
     },
+    BuiltinFunction {
+        name: "str_push",
+        return_ty: BuiltinReturn::Void,
+        borrowed_scalar_params: &[],
+    },
 ];
 
 /// Synthesized (non-user-facing) runtime callees that use the

@@ -140,6 +140,78 @@ pub unsafe extern "C" fn ryo_str_concat(
     }
 }
 
+/// Append `suffix` to the str fat-pointer at `s_ptr`, reallocating if the
+/// existing capacity cannot hold the result, and write the new
+/// (ptr, len, cap) back through `s_ptr`. This is the runtime backing for
+/// the M8.3 `str_push(s: inout str, suffix: str)` builtin.
+///
+/// # Safety
+/// `s_ptr` points to a valid `RyoStrFat` owned by the caller;
+/// `suffix_ptr`/`suffix_len` describe a valid readable byte range
+/// (which may be empty / null when `suffix_len == 0`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __ryo_str_push(
+    s_ptr: *mut RyoStrFat,
+    suffix_ptr: *const u8,
+    suffix_len: i64,
+) {
+    // SAFETY: s_ptr is a valid RyoStrFat per the ABI contract; the suffix
+    // range is valid for reading and does not overlap the destination
+    // buffer (the caller owns disjoint storage).
+    unsafe {
+        let cur_ptr = (*s_ptr).ptr;
+        let cur_len = (*s_ptr).len;
+        let cur_cap = (*s_ptr).cap;
+        let add: u64 = suffix_len.max(0) as u64;
+        let new_len = match cur_len.checked_add(add) {
+            Some(l) => l,
+            None => oom_abort(),
+        };
+
+        // Reuse the current buffer when it already fits; otherwise grow.
+        // Capacity policy: double the old capacity (or fit exactly when
+        // the old buffer was empty) — a tighter ARC/CoW policy is a
+        // post-M11 concern.
+        let (buf, cap) = if new_len <= cur_cap {
+            (cur_ptr, cur_cap)
+        } else {
+            let new_cap = if cur_cap == 0 {
+                new_len
+            } else {
+                cur_cap.saturating_mul(2).max(new_len)
+            };
+            if cur_cap == 0 {
+                // Static (.rodata sentinel) source: cap==0 means the ptr is
+                // NOT heap-owned, so `ryo_str_realloc` would allocate fresh
+                // WITHOUT copying. Allocate here and copy the existing
+                // `cur_len` bytes explicitly.
+                let nb = ryo_str_alloc(new_cap);
+                if cur_len > 0 {
+                    let n: usize = cur_len.try_into().unwrap_or_else(|_| oom_abort());
+                    debug_assert!(!cur_ptr.is_null());
+                    core::ptr::copy_nonoverlapping(cur_ptr, nb, n);
+                }
+                (nb, new_cap)
+            } else {
+                // Heap-owned: realloc copies the old contents and frees
+                // the old buffer.
+                let nb = ryo_str_realloc(cur_ptr, cur_cap, new_cap);
+                (nb, new_cap)
+            }
+        };
+
+        if add > 0 {
+            let dst_off: usize = cur_len.try_into().unwrap_or_else(|_| oom_abort());
+            let n: usize = add.try_into().unwrap_or_else(|_| oom_abort());
+            debug_assert!(!suffix_ptr.is_null());
+            core::ptr::copy_nonoverlapping(suffix_ptr, buf.add(dst_off), n);
+        }
+        (*s_ptr).ptr = buf;
+        (*s_ptr).len = new_len;
+        (*s_ptr).cap = cap;
+    }
+}
+
 /// # Safety
 /// `a_ptr` must point to `a_len` readable bytes (or be null/dangling if a_len==0).
 /// Same for `b_ptr`/`b_len`.

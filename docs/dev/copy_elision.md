@@ -3,6 +3,27 @@
 **Status:** Design (v0.2+). Partial implementation starts at milestone
 Copy Elision & NRVO (Phase 5, v0.2+).
 
+**Current status (2026-07):** parts of the contract this document
+defines are already true in the compiler, and verified by the M8.1–M8.3
+work:
+
+- **The destination-slot mechanism exists.** `str` returns already use
+  the hidden sret output pointer described in the Algorithm Sketch —
+  the same calling-convention shape the G1/G2 guarantees will build on.
+- **G3 behavior is implemented.** Move parameters receive the original
+  buffer (a fat-pointer move, no data copy), and reusing a moved
+  binding is a compile error (E0020). Forwarding through a `move`
+  chain requires `move` in each signature, as G3 states.
+- **F2's note is verified.** `inout` parameters cannot be returned
+  (E0022) or stored, so a mutable borrow provably never survives the
+  call — the F2 alias is unconstructible.
+- **The `inout` write-back ABI (M8.3)** passes a pointer to the
+  caller's slot for mutable borrows — the second place the
+  destination-slot discipline already exists.
+
+Still future: the dedicated elision pass itself (G1/G2 guarantees,
+the P1–P4 permitted cases, and the safety verification of step 4).
+
 ## Purpose
 Defines the compiler's contract for eliding copies on function return
 and parameter passing. Section 5.9 of the specification promises

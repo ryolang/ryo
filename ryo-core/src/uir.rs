@@ -43,6 +43,7 @@
 //! mirrors Zig's `Zir.Inst.Index` / `Zir.Inst.OptionalIndex` pair.
 
 use crate::ast::CompoundOp;
+use crate::tir::ParamMode;
 use crate::types::{InternPool, StringId, TypeId};
 use chumsky::span::{SimpleSpan, Span as _};
 use std::fmt;
@@ -203,6 +204,11 @@ pub enum InstTag {
 
     /// Method call (e.g. `receiver.name(args)`). Variable payload in `extra` — see [`method_call_extra`].
     MethodCall,
+
+    /// Call-site mutable-borrow marker `&expr` (M8.3). The operand is
+    /// the inner expression's ref; the `&` carries no runtime op —
+    /// codegen decides pass-by-pointer from `ParamMode::Inout`.
+    Borrow,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -228,6 +234,9 @@ pub enum InstData {
     /// Single operand, used by unary ops, [`InstTag::Return`], and
     /// [`InstTag::ExprStmt`].
     UnOp(InstRef),
+    /// Call-site mutable-borrow marker `&expr`; operand is the inner
+    /// ref. See [`InstTag::Borrow`].
+    Borrow(InstRef),
     /// Both operands of a binary op.
     BinOp {
         lhs: InstRef,
@@ -249,7 +258,7 @@ pub struct Inst {
 pub struct UirParam {
     pub name: StringId,
     pub ty: TypeId,
-    pub is_move: bool,
+    pub mode: ParamMode,
     pub span: Span,
 }
 
@@ -483,6 +492,13 @@ impl UirBuilder {
             InstTag::Neg | InstTag::Not | InstTag::Return | InstTag::ExprStmt
         ));
         self.push(tag, InstData::UnOp(operand), span)
+    }
+
+    /// Emit a call-site mutable-borrow marker `&expr` (M8.3). The
+    /// `&` is a marker, not an op — sema lowers it to its inner ref
+    /// and codegen decides pass-by-pointer from `ParamMode::Inout`.
+    pub fn borrow(&mut self, inner: InstRef, span: Span) -> InstRef {
+        self.push(InstTag::Borrow, InstData::Borrow(inner), span)
     }
 
     pub fn binary(&mut self, tag: InstTag, lhs: InstRef, rhs: InstRef, span: Span) -> InstRef {
@@ -1194,6 +1210,9 @@ fn write_inst(
         }
         (InstTag::Break, InstData::None) => writeln!(f, "break"),
         (InstTag::Continue, InstData::None) => writeln!(f, "continue"),
+        (InstTag::Borrow, InstData::Borrow(inner)) => {
+            writeln!(f, "borrow %{}", inner.index())
+        }
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
 }

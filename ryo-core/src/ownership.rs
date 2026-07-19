@@ -12,7 +12,6 @@ pub struct BranchId(pub u32);
 /// the instruction at `after`, gated by `branch` (None =
 /// unconditional, Some = only inside that arm or a descendant).
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // fields read by Task 7+ Free emission
 pub struct FreePoint {
     pub after: TirRef,
     pub target: TirRef,
@@ -25,11 +24,25 @@ pub struct FreePoint {
 /// as it lowers each arm, so a branch-gated `FreePoint` only fires
 /// inside the arm that ended with the owner still `Valid`.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // fields read by codegen's branch_stack
 pub struct IfBranchIds {
     pub then_branch: BranchId,
     pub elif_branches: Vec<BranchId>,
     pub else_branch: Option<BranchId>,
+}
+
+/// One conditional drop of a pre-branch buffer. When a binding
+/// is reassigned in SOME arms of an if but kept untouched in others,
+/// and the reassigned value is never read after the join, the
+/// pre-branch buffer would leak on the untouched paths. This drop
+/// covers it: codegen emits `ryo_str_free` at the START of each arm in
+/// `arms` (the binding's value there is still the pre-if one).
+/// `target` is the pre-branch owner's `TirRef`, resolved to the
+/// binding's current `StrLocals` via `free_binding_names`.
+#[derive(Clone, Debug)]
+pub struct ConditionalDeadDrop {
+    pub if_stmt: TirRef,
+    pub target: TirRef,
+    pub arms: Vec<BranchId>,
 }
 
 /// Side-table produced by the ownership pass alongside diagnostics.
@@ -46,7 +59,6 @@ pub struct IfBranchIds {
 /// codegen looks up the entry for the current function before
 /// consulting any of the per-function maps.
 #[derive(Default, Debug, Clone)]
-#[allow(dead_code)] // fields read by Task 7+ Free emission
 pub struct OwnershipSidecar {
     pub functions: HashMap<StringId, FunctionSidecar>,
 }
@@ -56,7 +68,6 @@ pub struct OwnershipSidecar {
 /// `analyze_function` and inserted into the parent
 /// [`OwnershipSidecar`] under the function's name.
 #[derive(Default, Debug, Clone)]
-#[allow(dead_code)] // fields read by Task 7+ Free emission
 pub struct FunctionSidecar {
     /// Frees anchored after specific instructions.
     pub free_schedule: Vec<FreePoint>,
@@ -68,4 +79,9 @@ pub struct FunctionSidecar {
     /// lowering if/elif/else to know which `BranchId` to push onto
     /// `branch_stack` for each arm.
     pub if_branches: HashMap<TirRef /* IfStmt inst */, IfBranchIds>,
+    /// Conditional drops of pre-branch buffers for dead conditional
+    /// reassignments. Codegen fires each entry at the start of
+    /// the arms it names (including a synthetic fall-through block for
+    /// else-less ifs).
+    pub conditional_dead_drops: Vec<ConditionalDeadDrop>,
 }

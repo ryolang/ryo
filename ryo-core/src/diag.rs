@@ -44,14 +44,12 @@ pub struct Diag {
 pub enum Severity {
     Error,
     Warning,
-    #[allow(dead_code)]
     Note,
 }
 
 /// Stable error identity. Renderers, tests, and future tooling
 /// pattern-match on this rather than on `message`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum DiagCode {
     // --- astgen ---
     UnknownType,
@@ -119,6 +117,12 @@ pub enum DiagCode {
     ReturnBorrowedValue,
     /// Attempted to move a value while it is borrowed as an argument in the same call.
     MoveWhileBorrowedInCall,
+    /// Call-site `&`/`inout` disagreement, or `&` applied to a
+    /// non-assignable lvalue (M8.3).
+    BorrowMismatch,
+    /// Rule 7 violation: a value has more than one mutable borrow, or a
+    /// mutable and an immutable/moved use, in the same call (M8.3).
+    MutableAliasingViolation,
     /// A Move-typed value is declared (or assigned) but never used.
     DeadStore,
 
@@ -138,7 +142,6 @@ pub enum DiagCode {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DiagNote {
     pub span: Option<Span>,
     pub message: String,
@@ -165,7 +168,6 @@ impl Diag {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_note(mut self, span: Option<Span>, message: impl Into<String>) -> Self {
         self.notes.push(DiagNote {
             span,
@@ -221,12 +223,10 @@ impl DiagSink {
         self.error_count > 0
     }
 
-    #[allow(dead_code)]
     pub fn error_count(&self) -> usize {
         self.error_count
     }
 
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.diags.is_empty()
     }

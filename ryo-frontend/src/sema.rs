@@ -51,7 +51,7 @@ use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use ryo_core::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 // ---------- Decl table ----------
@@ -188,6 +188,30 @@ pub struct Sema<'a> {
     /// Per-decl emitted TIR slot. Filled as decls transition to
     /// `Resolved`. Result extraction drains this in source order.
     results: Vec<Option<Tir>>,
+    /// Refs that appear as direct arguments of some call anywhere in
+    /// the program. `&expr` (UIR `Borrow`) is only meaningful as a call
+    /// argument to an `inout` parameter; the `Borrow` arm in
+    /// `analyze_expr` rejects any `Borrow` inst outside this set. UIR
+    /// insts are unique per use, so a program-wide set is precise — a
+    /// `Borrow` that is a call arg in one function can never be a stray
+    /// `&` in another.
+    call_arg_refs: HashSet<InstRef>,
+}
+
+/// Every direct call-argument `InstRef` in the program. Scans
+/// `Call` and `MethodCall` instructions (method-call args count; the
+/// receiver does not — `(&x).len()` is not a valid borrow position).
+fn collect_call_arg_refs(uir: &Uir) -> HashSet<InstRef> {
+    let mut set = HashSet::new();
+    for (i, inst) in uir.instructions.iter().enumerate().skip(1) {
+        let r = InstRef::from_raw(i as u32);
+        match inst.tag {
+            InstTag::Call => set.extend(uir.call_view(r).args),
+            InstTag::MethodCall => set.extend(uir.method_call_view(r).args),
+            _ => {}
+        }
+    }
+    set
 }
 
 impl<'a> Sema<'a> {
@@ -240,6 +264,7 @@ impl<'a> Sema<'a> {
             name_to_decl,
             signatures: HashMap::with_capacity(n),
             results,
+            call_arg_refs: collect_call_arg_refs(uir),
         }
     }
 
@@ -315,6 +340,12 @@ impl<'a> Sema<'a> {
     /// diagnostic when a cycle is detected. The caller should fall
     /// back to the error type for whatever it was trying to
     /// compute.
+    /// Reserved for the comptime / lazy-resolution era: the cycle
+    /// sentinel for on-demand decl resolution. Production never calls
+    /// it today (signatures resolve eagerly instead); it is exercised
+    /// by the `require_decl_reports_cycle_when_in_progress` substrate
+    /// test, which the comptime milestones will lean on. Private, so
+    /// the lib-target dead-code analysis needs the allow.
     #[allow(dead_code)]
     fn require_decl(&mut self, callee: DeclId, span: Span, name: StringId) -> bool {
         match self.decl_state[callee.index()] {
@@ -354,7 +385,10 @@ impl<'a> Sema<'a> {
 fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     let mut scope = Scope::new();
     for param in &body.params {
-        scope.insert_binding(param.name, param.ty, false);
+        // An `inout` parameter is mutable inside the callee body (like a
+        // `mut` local); `move` and borrowed params are immutable.
+        let is_mutable = param.mode == ParamMode::Inout;
+        scope.insert_binding(param.name, param.ty, is_mutable);
     }
 
     // W0002: warn on `move` annotations applied to Copy-typed
@@ -363,7 +397,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     // redundant noise. `move` on `str` (and other heap types) stays
     // silent — that's the whole reason the keyword exists.
     for param in &body.params {
-        if param.is_move && sema.pool.is_copy(param.ty) {
+        if param.mode == ParamMode::Move && sema.pool.is_copy(param.ty) {
             let name = sema.pool.str(param.name).to_string();
             let ty_str = sema.pool.display(param.ty).to_string();
             sema.sink.emit(Diag::warning(
@@ -383,7 +417,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         .map(|p| TirParam {
             name: p.name,
             ty: p.ty,
-            is_move: p.is_move,
+            mode: p.mode,
             span: p.span,
         })
         .collect();
@@ -984,7 +1018,7 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
             for a in &view.args {
                 arg_tirs.push(analyze_expr(sema, fcx, scope, *a));
             }
-            check_call(sema, fcx, &view, &arg_tirs, span)
+            check_call(sema, fcx, scope, &view, &arg_tirs, span)
         }
         InstTag::MethodCall => {
             let view = sema.uir.method_call_view(r);
@@ -1053,6 +1087,27 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
             }
+        }
+        InstTag::Borrow => {
+            let inner = match inst.data {
+                InstData::Borrow(inner) => inner,
+                _ => unreachable!("Borrow must carry InstData::Borrow"),
+            };
+            // The `&` is a marker, not an op: lower to the inner value's
+            // TirRef. Codegen decides pass-by-pointer from the callee's
+            // `ParamMode::Inout`. (&/inout agreement + lvalue validation
+            // are enforced in `check_call`, not here.)
+            if !sema.call_arg_refs.contains(&r) {
+                // A `&` that is not a direct call argument marks
+                // no mutation at all — reject it instead of silently
+                // discarding it.
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::BorrowMismatch,
+                    "`&` is only valid as an argument to an `inout` parameter".to_string(),
+                ));
+            }
+            analyze_expr(sema, fcx, scope, inner)
         }
         other => panic!(
             "analyze_expr: instruction at %{} is not an expression (tag={:?})",
@@ -1298,6 +1353,7 @@ fn check_binary_op(
 fn check_call(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
+    scope: &Scope,
     view: &CallView,
     arg_tirs: &[TirRef],
     span: Span,
@@ -1308,7 +1364,7 @@ fn check_call(
     // `name_to_decl`, so signature resolution and the worklist
     // never see them.
     if let Some(builtin) = builtins::lookup(sema.pool.str(name_id)) {
-        return emit_builtin_call(sema, fcx, view, arg_tirs, span, builtin);
+        return emit_builtin_call(sema, fcx, scope, view, arg_tirs, span, builtin);
     }
 
     if check_reserved_builtin(
@@ -1340,13 +1396,13 @@ fn check_call(
             return fcx.builder.unreachable(sema.pool.error_type(), span);
         }
     };
-    // Snapshot the callee's per-parameter move flags from its UIR
+    // Snapshot the callee's per-parameter modes from its UIR
     // body so we can stamp `ParamMode`s without holding a borrow on
     // `sema` through the per-argument diagnostics below.
-    let callee_move_flags: Vec<bool> = sema.uir.func_bodies[callee.index()]
+    let callee_modes: Vec<ParamMode> = sema.uir.func_bodies[callee.index()]
         .params
         .iter()
-        .map(|p| p.is_move)
+        .map(|p| p.mode)
         .collect();
 
     let sig = sema
@@ -1359,20 +1415,11 @@ fn check_call(
     let expected: Vec<TypeId> = sig.params.clone();
     let return_type = sig.return_type;
     // One mode per call-site argument, stamped from the callee
-    // signature's `is_move` flags. When the arity mismatches we
+    // signature's parameter modes. When the arity mismatches we
     // fall back to all-Borrow over the actual argument count so the
     // encoded payload stays well-formed on the error path.
-    let modes: Vec<ParamMode> = if view.args.len() == callee_move_flags.len() {
-        callee_move_flags
-            .iter()
-            .map(|&is_move| {
-                if is_move {
-                    ParamMode::Move
-                } else {
-                    ParamMode::Borrow
-                }
-            })
-            .collect()
+    let modes: Vec<ParamMode> = if view.args.len() == callee_modes.len() {
+        callee_modes.clone()
     } else {
         vec![ParamMode::Borrow; view.args.len()]
     };
@@ -1410,10 +1457,75 @@ fn check_call(
                     ),
                 ));
             }
+
+            // --- M8.3: `&`/`inout` agreement + mutable-lvalue validation ---
+            let arg_is_borrow = matches!(sema.uir.inst(*arg_uir).tag, InstTag::Borrow);
+            let param_is_inout = modes[idx] == ParamMode::Inout;
+            if arg_is_borrow && !param_is_inout {
+                sema.sink.emit(
+                    Diag::error(
+                        sema.uir.span(*arg_uir),
+                        DiagCode::BorrowMismatch,
+                        format!(
+                            "argument {} is passed by `&` but parameter is not `inout`",
+                            idx + 1
+                        ),
+                    )
+                    .with_help("remove the `&`, or declare the parameter `inout`"),
+                );
+            } else if !arg_is_borrow && param_is_inout {
+                sema.sink.emit(
+                    Diag::error(
+                        sema.uir.span(*arg_uir),
+                        DiagCode::BorrowMismatch,
+                        format!(
+                            "`inout` parameter {} requires `&` at the call site",
+                            idx + 1
+                        ),
+                    )
+                    .with_help("pass the argument as `&name` to mark the mutation"),
+                );
+            } else if arg_is_borrow {
+                // Parameter is `inout` and arg is `&expr`: validate the
+                // borrow target is an assignable lvalue.
+                let inner = match sema.uir.inst(*arg_uir).data {
+                    InstData::Borrow(inner) => inner,
+                    _ => unreachable!("Borrow must carry InstData::Borrow"),
+                };
+                if let Some(reason) = borrow_target_reason(sema, scope, inner) {
+                    sema.sink.emit(Diag::error(
+                        sema.uir.span(*arg_uir),
+                        DiagCode::BorrowMismatch,
+                        format!("cannot borrow this expression as mutable: {}", reason),
+                    ));
+                }
+            }
         }
     }
     fcx.builder
         .call(name_id, arg_tirs, &modes, return_type, span)
+}
+
+/// Returns `None` if `inner` is an assignable lvalue (a `mut` local or
+/// an `inout` parameter), else a human reason why it is not borrowable
+/// as mutable (M8.3).
+fn borrow_target_reason(sema: &Sema<'_>, scope: &Scope, inner: InstRef) -> Option<String> {
+    match sema.uir.inst(inner).tag {
+        InstTag::Var => {
+            let name = match sema.uir.inst(inner).data {
+                InstData::Var(n) => n,
+                _ => unreachable!("Var must carry InstData::Var"),
+            };
+            match scope.lookup_full(name) {
+                Some((_, true)) => None, // mutable binding (mut local or inout param)
+                Some((_, false)) => {
+                    Some(format!("`{}` is not declared `mut`", sema.pool.str(name)))
+                }
+                None => Some(format!("`{}` is not defined", sema.pool.str(name))),
+            }
+        }
+        _ => Some("only `mut` variables can be borrowed as mutable".to_string()),
+    }
 }
 
 /// Front-end validation for builtin calls.
@@ -1421,6 +1533,7 @@ fn check_call(
 fn emit_builtin_call(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
+    scope: &Scope,
     view: &CallView,
     arg_tirs: &[TirRef],
     span: Span,
@@ -1430,6 +1543,35 @@ fn emit_builtin_call(
     // Builtins never take ownership of their arguments — every arg
     // is borrowed regardless of declared type.
     let modes = vec![ParamMode::Borrow; arg_tirs.len()];
+    // --- M8.3: `&`/`inout` agreement for builtin calls (builtins
+    // bypass `check_call`, so the check is replayed here). `&` is only
+    // valid on an `inout` parameter — today only str_push's first
+    // argument — everywhere else it is rejected, exactly like
+    // user-function calls. str_push's own arm additionally validates
+    // the mutable lvalue of that first argument.
+    let builtin_modes: Vec<ParamMode> = if name == "str_push" {
+        vec![ParamMode::Inout, ParamMode::Borrow]
+    } else {
+        modes.clone()
+    };
+    for (idx, arg_uir) in view.args.iter().enumerate() {
+        let arg_is_borrow = matches!(sema.uir.inst(*arg_uir).tag, InstTag::Borrow);
+        let param_is_inout =
+            builtin_modes.get(idx).copied().unwrap_or(ParamMode::Borrow) == ParamMode::Inout;
+        if arg_is_borrow && !param_is_inout {
+            sema.sink.emit(
+                Diag::error(
+                    sema.uir.span(*arg_uir),
+                    DiagCode::BorrowMismatch,
+                    format!(
+                        "argument {} is passed by `&` but parameter is not `inout`",
+                        idx + 1
+                    ),
+                )
+                .with_help("remove the `&`, or declare the parameter `inout`"),
+            );
+        }
+    }
     match name {
         "print" => {
             if !check_print_args(sema, fcx, view, arg_tirs, span) {
@@ -1527,6 +1669,59 @@ fn emit_builtin_call(
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
+        "str_push" => {
+            // str_push(s: inout str, suffix: str) -> void. Builtins
+            // bypass `check_call`, so the `&`/`inout` agreement +
+            // mutable-lvalue checks are replayed here against arg 0.
+            if view.args.len() != 2 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "str_push() takes exactly 2 arguments, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let a0 = view.args[0];
+            let t0 = fcx.builder.ty_of(arg_tirs[0]);
+            let t1 = fcx.builder.ty_of(arg_tirs[1]);
+            if !matches!(sema.pool.kind(t0), TypeKind::Str)
+                || !matches!(sema.pool.kind(t1), TypeKind::Str)
+            {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(a0),
+                    DiagCode::TypeMismatch,
+                    "str_push(s: inout str, suffix: str): both arguments must be str".to_string(),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            // arg 0 must be `&<mut str>`: a Borrow whose target is an
+            // assignable lvalue (Task 6's helper).
+            let inner = match sema.uir.inst(a0).data {
+                InstData::Borrow(i) => i,
+                _ => {
+                    sema.sink.emit(Diag::error(
+                        sema.uir.span(a0),
+                        DiagCode::BorrowMismatch,
+                        "str_push's first argument is `inout str` and requires `&`".to_string(),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+            };
+            if let Some(reason) = borrow_target_reason(sema, scope, inner) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(a0),
+                    DiagCode::BorrowMismatch,
+                    format!("cannot borrow this expression as mutable: {}", reason),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let modes = vec![ParamMode::Inout, ParamMode::Borrow];
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
@@ -1818,6 +2013,221 @@ mod tests {
 
     fn stmt_at(tir: &Tir, i: usize) -> TirRef {
         tir.body_stmts()[i]
+    }
+
+    #[test]
+    fn inout_param_is_assignable() {
+        // Mutating an inout param by name must NOT raise ImmutableAssign.
+        let (_tirs, diags, _pool) = run_with_errors("fn inc(inout x: int):\n\tx += 1\n");
+        assert!(
+            !any_code(&diags, DiagCode::ImmutableAssign),
+            "inout param must be mutable; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_typechecks_to_inner_type() {
+        // &c where c: int and callee expects inout int — no type error.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn inc(inout x: int):\n\tx += 1\nfn main():\n\tmut c = 0\n\tinc(&c)\n",
+        );
+        assert!(
+            !any_code(&diags, DiagCode::TypeMismatch),
+            "&c into inout int must typecheck; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_without_inout_rejected() {
+        // `&c` passed to a plain (non-inout) `int` parameter.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn f(x: int):\n\tprint(int_to_str(x))\nfn main():\n\tmut c = 0\n\tf(&c)\n",
+        );
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "&c into a non-inout param must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inout_without_borrow_rejected() {
+        // plain `c` passed to an `inout int` parameter.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn inc(inout x: int):\n\tx += 1\nfn main():\n\tmut c = 0\n\tinc(c)\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "inout param without & must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_of_immutable_rejected() {
+        // `&c` where c is not declared `mut`.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn inc(inout x: int):\n\tx += 1\nfn main():\n\tc = 0\n\tinc(&c)\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& of an immutable binding must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_of_mut_local_ok() {
+        // `&c` where c is `mut` — the happy path.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn inc(inout x: int):\n\tx += 1\nfn main():\n\tmut c = 0\n\tinc(&c)\n",
+        );
+        assert!(
+            !any_code(&diags, DiagCode::BorrowMismatch),
+            "& of a mut local must be allowed; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_outside_call_rejected() {
+        // `x = &c` — a `&` that is not a call argument is not a
+        // mutation marker for anything; it must be an error, not a
+        // silent no-op.
+        let (_tirs, diags, _pool) = run_with_errors("fn main():\n\tmut c = 5\n\tx = &c\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& outside call-argument position must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_nested_in_binop_rejected() {
+        // `inc(1 + &c)` — the `&` is buried inside an expression;
+        // it is not the call argument itself, so it is rejected here (and
+        // check_call separately reports the missing `&` on the inout arg).
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn inc(inout x: int):\n\tx += 1\nfn main():\n\tmut c = 1\n\tinc(1 + &c)\n",
+        );
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& nested inside a larger expression must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_as_inout_arg_still_ok() {
+        // Regression guard: a direct call argument keeps working.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn inc(inout x: int):\n\tx += 1\nfn main():\n\tmut c = 0\n\tinc(&c)\n",
+        );
+        assert!(
+            !any_code(&diags, DiagCode::BorrowMismatch),
+            "& as a direct inout call argument must stay valid; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_of_borrowed_param_rejected() {
+        // Review coverage: `&` on a plain (borrowed) param — immutable.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn f(s: str):\n\tstr_push(&s, \"x\")\nfn main():\n\tf(\"hi\")\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& of a borrowed param must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_of_move_param_rejected() {
+        // Review coverage: `&` on a `move` param — immutable binding.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn f(move s: str):\n\tstr_push(&s, \"x\")\nfn main():\n\tf(\"hi\")\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& of a move param must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_of_for_loop_var_rejected() {
+        // Review coverage: `&` on a for-loop variable — immutable,
+        // block-scoped.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn inc(inout x: int):\n\tx += 1\nfn main():\n\tfor i in range(0, 3):\n\t\tinc(&i)\n",
+        );
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& of a for-loop variable must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn str_push_immutable_first_arg_rejected() {
+        // Review coverage: str_push replays the lvalue check (builtins
+        // bypass check_call) — `&s` with a non-`mut` s must be E0033.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts = \"hi\"\n\tstr_push(&s, \"x\")\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "str_push(&immutable, ..) must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn print_with_borrow_arg_rejected() {
+        // `print(&s)` — print's parameter is not `inout`, so the `&`
+        // marker must be rejected, not silently discarded.
+        let (_tirs, diags, _pool) = run_with_errors("fn main():\n\tmut s = \"hi\"\n\tprint(&s)\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "print(&s) must be rejected (param is not inout); got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn conversion_builtin_with_borrow_arg_rejected() {
+        // `int_to_str(&c)` — conversion builtins are not `inout` either.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\tmut c = 1\n\tprint(int_to_str(&c))\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "int_to_str(&c) must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn str_push_borrow_suffix_rejected() {
+        // `str_push(&s, &x)` — the suffix parameter is Borrow, not
+        // `inout`, so `&` on it must be rejected through the same check.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\tmut s = \"hi\"\n\tmut x = \"yo\"\n\tstr_push(&s, &x)\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "str_push's suffix must reject `&`; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn str_push_valid_still_ok() {
+        // Regression guard: the valid form stays clean.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, \"x\")\n");
+        assert!(
+            !any_code(&diags, DiagCode::BorrowMismatch),
+            "str_push(&s, \"x\") must stay valid; got {:?}",
+            diags
+        );
     }
 
     #[test]

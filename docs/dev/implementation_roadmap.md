@@ -23,9 +23,9 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
   - [x] [Milestone 8a — Void Type & `main()` Signature [alpha]](#milestone-8a-void-type--main-signature-alpha)
   - [x] [Milestone 8b — Conditionals & Logical Operators [alpha] ✅ COMPLETE](#milestone-8b-conditionals--logical-operators-alpha--complete)
   - [x] [Milestone 8c — Loops & Loop Control [alpha] ✅ COMPLETE](#milestone-8c-loops--loop-control-alpha--complete)
-- [x] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type-and-move-semantics-alpha) ✅
-- [x] [Milestone 8.2 — Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE](#milestone-82-implicit-borrow-liveness--ownership-pass-refactors-alpha)
-- [ ] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha]](#milestone-83-mutable-borrows-inout-alpha)
+- [x] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha--complete) ✅
+- [x] [Milestone 8.2 — Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE](#milestone-82-implicit-borrow-liveness--ownership-pass-refactors-alpha--complete)
+- [x] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha] ✅ COMPLETE](#milestone-83-mutable-borrows-inout-alpha--complete)
 - [ ] [Milestone 8.4 — String Slices (`&str`) [alpha]](#milestone-84-string-slices-str-alpha)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
@@ -49,6 +49,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [ ] [Milestone 25 — Panic & Debugging Support [alpha: partial]](#milestone-25-panic--debugging-support-alpha-partial)
 - [ ] [Milestone 26 — Testing Framework & Documentation](#milestone-26-testing-framework--documentation)
 - [ ] [Milestone 26.5 — Distribution & Installer [alpha: partial]](#milestone-265-distribution--installer-alpha-partial)
+- [ ] [Milestone 26.6 — Cross-Compilation (64-bit)](#milestone-266-cross-compilation-64-bit)
 - [ ] [Milestone 27 — Core Language Complete & v0.1.0 Prep](#milestone-27-core-language-complete--v010-prep)
 
 ### Phase 5: Post-v0.1.0 Extensions (v0.2+)
@@ -1076,31 +1077,30 @@ fn main():
 - Ownership and dataflow algorithms have been thoroughly hardened with comprehensive regression tests.
 - Dependencies: Milestone 8.1 (move tracker provides the initial ownership framework)
 
-### Milestone 8.3: Mutable Borrows (`inout`) [alpha]
+### Milestone 8.3: Mutable Borrows (`inout`) [alpha] ✅ COMPLETE
 
 **Goal:** Add mutable references with aliasing exclusion, completing the v0.1 borrow checker.
 
-**Status:** ⏳ Planned
+**Status:** ✅ COMPLETE (2026-07-18)
 
-**Tasks:**
+**What was implemented:**
 
-- Add `inout` keyword to lexer/parser
-- Add the third `ParamMode::Inout` variant (M8.2 reserved the slot) — a **calling convention**, not a new type. Per Rule 3, mutable borrows are parameter conventions only, so there is no `Type::MutRef` / `TypeKind::Ref` (see M8.2 design, "Why no `Owner::Borrow`").
-- Parse:
-  - Type annotations: `inout User`
-  - Call-site borrow: `&value` (new `&` token + `ExprKind::Borrow`)
-- Extend the borrow checker with exclusion rules (Rule 7), reusing M8.2's intra-call borrowed/moved partition:
+- `inout` keyword and `&` token in the lexer; parser support for the param mode selector (`inout x: int`) and the call-site borrow `&value` (`ExprKind::Borrow`, lowered to a UIR `Borrow` inst).
+- The third `ParamMode::Inout` variant (M8.2 reserved the slot) — a **calling convention**, not a new type. Per Rule 3, mutable borrows are parameter conventions only, so there is no `Type::MutRef` / `TypeKind::Ref` (see M8.2 design, "Why no `Owner::Borrow`"). Replaced the old `is_move: bool` param field with `mode: ParamMode` across AST/UIR/TIR.
+- Sema: `inout` params bind as mutable in the callee scope; `&`⟺`inout` agreement and mutable-lvalue validation (E0033 `BorrowMismatch`); `str_push(inout s: str, suffix: str)` builtin dispatch with `[Inout, Borrow]` modes.
+- Codegen: sret-style write-back ABI — the callee receives a pointer, mutates through locals, and stores back before **every** `return`; the caller spills its slot, passes the address, and reloads after the call. Scalars (`int`/`float`/`bool`) and `str` (24-byte fat-pointer slot) are supported; the runtime `__ryo_str_push` backs the builtin.
+- Extended the borrow checker with exclusion rules (Rule 7), reusing M8.2's intra-call borrowed/moved partition with a third `inout` set (E0032 `MutableAliasingViolation`):
   - **At most one mutable borrow** of a value at any point
   - **No immutable borrows while a mutable borrow is live**
   - Mutable borrows still cannot outlive the borrowed value
-- Codegen: pass a pointer to the caller's slot; the callee mutates through it and writes back on return
+- `inout` accepts scalars and `str` only; `inout` on aggregates (`[T]`, structs) is deferred to M22.
 
 **Visible Progress:** Mutation through references is safe and aliasing-free. Foundations for `inout self` methods (M17) and in-place collection updates (M22) are in place.
 
 **Example:**
 
 ```ryo
-fn increment(x: inout int):
+fn increment(inout x: int):
 	x += 1                       # mutate by name — no deref operator
 
 fn main():
@@ -1109,8 +1109,8 @@ fn main():
 	print(int_to_str(count))     # 1
 
 	# Aliasing prevented within a single call (Rule 7):
-	# swap(&count, &count)       # compile error: cannot borrow `count` as mutable twice
-	# f(&count, count)           # compile error: shared while mutable borrow live
+	# swap(&count, &count)       # E0032: cannot borrow `count` as mutable more than once in the same call
+	# f(&count, count)           # E0032: immutable borrow while mutably borrowed
 ```
 
 **Implementation Notes:**
@@ -1313,6 +1313,8 @@ fn main():
 ### Milestone 10: Tuples
 
 **Goal:** Implement tuple types for multiple return values and grouping
+
+> **Decision Review (before implementation):** Reconsider whether this milestone ships a distinct tuple *type* at all. Candidate direction (preferred as of 2026-07): **remove tuples and use anonymous structs** — Zig's model — both for structural grouping and for wrapping multi-value returns (wrapped struct return, not a Go-style multi-return convention). Rationale: one product-type mechanism (simplicity goal), no second ABI/ownership path, kills the positional swap-bug class (`(int, str)` vs `(str, int)`), and error unions (`!T`, M13) absorb the main tuple use case. Cost: loses the Python-familiar `(a, b)` literal/unpack syntax; needs spec edits (`specification.md` literal list, "return single value (can be tuple)") and deletes the `types.rs` tuple interning stubs. Cheap to decide now, expensive after M10/M12 land — revisit here before starting.
 
 **Tasks:**
 
@@ -2227,6 +2229,43 @@ ryo upgrade
 - Windows is a first-class citizen (PowerShell script works seamlessly)
 - Dependencies: Milestone 27 prep work (this enables distribution)
 
+### Milestone 26.6: Cross-Compilation (64-bit) [alpha]
+
+**Goal:** `ryo build --target <triple>` produces a working binary for any supported 64-bit POSIX target from any host — enabling M26.5's binary distributions without per-platform runners.
+
+**Status:** ⏳ Planned
+
+**Tasks:**
+
+- CLI: `--target <triple>` flag on `ryo build` (and `ryo ir` for inspection)
+- Pipeline: thread the requested triple into AOT (replacing the `Triple::host()` call sites) and into the linker
+- Runtime: parameterize the runtime-archive build/resolution by triple — the `--target` propagation and triple-namespaced layout (`<dir>/<triple>/<profile>/`) already landed; build the requested target's archive on demand at link time
+- Linker: pass `-target <zig-triple>` to zig cc with an LLVM→zig triple mapping for the supported set; gate `-lunwind` on the target OS, not the host
+- Target policy: start with 64-bit POSIX-to-POSIX (macOS arm64, Linux x86_64/aarch64 — glibc and musl); enforce it via `check_platform_support`. 32-bit deferred until the `str` ABI layout is computed from `pointer_type()` (I-076)
+- Tests: a CI lane that cross-builds the eager-destruction benchmark (or `examples/`) for linux x86_64/aarch64 and runs it (native ARM runner or qemu)
+
+**Visible Progress:** `ryo build --target aarch64-unknown-linux-musl hello.ryo` on macOS produces a static Linux ARM64 binary that runs unchanged.
+
+**Example:**
+
+```bash
+# From a macOS (Apple Silicon) host:
+ryo build --target aarch64-unknown-linux-musl examples/hello.ryo
+file ./hello
+# => ELF 64-bit LSB executable, ARM aarch64, statically linked
+```
+
+**Implementation Notes:**
+
+- Most machinery already exists: AOT ISA selection is triple-parameterized (`Codegen::new_aot`), zig cc is a multi-target cross-linker, and the runtime archive already builds per-triple. The work is plumbing: CLI flag → pipeline → archive resolution → linker target mapping.
+- JIT (`ryo run`) stays host-only by definition.
+- The existing `check_platform_support` gate (POSIX-only) becomes the allowed-target policy; keep 32-bit out until I-076 lands.
+- No language-feature dependencies — schedule is set purely by plumbing effort.
+
+**Dependencies:** Milestone 3 (AOT), Milestone 8.1 (str ABI), zig toolchain. 32-bit targets: blocked on I-076 (str ABI hardcoding).
+
+**Effort:** ~1-2 weeks
+
 ### Milestone 27: Core Language Complete & v0.1.0 Prep
 
 **Goal:** Finalize core language, polish, and prepare for v0.1.0 release
@@ -2819,6 +2858,37 @@ msg = "Hello, " + name + "! Score: " + float_to_str(score)
 **Dependencies:** v0.2 traits (for `Display`), v0.1 strings (M15)
 **Timeline:** v0.2
 
+### T-strings & Template Literals
+
+**Goal:** Deferred-evaluation template literals: `t"Hello, {name}!"` evaluates to a `Template` value exposing literal parts and interpolation sites — safe structured parsing for SQL, logging, and DSLs, where `f""` interpolates eagerly to `str`
+
+**Why Post-v0.1.0:**
+
+- Builds directly on the f-string interpolation parser (shared machinery) — shipping it after f-strings keeps the parser single-sourced
+- The `Template` type needs user-defined types (M9) and methods (M17) for its API, and `Display` reification to `str` needs v0.2 traits
+
+**Features:**
+
+- `t"..."` literal prefix produces a `Template` value, not a `str`
+- Access to literal parts and interpolated values for consumer-side structured parsing (the consumer — not the compiler — decides how values are escaped and rendered)
+- Compile-time parsed like f-strings: invalid expressions produce errors at the interpolation site
+
+**Example:**
+
+```ryo
+# v0.2
+name = "Alice"
+tmpl = t"Hello, {name}!"
+for part in tmpl.parts:
+	print(part)              # "Hello, " / interpolation site 0
+print(tmpl.values[0])      # "Alice"
+render(tmpl)               # consumer renders/escapes as it sees fit
+```
+
+**Effort:** ~1 week (reuses the f-string parser)
+**Dependencies:** F-strings & String Interpolation, M9 structs, M17 methods, v0.2 traits
+**Timeline:** v0.2, after F-strings
+
 ### Stack Traces & Compiler Diagnostics Polish
 
 **Goal:** Multi-frame DWARF stack traces on panic, plus "did you mean?" suggestions in compiler errors
@@ -3255,7 +3325,7 @@ This foundation enables building **synchronous applications** including CLI tool
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
 **Phase 2 (M4-M13):** 14 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (&str); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~42 weeks (~10 months)
 **Phase 3 (M16, M17, M21, M22, M23):** 5 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~15 weeks (~4 months)
-**Phase 4 (M24-M27):** 5 milestones (includes M26.5 Distribution & Installer) × 4 weeks avg = ~20 weeks (~5 months)
+**Phase 4 (M24-M27):** 6 milestones (includes M26.5 Distribution & Installer and M26.6 Cross-Compilation) × 4 weeks avg = ~24 weeks (~6 months)
 
 **Total Estimated Time:** 89 weeks (~22 months) from Phase 2 start to v0.1.0
 
@@ -3397,5 +3467,5 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 o
 ## References
 
 - Spec: [specification.md](../specification.md) — canonical language specification; this roadmap schedules its delivery
-- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md) — implementation plans linked from milestones
+- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [architecture_analysis.md](architecture_analysis.md) — implementation plans linked from milestones; architecture_analysis.md holds the verified codebase snapshot + improvement roadmap
 - Milestone: alpha milestones tagged `[alpha]` inline; see [alpha_scope.md](alpha_scope.md) for the alpha delivery slice

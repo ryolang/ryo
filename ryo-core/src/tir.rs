@@ -229,6 +229,7 @@ pub enum TirTag {
 pub enum ParamMode {
     Borrow = 0,
     Move = 1,
+    Inout = 2,
 }
 
 impl ParamMode {
@@ -239,6 +240,7 @@ impl ParamMode {
     fn from_u32(v: u32) -> Self {
         match v {
             1 => ParamMode::Move,
+            2 => ParamMode::Inout,
             _ => ParamMode::Borrow,
         }
     }
@@ -274,7 +276,7 @@ pub struct TypedInst {
 pub struct TirParam {
     pub name: StringId,
     pub ty: TypeId,
-    pub is_move: bool,
+    pub mode: ParamMode,
     pub span: Span,
 }
 
@@ -328,8 +330,8 @@ impl Tir {
 ///   [2+argc..2+2*argc] modes: ParamMode (one u32 per arg)
 /// ```
 ///
-/// `modes` is stamped by sema from each callee parameter's `is_move`
-/// flag (user functions) or all-`Borrow` (builtins). The ownership
+/// `modes` is stamped by sema from each callee parameter's `mode`
+/// field (user functions) or all-`Borrow` (builtins). The ownership
 /// pass consumes these modes directly from the `CallView` payload to
 /// determine parameter move/borrow conventions.
 pub mod call_extra {
@@ -795,7 +797,7 @@ pub struct CallView {
     pub name: StringId,
     pub args: Vec<TirRef>,
     /// Per-argument call convention, parallel to `args`. Stamped by
-    /// sema from each callee parameter's `is_move` flag.
+    /// sema from each callee parameter's `mode` field.
     pub modes: Vec<ParamMode>,
 }
 
@@ -1024,9 +1026,12 @@ impl<'a> fmt::Display for TirDump<'a> {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                if p.is_move {
-                    write!(f, "move ")?;
-                }
+                let prefix = match p.mode {
+                    ParamMode::Move => "move ",
+                    ParamMode::Inout => "inout ",
+                    ParamMode::Borrow => "",
+                };
+                write!(f, "{prefix}")?;
                 write!(f, "{}: {}", self.pool.str(p.name), self.pool.display(p.ty))?;
             }
             writeln!(f, ") -> {}", self.pool.display(tir.return_type))?;

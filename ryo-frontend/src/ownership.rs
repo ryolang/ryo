@@ -24,7 +24,7 @@
 use crate::builtins::is_borrowed_scalar_param;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 pub use ryo_core::ownership::{
-    BranchId, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
+    BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
 };
 use ryo_core::tir::{ParamMode, Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
@@ -138,6 +138,49 @@ pub(crate) struct Ownership {
     /// `analyze_if_stmt` enters an arm (then / each elif / else) so
     /// the resulting ids are unique across the function body.
     pub next_branch_id: u32,
+
+    /// Names of `inout` parameters whose type is Move-tracked (i.e.
+    /// `str` in v0.1). The value bound to such a param ESCAPES through
+    /// the write-back pointer at function exit, so it must not be freed
+    /// by the callee (no last-use/dead-store Free, no W0001) and must
+    /// not be moved out — but reassigning the param drops the old
+    /// pointee. Constant per function (derived from `tir.params`), so
+    /// branch merges need no per-field rule for it.
+    pub inout_str_params: HashSet<StringId>,
+
+    /// Conditional reseats observed while walking if/elif/else arms:
+    /// bindings that SOME arm reseated while other arms kept
+    /// the pre-branch owner. Monotone-accumulating (like
+    /// `owner_at_read`) — loop convergence re-walks are deduped at push
+    /// time. Consumed by the dead-store drain, which converts the
+    /// matching entries into arm-gated `ConditionalDeadDrop`s so the
+    /// pre-branch buffer is also freed on the untouched paths.
+    pub reseat_drops: Vec<ReseatDrop>,
+
+    /// Owners still `Valid` at each `Return`/`ReturnVoid`, snapshotted
+    /// mid-walk while the lattice state is path-correct for that exit
+    /// point. The function must destroy those values on that path —
+    /// they are dead at the return, but the last-use / temp / drain
+    /// passes (which run at function exit) anchor their Frees on OTHER
+    /// paths or program points the early return never reaches.
+    /// Monotone-accumulating; loop convergence re-walks may record the
+    /// same return twice — deduped at scheduling time.
+    pub return_epilogue: Vec<(TirRef, Vec<Owner>)>,
+}
+
+/// One conditional-reseat observation, recorded by
+/// `analyze_if_stmt` after walking an if's arms. `reseat_owners` is the
+/// set of owners the binding was reseated TO across the arms;
+/// `untouched_arms` are the arms (by [`BranchId`]) that kept the
+/// pre-branch owner — including the synthetic fall-through arm of an
+/// else-less if.
+#[derive(Clone, Debug)]
+pub(crate) struct ReseatDrop {
+    pub if_stmt: TirRef,
+    pub name: StringId,
+    pub pre_owner: Owner,
+    pub reseat_owners: HashSet<Owner>,
+    pub untouched_arms: Vec<BranchId>,
 }
 
 impl Ownership {
@@ -294,6 +337,357 @@ impl Ownership {
     }
 }
 
+/// Outermost loop statement (`WhileLoop`/`ForRange`) whose body
+/// contains `target`, or `None` when `target` is not inside any loop.
+/// Walks the body's statements tracking the loop stack; if/elif/else
+/// arms are transparent (an if inside a loop does not reset the stack).
+/// Used by the dead-store re-anchor.
+fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
+    fn walk(
+        tir: &Tir,
+        stmts: &[TirRef],
+        target: TirRef,
+        stack: &mut Vec<TirRef>,
+    ) -> Option<TirRef> {
+        for &r in stmts {
+            if r == target {
+                return stack.first().copied();
+            }
+            match tir.inst(r).tag {
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(r);
+                    if let Some(found) = walk(tir, &view.then_stmts, target, stack) {
+                        return Some(found);
+                    }
+                    for elif in &view.elif_branches {
+                        if let Some(found) = walk(tir, &elif.body, target, stack) {
+                            return Some(found);
+                        }
+                    }
+                    if let Some(else_stmts) = &view.else_stmts
+                        && let Some(found) = walk(tir, else_stmts, target, stack)
+                    {
+                        return Some(found);
+                    }
+                }
+                TirTag::WhileLoop => {
+                    stack.push(r);
+                    let found = walk(tir, &tir.while_loop_view(r).body, target, stack);
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                TirTag::ForRange => {
+                    stack.push(r);
+                    let found = walk(tir, &tir.for_range_view(r).body, target, stack);
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    walk(tir, &tir.body_stmts(), target, &mut Vec::new())
+}
+
+/// True if `name` is declared by a `VarDecl` anywhere before `stop` in
+/// program order (any nesting depth). Guards the dead-store re-anchor: only
+/// bindings that exist BEFORE their outermost reseating loop may move
+/// their Free to the loop anchor — a loop-local value's `StrLocals`
+/// don't exist on the zero-iteration path.
+fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> bool {
+    fn walk(
+        tir: &Tir,
+        stmts: &[TirRef],
+        name: StringId,
+        stop: TirRef,
+        found: &mut bool,
+        stopped: &mut bool,
+    ) {
+        for &r in stmts {
+            if *found || *stopped {
+                return;
+            }
+            if r == stop {
+                *stopped = true;
+                return;
+            }
+            match tir.inst(r).tag {
+                TirTag::VarDecl => {
+                    if tir.var_decl_view(r).name == name {
+                        *found = true;
+                        return;
+                    }
+                }
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(r);
+                    walk(tir, &view.then_stmts, name, stop, found, stopped);
+                    for elif in &view.elif_branches {
+                        walk(tir, &elif.body, name, stop, found, stopped);
+                    }
+                    if let Some(else_stmts) = &view.else_stmts {
+                        walk(tir, else_stmts, name, stop, found, stopped);
+                    }
+                }
+                TirTag::WhileLoop => {
+                    walk(
+                        tir,
+                        &tir.while_loop_view(r).body,
+                        name,
+                        stop,
+                        found,
+                        stopped,
+                    );
+                }
+                TirTag::ForRange => {
+                    walk(tir, &tir.for_range_view(r).body, name, stop, found, stopped);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut found = false;
+    let mut stopped = false;
+    walk(tir, &tir.body_stmts(), name, stop, &mut found, &mut stopped);
+    found
+}
+
+/// True if any statement in `stmts` (any depth) is a `Return` /
+/// `ReturnVoid` — a body that may leave the function early, where an
+/// after-loop Free would be unreachable on the return path.
+fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
+    for &r in stmts {
+        match tir.inst(r).tag {
+            TirTag::Return | TirTag::ReturnVoid => return true,
+            TirTag::IfStmt => {
+                let view = tir.if_stmt_view(r);
+                if body_may_return(tir, &view.then_stmts)
+                    || view
+                        .elif_branches
+                        .iter()
+                        .any(|e| body_may_return(tir, &e.body))
+                    || view
+                        .else_stmts
+                        .as_ref()
+                        .is_some_and(|es| body_may_return(tir, es))
+                {
+                    return true;
+                }
+            }
+            TirTag::WhileLoop | TirTag::ForRange => {
+                if let Some(body) = loop_body(tir, r)
+                    && body_may_return(tir, &body)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// True when the branch (`IfStmt`/`WhileLoop`/`ForRange`) contains no
+/// `Return`/`ReturnVoid` on any path — its exit anchor is reachable on
+/// every path, so a conditional-last-use Free can safely move there.
+fn branch_may_not_return(tir: &Tir, branch_stmt: TirRef) -> bool {
+    match tir.inst(branch_stmt).tag {
+        TirTag::IfStmt => {
+            let view = tir.if_stmt_view(branch_stmt);
+            !body_may_return(tir, &view.then_stmts)
+                && !view
+                    .elif_branches
+                    .iter()
+                    .any(|e| body_may_return(tir, &e.body))
+                && !view
+                    .else_stmts
+                    .as_ref()
+                    .is_some_and(|es| body_may_return(tir, es))
+        }
+        TirTag::WhileLoop | TirTag::ForRange => match loop_body(tir, branch_stmt) {
+            Some(body) => !body_may_return(tir, &body),
+            None => false,
+        },
+        _ => false,
+    }
+}
+/// Outermost branch statement (`IfStmt`/`WhileLoop`/`ForRange`) whose
+/// arm or body contains `target`, or `None` when `target` is not
+/// inside any branch. `target` may be a sub-expression (e.g. a `Var`
+/// read inside a call), so statements are matched by subtree, not by
+/// reference equality. Used by the conditional-last-use re-anchor.
+fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
+    fn walk(
+        tir: &Tir,
+        stmts: &[TirRef],
+        target: TirRef,
+        stack: &mut Vec<TirRef>,
+    ) -> Option<TirRef> {
+        for &r in stmts {
+            if r == target {
+                return stack.first().copied();
+            }
+            let mut sub: HashSet<TirRef> = HashSet::new();
+            collect_refs_recursive(tir, r, &mut sub);
+            if !sub.contains(&target) {
+                continue;
+            }
+            // `target` is inside this statement's subtree. Descend
+            // through branches; a plain statement means the enclosing
+            // branch (if any) is the answer.
+            match tir.inst(r).tag {
+                TirTag::IfStmt => {
+                    stack.push(r);
+                    let view = tir.if_stmt_view(r);
+                    let mut found = walk(tir, &view.then_stmts, target, stack);
+                    for elif in &view.elif_branches {
+                        if found.is_none() {
+                            found = walk(tir, &elif.body, target, stack);
+                        }
+                    }
+                    if found.is_none()
+                        && let Some(else_stmts) = &view.else_stmts
+                    {
+                        found = walk(tir, else_stmts, target, stack);
+                    }
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                TirTag::WhileLoop | TirTag::ForRange => {
+                    stack.push(r);
+                    let found = match loop_body(tir, r) {
+                        Some(body) => walk(tir, &body, target, stack),
+                        None => None,
+                    };
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                _ => return stack.first().copied(),
+            }
+        }
+        None
+    }
+    walk(tir, &tir.body_stmts(), target, &mut Vec::new())
+}
+
+/// All branch statements (`IfStmt`/`WhileLoop`/`ForRange`) containing
+/// `target`, outermost first. A Free anchored after any of these never
+/// fires on a return path that exits through `target` — the branch
+/// statement does not complete before the return leaves the function.
+/// Used by the return-epilogue dedup.
+fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
+    fn walk(
+        tir: &Tir,
+        stmts: &[TirRef],
+        target: TirRef,
+        stack: &mut Vec<TirRef>,
+    ) -> Option<Vec<TirRef>> {
+        for &r in stmts {
+            if r == target {
+                return Some(stack.clone());
+            }
+            let mut sub: HashSet<TirRef> = HashSet::new();
+            collect_refs_recursive(tir, r, &mut sub);
+            if !sub.contains(&target) {
+                continue;
+            }
+            match tir.inst(r).tag {
+                TirTag::IfStmt => {
+                    stack.push(r);
+                    let view = tir.if_stmt_view(r);
+                    let mut found = walk(tir, &view.then_stmts, target, stack);
+                    for elif in &view.elif_branches {
+                        if found.is_none() {
+                            found = walk(tir, &elif.body, target, stack);
+                        }
+                    }
+                    if found.is_none()
+                        && let Some(else_stmts) = &view.else_stmts
+                    {
+                        found = walk(tir, else_stmts, target, stack);
+                    }
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                TirTag::WhileLoop | TirTag::ForRange => {
+                    stack.push(r);
+                    let found = match loop_body(tir, r) {
+                        Some(body) => walk(tir, &body, target, stack),
+                        None => None,
+                    };
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                _ => return Some(stack.clone()),
+            }
+        }
+        None
+    }
+    walk(tir, &tir.body_stmts(), target, &mut Vec::new()).unwrap_or_default()
+}
+
+/// The binding name whose initializer (`VarDecl`) or value (`Assign`)
+/// produced `owner`, or `None` for anonymous producers. The
+/// ownership-side view of codegen's `free_binding_names` map.
+fn owner_binding_name(tir: &Tir, owner: TirRef) -> Option<StringId> {
+    fn walk(tir: &Tir, stmts: &[TirRef], owner: TirRef) -> Option<StringId> {
+        for &r in stmts {
+            match tir.inst(r).tag {
+                TirTag::VarDecl => {
+                    let view = tir.var_decl_view(r);
+                    if view.initializer == owner {
+                        return Some(view.name);
+                    }
+                }
+                TirTag::Assign => {
+                    let view = tir.assign_view(r);
+                    if view.value == owner {
+                        return Some(view.name);
+                    }
+                }
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(r);
+                    if let Some(found) = walk(tir, &view.then_stmts, owner) {
+                        return Some(found);
+                    }
+                    for elif in &view.elif_branches {
+                        if let Some(found) = walk(tir, &elif.body, owner) {
+                            return Some(found);
+                        }
+                    }
+                    if let Some(else_stmts) = &view.else_stmts
+                        && let Some(found) = walk(tir, else_stmts, owner)
+                    {
+                        return Some(found);
+                    }
+                }
+                TirTag::WhileLoop | TirTag::ForRange => {
+                    if let Some(body) = loop_body(tir, r)
+                        && let Some(found) = walk(tir, &body, owner)
+                    {
+                        return Some(found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    walk(tir, &tir.body_stmts(), owner)
+}
+
 /// Validate move safety for every function body. Emits diagnostics
 /// into `sink`. Returns an [`OwnershipSidecar`] that codegen consults
 /// to decide where to emit `ryo_str_free` calls. The TIR itself is
@@ -378,20 +772,24 @@ fn analyze_function(
     let mut own = Ownership::default();
 
     // Initialise per-parameter state. Move-typed params start at
-    // `Valid` (the callee owns them); borrowed params start at
-    // `Borrowed`. Copy-typed params skip the lattice entirely.
+    // `Valid` (the callee owns them); borrowed and inout params start
+    // at `Borrowed` (the callee does not own the buffer — inout adds
+    // mutability, not ownership). Copy-typed params skip the lattice
+    // entirely.
     for param in &tir.params {
         if !needs_tracking(param.ty, pool) {
             continue;
         }
         let owner = Owner::Param(param.name);
-        let state = if param.is_move {
-            OwnerState::Valid
-        } else {
-            OwnerState::Borrowed
+        let state = match param.mode {
+            ParamMode::Move => OwnerState::Valid,
+            ParamMode::Borrow | ParamMode::Inout => OwnerState::Borrowed,
         };
         own.states.insert(owner, state);
         own.current_owner.insert(param.name, owner);
+        if param.mode == ParamMode::Inout {
+            own.inout_str_params.insert(param.name);
+        }
     }
 
     for stmt in tir.body_stmts() {
@@ -421,10 +819,28 @@ fn analyze_function(
     // last_use after the `owner_at_read` snapshot fix; without this
     // guard a pre-rebind owner would receive both a reassign-Free and
     // a last-use-Free.)
+    //
+    // EXCEPTION: a reassign target that is STILL its binding's current
+    // owner at function exit needs the last-use Free after all. That
+    // happens when the reseat was branch-divergent: the merge keeps the
+    // pre-branch owner (a reseat inside one arm does not survive the
+    // join), so on the not-taken path the binding still owns the
+    // pre-reassign allocation. Codegen emits the Free from the binding's
+    // current `StrLocals`, which is the path-correct buffer.
     let reassign_targets: HashSet<Owner> = sidecar
         .free_on_reassign
         .values()
         .map(|t| Owner::Inst(*t))
+        .collect();
+    let live_binding_owners: HashSet<Owner> = own.current_owner.values().copied().collect();
+    // Owners that escape through an `inout str` param's write-back
+    // pointer at function exit: whatever value is CURRENTLY bound to each
+    // inout param name leaves the function alive, so neither the last-use
+    // pass nor the dead-store drain may free it (or warn about it).
+    let inout_escape_owners: HashSet<Owner> = own
+        .inout_str_params
+        .iter()
+        .filter_map(|n| own.current_owner.get(n).copied())
         .collect();
     for (owner, state) in &own.states {
         if !matches!(state, OwnerState::Valid) {
@@ -432,12 +848,35 @@ fn analyze_function(
         }
         match owner {
             Owner::Inst(r) => {
-                if reassign_targets.contains(owner) {
+                let stale_reassign_target =
+                    reassign_targets.contains(owner) && !live_binding_owners.contains(owner);
+                if stale_reassign_target || inout_escape_owners.contains(owner) {
                     continue;
                 }
                 if let Some(&after) = last_use.get(r) {
+                    // Conditional last use: a named binding whose LAST
+                    // READ is inside a branch is freed at the branch's
+                    // exit — the earliest point where the value is dead
+                    // on ALL paths. Anchoring after the read itself
+                    // fires per-iteration in loops (UAF on later reads)
+                    // and never fires on not-taken arms (leak). Skip
+                    // the re-anchor when the branch may `return` (the
+                    // exit anchor is unreachable on the return path)
+                    // and for temps / branch-local bindings (their
+                    // values don't exist on every exit path).
+                    let anchor = match outermost_branch_of(tir, after) {
+                        Some(branch_stmt)
+                            if branch_may_not_return(tir, branch_stmt)
+                                && owner_binding_name(tir, *r).is_some_and(|name| {
+                                    declared_before_stmt(tir, name, branch_stmt)
+                                }) =>
+                        {
+                            branch_stmt
+                        }
+                        _ => after,
+                    };
                     sidecar.free_schedule.push(FreePoint {
-                        after,
+                        after: anchor,
                         target: *r,
                         span: tir.span(*r),
                         branch: None,
@@ -445,6 +884,12 @@ fn analyze_function(
                 }
             }
             Owner::Param(name) => {
+                // An `inout str` param's value escapes through the
+                // write-back pointer — never freed by the callee, even
+                // if a branch merge left its owner stamped Valid.
+                if own.inout_str_params.contains(name) {
+                    continue;
+                }
                 if let Some(&after) = body_stmts.last() {
                     let idx = tir
                         .params
@@ -517,6 +962,18 @@ fn analyze_function(
     // guard activates with Task 6. (`reassign_targets` was computed
     // above for the last-use pass.)
     for (owner, (name, span, decl_inst)) in &own.pending_dead_store {
+        // Bound to an `inout str` param: the value escapes through the
+        // write-back — it IS used, just not by any TIR instruction the
+        // pass can see. Checked by NAME (not by current owner): a rebind
+        // inside a branch is discarded by the merge, leaving the entry
+        // keyed by a branch-local owner the exit-time escape set can't
+        // see. No W0001, no Free.
+        if own.inout_str_params.contains(name) {
+            continue;
+        }
+        if inout_escape_owners.contains(owner) {
+            continue;
+        }
         sink.emit(Diag::warning(
             *span,
             DiagCode::DeadStore,
@@ -527,11 +984,70 @@ fn analyze_function(
             // emitting another dead-store Free would double-free.
             continue;
         }
+        // A dead reassign INSIDE A LOOP for a binding declared
+        // before that loop: anchor the Free after the outermost loop
+        // rather than after the in-loop assign. The in-loop anchor
+        // fires only when the body executes — the zero-iteration path
+        // leaks the pre-loop buffer. The after-loop anchor emits the
+        // binding's CURRENT StrLocals (the init→name map): the final iteration's
+        // value on taken paths, the pre-loop value on zero iterations.
+        // When the body may `return`, keep the in-loop Free too — the
+        // after-loop anchor is unreachable on the return path.
+        let (anchor, also_in_body) = match outermost_loop_of(tir, *decl_inst) {
+            Some(loop_stmt) if declared_before_stmt(tir, *name, loop_stmt) => {
+                let may_return = match tir.inst(loop_stmt).tag {
+                    TirTag::WhileLoop => {
+                        let view = tir.while_loop_view(loop_stmt);
+                        body_may_return(tir, &view.body)
+                    }
+                    TirTag::ForRange => {
+                        let view = tir.for_range_view(loop_stmt);
+                        body_may_return(tir, &view.body)
+                    }
+                    _ => unreachable!("outermost_loop_of returns loops"),
+                };
+                (loop_stmt, may_return)
+            }
+            _ => (*decl_inst, false),
+        };
         sidecar.free_schedule.push(FreePoint {
-            after: *decl_inst,
+            after: anchor,
             target: owner.inst_tirref().unwrap(),
             span: *span,
             branch: None,
+        });
+        if also_in_body {
+            sidecar.free_schedule.push(FreePoint {
+                after: *decl_inst,
+                target: owner.inst_tirref().unwrap(),
+                span: *span,
+                branch: None,
+            });
+        }
+    }
+
+    // Convert honored reseat records into arm-gated
+    // `ConditionalDeadDrop`s. A record is honored when a pending entry
+    // for one of its reseated owners survived to the drain — i.e. the
+    // reassigned value is never read afterwards — so the pre-branch
+    // buffer would leak on the paths where the reassign did not happen.
+    // (Reads-after clear the pending entry by name, so honored records
+    // never collide with the last-use machinery.) Deduped by record:
+    // several pending entries can match one record.
+    let mut honored: HashSet<usize> = HashSet::new();
+    for (owner, (name, _, _)) in &own.pending_dead_store {
+        for (idx, drop) in own.reseat_drops.iter().enumerate() {
+            if drop.name == *name && drop.reseat_owners.contains(owner) {
+                honored.insert(idx);
+            }
+        }
+    }
+    for idx in honored {
+        let drop = &own.reseat_drops[idx];
+        sidecar.conditional_dead_drops.push(ConditionalDeadDrop {
+            if_stmt: drop.if_stmt,
+            target: drop.pre_owner.tirref(tir),
+            arms: drop.untouched_arms.clone(),
         });
     }
 
@@ -539,6 +1055,48 @@ fn analyze_function(
     // `free_schedule` and only add jump-anchored Frees for inside-loop
     // owners that no earlier pass already covered. See I-058.
     schedule_loop_exit_frees_in(tir, &own, sidecar, &body_stmts, None);
+
+    // Return epilogue: destroy locals still live at an early return.
+    // Runs LAST so every other Free pass has populated `free_schedule`
+    // and we can dedup against it — a value is skipped when another
+    // Free already fires on the return's path, or the dead-store drain
+    // owns it (its after-decl Free covers every path). Codegen emits
+    // due Frees before every `return_`, so anchoring at the return
+    // statement itself fires exactly on that exit path.
+    let mut epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
+    for (return_stmt, owners) in &own.return_epilogue {
+        let mut on_path: HashSet<TirRef> = HashSet::new();
+        let _ = collect_jump_path(tir, &body_stmts, *return_stmt, &mut on_path);
+        // A Free anchored after a branch CONTAINING the return never
+        // fires on the return's path — the branch statement does not
+        // complete before the return exits. Exclude ancestors from the
+        // covering set (the path walk counts them as "passed through",
+        // which is true for evaluation but false for after-anchoring).
+        let ancestors: HashSet<TirRef> = ancestor_branches_of(tir, *return_stmt)
+            .into_iter()
+            .collect();
+        for owner in owners {
+            if own.pending_dead_store.contains_key(owner) {
+                continue;
+            }
+            let r = owner.tirref(tir);
+            if !epilogue_emitted.insert((*return_stmt, r)) {
+                continue;
+            }
+            let covered = sidecar.free_schedule.iter().any(|fp| {
+                fp.target == r && on_path.contains(&fp.after) && !ancestors.contains(&fp.after)
+            });
+            if covered {
+                continue;
+            }
+            sidecar.free_schedule.push(FreePoint {
+                after: *return_stmt,
+                target: r,
+                span: tir.span(*return_stmt),
+                branch: None,
+            });
+        }
+    }
 }
 
 fn analyze_stmt(
@@ -553,8 +1111,11 @@ fn analyze_stmt(
     match inst.tag {
         TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, sidecar, stmt),
         TirTag::Assign => analyze_assign(tir, pool, own, sink, sidecar, stmt),
-        TirTag::Return => analyze_return(tir, pool, own, sink, sidecar, stmt),
-        TirTag::ReturnVoid => {}
+        TirTag::Return => {
+            analyze_return(tir, pool, own, sink, sidecar, stmt);
+            record_return_epilogue(own, stmt);
+        }
+        TirTag::ReturnVoid => record_return_epilogue(own, stmt),
         TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, sidecar, stmt),
         TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, sidecar, stmt),
         TirTag::ForRange => analyze_for_range(tir, pool, own, sink, sidecar, stmt),
@@ -636,29 +1197,53 @@ fn analyze_assign(
         // Capture the old owner before consume_for_assignment / rebind
         // overwrite current_owner[name]. Only emit the Free entry if the
         // old owner is Valid — Borrowed/Moved/missing means there is no
-        // live allocation to release. Codegen (Task 8) consults this map
-        // when lowering Assign.
-        if let Some(&old_owner) = own.current_owner.get(&view.name)
-            && matches!(own.states.get(&old_owner), Some(OwnerState::Valid))
-        {
-            sidecar.free_on_reassign.insert(
-                r,
-                old_owner
-                    .inst_tirref()
-                    .expect("param cannot be a Free target in reassign"),
-            );
-            // Reassignment runs the old value's destructor (the
-            // free_on_reassign Free above) — that's an observable use,
-            // so the prior VarDecl/Assign isn't a dead store. Drop the
-            // pending_dead_store entry so W0001 doesn't fire and the
-            // drain block doesn't try to schedule a redundant Free.
-            own.pending_dead_store.remove(&old_owner);
+        // live allocation to release. EXCEPTION: an `inout str` param's
+        // current owner is Borrowed, yet the callee must drop the old
+        // pointee when reassigning the param (the write-back ABI hands
+        // the caller whatever triple the param holds at exit — like
+        // `*x = new` dropping the old value in Rust). Codegen (Task 8)
+        // consults this map when lowering Assign.
+        if let Some(&old_owner) = own.current_owner.get(&view.name) {
+            let old_droppable = match own.states.get(&old_owner) {
+                Some(OwnerState::Valid) => true,
+                Some(OwnerState::Borrowed) => own.inout_str_params.contains(&view.name),
+                _ => false,
+            };
+            if old_droppable {
+                // `tirref` (not `inst_tirref`): an inout param's old owner
+                // is a `Param`, resolved here to its virtual ref — codegen
+                // caches that ref's repr at the prologue.
+                sidecar.free_on_reassign.insert(r, old_owner.tirref(tir));
+                // Reassignment runs the old value's destructor (the
+                // free_on_reassign Free above) — that's an observable use,
+                // so the prior VarDecl/Assign isn't a dead store. Drop the
+                // pending_dead_store entry so W0001 doesn't fire and the
+                // drain block doesn't try to schedule a redundant Free.
+                own.pending_dead_store.remove(&old_owner);
+            }
         }
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, view.value);
         consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name);
         rebind_to_init(own, view.name, view.value);
         register_pending_dead_store(own, view.value, view.name, span, r);
+    }
+}
+
+/// Snapshot the owners still `Valid` at a return — values the function
+/// must destroy on that exit path (see `Ownership::return_epilogue`).
+/// The returned value itself is already `Moved` by `analyze_return`,
+/// so it is naturally excluded; inout-escape owners are excluded too —
+/// they leave through the write-back pointer, not through destruction.
+fn record_return_epilogue(own: &mut Ownership, return_stmt: TirRef) {
+    let live: Vec<Owner> = own
+        .states
+        .iter()
+        .filter(|(o, s)| matches!(s, OwnerState::Valid) && !inout_escape_owner(own, **o))
+        .map(|(o, _)| *o)
+        .collect();
+    if !live.is_empty() {
+        own.return_epilogue.push((return_stmt, live));
     }
 }
 
@@ -736,6 +1321,37 @@ fn underlying_owner(own: &Ownership, init: TirRef) -> Owner {
         Some(Some(owner)) => owner,
         _ => Owner::Inst(init),
     }
+}
+
+/// Aliasing identity of an `inout` (or Copy borrow) call argument for the
+/// Rule 7 overlap check (M8.3). Tracked (Move-typed) args resolve to the
+/// usual underlying owner. Copy scalars never enter the lattice, so their
+/// stable identity is the binding's `current_owner` slot (seeded at the
+/// VarDecl) — two `&c` reads of one `mut c` must collide even though each
+/// read is its own SSA value. An unregistered name (a Copy-typed
+/// parameter, which the param loop skips) falls back to
+/// `Owner::Param(name)` — the correct per-binding key for exactly that
+/// case.
+fn inout_owner(own: &Ownership, tir: &Tir, arg: TirRef) -> Owner {
+    match tir.inst(arg).data {
+        TirData::Var(name) => own
+            .current_owner
+            .get(&name)
+            .copied()
+            .unwrap_or(Owner::Param(name)),
+        _ => underlying_owner(own, arg),
+    }
+}
+
+/// True if `owner` is the value currently bound to an `inout str`
+/// parameter name. That value ESCAPES through the write-back pointer at
+/// function exit, so it can be reassigned (dropping the old pointee) but
+/// never moved out of the function — not even after a reassign replaced
+/// the original (Borrowed) param owner with a fresh Valid one.
+fn inout_escape_owner(own: &Ownership, owner: Owner) -> bool {
+    own.inout_str_params
+        .iter()
+        .any(|n| own.current_owner.get(n) == Some(&owner))
 }
 
 /// Use-site use-after-move authority (I-050). Resolve the operand's
@@ -819,11 +1435,17 @@ fn consume_underlying(
     on_borrowed: BorrowedAction,
 ) {
     let underlying = underlying_owner(own, operand);
-    let state = own
+    let mut state = own
         .states
         .get(&underlying)
         .cloned()
         .unwrap_or(OwnerState::NotTracked);
+    // A Valid value currently bound to an `inout str` param still escapes
+    // through the write-back pointer — moving it out would leave the slot
+    // holding a stale triple. Treat it as borrowed at consume sites.
+    if matches!(state, OwnerState::Valid) && inout_escape_owner(own, underlying) {
+        state = OwnerState::Borrowed;
+    }
     match state {
         OwnerState::Valid => {
             own.pending_dead_store.remove(&underlying);
@@ -886,6 +1508,28 @@ fn owner_name_for_diag(owner: Owner, tir: &Tir, pool: &InternPool) -> String {
     }
 }
 
+/// Rule 7 (E0032) binding name: scan the call's args for a `Var` read
+/// that resolves to `owner` and use ITS name. `owner_name_for_diag`
+/// inspects the binding's initializer (an IntConst/StrConst — never a
+/// `Var`), so it falls back to "value" for locals; the conflicting arg
+/// reads always carry the name.
+fn rule7_owner_name(
+    own: &Ownership,
+    tir: &Tir,
+    pool: &InternPool,
+    args: &[TirRef],
+    owner: Owner,
+) -> String {
+    for arg in args {
+        if let TirData::Var(name) = tir.inst(*arg).data
+            && inout_owner(own, tir, *arg) == owner
+        {
+            return format!("`{}`", pool.str(name));
+        }
+    }
+    owner_name_for_diag(owner, tir, pool)
+}
+
 /// CFG join for `if` / `elif` / `else`. The naïve forward walk
 /// would let a move inside a then-branch persist past the merge
 /// regardless of whether else also moved — wrong for the spec's
@@ -917,12 +1561,13 @@ fn analyze_if_stmt(
         elif_branches.push(BranchId(own.next_branch_id));
         own.next_branch_id += 1;
     }
-    let else_branch = if view.else_stmts.is_some() {
+    // Mint a BranchId for the else/fall-through arm ALWAYS — an
+    // else-less if's fall-through still needs an id so the
+    // conditional DeadDrops can gate on it.
+    let else_branch = {
         let id = BranchId(own.next_branch_id);
         own.next_branch_id += 1;
         Some(id)
-    } else {
-        None
     };
     sidecar.if_branches.insert(
         r,
@@ -1063,6 +1708,64 @@ fn analyze_if_stmt(
             }
             // Empty arm or sema-rejected case: skip. The M8.1
             // grammar forbids empty arms.
+        }
+    }
+
+    // Record conditional reseats — bindings that SOME arm
+    // reseated while other arms kept the pre-if owner. The dead-store
+    // drain (function exit) converts a record into arm-gated
+    // `ConditionalDeadDrop`s when the reassigned value is never read
+    // afterwards, so the pre-if buffer is also freed on the paths where
+    // the reassign did not happen. Includes the implicit fall-through
+    // pseudo-arm of an else-less if (its BranchId was minted above).
+    {
+        let mut arm_states: Vec<(BranchId, &Ownership)> = Vec::with_capacity(branch_results.len());
+        arm_states.push((then_branch, &branch_results[0]));
+        for (i, _) in view.elif_branches.iter().enumerate() {
+            arm_states.push((elif_branches[i], &branch_results[1 + i]));
+        }
+        arm_states.push((
+            else_branch.expect("else/fall-through arm id minted"),
+            branch_results
+                .last()
+                .expect("else/fall-through snapshot pushed"),
+        ));
+        for (name, owner_pre) in &snap_current_owner {
+            // Only tracked (Move-typed) locals need drops; Copy values
+            // have no buffer, and params are covered by the exit-time
+            // param free.
+            let Owner::Inst(pre_ref) = owner_pre else {
+                continue;
+            };
+            if !needs_tracking(tir.inst(*pre_ref).ty, pool) {
+                continue;
+            }
+            let mut reseat_owners: HashSet<Owner> = HashSet::new();
+            let mut untouched_arms: Vec<BranchId> = Vec::new();
+            for (bid, b) in &arm_states {
+                let owner_b = b.current_owner.get(name).copied().unwrap_or(*owner_pre);
+                if owner_b == *owner_pre {
+                    untouched_arms.push(*bid);
+                } else {
+                    reseat_owners.insert(owner_b);
+                }
+            }
+            // Dedup: loop-convergence re-walks revisit this if.
+            if !reseat_owners.is_empty()
+                && !untouched_arms.is_empty()
+                && !own
+                    .reseat_drops
+                    .iter()
+                    .any(|d| d.if_stmt == r && d.name == *name)
+            {
+                own.reseat_drops.push(ReseatDrop {
+                    if_stmt: r,
+                    name: *name,
+                    pre_owner: *owner_pre,
+                    reseat_owners,
+                    untouched_arms,
+                });
+            }
         }
     }
 
@@ -1821,9 +2524,12 @@ fn visit_expr(
                 visit_expr(tir, pool, own, sink, sidecar, *arg);
             }
 
-            // Phase 2 — use-safety check + borrow/move partition.
+            // Phase 2 — use-safety check + borrow/move/inout partition.
             let mut borrowed: HashSet<Owner> = HashSet::new();
             let mut moved: HashSet<Owner> = HashSet::new();
+            // inout occurrences: (owner, arg span) — a Vec, not a Set, so
+            // a double-inout of one owner is detectable by count (Rule 7).
+            let mut inout_uses: Vec<(Owner, Span)> = Vec::new();
             for (i, arg) in view.args.iter().enumerate() {
                 if is_borrowed_scalar_param(view.name, pool, i)
                     && matches!(tir.inst(*arg).tag, TirTag::StrConst)
@@ -1835,17 +2541,97 @@ fn visit_expr(
                     // pass. See I-057.
                     own.temp_owners.remove(&Owner::Inst(*arg));
                 }
+                let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
                 let arg_ty = tir.inst(*arg).ty;
+                if mode == ParamMode::Inout {
+                    // Rule 7 (M8.3): resolve an aliasing identity even for
+                    // Copy scalars, which never enter the lattice.
+                    let owner = inout_owner(own, tir, *arg);
+                    check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
+                    inout_uses.push((owner, tir.span(*arg)));
+                    continue;
+                }
                 if !needs_tracking(arg_ty, pool) {
+                    // A Copy borrow is a no-op for liveness, but it still
+                    // aliases an `inout` of the same binding in this call —
+                    // record Var reads by name for the Rule 7 overlap check.
+                    // (A Copy `move` arg is rejected by sema's RedundantMove,
+                    // so only the Borrow arm is reachable from real code.)
+                    if mode == ParamMode::Borrow && matches!(tir.inst(*arg).tag, TirTag::Var) {
+                        borrowed.insert(inout_owner(own, tir, *arg));
+                    }
                     continue;
                 }
                 let owner = underlying_owner(own, *arg);
-                let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
                 if mode == ParamMode::Borrow {
                     check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
                     borrowed.insert(owner);
                 } else {
                     moved.insert(owner);
+                }
+            }
+            // Rule 7 (M8.3): at most one mutable borrow per owner in a call,
+            // and no immutable borrow / move alongside it. Each DISTINCT
+            // inout owner is handled exactly once (the `seen_owners` guard)
+            // so cases 2/3 don't re-fire per occurrence.
+            let mut seen_owners: HashSet<Owner> = HashSet::new();
+            for (owner, _span) in &inout_uses {
+                if !seen_owners.insert(*owner) {
+                    continue;
+                }
+                let name = rule7_owner_name(own, tir, pool, &view.args, *owner);
+
+                // (1) The same owner is mutably borrowed more than once.
+                // Collect every occurrence so the two notes point at
+                // DISTINCT arg spans — the loop item's own span is
+                // occurrence 0, so reusing it for the "second" note would
+                // duplicate the "first" note's span.
+                let occurrences: Vec<Span> = inout_uses
+                    .iter()
+                    .filter(|(o, _)| o == owner)
+                    .map(|(_, s)| *s)
+                    .collect();
+                if occurrences.len() > 1 {
+                    let mut diag = Diag::error(
+                        tir.span(r),
+                        DiagCode::MutableAliasingViolation,
+                        format!(
+                            "cannot borrow {} as mutable more than once in the same call",
+                            name
+                        ),
+                    );
+                    diag = diag.with_note(Some(occurrences[0]), "first mutable borrow here");
+                    diag = diag.with_note(Some(occurrences[1]), "second mutable borrow here");
+                    diag = diag.with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)");
+                    sink.emit(diag);
+                }
+                // (2) inout ∩ borrowed.
+                if borrowed.contains(owner) {
+                    sink.emit(
+                        Diag::error(
+                            tir.span(r),
+                            DiagCode::MutableAliasingViolation,
+                            format!(
+                                "cannot borrow {} as immutable while it is mutably borrowed in the same call",
+                                name
+                            ),
+                        )
+                        .with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)"),
+                    );
+                }
+                // (3) inout ∩ moved.
+                if moved.contains(owner) {
+                    sink.emit(
+                        Diag::error(
+                            tir.span(r),
+                            DiagCode::MutableAliasingViolation,
+                            format!(
+                                "cannot move {} while it is mutably borrowed in the same call",
+                                name
+                            ),
+                        )
+                        .with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)"),
+                    );
                 }
             }
             // Overlap — same owner borrowed AND moved in one call.
@@ -1860,10 +2646,12 @@ fn visit_expr(
                         && underlying_owner(own, *arg) == *owner
                     {
                         let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
-                        if mode == ParamMode::Borrow {
-                            borrow_span = Some(tir.span(*arg));
-                        } else {
-                            move_span = Some(tir.span(*arg));
+                        match mode {
+                            ParamMode::Borrow => borrow_span = Some(tir.span(*arg)),
+                            ParamMode::Move => move_span = Some(tir.span(*arg)),
+                            // inout overlaps are reported as E0032 above —
+                            // never as the "moved here" half of E0031.
+                            ParamMode::Inout => {}
                         }
                     }
                 }
@@ -1891,6 +2679,14 @@ fn visit_expr(
                     consume_for_assignment(tir, pool, own, sink, *arg, tir.span(r), consumed_name);
                 }
             }
+
+            // `inout` args need no ownership transition: the callee only
+            // borrows the slot, and the binding keeps its pre-call owner.
+            // The stale-triple hazard (callee realloc'd/replaced the
+            // buffer) is handled in CODEGEN, where named-binding Frees
+            // emit the binding's CURRENT `StrLocals` instead of the
+            // producing inst's cached repr — the same pattern
+            // `free_on_reassign` already used.
         }
         // ---- Aliasing read ----
         // `Var` is a non-consuming read. Record which SSA value it
@@ -1908,8 +2704,12 @@ fn visit_expr(
                 // Any read counts as "used" for dead-store purposes,
                 // even if it ultimately fires E0020 — once the
                 // programmer's code looked at the value, they
-                // didn't ignore it.
-                own.pending_dead_store.remove(&owner);
+                // didn't ignore it. Clear by NAME, not by current-owner
+                // key: a reseat inside a branch (Assign) is discarded
+                // by the branch merge, so the pending entry can survive
+                // under a branch-local owner key while the binding
+                // itself is provably read afterwards.
+                own.pending_dead_store.retain(|_, (n, _, _)| *n != name);
                 own.origin.insert(r, Some(owner));
                 // Snapshot owner-at-read so the post-walk
                 // `collect_last_uses` anchors the last-use Free to the
@@ -2174,7 +2974,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_loop_owner_break_before_last_use_schedules_free_on_break() {
+    fn pre_loop_owner_last_use_in_loop_freed_at_loop_exit() {
         // A pre-loop owner whose last-use is inside a loop must be
         // freed on a `break` path that bypasses that last-use, as we
         // are exiting the loop and will never reach the last-use again.
@@ -2220,12 +3020,20 @@ mod tests {
             .remove(&main)
             .expect("per-function sidecar entry");
 
-        assert!(
-            sidecar
-                .free_schedule
-                .iter()
-                .any(|fp| fp.after == brk && fp.target == alloc),
-            "expected pre-loop owner whose last-use is in the loop to be freed on break; got: {:?}",
+        let frees: Vec<_> = sidecar
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == alloc)
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the pre-loop owner; got: {:?}",
+            sidecar.free_schedule
+        );
+        assert_eq!(
+            frees[0].after, wl,
+            "a pre-loop owner whose last use is in the loop is freed at the loop exit (covers break, normal-exit, and zero-iteration paths); got: {:?}",
             sidecar.free_schedule
         );
     }
@@ -3045,7 +3853,7 @@ mod tests {
     #[test]
     fn borrowed_param_resolves_under_owner_param_as_borrowed() {
         use chumsky::span::{SimpleSpan, Span as _};
-        use ryo_core::tir::{TirBuilder, TirParam};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
         let void = pool.void();
@@ -3057,7 +3865,7 @@ mod tests {
             vec![TirParam {
                 name: s_name,
                 ty: str_ty,
-                is_move: false,
+                mode: ParamMode::Borrow,
                 span,
             }],
             void,
@@ -3081,7 +3889,7 @@ mod tests {
     #[test]
     fn unconsumed_move_param_schedules_free_at_function_end() {
         use chumsky::span::{SimpleSpan, Span as _};
-        use ryo_core::tir::{TirBuilder, TirParam};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
         let mut pool = InternPool::new();
         let str_ty = pool.str_();
         let void = pool.void();
@@ -3093,7 +3901,7 @@ mod tests {
             vec![TirParam {
                 name: s_name,
                 ty: str_ty,
-                is_move: true,
+                mode: ParamMode::Move,
                 span,
             }],
             void,
@@ -3135,13 +3943,13 @@ mod tests {
                 TirParam {
                     name: s_name,
                     ty: str_ty,
-                    is_move: true,
+                    mode: ParamMode::Move,
                     span,
                 },
                 TirParam {
                     name: cond_name,
                     ty: bool_ty,
-                    is_move: false,
+                    mode: ParamMode::Borrow,
                     span,
                 },
             ],
@@ -3717,6 +4525,1142 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
             "borrow and move in sequential statements must not trigger E0031"
+        );
+    }
+
+    #[test]
+    fn inout_same_owner_twice_rejected() {
+        // swap(&c, &c) — two mutable borrows of one int owner in the same
+        // call (Rule 7 case 1). The int args never enter the lattice, so
+        // this exercises the name-based inout owner resolution.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let c = pool.intern_str("c");
+        let swap = pool.intern_str("swap");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ic = tb.int_const(1, int_ty, span);
+        let decl = tb.var_decl(c, false, int_ty, ic, span);
+        let cv1 = tb.var(c, int_ty, span);
+        let cv2 = tb.var(c, int_ty, span);
+        let call = tb.call(
+            swap,
+            &[cv1, cv2],
+            &[ParamMode::Inout, ParamMode::Inout],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        let e0032_count = diags
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::MutableAliasingViolation))
+            .count();
+        assert_eq!(
+            e0032_count, 1,
+            "Expected exactly one MutableAliasingViolation (E0032) for swap(&c, &c); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_and_borrow_same_owner_rejected() {
+        // f(&c, c) — mutable borrow plus immutable borrow of one int owner
+        // in the same call (Rule 7 case 2).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let c = pool.intern_str("c");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ic = tb.int_const(1, int_ty, span);
+        let decl = tb.var_decl(c, false, int_ty, ic, span);
+        let cv1 = tb.var(c, int_ty, span);
+        let cv2 = tb.var(c, int_ty, span);
+        let call = tb.call(
+            f,
+            &[cv1, cv2],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        let e0032_count = diags
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::MutableAliasingViolation))
+            .count();
+        assert_eq!(
+            e0032_count, 1,
+            "Expected exactly one MutableAliasingViolation (E0032) for f(&c, c); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_and_move_same_owner_rejected() {
+        // f(&x, move x) — mutable borrow plus move of one str owner in the
+        // same call (Rule 7 case 3). The tracked str args exercise the
+        // lattice-backed path of the overlap check.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let x = pool.intern_str("x");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let decl = tb.var_decl(x, false, str_ty, lit, span);
+        let xv1 = tb.var(x, str_ty, span);
+        let xv2 = tb.var(x, str_ty, span);
+        let call = tb.call(
+            f,
+            &[xv1, xv2],
+            &[ParamMode::Inout, ParamMode::Move],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        let e0032_count = diags
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::MutableAliasingViolation))
+            .count();
+        assert_eq!(
+            e0032_count, 1,
+            "Expected exactly one MutableAliasingViolation (E0032) for f(&x, move x); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e0032_names_local_binding_not_value() {
+        // `swap(&c, &c)` must name `c` in the message — the spec's
+        // rendered example shows the backticked binding name, not the
+        // generic "value" that `owner_name_for_diag` falls back to for
+        // locals (it inspects the initializer, not the read).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let c = pool.intern_str("c");
+        let swap = pool.intern_str("swap");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ic = tb.int_const(1, int_ty, span);
+        let decl = tb.var_decl(c, false, int_ty, ic, span);
+        let cv1 = tb.var(c, int_ty, span);
+        let cv2 = tb.var(c, int_ty, span);
+        let call = tb.call(
+            swap,
+            &[cv1, cv2],
+            &[ParamMode::Inout, ParamMode::Inout],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        let msg = &diags
+            .iter()
+            .find(|d| matches!(d.code, DiagCode::MutableAliasingViolation))
+            .expect("E0032 must fire")
+            .message;
+        assert!(
+            msg.contains("`c`"),
+            "E0032 must name the binding `c`; got: {msg}"
+        );
+        assert!(
+            !msg.contains("value"),
+            "E0032 must not fall back to 'value'; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn inout_distinct_owners_ok() {
+        // swap(&a, &b) — mutable borrows of DISTINCT int owners: no E0032.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let a = pool.intern_str("a");
+        let b = pool.intern_str("b");
+        let swap = pool.intern_str("swap");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ia = tb.int_const(1, int_ty, span);
+        let ib = tb.int_const(2, int_ty, span);
+        let da = tb.var_decl(a, false, int_ty, ia, span);
+        let db = tb.var_decl(b, false, int_ty, ib, span);
+        let av = tb.var(a, int_ty, span);
+        let bv = tb.var(b, int_ty, span);
+        let call = tb.call(
+            swap,
+            &[av, bv],
+            &[ParamMode::Inout, ParamMode::Inout],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[da, db, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MutableAliasingViolation)),
+            "mutable borrows of DISTINCT owners are fine (Rule 7); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn two_immutable_borrows_ok() {
+        // f(c, c) — two immutable borrows of one int owner: no E0032
+        // (Rule 7 many readers). Guards the untracked-Borrow recording
+        // against false positives.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let c = pool.intern_str("c");
+        let f = pool.intern_str("f");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ic = tb.int_const(1, int_ty, span);
+        let decl = tb.var_decl(c, false, int_ty, ic, span);
+        let cv1 = tb.var(c, int_ty, span);
+        let cv2 = tb.var(c, int_ty, span);
+        let call = tb.call(
+            f,
+            &[cv1, cv2],
+            &[ParamMode::Borrow, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MutableAliasingViolation)),
+            "two immutable borrows of one owner are fine (Rule 7 many readers); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_str_param_reassign_escapes_no_dead_store_no_free() {
+        // Callee side: `fn set(inout s: str): s = "new"`. The
+        // replacement value escapes through the write-back pointer, so the
+        // pass must NOT emit W0001 or free the new value; the OLD pointee
+        // (the incoming buffer) must be dropped at the reassign.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let set = pool.intern_str("set");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            set,
+            vec![TirParam {
+                name: s,
+                ty: str_ty,
+                mode: ParamMode::Inout,
+                span,
+            }],
+            void,
+            span,
+        );
+        let lit = tb.str_const(pool.intern_str("new"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit, span);
+        let tir = tb.finish(&[asg]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "inout param reassignment must not warn dead-store — the value escapes via write-back; got {diags:?}"
+        );
+        let sc = sidecar.functions.remove(&set).expect("sidecar");
+        assert_eq!(
+            sc.free_on_reassign.get(&asg),
+            Some(&TirRef::param(0)),
+            "reassigning an inout str param must drop the incoming buffer at the reassign; free_on_reassign = {:?}",
+            sc.free_on_reassign
+        );
+        assert!(
+            !sc.free_schedule.iter().any(|fp| fp.target == lit),
+            "the reassigned value escapes to the caller — no Free may target it; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn inout_str_param_reassign_inside_if_escapes() {
+        // `fn g(inout s: str): if c: s = "b"`. The rebind is
+        // branch-divergent — the merge keeps `Param(s)` as the binding's
+        // owner and can stamp it Valid — but the bound value still
+        // escapes via the write-back: no W0001, no Free for the rebound
+        // value or the param, while the taken arm still drops the
+        // incoming buffer.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let g = pool.intern_str("g");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            g,
+            vec![TirParam {
+                name: s,
+                ty: str_ty,
+                mode: ParamMode::Inout,
+                span,
+            }],
+            void,
+            span,
+        );
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit, span);
+        let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
+        let tir = tb.finish(&[if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "inout param reassignment escapes — no dead-store warning, even branch-divergent; got {diags:?}"
+        );
+        let sc = sidecar.functions.remove(&g).expect("sidecar");
+        assert!(
+            sc.free_on_reassign.contains_key(&asg),
+            "the taken arm must drop the incoming buffer; free_on_reassign = {:?}",
+            sc.free_on_reassign
+        );
+        assert!(
+            !sc.free_schedule.iter().any(|fp| fp.target == lit),
+            "the rebound value escapes to the caller — no Free may target it; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == TirRef::param(0)),
+            "the inout param's value escapes — no callee Free for the param owner; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn inout_str_param_move_out_after_reassign_rejected() {
+        // The value bound to an inout str param escapes via the
+        // write-back, so moving it out (even after a reassign made it a
+        // fresh, Valid owner) must still be an error.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let g = pool.intern_str("g");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s,
+                ty: str_ty,
+                mode: ParamMode::Inout,
+                span,
+            }],
+            void,
+            span,
+        );
+        let lit = tb.str_const(pool.intern_str("new"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit, span);
+        let sv = tb.var(s, str_ty, span);
+        let call = tb.call(g, &[sv], &[ParamMode::Move], void, span);
+        let tir = tb.finish(&[asg, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::MoveOutOfBorrowedParam)),
+            "moving out of an inout param after reassign must be E0021; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_str_param_return_after_reassign_rejected() {
+        // Returning the value currently bound to an inout str param
+        // double-owns it (it also escapes via the write-back) — E0022.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirData, TirParam, TirTag};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s,
+                ty: str_ty,
+                mode: ParamMode::Inout,
+                span,
+            }],
+            str_ty,
+            span,
+        );
+        let lit = tb.str_const(pool.intern_str("new"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit, span);
+        let sv = tb.var(s, str_ty, span);
+        let ret = tb.push_typed(TirTag::Return, TirData::UnOp(sv), str_ty, span);
+        let _ = void;
+        let tir = tb.finish(&[asg, ret]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::ReturnBorrowedValue)),
+            "returning an inout param's bound value must be E0022; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_call_keeps_owner_and_frees_current_buffer() {
+        // Caller side: `mut s = "hi"; set(&s); print(s)`. An inout
+        // call is a pure borrow of the slot: the binding KEEPS its
+        // pre-call owner (no reseat, no Moved, no dead-store churn), and
+        // the freshness of the freed buffer is codegen's job — it emits
+        // the Free from the binding's current `StrLocals` (which hold the
+        // write-back triple after the reload), never the stale pre-call
+        // repr. Assert the lattice invariants: owner unchanged, exactly
+        // one Free for it, no diagnostics.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let set = pool.intern_str("set");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("hi"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let sv1 = tb.var(s, str_ty, span);
+        let call = tb.call(set, &[sv1], &[ParamMode::Inout], void, span);
+        let sv2 = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
+        let tir = tb.finish(&[decl, call, pr]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            diags.is_empty(),
+            "inout call on a str local must produce no diagnostics; got {diags:?}"
+        );
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        let frees: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == lit)
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the binding's owner; codegen emits it from the current StrLocals; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn inout_call_inside_if_no_false_dead_store() {
+        // `mut s = "a"; if c: set(&s); print(s)` — the
+        // reseat happens inside the if-arm; the post-if read must clear
+        // the dead-store entry across the branch merge.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let set = pool.intern_str("set");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sv1 = tb.var(s, str_ty, span);
+        let call = tb.call(set, &[sv1], &[ParamMode::Inout], void, span);
+        let if_s = tb.if_stmt(cond, &[call], &[], None, void, span);
+        let sv2 = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
+        let tir = tb.finish(&[decl, if_s, pr]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "s is read after the if — no dead-store warning may survive the merge; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn inout_call_inside_loop_no_false_dead_store() {
+        // `mut s = ""; while i < 3: str_push(&s, "x") ...
+        // print(s)` — same merge concern through the loop fixed point.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let set = pool.intern_str("set");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str(""), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sv1 = tb.var(s, str_ty, span);
+        let call = tb.call(set, &[sv1], &[ParamMode::Inout], void, span);
+        let wl = tb.while_loop(cond, &[call], void, span);
+        let sv2 = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
+        let tir = tb.finish(&[decl, wl, pr]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "s is read after the loop — no dead-store warning may survive the loop merge; got {diags:?}"
+        );
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert_eq!(
+            sc.free_schedule
+                .iter()
+                .filter(|fp| fp.target == lit)
+                .count(),
+            1,
+            "exactly one Free for the binding's owner after the loop; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn reassign_inside_if_still_frees_binding_at_last_use() {
+        // Pre-existing M8.1 bug: `mut s = "a"; if c:
+        // s = "b"; print(s)`. The merge keeps the pre-branch owner, so the
+        // reassign-target guard must not skip its last-use Free — on the
+        // not-taken path the binding still owns `lit_a`. Codegen emits the
+        // Free from the binding's current StrLocals (path-correct buffer).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit_b, span);
+        let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
+        let sv = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
+        let tir = tb.finish(&[decl, if_s, pr]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
+            "s is read after the if — no dead-store warning; got {diags:?}"
+        );
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_on_reassign.contains_key(&asg),
+            "the taken arm must drop the pre-reassign buffer; free_on_reassign = {:?}",
+            sc.free_on_reassign
+        );
+        assert_eq!(
+            sc.free_schedule
+                .iter()
+                .filter(|fp| fp.target == lit_a)
+                .count(),
+            1,
+            "the binding's owner must still get its last-use Free (covers the not-taken path); schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule.iter().any(|fp| fp.target == lit_b),
+            "lit_b's buffer is freed through the binding's current StrLocals (same buffer as lit_a's Free on the taken path) — a second Free would double-free; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn conditional_dead_reassign_schedules_fallthrough_drop() {
+        // `mut s = "a"; if c: s = "b"` with s never read after.
+        // The taken arm drops "a" (free_on_reassign) and the drain frees
+        // "b"; the NOT-taken path must also free "a" — via an arm-gated
+        // ConditionalDeadDrop for the pre-branch owner.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit_b, span);
+        let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        let drops: Vec<_> = sc
+            .conditional_dead_drops
+            .iter()
+            .filter(|d| d.target == lit_a)
+            .collect();
+        assert_eq!(
+            drops.len(),
+            1,
+            "expected one ConditionalDeadDrop for the pre-branch owner; got {:?}",
+            sc.conditional_dead_drops
+        );
+        assert_eq!(drops[0].if_stmt, if_s, "the drop must key on the if");
+        assert!(
+            !drops[0].arms.is_empty(),
+            "the drop must name at least one untouched arm (the fall-through)"
+        );
+    }
+
+    #[test]
+    fn conditional_reassign_all_arms_reseated_no_drop() {
+        // `if c: s = "b" else: s = "d"` — every arm reseats, so the
+        // pre-branch buffer is dropped by free_on_reassign on every
+        // path; no ConditionalDeadDrop may be scheduled.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg_then = tb.assign(s, str_ty, lit_b, span);
+        let lit_d = tb.str_const(pool.intern_str("d"), str_ty, span);
+        let asg_else = tb.assign(s, str_ty, lit_d, span);
+        let if_s = tb.if_stmt(cond, &[asg_then], &[], Some(&[asg_else]), void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.conditional_dead_drops.is_empty(),
+            "all arms reseated — no untouched path, no ConditionalDeadDrop; got {:?}",
+            sc.conditional_dead_drops
+        );
+    }
+
+    #[test]
+    fn loop_dead_reassign_anchors_after_loop() {
+        // `mut s = "a"; while c: s = "b"` with s never read
+        // after. The dead-store Free must anchor AFTER THE LOOP (not
+        // after the in-loop assign): the in-loop anchor never fires on
+        // the zero-iteration path, leaking the pre-loop buffer. The
+        // after-loop anchor emits the binding's current StrLocals —
+        // final value on taken paths, pre-loop value on zero iterations.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit_b, span);
+        let wl = tb.while_loop(cond, &[asg], void, span);
+        let tir = tb.finish(&[decl, wl]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == wl && fp.target == lit_b),
+            "expected a Free anchored after the loop for the binding's value; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == asg && fp.target == lit_b),
+            "the in-loop dead-store Free must move to the loop anchor (it never fires on zero iterations); schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn loop_dead_reassign_with_return_keeps_in_body_free() {
+        // When the loop body can `return`, the after-loop anchor
+        // is unreachable on the return path — the in-body Free must stay
+        // alongside the after-loop one.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit_b, span);
+        let ret = tb.return_void(void, span);
+        let wl = tb.while_loop(cond, &[asg, ret], void, span);
+        let tir = tb.finish(&[decl, wl]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == wl && fp.target == lit_b),
+            "expected the after-loop Free; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == asg && fp.target == lit_b),
+            "a returning body keeps the in-body Free (return path); schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn loop_local_dead_value_keeps_in_body_anchor() {
+        // Guard: a value DECLARED inside the loop body is not a
+        // pre-loop binding — its Free must stay anchored in the body
+        // (the binding's StrLocals don't exist on the zero-iteration
+        // path).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let t = pool.intern_str("t");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_x = tb.str_const(pool.intern_str("x"), str_ty, span);
+        let decl = tb.var_decl(t, false, str_ty, lit_x, span);
+        let wl = tb.while_loop(cond, &[decl], void, span);
+        let tir = tb.finish(&[wl]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == decl && fp.target == lit_x),
+            "loop-local dead value keeps its in-body Free; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule.iter().any(|fp| fp.after == wl),
+            "loop-local value must NOT be re-anchored after the loop; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn last_use_inside_loop_anchors_after_loop() {
+        // Conditional last use: `mut s = "a";
+        // for i in range(0, 3): print(s)`. The last read of `s` is
+        // inside the loop body, but freeing there is a UAF — the next
+        // iteration reads the freed buffer. The value is dead on ALL
+        // paths only at the loop exit, so the Free must anchor after
+        // the loop statement.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let i = pool.intern_str("i");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let three = tb.int_const(3, int_ty, span);
+        let sv = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
+        let fr = tb.for_range(i, zero, three, &[pr], void, span);
+        let tir = tb.finish(&[decl, fr]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == fr && fp.target == lit_a),
+            "the last-use Free must anchor after the loop (in-body anchoring frees s between iterations — UAF); schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == sv && fp.target == lit_a),
+            "no Free may anchor after the in-loop read itself; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn last_use_inside_if_anchors_after_if() {
+        // Same family through an if: `mut s = "a"; if d: print(s)` —
+        // anchoring after the in-arm read leaks `s` on the not-taken
+        // path; the merge point is where the value is dead on all paths.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sv = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
+        let if_s = tb.if_stmt(cond, &[pr], &[], None, void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == if_s && fp.target == lit_a),
+            "the last-use Free must anchor after the if (in-arm anchoring leaks on the not-taken path); schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn return_epilogue_frees_live_local() {
+        // Return-epilogue: `mut s = "a"; if d: print(s) else: return`.
+        // On the else path, `s` is still live at the return and nothing
+        // freed it — the last-use Free anchors in the sibling then-arm,
+        // which the else path never reaches. An early return must
+        // destroy the function's still-owned locals on ITS path.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sv = tb.var(s, str_ty, span);
+        let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
+        let ret = tb.return_void(void, span);
+        let if_s = tb.if_stmt(cond, &[pr], &[], Some(&[ret]), void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == ret && fp.target == lit_a),
+            "the still-live local must be freed on the early-return path; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn return_epilogue_skips_consumed_return_value() {
+        // `fn f() -> str: s = "a"; return s` — the returned value moved
+        // out; an epilogue Free for it would be a use-after-free in the
+        // caller.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{TirBuilder, TirData, TirTag};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let f = pool.intern_str("f");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(f, vec![], str_ty, span);
+        let lit = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let sv = tb.var(s, str_ty, span);
+        let ret = tb.push_typed(TirTag::Return, TirData::UnOp(sv), str_ty, span);
+        let tir = tb.finish(&[decl, ret]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == lit && fp.after == ret),
+            "the returned value moved out — no epilogue Free for it; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn return_epilogue_skips_dead_store_owned() {
+        // `mut s = "a"; if d: return` with s never read: the dead-store
+        // drain already frees `s` right after its declaration (covering
+        // every path), so no epilogue Free may be added for it.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let ret = tb.return_void(void, span);
+        let if_s = tb.if_stmt(cond, &[ret], &[], None, void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == lit_a && fp.after == ret),
+            "dead-store-owned value is already freed at its decl — no epilogue Free; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn return_epilogue_covers_move_param() {
+        // `fn f(move s: str): if d: return` — the owned param is still
+        // Valid at the early return; the callee must destroy it there
+        // (the exit-time param Free anchors after the last body stmt,
+        // which the early-return path never reaches).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s,
+                ty: str_ty,
+                mode: ParamMode::Move,
+                span,
+            }],
+            void,
+            span,
+        );
+        let cond = tb.bool_const(true, bool_ty, span);
+        let ret = tb.return_void(void, span);
+        let if_s = tb.if_stmt(cond, &[ret], &[], None, void, span);
+        let tir = tb.finish(&[if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == ret && fp.target == TirRef::param(0)),
+            "an owned param must be destroyed on the early-return path; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn temp_last_use_inside_loop_not_reanchored() {
+        // Guard: an anonymous temp consumed inside the loop body must
+        // keep its per-iteration Free (each iteration allocates a fresh
+        // value) — the re-anchor applies only to named pre-branch
+        // bindings.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let i = pool.intern_str("i");
+        let int_to_str = pool.intern_str("int_to_str");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let three = tb.int_const(3, int_ty, span);
+        let iv = tb.var(i, int_ty, span);
+        let call = tb.call(int_to_str, &[iv], &[ParamMode::Borrow], str_ty, span);
+        let pr = tb.call(print, &[call], &[ParamMode::Borrow], void, span);
+        let fr = tb.for_range(i, zero, three, &[pr], void, span);
+        let tir = tb.finish(&[fr]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            !sc.free_schedule.iter().any(|fp| fp.after == fr),
+            "a loop-local temp must keep its per-iteration Free, not move to the loop anchor; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == call && fp.after == pr),
+            "the temp's Free stays anchored after its consumer; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn conditional_dead_reassign_gated_on_real_else() {
+        // `if c: s = "b" else: <no reassign>` with s unread after —
+        // the drop must be gated on the REAL else arm's BranchId.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit_b, span);
+        let lit_x = tb.str_const(pool.intern_str("x"), str_ty, span);
+        let pr = tb.call(print, &[lit_x], &[ParamMode::Borrow], void, span);
+        let if_s = tb.if_stmt(cond, &[asg], &[], Some(&[pr]), void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        let else_id = sc
+            .if_branches
+            .get(&if_s)
+            .and_then(|ids| ids.else_branch)
+            .expect("else branch id");
+        let drops: Vec<_> = sc
+            .conditional_dead_drops
+            .iter()
+            .filter(|d| d.target == lit_a)
+            .collect();
+        assert_eq!(
+            drops.len(),
+            1,
+            "expected one ConditionalDeadDrop; got {:?}",
+            sc.conditional_dead_drops
+        );
+        assert!(
+            drops[0].arms.contains(&else_id),
+            "the drop must be gated on the else arm {:?}; got {:?}",
+            else_id,
+            drops[0].arms
         );
     }
 }

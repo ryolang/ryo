@@ -2,9 +2,9 @@
 
 # Ryo Language Design Issues & Recommendations
 
-This document identifies design inconsistencies, open questions, and recommendations for the Ryo language specification and roadmap. Issues are categorized by status.
+This document identifies design inconsistencies, open questions, and recommendations for the Ryo language specification and roadmap. Issues are categorized by status. Resolved items are removed (see `git log` for history).
 
-**Last updated:** 2026-07-17 (resolved-item sweep: closed Issue 15, trimmed Issue 16 to its open runtime piece after M8.1/M8.2 landed).
+**Last updated:** 2026-07-19 (sweep: removed resolved items — Variable Initialization, Variable Shadowing, Default Integer Size, Global Mutable State — and their checklist entries, per the removal convention; renumbered sequentially and replaced fragile numbered cross-references with named ones. Prior sweep 2026-07-17: trimmed Iterator Invalidation to its open runtime piece.)
 
 ---
 
@@ -12,7 +12,7 @@ This document identifies design inconsistencies, open questions, and recommendat
 
 These require resolution before implementation reaches the affected milestone.
 
-### 2. The "Hardcoded Generics" Trap
+### 1. The "Hardcoded Generics" Trap
 
 *   **The Smell:** Milestone 22 implements `list[int]` and `list[str]` as "hardcoded types" while pushing real generics to Phase 5 (post-v1.0).
 *   **The Problem:** This creates a **Privileged Standard Library**.
@@ -21,7 +21,7 @@ These require resolution before implementation reaches the affected milestone.
     *   This mirrors Go's pre-1.18 era where `map` and `slice` were magic generic types but user code was stuck with `interface{}`.
 *   **Proposal:** Keep hardcoded generics for v0.1 (pragmatic), but use **Monomorphization** (like Rust/C++) when real generics land — the compiler copies the generic code and replaces `T` with the concrete type.
 
-### 3. Error Handling Overhead
+### 2. Error Handling Overhead
 
 *   **The Smell:** The spec claims "Native Performance" but admits a "~5-10% overhead" for mandatory stack trace capture on errors.
 *   **The Reality:** Capturing stack traces is extremely expensive in high-throughput systems (10x-100x slower than the operation itself).
@@ -31,20 +31,20 @@ These require resolution before implementation reaches the affected milestone.
     3.  **Production:** Provide `--strip-debug` compiler flag to disable entirely.
 *   **Lightweight errors:** Add a `#[no_trace]` attribute for errors used as control flow (e.g., `EndOfFile`).
 
-### 4. Circular Dependencies
+### 3. Circular Dependencies
 
 *   **The Smell:** "Directory = Module" + "No Cycles" mimics Go's structural rigidity.
 *   **The Problem:** A `User` struct in `models/` needs to save to `db/`, but `db/` needs to return `User` objects. You're forced to create a third "types" package, breaking encapsulation.
 *   **Proposal:** Allow circular dependencies **within the same module (directory)**, ban them between modules. The compiler compiles the directory as a single unit (like a Go package).
 
-### 5. Specification Holes
+### 4. Specification Holes
 
 *   **`impl` Blocks for non-Trait methods:** Roadmap shows `impl Rectangle: ...` but the spec only details `impl Trait for Type`.
     *   *The Fix:* Document inherent implementations explicitly in Section 3.
 *   **Generics Strategy:** Roadmap uses "Hardcoded Generics" for v0.1, but the spec implies true generics.
     *   *The Fix:* Explicitly note that user-defined generics are post-v0.1.
 
-### 6. Conflicting Syntax: The `!` Operator
+### 5. Conflicting Syntax: The `!` Operator
 
 *   `!` is used for **Error Unions** (`!T`) but `not` is used for boolean logic.
 *   C/Rust/Java/JS developers have muscle memory for `!x` meaning "not x". Repurposing `!` for types may confuse the target audience. `!?T` looks like "Not Optional T" to a C-family eye but means "Error or Optional T" in Ryo.
@@ -56,96 +56,83 @@ These require resolution before implementation reaches the affected milestone.
 
 These are underspecified aspects that will confuse developers if left undefined.
 
-### 7. Variable Initialization
-
-*   **The Risk:** If `mut x: int` is allowed without initialization, you need complex flow analysis to prevent reading before writing.
-*   **Proposal: Mandatory Initialization.** Reject `mut x: int`. Require `mut x: int = 0`.
-
-### 8. Variable Shadowing
-
-*   **Proposal: Allow Shadowing (Rust Style).** Useful for transformations where the old binding is no longer needed.
-
-### 9. Structural Equality
+### 6. Structural Equality
 
 *   When `struct_a == struct_b`, compare fields (Python/Rust) or addresses (Java)?
 *   **Proposal: Automatic Structural Equality** for structs containing only comparable types. Pointer equality via `std.mem.same_address(a, b)`.
+*   **Status:** Open — prerequisite is Milestone 9 (structs).
 
-### 10. String Indexing — The Unicode Trap
+### 7. String Indexing — The Unicode Trap
 
 *   `str` is UTF-8. `s[0]` is ambiguous: 0th byte (fast, dangerous) or 0th character (safe, O(N))?
 *   **Proposal: Forbid `s[i]`.** Provide `.bytes()[i]` (O(1), returns `u8`) and `.runes()[i]` (O(N), returns `char`).
+*   **Status:** Open, but the current direction leans the other way — Milestone 8.4 (String Slices) plans the slice operator `s[start:end]`, i.e. indexing-syntax on strings. The `s[i]` scalar-index question needs an explicit decision alongside M8.4.
 
-### 11. Default Integer Size
-
-*   `int` defaults to `isize` (varies by platform — 32-bit vs 64-bit).
-*   **Proposal: Default to `i64`.** Consistent across platforms. Use `isize` only for indexing.
-
-### 12. Default Arguments
+### 8. Default Arguments
 
 *   No overloading (correct), but default arguments are missing.
 *   **Proposal:** Allow `fn connect(url: str, retries: int = 3)`.
+*   **Status:** Decided — scheduled as **Milestone 8.5** (Default Parameters & Named Arguments). The remaining work is the spec text when M8.5 lands.
 
-### 13. Panic During Drop
+### 9. Panic During Drop
 
 *   If a `.drop()` panics while unwinding from another panic, undefined behavior.
 *   **Proposal: Immediate Abort.** Document clearly.
+*   **Status:** Open — prerequisite is Milestone 23 (RAII & Drop).
 
-### 14. Variadic Functions
+### 10. Variadic Functions
 
 *   `print` is variadic. Can users define them?
 *   **Proposal: Reserve for built-ins only (v0.1).** Users accept lists: `fn log(msgs: list[str])`.
+*   **Status:** Matches the current implementation (`print` is special-cased in codegen — I-006 — and user-defined variadics don't exist), but the reservation is not yet documented in the spec.
 
-### 15. Global Mutable State — RESOLVED
+### 11. Iterator Invalidation — OPEN (runtime piece only)
 
-*   **Was:** No mechanism defined for application-wide state (e.g., DB pool).
-*   **Resolution:** Settled in the spec — module-level `const` for compile-time constants; `shared[T]` (spec §5.6) for mutable shared state. No module-level `mut` variables; shared state must be explicit. Nothing further to decide.
-
----
-
-### 16. Iterator Invalidation — OPEN (runtime piece only)
-
-*   **Compile-time half resolved:** Scope-locked views (spec §5.7) prevent iterators from escaping their block, and Rule 7 (one writer OR many readers) prevents simultaneous mutation and iteration in concurrent contexts. Both shipped with the ownership pass (M8.1/M8.2).
+*   **Compile-time half resolved:** Scope-locked views (spec §5.7) prevent iterators from escaping their block, and Rule 7 (one writer OR many readers) prevents simultaneous mutation and iteration in concurrent contexts. The ownership framework shipped with M8.1/M8.2; the intra-call aliasing exclusion (Rule 7) was completed in M8.3.
 *   **Open (runtime):** For sequential code where mutation happens *inside* the loop body (e.g., `list.append()` during `for n in list`), **Versioned Iterators** are still needed as a runtime safety net:
     *   Every collection has an internal `mod_count` that increments on modification.
     *   Iterators capture `expected_mod` at creation and check on every `next()`.
     *   Mismatch triggers a panic with a clear message: `"collection modified during iteration"`.
     *   Cost: one integer comparison per iteration — negligible.
 
-### 17. Loop-as-an-Expression and Safe `continue` (Zig inspirations)
+### 12. Loop-as-an-Expression and Safe `continue` (Zig inspirations)
 
-*   **The Smell:** 
+*   **The Smell:**
     1. Loop-as-an-expression (`break <value>`) is highly useful for searching and initializing immutable variables, but is currently deferred.
     2. In `while` loops, using `continue` skips the rest of the block. If manual counter increments are placed there, it results in an accidental infinite loop. Zig solves this with `while (cond) : (continue_expr)`.
 *   **Proposal for Loop Expressions:** Consider implementing `break <value>` in a later milestone (requires `Phi` node insertion or stack allocs at the exit block).
 *   **Proposal for Safe `while`:** Since Ryo uses Pythonic syntax, adding `:(expr)` breaks aesthetic coherence. However, we could introduce a `defer` statement or explore a block-level `continue` hook to guarantee increment execution. For now, rely on `ForRange` loops where `continue` safely jumps to the builtin increment block.
 
-### Priority 2 (Spec Completeness)
-5.  Document inherent `impl` blocks.
-6.  Add "post-v0.1" note to Sections 9 (Concurrency) and generics usage.
+---
 
-### Priority 3 (Grey Area Decisions)
-7.  Mandate variable initialization.
-8.  Decide on shadowing.
-9.  Forbid `s[i]` string indexing.
-10. Default `int` to `i64`.
-11. Allow default function arguments.
-12. Document double-panic behavior.
-13. Discuss/Track Loop-as-an-Expression and Safe `continue` features.
+## Recommendations
+
+### Spec Completeness
+
+- Document inherent `impl` blocks (Issue 4 — Specification Holes).
+- Add a "post-v0.1" note to Sections 9 (Concurrency) and generics usage.
+
+### Grey Area Decisions
+
+- Structural equality semantics (Issue 6 — blocked on M9).
+- `s[i]` scalar indexing vs. slices (Issue 7 — decide alongside M8.4, which currently plans `s[start:end]`).
+- Default function arguments (Issue 8 — decided, lands with M8.5; spec text then).
+- Document double-panic abort behavior (Issue 9 — blocked on M23).
+- Document the variadic-as-builtin-only reservation (Issue 10 — already true in the compiler).
+- Resolve the `!` operator conflict (Issue 5).
+- Track Loop-as-an-Expression and Safe `continue` (Issue 12).
 
 ### Checklist
 
-- [ ] Add `never` type to spec
-- [ ] Define `mut x: T = val` as mandatory
-- [ ] Define shadowing rules
-- [ ] Define `==` as structural equality
-- [ ] Forbid `str` indexing, add `.bytes()` and `.runes()`
-- [ ] Default `int` to `i64`
-- [ ] Allow default function arguments
-- [ ] Document double-panic abort behavior
-- [ ] Reserve variadic functions for built-ins only
-- [ ] Resolve `!` operator conflict
-- [ ] Track Loop-as-an-Expression and Safe `continue` (Issue 17)
+- [ ] Define `==` as structural equality (M9 prerequisite)
+- [ ] Forbid `str` indexing, add `.bytes()` and `.runes()` (revisit against M8.4 slices)
+- [ ] Allow default function arguments (M8.5)
+- [ ] Document double-panic abort behavior (M23)
+- [ ] Reserve variadic functions for built-ins only (already true in the compiler; needs spec text)
+- [ ] Resolve `!` operator conflict (Issue 5)
+- [ ] Track Loop-as-an-Expression and Safe `continue` (Issue 12)
 
 ## References
+
 - Spec: `docs/specification.md` (each resolved issue lands in its relevant section)
 - Roadmap: `docs/dev/implementation_roadmap.md`

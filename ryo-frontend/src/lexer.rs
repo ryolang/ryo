@@ -56,6 +56,9 @@ pub enum Token {
     Or,
     Not,
     While,
+
+    Inout,
+    Amp,
     Break,
     Continue,
     For,
@@ -131,6 +134,8 @@ impl fmt::Display for Token {
             Self::Continue => write!(f, "continue"),
             Self::For => write!(f, "for"),
             Self::In => write!(f, "in"),
+            Self::Inout => write!(f, "inout"),
+            Self::Amp => write!(f, "&"),
             Self::Ident(id) => write!(f, "<id#{}>", id.raw()),
             Self::Add => write!(f, "+"),
             Self::Arrow => write!(f, "->"),
@@ -195,6 +200,8 @@ pub(crate) enum RawToken<'a> {
     Mut,
     #[token("move")]
     Move,
+    #[token("inout")]
+    Inout,
     #[token("struct")]
     Struct,
     #[token("enum")]
@@ -251,6 +258,8 @@ pub(crate) enum RawToken<'a> {
     Gt,
     #[token("=")]
     Assign,
+    #[token("&")]
+    Amp,
     #[token("+=")]
     PlusAssign,
     #[token("-=")]
@@ -428,6 +437,7 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::Return => Token::Return,
         RawToken::Mut => Token::Mut,
         RawToken::Move => Token::Move,
+        RawToken::Inout => Token::Inout,
         RawToken::Struct => Token::Struct,
         RawToken::Enum => Token::Enum,
         RawToken::Match => Token::Match,
@@ -455,6 +465,7 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::LtEq => Token::LtEq,
         RawToken::GtEq => Token::GtEq,
         RawToken::Assign => Token::Assign,
+        RawToken::Amp => Token::Amp,
         RawToken::PlusAssign => Token::PlusAssign,
         RawToken::MinusAssign => Token::MinusAssign,
         RawToken::StarAssign => Token::StarAssign,
@@ -524,6 +535,20 @@ mod tests {
         let (toks, _) = lex_strings("move");
         assert_eq!(toks.len(), 1);
         assert!(matches!(toks[0], Token::Move));
+    }
+
+    #[test]
+    fn lex_inout_keyword() {
+        let (toks, _) = lex_strings("inout");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0], Token::Inout));
+    }
+
+    #[test]
+    fn lex_ampersand() {
+        let (toks, _) = lex_strings("&");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0], Token::Amp));
     }
 
     #[test]

@@ -22,7 +22,7 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use cranelift::codegen::ir::{ArgumentPurpose, BlockArg, FuncRef};
+use cranelift::codegen::ir::{ArgumentPurpose, BlockArg, FuncRef, StackSlot};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -30,7 +30,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use ryo_core::ast::CompoundOp;
-use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
@@ -155,6 +155,19 @@ struct FunctionContext<'a, M: Module> {
     pending_sweep: Vec<usize>,
     loop_stack: Vec<LoopContext>,
     str_locals: HashMap<StringId, StrLocals>,
+    /// Free-target (initializer / Assign value / str-param virtual ref)
+    /// → binding-name map, built once per function by
+    /// `build_free_binding_names`. `emit_frees` uses it to release a
+    /// named binding's CURRENT `StrLocals` rather than the producing
+    /// init's possibly-stale cached repr.
+    free_binding_names: HashMap<TirRef, StringId>,
+    /// M8.3 inout parameters: maps each inout param's name to the
+    /// caller-provided slot address (a function-entry block param)
+    /// and its pointee `TypeId`. The write-back chokepoint stores each
+    /// param's current `Variable` back through this pointer before
+    /// every `return_`. Scalars store one field at offset 0; str
+    /// pointees (M8.3a Task 9) store three fields.
+    inout_ptrs: HashMap<StringId, (Value, TypeId)>,
     /// For str-returning functions: the hidden sret pointer (first block param)
     /// through which the callee writes the (ptr, len, cap) triple.
     sret_ptr: Option<Value>,
@@ -241,6 +254,7 @@ impl Codegen<JITModule> {
             ),
             ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
             ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
+            ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
             ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
             ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
             (
@@ -387,7 +401,11 @@ impl<M: Module> Codegen<M> {
     fn build_signature(&self, tir: &Tir, pool: &InternPool) -> Signature {
         let mut sig = self.module.make_signature();
         for param in &tir.params {
-            if is_str_type(param.ty, pool) {
+            if param.mode == ParamMode::Inout {
+                // Mutable borrow: pass a single pointer to the caller's
+                // slot, regardless of pointee type (scalar or str).
+                sig.params.push(AbiParam::new(self.int_type));
+            } else if is_str_type(param.ty, pool) {
                 sig.params.push(AbiParam::new(self.int_type)); // ptr
                 sig.params.push(AbiParam::new(types::I64)); // len
                 sig.params.push(AbiParam::new(types::I64)); // cap
@@ -461,8 +479,49 @@ impl<M: Module> Codegen<M> {
             };
 
             let mut str_param_locals: HashMap<StringId, StrLocals> = HashMap::new();
+            let mut inout_ptrs: HashMap<StringId, (Value, TypeId)> = HashMap::new();
 
             for param in tir.params.iter() {
+                if param.mode == ParamMode::Inout {
+                    // inout param: a single pointer to the caller's slot,
+                    // regardless of pointee type. Load the current value
+                    // into Variables so the body's existing read/mutate
+                    // codegen is unchanged; remember the pointer for the
+                    // write-back chokepoint before each `return_`.
+                    let ptr = builder.block_params(entry_block)[block_idx];
+                    block_idx += 1;
+                    if is_str_type(param.ty, pool) {
+                        // str inout: load the fat-pointer triple into
+                        // StrLocals so the body reads/mutates it like any
+                        // str local; write all three fields back before
+                        // each return_.
+                        let p = builder.ins().load(int_type, MemFlags::trusted(), ptr, 0);
+                        let l = builder.ins().load(types::I64, MemFlags::trusted(), ptr, 8);
+                        let c = builder.ins().load(types::I64, MemFlags::trusted(), ptr, 16);
+                        let var_ptr = builder.declare_var(int_type);
+                        let var_len = builder.declare_var(types::I64);
+                        let var_cap = builder.declare_var(types::I64);
+                        builder.def_var(var_ptr, p);
+                        builder.def_var(var_len, l);
+                        builder.def_var(var_cap, c);
+                        str_param_locals.insert(
+                            param.name,
+                            StrLocals {
+                                ptr: var_ptr,
+                                len: var_len,
+                                cap: var_cap,
+                            },
+                        );
+                    } else {
+                        let cl_ty = cranelift_type_for(param.ty, pool, int_type);
+                        let cur = builder.ins().load(cl_ty, MemFlags::trusted(), ptr, 0);
+                        let var = builder.declare_var(cl_ty);
+                        builder.def_var(var, cur);
+                        locals.insert(param.name, var);
+                    }
+                    inout_ptrs.insert(param.name, (ptr, param.ty));
+                    continue;
+                }
                 if is_str_type(param.ty, pool) {
                     let var_ptr = builder.declare_var(int_type);
                     let var_len = builder.declare_var(types::I64);
@@ -510,6 +569,8 @@ impl<M: Module> Codegen<M> {
                 pending_sweep,
                 loop_stack: Vec::new(),
                 str_locals: str_param_locals,
+                free_binding_names: Self::build_free_binding_names(tir, pool),
+                inout_ptrs,
                 sret_ptr,
                 sidecar: func_sidecar,
                 branch_stack: Vec::new(),
@@ -533,12 +594,12 @@ impl<M: Module> Codegen<M> {
             if !has_return {
                 if is_main {
                     let zero = builder.ins().iconst(int_type, 0);
-                    builder.ins().return_(&[zero]);
+                    Self::emit_return(&mut builder, &mut ctx, &[zero])?;
                 } else if returns_str || tir.return_type == pool.void() {
-                    builder.ins().return_(&[]);
+                    Self::emit_return(&mut builder, &mut ctx, &[])?;
                 } else {
                     let zero = builder.ins().iconst(int_type, 0);
-                    builder.ins().return_(&[zero]);
+                    Self::emit_return(&mut builder, &mut ctx, &[zero])?;
                 }
             }
 
@@ -594,6 +655,56 @@ impl<M: Module> Codegen<M> {
         ctx.locals = saved_locals;
         ctx.str_locals = saved_str_locals;
         Ok(block_terminated)
+    }
+
+    /// Store every inout parameter's current `Variable` back through its
+    /// caller-provided slot pointer. Called immediately before EVERY
+    /// `return_` so mutations are visible to the caller regardless of
+    /// which exit the function takes. Panic/abort exits are noreturn and
+    /// never reach here — partial mutations are correctly not committed.
+    fn emit_inout_writeback(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+    ) -> Result<(), String> {
+        for (name, (ptr, ty)) in ctx.inout_ptrs.iter() {
+            if is_str_type(*ty, ctx.pool) {
+                // str pointee: store all three fat-pointer fields.
+                let sl = ctx.str_locals.get(name).ok_or_else(|| {
+                    format!("inout str '{}' has no StrLocals", ctx.pool.str(*name))
+                })?;
+                let p = builder.use_var(sl.ptr);
+                let l = builder.use_var(sl.len);
+                let c = builder.use_var(sl.cap);
+                builder.ins().store(MemFlags::trusted(), p, *ptr, 0);
+                builder.ins().store(MemFlags::trusted(), l, *ptr, 8);
+                builder.ins().store(MemFlags::trusted(), c, *ptr, 16);
+            } else {
+                // Scalar pointee: a single store at offset 0.
+                let var = ctx.locals.get(name).ok_or_else(|| {
+                    format!(
+                        "inout scalar '{}' has no local Variable",
+                        ctx.pool.str(*name)
+                    )
+                })?;
+                let val = builder.use_var(*var);
+                builder.ins().store(MemFlags::trusted(), val, *ptr, 0);
+            }
+        }
+        Ok(())
+    }
+
+    /// THE single exit point for user functions: inout write-back, then
+    /// the return. NEVER emit a bare `return_` for a user-function exit —
+    /// a missed write-back silently drops a caller-visible mutation.
+    /// Panic/abort paths are noreturn and intentionally skip this.
+    fn emit_return(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        vals: &[Value],
+    ) -> Result<(), String> {
+        Self::emit_inout_writeback(builder, ctx)?;
+        builder.ins().return_(vals);
+        Ok(())
     }
 
     /// Emit a top-level statement instruction. Returns `true` iff
@@ -656,11 +767,11 @@ impl<M: Module> Codegen<M> {
                     builder.ins().store(MemFlags::trusted(), len, sret, 8);
                     builder.ins().store(MemFlags::trusted(), cap, sret, 16);
                     Self::emit_due_frees(builder, ctx, r)?;
-                    builder.ins().return_(&[]);
+                    Self::emit_return(builder, ctx, &[])?;
                 } else {
                     let val = Self::eval_inst(builder, ctx, operand)?;
                     Self::emit_due_frees(builder, ctx, r)?;
-                    builder.ins().return_(&[val]);
+                    Self::emit_return(builder, ctx, &[val])?;
                 }
                 Ok(true)
             }
@@ -671,10 +782,10 @@ impl<M: Module> Codegen<M> {
                 if is_main {
                     let zero = builder.ins().iconst(ctx.int_type, 0);
                     Self::emit_due_frees(builder, ctx, r)?;
-                    builder.ins().return_(&[zero]);
+                    Self::emit_return(builder, ctx, &[zero])?;
                 } else {
                     Self::emit_due_frees(builder, ctx, r)?;
-                    builder.ins().return_(&[]);
+                    Self::emit_return(builder, ctx, &[])?;
                 }
                 Ok(true)
             }
@@ -828,12 +939,21 @@ impl<M: Module> Codegen<M> {
 
         let elif_count = view.elif_branches.len();
         let has_else = view.else_stmts.is_some();
-        let capacity = elif_count + usize::from(has_else);
+        // An else-less if whose arms conditionally reseated a
+        // binding needs a REAL fall-through block so the arm-gated
+        // DeadDrops have somewhere to fire.
+        let needs_fallthrough_block = !has_else
+            && ctx
+                .sidecar
+                .conditional_dead_drops
+                .iter()
+                .any(|d| d.if_stmt == r);
+        let capacity = elif_count + usize::from(has_else || needs_fallthrough_block);
         let mut next_blocks: Vec<Block> = Vec::with_capacity(capacity);
         for _ in 0..elif_count {
             next_blocks.push(builder.create_block());
         }
-        let else_or_merge = if has_else {
+        let else_or_merge = if has_else || needs_fallthrough_block {
             let eb = builder.create_block();
             next_blocks.push(eb);
             eb
@@ -853,6 +973,7 @@ impl<M: Module> Codegen<M> {
         // poorly with a scope-guard holding `&mut ctx`. We pop on
         // both Ok and Err paths by binding the result first.
         ctx.branch_stack.push(branch_ids.then_branch);
+        Self::emit_conditional_dead_drops(builder, ctx, r, branch_ids.then_branch)?;
         let then_returns_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
         ctx.branch_stack.pop();
         let then_returns = then_returns_result?;
@@ -883,6 +1004,7 @@ impl<M: Module> Codegen<M> {
             builder.switch_to_block(elif_body_block);
             let elif_branch_id = branch_ids.elif_branches.get(i).copied().unwrap_or_default();
             ctx.branch_stack.push(elif_branch_id);
+            Self::emit_conditional_dead_drops(builder, ctx, r, elif_branch_id)?;
             let elif_returns_result = Self::emit_scoped_body(builder, ctx, &elif.body);
             ctx.branch_stack.pop();
             let elif_returns = elif_returns_result?;
@@ -897,6 +1019,7 @@ impl<M: Module> Codegen<M> {
             builder.switch_to_block(else_or_merge);
             let else_branch_id = branch_ids.else_branch.unwrap_or_default();
             ctx.branch_stack.push(else_branch_id);
+            Self::emit_conditional_dead_drops(builder, ctx, r, else_branch_id)?;
             let else_returns_result = Self::emit_scoped_body(builder, ctx, else_stmts);
             ctx.branch_stack.pop();
             let else_returns = else_returns_result?;
@@ -904,6 +1027,17 @@ impl<M: Module> Codegen<M> {
                 builder.ins().jump(merge_block, &[]);
             }
             all_branches_return = all_branches_return && else_returns;
+        } else if needs_fallthrough_block {
+            // The synthetic fall-through — emit the arm-gated
+            // DeadDrops for the paths where no arm reseated the binding.
+            builder.seal_block(else_or_merge);
+            builder.switch_to_block(else_or_merge);
+            let fallthrough_id = branch_ids.else_branch.unwrap_or_default();
+            ctx.branch_stack.push(fallthrough_id);
+            Self::emit_conditional_dead_drops(builder, ctx, r, fallthrough_id)?;
+            ctx.branch_stack.pop();
+            builder.ins().jump(merge_block, &[]);
+            all_branches_return = false;
         } else {
             all_branches_return = false;
         }
@@ -1411,6 +1545,14 @@ impl<M: Module> Codegen<M> {
     /// (borrowed-scalar ABI, never heap-owned) returns an error and aborts
     /// code generation — the ABI registry is supposed to keep such args out
     /// of `temp_owners`. See I-057/I-059.
+    ///
+    /// When the target is a named binding's initializer/value (or a str
+    /// param's virtual ref), the Free is emitted from the binding's
+    /// CURRENT `StrLocals` instead of the producing inst's cached repr:
+    /// after a reassign, a branch merge, or an `inout` write-back the
+    /// cached triple may be stale (freed/replaced), while the binding's
+    /// `Variable`s are SSA-correct at every program point (the
+    /// same reasoning the `free_on_reassign` path documents).
     fn emit_frees(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1421,13 +1563,23 @@ impl<M: Module> Codegen<M> {
         }
         let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
         for (idx, target) in pending {
+            ctx.freed_at.insert(idx);
+            let binding = ctx
+                .free_binding_names
+                .get(&target)
+                .and_then(|name| ctx.str_locals.get(name).cloned());
+            if let Some(sl) = binding {
+                let ptr = builder.use_var(sl.ptr);
+                let cap = builder.use_var(sl.cap);
+                builder.ins().call(free_ref, &[ptr, cap]);
+                continue;
+            }
             let repr = ctx.inst_values.get(&target).copied().ok_or_else(|| {
                 format!(
                     "ownership pass scheduled Free for %{} but no ValueRepr cached",
                     target.index()
                 )
             })?;
-            ctx.freed_at.insert(idx);
             match repr {
                 ValueRepr::Str { ptr, cap, .. } => {
                     builder.ins().call(free_ref, &[ptr, cap]);
@@ -1442,6 +1594,79 @@ impl<M: Module> Codegen<M> {
         }
         ctx.pending_sweep.retain(|idx| !ctx.freed_at.contains(idx));
         Ok(())
+    }
+
+    /// Emit conditional DeadDrops for (`if_stmt`, `arm`): frees of
+    /// the pre-if buffer of a conditionally-reassigned binding on the
+    /// paths where the reassign did NOT happen. Fired at the START of an
+    /// untouched arm, where the binding's `StrLocals` still hold the
+    /// pre-if value. Resolves `target` through `free_binding_names` (the
+    /// init→name map), so the freed buffer is the binding's
+    /// current triple at that program point.
+    fn emit_conditional_dead_drops(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        if_stmt: TirRef,
+        arm: ryo_core::ownership::BranchId,
+    ) -> Result<(), String> {
+        for drop in ctx.sidecar.conditional_dead_drops.iter() {
+            if drop.if_stmt != if_stmt || !drop.arms.contains(&arm) {
+                continue;
+            }
+            let Some(name) = ctx.free_binding_names.get(&drop.target).copied() else {
+                continue;
+            };
+            let Some(sl) = ctx.str_locals.get(&name).cloned() else {
+                continue;
+            };
+            let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
+            let ptr = builder.use_var(sl.ptr);
+            let cap = builder.use_var(sl.cap);
+            builder.ins().call(free_ref, &[ptr, cap]);
+        }
+        Ok(())
+    }
+
+    /// Map every str-producing named initializer to its binding: VarDecl
+    /// initializers, Assign values, and str params' virtual refs. Built
+    /// once per function; `emit_frees` consults it to free a binding's
+    /// current `StrLocals` rather than a stale cached repr.
+    fn build_free_binding_names(tir: &Tir, pool: &InternPool) -> HashMap<TirRef, StringId> {
+        fn walk(tir: &Tir, stmts: &[TirRef], map: &mut HashMap<TirRef, StringId>) {
+            for &r in stmts {
+                match tir.inst(r).tag {
+                    TirTag::VarDecl => {
+                        let view = tir.var_decl_view(r);
+                        map.insert(view.initializer, view.name);
+                    }
+                    TirTag::Assign => {
+                        let view = tir.assign_view(r);
+                        map.insert(view.value, view.name);
+                    }
+                    TirTag::IfStmt => {
+                        let view = tir.if_stmt_view(r);
+                        walk(tir, &view.then_stmts, map);
+                        for elif in &view.elif_branches {
+                            walk(tir, &elif.body, map);
+                        }
+                        if let Some(else_stmts) = &view.else_stmts {
+                            walk(tir, else_stmts, map);
+                        }
+                    }
+                    TirTag::WhileLoop => walk(tir, &tir.while_loop_view(r).body, map),
+                    TirTag::ForRange => walk(tir, &tir.for_range_view(r).body, map),
+                    _ => {}
+                }
+            }
+        }
+        let mut map = HashMap::new();
+        for (idx, param) in tir.params.iter().enumerate() {
+            if is_str_type(param.ty, pool) {
+                map.insert(TirRef::param(idx), param.name);
+            }
+        }
+        walk(tir, &tir.body_stmts(), &mut map);
+        map
     }
 
     /// Declare `extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64)` for
@@ -1728,15 +1953,104 @@ impl<M: Module> Codegen<M> {
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
+        if name_str == "str_push" {
+            // str_push(&s, suffix): spill s's fat pointer to a 24-byte
+            // slot, call __ryo_str_push(slot_addr, suffix_ptr, suffix_len),
+            // then reload the mutated triple back into s's StrLocals.
+            // arg 0 is `&s` (lowered to Var(s)); arg 1 is the suffix str.
+            let s_ref = view.args[0];
+            let suffix_ref = view.args[1];
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                24,
+                3,
+            ));
+            let s_addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            let s_repr = Self::eval_inst_str(builder, ctx, s_ref)?;
+            let ValueRepr::Str { ptr, len, cap } = s_repr else {
+                unreachable!("str_push target must be a str");
+            };
+            builder.ins().store(MemFlags::trusted(), ptr, s_addr, 0);
+            builder.ins().store(MemFlags::trusted(), len, s_addr, 8);
+            builder.ins().store(MemFlags::trusted(), cap, s_addr, 16);
+            let suf = Self::eval_inst_str(builder, ctx, suffix_ref)?;
+            let (suf_ptr, suf_len) = match suf {
+                ValueRepr::Str { ptr, len, .. } => (ptr, len),
+                _ => unreachable!("str_push suffix must be a str"),
+            };
+            let func_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                "__ryo_str_push",
+                &[ctx.int_type, ctx.int_type, types::I64],
+                &[],
+            )?;
+            builder.ins().call(func_ref, &[s_addr, suf_ptr, suf_len]);
+            // Reload the mutated fat pointer back into the caller's StrLocals.
+            let np = builder
+                .ins()
+                .load(ctx.int_type, MemFlags::trusted(), s_addr, 0);
+            let nl = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), s_addr, 8);
+            let nc = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), s_addr, 16);
+            if let Some(name) = Self::local_name_of(ctx, s_ref)
+                && let Some(sl) = ctx.str_locals.get(&name).cloned()
+            {
+                builder.def_var(sl.ptr, np);
+                builder.def_var(sl.len, nl);
+                builder.def_var(sl.cap, nc);
+            }
+            return Ok(builder.ins().iconst(ctx.int_type, 0));
+        }
+
         let callee_id = *ctx
             .func_ids
             .get(&name_id)
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
         let mut arg_values = Vec::with_capacity(view.args.len() * 3 + 1);
-        for arg in &view.args {
+        // inout args: spill the current value to a stack slot, pass the
+        // slot address, then reload after the call. Scalar spills one
+        // field; str spills the fat-pointer triple.
+        let mut inout_reloads: Vec<(TirRef, StackSlot)> = Vec::new();
+        for (i, arg) in view.args.iter().enumerate() {
+            let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
             let arg_ty = ctx.tir.inst(*arg).ty;
-            if is_str_type(arg_ty, ctx.pool) {
+            if mode == ParamMode::Inout {
+                if is_str_type(arg_ty, ctx.pool) {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        24,
+                        3,
+                    ));
+                    let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                    let repr = Self::eval_inst_str(builder, ctx, *arg)?;
+                    let ValueRepr::Str { ptr, len, cap } = repr else {
+                        unreachable!("inout str arg must produce ValueRepr::Str");
+                    };
+                    builder.ins().store(MemFlags::trusted(), ptr, addr, 0);
+                    builder.ins().store(MemFlags::trusted(), len, addr, 8);
+                    builder.ins().store(MemFlags::trusted(), cap, addr, 16);
+                    arg_values.push(addr);
+                    inout_reloads.push((*arg, slot));
+                } else {
+                    let cl_ty = cranelift_type_for(arg_ty, ctx.pool, ctx.int_type);
+                    let bytes = cl_ty.bytes().max(8);
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        bytes,
+                        3,
+                    ));
+                    let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                    let cur = Self::eval_inst(builder, ctx, *arg)?;
+                    builder.ins().store(MemFlags::trusted(), cur, addr, 0);
+                    arg_values.push(addr);
+                    inout_reloads.push((*arg, slot));
+                }
+            } else if is_str_type(arg_ty, ctx.pool) {
                 let repr = Self::eval_inst_str(builder, ctx, *arg)?;
                 match repr {
                     ValueRepr::Str { ptr, len, cap } => {
@@ -1781,6 +2095,7 @@ impl<M: Module> Codegen<M> {
             all_args.extend(arg_values);
 
             builder.ins().call(callee_ref, &all_args);
+            Self::reload_inout_args(builder, ctx, &inout_reloads)?;
 
             let ptr = builder
                 .ins()
@@ -1792,12 +2107,70 @@ impl<M: Module> Codegen<M> {
         }
 
         let call = builder.ins().call(callee_ref, &arg_values);
+        Self::reload_inout_args(builder, ctx, &inout_reloads)?;
         let results = builder.inst_results(call);
 
         if results.is_empty() {
             Ok(builder.ins().iconst(ctx.int_type, 0))
         } else {
             Ok(results[0])
+        }
+    }
+
+    /// Reload each inout slot after a call and write the updated value
+    /// back into the caller's local. The inout arg was sema-lowered to
+    /// its inner `Var(name)` ref, so `*arg_ref` is that `Var` inst —
+    /// read its binding name to find the local. Scalar args reload one
+    /// field into `locals`; str args reload the fat-pointer triple into
+    /// `str_locals`.
+    fn reload_inout_args(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        reloads: &[(TirRef, StackSlot)],
+    ) -> Result<(), String> {
+        for (arg_ref, slot) in reloads {
+            let addr = builder.ins().stack_addr(ctx.int_type, *slot, 0);
+            let arg_ty = ctx.tir.inst(*arg_ref).ty;
+            if is_str_type(arg_ty, ctx.pool) {
+                let np = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlags::trusted(), addr, 0);
+                let nl = builder.ins().load(types::I64, MemFlags::trusted(), addr, 8);
+                let nc = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), addr, 16);
+                if let Some(name) = Self::local_name_of(ctx, *arg_ref)
+                    && let Some(sl) = ctx.str_locals.get(&name).cloned()
+                {
+                    builder.def_var(sl.ptr, np);
+                    builder.def_var(sl.len, nl);
+                    builder.def_var(sl.cap, nc);
+                }
+            } else {
+                let cl_ty = cranelift_type_for(arg_ty, ctx.pool, ctx.int_type);
+                let updated = builder.ins().load(cl_ty, MemFlags::trusted(), addr, 0);
+                if let Some(name) = Self::local_name_of(ctx, *arg_ref)
+                    && let Some(var) = ctx.locals.get(&name).copied()
+                {
+                    builder.def_var(var, updated);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the binding name when `r` is a `TirTag::Var` inst, else
+    /// `None`. Used to resolve an inout arg (lowered to its inner
+    /// `Var(name)`) back to the caller local that must receive the
+    /// reloaded value.
+    fn local_name_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
+        let inst = ctx.tir.inst(r);
+        match inst.tag {
+            TirTag::Var => match inst.data {
+                TirData::Var(name) => Some(name),
+                _ => None,
+            },
+            _ => None,
         }
     }
 

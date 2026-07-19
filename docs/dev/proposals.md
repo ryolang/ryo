@@ -67,7 +67,7 @@ result = try some_operation() catch |e|:
 **Basic Trait Bounds**
 ```ryo
 # Future syntax for trait bounds
-fn sort[T](list: inout list[T])
+fn sort[T](inout list: list[T])
 where T: Comparable:
 	# Implementation using T's comparison capabilities
 
@@ -355,10 +355,10 @@ Currently, Ryo has basic f-strings. Enhanced formatting capabilities are planned
 ```ryo
 # Future formatting trait system
 trait Display:
-	fn fmt(&self, formatter: inout Formatter) -> FormatError!void
+	fn fmt(&self, inout formatter: Formatter) -> FormatError!void
 
 trait Debug:
-	fn fmt(&self, formatter: inout Formatter) -> FormatError!void
+	fn fmt(&self, inout formatter: Formatter) -> FormatError!void
 
 # Automatic implementations possible with attributes
 #[derive(Debug)]
@@ -367,7 +367,7 @@ struct Point:
 	y: float
 
 impl Display for Point:
-	fn fmt(&self, formatter: inout Formatter) -> FormatError!void:
+	fn fmt(&self, inout formatter: Formatter) -> FormatError!void:
 		formatter.write(f"({self.x}, {self.y})")
 ```
 
@@ -404,7 +404,7 @@ struct Currency:
 	symbol: str
 
 impl Display for Currency:
-	fn fmt(&self, formatter: inout Formatter) -> FormatError!void:
+	fn fmt(&self, inout formatter: Formatter) -> FormatError!void:
 		formatter.write(f"{self.symbol}{self.amount:.2}")
 
 price = Currency(amount=123.456, symbol="$")
