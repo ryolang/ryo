@@ -340,7 +340,6 @@ impl<'a> Sema<'a> {
     /// diagnostic when a cycle is detected. The caller should fall
     /// back to the error type for whatever it was trying to
     /// compute.
-    #[allow(dead_code)]
     fn require_decl(&mut self, callee: DeclId, span: Span, name: StringId) -> bool {
         match self.decl_state[callee.index()] {
             DeclState::Unresolved | DeclState::Resolved => true,

@@ -285,24 +285,6 @@ impl Ident {
     pub fn new(name: StringId, span: SimpleSpan) -> Self {
         Ident { name, span }
     }
-
-    /// Display adapter that resolves `name` through `pool`.
-    #[allow(dead_code)]
-    pub fn display<'a>(&'a self, pool: &'a InternPool) -> impl fmt::Display + 'a {
-        struct D<'a> {
-            pool: &'a InternPool,
-            id: StringId,
-        }
-        impl fmt::Display for D<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.pool.str(self.id))
-            }
-        }
-        D {
-            pool,
-            id: self.name,
-        }
-    }
 }
 
 /// A type expression. Currently just a name like `int`, `bool`, etc.

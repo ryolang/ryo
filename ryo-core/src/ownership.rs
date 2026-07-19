@@ -12,7 +12,6 @@ pub struct BranchId(pub u32);
 /// the instruction at `after`, gated by `branch` (None =
 /// unconditional, Some = only inside that arm or a descendant).
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // fields read by Task 7+ Free emission
 pub struct FreePoint {
     pub after: TirRef,
     pub target: TirRef,
@@ -25,7 +24,6 @@ pub struct FreePoint {
 /// as it lowers each arm, so a branch-gated `FreePoint` only fires
 /// inside the arm that ended with the owner still `Valid`.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // fields read by codegen's branch_stack
 pub struct IfBranchIds {
     pub then_branch: BranchId,
     pub elif_branches: Vec<BranchId>,
@@ -41,7 +39,6 @@ pub struct IfBranchIds {
 /// `target` is the pre-branch owner's `TirRef`, resolved to the
 /// binding's current `StrLocals` via `free_binding_names`.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // fields read by Task 7+ Free emission
 pub struct ConditionalDeadDrop {
     pub if_stmt: TirRef,
     pub target: TirRef,
@@ -62,7 +59,6 @@ pub struct ConditionalDeadDrop {
 /// codegen looks up the entry for the current function before
 /// consulting any of the per-function maps.
 #[derive(Default, Debug, Clone)]
-#[allow(dead_code)] // fields read by Task 7+ Free emission
 pub struct OwnershipSidecar {
     pub functions: HashMap<StringId, FunctionSidecar>,
 }
@@ -72,7 +68,6 @@ pub struct OwnershipSidecar {
 /// `analyze_function` and inserted into the parent
 /// [`OwnershipSidecar`] under the function's name.
 #[derive(Default, Debug, Clone)]
-#[allow(dead_code)] // fields read by Task 7+ Free emission
 pub struct FunctionSidecar {
     /// Frees anchored after specific instructions.
     pub free_schedule: Vec<FreePoint>,
