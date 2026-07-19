@@ -19,3 +19,4 @@ dirs = { workspace = true }
 
 [build-dependencies]
 sha2 = { workspace = true }
+build-support = { path = "../build-support" }
