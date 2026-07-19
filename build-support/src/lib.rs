@@ -5,10 +5,14 @@
 use std::path::{Path, PathBuf};
 
 /// Resolve the `ryo-runtime` static archive for the current cargo
-/// profile, building it on demand, and return its path as a `String`.
+/// profile and target triple, building it on demand, and return its
+/// path as a `String`.
 ///
-/// - Profile: `release` for release/production/prod profiles or any
-///   non-zero `OPT_LEVEL`, else `debug`.
+/// - Profile: Cargo's build-script `PROFILE` contract (`debug` or
+///   `release`); `release` builds pass `--release`.
+/// - Target: Cargo's build-script `TARGET` triple, forwarded as
+///   `--target` so cross-compilation produces an archive for the outer
+///   target, not the host.
 /// - Target dir: `$CARGO_TARGET_DIR/runtime-build` when
 ///   `CARGO_TARGET_DIR` is set, else `<root_dir>/target/runtime-build`.
 ///   A separate target directory avoids cargo lock deadlocks when this
@@ -19,15 +23,8 @@ use std::path::{Path, PathBuf};
 ///
 /// Panics when the build fails or the resolved path is not UTF-8.
 pub fn ensure_runtime_archive(root_dir: &Path) -> String {
-    let raw_profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    let profile = match raw_profile.as_str() {
-        "release" | "production" | "prod" => "release",
-        "debug" | "dev" => "debug",
-        _ => {
-            let opt_level = std::env::var("OPT_LEVEL").unwrap_or_else(|_| "0".to_string());
-            if opt_level != "0" { "release" } else { "debug" }
-        }
-    };
+    let profile = std::env::var("PROFILE").expect("cargo sets PROFILE for build scripts");
+    let target = std::env::var("TARGET").expect("cargo sets TARGET for build scripts");
     let custom_target_dir = std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| root_dir.join("target"))
@@ -37,6 +34,8 @@ pub fn ensure_runtime_archive(root_dir: &Path) -> String {
     cmd.arg("build")
         .arg("-p")
         .arg("ryo-runtime")
+        .arg("--target")
+        .arg(&target)
         .arg("--target-dir")
         .arg(&custom_target_dir);
     if profile == "release" {
@@ -48,7 +47,12 @@ pub fn ensure_runtime_archive(root_dir: &Path) -> String {
     if !status.success() {
         panic!("`cargo build -p ryo-runtime` failed with {status}");
     }
-    let path = custom_target_dir.join(profile).join("libryo_runtime.a");
+    // With an explicit `--target`, cargo namespaces the output under the
+    // triple: <target-dir>/<triple>/<profile>/.
+    let path = custom_target_dir
+        .join(&target)
+        .join(&profile)
+        .join("libryo_runtime.a");
     if !path.exists() {
         panic!(
             "libryo_runtime.a still missing at {} after build attempt",
