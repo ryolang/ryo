@@ -413,6 +413,12 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** The compiler parses the prefix form `fn f(inout x: int)`; the specification, the M8.3 design doc's user-facing examples, and the docs gotcha note all document the postfix form `x: inout int` / `data: inout Type`. The design doc is internally inconsistent (prose postfix, parser sketch prefix), and the implementation followed the sketch. Per the design-change-escalation rule in the root `CLAUDE.md`, resolving this is a language-design decision, not a coherence fix.
 **Resolution:** Human decision required: either update `specification.md` + companions to the shipped prefix form, or change the parser to the documented postfix form. Until decided, the roadmap entry documents the shipped form.
 
+### I-117 — Conditional dead reassign leaks the pre-branch buffer on the not-taken path
+
+**Files:** `ryo-frontend/src/ownership.rs` (`analyze_assign` `free_on_reassign` ~:687-710, `merge_branches` `pending_dead_store` intersect ~:290-302, dead-store drain ~:556-580)
+**Summary:** `mut s = "a"; if c: s = "b"` with `s` never read after the join leaks the `"a"` buffer whenever the branch does NOT execute. The then-arm's reassign schedules a `free_on_reassign` for the old buffer AND removes its `pending_dead_store` entry; the merge's intersect rule (a pre-branch entry survives only if *every* branch kept it) then drops that entry globally. On the fall-through path the reassignment never happened — the binding still owns `"a"` — but no Free was scheduled anywhere for it. The taken path is correct: `free_on_reassign` drops `"a"`, and the branch-local dead-store drain frees `"b"` (unread). Exposed by a probe during the I-112 fix; pre-existing in M8.1, and the same shape exists through the loop merge (`while` body reassigns, value never read after).
+**Resolution:** Make the drop path-sensitive: schedule a branch-gated Free for the pre-branch owner in each arm that left it untouched (the inverse of the existing Valid-arm conditional Frees for divergent moves at `analyze_if_stmt` ~:1095-1141), or keep its dead-store entry alive gated on the not-reassigned arms. Cover with an ASan/valgrind fixture of the exact shape above (plus the loop variant) in `ryo/tests/common/mod.rs`.
+
 ---
 
 ## 🟢 Cleanup
