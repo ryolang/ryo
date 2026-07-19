@@ -592,15 +592,14 @@ impl<M: Module> Codegen<M> {
             let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
 
             if !has_return {
-                Self::emit_inout_writeback(&mut builder, &mut ctx)?;
                 if is_main {
                     let zero = builder.ins().iconst(int_type, 0);
-                    builder.ins().return_(&[zero]);
+                    Self::emit_return(&mut builder, &mut ctx, &[zero])?;
                 } else if returns_str || tir.return_type == pool.void() {
-                    builder.ins().return_(&[]);
+                    Self::emit_return(&mut builder, &mut ctx, &[])?;
                 } else {
                     let zero = builder.ins().iconst(int_type, 0);
-                    builder.ins().return_(&[zero]);
+                    Self::emit_return(&mut builder, &mut ctx, &[zero])?;
                 }
             }
 
@@ -694,6 +693,20 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
+    /// THE single exit point for user functions: inout write-back, then
+    /// the return. NEVER emit a bare `return_` for a user-function exit —
+    /// a missed write-back silently drops a caller-visible mutation.
+    /// Panic/abort paths are noreturn and intentionally skip this.
+    fn emit_return(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        vals: &[Value],
+    ) -> Result<(), String> {
+        Self::emit_inout_writeback(builder, ctx)?;
+        builder.ins().return_(vals);
+        Ok(())
+    }
+
     /// Emit a top-level statement instruction. Returns `true` iff
     /// the statement was a terminator (Return / ReturnVoid) — the
     /// caller stops the body walk on the first one.
@@ -754,13 +767,11 @@ impl<M: Module> Codegen<M> {
                     builder.ins().store(MemFlags::trusted(), len, sret, 8);
                     builder.ins().store(MemFlags::trusted(), cap, sret, 16);
                     Self::emit_due_frees(builder, ctx, r)?;
-                    Self::emit_inout_writeback(builder, ctx)?;
-                    builder.ins().return_(&[]);
+                    Self::emit_return(builder, ctx, &[])?;
                 } else {
                     let val = Self::eval_inst(builder, ctx, operand)?;
                     Self::emit_due_frees(builder, ctx, r)?;
-                    Self::emit_inout_writeback(builder, ctx)?;
-                    builder.ins().return_(&[val]);
+                    Self::emit_return(builder, ctx, &[val])?;
                 }
                 Ok(true)
             }
@@ -771,12 +782,10 @@ impl<M: Module> Codegen<M> {
                 if is_main {
                     let zero = builder.ins().iconst(ctx.int_type, 0);
                     Self::emit_due_frees(builder, ctx, r)?;
-                    Self::emit_inout_writeback(builder, ctx)?;
-                    builder.ins().return_(&[zero]);
+                    Self::emit_return(builder, ctx, &[zero])?;
                 } else {
                     Self::emit_due_frees(builder, ctx, r)?;
-                    Self::emit_inout_writeback(builder, ctx)?;
-                    builder.ins().return_(&[]);
+                    Self::emit_return(builder, ctx, &[])?;
                 }
                 Ok(true)
             }
