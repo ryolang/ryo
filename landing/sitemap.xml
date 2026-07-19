@@ -10,4 +10,9 @@
       <image:loc>https://ryolang.org/og-image.png</image:loc>
     </image:image>
   </url>
+  <url>
+    <loc>https://ryolang.org/reference/</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
 </urlset>

@@ -1,0 +1,429 @@
+/* ============================================================
+   Ryo Language Reference — layout, prose, and code styling.
+   Loaded AFTER styles.css so it can reuse the landing's design
+   tokens (--syn-*, --bg-*, --text-*, --border-*) and components
+   (.navbar, .footer, .icon-btn, .btn, theme toggle).
+   ============================================================ */
+
+/* ----- Page shell -----
+   styles.css sets `html, body { overflow-x: hidden }`. Per CSS spec, when
+   one axis is `hidden` the other computes `visible`→`auto`, which makes
+   <body> a scroll container and DEFEATS `position: sticky` on the sidebar
+   (it then sticks to body's scrollport and scrolls away). `overflow-x: clip`
+   hides horizontal overflow WITHOUT creating a scroll container, so the
+   sticky sidebar keeps referencing the viewport. Loaded after styles.css,
+   same specificity → this wins.
+*/
+html,
+body {
+	overflow-x: hidden; /* fallback for browsers without `clip` */
+	overflow-x: clip;
+}
+.ref-main {
+	padding-top: 4rem; /* clear the fixed navbar */
+}
+.ref-container {
+	max-width: 80rem;
+	margin: 0 auto;
+	padding: 3rem 1.25rem 5rem;
+	display: grid;
+	grid-template-columns: 15rem minmax(0, 1fr);
+	gap: 3rem;
+	align-items: start;
+}
+@media (min-width: 640px) {
+	.ref-container {
+		padding: 3.5rem 1.5rem 5rem;
+	}
+}
+@media (max-width: 1023px) {
+	.ref-container {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 1.5rem;
+	}
+}
+
+/* ----- Sidebar ----- */
+.ref-sidebar {
+	position: sticky;
+	top: 5rem;
+	align-self: start;
+	max-height: calc(100vh - 6rem);
+	overflow-y: auto;
+	padding-right: 0.5rem;
+	font-size: 0.875rem;
+}
+@media (max-width: 1023px) {
+	.ref-sidebar {
+		position: static;
+		max-height: none;
+		overflow: visible;
+		border-bottom: 1px solid var(--border-subtle);
+		padding-bottom: 1rem;
+	}
+}
+.ref-sidebar::-webkit-scrollbar {
+	width: 6px;
+}
+.ref-sidebar::-webkit-scrollbar-thumb {
+	background: var(--border-subtle);
+	border-radius: 9999px;
+}
+.ref-nav-group {
+	margin-bottom: 1.25rem;
+}
+.ref-nav-title {
+	text-transform: uppercase;
+	letter-spacing: 0.1em;
+	font-size: 0.7rem;
+	font-weight: 700;
+	color: var(--text-muted);
+	margin: 0 0 0.5rem;
+}
+.ref-nav-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 0.05rem;
+	border-left: 1px solid var(--border-subtle);
+}
+.ref-nav-list a {
+	display: block;
+	padding: 0.3rem 0.75rem;
+	color: var(--text-muted);
+	border-left: 2px solid transparent;
+	margin-left: -1px;
+	transition:
+		color 0.15s,
+		border-color 0.15s,
+		background 0.15s;
+	border-radius: 0 0.25rem 0.25rem 0;
+	line-height: 1.4;
+}
+.ref-nav-list a:hover {
+	color: var(--text-base);
+	background: color-mix(in srgb, var(--color-primary-500) 6%, transparent);
+}
+.ref-nav-list a.is-active {
+	color: var(--text-base);
+	font-weight: 600;
+	border-left-color: var(--color-primary-500);
+}
+
+/* ----- Mobile sidebar toggle ----- */
+.ref-nav-toggle {
+	display: none;
+	width: 100%;
+	text-align: left;
+	padding: 0.75rem 1rem;
+	background: var(--bg-elevated);
+	border: 1px solid var(--border-subtle);
+	border-radius: 0.5rem;
+	font-weight: 600;
+	font-size: 0.9rem;
+	color: var(--text-base);
+	margin-bottom: 1rem;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.5rem;
+}
+.ref-nav-toggle svg {
+	width: 1rem;
+	height: 1rem;
+	transition: transform 0.2s;
+}
+@media (max-width: 1023px) {
+	.ref-nav-toggle {
+		display: flex;
+	}
+	.ref-sidebar-inner {
+		display: none;
+	}
+	.ref-sidebar.open .ref-sidebar-inner {
+		display: block;
+	}
+	.ref-sidebar.open .ref-nav-toggle svg {
+		transform: rotate(180deg);
+	}
+}
+
+/* ----- Intro header ----- */
+.ref-intro {
+	margin-bottom: 2.5rem;
+}
+.ref-eyebrow {
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	letter-spacing: 0.08em;
+	color: var(--color-primary-600);
+	font-weight: 600;
+}
+.dark .ref-eyebrow {
+	color: var(--color-primary-400);
+}
+.ref-intro h1 {
+	font-family: var(--font-display);
+	font-size: clamp(2rem, 4vw, 2.75rem);
+	font-weight: 700;
+	letter-spacing: -0.025em;
+	margin: 0.5rem 0 1rem;
+	color: var(--text-base);
+}
+.ref-intro p {
+	font-size: 1.0625rem;
+	line-height: 1.6;
+	color: var(--text-muted);
+	max-width: 48rem;
+	margin: 0;
+}
+
+/* ----- Prose ----- */
+.ref-content {
+	min-width: 0;
+	max-width: 52rem;
+}
+.ref-content section {
+	scroll-margin-top: 5rem;
+}
+.ref-content h2 {
+	font-family: var(--font-display);
+	font-size: 1.6rem;
+	font-weight: 700;
+	letter-spacing: -0.02em;
+	margin: 2.75rem 0 0.75rem;
+	padding-bottom: 0.5rem;
+	border-bottom: 1px solid var(--border-subtle);
+	color: var(--text-base);
+}
+.ref-content h2:first-of-type {
+	margin-top: 0;
+}
+.ref-content h2 .anchor {
+	margin-left: 0.5rem;
+	opacity: 0;
+	font-size: 0.9rem;
+	color: var(--text-muted);
+	text-decoration: none;
+	transition: opacity 0.15s;
+}
+.ref-content h2:hover .anchor {
+	opacity: 1;
+}
+.ref-content h3 {
+	font-family: var(--font-display);
+	font-size: 1.15rem;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	margin: 1.75rem 0 0.5rem;
+	color: var(--text-base);
+}
+.ref-content p {
+	font-size: 1rem;
+	line-height: 1.7;
+	color: var(--text-base);
+	margin: 0.75rem 0;
+}
+.ref-content p,
+.ref-content li {
+	scroll-margin-top: 5rem;
+}
+.ref-content a:not(.anchor) {
+	color: var(--color-primary-600);
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	text-decoration-color: color-mix(
+		in srgb,
+		var(--color-primary-500) 40%,
+		transparent
+	);
+}
+.dark .ref-content a:not(.anchor) {
+	color: var(--color-primary-400);
+}
+.ref-content a:not(.anchor):hover {
+	text-decoration-color: currentColor;
+}
+.ref-content ul,
+.ref-content ol {
+	margin: 0.75rem 0;
+	padding-left: 1.4rem;
+}
+.ref-content li {
+	line-height: 1.7;
+	margin: 0.25rem 0;
+}
+.ref-content strong {
+	font-weight: 600;
+	color: var(--text-base);
+}
+
+/* Inline code */
+.ref-content code {
+	font-family: var(--font-mono);
+	font-size: 0.85em;
+	background: color-mix(in srgb, var(--color-primary-500) 10%, transparent);
+	color: var(--text-base);
+	padding: 0.12em 0.4em;
+	border-radius: 0.3rem;
+	border: 1px solid var(--border-subtle);
+}
+
+/* ----- Code blocks ----- */
+.code-block {
+	margin: 1.25rem 0;
+	border: 1px solid var(--border-subtle);
+	border-radius: 0.625rem;
+	background: var(--bg-elevated);
+	overflow: hidden;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.dark .code-block {
+	box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.5);
+}
+.code-block-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 1rem;
+	padding: 0.5rem 0.75rem 0.5rem 1rem;
+	border-bottom: 1px solid var(--border-subtle);
+	background: var(--code-header-bg);
+}
+.code-block-head .filename {
+	font-family: var(--font-mono);
+	font-size: 0.72rem;
+	padding: 0.2rem 0.55rem;
+	border-radius: 0.3rem;
+	background: var(--code-tab-bg);
+	color: var(--text-muted);
+	border: 1px solid var(--border-subtle);
+}
+.code-block pre {
+	margin: 0;
+	padding: 1rem 1.25rem;
+	overflow-x: auto;
+	font-family: var(--font-mono);
+	font-size: 0.85rem;
+	line-height: 1.65;
+	color: var(--text-base);
+	tab-size: 4;
+	-moz-tab-size: 4;
+}
+.code-block pre code {
+	background: none;
+	border: 0;
+	padding: 0;
+	font-size: inherit;
+	color: inherit;
+}
+
+/* ----- Tables ----- */
+.ref-table-wrap {
+	overflow-x: auto;
+	margin: 1.25rem 0;
+	border: 1px solid var(--border-subtle);
+	border-radius: 0.625rem;
+}
+.ref-content table {
+	border-collapse: collapse;
+	width: 100%;
+	font-size: 0.9rem;
+}
+.ref-content thead th {
+	text-align: left;
+	font-weight: 600;
+	font-size: 0.8rem;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--text-muted);
+	background: var(--code-header-bg);
+	padding: 0.6rem 1rem;
+	border-bottom: 1px solid var(--border-subtle);
+	white-space: nowrap;
+}
+.ref-content tbody td {
+	padding: 0.65rem 1rem;
+	border-bottom: 1px solid var(--border-subtle);
+	vertical-align: top;
+	line-height: 1.55;
+}
+.ref-content tbody tr:last-child td {
+	border-bottom: 0;
+}
+.ref-content tbody tr:hover td {
+	background: color-mix(in srgb, var(--color-primary-500) 4%, transparent);
+}
+.ref-content td code,
+.ref-content th code {
+	white-space: nowrap;
+}
+
+/* ----- Callouts ----- */
+.callout {
+	display: flex;
+	gap: 0.75rem;
+	margin: 1.5rem 0;
+	padding: 0.9rem 1rem;
+	border: 1px solid var(--border-subtle);
+	border-left: 3px solid var(--color-primary-500);
+	border-radius: 0.5rem;
+	background: color-mix(in srgb, var(--color-primary-500) 6%, transparent);
+}
+.callout svg {
+	width: 1.15rem;
+	height: 1.15rem;
+	flex-shrink: 0;
+	margin-top: 0.1rem;
+	color: var(--color-primary-600);
+}
+.dark .callout svg {
+	color: var(--color-primary-400);
+}
+.callout-title {
+	font-weight: 700;
+	font-size: 0.85rem;
+	margin: 0 0 0.15rem;
+	color: var(--text-base);
+}
+.callout p {
+	margin: 0;
+	font-size: 0.9rem;
+	line-height: 1.6;
+	color: var(--text-base);
+}
+.callout code {
+	font-size: 0.85em;
+}
+.callout--info {
+	border-left-color: #3b82f6;
+	background: color-mix(in srgb, #3b82f6 7%, transparent);
+}
+.callout--info svg {
+	color: #3b82f6;
+}
+.callout--warn {
+	border-left-color: #f59e0b;
+	background: color-mix(in srgb, #f59e0b 8%, transparent);
+}
+.callout--warn svg {
+	color: #f59e0b;
+}
+
+/* ----- "Planned" pill ----- */
+.pill {
+	display: inline-flex;
+	align-items: center;
+	font-family: var(--font-mono);
+	font-size: 0.7rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	padding: 0.1rem 0.45rem;
+	border-radius: 0.3rem;
+	border: 1px dashed var(--border-subtle);
+	color: var(--text-muted);
+	background: var(--bg-elevated);
+	vertical-align: middle;
+}
