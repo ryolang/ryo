@@ -9,4 +9,4 @@ fn main():
 	y = 2  # Immutable int (type inferred)
 
 	z = sum(x,y)  # Immutable int (type inferred)
-	print(f"z: {z}")
+	print("z: " + int_to_str(z))

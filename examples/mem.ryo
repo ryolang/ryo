@@ -8,17 +8,17 @@ fn read_text(text: str):
 	print(text)
 
 # Mutable borrow — function can mutate but doesn't take ownership
-fn mutate_text(text: inout str):
+fn mutate_text(inout text: str):
 	# text is a mutable borrow (`inout`)
 	# We can modify it during this function's lifetime
-	text = f"{text}, mutated"
+	text = text + ", mutated"
 	print(text)
 
 # Move semantics — function takes ownership
 fn take_text(move text: str):
 	# text is now owned by this function
 	# Original binding cannot be used after this call
-	modified = f"{text}, owned"
+	modified = text + ", owned"
 	print(modified)
 	# text is destroyed when take_text returns
 

@@ -1,6 +1,6 @@
 # Ryo Examples
 
-## Working Examples (Milestone 8b)
+## Working Examples
 
 These compile and run with the current compiler.
 
@@ -14,6 +14,9 @@ These compile and run with the current compiler.
 | [classify.ryo](classify.ryo) | Conditionals, logical operators, `and`/`not` |
 | [booleans.ryo](booleans.ryo) | `bool` type, equality operators |
 | [floats_and_ordering.ryo](floats_and_ordering.ryo) | `float` type, comparison, integer division |
+| [simple.ryo](simple.ryo) | Type inference, `int_to_str` |
+| [hello_world_str.ryo](hello_world_str.ryo) | `str` parameters, string concatenation |
+| [mem.ryo](mem.ryo) | Ownership: implicit borrow, `inout` + `&`, `move` |
 
 ### Running
 
