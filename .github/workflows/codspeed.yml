@@ -77,7 +77,6 @@ jobs:
         uses: CodSpeedHQ/action@v4
         with:
           mode: walltime
-          run: codspeed run
 
   aot-benchmarks-memory:
     name: Run AOT Memory Benchmarks
@@ -106,4 +105,3 @@ jobs:
         uses: CodSpeedHQ/action@v4
         with:
           mode: memory
-          run: codspeed run
