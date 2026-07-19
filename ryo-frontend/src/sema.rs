@@ -2096,6 +2096,57 @@ mod tests {
     }
 
     #[test]
+    fn borrow_of_borrowed_param_rejected() {
+        // Review coverage: `&` on a plain (borrowed) param — immutable.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn f(s: str):\n\tstr_push(&s, \"x\")\nfn main():\n\tf(\"hi\")\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& of a borrowed param must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_of_move_param_rejected() {
+        // Review coverage: `&` on a `move` param — immutable binding.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn f(move s: str):\n\tstr_push(&s, \"x\")\nfn main():\n\tf(\"hi\")\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& of a move param must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_of_for_loop_var_rejected() {
+        // Review coverage: `&` on a for-loop variable — immutable,
+        // block-scoped.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn inc(inout x: int):\n\tx += 1\nfn main():\n\tfor i in range(0, 3):\n\t\tinc(&i)\n",
+        );
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& of a for-loop variable must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn str_push_immutable_first_arg_rejected() {
+        // Review coverage: str_push replays the lvalue check (builtins
+        // bypass check_call) — `&s` with a non-`mut` s must be E0033.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts = \"hi\"\n\tstr_push(&s, \"x\")\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "str_push(&immutable, ..) must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
     fn fills_types_on_flat_integer_var() {
         let (tirs, pool) = run("x = 42").unwrap();
         let main = tir_named(&tirs, &pool, "main");

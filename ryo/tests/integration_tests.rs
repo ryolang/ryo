@@ -2241,6 +2241,70 @@ fn str_push_growth_beyond_capacity() {
 }
 
 #[test]
+fn inout_bool_writeback() {
+    // Review coverage gap: `inout bool` — exercises the i8 scalar width
+    // through the write-back ABI.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn set(inout b: bool):\n\tb = true\n\nfn main():\n\tmut b = false\n\tset(&b)\n\tprint(bool_to_str(b))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_bool.ryo", code);
+    let output = run_ryo_command(&["run", "inout_bool.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\ntrue[Result]"),
+        "inout bool write-back should print true, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_int_reborrow_chain() {
+    // Review coverage gap: an inout param is itself a valid `&` target —
+    // `twice` reborrows its own inout param into `inc`, twice.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn inc(inout x: int):\n\tx += 1\n\nfn twice(inout x: int):\n\tinc(&x)\n\tinc(&x)\n\nfn main():\n\tmut c = 0\n\ttwice(&c)\n\tprint(int_to_str(c))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_reborrow.ryo", code);
+    let output = run_ryo_command(&["run", "inout_reborrow.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n2[Result]"),
+        "reborrowed inout chain should print 2, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn inout_fallthrough_return_writes_back() {
+    // Review coverage gap: the multi-return-site test only exercised the
+    // EARLY return. The fallthrough exit must write back too:
+    // bump(&b, false) takes the fallthrough path, so b == 0+1+100 == 101.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn bump(inout x: int, cond: bool):\n\tx += 1\n\tif cond:\n\t\tx += 10\n\t\treturn\n\tx += 100\n\nfn main():\n\tmut b = 0\n\tbump(&b, false)\n\tprint(int_to_str(b))\n";
+    let test_file = create_test_file(temp_dir.path(), "inout_fallthrough.ryo", code);
+    let output = run_ryo_command(&["run", "inout_fallthrough.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[Codegen]\n101[Result]"),
+        "fallthrough-return write-back should print 101, got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn str_reassign_inside_if_no_false_dead_store() {
     // I-112 follow-up (pre-existing M8.1 bug): a str reassignment inside
     // a branch, read after the join, must not warn W0001 and must free
