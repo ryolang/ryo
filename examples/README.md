@@ -7,16 +7,16 @@ These compile and run with the current compiler.
 | File | Features |
 |------|----------|
 | [hello.ryo](hello.ryo) | `print()` |
-| [multiline.ryo](multiline.ryo) | Multiple statements |
+| [multiple_statements.ryo](multiple_statements.ryo) | Multiple statements |
 | [calculator.ryo](calculator.ryo) | Arithmetic, operator precedence |
 | [square.ryo](square.ryo) | Function definition, return types |
 | [fizzbuzz.ryo](fizzbuzz.ryo) | `if`/`elif`/`else`, modulo |
 | [classify.ryo](classify.ryo) | Conditionals, logical operators, `and`/`not` |
 | [booleans.ryo](booleans.ryo) | `bool` type, equality operators |
 | [floats_and_ordering.ryo](floats_and_ordering.ryo) | `float` type, comparison, integer division |
-| [simple.ryo](simple.ryo) | Type inference, `int_to_str` |
+| [type_inference.ryo](type_inference.ryo) | Type inference, `int_to_str` |
 | [hello_world_str.ryo](hello_world_str.ryo) | `str` parameters, string concatenation |
-| [mem.ryo](mem.ryo) | Ownership: implicit borrow, `inout` + `&`, `move` |
+| [ownership.ryo](ownership.ryo) | Ownership: implicit borrow, `inout` + `&`, `move` |
 
 ### Running
 
