@@ -112,7 +112,7 @@ Companion to [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](moj
 |---|---|---|---|---|
 | **Use after move** | `error[E0382]` (borrowck) | `CheckLifetime` pass | Compile error (`consuming` use) | `DiagCode::UseAfterMove` (ownership.rs) |
 | **Borrow outlives owner** | `error[E0597]` | Origin error | N/A (refcount holds) | Forbidden by construction (Rules 5/6) |
-| **Conflicting borrows** | `error[E0502]` | Conflict error | Exclusivity violation | `DiagCode::AliasingViolation` (M8.3) |
+| **Conflicting borrows** | `error[E0502]` | Conflict error | Exclusivity violation | `DiagCode::MutableAliasingViolation` (E0032, M8.3) |
 | **Cycle leaks** | Silent (runtime memory growth) | Silent | Silent | Silent (documented) |
 | **Forgotten retain/release** | N/A (manual `clone`) | N/A (compiler manages) | N/A (compiler manages) | N/A (compiler manages) |
 | **Lifetime annotation needed** | `error[E0106]` "missing lifetime" | Never (inferred) | Never (no lifetimes) | Never (no lifetimes) |
