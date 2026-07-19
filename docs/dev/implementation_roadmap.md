@@ -2818,6 +2818,37 @@ msg = "Hello, " + name + "! Score: " + float_to_str(score)
 **Dependencies:** v0.2 traits (for `Display`), v0.1 strings (M15)
 **Timeline:** v0.2
 
+### T-strings & Template Literals
+
+**Goal:** Deferred-evaluation template literals: `t"Hello, {name}!"` evaluates to a `Template` value exposing literal parts and interpolation sites — safe structured parsing for SQL, logging, and DSLs, where `f""` interpolates eagerly to `str`
+
+**Why Post-v0.1.0:**
+
+- Builds directly on the f-string interpolation parser (shared machinery) — shipping it after f-strings keeps the parser single-sourced
+- The `Template` type needs user-defined types (M9) and methods (M17) for its API, and `Display` reification to `str` needs v0.2 traits
+
+**Features:**
+
+- `t"..."` literal prefix produces a `Template` value, not a `str`
+- Access to literal parts and interpolated values for consumer-side structured parsing (the consumer — not the compiler — decides how values are escaped and rendered)
+- Compile-time parsed like f-strings: invalid expressions produce errors at the interpolation site
+
+**Example:**
+
+```ryo
+# v0.2
+name = "Alice"
+tmpl = t"Hello, {name}!"
+for part in tmpl.parts:
+	print(part)              # "Hello, " / interpolation site 0
+print(tmpl.values[0])      # "Alice"
+render(tmpl)               # consumer renders/escapes as it sees fit
+```
+
+**Effort:** ~1 week (reuses the f-string parser)
+**Dependencies:** F-strings & String Interpolation, M9 structs, M17 methods, v0.2 traits
+**Timeline:** v0.2, after F-strings
+
 ### Stack Traces & Compiler Diagnostics Polish
 
 **Goal:** Multi-frame DWARF stack traces on panic, plus "did you mean?" suggestions in compiler errors
