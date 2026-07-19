@@ -28,10 +28,6 @@ fn main() {
     // packagers). Otherwise build it on demand using the current cargo profile
     // in a separate target directory to avoid cargo lock deadlocks.
     let runtime_path = env::var("RYO_RUNTIME_LIB").unwrap_or_else(|_| {
-        let target_dir =
-            env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
-                root_dir.join("target").to_string_lossy().to_string()
-            });
         let raw_profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
         let profile = match raw_profile.as_str() {
             "release" | "production" | "prod" => "release",
@@ -41,29 +37,28 @@ fn main() {
                 if opt_level != "0" { "release" } else { "debug" }
             }
         };
-        let mut path = PathBuf::from(&target_dir)
-            .join(profile)
-            .join("libryo_runtime.a");
-        if !path.exists() {
-            // Build the runtime archive in-process in a separate target directory to avoid deadlocks.
-            let custom_target_dir = root_dir.join("target/runtime-build");
-            let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-            let mut cmd = std::process::Command::new(&cargo);
-            cmd.arg("build")
-                .arg("-p")
-                .arg("ryo-runtime")
-                .arg("--target-dir")
-                .arg(&custom_target_dir);
-            if profile == "release" {
-                cmd.arg("--release");
-            }
-            let status = cmd
-                .status()
-                .unwrap_or_else(|e| panic!("failed to spawn `cargo build -p ryo-runtime`: {e}"));
-            if status.success() {
-                path = custom_target_dir.join(profile).join("libryo_runtime.a");
-            }
+        // Always rebuild via cargo: its own change detection no-ops when
+        // fresh, so the archive can never go stale the way the old
+        // `if !path.exists()` guard allowed (I-113). A separate target
+        // directory avoids cargo lock deadlocks.
+        let custom_target_dir = root_dir.join("target/runtime-build");
+        let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let mut cmd = std::process::Command::new(&cargo);
+        cmd.arg("build")
+            .arg("-p")
+            .arg("ryo-runtime")
+            .arg("--target-dir")
+            .arg(&custom_target_dir);
+        if profile == "release" {
+            cmd.arg("--release");
         }
+        let status = cmd
+            .status()
+            .unwrap_or_else(|e| panic!("failed to spawn `cargo build -p ryo-runtime`: {e}"));
+        if !status.success() {
+            panic!("`cargo build -p ryo-runtime` failed with {status}");
+        }
+        let path = custom_target_dir.join(profile).join("libryo_runtime.a");
         if !path.exists() {
             panic!(
                 "libryo_runtime.a still missing at {} after build attempt",

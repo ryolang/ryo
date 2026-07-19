@@ -395,12 +395,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
 **Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
 
-### I-113 — Runtime static archive is never rebuilt once present (stale-symbol AOT link failures)
-
-**Files:** `ryo/build.rs` (:47-51), `ryo-backend/build.rs` (:38-42)
-**Summary:** Both build scripts compile the `ryo-runtime` staticlib only `if !path.exists()`. Any checkout that already has `target/runtime-build/**/libryo_runtime.a` keeps it forever: after M8.3 added `__ryo_str_push`, the pre-existing release archive (built days earlier) lacked the symbol and `ryo build` failed at link with `undefined symbol: ___ryo_str_push`. Verified locally; fixed by a manual `cargo build -p ryo-runtime --release --target-dir target/runtime-build`. Clean checkouts are unaffected, which is why CI didn't see it.
-**Resolution:** Rebuild on source change, not just absence: stamp the archive with a hash/mtime of `runtime/src` and rebuild when stale, or invoke the cargo build unconditionally and let cargo's own change detection no-op.
-
 ### I-114 — `&` is accepted outside call-argument position as a silent no-op
 
 **Files:** `ryo-frontend/src/sema.rs` (`Borrow` arm :1060-1066, `check_call` agreement :1420-1461), `ryo-frontend/src/parser.rs` (:418-424)
