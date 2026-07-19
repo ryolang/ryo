@@ -23,9 +23,9 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
   - [x] [Milestone 8a — Void Type & `main()` Signature [alpha]](#milestone-8a-void-type--main-signature-alpha)
   - [x] [Milestone 8b — Conditionals & Logical Operators [alpha] ✅ COMPLETE](#milestone-8b-conditionals--logical-operators-alpha--complete)
   - [x] [Milestone 8c — Loops & Loop Control [alpha] ✅ COMPLETE](#milestone-8c-loops--loop-control-alpha--complete)
-- [x] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type-and-move-semantics-alpha) ✅
-- [x] [Milestone 8.2 — Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE](#milestone-82-implicit-borrow-liveness--ownership-pass-refactors-alpha)
-- [x] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha] ✅ COMPLETE](#milestone-83-mutable-borrows-inout-alpha)
+- [x] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha--complete) ✅
+- [x] [Milestone 8.2 — Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE](#milestone-82-implicit-borrow-liveness--ownership-pass-refactors-alpha--complete)
+- [x] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha] ✅ COMPLETE](#milestone-83-mutable-borrows-inout-alpha--complete)
 - [ ] [Milestone 8.4 — String Slices (`&str`) [alpha]](#milestone-84-string-slices-str-alpha)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)

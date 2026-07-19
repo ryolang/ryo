@@ -140,9 +140,6 @@ pub unsafe extern "C" fn ryo_str_concat(
     }
 }
 
-/// # Safety
-/// `a_ptr` must point to `a_len` readable bytes (or be null/dangling if a_len==0).
-/// Same for `b_ptr`/`b_len`.
 /// Append `suffix` to the str fat-pointer at `s_ptr`, reallocating if the
 /// existing capacity cannot hold the result, and write the new
 /// (ptr, len, cap) back through `s_ptr`. This is the runtime backing for
