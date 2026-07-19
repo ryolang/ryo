@@ -1536,6 +1536,35 @@ fn emit_builtin_call(
     // Builtins never take ownership of their arguments — every arg
     // is borrowed regardless of declared type.
     let modes = vec![ParamMode::Borrow; arg_tirs.len()];
+    // --- M8.3: `&`/`inout` agreement for builtin calls (builtins
+    // bypass `check_call`, so the check is replayed here). `&` is only
+    // valid on an `inout` parameter — today only str_push's first
+    // argument — everywhere else it is rejected, exactly like
+    // user-function calls. str_push's own arm additionally validates
+    // the mutable lvalue of that first argument.
+    let builtin_modes: Vec<ParamMode> = if name == "str_push" {
+        vec![ParamMode::Inout, ParamMode::Borrow]
+    } else {
+        modes.clone()
+    };
+    for (idx, arg_uir) in view.args.iter().enumerate() {
+        let arg_is_borrow = matches!(sema.uir.inst(*arg_uir).tag, InstTag::Borrow);
+        let param_is_inout =
+            builtin_modes.get(idx).copied().unwrap_or(ParamMode::Borrow) == ParamMode::Inout;
+        if arg_is_borrow && !param_is_inout {
+            sema.sink.emit(
+                Diag::error(
+                    sema.uir.span(*arg_uir),
+                    DiagCode::BorrowMismatch,
+                    format!(
+                        "argument {} is passed by `&` but parameter is not `inout`",
+                        idx + 1
+                    ),
+                )
+                .with_help("remove the `&`, or declare the parameter `inout`"),
+            );
+        }
+    }
     match name {
         "print" => {
             if !check_print_args(sema, fcx, view, arg_tirs, span) {
@@ -2141,6 +2170,55 @@ mod tests {
         assert!(
             any_code(&diags, DiagCode::BorrowMismatch),
             "str_push(&immutable, ..) must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn print_with_borrow_arg_rejected() {
+        // `print(&s)` — print's parameter is not `inout`, so the `&`
+        // marker must be rejected, not silently discarded.
+        let (_tirs, diags, _pool) = run_with_errors("fn main():\n\tmut s = \"hi\"\n\tprint(&s)\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "print(&s) must be rejected (param is not inout); got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn conversion_builtin_with_borrow_arg_rejected() {
+        // `int_to_str(&c)` — conversion builtins are not `inout` either.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\tmut c = 1\n\tprint(int_to_str(&c))\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "int_to_str(&c) must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn str_push_borrow_suffix_rejected() {
+        // `str_push(&s, &x)` — the suffix parameter is Borrow, not
+        // `inout`, so `&` on it must be rejected through the same check.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\tmut s = \"hi\"\n\tmut x = \"yo\"\n\tstr_push(&s, &x)\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "str_push's suffix must reject `&`; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn str_push_valid_still_ok() {
+        // Regression guard: the valid form stays clean.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, \"x\")\n");
+        assert!(
+            !any_code(&diags, DiagCode::BorrowMismatch),
+            "str_push(&s, \"x\") must stay valid; got {:?}",
             diags
         );
     }
