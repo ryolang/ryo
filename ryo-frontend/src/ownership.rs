@@ -24,7 +24,7 @@
 use crate::builtins::is_borrowed_scalar_param;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 pub use ryo_core::ownership::{
-    BranchId, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
+    BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
 };
 use ryo_core::tir::{ParamMode, Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
@@ -147,6 +147,30 @@ pub(crate) struct Ownership {
     /// pointee. Constant per function (derived from `tir.params`), so
     /// branch merges need no per-field rule for it.
     pub inout_str_params: HashSet<StringId>,
+
+    /// Conditional reseats observed while walking if/elif/else arms
+    /// (I-117): bindings that SOME arm reseated while other arms kept
+    /// the pre-branch owner. Monotone-accumulating (like
+    /// `owner_at_read`) — loop convergence re-walks are deduped at push
+    /// time. Consumed by the dead-store drain, which converts the
+    /// matching entries into arm-gated `ConditionalDeadDrop`s so the
+    /// pre-branch buffer is also freed on the untouched paths.
+    pub reseat_drops: Vec<ReseatDrop>,
+}
+
+/// One conditional-reseat observation (I-117), recorded by
+/// `analyze_if_stmt` after walking an if's arms. `reseat_owners` is the
+/// set of owners the binding was reseated TO across the arms;
+/// `untouched_arms` are the arms (by [`BranchId`]) that kept the
+/// pre-branch owner — including the synthetic fall-through arm of an
+/// else-less if.
+#[derive(Clone, Debug)]
+pub(crate) struct ReseatDrop {
+    pub if_stmt: TirRef,
+    pub name: StringId,
+    pub pre_owner: Owner,
+    pub reseat_owners: HashSet<Owner>,
+    pub untouched_arms: Vec<BranchId>,
 }
 
 impl Ownership {
@@ -583,6 +607,31 @@ fn analyze_function(
             target: owner.inst_tirref().unwrap(),
             span: *span,
             branch: None,
+        });
+    }
+
+    // I-117: convert honored reseat records into arm-gated
+    // `ConditionalDeadDrop`s. A record is honored when a pending entry
+    // for one of its reseated owners survived to the drain — i.e. the
+    // reassigned value is never read afterwards — so the pre-branch
+    // buffer would leak on the paths where the reassign did not happen.
+    // (Reads-after clear the pending entry by name, so honored records
+    // never collide with the last-use machinery.) Deduped by record:
+    // several pending entries can match one record.
+    let mut honored: HashSet<usize> = HashSet::new();
+    for (owner, (name, _, _)) in &own.pending_dead_store {
+        for (idx, drop) in own.reseat_drops.iter().enumerate() {
+            if drop.name == *name && drop.reseat_owners.contains(owner) {
+                honored.insert(idx);
+            }
+        }
+    }
+    for idx in honored {
+        let drop = &own.reseat_drops[idx];
+        sidecar.conditional_dead_drops.push(ConditionalDeadDrop {
+            if_stmt: drop.if_stmt,
+            target: drop.pre_owner.tirref(tir),
+            arms: drop.untouched_arms.clone(),
         });
     }
 
@@ -1034,12 +1083,13 @@ fn analyze_if_stmt(
         elif_branches.push(BranchId(own.next_branch_id));
         own.next_branch_id += 1;
     }
-    let else_branch = if view.else_stmts.is_some() {
+    // Mint a BranchId for the else/fall-through arm ALWAYS — an
+    // else-less if's fall-through still needs an id so I-117
+    // conditional DeadDrops can gate on it.
+    let else_branch = {
         let id = BranchId(own.next_branch_id);
         own.next_branch_id += 1;
         Some(id)
-    } else {
-        None
     };
     sidecar.if_branches.insert(
         r,
@@ -1180,6 +1230,64 @@ fn analyze_if_stmt(
             }
             // Empty arm or sema-rejected case: skip. The M8.1
             // grammar forbids empty arms.
+        }
+    }
+
+    // I-117: record conditional reseats — bindings that SOME arm
+    // reseated while other arms kept the pre-if owner. The dead-store
+    // drain (function exit) converts a record into arm-gated
+    // `ConditionalDeadDrop`s when the reassigned value is never read
+    // afterwards, so the pre-if buffer is also freed on the paths where
+    // the reassign did not happen. Includes the implicit fall-through
+    // pseudo-arm of an else-less if (its BranchId was minted above).
+    {
+        let mut arm_states: Vec<(BranchId, &Ownership)> = Vec::with_capacity(branch_results.len());
+        arm_states.push((then_branch, &branch_results[0]));
+        for (i, _) in view.elif_branches.iter().enumerate() {
+            arm_states.push((elif_branches[i], &branch_results[1 + i]));
+        }
+        arm_states.push((
+            else_branch.expect("else/fall-through arm id minted"),
+            branch_results
+                .last()
+                .expect("else/fall-through snapshot pushed"),
+        ));
+        for (name, owner_pre) in &snap_current_owner {
+            // Only tracked (Move-typed) locals need drops; Copy values
+            // have no buffer, and params are covered by the exit-time
+            // param free.
+            let Owner::Inst(pre_ref) = owner_pre else {
+                continue;
+            };
+            if !needs_tracking(tir.inst(*pre_ref).ty, pool) {
+                continue;
+            }
+            let mut reseat_owners: HashSet<Owner> = HashSet::new();
+            let mut untouched_arms: Vec<BranchId> = Vec::new();
+            for (bid, b) in &arm_states {
+                let owner_b = b.current_owner.get(name).copied().unwrap_or(*owner_pre);
+                if owner_b == *owner_pre {
+                    untouched_arms.push(*bid);
+                } else {
+                    reseat_owners.insert(owner_b);
+                }
+            }
+            // Dedup: loop-convergence re-walks revisit this if.
+            if !reseat_owners.is_empty()
+                && !untouched_arms.is_empty()
+                && !own
+                    .reseat_drops
+                    .iter()
+                    .any(|d| d.if_stmt == r && d.name == *name)
+            {
+                own.reseat_drops.push(ReseatDrop {
+                    if_stmt: r,
+                    name: *name,
+                    pre_owner: *owner_pre,
+                    reseat_owners,
+                    untouched_arms,
+                });
+            }
         }
     }
 
@@ -4073,7 +4181,13 @@ mod tests {
         let decl = tb.var_decl(c, false, int_ty, ic, span);
         let cv1 = tb.var(c, int_ty, span);
         let cv2 = tb.var(c, int_ty, span);
-        let call = tb.call(swap, &[cv1, cv2], &[ParamMode::Inout, ParamMode::Inout], void, span);
+        let call = tb.call(
+            swap,
+            &[cv1, cv2],
+            &[ParamMode::Inout, ParamMode::Inout],
+            void,
+            span,
+        );
         let tir = tb.finish(&[decl, call]);
         let mut sink = DiagSink::new();
         let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
@@ -4541,6 +4655,135 @@ mod tests {
             !sc.free_schedule.iter().any(|fp| fp.target == lit_b),
             "lit_b's buffer is freed through the binding's current StrLocals (same buffer as lit_a's Free on the taken path) — a second Free would double-free; schedule = {:?}",
             sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn conditional_dead_reassign_schedules_fallthrough_drop() {
+        // I-117: `mut s = "a"; if c: s = "b"` with s never read after.
+        // The taken arm drops "a" (free_on_reassign) and the drain frees
+        // "b"; the NOT-taken path must also free "a" — via an arm-gated
+        // ConditionalDeadDrop for the pre-branch owner.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit_b, span);
+        let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        let drops: Vec<_> = sc
+            .conditional_dead_drops
+            .iter()
+            .filter(|d| d.target == lit_a)
+            .collect();
+        assert_eq!(
+            drops.len(),
+            1,
+            "expected one ConditionalDeadDrop for the pre-branch owner; got {:?}",
+            sc.conditional_dead_drops
+        );
+        assert_eq!(drops[0].if_stmt, if_s, "the drop must key on the if");
+        assert!(
+            !drops[0].arms.is_empty(),
+            "the drop must name at least one untouched arm (the fall-through)"
+        );
+    }
+
+    #[test]
+    fn conditional_reassign_all_arms_reseated_no_drop() {
+        // `if c: s = "b" else: s = "d"` — every arm reseats, so the
+        // pre-branch buffer is dropped by free_on_reassign on every
+        // path; no ConditionalDeadDrop may be scheduled.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg_then = tb.assign(s, str_ty, lit_b, span);
+        let lit_d = tb.str_const(pool.intern_str("d"), str_ty, span);
+        let asg_else = tb.assign(s, str_ty, lit_d, span);
+        let if_s = tb.if_stmt(cond, &[asg_then], &[], Some(&[asg_else]), void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sc.conditional_dead_drops.is_empty(),
+            "all arms reseated — no untouched path, no ConditionalDeadDrop; got {:?}",
+            sc.conditional_dead_drops
+        );
+    }
+
+    #[test]
+    fn conditional_dead_reassign_gated_on_real_else() {
+        // `if c: s = "b" else: <no reassign>` with s unread after —
+        // the drop must be gated on the REAL else arm's BranchId.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let asg = tb.assign(s, str_ty, lit_b, span);
+        let lit_x = tb.str_const(pool.intern_str("x"), str_ty, span);
+        let pr = tb.call(print, &[lit_x], &[ParamMode::Borrow], void, span);
+        let if_s = tb.if_stmt(cond, &[asg], &[], Some(&[pr]), void, span);
+        let tir = tb.finish(&[decl, if_s]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        let else_id = sc
+            .if_branches
+            .get(&if_s)
+            .and_then(|ids| ids.else_branch)
+            .expect("else branch id");
+        let drops: Vec<_> = sc
+            .conditional_dead_drops
+            .iter()
+            .filter(|d| d.target == lit_a)
+            .collect();
+        assert_eq!(
+            drops.len(),
+            1,
+            "expected one ConditionalDeadDrop; got {:?}",
+            sc.conditional_dead_drops
+        );
+        assert!(
+            drops[0].arms.contains(&else_id),
+            "the drop must be gated on the else arm {:?}; got {:?}",
+            else_id,
+            drops[0].arms
         );
     }
 }

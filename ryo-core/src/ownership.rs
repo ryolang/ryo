@@ -32,6 +32,22 @@ pub struct IfBranchIds {
     pub else_branch: Option<BranchId>,
 }
 
+/// One conditional drop of a pre-branch buffer (I-117). When a binding
+/// is reassigned in SOME arms of an if but kept untouched in others,
+/// and the reassigned value is never read after the join, the
+/// pre-branch buffer would leak on the untouched paths. This drop
+/// covers it: codegen emits `ryo_str_free` at the START of each arm in
+/// `arms` (the binding's value there is still the pre-if one).
+/// `target` is the pre-branch owner's `TirRef`, resolved to the
+/// binding's current `StrLocals` via `free_binding_names`.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // fields read by Task 7+ Free emission
+pub struct ConditionalDeadDrop {
+    pub if_stmt: TirRef,
+    pub target: TirRef,
+    pub arms: Vec<BranchId>,
+}
+
 /// Side-table produced by the ownership pass alongside diagnostics.
 /// Codegen consults it to decide where to emit `ryo_str_free` calls.
 /// The TIR itself is never mutated — index stability is load-bearing
@@ -68,4 +84,9 @@ pub struct FunctionSidecar {
     /// lowering if/elif/else to know which `BranchId` to push onto
     /// `branch_stack` for each arm.
     pub if_branches: HashMap<TirRef /* IfStmt inst */, IfBranchIds>,
+    /// Conditional drops of pre-branch buffers for dead conditional
+    /// reassignments (I-117). Codegen fires each entry at the start of
+    /// the arms it names (including a synthetic fall-through block for
+    /// else-less ifs).
+    pub conditional_dead_drops: Vec<ConditionalDeadDrop>,
 }

@@ -260,6 +260,32 @@ fn main():
 \tprint(s)
 ",
     ),
+    (
+        // I-117: dead conditional reassign, taken path — the old buffer
+        // is dropped by free_on_reassign and the new one by the
+        // dead-store Free. Both must be freed exactly once.
+        "dead_reassign_if_taken",
+        "\
+fn main():
+\tmut s = \"a\"
+\tc = true
+\tif c:
+\t\ts = \"b\"
+",
+    ),
+    (
+        // I-117: dead conditional reassign, NOT-taken path — the
+        // reassign never happens; the original buffer must be freed by
+        // the arm-gated conditional DeadDrop in the fall-through.
+        "dead_reassign_if_fallthrough",
+        "\
+fn main():
+\tmut s = \"a\"
+\tc = false
+\tif c:
+\t\ts = \"b\"
+",
+    ),
 ];
 
 pub fn find_fixture(name: &str) -> &'static str {

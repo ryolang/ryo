@@ -939,12 +939,21 @@ impl<M: Module> Codegen<M> {
 
         let elif_count = view.elif_branches.len();
         let has_else = view.else_stmts.is_some();
-        let capacity = elif_count + usize::from(has_else);
+        // I-117: an else-less if whose arms conditionally reseated a
+        // binding needs a REAL fall-through block so the arm-gated
+        // DeadDrops have somewhere to fire.
+        let needs_fallthrough_block = !has_else
+            && ctx
+                .sidecar
+                .conditional_dead_drops
+                .iter()
+                .any(|d| d.if_stmt == r);
+        let capacity = elif_count + usize::from(has_else || needs_fallthrough_block);
         let mut next_blocks: Vec<Block> = Vec::with_capacity(capacity);
         for _ in 0..elif_count {
             next_blocks.push(builder.create_block());
         }
-        let else_or_merge = if has_else {
+        let else_or_merge = if has_else || needs_fallthrough_block {
             let eb = builder.create_block();
             next_blocks.push(eb);
             eb
@@ -964,6 +973,7 @@ impl<M: Module> Codegen<M> {
         // poorly with a scope-guard holding `&mut ctx`. We pop on
         // both Ok and Err paths by binding the result first.
         ctx.branch_stack.push(branch_ids.then_branch);
+        Self::emit_conditional_dead_drops(builder, ctx, r, branch_ids.then_branch)?;
         let then_returns_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
         ctx.branch_stack.pop();
         let then_returns = then_returns_result?;
@@ -994,6 +1004,7 @@ impl<M: Module> Codegen<M> {
             builder.switch_to_block(elif_body_block);
             let elif_branch_id = branch_ids.elif_branches.get(i).copied().unwrap_or_default();
             ctx.branch_stack.push(elif_branch_id);
+            Self::emit_conditional_dead_drops(builder, ctx, r, elif_branch_id)?;
             let elif_returns_result = Self::emit_scoped_body(builder, ctx, &elif.body);
             ctx.branch_stack.pop();
             let elif_returns = elif_returns_result?;
@@ -1008,6 +1019,7 @@ impl<M: Module> Codegen<M> {
             builder.switch_to_block(else_or_merge);
             let else_branch_id = branch_ids.else_branch.unwrap_or_default();
             ctx.branch_stack.push(else_branch_id);
+            Self::emit_conditional_dead_drops(builder, ctx, r, else_branch_id)?;
             let else_returns_result = Self::emit_scoped_body(builder, ctx, else_stmts);
             ctx.branch_stack.pop();
             let else_returns = else_returns_result?;
@@ -1015,6 +1027,17 @@ impl<M: Module> Codegen<M> {
                 builder.ins().jump(merge_block, &[]);
             }
             all_branches_return = all_branches_return && else_returns;
+        } else if needs_fallthrough_block {
+            // I-117: the synthetic fall-through — emit the arm-gated
+            // DeadDrops for the paths where no arm reseated the binding.
+            builder.seal_block(else_or_merge);
+            builder.switch_to_block(else_or_merge);
+            let fallthrough_id = branch_ids.else_branch.unwrap_or_default();
+            ctx.branch_stack.push(fallthrough_id);
+            Self::emit_conditional_dead_drops(builder, ctx, r, fallthrough_id)?;
+            ctx.branch_stack.pop();
+            builder.ins().jump(merge_block, &[]);
+            all_branches_return = false;
         } else {
             all_branches_return = false;
         }
@@ -1570,6 +1593,37 @@ impl<M: Module> Codegen<M> {
             }
         }
         ctx.pending_sweep.retain(|idx| !ctx.freed_at.contains(idx));
+        Ok(())
+    }
+
+    /// Emit I-117 conditional DeadDrops for (`if_stmt`, `arm`): frees of
+    /// the pre-if buffer of a conditionally-reassigned binding on the
+    /// paths where the reassign did NOT happen. Fired at the START of an
+    /// untouched arm, where the binding's `StrLocals` still hold the
+    /// pre-if value. Resolves `target` through `free_binding_names` (the
+    /// I-112 init→name map), so the freed buffer is the binding's
+    /// current triple at that program point.
+    fn emit_conditional_dead_drops(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        if_stmt: TirRef,
+        arm: ryo_core::ownership::BranchId,
+    ) -> Result<(), String> {
+        for drop in ctx.sidecar.conditional_dead_drops.iter() {
+            if drop.if_stmt != if_stmt || !drop.arms.contains(&arm) {
+                continue;
+            }
+            let Some(name) = ctx.free_binding_names.get(&drop.target).copied() else {
+                continue;
+            };
+            let Some(sl) = ctx.str_locals.get(&name).cloned() else {
+                continue;
+            };
+            let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
+            let ptr = builder.use_var(sl.ptr);
+            let cap = builder.use_var(sl.cap);
+            builder.ins().call(free_ref, &[ptr, cap]);
+        }
         Ok(())
     }
 

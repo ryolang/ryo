@@ -161,3 +161,19 @@ fn valgrind_reassign_inside_if() {
         "reassign_inside_if",
     );
 }
+
+#[test]
+fn valgrind_dead_reassign_if_taken() {
+    run_valgrind_smoke(
+        common::find_fixture("dead_reassign_if_taken"),
+        "dead_reassign_if_taken",
+    );
+}
+
+#[test]
+fn valgrind_dead_reassign_if_fallthrough() {
+    run_valgrind_smoke(
+        common::find_fixture("dead_reassign_if_fallthrough"),
+        "dead_reassign_if_fallthrough",
+    );
+}

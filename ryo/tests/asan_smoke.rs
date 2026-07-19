@@ -129,3 +129,19 @@ fn asan_reassign_inside_if() {
         "reassign_inside_if",
     );
 }
+
+#[test]
+fn asan_dead_reassign_if_taken() {
+    run_asan_smoke(
+        common::find_fixture("dead_reassign_if_taken"),
+        "dead_reassign_if_taken",
+    );
+}
+
+#[test]
+fn asan_dead_reassign_if_fallthrough() {
+    run_asan_smoke(
+        common::find_fixture("dead_reassign_if_fallthrough"),
+        "dead_reassign_if_fallthrough",
+    );
+}
