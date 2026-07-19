@@ -305,12 +305,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** The tarball is streamed HTTPS → XZ → tar with no sha256/signature check even though ziglang.org publishes shasums and `.minisig` files — a supply-chain gap. The fixed temp dir `.zig-{v}-downloading` (:62) lets two concurrent first-runs delete each other's in-flight download (`remove_dir_all` at :67), and `remove_dir_all(&desired_path)` (:101) can delete a working toolchain out from under another running compile.
 **Resolution:** Hardcode the three pinned sha256s (one per supported target) and verify before extraction; use a pid-suffixed temp dir (matching `runtime_lib.rs`'s discipline) and atomic rename; never delete `desired_path` until the replacement is staged.
 
-### I-074 — Build scripts can embed a stale runtime archive
-
-**Files:** `ryo/build.rs` (:47), `ryo-backend/build.rs` (:38)
-**Summary:** Both build scripts reuse `target/{profile}/libryo_runtime.a` when it merely exists. If the archive exists from an earlier build and `runtime/src` later changes, the script reruns (via `rerun-if-changed`) but reuses the stale archive; the sha256 is then computed over old bytes — self-consistent but wrong. Only the missing-archive path gets cargo's dependency tracking.
-**Resolution:** Always invoke `cargo build -p ryo-runtime --target-dir target/runtime-build` (a cheap no-op when fresh) instead of the `exists()` shortcut. Fold into the `TODO(dedup)` build-support extraction (`ryo-backend/build.rs:5-12`).
-
 ### I-075 — Duplicate function definitions silently accepted
 
 **Files:** `ryo-frontend/src/sema.rs` (`Sema::new` :219-227)
