@@ -1086,7 +1086,7 @@ fn main():
 
 - `inout` keyword and `&` token in the lexer; parser support for the param mode selector (`inout x: int`) and the call-site borrow `&value` (`ExprKind::Borrow`, lowered to a UIR `Borrow` inst).
 - The third `ParamMode::Inout` variant (M8.2 reserved the slot) — a **calling convention**, not a new type. Per Rule 3, mutable borrows are parameter conventions only, so there is no `Type::MutRef` / `TypeKind::Ref` (see M8.2 design, "Why no `Owner::Borrow`"). Replaced the old `is_move: bool` param field with `mode: ParamMode` across AST/UIR/TIR.
-- Sema: `inout` params bind as mutable in the callee scope; `&`⟺`inout` agreement and mutable-lvalue validation (E0033 `BorrowMismatch`); `str_push(s: inout str, suffix: str)` builtin dispatch with `[Inout, Borrow]` modes.
+- Sema: `inout` params bind as mutable in the callee scope; `&`⟺`inout` agreement and mutable-lvalue validation (E0033 `BorrowMismatch`); `str_push(inout s: str, suffix: str)` builtin dispatch with `[Inout, Borrow]` modes.
 - Codegen: sret-style write-back ABI — the callee receives a pointer, mutates through locals, and stores back before **every** `return`; the caller spills its slot, passes the address, and reloads after the call. Scalars (`int`/`float`/`bool`) and `str` (24-byte fat-pointer slot) are supported; the runtime `__ryo_str_push` backs the builtin.
 - Extended the borrow checker with exclusion rules (Rule 7), reusing M8.2's intra-call borrowed/moved partition with a third `inout` set (E0032 `MutableAliasingViolation`):
   - **At most one mutable borrow** of a value at any point

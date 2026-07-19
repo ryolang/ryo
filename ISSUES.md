@@ -407,12 +407,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** The parser accepts `&ident` as a general expression atom, and sema's `Borrow` arm lowers it to the inner value's `TirRef` unconditionally. The `&`/`inout` agreement and lvalue checks only run in `check_call` (and the `str_push` dispatch), so `x = &c`, `return &c`, `1 + &c`, `print(&c)` all compile with the `&` silently discarded — probe-verified: `mut c = 5; x = &c` prints `5`. Misleading syntax: it advertises call-site mutation semantics where none exist.
 **Resolution:** Reject `InstTag::Borrow` anywhere except directly as a call argument (one check in the UIR-instruction walk, message along the lines of "`&` is only valid as an argument to an `inout` parameter").
 
-### I-115 — Shipped `inout` param syntax contradicts the specification (prefix vs postfix)
-
-**Files:** `ryo-frontend/src/parser.rs` (:316-332), `docs/specification.md` (:1005, :1031, :1150), `docs/CLAUDE.md` (:95), `docs/superpowers/specs/2026-07-17-milestone-8.3-mutable-borrows-inout-design.md` (:84)
-**Summary:** The compiler parses the prefix form `fn f(inout x: int)`; the specification, the M8.3 design doc's user-facing examples, and the docs gotcha note all document the postfix form `x: inout int` / `data: inout Type`. The design doc is internally inconsistent (prose postfix, parser sketch prefix), and the implementation followed the sketch. Per the design-change-escalation rule in the root `CLAUDE.md`, resolving this is a language-design decision, not a coherence fix.
-**Resolution:** Human decision required: either update `specification.md` + companions to the shipped prefix form, or change the parser to the documented postfix form. Until decided, the roadmap entry documents the shipped form.
-
 ### I-117 — Conditional dead reassign leaks the pre-branch buffer on the not-taken path
 
 **Files:** `ryo-frontend/src/ownership.rs` (`analyze_assign` `free_on_reassign` ~:687-710, `merge_branches` `pending_dead_store` intersect ~:290-302, dead-store drain ~:556-580)

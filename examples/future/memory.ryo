@@ -8,6 +8,6 @@ fn main():
 	print(scores)               # [95, 90, 100]
 
 # Compiler ensures `list` is valid for the borrow duration
-fn add_extra(list: inout list[int], bonus: int):
+fn add_extra(inout list: list[int], bonus: int):
 	for i in 0..len(list):
 		list[i] += bonus

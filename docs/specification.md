@@ -383,7 +383,7 @@ fn process_string(s: str):              # Implicit immutable borrow
 fn process_list(items: list[int]):      # Implicit immutable borrow
 	# ... read items ...
 
-fn mutate_list(items: inout list[int]): # Explicit mutable borrow
+fn mutate_list(inout items: list[int]): # Explicit mutable borrow
 	# ... modify items ...                # caller writes `mutate_list(&my_list)`
 ```
 
@@ -1002,7 +1002,7 @@ Ryo defines three explicit ways to pass data into functions. These are **paramet
 | Mode | Syntax | Semantics | Caller's Variable After Call |
 | :--- | :--- | :--- | :--- |
 | **Immutable Borrow** | `data: Type` (implicit) | Read-only access. The default for all parameters. | **Valid** — unchanged |
-| **Mutable Borrow** | `data: inout Type` (in signature) + `&x` (at call site) | Exclusive mutable access. No other borrows allowed simultaneously. | **Valid** — may be modified |
+| **Mutable Borrow** | `inout data: Type` (in signature) + `&x` (at call site) | Exclusive mutable access. No other borrows allowed simultaneously. | **Valid** — may be modified |
 | **Move** | `move data: Type` (in signature) | Transfers ownership. The function now owns the value. | **Invalidated** — use-after-move is a compile error |
 
 #### 5.2.1 Choosing Between Parameter Modes
@@ -1028,7 +1028,7 @@ need to leave the caller?**
 
 Example:
 ```ryo
-fn add_header(buf: inout str, header: str):
+fn add_header(inout buf: str, header: str):
 	buf.push_str(header)
 	buf.push('\n')
 ```
@@ -1147,7 +1147,7 @@ This is the core ergonomic trade-off: `fn read(data: MyStruct)` is equivalent to
 Mutation requires `inout` on the parameter declaration and `&` on the corresponding argument at the call site. This makes mutation visible during code review — a reader immediately knows "this call changes my variable."
 
 ```ryo
-fn add_bonus(scores: inout list[int], bonus: int):
+fn add_bonus(inout scores: list[int], bonus: int):
 	for i in range(len(scores)):
 		scores[i] += bonus
 
@@ -1320,7 +1320,7 @@ fn read_file(path: str) -> Error!str:
 		f.read()
 	# f closed here (Drop closes it)
 
-fn update_count(counter: inout mutex[int]):
+fn update_count(inout counter: mutex[int]):
 	with counter.lock() as guard:            # acquires the lock
 		guard.value += 1
 	# lock released here (Drop releases it)
@@ -1453,7 +1453,7 @@ are the tools in order of preference.
    rule between `inout` and `move`.
 
    ```ryo
-   fn add_header(buf: inout str, header: str):
+   fn add_header(inout buf: str, header: str):
    	buf.push_str(header)
    	buf.push('\n')
    ```
@@ -2517,7 +2517,7 @@ fn average(items: list[float]) -> float:
 
 #[pre(index >= 0)]
 #[pre(index <= items.len())]
-fn insert_at(items: inout list[int], index: int, value: int):
+fn insert_at(inout items: list[int], index: int, value: int):
     items.insert(index, value)
 ```
 
