@@ -1,0 +1,1142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ryo — Language Reference</title>
+    <meta
+      name="description"
+      content="The Ryo language reference: types, variables, control flow, functions, operators, built-in functions, and the Ownership Lite memory model. Documents the language as implemented in the current pre-alpha."
+    />
+    <meta
+      name="theme-color"
+      content="#FFC300"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#0B0B0F"
+      media="(prefers-color-scheme: dark)"
+    />
+
+    <!-- Canonical -->
+    <link rel="canonical" href="https://ryolang.org/reference/" />
+
+    <!-- Favicons -->
+    <link rel="icon" type="image/svg+xml" href="../img/ryo.svg" />
+    <link rel="icon" type="image/png" href="../img/ryo.png" />
+    <link rel="apple-touch-icon" href="../img/ryo.png" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="Ryo" />
+    <meta property="og:url" content="https://ryolang.org/reference/" />
+    <meta property="og:title" content="Ryo — Language Reference" />
+    <meta
+      property="og:description"
+      content="Types, variables, control flow, functions, operators, built-ins, and the Ownership Lite memory model — documented as implemented in the current pre-alpha."
+    />
+    <meta property="og:image" content="https://ryolang.org/img/og-image.png" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Ryo — Language Reference" />
+    <meta
+      name="twitter:description"
+      content="Types, variables, control flow, functions, operators, built-ins, and the Ownership Lite memory model."
+    />
+    <meta name="twitter:image" content="https://ryolang.org/img/og-image.png" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../assets/styles.css" />
+    <link rel="stylesheet" href="../assets/reference.css" />
+    <script>
+      // Apply theme before paint to avoid flash
+      (function () {
+        const saved = localStorage.getItem("theme");
+        const prefersDark = window.matchMedia(
+          "(prefers-color-scheme: dark)",
+        ).matches;
+        if (saved === "dark" || (!saved && prefersDark)) {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <!-- Navbar -->
+    <nav class="navbar">
+      <div class="nav-inner">
+        <div class="brand">
+          <a href="../" class="brand" style="text-decoration: none">
+            <div class="brand-logo" aria-hidden="true">
+              <img src="../img/ryo.svg" alt="" width="20" height="20" />
+            </div>
+            <span class="brand-name">ryo</span>
+          </a>
+        </div>
+
+        <div class="nav-links">
+          <a href="../#features">Features</a>
+          <a href="./" style="color: var(--text-base); font-weight: 600"
+            >Reference</a
+          >
+        </div>
+
+        <div class="nav-actions">
+          <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">
+            <svg
+              class="icon-moon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              width="20"
+              height="20"
+            >
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+            </svg>
+            <svg
+              class="icon-sun"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              width="20"
+              height="20"
+            >
+              <circle cx="12" cy="12" r="4" />
+              <path
+                d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
+              />
+            </svg>
+          </button>
+
+          <a
+            id="gh-star"
+            class="gh-star"
+            href="https://github.com/ryolang/ryo"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <span class="gh-star-left">
+              <svg
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                width="16"
+                height="16"
+              >
+                <path
+                  d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.36-3.87-1.36-.52-1.31-1.27-1.66-1.27-1.66-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.96.1-.74.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.18a10.96 10.96 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.58.23 2.75.11 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.4-5.25 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.21.66.8.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"
+                />
+              </svg>
+              <span class="hide-sm">Star</span>
+            </span>
+            <span class="gh-star-count" id="gh-star-count" hidden></span>
+          </a>
+        </div>
+      </div>
+    </nav>
+
+    <main class="ref-main">
+      <div class="ref-container">
+        <!-- Sidebar -->
+        <aside class="ref-sidebar" id="ref-sidebar">
+          <button
+            class="ref-nav-toggle"
+            type="button"
+            aria-expanded="false"
+            aria-controls="ref-nav"
+          >
+            <span>On this page</span>
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </button>
+
+          <div class="ref-sidebar-inner" id="ref-nav">
+            <div class="ref-nav-group">
+              <p class="ref-nav-title">Basics</p>
+              <nav class="ref-nav-list">
+                <a href="#variables">Variables &amp; Mutability</a>
+                <a href="#types">Primitive Types</a>
+                <a href="#integers">Integers &amp; Arithmetic</a>
+                <a href="#booleans">Booleans &amp; Logic</a>
+                <a href="#strings">Strings</a>
+              </nav>
+            </div>
+
+            <div class="ref-nav-group">
+              <p class="ref-nav-title">Control &amp; Functions</p>
+              <nav class="ref-nav-list">
+                <a href="#control-flow">Control Flow</a>
+                <a href="#functions">Functions</a>
+                <a href="#operators">Operators</a>
+                <a href="#builtins">Built-in Functions</a>
+              </nav>
+            </div>
+
+            <div class="ref-nav-group">
+              <p class="ref-nav-title">Memory</p>
+              <nav class="ref-nav-list">
+                <a href="#ownership">Ownership Lite</a>
+                <a href="#borrow-modes">Borrow Modes</a>
+                <a href="#whats-next">What's Next</a>
+              </nav>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Content -->
+        <div class="ref-content">
+          <header class="ref-intro">
+            <span class="ref-eyebrow">Language Reference</span>
+            <h1>Ryo Reference</h1>
+            <p>
+              Ryo /ˈraɪoʊ/ is a statically-typed, compiled language that
+              combines Python-style syntax with the memory safety of Rust and
+              the concurrency model of Go. This reference documents the language
+              <strong>as implemented</strong> in the current pre-alpha (through
+              <em>Milestone 8.3</em>). Every example below compiles and runs
+              today. Features not yet available are gathered in
+              <a href="#whats-next">What's Next</a> and never presented as
+              working.
+            </p>
+          </header>
+
+          <!-- =================================================== -->
+          <section id="variables">
+            <h2>
+              Variables &amp; Mutability
+              <a class="anchor" href="#variables" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Bindings are introduced without a keyword — just a name and a
+              value. They are <strong>immutable by default</strong>. The
+              compiler infers the type from the initializer; you may also write
+              an explicit annotation.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">variables.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn main():
+	name = "Alice"          # inferred as str, immutable
+	count: int = 10         # explicit type annotation
+	mut total = 0           # mutable variable
+	total = total + count
+
+	# name = "Bob"          # error: cannot assign to immutable binding</code></pre>
+            </div>
+
+            <ul>
+              <li><code>name = expr</code> — immutable, type inferred.</li>
+              <li>
+                <code>name: Type = expr</code> — immutable, explicit type.
+              </li>
+              <li>
+                <code>mut name = expr</code> — mutable; may be reassigned.
+              </li>
+            </ul>
+
+            <div class="callout callout--info">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="16" x2="12" y2="12"></line>
+                <line x1="12" y1="8" x2="12.01" y2="8"></line>
+              </svg>
+              <div>
+                <p class="callout-title">No <code>let</code> keyword</p>
+                <p>
+                  Ryo drops the declaration keyword entirely. The presence of
+                  <code>mut</code> is the only thing that makes a binding
+                  writable, mirroring Python's readability while keeping types
+                  static.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="types">
+            <h2>
+              Primitive Types
+              <a class="anchor" href="#types" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Ryo has a small set of primitive types. Today <code>int</code> is
+              always 64-bit signed and <code>float</code> is always 64-bit
+              IEEE&nbsp;754.
+            </p>
+
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>int</code></td>
+                    <td>64-bit signed integer (<code>i64</code>).</td>
+                  </tr>
+                  <tr>
+                    <td><code>float</code></td>
+                    <td>
+                      64-bit IEEE&nbsp;754 floating point
+                      (<code>float64</code>).
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>bool</code></td>
+                    <td>
+                      Boolean — exactly <code>true</code> or <code>false</code>.
+                      No implicit conversion to or from <code>int</code>.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>str</code></td>
+                    <td>
+                      Owned, heap-allocated UTF-8 string. Grows and shrinks when
+                      bound to a <code>mut</code> variable.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>void</code></td>
+                    <td>
+                      Unit type. The implicit return of functions that produce
+                      no value.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="callout callout--warn">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path
+                  d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+                ></path>
+                <line x1="12" y1="9" x2="12" y2="13"></line>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+              </svg>
+              <div>
+                <p class="callout-title">Width types are planned</p>
+                <p>
+                  Explicit sizes (<code>i8</code>–<code>i64</code>,
+                  <code>u8</code>–<code>u64</code>, <code>usize</code>,
+                  <code>float32</code>) and <code>char</code> are specified but
+                  not yet implemented. Writing <code>i32</code> today is a parse
+                  error — use <code>int</code>.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="integers">
+            <h2>
+              Integers &amp; Arithmetic
+              <a class="anchor" href="#integers" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Integer literals may use underscores for readability
+              (<code>1_000_000</code>) and the standard <code>0x</code>,
+              <code>0o</code>, <code>0b</code> prefixes. Division between two
+              integers truncates toward zero, like Python's <code>//</code>.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">arithmetic.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn main():
+	print(int_to_str(7 / 2))     # 3  — integer division truncates
+	print(int_to_str(7 % 2))     # 1  — remainder
+
+	mut counter = 0
+	counter += 10                # compound assignment
+	counter -= 3
+	print(int_to_str(counter))   # 7</code></pre>
+            </div>
+
+            <div class="callout">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path
+                  d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"
+                ></path>
+              </svg>
+              <div>
+                <p class="callout-title">
+                  <code>print()</code> takes only <code>str</code>
+                </p>
+                <p>
+                  To output a number, convert it first with
+                  <code>int_to_str(n)</code>. There is no implicit formatting
+                  yet.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="booleans">
+            <h2>
+              Booleans &amp; Logic
+              <a class="anchor" href="#booleans" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              The <code>bool</code> type has two values, <code>true</code> and
+              <code>false</code>, produced by comparison operators. Logical
+              operators <code>and</code>, <code>or</code>, and
+              <code>not</code> are words, not symbols, and
+              <code>and</code>/<code>or</code> short-circuit.
+            </p>
+
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Operator</th>
+                    <th>Name</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>and</code></td>
+                    <td>AND</td>
+                    <td>True if both operands are true (short-circuits).</td>
+                  </tr>
+                  <tr>
+                    <td><code>or</code></td>
+                    <td>OR</td>
+                    <td>True if either operand is true (short-circuits).</td>
+                  </tr>
+                  <tr>
+                    <td><code>not</code></td>
+                    <td>NOT</td>
+                    <td>Negates a boolean value.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">logic.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn is_valid(x: int) -&gt; bool:
+	return x &gt; 0 and x &lt; 100
+
+fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
+	return is_admin or is_owner</code></pre>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="strings">
+            <h2>
+              Strings
+              <a class="anchor" href="#strings" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              The <code>str</code> type is an owned, heap-allocated UTF-8
+              string. A binding is read-only unless declared <code>mut</code>.
+              Concatenate with <code>+</code>.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">strings.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn main():
+	mut greeting = "Hello"
+	greeting = greeting + ", World!"
+	print(greeting)              # Hello, World!
+
+	print("tab\there\n")        # escape sequences
+	print("quote: \"hi\"\n")</code></pre>
+            </div>
+
+            <h3>Escape Sequences</h3>
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Escape</th>
+                    <th>Meaning</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>\n</code></td>
+                    <td>Newline</td>
+                  </tr>
+                  <tr>
+                    <td><code>\r</code></td>
+                    <td>Carriage return</td>
+                  </tr>
+                  <tr>
+                    <td><code>\t</code></td>
+                    <td>Horizontal tab</td>
+                  </tr>
+                  <tr>
+                    <td><code>\\</code></td>
+                    <td>Backslash</td>
+                  </tr>
+                  <tr>
+                    <td><code>\"</code></td>
+                    <td>Double quote</td>
+                  </tr>
+                  <tr>
+                    <td><code>\'</code></td>
+                    <td>Single quote</td>
+                  </tr>
+                  <tr>
+                    <td><code>\0</code></td>
+                    <td>Null byte</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="callout callout--warn">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path
+                  d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+                ></path>
+                <line x1="12" y1="9" x2="12" y2="13"></line>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+              </svg>
+              <div>
+                <p class="callout-title">f-strings are planned</p>
+                <p>
+                  Interpolated strings like <code>f"{name}"</code> are not yet
+                  implemented. Build strings today with <code>+</code> and
+                  <code>int_to_str()</code>.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="control-flow">
+            <h2>
+              Control Flow
+              <a class="anchor" href="#control-flow" aria-label="Permalink"
+                >#</a
+              >
+            </h2>
+            <p>
+              Ryo uses Python-style colons and indentation. There are
+              <code>if</code>/<code>elif</code>/<code>else</code>,
+              <code>while</code>, and <code>for</code> loops, plus
+              <code>break</code> and <code>continue</code>.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">control_flow.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn classify(n: int) -&gt; str:
+	if n &gt; 0:
+		return "positive"
+	elif n == 0:
+		return "zero"
+	else:
+		return "negative"
+
+fn main():
+	mut i = 3
+	while i &gt; 0:
+		print("countdown\n")
+		i -= 1
+
+	# range(start, end) is half-open: 0, 1, 2, 3, 4
+	for j in range(0, 5):
+		print(int_to_str(j))</code></pre>
+            </div>
+
+            <p>
+              The <code>for</code> loop iterates a <em>half-open</em> integer
+              range produced by <code>range(start, end)</code>: it yields
+              <code>start</code> through <code>end - 1</code>.
+            </p>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="functions">
+            <h2>
+              Functions
+              <a class="anchor" href="#functions" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Functions are declared with <code>fn</code>. Parameters carry
+              explicit type annotations; the return type follows the parameter
+              list after <code>-&gt;</code>. Omit the return type for a function
+              that returns nothing (<code>void</code>). By convention, functions
+              and variables use <code>snake_case</code>.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">functions.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo"># Two int inputs, returns int.
+fn add(x: int, y: int) -&gt; int:
+	return x + y
+
+# No return value — return type omitted.
+fn greet(name: str):
+	print("Hi, " + name)
+
+fn main():
+	result = add(3, 4)
+	greet("Ryo")</code></pre>
+            </div>
+
+            <div class="callout callout--info">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="16" x2="12" y2="12"></line>
+                <line x1="12" y1="8" x2="12.01" y2="8"></line>
+              </svg>
+              <div>
+                <p class="callout-title">
+                  No <code>void</code> keyword in signatures
+                </p>
+                <p>
+                  Don't write <code>-&gt; void</code>. Just leave the
+                  return-type slot empty — the function returns the unit value
+                  implicitly.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="operators">
+            <h2>
+              Operators
+              <a class="anchor" href="#operators" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Operator precedence follows the usual mathematical rules.
+              Parentheses group sub-expressions.
+            </p>
+
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Category</th>
+                    <th>Operators</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Arithmetic</td>
+                    <td>
+                      <code
+                        >+&nbsp;&nbsp;-&nbsp;&nbsp;*&nbsp;&nbsp;/&nbsp;&nbsp;%</code
+                      >
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Compound assign</td>
+                    <td>
+                      <code
+                        >+=&nbsp;&nbsp;-=&nbsp;&nbsp;*=&nbsp;&nbsp;/=&nbsp;&nbsp;%=</code
+                      >
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Comparison</td>
+                    <td>
+                      <code
+                        >&lt;&nbsp;&nbsp;&gt;&nbsp;&nbsp;&lt;=&nbsp;&nbsp;&gt;=&nbsp;&nbsp;==&nbsp;&nbsp;!=</code
+                      >
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Logical</td>
+                    <td><code>and&nbsp;&nbsp;or&nbsp;&nbsp;not</code></td>
+                  </tr>
+                  <tr>
+                    <td>Grouping</td>
+                    <td><code>(&nbsp;&nbsp;)</code></td>
+                  </tr>
+                  <tr>
+                    <td>Ownership</td>
+                    <td>
+                      <code>&amp;</code> (borrow) · <code>inout</code> ·
+                      <code>move</code>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">precedence.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo"># Multiplication and division bind tighter than + and -.
+result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pre>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="builtins">
+            <h2>
+              Built-in Functions
+              <a class="anchor" href="#builtins" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              These are available in every file without an import — the
+              <em>Prelude</em>.
+            </p>
+
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Signature</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>print(s: str)</code></td>
+                    <td>
+                      Write a string to standard output. No trailing newline.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>panic(msg: str)</code></td>
+                    <td>
+                      Abort the program with <code>msg</code>. Never returns.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>assert(cond: bool, msg: str)</code></td>
+                    <td>
+                      Abort with <code>msg</code> if <code>cond</code> is false.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>int_to_str(n: int) -&gt; str</code></td>
+                    <td>Convert an integer to its decimal string form.</td>
+                  </tr>
+                  <tr>
+                    <td><code>range(start: int, end: int)</code></td>
+                    <td>Half-open integer range for <code>for</code> loops.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="callout callout--info">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="16" x2="12" y2="12"></line>
+                <line x1="12" y1="8" x2="12.01" y2="8"></line>
+              </svg>
+              <div>
+                <p class="callout-title">
+                  <code>print()</code> is <code>str</code>-only
+                </p>
+                <p>
+                  Passing an <code>int</code>, <code>float</code>, or
+                  <code>bool</code> is a compile error. Convert numbers with
+                  <code>int_to_str()</code> first; a
+                  <code>float</code>-to-string helper is not yet available.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="ownership">
+            <h2>
+              Ownership Lite
+              <a class="anchor" href="#ownership" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Ryo is memory-safe without a garbage collector and
+              <strong>without lifetime annotations</strong>. Every binding owns
+              its value; how a function receives an argument is declared once,
+              on the parameter, and the compiler enforces the rules. The design
+              is inspired by Rust's borrow checker and Mojo's eager destruction.
+            </p>
+            <p>
+              There are three parameter <em>modes</em>, chosen by a keyword
+              between the colon and the type:
+            </p>
+
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Mode</th>
+                    <th>Keyword</th>
+                    <th>Callee access</th>
+                    <th>Caller afterwards</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Immutable borrow</td>
+                    <td><em>(default)</em></td>
+                    <td>read-only</td>
+                    <td>unchanged, still usable</td>
+                  </tr>
+                  <tr>
+                    <td>Mutable borrow</td>
+                    <td><code>inout</code></td>
+                    <td>read-write</td>
+                    <td>unchanged, still usable</td>
+                  </tr>
+                  <tr>
+                    <td>Move (take ownership)</td>
+                    <td><code>move</code></td>
+                    <td>read-write, then drops</td>
+                    <td>dead — read is a compile error</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p>
+              One rule ties them together: call sites are
+              <strong>sigil-free</strong> for every mode except the mutable
+              borrow, which takes a <code>&amp;</code> at the call site to make
+              mutation explicit. The signature does the rest.
+            </p>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="borrow-modes">
+            <h2>
+              Borrow Modes in Practice
+              <a class="anchor" href="#borrow-modes" aria-label="Permalink"
+                >#</a
+              >
+            </h2>
+
+            <h3>Immutable borrow (default)</h3>
+            <p>
+              A plain parameter is borrowed read-only. The caller keeps the
+              value and can use it again afterwards.
+            </p>
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">borrow.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn read_text(text: str):
+	# text is implicitly borrowed — read-only
+	print(text)
+
+fn main():
+	mut message = "Hello"
+	read_text(message)        # implicit borrow
+	print(message)            # message still usable</code></pre>
+            </div>
+
+            <h3>Mutable borrow (<code>inout</code> + <code>&amp;</code>)</h3>
+            <p>
+              An <code>inout</code> parameter may be mutated by the callee. The
+              caller passes it with an explicit <code>&amp;</code> so every
+              mutation is visible at the call site.
+            </p>
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">inout.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn mutate_text(inout text: str):
+	text = text + ", mutated"
+
+fn main():
+	mut message = "Hello"
+	mutate_text(&amp;message)    # explicit &amp; at the call site
+	print(message)            # Hello, mutated</code></pre>
+            </div>
+
+            <h3>Move (<code>move</code>)</h3>
+            <p>
+              A <code>move</code> parameter takes ownership. After the call, the
+              caller's binding is dead — reading it is a compile error. The
+              value is destroyed when the callee returns (unless it moves it
+              onward).
+            </p>
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">move.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn take_text(move text: str):
+	modified = text + ", owned"
+	print(modified)
+	# text is dropped when take_text returns
+
+fn main():
+	message = "Hello"
+	take_text(message)        # ownership moves into take_text
+
+	# print(message)          # compile error: `message` was moved</code></pre>
+            </div>
+
+            <div class="callout">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <polygon
+                  points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"
+                ></polygon>
+              </svg>
+              <div>
+                <p class="callout-title">Safety without lifetimes</p>
+                <p>
+                  No use-after-free, no double-free, and no leaked values — and
+                  you never annotate a lifetime. The compiler tracks liveness
+                  implicitly and inserts destruction at last use.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="whats-next">
+            <h2>
+              What's Next
+              <a class="anchor" href="#whats-next" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Ryo is pre-alpha. The features below are specified and on the
+              roadmap but <strong>not yet implemented</strong> — they do not
+              compile today. This list tracks the largest items.
+            </p>
+
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Feature</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>String slices (<code>&amp;str</code>)</td>
+                    <td><span class="pill">Milestone 8.4</span></td>
+                  </tr>
+                  <tr>
+                    <td>Structs &amp; methods</td>
+                    <td><span class="pill">Milestone 9</span></td>
+                  </tr>
+                  <tr>
+                    <td>Tuples</td>
+                    <td><span class="pill">Milestone 10</span></td>
+                  </tr>
+                  <tr>
+                    <td>Enums (algebraic data types)</td>
+                    <td><span class="pill">Milestone 11</span></td>
+                  </tr>
+                  <tr>
+                    <td>Pattern matching (<code>match</code>)</td>
+                    <td><span class="pill">Milestone 12</span></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      Errors as values (<code>!T</code>) &amp;
+                      <code>catch</code>
+                    </td>
+                    <td><span class="pill">Milestone 13</span></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      Optionals (<code>?T</code>) &amp; <code>orelse</code>
+                    </td>
+                    <td><span class="pill">Milestone 16</span></td>
+                  </tr>
+                  <tr>
+                    <td>Collections (<code>list</code>, <code>map</code>)</td>
+                    <td><span class="pill">Milestone 22</span></td>
+                  </tr>
+                  <tr>
+                    <td>Concurrency (tasks &amp; channels)</td>
+                    <td><span class="pill">Planned</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p>
+              For the full picture, see the
+              <a
+                href="https://github.com/ryolang/ryo/blob/main/docs/specification.md"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Language Specification</a
+              >
+              and the
+              <a
+                href="https://github.com/ryolang/ryo/blob/main/docs/dev/implementation_roadmap.md"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Implementation Roadmap</a
+              >.
+            </p>
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <div class="footer-inner">
+        <div class="brand">
+          <div class="brand-logo brand-logo-sm" aria-hidden="true">
+            <img src="../img/ryo.svg" alt="" width="14" height="14" />
+          </div>
+          <span class="brand-name brand-name-sm">ryo</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/ryolang/ryo">GitHub</a>
+          <a href="../">Home</a>
+        </div>
+        <p class="footer-meta">
+          &copy; 2025 The Ryo Authors &middot; Pre-alpha &middot; MIT licensed
+        </p>
+      </div>
+    </footer>
+
+    <!-- highlight.js (self-hosted) + Ryo language definition -->
+    <script src="../assets/highlight.min.js"></script>
+    <script src="../assets/ryo-highlight.js"></script>
+    <!-- Shared page behaviour (theme toggle, GitHub stars, copy buttons, highlighting) -->
+    <script src="../assets/script.js"></script>
+    <script>
+      (function () {
+        // Highlighting is handled by the shared script.js
+        // (vendor/highlight.min.js + vendor/ryo-highlight.js loaded above).
+
+        // Mobile sidebar toggle.
+        var sidebar = document.getElementById("ref-sidebar");
+        var toggle = document.querySelector(".ref-nav-toggle");
+        if (toggle && sidebar) {
+          toggle.addEventListener("click", function () {
+            var open = sidebar.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", String(open));
+          });
+        }
+
+        // Scroll-spy: highlight the current section in the sidebar.
+        var links = Array.prototype.slice.call(
+          document.querySelectorAll(".ref-nav-list a"),
+        );
+        var linkFor = {};
+        links.forEach(function (a) {
+          var id = a.getAttribute("href").slice(1);
+          var sec = document.getElementById(id);
+          if (sec) linkFor[id] = a;
+        });
+        if ("IntersectionObserver" in window && links.length) {
+          var observer = new IntersectionObserver(
+            function (entries) {
+              entries.forEach(function (entry) {
+                var a = linkFor[entry.target.id];
+                if (!a) return;
+                if (entry.isIntersecting) {
+                  links.forEach(function (l) {
+                    l.classList.remove("is-active");
+                  });
+                  a.classList.add("is-active");
+                }
+              });
+            },
+            { rootMargin: "-5rem 0px -70% 0px", threshold: 0 },
+          );
+          Object.keys(linkFor).forEach(function (id) {
+            observer.observe(document.getElementById(id));
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>
