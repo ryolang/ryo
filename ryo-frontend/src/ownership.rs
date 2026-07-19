@@ -981,6 +981,28 @@ fn owner_name_for_diag(owner: Owner, tir: &Tir, pool: &InternPool) -> String {
     }
 }
 
+/// Rule 7 (E0032) binding name: scan the call's args for a `Var` read
+/// that resolves to `owner` and use ITS name. `owner_name_for_diag`
+/// inspects the binding's initializer (an IntConst/StrConst — never a
+/// `Var`), so it falls back to "value" for locals; the conflicting arg
+/// reads always carry the name (I-116).
+fn rule7_owner_name(
+    own: &Ownership,
+    tir: &Tir,
+    pool: &InternPool,
+    args: &[TirRef],
+    owner: Owner,
+) -> String {
+    for arg in args {
+        if let TirData::Var(name) = tir.inst(*arg).data
+            && inout_owner(own, tir, *arg) == owner
+        {
+            return format!("`{}`", pool.str(name));
+        }
+    }
+    owner_name_for_diag(owner, tir, pool)
+}
+
 /// CFG join for `if` / `elif` / `else`. The naïve forward walk
 /// would let a move inside a then-branch persist past the merge
 /// regardless of whether else also moved — wrong for the spec's
@@ -1971,7 +1993,7 @@ fn visit_expr(
                 if !seen_owners.insert(*owner) {
                     continue;
                 }
-                let name = owner_name_for_diag(*owner, tir, pool);
+                let name = rule7_owner_name(own, tir, pool, &view.args, *owner);
 
                 // (1) The same owner is mutably borrowed more than once.
                 // Collect every occurrence so the two notes point at
@@ -4028,6 +4050,46 @@ mod tests {
         assert_eq!(
             e0032_count, 1,
             "Expected exactly one MutableAliasingViolation (E0032) for f(&x, move x); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e0032_names_local_binding_not_value() {
+        // I-116: `swap(&c, &c)` must name `c` in the message — the spec's
+        // rendered example shows the backticked binding name, not the
+        // generic "value" that `owner_name_for_diag` falls back to for
+        // locals (it inspects the initializer, not the read).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let c = pool.intern_str("c");
+        let swap = pool.intern_str("swap");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let ic = tb.int_const(1, int_ty, span);
+        let decl = tb.var_decl(c, false, int_ty, ic, span);
+        let cv1 = tb.var(c, int_ty, span);
+        let cv2 = tb.var(c, int_ty, span);
+        let call = tb.call(swap, &[cv1, cv2], &[ParamMode::Inout, ParamMode::Inout], void, span);
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        let msg = &diags
+            .iter()
+            .find(|d| matches!(d.code, DiagCode::MutableAliasingViolation))
+            .expect("E0032 must fire")
+            .message;
+        assert!(
+            msg.contains("`c`"),
+            "E0032 must name the binding `c`; got: {msg}"
+        );
+        assert!(
+            !msg.contains("value"),
+            "E0032 must not fall back to 'value'; got: {msg}"
         );
     }
 

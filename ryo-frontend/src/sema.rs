@@ -51,7 +51,7 @@ use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use ryo_core::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 // ---------- Decl table ----------
@@ -188,6 +188,30 @@ pub struct Sema<'a> {
     /// Per-decl emitted TIR slot. Filled as decls transition to
     /// `Resolved`. Result extraction drains this in source order.
     results: Vec<Option<Tir>>,
+    /// Refs that appear as direct arguments of some call anywhere in
+    /// the program. `&expr` (UIR `Borrow`) is only meaningful as a call
+    /// argument to an `inout` parameter (I-114); the `Borrow` arm in
+    /// `analyze_expr` rejects any `Borrow` inst outside this set. UIR
+    /// insts are unique per use, so a program-wide set is precise — a
+    /// `Borrow` that is a call arg in one function can never be a stray
+    /// `&` in another.
+    call_arg_refs: HashSet<InstRef>,
+}
+
+/// Every direct call-argument `InstRef` in the program (I-114). Scans
+/// `Call` and `MethodCall` instructions (method-call args count; the
+/// receiver does not — `(&x).len()` is not a valid borrow position).
+fn collect_call_arg_refs(uir: &Uir) -> HashSet<InstRef> {
+    let mut set = HashSet::new();
+    for (i, inst) in uir.instructions.iter().enumerate().skip(1) {
+        let r = InstRef::from_raw(i as u32);
+        match inst.tag {
+            InstTag::Call => set.extend(uir.call_view(r).args),
+            InstTag::MethodCall => set.extend(uir.method_call_view(r).args),
+            _ => {}
+        }
+    }
+    set
 }
 
 impl<'a> Sema<'a> {
@@ -240,6 +264,7 @@ impl<'a> Sema<'a> {
             name_to_decl,
             signatures: HashMap::with_capacity(n),
             results,
+            call_arg_refs: collect_call_arg_refs(uir),
         }
     }
 
@@ -1066,6 +1091,16 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
             // TirRef. Codegen decides pass-by-pointer from the callee's
             // `ParamMode::Inout`. (&/inout agreement + lvalue validation
             // are enforced in `check_call`, not here.)
+            if !sema.call_arg_refs.contains(&r) {
+                // I-114: a `&` that is not a direct call argument marks
+                // no mutation at all — reject it instead of silently
+                // discarding it.
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::BorrowMismatch,
+                    "`&` is only valid as an argument to an `inout` parameter".to_string(),
+                ));
+            }
             analyze_expr(sema, fcx, scope, inner)
         }
         other => panic!(
@@ -2015,6 +2050,47 @@ mod tests {
         assert!(
             !any_code(&diags, DiagCode::BorrowMismatch),
             "& of a mut local must be allowed; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_outside_call_rejected() {
+        // I-114: `x = &c` — a `&` that is not a call argument is not a
+        // mutation marker for anything; it must be an error, not a
+        // silent no-op.
+        let (_tirs, diags, _pool) = run_with_errors("fn main():\n\tmut c = 5\n\tx = &c\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& outside call-argument position must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_nested_in_binop_rejected() {
+        // I-114: `inc(1 + &c)` — the `&` is buried inside an expression;
+        // it is not the call argument itself, so it is rejected here (and
+        // check_call separately reports the missing `&` on the inout arg).
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn inc(inout x: int):\n\tx += 1\nfn main():\n\tmut c = 1\n\tinc(1 + &c)\n",
+        );
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "& nested inside a larger expression must be rejected; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn borrow_as_inout_arg_still_ok() {
+        // I-114 regression guard: a direct call argument keeps working.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn inc(inout x: int):\n\tx += 1\nfn main():\n\tmut c = 0\n\tinc(&c)\n",
+        );
+        assert!(
+            !any_code(&diags, DiagCode::BorrowMismatch),
+            "& as a direct inout call argument must stay valid; got {:?}",
             diags
         );
     }

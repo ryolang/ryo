@@ -395,12 +395,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
 **Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
 
-### I-114 — `&` is accepted outside call-argument position as a silent no-op
-
-**Files:** `ryo-frontend/src/sema.rs` (`Borrow` arm :1060-1066, `check_call` agreement :1420-1461), `ryo-frontend/src/parser.rs` (:418-424)
-**Summary:** The parser accepts `&ident` as a general expression atom, and sema's `Borrow` arm lowers it to the inner value's `TirRef` unconditionally. The `&`/`inout` agreement and lvalue checks only run in `check_call` (and the `str_push` dispatch), so `x = &c`, `return &c`, `1 + &c`, `print(&c)` all compile with the `&` silently discarded — probe-verified: `mut c = 5; x = &c` prints `5`. Misleading syntax: it advertises call-site mutation semantics where none exist.
-**Resolution:** Reject `InstTag::Borrow` anywhere except directly as a call argument (one check in the UIR-instruction walk, message along the lines of "`&` is only valid as an argument to an `inout` parameter").
-
 ### I-117 — Conditional dead reassign leaks the pre-branch buffer on the not-taken path
 
 **Files:** `ryo-frontend/src/ownership.rs` (`analyze_assign` `free_on_reassign` ~:687-710, `merge_branches` `pending_dead_store` intersect ~:290-302, dead-store drain ~:556-580)
