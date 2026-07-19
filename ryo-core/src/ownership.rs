@@ -30,7 +30,7 @@ pub struct IfBranchIds {
     pub else_branch: Option<BranchId>,
 }
 
-/// One conditional drop of a pre-branch buffer (I-117). When a binding
+/// One conditional drop of a pre-branch buffer. When a binding
 /// is reassigned in SOME arms of an if but kept untouched in others,
 /// and the reassigned value is never read after the join, the
 /// pre-branch buffer would leak on the untouched paths. This drop
@@ -80,7 +80,7 @@ pub struct FunctionSidecar {
     /// `branch_stack` for each arm.
     pub if_branches: HashMap<TirRef /* IfStmt inst */, IfBranchIds>,
     /// Conditional drops of pre-branch buffers for dead conditional
-    /// reassignments (I-117). Codegen fires each entry at the start of
+    /// reassignments. Codegen fires each entry at the start of
     /// the arms it names (including a synthetic fall-through block for
     /// else-less ifs).
     pub conditional_dead_drops: Vec<ConditionalDeadDrop>,

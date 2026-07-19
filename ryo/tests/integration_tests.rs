@@ -2167,7 +2167,7 @@ fn inout_aliasing_distinct_owners_ok() {
 
 #[test]
 fn inout_str_reassign_in_callee_writeback() {
-    // I-112: reassigning an inout str param inside the callee replaces the
+    // Reassigning an inout str param inside the callee replaces the
     // caller's buffer. The replacement escapes via the write-back — it must
     // NOT be freed by the callee (UAF) nor flagged W0001, and the caller's
     // old buffer must be dropped exactly once.
@@ -2192,7 +2192,7 @@ fn inout_str_reassign_in_callee_writeback() {
 
 #[test]
 fn inout_str_user_fn_and_reborrow_writeback() {
-    // I-112: a user function taking `inout str`, mutating it via str_push
+    // A user function taking `inout str`, mutating it via str_push
     // (a reborrow of the inout param). Exercises the general str inout ABI
     // plus the nested inout call inside the callee.
     let temp_dir = TempDir::new().expect("temp");
@@ -2214,7 +2214,7 @@ fn inout_str_user_fn_and_reborrow_writeback() {
 
 #[test]
 fn str_push_growth_beyond_capacity() {
-    // I-112: growing past capacity forces a realloc MOVE inside the
+    // Growing past capacity forces a realloc MOVE inside the
     // runtime — the caller's old buffer is freed there, so the caller must
     // not free the stale pre-call triple (double-free). Behavioral half of
     // the check; the sanitizer half is the `str_push_growth` ASan fixture.
@@ -2306,7 +2306,7 @@ fn inout_fallthrough_return_writes_back() {
 
 #[test]
 fn str_reassign_inside_if_no_false_dead_store() {
-    // I-112 follow-up (pre-existing M8.1 bug): a str reassignment inside
+    // Follow-up (pre-existing M8.1 bug): a str reassignment inside
     // a branch, read after the join, must not warn W0001 and must free
     // both buffers correctly (sanitizer half: `reassign_inside_if` ASan
     // fixture).

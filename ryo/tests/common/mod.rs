@@ -208,7 +208,7 @@ fn main():
 ",
     ),
     (
-        // I-112: the callee reassigns the inout str param; the replacement
+        // The callee reassigns the inout str param; the replacement
         // escapes via the write-back (callee must not free it), and the
         // caller's old buffer is dropped exactly once.
         "inout_str_reassign_in_callee",
@@ -223,7 +223,7 @@ fn main():
 ",
     ),
     (
-        // I-112: user-fn inout str + reborrow through str_push.
+        // User-fn inout str + reborrow through str_push.
         "inout_str_reborrow",
         "\
 fn app(inout s: str):
@@ -236,7 +236,7 @@ fn main():
 ",
     ),
     (
-        // I-112: growth forces a realloc move; the caller must free the
+        // Growth forces a realloc move; the caller must free the
         // write-back triple, not the stale pre-call one (double-free).
         "str_push_growth",
         "\
@@ -247,7 +247,7 @@ fn main():
 ",
     ),
     (
-        // I-112 / pre-existing M8.1 bug: reassignment inside a branch,
+        // Pre-existing M8.1 bug: reassignment inside a branch,
         // read after the join. The taken arm drops the old buffer
         // (free_on_reassign); the merged value is freed at last use.
         "reassign_inside_if",
@@ -261,7 +261,7 @@ fn main():
 ",
     ),
     (
-        // I-117: dead conditional reassign, taken path — the old buffer
+        // Dead conditional reassign, taken path — the old buffer
         // is dropped by free_on_reassign and the new one by the
         // dead-store Free. Both must be freed exactly once.
         "dead_reassign_if_taken",
@@ -274,7 +274,7 @@ fn main():
 ",
     ),
     (
-        // I-117: dead conditional reassign, NOT-taken path — the
+        // Dead conditional reassign, NOT-taken path — the
         // reassign never happens; the original buffer must be freed by
         // the arm-gated conditional DeadDrop in the fall-through.
         "dead_reassign_if_fallthrough",
@@ -287,7 +287,7 @@ fn main():
 ",
     ),
     (
-        // I-118: dead reassign in a loop body, taken path — every
+        // Dead reassign in a loop body, taken path — every
         // iteration's old buffer drops via free_on_reassign, and the
         // final value is freed by the after-loop anchor (not a second
         // in-body Free).
@@ -302,7 +302,7 @@ fn main():
 ",
     ),
     (
-        // I-118: dead reassign in a loop body, ZERO iterations — the
+        // Dead reassign in a loop body, ZERO iterations — the
         // pre-loop buffer must still be freed by the after-loop anchor.
         "dead_reassign_while_zero",
         "\
@@ -314,7 +314,7 @@ fn main():
 ",
     ),
     (
-        // I-118: same shape through a for-range loop with an empty
+        // Same shape through a for-range loop with an empty
         // range (zero iterations).
         "dead_reassign_for_zero",
         "\

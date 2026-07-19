@@ -148,8 +148,8 @@ pub(crate) struct Ownership {
     /// branch merges need no per-field rule for it.
     pub inout_str_params: HashSet<StringId>,
 
-    /// Conditional reseats observed while walking if/elif/else arms
-    /// (I-117): bindings that SOME arm reseated while other arms kept
+    /// Conditional reseats observed while walking if/elif/else arms:
+    /// bindings that SOME arm reseated while other arms kept
     /// the pre-branch owner. Monotone-accumulating (like
     /// `owner_at_read`) — loop convergence re-walks are deduped at push
     /// time. Consumed by the dead-store drain, which converts the
@@ -168,7 +168,7 @@ pub(crate) struct Ownership {
     pub return_epilogue: Vec<(TirRef, Vec<Owner>)>,
 }
 
-/// One conditional-reseat observation (I-117), recorded by
+/// One conditional-reseat observation, recorded by
 /// `analyze_if_stmt` after walking an if's arms. `reseat_owners` is the
 /// set of owners the binding was reseated TO across the arms;
 /// `untouched_arms` are the arms (by [`BranchId`]) that kept the
@@ -341,7 +341,7 @@ impl Ownership {
 /// contains `target`, or `None` when `target` is not inside any loop.
 /// Walks the body's statements tracking the loop stack; if/elif/else
 /// arms are transparent (an if inside a loop does not reset the stack).
-/// Used by the I-118 dead-store re-anchor.
+/// Used by the dead-store re-anchor.
 fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
     fn walk(
         tir: &Tir,
@@ -395,7 +395,7 @@ fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
 }
 
 /// True if `name` is declared by a `VarDecl` anywhere before `stop` in
-/// program order (any nesting depth). Guards the I-118 re-anchor: only
+/// program order (any nesting depth). Guards the dead-store re-anchor: only
 /// bindings that exist BEFORE their outermost reseating loop may move
 /// their Free to the loop anchor — a loop-local value's `StrLocals`
 /// don't exist on the zero-iteration path.
@@ -458,7 +458,7 @@ fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> bool {
 
 /// True if any statement in `stmts` (any depth) is a `Return` /
 /// `ReturnVoid` — a body that may leave the function early, where an
-/// after-loop Free would be unreachable (I-118).
+/// after-loop Free would be unreachable on the return path.
 fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
     for &r in stmts {
         match tir.inst(r).tag {
@@ -826,7 +826,7 @@ fn analyze_function(
     // pre-branch owner (a reseat inside one arm does not survive the
     // join), so on the not-taken path the binding still owns the
     // pre-reassign allocation. Codegen emits the Free from the binding's
-    // current `StrLocals` (I-112), which is the path-correct buffer.
+    // current `StrLocals`, which is the path-correct buffer.
     let reassign_targets: HashSet<Owner> = sidecar
         .free_on_reassign
         .values()
@@ -984,12 +984,12 @@ fn analyze_function(
             // emitting another dead-store Free would double-free.
             continue;
         }
-        // I-118: a dead reassign INSIDE A LOOP for a binding declared
+        // A dead reassign INSIDE A LOOP for a binding declared
         // before that loop: anchor the Free after the outermost loop
         // rather than after the in-loop assign. The in-loop anchor
         // fires only when the body executes — the zero-iteration path
         // leaks the pre-loop buffer. The after-loop anchor emits the
-        // binding's CURRENT StrLocals (I-112 map): the final iteration's
+        // binding's CURRENT StrLocals (the init→name map): the final iteration's
         // value on taken paths, the pre-loop value on zero iterations.
         // When the body may `return`, keep the in-loop Free too — the
         // after-loop anchor is unreachable on the return path.
@@ -1026,7 +1026,7 @@ fn analyze_function(
         }
     }
 
-    // I-117: convert honored reseat records into arm-gated
+    // Convert honored reseat records into arm-gated
     // `ConditionalDeadDrop`s. A record is honored when a pending entry
     // for one of its reseated owners survived to the drain — i.e. the
     // reassigned value is never read afterwards — so the pre-branch
@@ -1512,7 +1512,7 @@ fn owner_name_for_diag(owner: Owner, tir: &Tir, pool: &InternPool) -> String {
 /// that resolves to `owner` and use ITS name. `owner_name_for_diag`
 /// inspects the binding's initializer (an IntConst/StrConst — never a
 /// `Var`), so it falls back to "value" for locals; the conflicting arg
-/// reads always carry the name (I-116).
+/// reads always carry the name.
 fn rule7_owner_name(
     own: &Ownership,
     tir: &Tir,
@@ -1562,7 +1562,7 @@ fn analyze_if_stmt(
         own.next_branch_id += 1;
     }
     // Mint a BranchId for the else/fall-through arm ALWAYS — an
-    // else-less if's fall-through still needs an id so I-117
+    // else-less if's fall-through still needs an id so the
     // conditional DeadDrops can gate on it.
     let else_branch = {
         let id = BranchId(own.next_branch_id);
@@ -1711,7 +1711,7 @@ fn analyze_if_stmt(
         }
     }
 
-    // I-117: record conditional reseats — bindings that SOME arm
+    // Record conditional reseats — bindings that SOME arm
     // reseated while other arms kept the pre-if owner. The dead-store
     // drain (function exit) converts a record into arm-gated
     // `ConditionalDeadDrop`s when the reassigned value is never read
@@ -2685,7 +2685,7 @@ fn visit_expr(
             // The stale-triple hazard (callee realloc'd/replaced the
             // buffer) is handled in CODEGEN, where named-binding Frees
             // emit the binding's CURRENT `StrLocals` instead of the
-            // producing inst's cached repr (I-112) — the same pattern
+            // producing inst's cached repr — the same pattern
             // `free_on_reassign` already used.
         }
         // ---- Aliasing read ----
@@ -4649,7 +4649,7 @@ mod tests {
 
     #[test]
     fn e0032_names_local_binding_not_value() {
-        // I-116: `swap(&c, &c)` must name `c` in the message — the spec's
+        // `swap(&c, &c)` must name `c` in the message — the spec's
         // rendered example shows the backticked binding name, not the
         // generic "value" that `owner_name_for_diag` falls back to for
         // locals (it inspects the initializer, not the read).
@@ -4772,7 +4772,7 @@ mod tests {
 
     #[test]
     fn inout_str_param_reassign_escapes_no_dead_store_no_free() {
-        // I-112 callee side: `fn set(inout s: str): s = "new"`. The
+        // Callee side: `fn set(inout s: str): s = "new"`. The
         // replacement value escapes through the write-back pointer, so the
         // pass must NOT emit W0001 or free the new value; the OLD pointee
         // (the incoming buffer) must be dropped at the reassign.
@@ -4821,7 +4821,7 @@ mod tests {
 
     #[test]
     fn inout_str_param_reassign_inside_if_escapes() {
-        // I-112: `fn g(inout s: str): if c: s = "b"`. The rebind is
+        // `fn g(inout s: str): if c: s = "b"`. The rebind is
         // branch-divergent — the merge keeps `Param(s)` as the binding's
         // owner and can stamp it Valid — but the bound value still
         // escapes via the write-back: no W0001, no Free for the rebound
@@ -4881,7 +4881,7 @@ mod tests {
 
     #[test]
     fn inout_str_param_move_out_after_reassign_rejected() {
-        // I-112: the value bound to an inout str param escapes via the
+        // The value bound to an inout str param escapes via the
         // write-back, so moving it out (even after a reassign made it a
         // fresh, Valid owner) must still be an error.
         use chumsky::span::{SimpleSpan, Span as _};
@@ -4922,7 +4922,7 @@ mod tests {
 
     #[test]
     fn inout_str_param_return_after_reassign_rejected() {
-        // I-112: returning the value currently bound to an inout str param
+        // Returning the value currently bound to an inout str param
         // double-owns it (it also escapes via the write-back) — E0022.
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::{ParamMode, TirBuilder, TirData, TirParam, TirTag};
@@ -4962,7 +4962,7 @@ mod tests {
 
     #[test]
     fn inout_call_keeps_owner_and_frees_current_buffer() {
-        // I-112 caller side: `mut s = "hi"; set(&s); print(s)`. An inout
+        // Caller side: `mut s = "hi"; set(&s); print(s)`. An inout
         // call is a pure borrow of the slot: the binding KEEPS its
         // pre-call owner (no reseat, no Moved, no dead-store churn), and
         // the freshness of the freed buffer is codegen's job — it emits
@@ -5011,7 +5011,7 @@ mod tests {
 
     #[test]
     fn inout_call_inside_if_no_false_dead_store() {
-        // I-112 follow-up: `mut s = "a"; if c: set(&s); print(s)` — the
+        // `mut s = "a"; if c: set(&s); print(s)` — the
         // reseat happens inside the if-arm; the post-if read must clear
         // the dead-store entry across the branch merge.
         use chumsky::span::{SimpleSpan, Span as _};
@@ -5046,7 +5046,7 @@ mod tests {
 
     #[test]
     fn inout_call_inside_loop_no_false_dead_store() {
-        // I-112 follow-up: `mut s = ""; while i < 3: str_push(&s, "x") ...
+        // `mut s = ""; while i < 3: str_push(&s, "x") ...
         // print(s)` — same merge concern through the loop fixed point.
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::{ParamMode, TirBuilder};
@@ -5090,7 +5090,7 @@ mod tests {
 
     #[test]
     fn reassign_inside_if_still_frees_binding_at_last_use() {
-        // Pre-existing M8.1 bug exposed by I-112: `mut s = "a"; if c:
+        // Pre-existing M8.1 bug: `mut s = "a"; if c:
         // s = "b"; print(s)`. The merge keeps the pre-branch owner, so the
         // reassign-target guard must not skip its last-use Free — on the
         // not-taken path the binding still owns `lit_a`. Codegen emits the
@@ -5146,7 +5146,7 @@ mod tests {
 
     #[test]
     fn conditional_dead_reassign_schedules_fallthrough_drop() {
-        // I-117: `mut s = "a"; if c: s = "b"` with s never read after.
+        // `mut s = "a"; if c: s = "b"` with s never read after.
         // The taken arm drops "a" (free_on_reassign) and the drain frees
         // "b"; the NOT-taken path must also free "a" — via an arm-gated
         // ConditionalDeadDrop for the pre-branch owner.
@@ -5224,7 +5224,7 @@ mod tests {
 
     #[test]
     fn loop_dead_reassign_anchors_after_loop() {
-        // I-118: `mut s = "a"; while c: s = "b"` with s never read
+        // `mut s = "a"; while c: s = "b"` with s never read
         // after. The dead-store Free must anchor AFTER THE LOOP (not
         // after the in-loop assign): the in-loop anchor never fires on
         // the zero-iteration path, leaking the pre-loop buffer. The
@@ -5268,7 +5268,7 @@ mod tests {
 
     #[test]
     fn loop_dead_reassign_with_return_keeps_in_body_free() {
-        // I-118: when the loop body can `return`, the after-loop anchor
+        // When the loop body can `return`, the after-loop anchor
         // is unreachable on the return path — the in-body Free must stay
         // alongside the after-loop one.
         use chumsky::span::{SimpleSpan, Span as _};
@@ -5310,7 +5310,7 @@ mod tests {
 
     #[test]
     fn loop_local_dead_value_keeps_in_body_anchor() {
-        // I-118 guard: a value DECLARED inside the loop body is not a
+        // Guard: a value DECLARED inside the loop body is not a
         // pre-loop binding — its Free must stay anchored in the body
         // (the binding's StrLocals don't exist on the zero-iteration
         // path).
@@ -5348,7 +5348,7 @@ mod tests {
 
     #[test]
     fn last_use_inside_loop_anchors_after_loop() {
-        // Conditional last use (I-118 family): `mut s = "a";
+        // Conditional last use: `mut s = "a";
         // for i in range(0, 3): print(s)`. The last read of `s` is
         // inside the loop body, but freeing there is a UAF — the next
         // iteration reads the freed buffer. The value is dead on ALL

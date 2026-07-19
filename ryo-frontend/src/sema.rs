@@ -190,7 +190,7 @@ pub struct Sema<'a> {
     results: Vec<Option<Tir>>,
     /// Refs that appear as direct arguments of some call anywhere in
     /// the program. `&expr` (UIR `Borrow`) is only meaningful as a call
-    /// argument to an `inout` parameter (I-114); the `Borrow` arm in
+    /// argument to an `inout` parameter; the `Borrow` arm in
     /// `analyze_expr` rejects any `Borrow` inst outside this set. UIR
     /// insts are unique per use, so a program-wide set is precise — a
     /// `Borrow` that is a call arg in one function can never be a stray
@@ -198,7 +198,7 @@ pub struct Sema<'a> {
     call_arg_refs: HashSet<InstRef>,
 }
 
-/// Every direct call-argument `InstRef` in the program (I-114). Scans
+/// Every direct call-argument `InstRef` in the program. Scans
 /// `Call` and `MethodCall` instructions (method-call args count; the
 /// receiver does not — `(&x).len()` is not a valid borrow position).
 fn collect_call_arg_refs(uir: &Uir) -> HashSet<InstRef> {
@@ -1091,7 +1091,7 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
             // `ParamMode::Inout`. (&/inout agreement + lvalue validation
             // are enforced in `check_call`, not here.)
             if !sema.call_arg_refs.contains(&r) {
-                // I-114: a `&` that is not a direct call argument marks
+                // A `&` that is not a direct call argument marks
                 // no mutation at all — reject it instead of silently
                 // discarding it.
                 sema.sink.emit(Diag::error(
@@ -2084,7 +2084,7 @@ mod tests {
 
     #[test]
     fn borrow_outside_call_rejected() {
-        // I-114: `x = &c` — a `&` that is not a call argument is not a
+        // `x = &c` — a `&` that is not a call argument is not a
         // mutation marker for anything; it must be an error, not a
         // silent no-op.
         let (_tirs, diags, _pool) = run_with_errors("fn main():\n\tmut c = 5\n\tx = &c\n");
@@ -2097,7 +2097,7 @@ mod tests {
 
     #[test]
     fn borrow_nested_in_binop_rejected() {
-        // I-114: `inc(1 + &c)` — the `&` is buried inside an expression;
+        // `inc(1 + &c)` — the `&` is buried inside an expression;
         // it is not the call argument itself, so it is rejected here (and
         // check_call separately reports the missing `&` on the inout arg).
         let (_tirs, diags, _pool) = run_with_errors(
@@ -2112,7 +2112,7 @@ mod tests {
 
     #[test]
     fn borrow_as_inout_arg_still_ok() {
-        // I-114 regression guard: a direct call argument keeps working.
+        // Regression guard: a direct call argument keeps working.
         let (_tirs, diags, _pool) = run_with_errors(
             "fn inc(inout x: int):\n\tx += 1\nfn main():\n\tmut c = 0\n\tinc(&c)\n",
         );

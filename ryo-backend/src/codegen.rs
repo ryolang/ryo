@@ -159,7 +159,7 @@ struct FunctionContext<'a, M: Module> {
     /// → binding-name map, built once per function by
     /// `build_free_binding_names`. `emit_frees` uses it to release a
     /// named binding's CURRENT `StrLocals` rather than the producing
-    /// inst's possibly-stale cached repr (I-112).
+    /// init's possibly-stale cached repr.
     free_binding_names: HashMap<TirRef, StringId>,
     /// M8.3 inout parameters: maps each inout param's name to the
     /// caller-provided slot address (a function-entry block param)
@@ -939,7 +939,7 @@ impl<M: Module> Codegen<M> {
 
         let elif_count = view.elif_branches.len();
         let has_else = view.else_stmts.is_some();
-        // I-117: an else-less if whose arms conditionally reseated a
+        // An else-less if whose arms conditionally reseated a
         // binding needs a REAL fall-through block so the arm-gated
         // DeadDrops have somewhere to fire.
         let needs_fallthrough_block = !has_else
@@ -1028,7 +1028,7 @@ impl<M: Module> Codegen<M> {
             }
             all_branches_return = all_branches_return && else_returns;
         } else if needs_fallthrough_block {
-            // I-117: the synthetic fall-through — emit the arm-gated
+            // The synthetic fall-through — emit the arm-gated
             // DeadDrops for the paths where no arm reseated the binding.
             builder.seal_block(else_or_merge);
             builder.switch_to_block(else_or_merge);
@@ -1551,7 +1551,7 @@ impl<M: Module> Codegen<M> {
     /// CURRENT `StrLocals` instead of the producing inst's cached repr:
     /// after a reassign, a branch merge, or an `inout` write-back the
     /// cached triple may be stale (freed/replaced), while the binding's
-    /// `Variable`s are SSA-correct at every program point (I-112 — the
+    /// `Variable`s are SSA-correct at every program point (the
     /// same reasoning the `free_on_reassign` path documents).
     fn emit_frees(
         builder: &mut FunctionBuilder,
@@ -1596,12 +1596,12 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// Emit I-117 conditional DeadDrops for (`if_stmt`, `arm`): frees of
+    /// Emit conditional DeadDrops for (`if_stmt`, `arm`): frees of
     /// the pre-if buffer of a conditionally-reassigned binding on the
     /// paths where the reassign did NOT happen. Fired at the START of an
     /// untouched arm, where the binding's `StrLocals` still hold the
     /// pre-if value. Resolves `target` through `free_binding_names` (the
-    /// I-112 init→name map), so the freed buffer is the binding's
+    /// init→name map), so the freed buffer is the binding's
     /// current triple at that program point.
     fn emit_conditional_dead_drops(
         builder: &mut FunctionBuilder,
@@ -1630,7 +1630,7 @@ impl<M: Module> Codegen<M> {
     /// Map every str-producing named initializer to its binding: VarDecl
     /// initializers, Assign values, and str params' virtual refs. Built
     /// once per function; `emit_frees` consults it to free a binding's
-    /// current `StrLocals` rather than a stale cached repr (I-112).
+    /// current `StrLocals` rather than a stale cached repr.
     fn build_free_binding_names(tir: &Tir, pool: &InternPool) -> HashMap<TirRef, StringId> {
         fn walk(tir: &Tir, stmts: &[TirRef], map: &mut HashMap<TirRef, StringId>) {
             for &r in stmts {

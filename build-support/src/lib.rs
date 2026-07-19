@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 ///   A separate target directory avoids cargo lock deadlocks when this
 ///   runs inside a build script under cargo.
 /// - The build always runs: cargo's own change detection no-ops when
-///   fresh, so the archive can never go stale (I-113).
+///   fresh, so the archive can never go stale the way the old
+///   `if !path.exists()` guard allowed.
 ///
 /// Panics when the build fails or the resolved path is not UTF-8.
 pub fn ensure_runtime_archive(root_dir: &Path) -> String {
