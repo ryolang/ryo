@@ -459,11 +459,11 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `ryo run` echoes `[Input Source]`, the full AST, and `[Codegen]` on every invocation; ~63 test assertions key on `"[Result] => 0"` and the section headers as the pass/fail signal, and tests post-filter stdout (split on `"[Codegen]"`). Any cleanup of the chatter breaks the suite.
 **Resolution:** Gate the debug sections behind a `--verbose` flag, then migrate tests to exit-code assertions; do the harness migration (with I-098) before touching `run_file`.
 
-### I-100 — CodSpeed AOT lanes measure nothing; no backend benchmarks exist
+### I-100 — CodSpeed AOT lanes are unverified and masked by `allow-empty`; no backend benchmarks
 
-**Files:** `.github/workflows/codspeed.yml` (:80, :110), `ryo-frontend/benches/frontend.rs`
-**Summary:** Both AOT lanes run `codspeed run` with `allow-empty: true`; no codspeed-instrumented AOT benchmarks exist in the repo. The lanes still build the full compiler in release and rebuild both benchmark binaries. There are also no backend benchmarks at all — Cranelift codegen, linking, and the ownership/eager-destruction story have zero automated benchmark coverage; the headline "2× less heap" claim is validated only by a manual shell script.
-**Resolution:** Either add instrumented AOT/codegen benchmarks (e.g. compile `benchmarks/fibonacci`) or delete the lanes. Add an automated eager-destruction regression check.
+**Files:** `.github/workflows/codspeed.yml` (:53-111), `codspeed.yml` (repo root), `ryo-frontend/benches/frontend.rs`
+**Summary:** Correction of the earlier text: the AOT lanes DO have registered benchmarks — `codspeed.yml` (root, since e7efcc4) maps `fibonacci-aot` and `eager-destruction-aot` to the compiled binaries, and `codspeed run` executes `codspeed.yml` entries per the [CodSpeed CLI docs](https://codspeed.io/docs/cli). The walltime lane (`codspeed-macro`) and the memory lane (`ubuntu-latest`, eBPF-capable) should both report data, and the memory lane is the closest thing to automated validation of the "2× less heap" claim that exists. Real gaps: (1) both lanes set `allow-empty: true`, so any future drift (renamed binary, broken config, deleted `codspeed.yml`) silently degrades them to measuring nothing again — the I-085 pattern; (2) no Cranelift-codegen/linking instrumented benchmarks (frontend benches cover the frontend only); (3) the 2× ratio itself is computed by hand from `benchmarks/eager_destruction/run_benchmarks.sh`, not asserted anywhere.
+**Resolution:** Remove `allow-empty: true` from both AOT lanes so empty runs fail loudly; verify in the CodSpeed dashboard that both lanes report data for both registered benchmarks; optionally add a CI step asserting eager_destruction's peak RSS stays under a fixed bound (the manual script's check, automated).
 
 ### I-101 — `examples/` is exercised by nothing
 

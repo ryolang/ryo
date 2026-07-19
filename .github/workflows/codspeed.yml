@@ -78,7 +78,6 @@ jobs:
         with:
           mode: walltime
           run: codspeed run
-          allow-empty: true
 
   aot-benchmarks-memory:
     name: Run AOT Memory Benchmarks
@@ -108,4 +107,3 @@ jobs:
         with:
           mode: memory
           run: codspeed run
-          allow-empty: true
