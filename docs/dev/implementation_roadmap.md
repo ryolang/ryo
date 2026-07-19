@@ -49,6 +49,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [ ] [Milestone 25 — Panic & Debugging Support [alpha: partial]](#milestone-25-panic--debugging-support-alpha-partial)
 - [ ] [Milestone 26 — Testing Framework & Documentation](#milestone-26-testing-framework--documentation)
 - [ ] [Milestone 26.5 — Distribution & Installer [alpha: partial]](#milestone-265-distribution--installer-alpha-partial)
+- [ ] [Milestone 26.6 — Cross-Compilation (64-bit)](#milestone-266-cross-compilation-64-bit)
 - [ ] [Milestone 27 — Core Language Complete & v0.1.0 Prep](#milestone-27-core-language-complete--v010-prep)
 
 ### Phase 5: Post-v0.1.0 Extensions (v0.2+)
@@ -2226,6 +2227,43 @@ ryo upgrade
 - Windows is a first-class citizen (PowerShell script works seamlessly)
 - Dependencies: Milestone 27 prep work (this enables distribution)
 
+### Milestone 26.6: Cross-Compilation (64-bit) [alpha]
+
+**Goal:** `ryo build --target <triple>` produces a working binary for any supported 64-bit POSIX target from any host — enabling M26.5's binary distributions without per-platform runners.
+
+**Status:** ⏳ Planned
+
+**Tasks:**
+
+- CLI: `--target <triple>` flag on `ryo build` (and `ryo ir` for inspection)
+- Pipeline: thread the requested triple into AOT (replacing the `Triple::host()` call sites) and into the linker
+- Runtime: parameterize the runtime-archive build/resolution by triple — the `--target` propagation and triple-namespaced layout (`<dir>/<triple>/<profile>/`) already landed; build the requested target's archive on demand at link time
+- Linker: pass `-target <zig-triple>` to zig cc with an LLVM→zig triple mapping for the supported set; gate `-lunwind` on the target OS, not the host
+- Target policy: start with 64-bit POSIX-to-POSIX (macOS arm64, Linux x86_64/aarch64 — glibc and musl); enforce it via `check_platform_support`. 32-bit deferred until the `str` ABI layout is computed from `pointer_type()` (I-076)
+- Tests: a CI lane that cross-builds the eager-destruction benchmark (or `examples/`) for linux x86_64/aarch64 and runs it (native ARM runner or qemu)
+
+**Visible Progress:** `ryo build --target aarch64-unknown-linux-musl hello.ryo` on macOS produces a static Linux ARM64 binary that runs unchanged.
+
+**Example:**
+
+```bash
+# From a macOS (Apple Silicon) host:
+ryo build --target aarch64-unknown-linux-musl examples/hello.ryo
+file ./hello
+# => ELF 64-bit LSB executable, ARM aarch64, statically linked
+```
+
+**Implementation Notes:**
+
+- Most machinery already exists: AOT ISA selection is triple-parameterized (`Codegen::new_aot`), zig cc is a multi-target cross-linker, and the runtime archive already builds per-triple. The work is plumbing: CLI flag → pipeline → archive resolution → linker target mapping.
+- JIT (`ryo run`) stays host-only by definition.
+- The existing `check_platform_support` gate (POSIX-only) becomes the allowed-target policy; keep 32-bit out until I-076 lands.
+- No language-feature dependencies — schedule is set purely by plumbing effort.
+
+**Dependencies:** Milestone 3 (AOT), Milestone 8.1 (str ABI), zig toolchain. 32-bit targets: blocked on I-076 (str ABI hardcoding).
+
+**Effort:** ~1-2 weeks
+
 ### Milestone 27: Core Language Complete & v0.1.0 Prep
 
 **Goal:** Finalize core language, polish, and prepare for v0.1.0 release
@@ -3285,7 +3323,7 @@ This foundation enables building **synchronous applications** including CLI tool
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
 **Phase 2 (M4-M13):** 14 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (&str); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~42 weeks (~10 months)
 **Phase 3 (M16, M17, M21, M22, M23):** 5 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~15 weeks (~4 months)
-**Phase 4 (M24-M27):** 5 milestones (includes M26.5 Distribution & Installer) × 4 weeks avg = ~20 weeks (~5 months)
+**Phase 4 (M24-M27):** 6 milestones (includes M26.5 Distribution & Installer and M26.6 Cross-Compilation) × 4 weeks avg = ~24 weeks (~6 months)
 
 **Total Estimated Time:** 89 weeks (~22 months) from Phase 2 start to v0.1.0
 
