@@ -75,7 +75,7 @@ Dependency direction is acyclic: `ryo` (CLI, clap) → `ryo-driver` (orchestrati
 - One `unsafe from_utf8_unchecked`, soundly argued. Handles carry no pool identity — cross-pool use silently mis-indexes (standard interner trade-off, undocumented).
 - Open design points: `TypeId` newtype vs enum (I-018), name-based annotation resolution in astgen (`resolve_type` = `StringId` equality against 4 pre-interned primitives) — will not scale to user types.
 
-### 2.5 Sema (`sema.rs`, 3152 lines, ~2000 code)
+### 2.5 Sema (`sema.rs`, 3229 lines, ~2050 code)
 
 - `Sema { uir, pool, sink, source, file_path, decl_state, queue, name_to_decl, signatures, results }` — worklist driver, `Unresolved → InProgress → Resolved`. Signatures resolve eagerly → recursion works. `CycleInResolution` is a dormant `DiagCode`: `require_decl` is `#[allow(dead_code)]`, deliberately never called from `check_call` (`:1344-1346`) — comptime-era scaffolding.
 - Scopes: parent-chained `HashMap`s. `FuncCtx.inst_map: Vec<Option<TirRef>>` sized to the **program-wide UIR length** per function (I-092).

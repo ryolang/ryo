@@ -340,6 +340,13 @@ impl<'a> Sema<'a> {
     /// diagnostic when a cycle is detected. The caller should fall
     /// back to the error type for whatever it was trying to
     /// compute.
+    /// Reserved for the comptime / lazy-resolution era: the cycle
+    /// sentinel for on-demand decl resolution. Production never calls
+    /// it today (signatures resolve eagerly instead); it is exercised
+    /// by the `require_decl_reports_cycle_when_in_progress` substrate
+    /// test, which the comptime milestones will lean on. Private, so
+    /// the lib-target dead-code analysis needs the allow.
+    #[allow(dead_code)]
     fn require_decl(&mut self, callee: DeclId, span: Span, name: StringId) -> bool {
         match self.decl_state[callee.index()] {
             DeclState::Unresolved | DeclState::Resolved => true,
