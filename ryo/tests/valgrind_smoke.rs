@@ -201,3 +201,16 @@ fn valgrind_dead_reassign_for_zero() {
         "dead_reassign_for_zero",
     );
 }
+
+#[test]
+fn valgrind_last_use_in_loop() {
+    run_valgrind_smoke(common::find_fixture("last_use_in_loop"), "last_use_in_loop");
+}
+
+#[test]
+fn valgrind_last_use_in_if_fallthrough() {
+    run_valgrind_smoke(
+        common::find_fixture("last_use_in_if_fallthrough"),
+        "last_use_in_if_fallthrough",
+    );
+}

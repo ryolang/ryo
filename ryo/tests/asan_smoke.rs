@@ -169,3 +169,16 @@ fn asan_dead_reassign_for_zero() {
         "dead_reassign_for_zero",
     );
 }
+
+#[test]
+fn asan_last_use_in_loop() {
+    run_asan_smoke(common::find_fixture("last_use_in_loop"), "last_use_in_loop");
+}
+
+#[test]
+fn asan_last_use_in_if_fallthrough() {
+    run_asan_smoke(
+        common::find_fixture("last_use_in_if_fallthrough"),
+        "last_use_in_if_fallthrough",
+    );
+}

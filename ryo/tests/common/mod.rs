@@ -324,6 +324,31 @@ fn main():
 \t\ts = \"b\"
 ",
     ),
+    (
+        // Conditional last use: the binding's last read is inside the
+        // loop body. The Free must fire at the loop exit — freeing in
+        // the body is a use-after-free on the next iteration.
+        "last_use_in_loop",
+        "\
+fn main():
+\tmut s = \"a\"
+\tfor i in range(0, 3):
+\t\tprint(s)
+",
+    ),
+    (
+        // Conditional last use through an if: the read is inside an
+        // arm that is NOT taken. The value must still be freed at the
+        // merge point.
+        "last_use_in_if_fallthrough",
+        "\
+fn main():
+\tmut s = \"a\"
+\td = false
+\tif d:
+\t\tprint(s)
+",
+    ),
 ];
 
 pub fn find_fixture(name: &str) -> &'static str {
