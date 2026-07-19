@@ -79,6 +79,12 @@
 				const target = document.getElementById(btn.dataset.copyTarget);
 				if (target) text = target.innerText;
 			}
+			// Fallback: copy the nearest code block's text (reference page).
+			if (!text) {
+				const block = btn.closest(".code-block");
+				const code = block && block.querySelector("pre code");
+				if (code) text = code.innerText;
+			}
 			if (!text) return;
 			navigator.clipboard.writeText(text).then(() => {
 				btn.classList.add("copied");
