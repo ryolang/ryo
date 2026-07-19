@@ -2,9 +2,9 @@
 
 # Ryo Language Design Issues & Recommendations
 
-This document identifies design inconsistencies, open questions, and recommendations for the Ryo language specification and roadmap. Issues are categorized by status.
+This document identifies design inconsistencies, open questions, and recommendations for the Ryo language specification and roadmap. Issues are categorized by status. Resolved items are removed (see `git log` for history).
 
-**Last updated:** 2026-07-19 (sweep: resolved Variable Initialization, Variable Shadowing, Default Integer Size, and the `never` checklist item against the spec; renumbered sections sequentially and replaced fragile numbered cross-references with named ones. Prior sweep 2026-07-17: closed Global Mutable State, trimmed Iterator Invalidation to its open runtime piece.)
+**Last updated:** 2026-07-19 (sweep: removed resolved items — Variable Initialization, Variable Shadowing, Default Integer Size, Global Mutable State — and their checklist entries, per the removal convention; renumbered sequentially and replaced fragile numbered cross-references with named ones. Prior sweep 2026-07-17: trimmed Iterator Invalidation to its open runtime piece.)
 
 ---
 
@@ -56,59 +56,37 @@ These require resolution before implementation reaches the affected milestone.
 
 These are underspecified aspects that will confuse developers if left undefined.
 
-### 6. Variable Initialization — RESOLVED
-
-*   **Was:** If `mut x: int` is allowed without initialization, you need complex flow analysis to prevent reading before writing.
-*   **Resolution:** Mandatory initialization, as proposed — the grammar requires an initializer (`[mut] ident [: type] = expression`), and the spec types locals "inferred from initialization" (§4.1). Matches the proposal.
-
-### 7. Variable Shadowing — RESOLVED
-
-*   **Was:** Proposal to allow shadowing (Rust style) for transformations where the old binding is no longer needed.
-*   **Resolution:** Decided differently — **same-scope shadowing is banned** (re-using a name in the same scope is a compile-time error), while **inner-scope shadowing is allowed** via an explicit declaration (spec §"Variable Shadowing", :252). Partial shadowing, not the full Rust-style proposal.
-
-### 8. Structural Equality
+### 6. Structural Equality
 
 *   When `struct_a == struct_b`, compare fields (Python/Rust) or addresses (Java)?
 *   **Proposal: Automatic Structural Equality** for structs containing only comparable types. Pointer equality via `std.mem.same_address(a, b)`.
 *   **Status:** Open — prerequisite is Milestone 9 (structs).
 
-### 9. String Indexing — The Unicode Trap
+### 7. String Indexing — The Unicode Trap
 
 *   `str` is UTF-8. `s[0]` is ambiguous: 0th byte (fast, dangerous) or 0th character (safe, O(N))?
 *   **Proposal: Forbid `s[i]`.** Provide `.bytes()[i]` (O(1), returns `u8`) and `.runes()[i]` (O(N), returns `char`).
 *   **Status:** Open, but the current direction leans the other way — Milestone 8.4 (String Slices) plans the slice operator `s[start:end]`, i.e. indexing-syntax on strings. The `s[i]` scalar-index question needs an explicit decision alongside M8.4.
 
-### 10. Default Integer Size — RESOLVED
-
-*   **Was:** `int` defaults to `isize` (varies by platform — 32-bit vs 64-bit).
-*   **Resolution:** Spec §4.2 (:357) defaults `int` to `i64`, as proposed — consistent across platforms. (Implementation note: codegen currently uses the pointer-sized type, which coincides with `i64` on 64-bit targets; the decision matters when a 32-bit target lands.)
-
-### 11. Default Arguments
+### 8. Default Arguments
 
 *   No overloading (correct), but default arguments are missing.
 *   **Proposal:** Allow `fn connect(url: str, retries: int = 3)`.
 *   **Status:** Decided — scheduled as **Milestone 8.5** (Default Parameters & Named Arguments). The remaining work is the spec text when M8.5 lands.
 
-### 12. Panic During Drop
+### 9. Panic During Drop
 
 *   If a `.drop()` panics while unwinding from another panic, undefined behavior.
 *   **Proposal: Immediate Abort.** Document clearly.
 *   **Status:** Open — prerequisite is Milestone 23 (RAII & Drop).
 
-### 13. Variadic Functions
+### 10. Variadic Functions
 
 *   `print` is variadic. Can users define them?
 *   **Proposal: Reserve for built-ins only (v0.1).** Users accept lists: `fn log(msgs: list[str])`.
 *   **Status:** Matches the current implementation (`print` is special-cased in codegen — I-006 — and user-defined variadics don't exist), but the reservation is not yet documented in the spec.
 
-### 14. Global Mutable State — RESOLVED
-
-*   **Was:** No mechanism defined for application-wide state (e.g., DB pool).
-*   **Resolution:** Settled in the spec — module-level `const` for compile-time constants; `shared[T]` (spec §5.6) for mutable shared state. No module-level `mut` variables; shared state must be explicit. Nothing further to decide.
-
----
-
-### 15. Iterator Invalidation — OPEN (runtime piece only)
+### 11. Iterator Invalidation — OPEN (runtime piece only)
 
 *   **Compile-time half resolved:** Scope-locked views (spec §5.7) prevent iterators from escaping their block, and Rule 7 (one writer OR many readers) prevents simultaneous mutation and iteration in concurrent contexts. The ownership framework shipped with M8.1/M8.2; the intra-call aliasing exclusion (Rule 7) was completed in M8.3.
 *   **Open (runtime):** For sequential code where mutation happens *inside* the loop body (e.g., `list.append()` during `for n in list`), **Versioned Iterators** are still needed as a runtime safety net:
@@ -117,7 +95,7 @@ These are underspecified aspects that will confuse developers if left undefined.
     *   Mismatch triggers a panic with a clear message: `"collection modified during iteration"`.
     *   Cost: one integer comparison per iteration — negligible.
 
-### 16. Loop-as-an-Expression and Safe `continue` (Zig inspirations)
+### 12. Loop-as-an-Expression and Safe `continue` (Zig inspirations)
 
 *   **The Smell:**
     1. Loop-as-an-expression (`break <value>`) is highly useful for searching and initializing immutable variables, but is currently deferred.
@@ -136,27 +114,23 @@ These are underspecified aspects that will confuse developers if left undefined.
 
 ### Grey Area Decisions
 
-- Structural equality semantics (Issue 8 — blocked on M9).
-- `s[i]` scalar indexing vs. slices (Issue 9 — decide alongside M8.4, which currently plans `s[start:end]`).
-- Default function arguments (Issue 11 — decided, lands with M8.5; spec text then).
-- Document double-panic abort behavior (Issue 12 — blocked on M23).
-- Document the variadic-as-builtin-only reservation (Issue 13 — already true in the compiler).
+- Structural equality semantics (Issue 6 — blocked on M9).
+- `s[i]` scalar indexing vs. slices (Issue 7 — decide alongside M8.4, which currently plans `s[start:end]`).
+- Default function arguments (Issue 8 — decided, lands with M8.5; spec text then).
+- Document double-panic abort behavior (Issue 9 — blocked on M23).
+- Document the variadic-as-builtin-only reservation (Issue 10 — already true in the compiler).
 - Resolve the `!` operator conflict (Issue 5).
-- Track Loop-as-an-Expression and Safe `continue` (Issue 16).
+- Track Loop-as-an-Expression and Safe `continue` (Issue 12).
 
 ### Checklist
 
-- [x] Add `never` type to spec (§4.1, :363)
-- [x] Define `mut x: T = val` as mandatory (grammar requires the initializer)
-- [x] Define shadowing rules (spec :252 — same-scope banned, inner-scope allowed)
 - [ ] Define `==` as structural equality (M9 prerequisite)
 - [ ] Forbid `str` indexing, add `.bytes()` and `.runes()` (revisit against M8.4 slices)
-- [x] Default `int` to `i64` (spec §4.2, :357)
 - [ ] Allow default function arguments (M8.5)
 - [ ] Document double-panic abort behavior (M23)
 - [ ] Reserve variadic functions for built-ins only (already true in the compiler; needs spec text)
 - [ ] Resolve `!` operator conflict (Issue 5)
-- [ ] Track Loop-as-an-Expression and Safe `continue` (Issue 16)
+- [ ] Track Loop-as-an-Expression and Safe `continue` (Issue 12)
 
 ## References
 
