@@ -1,0 +1,69 @@
+name: Examples CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "examples/**"
+      - ".github/workflows/examples.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "examples/**"
+      - ".github/workflows/examples.yml"
+
+concurrency:
+  group: examples-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  run-examples:
+    name: Run Working Examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: examples
+
+      - name: Get Zig version
+        id: zig-version
+        run: |
+          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Zig toolchain
+        id: zig-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.ryo/toolchain
+          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Zig toolchain
+        if: steps.zig-cache.outputs.cache-hit != 'true'
+        run: cargo run -- toolchain install
+
+      - name: Build Ryo compiler
+        run: cargo build --release
+
+      - name: Run examples
+        run: |
+          for file in examples/*.ryo; do
+            echo "=== Running $file ==="
+            if [[ "$file" == *"panic.ryo" ]]; then
+              # Expect panic.ryo to exit with non-zero
+              ./target/release/ryo run "$file" && (echo "Error: $file was expected to panic but succeeded" && exit 1) || echo "Expected panic occurred successfully"
+            else
+              # Expect other examples to succeed with 0
+              ./target/release/ryo run "$file"
+            fi
+          done

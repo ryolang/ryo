@@ -105,7 +105,7 @@ fn main():
 	print("=== Single Error Type Examples ===")
 
 	# Example 1: Successful operation
-	result = divide(10.0, 2.0) catch |e|:
+	result = divide(10.0, 2.0) catch as e:
 		match e:
 			math.DivisionByZero:
 				print("Error: Cannot divide by zero")
@@ -114,7 +114,7 @@ fn main():
 	print(f"10.0 / 2.0 = {result}")
 
 	# Example 2: Error case
-	error_result = divide(10.0, 0.0) catch |e|:
+	error_result = divide(10.0, 0.0) catch as e:
 		match e:
 			math.DivisionByZero:
 				print("Caught error: Division by zero")
@@ -123,7 +123,7 @@ fn main():
 	print("\n=== Error Propagation with try ===")
 
 	# Example 3: Chain of operations (same error type)
-	chain_result = safe_division_chain(100.0, 5.0, 2.0) catch |e|:
+	chain_result = safe_division_chain(100.0, 5.0, 2.0) catch as e:
 		match e:
 			math.DivisionByZero:
 				print("Chain failed: Division by zero")
@@ -132,7 +132,7 @@ fn main():
 	print(f"Chain result: (100.0 / 5.0) / 2.0 = {chain_result}")
 
 	# Example 4: Chain with error
-	chain_error = safe_division_chain(100.0, 5.0, 0.0) catch |e|:
+	chain_error = safe_division_chain(100.0, 5.0, 0.0) catch as e:
 		match e:
 			math.DivisionByZero:
 				print("Chain error caught: Division by zero in second operation")
@@ -141,7 +141,7 @@ fn main():
 	print("\n=== Error Union Handling (Multiple Error Types) ===")
 
 	# Example 5: Error union - must handle all variants exhaustively
-	union_result = validate_and_process("42") catch |e|:
+	union_result = validate_and_process("42") catch as e:
 		match e:
 			math.InvalidInput(msg):
 				print(f"Validation error: {msg}")
@@ -152,7 +152,7 @@ fn main():
 	print(f"Processed value: {union_result}")
 
 	# Example 6: Error union with error case
-	union_error = validate_and_process("") catch |e|:
+	union_error = validate_and_process("") catch as e:
 		match e:
 			math.InvalidInput(msg):
 				print(f"Caught validation error: {msg}")
@@ -164,7 +164,7 @@ fn main():
 
 	# Example 7: Successful average
 	numbers = [1.0, 2.0, 3.0, 4.0, 5.0]
-	avg_result = calculate_average(numbers) catch |e|:
+	avg_result = calculate_average(numbers) catch as e:
 		match e:
 			math.InvalidInput(msg):
 				print(f"Error: {msg}")
@@ -174,7 +174,7 @@ fn main():
 
 	# Example 8: Average with empty list
 	empty_numbers = []
-	empty_avg = calculate_average(empty_numbers) catch |e|:
+	empty_avg = calculate_average(empty_numbers) catch as e:
 		match e:
 			math.InvalidInput(msg):
 				print(f"Expected error: {msg}")
@@ -183,7 +183,7 @@ fn main():
 	print("\n=== Error Messages ===")
 
 	# Example 9: Accessing error messages
-	result9 = validate_number("invalid") catch |e|:
+	result9 = validate_number("invalid") catch as e:
 		# All errors implement .message() automatically
 		print(f"Error message: {e.message()}")
 		return

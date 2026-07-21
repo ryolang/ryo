@@ -1057,19 +1057,19 @@ fn main():
 
 ```ryo
 fn print_message(s: str):
-	print(s)
+ print(s)
 
 fn consume_and_print(move s: str, other: str):
-	print(s)
-	print(other)
+ print(s)
+ print(other)
 
 fn main():
-	msg: str = "Hello"
-	# Implicitly borrowed (Rule 2) here since it is read but its lifetime continues
-	print_message(msg)
-	
-	# E0023 compile error: cannot move 'msg' into 'consume_and_print' while it's also implicitly borrowed
-	consume_and_print(msg, msg)
+ msg: str = "Hello"
+ # Implicitly borrowed (Rule 2) here since it is read but its lifetime continues
+ print_message(msg)
+ 
+ # E0023 compile error: cannot move 'msg' into 'consume_and_print' while it's also implicitly borrowed
+ consume_and_print(msg, msg)
 ```
 
 **Implementation Notes:**
@@ -1102,16 +1102,16 @@ fn main():
 
 ```ryo
 fn increment(inout x: int):
-	x += 1                       # mutate by name — no deref operator
+ x += 1                       # mutate by name — no deref operator
 
 fn main():
-	mut count = 0
-	increment(&count)            # `&` marks the mutation at the call site
-	print(int_to_str(count))     # 1
+ mut count = 0
+ increment(&count)            # `&` marks the mutation at the call site
+ print(int_to_str(count))     # 1
 
-	# Aliasing prevented within a single call (Rule 7):
-	# swap(&count, &count)       # E0032: cannot borrow `count` as mutable more than once in the same call
-	# f(&count, count)           # E0032: immutable borrow while mutably borrowed
+ # Aliasing prevented within a single call (Rule 7):
+ # swap(&count, &count)       # E0032: cannot borrow `count` as mutable more than once in the same call
+ # f(&count, count)           # E0032: immutable borrow while mutably borrowed
 ```
 
 **Implementation Notes:**
@@ -2169,20 +2169,20 @@ note: run with `RYOLANG_BACKTRACE=1` for full backtrace
 /// assert(result == 120)
 /// ```
 fn factorial(n: int) -> int:
-	if n <= 1:
-		return 1
-	return n * factorial(n - 1)
+ if n <= 1:
+  return 1
+ return n * factorial(n - 1)
 
 #[test]
 fn test_factorial():
-	assert_eq(factorial(0), 1, "0! = 1")
-	assert_eq(factorial(1), 1, "1! = 1")
-	assert_eq(factorial(5), 120, "5! = 120")
+ assert_eq(factorial(0), 1, "0! = 1")
+ assert_eq(factorial(1), 1, "1! = 1")
+ assert_eq(factorial(5), 120, "5! = 120")
 
 #[test]
 fn test_factorial_large():
-	result = factorial(10)
-	assert(result == 3628800, "10! calculation")
+ result = factorial(10)
+ assert(result == 3628800, "10! calculation")
 ```
 
 **Running tests:**
@@ -2358,24 +2358,24 @@ Acceptance criteria, this code must run well with version v0.1
 error NotFound
 
 fn find_user(id: int) -> NotFound!str:
-	if id == 0:
-		return NotFound
-	return "user_" + int_to_str(id)
+ if id == 0:
+  return NotFound
+ return "user_" + int_to_str(id)
 
 fn main():
-	# Immutable by default — no `let` keyword
-	greeting = "Welcome to Ryo"
+ # Immutable by default — no `let` keyword
+ greeting = "Welcome to Ryo"
 
-	# Optionals — no null pointer exceptions
-	maybe: ?str = "Alice"
-	name = maybe orelse "guest"
+ # Optionals — no null pointer exceptions
+ maybe: ?str = "Alice"
+ name = maybe orelse "guest"
 
-	# Explicit, type-safe error handling
-	user = match find_user(42):
-		NotFound: "unknown"
-		u: u
+ # Explicit, type-safe error handling
+ user = match find_user(42):
+  NotFound: "unknown"
+  u: u
 
-	print(greeting + ", " + name + " → " + user)
+ print(greeting + ", " + name + " → " + user)
 ```
 
 **Visible Progress:** Ryo v0.1.0 is production-ready!
@@ -2518,7 +2518,7 @@ fn test_fetch():
 import std.task
 
 fn process_all(urls: list[str]) -> !list[Data]:
- task.scope |s|:
+ task.scope as s:
   for url in urls:
    s.spawn(fn(): fetch_data(url))
  # Implicit join - all tasks finished or cancelled
@@ -2630,7 +2630,7 @@ fn main():
   (tx_in, rx_in) = channel.create[int]()
   (tx_out, rx_out) = channel.create[str]()
   
-  task.scope |s|:
+  task.scope as s:
    # Spawn workers
    for _ in range(0, 4):
     s.spawn(fn(): worker(rx_in.clone(), tx_out.clone()))
@@ -2659,6 +2659,8 @@ fn main():
 ### Closures & Lambda Expressions
 
 **Goal:** Implement anonymous functions with capture analysis and ownership-aware semantics
+
+> **Syntax decision (locked):** The sole lambda form is `fn(args): expr` (single-line) and `fn(args):` + block (multi-line). No sigil shorthand (such as Rust's `|args|`) is provided — one shape serves typed and inferred, single- and multi-line closures. The `fn` keyword is reused from named definitions, distinguished only by the presence of a name.
 
 **Why Post-v0.1.0:**
 
@@ -2828,6 +2830,8 @@ impl[T] Stack[T]:
 
 **Goal:** Ergonomic error propagation and handling sugar over error unions
 
+> **Syntax decision (locked):** `catch` binds the error via the `as` keyword — `expr catch as e:` — mirroring `with EXPR as NAME:`. `as` is a binding keyword (type conversions use `TargetType(value)`, not `as`). Use bare `expr catch:` to handle without binding. The earlier `catch |e|:` form is superseded.
+
 **Why Post-v0.1.0:**
 
 - v0.1 ships error union *types* (Milestone 13) and pattern matching (Milestone 12), so error handling is fully expressible — just verbose
@@ -2836,7 +2840,7 @@ impl[T] Stack[T]:
 **Features:**
 
 - `try expr` — propagates errors to the caller, unwraps the success value
-- `expr catch |e|: handler` — expression-based error handling with pattern matching on `e`
+- `expr catch as e: handler` — expression-based error handling with pattern matching on `e`
 - Automatic error-union composition (no manual enum construction at propagation sites)
 
 **Example:**
@@ -2848,7 +2852,7 @@ fn load_config(path: &str) -> (file.NotFound | parse.InvalidFormat)!Config:
  config = try parse_config(content)
  return config
 
-result = load_config("config.toml") catch |e|:
+result = load_config("config.toml") catch as e:
  match e:
   file.NotFound(p): print("missing: " + p)
   parse.InvalidFormat(m): print("bad format: " + m)
@@ -2926,7 +2930,7 @@ msg = "Hello, " + name + "! Score: " + float_to_str(score)
 name = "Alice"
 tmpl = t"Hello, {name}!"
 for part in tmpl.parts:
-	print(part)              # "Hello, " / interpolation site 0
+ print(part)              # "Hello, " / interpolation site 0
 print(tmpl.values[0])      # "Alice"
 render(tmpl)               # consumer renders/escapes as it sees fit
 ```
@@ -3198,7 +3202,7 @@ worker = task.run:
     return result
 
 # Timeout integration
-result = try task.timeout(5s, worker).await catch |e|:
+result = try task.timeout(5s, worker).await catch as e:
     match e:
         task.Canceled:
             log("Task cancelled")
