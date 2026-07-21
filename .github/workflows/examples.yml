@@ -4,13 +4,13 @@ on:
   push:
     branches: [main]
     paths:
-      - 'examples/**'
-      - '.github/workflows/examples.yml'
+      - "examples/**"
+      - ".github/workflows/examples.yml"
   pull_request:
     branches: [main]
     paths:
-      - 'examples/**'
-      - '.github/workflows/examples.yml'
+      - "examples/**"
+      - ".github/workflows/examples.yml"
 
 concurrency:
   group: examples-${{ github.ref }}
@@ -43,7 +43,7 @@ jobs:
 
       - name: Cache Zig toolchain
         id: zig-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ryo/toolchain
           key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}

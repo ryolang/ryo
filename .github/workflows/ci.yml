@@ -4,19 +4,19 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - 'landing/**'
-      - 'examples/**'
-      - 'LICENSE'
+      - "**/*.md"
+      - "docs/**"
+      - "landing/**"
+      - "examples/**"
+      - "LICENSE"
   pull_request:
     branches: [main]
     paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - 'landing/**'
-      - 'examples/**'
-      - 'LICENSE'
+      - "**/*.md"
+      - "docs/**"
+      - "landing/**"
+      - "examples/**"
+      - "LICENSE"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -74,7 +74,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Cache Zig toolchain
         id: zig-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ryo/toolchain
           key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
@@ -104,7 +104,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Cache Zig toolchain
         id: zig-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ryo/toolchain
           key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
@@ -136,7 +136,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Cache Zig toolchain
         id: zig-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ryo/toolchain
           key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
