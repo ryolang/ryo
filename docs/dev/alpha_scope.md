@@ -38,7 +38,7 @@ fn main():
 	maybe: ?str = "Alice"
 	name = maybe orelse "guest"
 
-	user = find_user(42) catch |err|:
+	user = find_user(42) catch as err:
 		match err:
 			NotFound: "unknown"
 

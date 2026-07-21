@@ -340,7 +340,7 @@ fn main():
 	name = maybe orelse "guest"
 
 	# Explicit, type-safe error handling
-	user = find_user(42) catch |err|:
+	user = find_user(42) catch as err:
 		match err:
 			NotFound: "unknown"
 

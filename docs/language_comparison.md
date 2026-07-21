@@ -63,7 +63,7 @@ fn divide(a: int, b: int) -> math.DivisionByZero!int:
 		return math.DivisionByZero
 	return a / b
 
-result = divide(10, 2) catch |e|:
+result = divide(10, 2) catch as e:
 	match e:
 		math.DivisionByZero:
 			print("Division failed: division by zero")
