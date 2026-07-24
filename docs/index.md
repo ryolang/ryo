@@ -56,7 +56,7 @@ fn main():
 	user_future = task.run:
 		return fetch_user(1)
 
-	user = user_future.wait() catch |e|:
+	user = user_future.wait() catch as e:
 		match e:
 			http.NetworkFailure(reason):
 				print(f"Network error: {reason}")

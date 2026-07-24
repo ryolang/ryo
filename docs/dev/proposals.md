@@ -58,7 +58,7 @@ import processing
 
 # Usage
 maybe = Option[str].Some("hello")
-result = try some_operation() catch |e|:
+result = try some_operation() catch as e:
 	handle_error(e)
 ```
 

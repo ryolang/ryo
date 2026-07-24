@@ -4,7 +4,7 @@ fn main():
 	println("Welcome to the Ryo application!")
 	println("Please enter your name:")
 
-	input = io.readln() catch |e|:
+	input = io.readln() catch as e:
 		eprintln(f"Failed to read line: {e.message()}")
 		exit(1)
 

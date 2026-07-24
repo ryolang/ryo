@@ -1,0 +1,9 @@
+{
+  "//about": "Project markdownlint config. Picked up automatically by pi-lens (markdownlint-cli2) for both diagnostics and --fix runs.",
+  "//why-tabs": "Ryo source uses TABS for indentation (see CLAUDE.md: one tab = one indent level, mixing tabs/spaces is a compile error). The docs are full of ryo code samples — often fenced blocks nested inside list items — and MD010's code_blocks:false does NOT cover those nested blocks, so --fix silently retabbed them to spaces (verified: 70 tabs destroyed in specification.md). Fully disabling MD010 is the only way to guarantee --fix never touches a tab anywhere.",
+  "default": true,
+  "MD010": false,
+
+  "//why-md013": "Once a config file exists, pi-lens stops passing its default --disable MD013, so disable it here to preserve the prior behavior. Ryo docs intentionally contain long code lines and URLs.",
+  "MD013": false
+}

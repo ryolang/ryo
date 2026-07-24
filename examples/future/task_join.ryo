@@ -39,7 +39,7 @@ fn main():
 	# The .await unwraps the future, the try unwraps the error union.
 	results = task.join(futures_list)
 
-	statuses: list[int] = results.await catch |e|:
+	statuses: list[int] = results.await catch as e:
 		io.println(f"ERROR: A task failed during join: {e.message()}")
 		return 1 # Exit with error code
 

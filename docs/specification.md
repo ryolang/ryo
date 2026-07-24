@@ -198,7 +198,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 *   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
 *   **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
     *   *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for user-defined types (structs, enums, traits) and enum variants. Built-in fundamental types (primitives and collections) use lowercase (e.g., `int`, `str`, `list`, `map`). *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
-*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `while`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `package`, `true`, `false`, `none`, `void`, `move`, `error`, `try`, `catch`, `orelse`, `select`, `case`, `default`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `as` and `let` are not keywords. `package` is an access modifier keyword added for package-internal visibility. `select`, `case`, and `default` are used for non-deterministic concurrent operations).
+*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `while`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `package`, `true`, `false`, `none`, `void`, `move`, `error`, `try`, `catch`, `as`, `orelse`, `select`, `case`, `default`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `let` is not a keyword; `as` is a binding keyword used in `with`, `catch`, and `task.scope` to name a captured value (type conversions use `TargetType(value)`, not `as`, keeping its meaning unambiguous). `package` is an access modifier keyword added for package-internal visibility. `select`, `case`, and `default` are used for non-deterministic concurrent operations).
 *   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error union prefix (`!`), optional chaining (`?.`), range bounds (`..`, used in constrained types `int(1..65535)` — not used for iteration or slicing), slice (`:` inside `[]`, e.g., `s[1:4]`, `s[:4]`, `s[2:]` — Python/Go convention).
     *   **Important Note:** The `!` operator is used exclusively for error union type prefixes (`!T` = error or T, `ErrorType!T` = ErrorType or T). The `!` is NOT used for logical negation—use `not` instead (following Python convention). Similarly, `?` operator in type context (`?T`) denotes optional types, while `?.` is the optional chaining operator.
     *   `_` (Underscore): The underscore `_` is treated as a special identifier. When used in patterns (`match`, destructuring assignment), it signifies a wildcard or an intentionally ignored value; it does not bind to a variable.
@@ -638,7 +638,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 *   **Single Error Type** (Exhaustive matching required):
     ```ryo
-	result = read_file(path) catch |e|:
+	result = read_file(path) catch as e:
 		match e:
 			io.FileNotFound(p):
 				print(f"File not found: {p}")
@@ -651,7 +651,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 *   **Error Union** (Exhaustive matching required):
     ```ryo
-	result = process(path) catch |e|:
+	result = process(path) catch as e:
 		match e:
 			io.FileNotFound(p):
 				return create_default(p)
@@ -671,7 +671,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
     **Using catch-all when needed:**
     ```ryo
-	result = process(path) catch |e|:
+	result = process(path) catch as e:
 		match e:
 			io.FileNotFound(p):
 				return create_default(p)
@@ -732,7 +732,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 		return file.NotFound("/etc/config.toml")
 
 	fn main():
-		config = find_config() catch |e|:
+		config = find_config() catch as e:
 			# Access location information
 			loc = e.location()  # Returns Location(file="src/main.ryo", line=5, ...)
 			print(f"Error at {loc.file}:{loc.line}:{loc.column} in {loc.function}")
@@ -782,7 +782,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 *   **Accessing Error Messages and Location:**
     ```ryo
-	result = operation() catch |e|:
+	result = operation() catch as e:
 		# Access message directly
 		print(e.message())
 
@@ -1755,7 +1755,7 @@ doubled = map([1, 2, 3], fn(x): x * 2)
 # doubled = [2, 4, 6]
 ```
 
-#### 6.2.5 Practical Examples
+#### 6.2.6 Practical Examples
 
 **Example 1: Higher-order functions (map/filter)**
 
@@ -1836,7 +1836,7 @@ results = [validator(10), validator(-5), validator(42), validator(105)]
 # results = [Some(20), none, Some(84), none]
 ```
 
-*(Rationale: Closures provide essential functional programming capabilities. Explicit move semantics prevent accidental data races in concurrent contexts. Python-like syntax with colon-indentation maintains consistency. Borrow checker ensures capture safety without runtime overhead. Closures are crucial for callbacks, higher-order functions, and future concurrency primitives).*
+*(Rationale: Closures provide essential functional programming capabilities. Explicit move semantics prevent accidental data races in concurrent contexts. Python-like syntax with colon-indentation maintains consistency. Borrow checker ensures capture safety without runtime overhead. Closures are crucial for callbacks, higher-order functions, and future concurrency primitives. The `fn(args):` form is the sole lambda syntax — no sigil shorthand (such as Rust's `|args|`) is provided, so one consistent shape serves typed and inferred, single- and multi-line closures).*
 
 ## 7. Error Handling
 
@@ -1985,7 +1985,7 @@ fn load_and_parse(path: str) -> !Config:
 		return result
 
 	fn main():
-		data = level1() catch |e|:
+		data = level1() catch as e:
 			# Can still access original location from level3
 			loc = e.location()
 			print(f"Original error at {loc.file}:{loc.line}")
@@ -2000,7 +2000,7 @@ fn load_and_parse(path: str) -> !Config:
 The `catch` operator handles errors with pattern matching:
 
 ```ryo
-config = load_and_parse("app.toml") catch |e|:
+config = load_and_parse("app.toml") catch as e:
 	match e:
 		FileError.NotFound(path):
 			print(f"Creating default config at {path}")
@@ -2011,13 +2011,14 @@ config = load_and_parse("app.toml") catch |e|:
 			exit(1)
 ```
 
-*   **Syntax:** `expr catch |e|: handle_error(e)`
+*   **Syntax:** `expr catch as e: handle_error(e)` binds the error to `e`; use `expr catch:` (no `as` clause) to handle without binding. `as` is Ryo's binding keyword — the same gesture as `with EXPR as NAME:` — and is *not* used for type conversion (which uses `TargetType(value)`).
 *   **Pattern Matching:** Full ADT pattern matching enables type-safe error handling.
+*   **Note (future improvement, not yet in the language):** The dominant idiom is `catch as err:` immediately followed by `match err:` — the value is bound only to be matched on the next line, so the explicit `match err:` is superfluous boilerplate. A later language improvement may let `catch:` introduce match arms directly (e.g. `expr catch: Pattern: body`), eliding the redundant `match`. Until then, the explicit `match` is required.
 
 *   **Pattern Matching Differences:**
     *   **Single Error Type** (exhaustive): Must handle all variants
         ```ryo
-		result = read_file(path) catch |e|:
+		result = read_file(path) catch as e:
 			match e:
 				FileError.NotFound(p):
 					# ...
@@ -2029,7 +2030,7 @@ config = load_and_parse("app.toml") catch |e|:
 		```
     *   **Error Union** (Exhaustive matching required): Must handle all error types in union:
         ```ryo
-		result = process(path) catch |e|:
+		result = process(path) catch as e:
 			match e:
 				io.FileNotFound(p):
 					return create_default(p)
@@ -2042,7 +2043,7 @@ config = load_and_parse("app.toml") catch |e|:
 		```
     *   **With Catch-All**: When you want generic handling for some errors:
         ```ryo
-		result = process(path) catch |e|:
+		result = process(path) catch as e:
 			match e:
 				io.FileNotFound(p):
 					return create_default(p)
@@ -2231,7 +2232,7 @@ name = maybe_user.name  # ERROR: Cannot access fields on optional type
 
 # ✅ CORRECT: Use try to unwrap errors
 result: ParseError!int = parse_int("42")
-value = try result catch |e|:
+value = try result catch as e:
 	handle_error(e)
 	return
 
@@ -2303,7 +2304,7 @@ fn query_user(id: int) -> db.QueryFailed!User:
 	return db.QueryFailed(f"SELECT * FROM users WHERE id = {id}")
 
 fn main():
-	user = query_user(42) catch |e|:
+	user = query_user(42) catch as e:
 		# Access location where error was created
 		if loc = e.location():
 			print(f"Error created at {loc.file}:{loc.line} in {loc.function}")
@@ -2363,14 +2364,14 @@ For complete performance implications and mitigation strategies, see Section 7.6
 
 1. **Use error location for quick diagnosis:**
    ```ryo
-   result = risky_operation() catch |e|:
+   result = risky_operation() catch as e:
 	   loc = e.location()
 	   print(f"Quick fix: Check {loc.file}:{loc.line}")
    ```
 
 2. **Print full stack trace for complex error chains:**
    ```ryo
-   result = risky_operation() catch |e|:
+   result = risky_operation() catch as e:
 	   print(f"Error: {e.message()}")
 	   if trace = e.stack_trace():
 		   print("Debug stack trace:")
@@ -2775,7 +2776,7 @@ This guarantee is essential: without it, cancellation would leak file handles, d
 Cancelled tasks propagate `Canceled` through `try` like any other error. Callers can handle it explicitly or let it propagate:
 
 ```ryo
-result = worker.await catch |e|:
+result = worker.await catch as e:
     match e:
         task.Canceled:
             log("Task was cancelled, using fallback")
@@ -3548,7 +3549,7 @@ Ryo makes **structured concurrency** the primary pattern to prevent resource lea
 import std.task
 
 fn process_all(urls: list[str]) -> !list[Data]:
-	task.scope |s|:
+	task.scope as s:
 		for url in urls:
 			s.spawn(fn(): fetch_data(url))
 	# Implicit join: all tasks finished or cancelled when scope ends
@@ -3559,6 +3560,7 @@ fn process_all(urls: list[str]) -> !list[Data]:
 - If any task panics, all tasks in scope are cancelled
 - Prevents "fire-and-forget" bugs common in unstructured concurrency
 - Parent cannot finish before children (enforced by compiler)
+- The scope handle is optional: write `task.scope as s:` when you need to call `s.spawn(...)`, or bare `task.scope:` when you only need the join boundary. (`as` is the shared binding gesture of `with`, `catch`, and `task.scope`.)
 
 **Detached Tasks (Rare):**
 For the rare case where you truly need fire-and-forget:
@@ -3694,7 +3696,7 @@ fn query_db(sql: str):
 worker = task.run:
 	panic("Task failed")  # Only this task dies
 
-result = worker.await catch |e|:
+result = worker.await catch as e:
 	io.println(f"Task panicked: {e}")
 # Main program continues
 ```

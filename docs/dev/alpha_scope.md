@@ -38,7 +38,7 @@ fn main():
 	maybe: ?str = "Alice"
 	name = maybe orelse "guest"
 
-	user = find_user(42) catch |err|:
+	user = find_user(42) catch as err:
 		match err:
 			NotFound: "unknown"
 
@@ -81,7 +81,7 @@ Cross-reference: [implementation_roadmap.md](implementation_roadmap.md). Alpha-i
 | **M8.4** — String Slices (`&str`) | `print(s: &str)` and other str-borrowing builtins |
 | **M11** — Enums (Algebraic Data Types) | `error NotFound` lowers to a unit enum variant |
 | **M12** — Pattern Matching | `match err: NotFound: "unknown"` |
-| **M13** — Error Types & Unions | `NotFound!str`, `catch \|err\|:` |
+| **M13** — Error Types & Unions | `NotFound!str`, `catch as err:` |
 | **M16** — Optional Types (`?T`) | `?str`, `none`, `orelse` |
 | **f-string interpolation** (extension of M3.5) | `f"user_{id}"`, `f"{greeting}, {name} → {user}"` |
 

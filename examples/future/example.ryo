@@ -38,7 +38,7 @@ fn main():
 	z = sum(x, y)
 
 	# Error handling with catch block
-	result = do_result() catch |e|:
+	result = do_result() catch as e:
 		print(f"Got an Error: {e.detail}")
 		return 0
 
