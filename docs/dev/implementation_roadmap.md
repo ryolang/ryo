@@ -1538,6 +1538,7 @@ fn describe_color(color: Color) -> str:
 - Parse error union syntax: `(ErrorA | ErrorB)!SuccessType`
 - Parse function signatures with error returns: `fn foo() -> FileError!Data`
 - Implement explicit error propagation via pattern matching on the union (the `try` sugar lands in v0.2)
+- Implement `expr catch as e:` error handling with exhaustive pattern matching on the bound error (spec §7.4; required by the alpha litmus test)
 - Implement `.message() -> str` method for all errors (compiler-known interface, not a user trait yet)
 - Extend Codegen: Generate IR for:
   - Error variant construction
@@ -1579,11 +1580,11 @@ fn main():
 - Errors are **single-variant only** (no multi-variant enums for errors)
 - Error unions use `|` syntax for composition
 - `.message() -> str` is exposed via a compiler-known interface (the user-facing `trait` keyword is v0.2/v0.3 — see Phase 5: Traits & Generics)
-- Ergonomic `try`/`catch` operators are deferred to v0.2 (see Phase 5: Try/Catch Operators); v0.1 uses `match` for propagation and handling
+- The `try` *propagation* operator and the bare `catch:` shortcut are deferred to v0.2 (see Phase 5: Try/Catch Operators); v0.1 handles errors with `expr catch as e:` (spec §7.4) and propagates with explicit `match`/`return`
 - Dependencies: Milestone 11 (enums), Milestone 12 (pattern matching for handling)
 - **Error return traces** (Zig-inspired): instrument every error-return site to record the return address into a per-error trace buffer, giving users the full propagation path from creation to handler. Compiler inserts instrumentation at `match` error-forwarding sites (`Err(e): return e`); the trace buffer is a fixed-size array carried alongside the error union value. Zero cost when errors don't fire. Unlike panic stack traces (I-039, which walk frame pointers at crash time), error traces capture the *propagation chain* at each return site — showing every function that forwarded the error, not just where it was created. Requires DWARF `.debug_line` for source mapping (shared prerequisite with I-039).
 
-> **Note:** Milestone 14 (`try`/`catch` operators) has been **deferred to v0.2** — see Phase 5: Try/Catch Operators. The error-union *types* and `.message()` accessor remain in v0.1; only the propagation/handling sugar is deferred. Programs use `match` on the error union, which is verbose but fully expressive.
+> **Note:** The `try` *propagation* operator (originally Milestone 14) is **deferred to v0.2** — see Phase 5: Try/Catch Operators. Error-union *types*, the `.message()` accessor, and `expr catch as e:` *handling* all ship in v0.1 (spec §7.4); v0.1 propagates errors with explicit `match`/`return`, which is verbose but fully expressive.
 
 ## Phase 3: Type System & Memory Safety
 
@@ -2834,19 +2835,22 @@ impl[T] Stack[T]:
 
 **Why Post-v0.1.0:**
 
-- v0.1 ships error union *types* (Milestone 13) and pattern matching (Milestone 12), so error handling is fully expressible — just verbose
-- `try`/`catch` is pure sugar; deferring it lets v0.2 design the operator alongside the trait system and `?` shorthand as a coherent ergonomics package
+- v0.1 ships error *handling* via `expr catch as e:` (Milestone 13, spec §7.4) — required by the alpha litmus test
+- What v0.1 *lacks* is the `try` *propagation* operator: v0.1 code propagates errors with explicit `match`/`return`, which is verbose but fully expressive
+- Also deferred: the bare `expr catch:` shortcut (a future improvement, spec §7.4) and automatic error-union composition at propagation sites
+- Deferring `try` lets v0.2 design it alongside the trait system and `?` shorthand as a coherent ergonomics package
 
 **Features:**
 
-- `try expr` — propagates errors to the caller, unwraps the success value
-- `expr catch as e: handler` — expression-based error handling with pattern matching on `e`
-- Automatic error-union composition (no manual enum construction at propagation sites)
+- `try expr` — propagates errors to the caller, unwraps the success value *(deferred to v0.2)*
+- `expr catch as e: handler` — expression-based error handling with pattern matching on `e` *(ships in v0.1, Milestone 13)*
+- Bare `expr catch:` shortcut — elides the redundant `match err:` *(future improvement, spec §7.4)*
+- Automatic error-union composition (no manual enum construction at propagation sites) *(deferred to v0.2)*
 
 **Example:**
 
 ```ryo
-# v0.2 sugar (this section)
+# v0.2 `try` propagation sugar (`catch as e:` handling below is already v0.1 — see M13)
 fn load_config(path: &str) -> (file.NotFound | parse.InvalidFormat)!Config:
  content = try read_file(path)
  config = try parse_config(content)
