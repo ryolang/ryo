@@ -28,6 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -61,7 +63,12 @@ jobs:
             echo "=== Running $file ==="
             if [[ "$file" == *"panic.ryo" ]]; then
               # Expect panic.ryo to exit with non-zero
-              ./target/release/ryo run "$file" && (echo "Error: $file was expected to panic but succeeded" && exit 1) || echo "Expected panic occurred successfully"
+              if ./target/release/ryo run "$file"; then
+                echo "Error: $file was expected to panic but succeeded"
+                exit 1
+              else
+                echo "Expected panic occurred successfully"
+              fi
             else
               # Expect other examples to succeed with 0
               ./target/release/ryo run "$file"
