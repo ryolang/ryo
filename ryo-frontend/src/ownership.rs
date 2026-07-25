@@ -2108,6 +2108,17 @@ fn walk_operands(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef, TirRef, ChildK
             f(r, lhs, ChildKind::Operand);
             f(r, rhs, ChildKind::Operand);
         }
+        TirData::Slice { base, start, end } => {
+            // M8.4: a slice reads its base and bounds; the base read
+            // is what keeps the owner live (final spec §3.2 P5).
+            f(r, base, ChildKind::Operand);
+            if let Some(s) = start {
+                f(r, s, ChildKind::Operand);
+            }
+            if let Some(e) = end {
+                f(r, e, ChildKind::Operand);
+            }
+        }
         TirData::Extra(_) => match inst.tag {
             TirTag::Call => {
                 let view = tir.call_view(r);
@@ -2752,6 +2763,21 @@ fn recurse_operands(
             visit_expr(tir, pool, own, sink, sidecar, rhs);
             if needs_tracking(tir.inst(rhs).ty, pool) {
                 check_use_moved(tir, pool, own, sink, rhs, tir.span(rhs));
+            }
+        }
+        TirData::Slice { base, start, end } => {
+            // M8.4: slicing is a non-consuming read of the base
+            // (final spec §3.2 P1); slicing a moved `str` is a
+            // use-after-move like any other read. Bounds are ints.
+            visit_expr(tir, pool, own, sink, sidecar, base);
+            if needs_tracking(tir.inst(base).ty, pool) {
+                check_use_moved(tir, pool, own, sink, base, tir.span(base));
+            }
+            for bound in [start, end].into_iter().flatten() {
+                visit_expr(tir, pool, own, sink, sidecar, bound);
+                if needs_tracking(tir.inst(bound).ty, pool) {
+                    check_use_moved(tir, pool, own, sink, bound, tir.span(bound));
+                }
             }
         }
         // `Extra`-shaped instructions (VarDecl, Assign, Call,

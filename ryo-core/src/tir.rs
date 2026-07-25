@@ -182,6 +182,13 @@ pub enum TirTag {
     /// Variable payload in `extra` — see [`compound_assign_extra`].
     CompoundAssign,
 
+    /// Slice projection `base[start:end]` → `&str` (M8.4).
+    Slice,
+    /// Explicit `str → &str` representation conversion (drops `cap`),
+    /// inserted by sema at view-parameter call sites and mixed-str
+    /// equality operands. Operand in `data.un_op`.
+    ViewOfStr,
+
     /// `return <expr>`. Operand in `TirData::UnOp`.
     Return,
 
@@ -259,7 +266,17 @@ pub enum TirData {
     Bool(bool),
     Var(StringId),
     UnOp(TirRef),
-    BinOp { lhs: TirRef, rhs: TirRef },
+    BinOp {
+        lhs: TirRef,
+        rhs: TirRef,
+    },
+    /// Slice projection. Bounds `None` for shorthands (codegen
+    /// substitutes 0 / len-of-base).
+    Slice {
+        base: TirRef,
+        start: Option<TirRef>,
+        end: Option<TirRef>,
+    },
     Extra(ExtraRange),
 }
 
@@ -554,6 +571,34 @@ impl TirBuilder {
     /// method-call lowerings like `StrLen`.
     pub fn push_typed(&mut self, tag: TirTag, data: TirData, ty: TypeId, span: Span) -> TirRef {
         self.push(tag, ty, data, span)
+    }
+
+    /// Slice projection `base[start:end]` → `&str` (final spec §3.1).
+    /// `start` / `end` are `None` for the `s[start:]`, `s[:end]`,
+    /// `s[:]` shorthands; codegen substitutes 0 / len-of-base.
+    /// `view_ty` is the pool's `str_view()` — the builder holds no pool.
+    pub fn slice(
+        &mut self,
+        base: TirRef,
+        start: Option<TirRef>,
+        end: Option<TirRef>,
+        view_ty: TypeId,
+        span: Span,
+    ) -> TirRef {
+        self.push(
+            TirTag::Slice,
+            view_ty,
+            TirData::Slice { base, start, end },
+            span,
+        )
+    }
+
+    /// Explicit `str → &str` representation conversion (final spec
+    /// §3.4): drops the `cap` word. Inserted by sema at view-parameter
+    /// call sites and on the owned side of mixed `str`/`&str`
+    /// equality. `view_ty` is the pool's `str_view()`.
+    pub fn view_of_str(&mut self, inner: TirRef, view_ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::ViewOfStr, view_ty, TirData::UnOp(inner), span)
     }
 
     fn extra_offset(&self) -> u32 {
@@ -1062,6 +1107,19 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
         (TirTag::BoolConst, TirData::Bool(b)) => writeln!(f, "bconst {}", b),
         (TirTag::StrConst, TirData::Str(s)) => writeln!(f, "sconst {:?}", pool.str(s)),
         (TirTag::Var, TirData::Var(s)) => writeln!(f, "var {}", pool.str(s)),
+        (TirTag::Slice, TirData::Slice { base, start, end }) => {
+            let bound = |b: Option<TirRef>| match b {
+                Some(b) => format!("%{}", b.index()),
+                None => "_".to_string(),
+            };
+            writeln!(
+                f,
+                "slice %{}, {}..{}",
+                base.index(),
+                bound(start),
+                bound(end)
+            )
+        }
         (op, TirData::BinOp { lhs, rhs }) => {
             writeln!(f, "{} %{}, %{}", bin_op_name(op), lhs.index(), rhs.index())
         }
@@ -1188,6 +1246,7 @@ fn un_op_name(t: TirTag) -> &'static str {
         TirTag::Return => "ret",
         TirTag::ExprStmt => "expr_stmt",
         TirTag::StrLen => "str_len",
+        TirTag::ViewOfStr => "view_of_str",
         _ => "?un",
     }
 }
@@ -1379,5 +1438,43 @@ mod tests {
         let tir = b.finish(&[u]);
         assert!(matches!(tir.inst(u).tag, TirTag::Unreachable));
         assert_eq!(tir.inst(u).ty, err_ty);
+    }
+
+    #[test]
+    fn slice_and_view_of_str_round_trip_and_dump() {
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+
+        let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
+        let base = b.var(s, str_ty, sp());
+        let lo = b.int_const(0, pool.int(), sp());
+        // `s[0:]` — end omitted, exercising the `None` bound.
+        let slice = b.slice(base, Some(lo), None, view_ty, sp());
+        // `str → &str` conversion of the same base.
+        let view = b.view_of_str(base, view_ty, sp());
+        let tir = b.finish(&[slice, view]);
+
+        assert_eq!(tir.inst(slice).ty, view_ty);
+        match tir.inst(slice).data {
+            TirData::Slice {
+                base: bb,
+                start,
+                end,
+            } => {
+                assert_eq!(bb, base);
+                assert_eq!(start, Some(lo));
+                assert_eq!(end, None);
+            }
+            other => panic!("expected TirData::Slice, got {:?}", other),
+        }
+        assert!(matches!(tir.inst(view).tag, TirTag::ViewOfStr));
+        assert_eq!(tir.inst(view).ty, view_ty);
+
+        let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));
+        assert!(out.contains("= slice %1, %2.._"), "got:\n{}", out);
+        assert!(out.contains("= view_of_str %1"), "got:\n{}", out);
     }
 }

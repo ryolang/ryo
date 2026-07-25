@@ -2186,7 +2186,10 @@ impl<M: Module> Codegen<M> {
     ) -> Result<(), String> {
         debug_assert_eq!(args.len(), 1, "sema should reject print() arity errors");
         debug_assert!(
-            is_str_type(ctx.tir.inst(args[0]).ty, ctx.pool),
+            matches!(
+                ctx.pool.kind(ctx.tir.inst(args[0]).ty),
+                TypeKind::Str | TypeKind::StrView
+            ),
             "sema should reject non-str print() args",
         );
 

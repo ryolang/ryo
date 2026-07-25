@@ -395,9 +395,14 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     // parameters. Copy types (int, float, bool) are duplicated on
     // every read regardless of the annotation, so `move` is
     // redundant noise. `move` on `str` (and other heap types) stays
-    // silent — that's the whole reason the keyword exists.
+    // silent — that's the whole reason the keyword exists. `&str`
+    // views are excluded here: `move`/`inout` on a view is an
+    // *error* (see below), and the warning would only cascade.
     for param in &body.params {
-        if param.mode == ParamMode::Move && sema.pool.is_copy(param.ty) {
+        if param.mode == ParamMode::Move
+            && sema.pool.is_copy(param.ty)
+            && sema.pool.kind(param.ty) != TypeKind::StrView
+        {
             let name = sema.pool.str(param.name).to_string();
             let ty_str = sema.pool.display(param.ty).to_string();
             sema.sink.emit(Diag::warning(
@@ -409,6 +414,34 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
                 ),
             ));
         }
+    }
+
+    // M8.4: `&str` is already a borrow, so `move` / `inout` on a view
+    // parameter is meaningless (final spec §3.3 E2, §3.4); views
+    // cannot be returned either (§3.3 E1 / Rule 5).
+    for param in &body.params {
+        if param.mode != ParamMode::Borrow && sema.pool.kind(param.ty) == TypeKind::StrView {
+            let mode_str = match param.mode {
+                ParamMode::Move => "move",
+                _ => "inout",
+            };
+            sema.sink.emit(Diag::error(
+                param.span,
+                DiagCode::TypeMismatch,
+                format!(
+                    "views cannot be `{}` parameters — `&str` is already a borrow",
+                    mode_str,
+                ),
+            ));
+        }
+    }
+    if sema.pool.kind(body.return_type) == TypeKind::StrView {
+        sema.sink.emit(Diag::error(
+            body.span,
+            DiagCode::ReturnBorrowedValue,
+            "functions cannot return views (`&str`) — return an owned `str` instead (Rule 5)"
+                .to_string(),
+        ));
     }
 
     let params: Vec<TirParam> = body
@@ -1030,8 +1063,11 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                 analyze_expr(sema, fcx, scope, arg);
             }
 
-            // For now, only str has methods
-            if sema.pool.kind(receiver_ty) != TypeKind::Str {
+            // Only `str` and `&str` views have methods (M8.4).
+            if !matches!(
+                sema.pool.kind(receiver_ty),
+                TypeKind::Str | TypeKind::StrView
+            ) {
                 if !sema.pool.is_error(receiver_ty) {
                     sema.sink.emit(Diag::error(
                         span,
@@ -1088,6 +1124,39 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                 }
             }
         }
+        InstTag::Slice => {
+            let (base_uir, start_uir, end_uir) = match inst.data {
+                InstData::Slice { base, start, end } => (base, start, end),
+                _ => unreachable!("Slice must carry InstData::Slice"),
+            };
+            let base_tir = analyze_expr(sema, fcx, scope, base_uir);
+            let base_ty = fcx.builder.ty_of(base_tir);
+            let base_kind = sema.pool.kind(base_ty);
+            // §3.2 P1: a slice projects a `str` (or re-projects an
+            // existing `&str`, P3); anything else is not sliceable.
+            if !matches!(base_kind, TypeKind::Str | TypeKind::StrView)
+                && !sema.pool.is_error(base_ty)
+            {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::TypeMismatch,
+                    format!("cannot slice type '{}'", sema.pool.display(base_ty)),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let start_tir = start_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
+            let end_tir = end_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
+            fcx.builder.push_typed(
+                TirTag::Slice,
+                TirData::Slice {
+                    base: base_tir,
+                    start: start_tir,
+                    end: end_tir,
+                },
+                sema.pool.str_view(),
+                span,
+            )
+        }
         InstTag::Borrow => {
             let inner = match inst.data {
                 InstData::Borrow(inner) => inner,
@@ -1120,6 +1189,23 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
     emitted
 }
 
+/// Type-check one slice bound (`start` / `end`): §3.1 requires
+/// non-negative `int` indices. The bound's TIR ref is returned either
+/// way so the enclosing `Slice` inst stays well-formed on the error
+/// path.
+fn check_slice_bound(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, b: InstRef) -> TirRef {
+    let t = analyze_expr(sema, fcx, scope, b);
+    let ty = fcx.builder.ty_of(t);
+    if sema.pool.kind(ty) != TypeKind::Int && !sema.pool.is_error(ty) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(b),
+            DiagCode::TypeMismatch,
+            format!("slice bound must be int, got '{}'", sema.pool.display(ty)),
+        ));
+    }
+    t
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_binary_op(
     sema: &mut Sema<'_>,
@@ -1131,6 +1217,26 @@ fn check_binary_op(
     rhs: TirRef,
     span: Span,
 ) -> TirRef {
+    // M8.4 §3.3/§3.4: mixed `str`/`&str` equality — wrap the owned
+    // side in an explicit `ViewOfStr` conversion so the comparison
+    // runs view-vs-view. This must happen before the generic
+    // `compatible` check below, which rightly rejects `str` ≠ `&str`
+    // for every other operator.
+    let (lhs, rhs, lhs_ty, rhs_ty) = if matches!(tag, InstTag::Eq | InstTag::NotEq) {
+        match (sema.pool.kind(lhs_ty), sema.pool.kind(rhs_ty)) {
+            (TypeKind::Str, TypeKind::StrView) => {
+                let v = fcx.builder.view_of_str(lhs, sema.pool.str_view(), span);
+                (v, rhs, sema.pool.str_view(), rhs_ty)
+            }
+            (TypeKind::StrView, TypeKind::Str) => {
+                let v = fcx.builder.view_of_str(rhs, sema.pool.str_view(), span);
+                (lhs, v, lhs_ty, sema.pool.str_view())
+            }
+            _ => (lhs, rhs, lhs_ty, rhs_ty),
+        }
+    } else {
+        (lhs, rhs, lhs_ty, rhs_ty)
+    };
     if !sema.pool.compatible(lhs_ty, rhs_ty) {
         sema.sink.emit(Diag::error(
             span,
@@ -1213,10 +1319,19 @@ fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
-            // `&str` view comparisons get real semantics with the M8.4
-            // sema task; until then a view is rejected like any other
-            // unsupported operand type.
-            TypeKind::Void | TypeKind::Never | TypeKind::Tuple | TypeKind::StrView => {
+            // M8.4 §3.3: view equality compares viewed contents. Same
+            // `StrCmpEq`/`StrCmpNe` tags — operands are `{ptr, len}`
+            // pairs instead of full fat pointers (Task 7 codegen).
+            TypeKind::StrView => {
+                let tir_tag = match tag {
+                    InstTag::Eq => TirTag::StrCmpEq,
+                    InstTag::NotEq => TirTag::StrCmpNe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+            }
+            TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -1431,6 +1546,11 @@ fn check_call(
         vec![ParamMode::Borrow; view.args.len()]
     };
 
+    // Per-argument validation may replace an arg's TirRef with a
+    // conversion inst (M8.4 §3.4), so the call is built from this
+    // copy rather than the incoming slice.
+    let mut converted: Vec<TirRef> = arg_tirs.to_vec();
+
     if view.args.len() != expected.len() {
         sema.sink.emit(Diag::error(
             span,
@@ -1451,6 +1571,23 @@ fn check_call(
             .enumerate()
         {
             let actual = fcx.builder.ty_of(*arg_tir);
+            // Implicit `str → &str` view conversion (§3.4): passing an
+            // owned `str` to a `&str` parameter drops the `cap` word —
+            // a representation coercion, not a copy.
+            let arg_tir = if sema.pool.kind(exp_ty) == TypeKind::StrView
+                && sema.pool.kind(actual) == TypeKind::Str
+            {
+                let v = fcx.builder.view_of_str(
+                    *arg_tir,
+                    sema.pool.str_view(),
+                    sema.uir.span(*arg_uir),
+                );
+                converted[idx] = v;
+                v
+            } else {
+                *arg_tir
+            };
+            let actual = fcx.builder.ty_of(arg_tir);
             if !sema.pool.compatible(actual, exp_ty) {
                 sema.sink.emit(Diag::error(
                     sema.uir.span(*arg_uir),
@@ -1510,7 +1647,7 @@ fn check_call(
         }
     }
     fcx.builder
-        .call(name_id, arg_tirs, &modes, return_type, span)
+        .call(name_id, &converted, &modes, return_type, span)
 }
 
 /// Returns `None` if `inner` is an assignable lvalue (a `mut` local or
@@ -1680,9 +1817,15 @@ fn emit_builtin_call(
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         "str_push" => {
-            // str_push(s: inout str, suffix: str) -> void. Builtins
+            // str_push(s: inout str, suffix: &str) -> void. Builtins
             // bypass `check_call`, so the `&`/`inout` agreement +
             // mutable-lvalue checks are replayed here against arg 0.
+            // M8.4: the suffix is a view — an owned `str` passes as
+            // today (codegen reads its ptr+len), a slice passes
+            // directly. No `ViewOfStr` wrap here: builtins bypass
+            // check_call's §3.4 conversion, and wrapping an owned
+            // `str` would leave an inst codegen can't lower yet
+            // (Task 7) in previously-valid programs.
             if view.args.len() != 2 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -1698,12 +1841,12 @@ fn emit_builtin_call(
             let t0 = fcx.builder.ty_of(arg_tirs[0]);
             let t1 = fcx.builder.ty_of(arg_tirs[1]);
             if !matches!(sema.pool.kind(t0), TypeKind::Str)
-                || !matches!(sema.pool.kind(t1), TypeKind::Str)
+                || !matches!(sema.pool.kind(t1), TypeKind::Str | TypeKind::StrView)
             {
                 sema.sink.emit(Diag::error(
                     sema.uir.span(a0),
                     DiagCode::TypeMismatch,
-                    "str_push(s: inout str, suffix: str): both arguments must be str".to_string(),
+                    "str_push(s: inout str, suffix: &str): first argument must be str, suffix must be str or &str".to_string(),
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
@@ -1875,12 +2018,12 @@ fn check_print_args(
     if sema.pool.is_error(arg_ty) {
         return false;
     }
-    if !matches!(sema.pool.kind(arg_ty), TypeKind::Str) {
+    if !matches!(sema.pool.kind(arg_ty), TypeKind::Str | TypeKind::StrView) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
             format!(
-                "print() argument must be str, got {}",
+                "print() argument must be str or &str, got {}",
                 sema.pool.display(arg_ty)
             ),
         ));
@@ -3239,5 +3382,217 @@ mod tests {
             !any_code(&diags, DiagCode::UndefinedVariable),
             "should not cascade into UndefinedVariable"
         );
+    }
+
+    // ---- M8.4: &str slices / views (final spec §3) ----
+
+    #[test]
+    fn slice_yields_str_view() {
+        let (tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hello\"\n\tx = s[1:3]\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = &tirs[0];
+        assert!(main.instructions.iter().any(|i| i.tag == TirTag::Slice));
+    }
+
+    #[test]
+    fn slice_shorthand_forms_yield_views() {
+        // `s[a:]`, `s[:b]`, `s[:]` — bounds omitted (§3.1).
+        let (tirs, diags, pool) = run_with_errors(
+            "fn main():\n\ts: str = \"hello\"\n\ta = s[1:]\n\tb = s[:2]\n\tc = s[:]\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        let slices: Vec<_> = main
+            .instructions
+            .iter()
+            .filter(|i| i.tag == TirTag::Slice)
+            .collect();
+        assert_eq!(slices.len(), 3, "one Slice inst per slice expression");
+        assert!(
+            slices.iter().all(|i| i.ty == pool.str_view()),
+            "every slice is typed &str"
+        );
+    }
+
+    #[test]
+    fn view_param_declared_type_and_borrow_mode() {
+        let (tirs, diags, pool) = run_with_errors("fn f(x: &str):\n\tprint(x)\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let f = tir_named(&tirs, &pool, "f");
+        assert_eq!(f.params[0].ty, pool.str_view());
+        assert_eq!(f.params[0].mode, ParamMode::Borrow);
+    }
+
+    #[test]
+    fn view_param_accepts_owned_str_via_conversion() {
+        let (tirs, diags, pool) = run_with_errors(
+            "fn shout(text: &str):\n\tprint(text)\n\nfn main():\n\ts: str = \"hi\"\n\tshout(s)\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(
+            main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr),
+            "owned str → &str param must insert a ViewOfStr conversion (§3.4)"
+        );
+    }
+
+    #[test]
+    fn view_param_accepts_view_arg_directly() {
+        // E4: a view argument to a view parameter needs no conversion.
+        let (tirs, diags, pool) = run_with_errors(
+            "fn shout(text: &str):\n\tprint(text)\n\nfn main():\n\ts: str = \"hi\"\n\tshout(s[0:1])\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(
+            !main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr),
+            "view → view must not insert ViewOfStr"
+        );
+    }
+
+    #[test]
+    fn view_to_owned_param_rejected() {
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn keep(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\tkeep(s[0:1])\n",
+        );
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn view_return_rejected() {
+        let (_tirs, diags, _pool) = run_with_errors("fn bad(s: str) -> &str:\n\treturn s[0:1]\n");
+        assert!(
+            any_code(&diags, DiagCode::ReturnBorrowedValue),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn move_and_inout_view_params_rejected() {
+        let (_tirs, diags, _pool) = run_with_errors("fn f(move x: &str):\n\tprint(x)\n");
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::TypeMismatch
+                && d.message.contains("already a borrow")),
+            "got {:?}",
+            diags
+        );
+        let (_tirs, diags, _pool) = run_with_errors("fn g(inout x: &str):\n\tprint(x)\n");
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::TypeMismatch
+                && d.message.contains("already a borrow")),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn owned_annotation_over_slice_rejected() {
+        // P6: an owned copy of viewed contents needs an explicit copy
+        // API (future work); plain annotation is a mismatch.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: str = s[0:1]\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn owned_to_view_binding_rejected() {
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: &str = s\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn view_annotation_over_slice_ok() {
+        let (tirs, diags, pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: &str = s[0:1]\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert_eq!(main.inst(stmt_at(main, 1)).ty, pool.str_view());
+    }
+
+    #[test]
+    fn print_and_len_accept_views() {
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn main():\n\ts: str = \"hello\"\n\tprint(s[0:2])\n\tprint(int_to_str(s[0:2].len()))\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn is_empty_accepts_view() {
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn main():\n\ts: str = \"hi\"\n\tif s[0:1].is_empty():\n\t\tprint(\"e\")\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn mixed_str_view_equality_accepted() {
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn main():\n\ts: str = \"he\"\n\tif s == s[0:2]:\n\t\tprint(\"eq\")\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn mixed_equality_wraps_str_side_in_view() {
+        // §3.3/§3.4: the owned side of a mixed comparison is converted.
+        let (tirs, diags, pool) =
+            run_with_errors("fn main():\n\ts: str = \"he\"\n\tx = s == s[0:2]\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr));
+        assert!(main.instructions.iter().any(|i| i.tag == TirTag::StrCmpEq));
+    }
+
+    #[test]
+    fn view_view_equality_accepted() {
+        let (tirs, diags, pool) = run_with_errors(
+            "fn main():\n\ts: str = \"he\"\n\tif s[0:1] != s[1:2]:\n\t\tprint(\"ne\")\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(main.instructions.iter().any(|i| i.tag == TirTag::StrCmpNe));
+        assert!(
+            !main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr),
+            "view vs view needs no conversion"
+        );
+    }
+
+    #[test]
+    fn view_concat_rejected() {
+        // `+` is owned-str concatenation only; a view operand falls
+        // through to E0015 UnsupportedOperator.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"ab\"\n\tx = s[0:1] + s[0:1]\n");
+        assert!(
+            any_code(&diags, DiagCode::UnsupportedOperator),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn slice_of_int_rejected() {
+        let (_tirs, diags, _pool) = run_with_errors("fn main():\n\tn: int = 5\n\tx = n[0:1]\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn slice_bound_must_be_int() {
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx = s[0.5:1]\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn str_push_accepts_view_suffix() {
+        // 4b: str_push's suffix parameter is `&str`; a slice passes
+        // directly, keeping [Inout, Borrow] modes.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, s[0:1])\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
     }
 }

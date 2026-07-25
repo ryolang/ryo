@@ -1239,6 +1239,19 @@ fn write_inst(
         (InstTag::Borrow, InstData::Borrow(inner)) => {
             writeln!(f, "borrow %{}", inner.index())
         }
+        (InstTag::Slice, InstData::Slice { base, start, end }) => {
+            let bound = |b: Option<InstRef>| match b {
+                Some(b) => format!("%{}", b.index()),
+                None => "_".to_string(),
+            };
+            writeln!(
+                f,
+                "slice %{}, {}..{}",
+                base.index(),
+                bound(start),
+                bound(end)
+            )
+        }
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
 }
