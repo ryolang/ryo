@@ -2017,6 +2017,14 @@ fn test_str_inequality() {
 }
 
 #[test]
+fn test_slice_print_roundtrip() {
+    assert_ryo_runs!(
+        "slice_print.ryo",
+        "fn main():\n\ts: str = \"hello world\"\n\tprint(s[0:5])\n\tprint(s[6:])\n\tprint(s[:5])\n"
+    );
+}
+
+#[test]
 fn test_int_to_str_builtin() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\ts: str = int_to_str(42)\n\tprint(s)\n";
