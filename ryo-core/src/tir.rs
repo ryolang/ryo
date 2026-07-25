@@ -62,6 +62,13 @@ pub struct TirRef(NonZeroU32);
 impl TirRef {
     fn from_index(idx: usize) -> Self {
         let raw = u32::try_from(idx).expect("TirRef index out of range (>= 2^32)");
+        // Real indices must stay below the param-sentinel band
+        // (`> u32::MAX / 2`); see the invariant on [`TirRef::param`].
+        debug_assert!(
+            raw <= u32::MAX / 2,
+            "TirRef index entered the param-sentinel band: function bodies \
+             must stay below 2^31 instructions"
+        );
         TirRef(NonZeroU32::new(raw).expect("TirRef index must be >= 1"))
     }
 
@@ -77,8 +84,33 @@ impl TirRef {
         TirRef(NonZeroU32::new(raw).expect("TirRef raw must be non-zero"))
     }
 
+    /// Param sentinel: `u32::MAX - idx`, so sentinels occupy the top
+    /// of the `u32` range and real instruction indices the bottom.
+    /// Ownership / codegen use these as map keys for param-origin
+    /// values; they are never valid indices into `instructions`.
+    ///
+    /// # Invariant
+    ///
+    /// Sentinels land at `> u32::MAX / 2`, so the encoding only stays
+    /// collision-free while a function body has fewer than 2^31
+    /// instructions (enforced by a `debug_assert!` in `from_index`,
+    /// the arena-push path) and `idx` stays below 2^31.
     pub fn param(idx: usize) -> Self {
         Self::from_raw(u32::MAX - idx as u32)
+    }
+
+    /// True for sentinel refs produced by [`TirRef::param`].
+    pub const fn is_param(self) -> bool {
+        self.0.get() > u32::MAX / 2
+    }
+
+    /// The param index for sentinel refs, `None` for real instructions.
+    pub const fn as_param_index(self) -> Option<u32> {
+        if self.is_param() {
+            Some(u32::MAX - self.0.get())
+        } else {
+            None
+        }
     }
 }
 
@@ -320,6 +352,7 @@ pub struct Tir {
 
 impl Tir {
     pub fn inst(&self, r: TirRef) -> &TypedInst {
+        debug_assert!(!r.is_param(), "Tir::inst called with a param sentinel ref");
         &self.instructions[r.index()]
     }
 
@@ -1265,6 +1298,16 @@ mod tests {
             std::mem::size_of::<Option<TirRef>>(),
             std::mem::size_of::<u32>()
         );
+    }
+
+    #[test]
+    fn param_ref_predicates() {
+        let p = TirRef::param(3);
+        assert!(p.is_param());
+        assert_eq!(p.as_param_index(), Some(3));
+        let real = TirRef::from_raw(7);
+        assert!(!real.is_param());
+        assert_eq!(real.as_param_index(), None);
     }
 
     #[test]
