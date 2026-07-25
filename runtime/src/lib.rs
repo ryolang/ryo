@@ -798,7 +798,10 @@ mod tests {
     #[test]
     fn slice_basic() {
         let s = "héllo wörld".as_bytes();
-        let mut out = RyoStrView { ptr: std::ptr::null(), len: 0 };
+        let mut out = RyoStrView {
+            ptr: std::ptr::null(),
+            len: 0,
+        };
         // "héllo" is 6 bytes (é = 2 bytes)
         unsafe { __ryo_str_slice(s.as_ptr(), s.len() as u64, 0, 6, &mut out) };
         assert_eq!(out.len, 6);
@@ -809,7 +812,10 @@ mod tests {
     #[test]
     fn slice_empty_at_len_is_ok() {
         let s = "abc".as_bytes();
-        let mut out = RyoStrView { ptr: std::ptr::null(), len: 0 };
+        let mut out = RyoStrView {
+            ptr: std::ptr::null(),
+            len: 0,
+        };
         unsafe { __ryo_str_slice(s.as_ptr(), 3, 3, 3, &mut out) };
         assert_eq!(out.len, 0);
     }
