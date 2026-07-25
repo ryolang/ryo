@@ -93,6 +93,8 @@ pub enum Token {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     Comma,
     Dot,
 
@@ -160,6 +162,8 @@ impl fmt::Display for Token {
             Self::RParen => write!(f, ")"),
             Self::LBrace => write!(f, "{{"),
             Self::RBrace => write!(f, "}}"),
+            Self::LBracket => write!(f, "["),
+            Self::RBracket => write!(f, "]"),
             Self::Comma => write!(f, ","),
             Self::Dot => write!(f, "."),
             Self::Newline => write!(f, "<newline>"),
@@ -281,6 +285,10 @@ pub(crate) enum RawToken<'a> {
     LBrace,
     #[token("}")]
     RBrace,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
     #[token(",")]
     Comma,
     #[token(".")]
@@ -477,6 +485,8 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::RParen => Token::RParen,
         RawToken::LBrace => Token::LBrace,
         RawToken::RBrace => Token::RBrace,
+        RawToken::LBracket => Token::LBracket,
+        RawToken::RBracket => Token::RBracket,
         RawToken::Comma => Token::Comma,
         RawToken::Dot => Token::Dot,
 
@@ -697,5 +707,27 @@ mod tests {
 
         let (toks, _) = lex_strings("x %= 5");
         assert_eq!(toks[1], Token::PercentAssign);
+    }
+
+    #[test]
+    fn lex_brackets() {
+        let (toks, pool) = lex_strings("s[1:2]");
+        assert_eq!(toks.len(), 6);
+        assert!(matches!(toks[0], Token::Ident(_)));
+        assert_eq!(toks[1], Token::LBracket);
+        assert_eq!(toks[2], Token::IntLit(1));
+        assert_eq!(toks[3], Token::Colon);
+        assert_eq!(toks[4], Token::IntLit(2));
+        assert_eq!(toks[5], Token::RBracket);
+        ident(&toks, 0, &pool, "s");
+    }
+
+    #[test]
+    fn lex_full_slice_shorthand() {
+        let (toks, _) = lex_strings("s[:]");
+        assert_eq!(toks.len(), 4);
+        assert_eq!(toks[1], Token::LBracket);
+        assert_eq!(toks[2], Token::Colon);
+        assert_eq!(toks[3], Token::RBracket);
     }
 }
