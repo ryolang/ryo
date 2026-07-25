@@ -110,11 +110,28 @@ pub fn generate(program: &ast::Program, pool: &mut InternPool, sink: &mut DiagSi
 
 fn resolve_type(
     name: StringId,
+    is_view: bool,
     span: Span,
     prims: &Primitives,
     pool: &InternPool,
     sink: &mut DiagSink,
 ) -> TypeId {
+    if is_view {
+        // `&str` is the only view type (final spec §3.1). Any other
+        // `&T` is rejected, never silently demoted to `T`.
+        if name == prims.str_ {
+            return pool.str_view();
+        }
+        sink.emit(Diag::error(
+            span,
+            DiagCode::UnknownType,
+            format!(
+                "unknown view type: '&{}' (only `&str` is a view type)",
+                pool.str(name)
+            ),
+        ));
+        return pool.error_type();
+    }
     if name == prims.int {
         pool.int()
     } else if name == prims.str_ {
@@ -185,6 +202,7 @@ fn gen_function_def(
             name: p.name.name,
             ty: resolve_type(
                 p.type_annotation.name,
+                p.type_annotation.is_view,
                 p.type_annotation.span,
                 prims,
                 pool,
@@ -196,7 +214,7 @@ fn gen_function_def(
         .collect();
 
     let return_type = match &func.return_type {
-        Some(ty) => resolve_type(ty.name, ty.span, prims, pool, sink),
+        Some(ty) => resolve_type(ty.name, ty.is_view, ty.span, prims, pool, sink),
         None => pool.void(),
     };
 
@@ -247,7 +265,7 @@ fn gen_stmt(
             let ty = decl
                 .type_annotation
                 .as_ref()
-                .map(|ann| resolve_type(ann.name, ann.span, prims, pool, sink));
+                .map(|ann| resolve_type(ann.name, ann.is_view, ann.span, prims, pool, sink));
             let r = b.var_decl(decl.name.name, decl.mutable, ty, initializer, stmt.span);
             out.push(r);
         }
@@ -401,18 +419,13 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression, sink: &mut DiagSink) -> 
             b.borrow(inner_ref, span)
         }
         ast::ExprKind::Slice { base, start, end } => {
-            // M8.4 stopgap (Task 2): the parser now produces Slice
-            // nodes, but UIR lowering lands in Task 4. Emit an error
-            // so a slice cannot silently miscompile as its base.
-            sink.emit(Diag::error(
-                span,
-                DiagCode::UnsupportedOperator,
-                "string slices are not yet supported",
-            ));
+            // Slice projection `base[start:end]` (final spec §3);
+            // bounds are optional shorthands. Sema type-checks the
+            // base and yields `&str`.
             let base_ref = gen_expr(b, base, sink);
-            let _ = start.as_ref().map(|e| gen_expr(b, e, sink));
-            let _ = end.as_ref().map(|e| gen_expr(b, e, sink));
-            base_ref
+            let start_ref = start.as_ref().map(|e| gen_expr(b, e, sink));
+            let end_ref = end.as_ref().map(|e| gen_expr(b, e, sink));
+            b.slice(base_ref, start_ref, end_ref, span)
         }
     }
 }
@@ -766,5 +779,30 @@ mod tests {
     fn for_non_range_iterator_rejected() {
         let result = parse_and_lower("fn main():\n\tfor i in something(0, 10):\n\t\tprint(i)\n");
         assert!(result.is_err(), "non-range iterator should be rejected");
+    }
+
+    #[test]
+    fn lower_slice_expression() {
+        // `s` is intentionally undefined — astgen is a purely
+        // structural pass; name resolution is sema's job. (Final
+        // spec §3: `base[start:end]` lowers to a Slice projection.)
+        let (uir, _pool) = parse_and_lower("fn main():\n\tx = s[1:2]\n").unwrap();
+        let has_slice = uir.instructions.iter().any(|i| i.tag == InstTag::Slice);
+        assert!(has_slice, "expected a Slice instruction");
+    }
+
+    #[test]
+    fn lower_view_param_type() {
+        let (uir, pool) = parse_and_lower("fn f(text: &str):\n\tprint(text)\n").unwrap();
+        let body = &uir.func_bodies[0];
+        assert_eq!(body.params[0].ty, pool.str_view());
+    }
+
+    #[test]
+    fn lower_view_of_non_str_rejected() {
+        // Only `&str` is a view type (final spec §3.1); `&int` must
+        // be a diagnostic, not a silent fallthrough to `int`.
+        let diags = parse_and_lower("fn f(x: &int):\n\tprint(\"\")\n").unwrap_err();
+        assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
     }
 }
