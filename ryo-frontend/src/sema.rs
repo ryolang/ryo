@@ -1213,7 +1213,10 @@ fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
-            TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
+            // `&str` view comparisons get real semantics with the M8.4
+            // sema task; until then a view is rejected like any other
+            // unsupported operand type.
+            TypeKind::Void | TypeKind::Never | TypeKind::Tuple | TypeKind::StrView => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -1261,7 +1264,11 @@ fn check_binary_op(
                 ));
                 fcx.builder.unreachable(sema.pool.error_type(), span)
             }
-            TypeKind::Bool | TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
+            TypeKind::Bool
+            | TypeKind::Void
+            | TypeKind::Never
+            | TypeKind::Tuple
+            | TypeKind::StrView => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,

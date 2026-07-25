@@ -19,11 +19,11 @@
 //!   lets later phases drop `&'a str` slices from `Token` and
 //!   shrink HIR's `String` count.
 //!
-//! Primitive types live at fixed item indices (0..=5), populated by
-//! `new()`. The slot order is `void, bool, int, str, float, error`.
-//! The `const fn` accessors (`void`, `bool_`, `int`, ...)
-//! return those indices without consulting the dedup table — hot
-//! paths never hash.
+//! Primitive types live at fixed item indices (0..=7), populated by
+//! `new()`. The slot order is `void, bool, int, str, float, error,
+//! never, strview`. The `const fn` accessors (`void`, `bool_`,
+//! `int`, ...) return those indices without consulting the dedup
+//! table — hot paths never hash.
 //!
 //! `TypeId` stays a plain `Copy` newtype rather than an `enum(u32)`
 //! with named primitive variants. The doc's risk register flagged
@@ -39,11 +39,11 @@ use std::hash::{BuildHasher, Hasher};
 
 /// A compact, copyable handle to an interned type.
 ///
-/// Primitive ids are stable: `TypeId(0..=5)` are `void`, `bool`,
-/// `int`, `str`, `float`, `error` (in that order; the constants
-/// `ID_VOID`..`ID_ERROR` below are the source of truth). Use the
-/// `const fn` accessors on `InternPool` instead of constructing
-/// these directly.
+/// Primitive ids are stable: `TypeId(0..=7)` are `void`, `bool`,
+/// `int`, `str`, `float`, `error`, `never`, `strview` (in that
+/// order; the constants `ID_VOID`..`ID_STRVIEW` below are the
+/// source of truth). Use the `const fn` accessors on `InternPool`
+/// instead of constructing these directly.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(u32);
 
@@ -94,6 +94,8 @@ enum Tag {
     Float,
     Error,
     Never,
+    /// Read-only `{ptr, len}` view into a `str` buffer (M8.4).
+    StrView,
     /// Variable payload: `data` is the index into `extra` of an
     /// `(n_elems: u32, elem_0: u32, ..., elem_{n-1}: u32)` block.
     Tuple,
@@ -119,6 +121,7 @@ const ID_STR: u32 = 3;
 const ID_FLOAT: u32 = 4;
 const ID_ERROR: u32 = 5;
 const ID_NEVER: u32 = 6;
+const ID_STRVIEW: u32 = 7;
 
 // ---------- Public TypeKind facade ----------
 
@@ -136,6 +139,9 @@ pub enum TypeKind {
     Int,
     /// Placeholder; the slice ABI is a separate change.
     Str,
+    /// Read-only UTF-8 view into a `str` buffer (`&str`, M8.4):
+    /// `{ptr, len}`, 16 bytes, non-owning, non-escaping.
+    StrView,
     /// IEEE-754 double-precision float (`f64`).
     Float,
     /// Sentinel for resolution failure. Sema substitutes this in for
@@ -297,7 +303,11 @@ impl InternPool {
             tag: Tag::Never,
             data: 0,
         });
-        debug_assert!(pool.items.len() == (ID_NEVER + 1) as usize);
+        pool.items.push(Item {
+            tag: Tag::StrView,
+            data: 0,
+        });
+        debug_assert!(pool.items.len() == (ID_STRVIEW + 1) as usize);
         pool
     }
 
@@ -312,6 +322,7 @@ impl InternPool {
             Tag::Float => TypeKind::Float,
             Tag::Error => TypeKind::Error,
             Tag::Never => TypeKind::Never,
+            Tag::StrView => TypeKind::StrView,
             Tag::Tuple => TypeKind::Tuple,
         }
     }
@@ -327,6 +338,9 @@ impl InternPool {
     }
     pub const fn str_(&self) -> TypeId {
         TypeId(ID_STR)
+    }
+    pub const fn str_view(&self) -> TypeId {
+        TypeId(ID_STRVIEW)
     }
     pub const fn float(&self) -> TypeId {
         TypeId(ID_FLOAT)
@@ -350,13 +364,15 @@ impl InternPool {
     /// True for types whose values are duplicated on `=` without
     /// invalidating the source. Mirrors Mojo's `Copyable` trait for
     /// the scalar primitives Ryo currently has: `int`, `float`,
-    /// `bool`. Used by sema (to flag redundant `move` annotations)
-    /// and by the ownership pass (to short-circuit liveness on
-    /// these values — they never enter the lattice).
+    /// `bool`, plus the non-owning `&str` view (M8.4) — copying a
+    /// view aliases the buffer but owns nothing. Used by sema (to
+    /// flag redundant `move` annotations) and by the ownership pass
+    /// (to short-circuit liveness on these values — they never
+    /// enter the lattice).
     pub fn is_copy(&self, ty: TypeId) -> bool {
         matches!(
             self.kind(ty),
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::StrView
         )
     }
 
@@ -514,6 +530,7 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::Bool => write!(f, "bool"),
             TypeKind::Int => write!(f, "int"),
             TypeKind::Str => write!(f, "str"),
+            TypeKind::StrView => write!(f, "&str"),
             TypeKind::Float => write!(f, "float"),
             TypeKind::Error => write!(f, "<error>"),
             TypeKind::Never => write!(f, "never"),
@@ -590,6 +607,16 @@ mod tests {
         assert_eq!(format!("{}", pool.display(pool.void())), "void");
         assert_eq!(format!("{}", pool.display(pool.bool_())), "bool");
         assert_eq!(format!("{}", pool.display(pool.error_type())), "<error>");
+    }
+
+    #[test]
+    fn str_view_is_copy_and_displays() {
+        let pool = InternPool::new();
+        let v = pool.str_view();
+        assert_eq!(pool.kind(v), TypeKind::StrView);
+        assert!(pool.is_copy(v));
+        assert_eq!(pool.display(v).to_string(), "&str");
+        assert_ne!(v, pool.str_());
     }
 
     #[test]

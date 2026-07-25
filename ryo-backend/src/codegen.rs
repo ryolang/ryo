@@ -49,11 +49,16 @@ fn is_str_type(ty: TypeId, pool: &InternPool) -> bool {
 /// `Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
 /// `Str` is a fat pointer (ptr, len, cap) — it cannot map to a single type;
 /// callers must gate with `is_str_type` before reaching this function.
+/// `StrView` (`&str`, M8.4) is likewise multi-word `{ptr, len}` and panics
+/// here until slice codegen lands.
 /// `Void` has no Cranelift representation and should not be mapped here.
 fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) -> types::Type {
     match pool.kind(ty) {
         TypeKind::Int => pointer_ty,
         TypeKind::Str => panic!("cranelift_type_for: str is multi-value; use is_str_type gate"),
+        // A `{ptr, len}` view is multi-word like `str`; M8.4 slice
+        // codegen gates before reaching this function.
+        TypeKind::StrView => panic!("cranelift_type_for: &str view is multi-value"),
         TypeKind::Bool => types::I8,
         TypeKind::Float => types::F64,
         // Dead code after trap, but Cranelift needs a concrete type for every SSA value
