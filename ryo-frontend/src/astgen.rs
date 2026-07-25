@@ -243,7 +243,7 @@ fn gen_stmt(
 ) {
     match &stmt.kind {
         ast::StmtKind::VarDecl(decl) => {
-            let initializer = gen_expr(b, &decl.initializer);
+            let initializer = gen_expr(b, &decl.initializer, sink);
             let ty = decl
                 .type_annotation
                 .as_ref()
@@ -252,14 +252,14 @@ fn gen_stmt(
             out.push(r);
         }
         ast::StmtKind::Return(Some(expr)) => {
-            let value = gen_expr(b, expr);
+            let value = gen_expr(b, expr, sink);
             out.push(b.unary(InstTag::Return, value, stmt.span));
         }
         ast::StmtKind::Return(None) => {
             out.push(b.return_void(stmt.span));
         }
         ast::StmtKind::ExprStmt(expr) => {
-            let value = gen_expr(b, expr);
+            let value = gen_expr(b, expr, sink);
             out.push(b.unary(InstTag::ExprStmt, value, stmt.span));
         }
         ast::StmtKind::FunctionDef(_) => {
@@ -270,24 +270,24 @@ fn gen_stmt(
             ));
         }
         ast::StmtKind::AssignOrDecl { target, value } => {
-            let value_ref = gen_expr(b, value);
+            let value_ref = gen_expr(b, value, sink);
             let r = b.assign_or_decl(target.name, value_ref, stmt.span);
             out.push(r);
         }
         ast::StmtKind::CompoundAssign { target, op, value } => {
-            let value_ref = gen_expr(b, value);
+            let value_ref = gen_expr(b, value, sink);
             let r = b.compound_assign(target.name, *op, value_ref, stmt.span);
             out.push(r);
         }
         ast::StmtKind::IfStmt(if_stmt) => {
-            let cond = gen_expr(b, &if_stmt.cond);
+            let cond = gen_expr(b, &if_stmt.cond, sink);
             let then_stmts = lower_block(b, &if_stmt.then_block, prims, pool, sink);
 
             let elif_branches: Vec<_> = if_stmt
                 .elif_branches
                 .iter()
                 .map(|elif| {
-                    let elif_cond = gen_expr(b, &elif.cond);
+                    let elif_cond = gen_expr(b, &elif.cond, sink);
                     let elif_body = lower_block(b, &elif.block, prims, pool, sink);
                     (elif_cond, elif_body)
                 })
@@ -308,7 +308,7 @@ fn gen_stmt(
             out.push(r);
         }
         ast::StmtKind::WhileLoop { cond, body } => {
-            let cond_ref = gen_expr(b, cond);
+            let cond_ref = gen_expr(b, cond, sink);
             let body_refs = lower_block(b, body, prims, pool, sink);
             let r = b.while_loop(cond_ref, &body_refs, stmt.span);
             out.push(r);
@@ -330,8 +330,8 @@ fn gen_stmt(
                     ),
                 ));
             }
-            let start_ref = gen_expr(b, start);
-            let end_ref = gen_expr(b, end);
+            let start_ref = gen_expr(b, start, sink);
+            let end_ref = gen_expr(b, end, sink);
             let body_refs = lower_block(b, body, prims, pool, sink);
             let r = b.for_range(var.name, start_ref, end_ref, &body_refs, stmt.span);
             out.push(r);
@@ -347,7 +347,7 @@ fn gen_stmt(
     }
 }
 
-fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
+fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression, sink: &mut DiagSink) -> InstRef {
     let span = expr.span;
     match &expr.kind {
         ast::ExprKind::Literal(ast::Literal::Int(n)) => b.int_literal(*n, span),
@@ -356,8 +356,8 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
         ast::ExprKind::Literal(ast::Literal::Float(v)) => b.float_literal(*v, span),
         ast::ExprKind::Ident(id) => b.var_ref(*id, span),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
-            let l = gen_expr(b, lhs);
-            let r = gen_expr(b, rhs);
+            let l = gen_expr(b, lhs, sink);
+            let r = gen_expr(b, rhs, sink);
             let tag = match op {
                 ast::BinaryOperator::Add => InstTag::Add,
                 ast::BinaryOperator::Sub => InstTag::Sub,
@@ -376,7 +376,7 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
             b.binary(tag, l, r, span)
         }
         ast::ExprKind::UnaryOp(op, sub) => {
-            let s = gen_expr(b, sub);
+            let s = gen_expr(b, sub, sink);
             let tag = match op {
                 ast::UnaryOperator::Neg => InstTag::Neg,
                 ast::UnaryOperator::Not => InstTag::Not,
@@ -384,7 +384,7 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
             b.unary(tag, s, span)
         }
         ast::ExprKind::Call(name, args) => {
-            let arg_refs: Vec<InstRef> = args.iter().map(|a| gen_expr(b, a)).collect();
+            let arg_refs: Vec<InstRef> = args.iter().map(|a| gen_expr(b, a, sink)).collect();
             b.call(*name, &arg_refs, span)
         }
         ast::ExprKind::MethodCall {
@@ -392,13 +392,27 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
             method,
             args,
         } => {
-            let receiver_ref = gen_expr(b, receiver);
-            let arg_refs: Vec<InstRef> = args.iter().map(|a| gen_expr(b, a)).collect();
+            let receiver_ref = gen_expr(b, receiver, sink);
+            let arg_refs: Vec<InstRef> = args.iter().map(|a| gen_expr(b, a, sink)).collect();
             b.method_call(receiver_ref, *method, &arg_refs, span)
         }
         ast::ExprKind::Borrow(inner) => {
-            let inner_ref = gen_expr(b, inner);
+            let inner_ref = gen_expr(b, inner, sink);
             b.borrow(inner_ref, span)
+        }
+        ast::ExprKind::Slice { base, start, end } => {
+            // M8.4 stopgap (Task 2): the parser now produces Slice
+            // nodes, but UIR lowering lands in Task 4. Emit an error
+            // so a slice cannot silently miscompile as its base.
+            sink.emit(Diag::error(
+                span,
+                DiagCode::UnsupportedOperator,
+                "string slices are not yet supported",
+            ));
+            let base_ref = gen_expr(b, base, sink);
+            let _ = start.as_ref().map(|e| gen_expr(b, e, sink));
+            let _ = end.as_ref().map(|e| gen_expr(b, e, sink));
+            base_ref
         }
     }
 }

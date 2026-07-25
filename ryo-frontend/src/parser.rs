@@ -10,6 +10,7 @@ use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan};
 use crate::lexer::Token;
 use ryo_core::ast::*;
 use ryo_core::tir::ParamMode;
+use ryo_core::types::StringId;
 
 /// Helper: skip zero or more newline tokens.
 fn skip_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
@@ -303,15 +304,28 @@ where
     top_level_statement_parser()
 }
 
+/// Type annotation: a plain name (`str`, `int`, ...) or the `&str`
+/// read-only view form (M8.4). The view alternative comes first so the
+/// `&` is consumed before the plain form can reject it.
+fn type_expr_parser<'a, I>()
+-> impl Parser<'a, I, TypeExpr, extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let view = just(Token::Amp)
+        .ignore_then(select! { Token::Ident(name) => name })
+        .map_with(|name, e| TypeExpr::view(name, e.span()));
+    let plain =
+        select! { Token::Ident(name) => name }.map_with(|name, e| TypeExpr::new(name, e.span()));
+    view.or(plain)
+}
+
 fn function_def_parser<'a, I>() -> impl Parser<'a, I, FunctionDef, extra::Err<Rich<'a, Token>>> + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     let ident =
         select! { Token::Ident(name) => name }.map_with(|name, e| Ident::new(name, e.span()));
-
-    let type_expr =
-        select! { Token::Ident(name) => name }.map_with(|name, e| TypeExpr::new(name, e.span()));
 
     let param_mode = choice((
         just(Token::Move).to(ParamMode::Move),
@@ -323,7 +337,7 @@ where
     let param = param_mode
         .then(select! { Token::Ident(name) => name }.map_with(|name, e| Ident::new(name, e.span())))
         .then_ignore(just(Token::Colon))
-        .then(type_expr)
+        .then(type_expr_parser())
         .map_with(|((mode, name), type_annotation), e| Param {
             name,
             type_annotation,
@@ -337,7 +351,7 @@ where
         .collect::<Vec<_>>()
         .delimited_by(just(Token::LParen), just(Token::RParen));
 
-    let return_type = just(Token::Arrow).ignore_then(type_expr).or_not();
+    let return_type = just(Token::Arrow).ignore_then(type_expr_parser()).or_not();
 
     let body = indented_block(body_statement_parser());
 
@@ -364,12 +378,7 @@ where
     let ident =
         select! { Token::Ident(name) => name }.map_with(|name, e| Ident::new(name, e.span()));
 
-    let type_annotation = just(Token::Colon)
-        .ignore_then(
-            select! { Token::Ident(name) => name }
-                .map_with(|name, e| TypeExpr::new(name, e.span())),
-        )
-        .or_not();
+    let type_annotation = just(Token::Colon).ignore_then(type_expr_parser()).or_not();
 
     mutable
         .then(ident)
@@ -429,32 +438,56 @@ where
             borrow.or(call).or(ident_expr).or(literal).or(parenthesized)
         };
 
+        // Postfix operators: method calls (`s.len()`) and slice
+        // projections `s[start:end]` (M8.4). Either slice bound may be
+        // omitted (`s[start:]`, `s[:end]`, `s[:]`). `s[]` is rejected
+        // grammatically — the colon is mandatory — so no extra
+        // validation is needed for the empty slice.
+        enum PostfixOp {
+            Method(StringId, Vec<Expression>, SimpleSpan),
+            Slice(Option<Expression>, Option<Expression>, SimpleSpan),
+        }
+
+        let method_op = just(Token::Dot)
+            .ignore_then(select! { Token::Ident(name) => name })
+            .then(
+                expr.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map_with(|(method, args), e| PostfixOp::Method(method, args, e.span()));
+
+        let slice_op = just(Token::LBracket)
+            .ignore_then(expr.clone().or_not())
+            .then_ignore(just(Token::Colon))
+            .then(expr.clone().or_not())
+            .then_ignore(just(Token::RBracket))
+            .map_with(|(start, end), e| PostfixOp::Slice(start, end, e.span()));
+
         let postfix = atom
-            .foldl(
-                just(Token::Dot)
-                    .ignore_then(select! { Token::Ident(name) => name })
-                    .then(
-                        expr.clone()
-                            .separated_by(just(Token::Comma))
-                            .allow_trailing()
-                            .collect::<Vec<_>>()
-                            .delimited_by(just(Token::LParen), just(Token::RParen)),
-                    )
-                    .map_with(|(method, args), e| (method, args, e.span()))
-                    .repeated(),
-                |receiver, (method, args, span): (_, _, SimpleSpan)| {
-                    let start = receiver.span.start;
-                    let end = span.end;
-                    Expression::new(
+            .foldl(choice((method_op, slice_op)).repeated(), |receiver, op| {
+                let start = receiver.span.start;
+                match op {
+                    PostfixOp::Method(method, args, span) => Expression::new(
                         ExprKind::MethodCall {
                             receiver: Box::new(receiver),
                             method,
                             args,
                         },
-                        SimpleSpan::new((), start..end),
-                    )
-                },
-            )
+                        SimpleSpan::new((), start..span.end),
+                    ),
+                    PostfixOp::Slice(lo, hi, span) => Expression::new(
+                        ExprKind::Slice {
+                            base: Box::new(receiver),
+                            start: lo.map(Box::new),
+                            end: hi.map(Box::new),
+                        },
+                        SimpleSpan::new((), start..span.end),
+                    ),
+                }
+            })
             .boxed();
 
         let unary_op = choice((
@@ -1502,5 +1535,91 @@ mod tests {
             matches!(args[0].kind, ExprKind::Borrow(_)),
             "call argument should be a Borrow expression"
         );
+    }
+
+    #[test]
+    fn parse_slice_full() {
+        let (program, _pool) = lex_and_parse("fn main():\n\tx = s[1:2]\n").unwrap();
+        // `fn main():` wraps the body: statements[0] is the FunctionDef.
+        // A bare `x = ...` in a body surfaces as AssignOrDecl (see
+        // `parse_assign_or_decl`); the slice sits in its value.
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        let StmtKind::AssignOrDecl { value, .. } = &func.body[0].kind else {
+            panic!("expected AssignOrDecl");
+        };
+        match &value.kind {
+            ExprKind::Slice { base, start, end } => {
+                assert!(matches!(base.kind, ExprKind::Ident(_)));
+                assert!(start.is_some() && end.is_some());
+            }
+            other => panic!("expected Slice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_slice_shorthands() {
+        for (src, want_start, want_end) in [
+            ("x = s[1:]", true, false),
+            ("x = s[:2]", false, true),
+            ("x = s[:]", false, false),
+        ] {
+            let snippet = format!("fn main():\n\t{}\n", src);
+            let (program, _pool) = lex_and_parse(&snippet).unwrap();
+            let func = match &program.statements[0].kind {
+                StmtKind::FunctionDef(f) => f,
+                other => panic!("expected FunctionDef for {}, got {:?}", src, other),
+            };
+            let StmtKind::AssignOrDecl { value, .. } = &func.body[0].kind else {
+                panic!("expected AssignOrDecl for {}", src);
+            };
+            match &value.kind {
+                ExprKind::Slice { start, end, .. } => {
+                    assert_eq!(start.is_some(), want_start, "{}: start", src);
+                    assert_eq!(end.is_some(), want_end, "{}: end", src);
+                }
+                other => panic!("{}: expected Slice, got {:?}", src, other),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_slice_after_method_call() {
+        let (program, _pool) = lex_and_parse("fn main():\n\tx = s.len()[0:1]\n").unwrap();
+        let func = match &program.statements[0].kind {
+            StmtKind::FunctionDef(f) => f,
+            other => panic!("expected FunctionDef, got {:?}", other),
+        };
+        let StmtKind::AssignOrDecl { value, .. } = &func.body[0].kind else {
+            panic!("expected AssignOrDecl");
+        };
+        match &value.kind {
+            ExprKind::Slice { base, .. } => {
+                assert!(matches!(base.kind, ExprKind::MethodCall { .. }));
+            }
+            other => panic!("expected Slice over MethodCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_slice_empty_rejected() {
+        assert!(lex_and_parse("fn main():\n\tx = s[]\n").is_err());
+    }
+
+    #[test]
+    fn parse_slice_three_part_rejected() {
+        assert!(lex_and_parse("fn main():\n\tx = s[1:2:3]\n").is_err());
+    }
+
+    #[test]
+    fn parse_view_param_annotation() {
+        let (program, pool) = lex_and_parse("fn first(text: &str):\n\tprint(text)\n").unwrap();
+        let StmtKind::FunctionDef(f) = &program.statements[0].kind else {
+            panic!("expected FunctionDef");
+        };
+        assert!(f.params[0].type_annotation.is_view);
+        assert_eq!(pool.str(f.params[0].type_annotation.name), "str");
     }
 }
