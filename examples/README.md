@@ -17,6 +17,7 @@ These compile and run with the current compiler.
 | [type_inference.ryo](type_inference.ryo) | Type inference, `int_to_str` |
 | [hello_world_str.ryo](hello_world_str.ryo) | `str` parameters, string concatenation |
 | [ownership.ryo](ownership.ryo) | Ownership: implicit borrow, `inout` + `&`, `move` |
+| [string_slices.ryo](string_slices.ryo) | `&str` slices, view parameters, zero-copy scanning, P4 lift |
 
 ### Running
 

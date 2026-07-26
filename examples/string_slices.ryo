@@ -14,6 +14,22 @@ fn print_first_word(text: &str):
 		i += 1
 	print(text)
 
+fn print_csv_fields(line: &str):
+	# The projection use case (final spec §2.3): parsers are projection
+	# sinks — views flow in (`&str` input), scanning is zero-copy, and
+	# owned values flow out. This walk allocates nothing.
+	# (Views can't be `+`-concatenated — P6 — so fields print as-is.)
+	mut start: int = 0
+	mut i: int = 0
+	while i < line.len():
+		if line[i:i+1] == ",":
+			print(line[start:i])
+			print("\n")
+			start = i + 1
+		i += 1
+	print(line[start:])
+	print("\n")
+
 fn main():
 	s: str = "hello world"
 
@@ -28,6 +44,10 @@ fn main():
 
 	print_first_word(s)    # owned str arg converts implicitly to &str
 	print(s)               # ok — s still owned
+
+	# The projection use case: zero-copy scanning of a whole record
+	print_csv_fields("ada,lovelace,1815")
+	print_csv_fields(s)    # works on any str or &str — no copies made
 
 	# P4 last-use lifting: a view freezes its owner only until the
 	# view's last use. `word` is last used above, so the freeze has
