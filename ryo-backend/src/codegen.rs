@@ -289,7 +289,7 @@ impl Codegen<JITModule> {
             ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
             ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
             ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
-            ("__ryo_str_slice", ryo_runtime::__ryo_str_slice as *const u8),
+            ("__ryo_slice", ryo_runtime::__ryo_slice as *const u8),
             ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
             ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
             (
@@ -2017,7 +2017,7 @@ impl<M: Module> Codegen<M> {
                 let slice_ref = Self::declare_runtime_fn(
                     ctx.module,
                     builder,
-                    "__ryo_str_slice",
+                    "__ryo_slice",
                     &[
                         ctx.int_type,
                         types::I64,
@@ -2087,7 +2087,7 @@ impl<M: Module> Codegen<M> {
     /// `(ptr, len)` words regardless of representation — owned triple
     /// or borrowed view pair (M8.4). Consumers that only need the
     /// viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`, the
-    /// `__ryo_str_push` suffix, the `__ryo_str_slice` base) use this;
+    /// `__ryo_str_push` suffix, the `__ryo_slice` base) use this;
     /// anything needing the cap must stay on `eval_inst_str`.
     fn eval_str_or_view_parts(
         builder: &mut FunctionBuilder,

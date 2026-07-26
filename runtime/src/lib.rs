@@ -10,7 +10,7 @@ pub struct RyoStrFat {
 /// Read-only view into a `str` buffer (M8.4): pointer + byte length.
 /// Owns nothing; never freed.
 #[repr(C)]
-pub struct RyoStrView {
+pub struct RyoSlice {
     pub ptr: *const u8,
     pub len: u64,
 }
@@ -129,16 +129,16 @@ fn is_char_boundary(s: *const u8, len: u64, i: u64) -> bool {
 ///
 /// # Safety
 /// `ptr` must point to `len` readable bytes (or be null if `len == 0`).
-/// `out` must point to a valid `RyoStrView`. Panics (exit 101) when
+/// `out` must point to a valid `RyoSlice`. Panics (exit 101) when
 /// `start > end`, `end > len`, or either bound is not a UTF-8 char
 /// boundary.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __ryo_str_slice(
+pub unsafe extern "C" fn __ryo_slice(
     ptr: *const u8,
     len: u64,
     start: u64,
     end: u64,
-    out: *mut RyoStrView,
+    out: *mut RyoSlice,
 ) {
     if start > end || end > len {
         slice_fail("slice index out of range");
@@ -798,12 +798,12 @@ mod tests {
     #[test]
     fn slice_basic() {
         let s = "héllo wörld".as_bytes();
-        let mut out = RyoStrView {
+        let mut out = RyoSlice {
             ptr: std::ptr::null(),
             len: 0,
         };
         // "héllo" is 6 bytes (é = 2 bytes)
-        unsafe { __ryo_str_slice(s.as_ptr(), s.len() as u64, 0, 6, &mut out) };
+        unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 0, 6, &mut out) };
         assert_eq!(out.len, 6);
         let got = unsafe { core::slice::from_raw_parts(out.ptr, out.len as usize) };
         assert_eq!(got, "héllo".as_bytes());
@@ -812,11 +812,11 @@ mod tests {
     #[test]
     fn slice_empty_at_len_is_ok() {
         let s = "abc".as_bytes();
-        let mut out = RyoStrView {
+        let mut out = RyoSlice {
             ptr: std::ptr::null(),
             len: 0,
         };
-        unsafe { __ryo_str_slice(s.as_ptr(), 3, 3, 3, &mut out) };
+        unsafe { __ryo_slice(s.as_ptr(), 3, 3, 3, &mut out) };
         assert_eq!(out.len, 0);
     }
 }
