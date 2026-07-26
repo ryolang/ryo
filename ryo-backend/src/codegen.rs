@@ -51,26 +51,22 @@ fn is_str_type(ty: TypeId, pool: &InternPool) -> bool {
     matches!(pool.kind(ty), TypeKind::Str)
 }
 
-/// `&str` views are 2-word values; like `Str`, they never map to a
-/// single Cranelift type — gate before `cranelift_type_for`.
-fn is_view_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(pool.kind(ty), TypeKind::StrView)
-}
-
 /// Map a TIR type to the corresponding Cranelift IR type.
 ///
 /// `Int` uses the target's pointer-sized integer (i64 on 64-bit).
 /// `Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
 /// `Str` is a fat pointer (ptr, len, cap) — it cannot map to a single type;
 /// callers must gate with `is_str_type` before reaching this function.
-/// `StrView` (`&str`, M8.4) is likewise multi-word `{ptr, len}`; callers
-/// must gate with `is_view_type` before reaching this function.
+/// Views (`&str`, M8.4) are likewise multi-word `{ptr, len}`; callers
+/// must gate with `pool.is_view()` before reaching this function.
 /// `Void` has no Cranelift representation and should not be mapped here.
 fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) -> types::Type {
     match pool.kind(ty) {
         TypeKind::Int => pointer_ty,
         TypeKind::Str => panic!("cranelift_type_for: str is multi-value; use is_str_type gate"),
-        TypeKind::StrView => panic!("cranelift_type_for: &str is two-word; use is_view_type gate"),
+        TypeKind::View(_) => {
+            panic!("cranelift_type_for: &str is two-word; use pool.is_view() gate")
+        }
         TypeKind::Bool => types::I8,
         TypeKind::Float => types::F64,
         // Dead code after trap, but Cranelift needs a concrete type for every SSA value
@@ -121,7 +117,8 @@ enum ValueRepr {
         len: Value,
         cap: Value,
     },
-    /// `&str` view: 16 bytes, non-owning (M8.4). Never freed.
+    /// View pair: 16 bytes, non-owning (M8.4). Never freed. Mirrors
+    /// `TypeKind::View` — all view kinds share the `{ptr, len}` repr.
     View {
         ptr: Value,
         len: Value,
@@ -447,7 +444,7 @@ impl<M: Module> Codegen<M> {
                 sig.params.push(AbiParam::new(self.int_type)); // ptr
                 sig.params.push(AbiParam::new(types::I64)); // len
                 sig.params.push(AbiParam::new(types::I64)); // cap
-            } else if is_view_type(param.ty, pool) {
+            } else if pool.is_view(param.ty) {
                 // `&str` view: 2-word ABI (ptr, len) — no cap word (M8.4).
                 sig.params.push(AbiParam::new(self.int_type)); // ptr
                 sig.params.push(AbiParam::new(types::I64)); // len
@@ -581,7 +578,7 @@ impl<M: Module> Codegen<M> {
                         },
                     );
                     block_idx += 3;
-                } else if is_view_type(param.ty, pool) {
+                } else if pool.is_view(param.ty) {
                     // `&str` view param: two ABI words (ptr, len). Views
                     // are borrows — no cap, never freed.
                     let var_ptr = builder.declare_var(int_type);
@@ -645,7 +642,7 @@ impl<M: Module> Codegen<M> {
                         cap: builder.use_var(locals.cap),
                     };
                     ctx.inst_values.insert(virtual_ref, repr);
-                } else if is_view_type(param.ty, pool) {
+                } else if pool.is_view(param.ty) {
                     let locals = ctx.view_locals.get(&param.name).unwrap();
                     let virtual_ref = TirRef::param(idx);
                     let repr = ValueRepr::View {
@@ -832,7 +829,7 @@ impl<M: Module> Codegen<M> {
                     }
                     return Ok(false);
                 }
-                if is_view_type(inst.ty, ctx.pool) {
+                if ctx.pool.is_view(inst.ty) {
                     let repr = Self::eval_inst_view(builder, ctx, view.initializer)?;
                     match repr {
                         ValueRepr::View { ptr, len } => {
@@ -948,7 +945,7 @@ impl<M: Module> Codegen<M> {
                     builder.def_var(locals.cap, cap);
                     return Ok(false);
                 }
-                if is_view_type(inst.ty, ctx.pool) {
+                if ctx.pool.is_view(inst.ty) {
                     let repr = Self::eval_inst_view(builder, ctx, view.value)?;
                     let ValueRepr::View { ptr, len } = repr else {
                         unreachable!("view-typed assign should produce ValueRepr::View");
@@ -1313,7 +1310,7 @@ impl<M: Module> Codegen<M> {
                 ValueRepr::Str { ptr, .. } => *ptr,
                 // I-083: views have no scalar stand-in. A view-typed value
                 // reaching eval_inst means a consumer forgot to gate on
-                // is_view_type and route through eval_inst_view.
+                // pool.is_view() and route through eval_inst_view.
                 ValueRepr::View { .. } => panic!(
                     "eval_inst: &str view %{} is two-word; use a view-aware consumer (I-083)",
                     r.index()
@@ -2098,7 +2095,7 @@ impl<M: Module> Codegen<M> {
         r: TirRef,
     ) -> Result<(Value, Value), String> {
         let ty = ctx.tir.inst(r).ty;
-        if is_view_type(ty, ctx.pool) {
+        if ctx.pool.is_view(ty) {
             let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, r)? else {
                 unreachable!("eval_inst_view must produce ValueRepr::View");
             };
@@ -2261,7 +2258,7 @@ impl<M: Module> Codegen<M> {
             // M8.4: the suffix may be either repr — an owned `str`
             // passes its ptr+len, a slice/view passes directly (no
             // ViewOfStr wrap: builtins bypass check_call's §3.4
-            // conversion, so sema accepts `Str | StrView` here).
+            // conversion, so sema accepts `Str | View(_)` here).
             let (suf_ptr, suf_len) = Self::eval_str_or_view_parts(builder, ctx, suffix_ref)?;
             let func_ref = Self::declare_runtime_fn(
                 ctx.module,
@@ -2345,7 +2342,7 @@ impl<M: Module> Codegen<M> {
                     }
                     _ => unreachable!("str-typed arg must produce ValueRepr::Str"),
                 }
-            } else if is_view_type(arg_ty, ctx.pool) {
+            } else if ctx.pool.is_view(arg_ty) {
                 // `&str` arg → 2-word ABI (ptr, len), matching the
                 // callee's build_signature. Sema has already inserted
                 // ViewOfStr for owned-str actuals (§3.4).
@@ -2475,7 +2472,7 @@ impl<M: Module> Codegen<M> {
         debug_assert!(
             matches!(
                 ctx.pool.kind(ctx.tir.inst(args[0]).ty),
-                TypeKind::Str | TypeKind::StrView
+                TypeKind::Str | TypeKind::View(_)
             ),
             "sema should reject non-str print() args",
         );

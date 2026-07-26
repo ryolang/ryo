@@ -21,7 +21,8 @@
 //!
 //! Primitive types live at fixed item indices (0..=7), populated by
 //! `new()`. The slot order is `void, bool, int, str, float, error,
-//! never, strview`. The `const fn` accessors (`void`, `bool_`,
+//! never, view` — slot 7 is the `&str` singleton, `View(ViewKind::Str)`
+//! (final spec §3.1). The `const fn` accessors (`void`, `bool_`,
 //! `int`, ...) return those indices without consulting the dedup
 //! table — hot paths never hash.
 //!
@@ -40,7 +41,7 @@ use std::hash::{BuildHasher, Hasher};
 /// A compact, copyable handle to an interned type.
 ///
 /// Primitive ids are stable: `TypeId(0..=7)` are `void`, `bool`,
-/// `int`, `str`, `float`, `error`, `never`, `strview` (in that
+/// `int`, `str`, `float`, `error`, `never`, `view(&str)` (in that
 /// order; the constants `ID_VOID`..`ID_STRVIEW` below are the
 /// source of truth). Use the `const fn` accessors on `InternPool`
 /// instead of constructing these directly.
@@ -94,8 +95,11 @@ enum Tag {
     Float,
     Error,
     Never,
-    /// Read-only `{ptr, len}` view into a `str` buffer (M8.4).
-    StrView,
+    /// Read-only `{ptr, len}` projection (final spec §3.1, D1). `data`:
+    /// 0 = Str, 1 = Bytes (uninhabited until 8.5), >= 2: index + 2 into
+    /// `extra`, where `extra[idx]` is the element TypeId of a Slice view
+    /// (uninhabited until M21 — no parametric interning yet).
+    View,
     /// Variable payload: `data` is the index into `extra` of an
     /// `(n_elems: u32, elem_0: u32, ..., elem_{n-1}: u32)` block.
     Tuple,
@@ -139,9 +143,10 @@ pub enum TypeKind {
     Int,
     /// Placeholder; the slice ABI is a separate change.
     Str,
-    /// Read-only UTF-8 view into a `str` buffer (`&str`, M8.4):
-    /// `{ptr, len}`, 16 bytes, non-owning, non-escaping.
-    StrView,
+    /// Non-owning, non-escaping view (final spec §3.1): `{ptr, len}`,
+    /// 16 bytes. The ONLY projection variant — P1–P6 / E1–E4 apply to
+    /// all inhabitants uniformly.
+    View(ViewKind),
     /// IEEE-754 double-precision float (`f64`).
     Float,
     /// Sentinel for resolution failure. Sema substitutes this in for
@@ -156,6 +161,24 @@ pub enum TypeKind {
     /// sidecar-`extra` encoding works; not currently constructible
     /// from user syntax.
     Tuple,
+}
+
+/// The CLOSED set of projection kinds (final spec §3.1, D1).
+///
+/// Never parameterize `View` over an arbitrary type — a
+/// `View(TypeId)` meaning "view of any T" would reintroduce the
+/// general borrow type Ownership Lite rejects (M8.3): `&int`,
+/// `&User` must stay unrepresentable. `Bytes` and `Slice` have NO
+/// constructors at M8.4 (uninhabited arms; `Bytes` lands with D2 in
+/// 8.5, `Slice` with `[T]` arrays in M21).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum ViewKind {
+    /// `&str` — owner: `str`; element: UTF-8 unit.
+    Str,
+    /// `&bytes` — owners: `bytes` | `sbytes`; element: `u8`. (D2, 8.5.)
+    Bytes,
+    /// `&[T]` — owners: `[T]` | `list[T]` | `[T; N]`; element: `T`. (M21.)
+    Slice(TypeId),
 }
 
 // ---------- Pool ----------
@@ -304,7 +327,7 @@ impl InternPool {
             data: 0,
         });
         pool.items.push(Item {
-            tag: Tag::StrView,
+            tag: Tag::View,
             data: 0,
         });
         debug_assert!(pool.items.len() == (ID_STRVIEW + 1) as usize);
@@ -314,7 +337,8 @@ impl InternPool {
     // ----- Type accessors -----
 
     pub fn kind(&self, id: TypeId) -> TypeKind {
-        match self.items[id.0 as usize].tag {
+        let item = self.items[id.0 as usize];
+        match item.tag {
             Tag::Void => TypeKind::Void,
             Tag::Bool => TypeKind::Bool,
             Tag::Int => TypeKind::Int,
@@ -322,7 +346,13 @@ impl InternPool {
             Tag::Float => TypeKind::Float,
             Tag::Error => TypeKind::Error,
             Tag::Never => TypeKind::Never,
-            Tag::StrView => TypeKind::StrView,
+            Tag::View => match item.data {
+                0 => TypeKind::View(ViewKind::Str),
+                // I-106 trusted-producer invariant: no Bytes/Slice
+                // constructor exists at M8.4, so the pool can never
+                // hold a `data == 1` or `data >= 2` payload.
+                _ => unreachable!("I-106: no Bytes/Slice constructor exists"),
+            },
             Tag::Tuple => TypeKind::Tuple,
         }
     }
@@ -364,7 +394,7 @@ impl InternPool {
     /// True for types whose values are duplicated on `=` without
     /// invalidating the source. Mirrors Mojo's `Copyable` trait for
     /// the scalar primitives Ryo currently has: `int`, `float`,
-    /// `bool`, plus the non-owning `&str` view (M8.4) — copying a
+    /// `bool`, plus the non-owning views (`&str`, M8.4) — copying a
     /// view aliases the buffer but owns nothing. Used by sema (to
     /// flag redundant `move` annotations) and by the ownership pass
     /// (to short-circuit liveness on these values — they never
@@ -372,8 +402,40 @@ impl InternPool {
     pub fn is_copy(&self, ty: TypeId) -> bool {
         matches!(
             self.kind(ty),
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::StrView
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::View(_)
         )
+    }
+
+    /// True for all projection types (final spec §3.1). The dominant
+    /// query — P2 freeze, E1–E4, implicit conversion are kind-agnostic.
+    pub fn is_view(&self, t: TypeId) -> bool {
+        matches!(self.kind(t), TypeKind::View(_))
+    }
+
+    /// Element type of a view (`T` for `&[T]`; the UTF-8 code unit for
+    /// `&str`).
+    ///
+    /// At M8.4 the pool has no char/u8 primitive, so the `&str`
+    /// element type is not representable and this returns `None` for
+    /// `View(Str)`; `Some(elem)` only decodes for `View(Slice(elem))`
+    /// (uninhabited until M21). Callers needing UTF-8 semantics
+    /// sub-match `ViewKind::Str` directly instead.
+    pub fn view_elem(&self, t: TypeId) -> Option<TypeId> {
+        match self.kind(t) {
+            TypeKind::View(ViewKind::Str) => None,
+            TypeKind::View(ViewKind::Slice(elem)) => Some(elem),
+            _ => None,
+        }
+    }
+
+    /// Implicit view conversion table (§3.4): owner → view. Lookup, not
+    /// scattered conditionals. Only `str → &str` exists at M8.4.
+    pub fn owner_view(&self, owner: TypeId) -> Option<TypeId> {
+        if owner == self.str_() {
+            Some(self.str_view())
+        } else {
+            None
+        }
     }
 
     /// Compatibility predicate that absorbs the `Error` sentinel.
@@ -530,7 +592,13 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::Bool => write!(f, "bool"),
             TypeKind::Int => write!(f, "int"),
             TypeKind::Str => write!(f, "str"),
-            TypeKind::StrView => write!(f, "&str"),
+            TypeKind::View(ViewKind::Str) => write!(f, "&str"),
+            // Bytes/Slice are uninhabited at M8.4 — pure decode arms
+            // that keep the match honest for D2 (8.5) / M21.
+            TypeKind::View(ViewKind::Bytes) => write!(f, "&bytes"),
+            TypeKind::View(ViewKind::Slice(elem)) => {
+                write!(f, "&[{}]", self.pool.display(elem))
+            }
             TypeKind::Float => write!(f, "float"),
             TypeKind::Error => write!(f, "<error>"),
             TypeKind::Never => write!(f, "never"),
@@ -613,10 +681,32 @@ mod tests {
     fn str_view_is_copy_and_displays() {
         let pool = InternPool::new();
         let v = pool.str_view();
-        assert_eq!(pool.kind(v), TypeKind::StrView);
+        assert_eq!(pool.kind(v), TypeKind::View(ViewKind::Str));
         assert!(pool.is_copy(v));
+        assert!(pool.is_view(v));
+        // The pool has no char/u8 primitive at M8.4 — the UTF-8 code
+        // unit is not interned as a type, so `view_elem` reports
+        // `None` for `&str` until D2/M21 gives elements a pool
+        // representation.
+        assert_eq!(pool.view_elem(v), None);
         assert_eq!(pool.display(v).to_string(), "&str");
         assert_ne!(v, pool.str_());
+    }
+
+    #[test]
+    fn view_helpers_reject_non_views() {
+        let pool = InternPool::new();
+        for t in [pool.int(), pool.str_(), pool.bool_(), pool.float()] {
+            assert!(!pool.is_view(t));
+            assert_eq!(pool.view_elem(t), None);
+        }
+    }
+
+    #[test]
+    fn owner_view_round_trip() {
+        let pool = InternPool::new();
+        assert_eq!(pool.owner_view(pool.str_()), Some(pool.str_view()));
+        assert_eq!(pool.owner_view(pool.int()), None);
     }
 
     #[test]

@@ -788,7 +788,7 @@ fn projection_root(own: &Ownership, tir: &Tir, pool: &InternPool, r: TirRef) -> 
     if needs_tracking(inst.ty, pool) {
         return Some(underlying_owner(own, r));
     }
-    if pool.kind(inst.ty) != TypeKind::StrView {
+    if !pool.is_view(inst.ty) {
         return None;
     }
     match inst.data {
@@ -1081,7 +1081,7 @@ fn view_liveness_stmt(
         TirTag::VarDecl => {
             let view = tir.var_decl_view(r);
             record_view_reads(tir, pool, view.initializer, bindings, last_use);
-            if pool.kind(tir.inst(r).ty) == TypeKind::StrView
+            if pool.is_view(tir.inst(r).ty)
                 && let Some(target) = view_binding_target(tir, bindings, view.initializer)
             {
                 bindings.insert(view.name, target);
@@ -1090,7 +1090,7 @@ fn view_liveness_stmt(
         TirTag::Assign => {
             let view = tir.assign_view(r);
             record_view_reads(tir, pool, view.value, bindings, last_use);
-            if pool.kind(tir.inst(r).ty) == TypeKind::StrView {
+            if pool.is_view(tir.inst(r).ty) {
                 match view_binding_target(tir, bindings, view.value) {
                     Some(target) => {
                         bindings.insert(view.name, target);
@@ -1171,7 +1171,7 @@ fn record_view_reads(
 ) {
     let inst = *tir.inst(r);
     if inst.tag == TirTag::Var
-        && pool.kind(inst.ty) == TypeKind::StrView
+        && pool.is_view(inst.ty)
         && let TirData::Var(name) = inst.data
         && let Some(&view_inst) = bindings.get(&name)
     {
@@ -1792,7 +1792,7 @@ fn analyze_var_decl(
         // surviving entry at function end fires W0001. Keyed by
         // `init`, the same TirRef `rebind_to_init` stamped Valid.
         register_pending_dead_store(own, init, view.name, span, r);
-    } else if pool.kind(init_ty) == TypeKind::StrView {
+    } else if pool.is_view(init_ty) {
         // P3 (final spec §3.2): binding a slice registers a projection
         // against the root owner (re-slices resolve transitively).
         // Var copies alias the original slice rather than projecting
@@ -1876,7 +1876,7 @@ fn analyze_assign(
         consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name);
         rebind_to_init(own, view.name, view.value);
         register_pending_dead_store(own, view.value, view.name, span, r);
-    } else if pool.kind(value_ty) == TypeKind::StrView {
+    } else if pool.is_view(value_ty) {
         // P3/P4 (final spec §3.2): rebinding a view registers the new
         // projection and ends the old binding's — unless another
         // binding still aliases the old view (a Var copy keeps it
@@ -1933,7 +1933,7 @@ fn analyze_return(
     };
     let ty = tir.inst(operand).ty;
     visit_expr(tir, pool, own, sink, sidecar, operand);
-    if pool.kind(ty) == TypeKind::StrView {
+    if pool.is_view(ty) {
         // E1 (final spec §3.3): slices cannot be returned from
         // functions. Backstop to sema's signature-level rejection.
         sink.emit(
@@ -2802,7 +2802,7 @@ fn collect_last_uses(
     // subsequent rebinds.
     if let TirTag::Var = inst.tag
         && let TirData::Var(_) = inst.data
-        && (needs_tracking(inst.ty, pool) || pool.kind(inst.ty) == TypeKind::StrView)
+        && (needs_tracking(inst.ty, pool) || pool.is_view(inst.ty))
         && let Some(&owner) = own.owner_at_read.get(&r)
     {
         // Overwriting insert: latest forward-order read wins =
@@ -3353,7 +3353,7 @@ fn visit_expr(
                     continue;
                 }
                 if !needs_tracking(arg_ty, pool) {
-                    if mode == ParamMode::Borrow && pool.kind(arg_ty) == TypeKind::StrView {
+                    if mode == ParamMode::Borrow && pool.is_view(arg_ty) {
                         // A view arg borrows its root owner for the
                         // call's duration (E4). `projection_root` looks
                         // through ViewOfStr conversions (the implicit
@@ -3511,7 +3511,7 @@ fn visit_expr(
                 );
                 // Note the view arg that keeps the owner live.
                 for arg in &view.args {
-                    if pool.kind(tir.inst(*arg).ty) == TypeKind::StrView
+                    if pool.is_view(tir.inst(*arg).ty)
                         && projection_root(own, tir, pool, *arg) == Some(owner)
                     {
                         diag = diag.with_note(Some(tir.span(*arg)), "slice passed here");
@@ -3528,7 +3528,7 @@ fn visit_expr(
                 // E2 (final spec §3.3): slices cannot be passed to
                 // `move` parameters. Backstop — sema rejects `move` on
                 // view-typed parameters already.
-                if mode == ParamMode::Move && pool.kind(arg_ty) == TypeKind::StrView {
+                if mode == ParamMode::Move && pool.is_view(arg_ty) {
                     sink.emit(
                         Diag::error(
                             tir.span(r),
@@ -3597,7 +3597,7 @@ fn visit_expr(
                     // (which would route pre-rebind reads to the post-
                     // rebind owner — wrong target, double-free).
                     own.owner_at_read.insert(r, owner);
-                } else if pool.kind(inst.ty) == TypeKind::StrView {
+                } else if pool.is_view(inst.ty) {
                     // P4 lift (final spec §3.2): record the read for
                     // `collect_last_uses`; when it is the projection's
                     // precomputed last use (and not loop-deferred), the
@@ -6845,7 +6845,7 @@ mod tests {
     fn view_return_is_escape() {
         // fn bad(s: str) -> &str: return s[0:1]
         // → sema rejects at signature level (Task 5); this is the
-        //   ownership backstop: hand-built TIR with a StrView return
+        //   ownership backstop: hand-built TIR with a view return
         //   must produce ViewEscape (E1, final spec §3.3).
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::{TirBuilder, TirParam};
@@ -6877,7 +6877,7 @@ mod tests {
         let diags = sink.into_diags();
         assert!(
             diags.iter().any(|d| matches!(d.code, DiagCode::ViewEscape)),
-            "expected ViewEscape on the StrView return; got: {diags:?}"
+            "expected ViewEscape on the view return; got: {diags:?}"
         );
     }
 

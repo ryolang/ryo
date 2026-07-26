@@ -49,7 +49,7 @@ use crate::builtins;
 use ryo_core::ast::CompoundOp;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
+use ryo_core::types::{InternPool, StringId, TypeId, TypeKind, ViewKind};
 use ryo_core::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -401,7 +401,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     for param in &body.params {
         if param.mode == ParamMode::Move
             && sema.pool.is_copy(param.ty)
-            && sema.pool.kind(param.ty) != TypeKind::StrView
+            && !sema.pool.is_view(param.ty)
         {
             let name = sema.pool.str(param.name).to_string();
             let ty_str = sema.pool.display(param.ty).to_string();
@@ -420,7 +420,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     // parameter is meaningless (final spec §3.3 E2, §3.4); views
     // cannot be returned either (§3.3 E1 / Rule 5).
     for param in &body.params {
-        if param.mode != ParamMode::Borrow && sema.pool.kind(param.ty) == TypeKind::StrView {
+        if param.mode != ParamMode::Borrow && sema.pool.is_view(param.ty) {
             let mode_str = match param.mode {
                 ParamMode::Move => "move",
                 _ => "inout",
@@ -435,7 +435,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
             ));
         }
     }
-    if sema.pool.kind(body.return_type) == TypeKind::StrView {
+    if sema.pool.is_view(body.return_type) {
         sema.sink.emit(Diag::error(
             body.span,
             DiagCode::ReturnBorrowedValue,
@@ -1066,7 +1066,7 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
             // Only `str` and `&str` views have methods (M8.4).
             if !matches!(
                 sema.pool.kind(receiver_ty),
-                TypeKind::Str | TypeKind::StrView
+                TypeKind::Str | TypeKind::View(_)
             ) {
                 if !sema.pool.is_error(receiver_ty) {
                     sema.sink.emit(Diag::error(
@@ -1134,7 +1134,7 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
             let base_kind = sema.pool.kind(base_ty);
             // §3.2 P1: a slice projects a `str` (or re-projects an
             // existing `&str`, P3); anything else is not sliceable.
-            if !matches!(base_kind, TypeKind::Str | TypeKind::StrView)
+            if !matches!(base_kind, TypeKind::Str | TypeKind::View(ViewKind::Str))
                 && !sema.pool.is_error(base_ty)
             {
                 sema.sink.emit(Diag::error(
@@ -1224,11 +1224,11 @@ fn check_binary_op(
     // for every other operator.
     let (lhs, rhs, lhs_ty, rhs_ty) = if matches!(tag, InstTag::Eq | InstTag::NotEq) {
         match (sema.pool.kind(lhs_ty), sema.pool.kind(rhs_ty)) {
-            (TypeKind::Str, TypeKind::StrView) => {
+            (TypeKind::Str, TypeKind::View(ViewKind::Str)) => {
                 let v = fcx.builder.view_of_str(lhs, sema.pool.str_view(), span);
                 (v, rhs, sema.pool.str_view(), rhs_ty)
             }
-            (TypeKind::StrView, TypeKind::Str) => {
+            (TypeKind::View(ViewKind::Str), TypeKind::Str) => {
                 let v = fcx.builder.view_of_str(rhs, sema.pool.str_view(), span);
                 (lhs, v, lhs_ty, sema.pool.str_view())
             }
@@ -1322,7 +1322,7 @@ fn check_binary_op(
             // M8.4 §3.3: view equality compares viewed contents. Same
             // `StrCmpEq`/`StrCmpNe` tags — operands are `{ptr, len}`
             // pairs instead of full fat pointers (Task 7 codegen).
-            TypeKind::StrView => {
+            TypeKind::View(ViewKind::Str) => {
                 let tir_tag = match tag {
                     InstTag::Eq => TirTag::StrCmpEq,
                     InstTag::NotEq => TirTag::StrCmpNe,
@@ -1331,7 +1331,7 @@ fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
-            TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
+            TypeKind::Void | TypeKind::Never | TypeKind::Tuple | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -1383,7 +1383,7 @@ fn check_binary_op(
             | TypeKind::Void
             | TypeKind::Never
             | TypeKind::Tuple
-            | TypeKind::StrView => {
+            | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -1573,15 +1573,12 @@ fn check_call(
             let actual = fcx.builder.ty_of(*arg_tir);
             // Implicit `str → &str` view conversion (§3.4): passing an
             // owned `str` to a `&str` parameter drops the `cap` word —
-            // a representation coercion, not a copy.
-            let arg_tir = if sema.pool.kind(exp_ty) == TypeKind::StrView
-                && sema.pool.kind(actual) == TypeKind::Str
-            {
-                let v = fcx.builder.view_of_str(
-                    *arg_tir,
-                    sema.pool.str_view(),
-                    sema.uir.span(*arg_uir),
-                );
+            // a representation coercion, not a copy. Routed through the
+            // pool's owner → view table, not a bare kind comparison.
+            let arg_tir = if sema.pool.owner_view(actual) == Some(exp_ty) {
+                let v = fcx
+                    .builder
+                    .view_of_str(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
                 converted[idx] = v;
                 v
             } else {
@@ -1841,7 +1838,7 @@ fn emit_builtin_call(
             let t0 = fcx.builder.ty_of(arg_tirs[0]);
             let t1 = fcx.builder.ty_of(arg_tirs[1]);
             if !matches!(sema.pool.kind(t0), TypeKind::Str)
-                || !matches!(sema.pool.kind(t1), TypeKind::Str | TypeKind::StrView)
+                || !matches!(sema.pool.kind(t1), TypeKind::Str | TypeKind::View(_))
             {
                 sema.sink.emit(Diag::error(
                     sema.uir.span(a0),
@@ -2018,7 +2015,7 @@ fn check_print_args(
     if sema.pool.is_error(arg_ty) {
         return false;
     }
-    if !matches!(sema.pool.kind(arg_ty), TypeKind::Str | TypeKind::StrView) {
+    if !matches!(sema.pool.kind(arg_ty), TypeKind::Str | TypeKind::View(_)) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
