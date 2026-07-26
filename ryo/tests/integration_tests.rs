@@ -3535,7 +3535,9 @@ fn test_slice_out_of_range_panics() {
 
 #[test]
 fn test_slice_non_boundary_panics() {
-    // `é` is 2 bytes, so `s[1:2]` starts mid-character.
+    // `é` is 2 bytes (bytes 1-2 of "héllo"): byte 1 STARTS the character
+    // (a valid boundary) and byte 2 falls INSIDE it, so `s[1:2]` panics on
+    // its end bound, not its start.
     let temp_dir = TempDir::new().expect("temp dir");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -3553,6 +3555,31 @@ fn test_slice_non_boundary_panics() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("UTF-8 char boundary"),
+        "missing panic message: {stderr}"
+    );
+}
+
+#[test]
+fn test_slice_reversed_range_panics() {
+    // Reversed ranges (start > end) are invalid and panic at creation
+    // (final spec §3.1).
+    let temp_dir = TempDir::new().expect("temp dir");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "slice_reversed.ryo",
+        "fn main():\n\ts: str = \"abc\"\n\tprint(s[3:1])\n",
+    );
+    let output = run_ryo_command(&["run", "slice_reversed.ryo"], &test_file).expect("run ryo");
+    assert!(!output.status.success());
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "expected panic exit code 101: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("slice index out of range"),
         "missing panic message: {stderr}"
     );
 }

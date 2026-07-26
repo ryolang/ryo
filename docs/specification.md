@@ -410,10 +410,13 @@ Slices are lightweight borrowed views into owned data. They are **scope-locked**
 *   `list[T]` slice: Immutable view of `T` elements (pointer + element length). Created via `my_list[start:end]`. Supports shorthand: `items[:3]`, `items[2:]`.
 *   `inout list[T]` parameter: Mutable list access passed via explicit `inout` parameter and call-site `&` (see Section 5.3, Rule 3).
 
-**Function parameters use owned types** — the compiler handles borrowing implicitly (Rule 2):
+**Read-only string parameters prefer `&str`** — passing an owned `str` converts implicitly; owned-type parameters remain supported and are still borrowed implicitly (Rule 2):
 ```ryo
-fn process_string(s: str):              # Implicit immutable borrow
+fn process_string(s: &str):              # Preferred: read-only view — zero-copy
 	# ... read s ...
+
+fn keep_string(s: str):                 # Also fine: implicit immutable borrow (Rule 2)
+	# ... read or extend s ...
 
 fn process_list(items: list[int]):      # Implicit immutable borrow
 	# ... read items ...

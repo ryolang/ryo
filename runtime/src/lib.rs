@@ -114,7 +114,10 @@ fn slice_fail(msg: &str) -> ! {
 
 /// True when byte offset `i` in `s[..len]` lies on a UTF-8 char
 /// boundary (start, end, or a non-continuation byte).
-fn is_char_boundary(s: *const u8, len: u64, i: u64) -> bool {
+///
+/// # Safety
+/// `s` must point to `len` readable bytes (or be null/dangling if `len == 0`).
+unsafe fn is_char_boundary(s: *const u8, len: u64, i: u64) -> bool {
     if i == 0 || i == len {
         return true;
     }
@@ -143,7 +146,9 @@ pub unsafe extern "C" fn __ryo_slice(
     if start > end || end > len {
         slice_fail("slice index out of range");
     }
-    if !is_char_boundary(ptr, len, start) || !is_char_boundary(ptr, len, end) {
+    // SAFETY: caller contract — ptr points to len readable bytes.
+    let bounds_ok = unsafe { is_char_boundary(ptr, len, start) && is_char_boundary(ptr, len, end) };
+    if !bounds_ok {
         slice_fail("slice index is not a UTF-8 char boundary");
     }
     // SAFETY: caller contract for `out`; `start <= end <= len` checked above.
@@ -818,5 +823,20 @@ mod tests {
         };
         unsafe { __ryo_slice(s.as_ptr(), 3, 3, 3, &mut out) };
         assert_eq!(out.len, 0);
+    }
+
+    #[test]
+    fn slice_nonzero_offset() {
+        let s = "héllo wörld".as_bytes();
+        let mut out = RyoSlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        };
+        // "wörld" starts at byte 7 (h=1, é=2, "llo "=4) and is 6 bytes
+        // — exercises the non-zero pointer-offset path.
+        unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 7, 13, &mut out) };
+        assert_eq!(out.len, 6);
+        let got = unsafe { core::slice::from_raw_parts(out.ptr, out.len as usize) };
+        assert_eq!(got, "wörld".as_bytes());
     }
 }

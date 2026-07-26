@@ -10,7 +10,7 @@
 
 ## 1. Placement
 
-```
+```text
 std.db            # database-agnostic API surface: connection concepts, errors, row mapping
 std.db.sqlite     # bundled SQLite — the batteries-included engine
 std.db.postgres   # pure-Ryo wire-protocol driver (later)
@@ -68,10 +68,10 @@ import std.db
 import std.db.sqlite
 
 fn fetch_user(db: sqlite.Db, id: int) -> (db.Error | db.NotFound)!User:
-    # t-string → Template → values bound as parameters, never concatenated.
-    # SQL injection is impossible by construction (base spec §2).
-    user = try db.query_one(User, t"SELECT id, name, email FROM users WHERE id = {id}")
-    return user orelse return db.NotFound(f"user {id}")
+	# t-string → Template → values bound as parameters, never concatenated.
+	# SQL injection is impossible by construction (base spec §2).
+	user = try db.query_one(User, t"SELECT id, name, email FROM users WHERE id = {id}")
+	return user orelse return db.NotFound(f"user {id}")
 ```
 
 - **Rows map to owned structs** (`User` with owned `str` fields) — the MVC validation's finding: DB results are owned in every language (wire buffers are reused); Ownership Lite costs nothing here.
@@ -92,8 +92,8 @@ Mutex-guarded free-list; `Pool[T]` with a factory closure:
 pool = shared(pool.new(8, fn(): sqlite.Db.open("app.db")))
 
 fn fetch_user(pool: Pool[sqlite.Db], id: int) -> (db.Error | db.NotFound)!User:
-    with pool.acquire() as conn:          # Drop returns conn — even on panic (§5.5)
-        return query(conn, id)
+	with pool.acquire() as conn:          # Drop returns conn — even on panic (§5.5)
+		return query(conn, id)
 ```
 
 Sufficient for SQLite single-writer workloads and CLI tools. `acquire` blocks a thread when exhausted — acceptable at this tier.

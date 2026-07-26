@@ -3,7 +3,7 @@
 > **Status:** Normative contributor instructions for AI coding agents
 > **Last Updated:** 2026-07-22
 > **Applies to:** the Ryo compiler, runtime, and toolchain repositories
-> **Source of truth (in order):** `specification.md` → `ryo-slicing-and-memory-model-final-spec.md` (D1–D11) → `ryo-proposal-review-issues.md` → these instructions
+> **Source of truth (in order):** `../specification.md` → `ryo-slicing-and-memory-model-final-spec.md` (D1–D11) → `ryo-proposal-review-issues.md` → these instructions
 > **Foundational reference:** Andrew Kelley, *Practical Data-Oriented Design* (Handmade Seattle 2021, <https://www.youtube.com/watch?v=IroPQ150F6c>) — the Zig-compiler talk this architecture follows. Treat its techniques as normative below; where a rule cites "Kelley", it refers to this talk.
 
 You are helping build the Ryo compiler. Ryo is an AI-era language: its design rule is *"a human reviewer must understand the code by reading it, without memorizing special rules."* That rule applies to **your output** with full force. The human reviews; you write for the reviewer.
@@ -56,7 +56,7 @@ Analyze only reachable declarations, on demand. The driver asks "give me the typ
 
 ## 2. Rust Discipline
 
-**R5 — No `unsafe` in the compiler.** Runtime stack-switching lives in the curated `corosensei` dependency. If a benchmark ever forces `unsafe` in tree code, it requires: a `#: SAFETY:` comment proving the invariant, a linked issue, and human sign-off in review. (We dogfood D4.)
+**R5 — No `unsafe` in the compiler.** Runtime stack-switching lives in the curated `corosensei` dependency. If a benchmark ever forces `unsafe` in tree code, it requires: a `// SAFETY:` comment proving the invariant, a linked issue, and human sign-off in review. (We dogfood D4.)
 
 **R6 — Curated, pinned dependencies.** Core set: `cranelift-*`, `corosensei`, `mio`, `crossbeam-*`, `bumpalo`/`typed-arena`, `insta` (tests). Every new dependency needs a one-line justification in the PR. No `anyhow`/`thiserror` sprawl in the compiler — diagnostics are structured (§3), not stringly.
 

@@ -120,7 +120,7 @@ Mojo is a declared Ryo inspiration (spec §1), and Ryo already imports its best 
 | `&[T]` | Read-only view into contiguous element storage (fixed arrays `[T]`, later `list[T]`) | `{ ptr, len }` — 16 bytes |
 | `&bytes` | Read-only view into a `bytes` buffer | `{ ptr, len }` — 16 bytes |
 
-Slice expressions: `s[start:end]`, `s[start:]`, `s[:end]`, `s[:]` — half-open `[start, end)`. Indices are non-negative `int`; out-of-range panics. For `str`, indices are byte offsets and must lie on UTF-8 boundaries, otherwise panic. No negative indexing (consistent with §4.7).
+Slice expressions: `s[start:end]`, `s[start:]`, `s[:end]`, `s[:]` — half-open `[start, end)`. Indices are non-negative `int`; out-of-range and reversed ranges (`start > end`) panic. For `str`, indices are byte offsets and must lie on UTF-8 boundaries, otherwise panic. No negative indexing (consistent with §4.7).
 
 ### 3.2 Projection rules
 
@@ -189,17 +189,17 @@ For views that must **escape** — struct fields, return values, caches, task bo
 
 ```ryo
 struct Packet:
-    header: sbytes           # ESCAPING view — legal: sbytes is an owned type
-    payload: sbytes
+	header: sbytes           # ESCAPING view — legal: sbytes is an owned type
+	payload: sbytes
 
 fn parse_packet(move buf: bytes) -> ParseError!Packet:
-    sb = buf.share()                  # move: buf's allocation rewrapped as ARC (refcount = 1, no copy)
-    if sb.len() < 4:
-        return ParseError("too short")
-    return Packet(
-        header  = sb[0:4],            # sbytes slice → sbytes (refcount +1, zero-copy)
-        payload = sb[4:],             # zero-copy, may outlive this function
-    )
+	sb = buf.share()                  # move: buf's allocation rewrapped as ARC (refcount = 1, no copy)
+	if sb.len() < 4:
+		return ParseError("too short")
+	return Packet(
+		header  = sb[0:4],            # sbytes slice → sbytes (refcount +1, zero-copy)
+		payload = sb[4:],             # zero-copy, may outlive this function
+	)
 ```
 
 - **`share()` is consuming and zero-copy:** `fn share(move self) -> sbytes` rewraps the existing heap allocation as shared — no copy, no hidden cost. The reverse direction (`sb.clone_bytes() -> bytes`) is an explicit copy, spelled as one.
@@ -281,10 +281,10 @@ Inside a `task.scope` body:
 mut data = load_pixels()              # list[u32], 100M elements
 
 task.scope:
-    # stdlib: splits into disjoint inout ranges, one child task each.
-    # Safe API; unsafe internals permitted by D4; borrows permitted by D5.
-    data.par_for_each_chunk(fn(chunk):    # chunk: inout range of the same list
-        apply_filter(&chunk))
+	# stdlib: splits into disjoint inout ranges, one child task each.
+	# Safe API; unsafe internals permitted by D4; borrows permitted by D5.
+	data.par_for_each_chunk(fn(chunk):    # chunk: inout range of the same list
+		apply_filter(&chunk))
 # scope joined — data fully owned by caller again, no copies
 ```
 

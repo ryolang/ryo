@@ -551,7 +551,8 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
               read-only, zero-copy view into the string's buffer.
               Shorthands: <code>s[start:]</code>, <code>s[:end]</code>,
               <code>s[:]</code>. Bounds are byte offsets; they panic at
-              creation when out of range or not on a UTF-8 boundary.
+              creation when out of range, reversed
+              (<code>start &gt; end</code>), or not on a UTF-8 boundary.
               Views are non-escaping: they can't be returned or stored
               past the current function, and the owner is frozen while
               a view is live.

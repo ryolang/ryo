@@ -29,11 +29,11 @@ A **context** is scope-bound runtime state carried in the ambient runtime's TLS.
 
 ```ryo
 fn handle_request(req: http.Request) -> !http.Response:
-    with deadline(500ms):                    # lexical bound — reviewer sees the extent
-        user = try fetch_user(pool, id)      # cancelled automatically if deadline fires
-        task.scope:
-            task.run fn(): enrich(user)      # inherits context — child of this scope
-        return render(user)
+	with deadline(500ms):                    # lexical bound — reviewer sees the extent
+		user = try fetch_user(pool, id)      # cancelled automatically if deadline fires
+		task.scope:
+			task.run fn(): enrich(user)      # inherits context — child of this scope
+		return render(user)
 ```
 
 Rules:
@@ -77,12 +77,12 @@ Spans are lexically-scoped resources — the `with` statement's home turf:
 import std.otel
 
 fn handle_request(req: http.Request) -> !http.Response:
-    with otel.span("handle_request") as span:      # Drop ends the span — always,
-        span.set_attr("user.id", user_id)           # including error paths and panic
-        user = try fetch_user(pool, id)             # error auto-recorded as span event
-        task.scope:
-            task.run fn(): enrich(user)             # child span — no context parameter
-        return render(user)
+	with otel.span("handle_request") as span:      # Drop ends the span — always,
+		span.set_attr("user.id", user_id)           # including error paths and panic
+		user = try fetch_user(pool, id)             # error auto-recorded as span event
+		task.scope:
+			task.run fn(): enrich(user)             # child span — no context parameter
+		return render(user)
 ```
 
 Compare Go: `ctx, span := tracer.Start(ctx, ...); defer span.End()` — plus manual context threading through every callee. The Ryo form is shorter, cannot leak a span, shows its extent lexically, and propagates across green threads for free.
