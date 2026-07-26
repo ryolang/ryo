@@ -873,6 +873,14 @@ fn remove_loop_deferred_views(own: &mut Ownership, loop_ref: TirRef) {
 /// live. Views bound inside an arm are scope-dropped with it — their
 /// last read is necessarily inside the branch — but their P5 deferral
 /// on the root survives via `root_owner` (never pruned).
+///
+/// Loop-deferred views (`view_defer_loop`) are exempt: their last read
+/// re-executes on later iterations, so their death is owned by
+/// `remove_loop_deferred_views` at the enclosing loop's exit. Pruning
+/// one here would lift the root's P2 freeze mid-loop-body and silently
+/// accept owner mutations whose realloc a later iteration reads
+/// through the view's stale pointer; conservative over-liveness is the
+/// sound direction.
 fn prune_branch_dead_projections(tir: &Tir, own: &mut Ownership, if_ref: TirRef) {
     let mut subtree: HashSet<TirRef> = HashSet::new();
     collect_refs_recursive(tir, if_ref, &mut subtree);
@@ -880,8 +888,15 @@ fn prune_branch_dead_projections(tir: &Tir, own: &mut Ownership, if_ref: TirRef)
         .root_owner
         .keys()
         .filter(|view| {
-            view.inst_tirref()
-                .and_then(|vi| own.view_last_use.get(&vi))
+            let Some(vi) = view.inst_tirref() else {
+                return false;
+            };
+            // P2/P4: loop-deferred views die at loop exit, not here.
+            if own.view_defer_loop.contains_key(&vi) {
+                return false;
+            }
+            own.view_last_use
+                .get(&vi)
                 .is_some_and(|lu| subtree.contains(lu))
         })
         .copied()
@@ -6975,6 +6990,84 @@ mod tests {
                 .any(|fp| fp.target == lit && fp.after == wl && fp.branch.is_none()),
             "expected s's Free anchored after the loop; got: {:?}",
             sidecar.free_schedule
+        );
+    }
+
+    #[test]
+    fn loop_deferred_view_survives_if_join_prune() {
+        // Regression test (review Critical): prune_branch_dead_projections
+        // must not kill a loop-deferred view at the if join.
+        //   s: str = "hello"; v = s[0:2]
+        //   while true:
+        //       if true: print(v)     # v's last read → loop-deferred (P4)
+        //       str_push(&s, "!")     # mutates the owner while v is live
+        // → exactly one SourceProjected naming `s` (P2). Before the fix
+        //   the if-join prune emptied live_projections[s] mid-loop-body,
+        //   silently accepting a mutation whose realloc later iterations
+        //   would read through v's stale pointer — the UAF class P2
+        //   exists to reject.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let while_cond = tb.bool_const(true, bool_ty, span);
+        let if_cond = tb.bool_const(true, bool_ty, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(if_cond, &[pstmt], &[], None, void, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let wl = tb.while_loop(while_cond, &[ifs, push_stmt], void, span);
+        let tir = tb.finish(&[decl, vdecl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
         );
     }
 
