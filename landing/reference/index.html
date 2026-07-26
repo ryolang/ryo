@@ -213,7 +213,7 @@
               combines Python-style syntax with the memory safety of Rust and
               the concurrency model of Go. This reference documents the language
               <strong>as implemented</strong> in the current pre-alpha (through
-              <em>Milestone 8.3</em>). Every example below compiles and runs
+              <em>Milestone 8.4</em>). Every example below compiles and runs
               today. Features not yet available are gathered in
               <a href="#whats-next">What's Next</a> and never presented as
               working.
@@ -543,6 +543,33 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
                   </tr>
                 </tbody>
               </table>
+            </div>
+
+            <h3>Slices</h3>
+            <p>
+              <code>s[start:end]</code> yields an <code>&amp;str</code> — a
+              read-only, zero-copy view into the string's buffer.
+              Shorthands: <code>s[start:]</code>, <code>s[:end]</code>,
+              <code>s[:]</code>. Bounds are byte offsets; they panic at
+              creation when out of range or not on a UTF-8 boundary.
+              Views are non-escaping: they can't be returned or stored
+              past the current function, and the owner is frozen while
+              a view is live.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">slices.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn main():
+	s: str = "hello world"
+	print(s[0:5])      # hello
+	print(s[6:])       # world
+	print(s[:5])       # hello
+
+	word = s[0:5]      # word: &amp;str — a view, no copy
+	print(word)</code></pre>
             </div>
 
             <div class="callout callout--warn">
@@ -1002,10 +1029,6 @@ fn main():
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>String slices (<code>&amp;str</code>)</td>
-                    <td><span class="pill">Milestone 8.4</span></td>
-                  </tr>
                   <tr>
                     <td>Structs &amp; methods</td>
                     <td><span class="pill">Milestone 9</span></td>
