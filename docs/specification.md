@@ -369,7 +369,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 
 ### 4.4 Slice Types (Scope-Locked Views)
 
-Slices are lightweight borrowed views into owned data. They are **scope-locked** — they exist only within the block where they're created and cannot be stored in variables, returned from functions, or placed in struct fields (see Section 5, Rules 5-6 and Section 5.7).
+Slices are lightweight borrowed views into owned data. They are **scope-locked**: a slice may be bound to a local variable whose uses remain within the current function; a slice cannot be stored in a variable, field, or container that outlives that function (see §5.7 and Rule 5).
 
 *   `str` slice: Immutable UTF-8 view (pointer + byte length). Created via `my_str[start:end]` or string slicing operations. Supports shorthand: `s[:end]` (from start), `s[start:]` (to end).
 *   `list[T]` slice: Immutable view of `T` elements (pointer + element length). Created via `my_list[start:end]`. Supports shorthand: `items[:3]`, `items[2:]`.
@@ -387,7 +387,7 @@ fn mutate_list(inout items: list[int]): # Explicit mutable borrow
 	# ... modify items ...                # caller writes `mutate_list(&my_list)`
 ```
 
-*(Rationale: Under Ownership Lite, borrows are parameter-passing conventions, not general-purpose types. Slices exist for efficient iteration and chaining within a scope, but cannot escape. This eliminates the need for lifetime annotations while preserving zero-copy performance within expression chains.)*
+*(Rationale: Mutable borrows remain a parameter-passing convention, not a type (M8.3). Immutable views (`&str`, `&[T]`, `&bytes`) are a narrow exception: they are first-class types that may be bound and passed, but they are non-escaping — they cannot be returned, moved, or stored in aggregates — so they cannot play the role of general-purpose reference types. This eliminates the need for lifetime annotations while preserving zero-copy performance within expression chains.)*
 
 ### 4.5 Struct Type (Product Type)
 
@@ -1396,6 +1396,8 @@ fn process(items: list[int]):
 *   Views **cannot be returned** from functions (follows Rule 5).
 *   Views **cannot be passed to other functions** that would store them.
 *   The compiler enforces that the source collection is not mutated while a view exists (follows Rule 7).
+
+String slices (`&str`, M8.4) follow the same rules; see §4.4.
 
 ```ryo
 # NOT allowed — storing an iterator escapes the borrow scope

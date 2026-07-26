@@ -26,7 +26,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha--complete) ✅
 - [x] [Milestone 8.2 — Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE](#milestone-82-implicit-borrow-liveness--ownership-pass-refactors-alpha--complete)
 - [x] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha] ✅ COMPLETE](#milestone-83-mutable-borrows-inout-alpha--complete)
-- [ ] [Milestone 8.4 — String Slices (`&str`) [alpha]](#milestone-84-string-slices-str-alpha)
+- [x] [Milestone 8.4 — String Slices (`&str`) [alpha] ✅ COMPLETE](#milestone-84-string-slices-str-alpha--complete)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
 - [ ] [Milestone 9.1 — Synthesized Eq & Debug for Structs](#milestone-91-synthesized-eq--debug-for-structs)
@@ -1121,45 +1121,46 @@ fn main():
 - Rule 7 exclusion builds on M8.2's intra-call borrowed/moved partition (`ryo-frontend/src/ownership.rs`); edge cases to be documented in the M8.3 design doc
 - Dependencies: Milestone 8.2 (intra-call borrowed/moved partition and `ParamMode` plumbing that `inout` extends)
 
-### Milestone 8.4: String Slices (`&str`) [alpha]
+### Milestone 8.4: String Slices (`&str`) [alpha] ✅ COMPLETE
 
-**Goal:** Borrowed views into `str` — zero-copy substrings and string parameters.
+**Goal:** Borrowed views into `str` — zero-copy substrings and read-only string parameters.
 
-**Status:** ⏳ Planned
+**Status:** ✅ COMPLETE (2026-07-26)
 
-**Tasks:**
+**What was implemented:**
 
-- Recognize `&str` as a fat pointer (ptr + len) borrowed from a `str`
-- Parse the slice operator on strings: `s[start:end]`
-- Codegen:
-  - Slice representation (pointer + length)
-  - UTF-8 boundary check at slice creation (panic on invalid boundary)
-  - Bounds check at runtime (panic on out-of-range)
-- Update standard library and method receivers to prefer `&str` for read-only string parameters
+- `&str` as a first-class read-only view type (`{ptr, len}`, 16 bytes), per the final slicing spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md`, D1). Slice expressions `s[start:end]`, `s[start:]`, `s[:end]`, `s[:]` yield `&str`; bounds are `int`, checked at creation (out-of-range and non-UTF-8-boundary both panic). Views are unified behind `TypeKind::View(ViewKind)` — `&str` today, `&[T]`/`&bytes` reserved.
+- `&str` parameters are the preferred read-only string convention (§3.4); passing an owned `str` to a `&str` parameter triggers the implicit view conversion (`str → &str` drops `cap`). `inout &str`, `move &str`, and `-> &str` are rejected (E1/E2).
+- Projection rules P1–P6 in the ownership pass: freeze of the owner while any slice is live (`SourceProjected`, E0035), transitive re-slicing, last-use projection lifetimes (P4 lift), and P5-deferred owner destruction. Escapes diagnose as `ViewEscape` (E0034) / Rule-5 type errors.
+- Builtin read-only string consumers accept views: `print`, `.len()`, `.is_empty()`, `==`.
+- Hardening landed alongside: deterministic `free_schedule` emission (I-068), the sweep-coverage assertion for anchored frees (I-070), `TirRef::is_param`/`as_param_index` guards (I-072), the E-code stability test + roadmap E-number fixes (I-086), full-tuple loop fixed-point convergence (I-087), the examples parse sweep + Examples CI (I-101), and `__ryo_str_push`'s `suffix_len: u64` (I-105).
 
-**Visible Progress:** Functions like `first_word(text: &str) -> &str` work. String parsing and tokenization no longer require copying.
+**Visible Progress:** `fn f(text: &str)` read-only string parameters work with zero copies; `s[a:b]` slicing, re-slicing, and shorthand forms compile and run; the owner stays usable while views are live and is freed exactly once after they end. String parsing and tokenization no longer require copying.
 
 **Example:**
 
 ```ryo
-fn first_word(text: &str) -> &str:
- for i in range(0, text.len()):
-  if text[i] == ' ':
-   return text[0:i]      # slice into text, no copy
- return text
+fn print_first_word(text: &str):
+	mut i: int = 0
+	while i < text.len():
+		if text[i:i+1] == " ":
+			print(text[0:i])  # slice into text, no copy
+			return
+		i += 1
+	print(text)
 
 fn main():
- s: str = "hello world"
- word = first_word(&s)         # word: &str borrowed from s
- print(word)                   # "hello"
- print(s)                      # ok — s still owned
+	s: str = "hello world"
+	print_first_word(s)      # s borrowed implicitly as &str — prints "hello"
+	print(s)                 # ok — s still owned
 ```
 
 **Implementation Notes:**
 
-- `&str` is a **borrowed view** (immutable, fixed-length); the owning `str` remains the source of truth
-- UTF-8 validity is checked at slice creation, not on every read — so iteration is allocation-free
-- Array slices `&[T]` are **not** included here; they ship in M21 alongside list literal syntax
+- `&str` is a **borrowed view** (immutable, fixed-length); the owning `str` remains the source of truth and is frozen against moves/mutation while any view is live (P2), with the freeze lifting at the view's last use (P4).
+- Views are non-escaping (Rule 5): they cannot be returned, passed to `move` parameters, or stored past the current function — so `first_word`-style helpers print or otherwise consume the slice in place rather than returning it. See `examples/string_slices.ryo`.
+- UTF-8 validity is checked at slice creation, not on every read — so iteration is allocation-free.
+- Array slices `&[T]` are **not** included here; they ship in M21 alongside list literal syntax. `TypeKind::View(ViewKind)` already reserves their representation.
 - Dependencies: Milestone 8.2 (immutable borrows provide the reference machinery), Milestone 8.3 (explicit borrow syntax)
 
 ### Milestone 8.5: Default Parameters & Named Arguments

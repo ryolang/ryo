@@ -2,7 +2,7 @@
 
 Compiler issues identified during source review. Each entry is independently actionable; severity reflects impact on correctness, future feature work, or code health — not user impact today (the compiler is pre-alpha).
 
-Resolved entries are removed (not kept around as a changelog). Look at `git log` if you need history.
+Resolved entries are marked in place with a `**Resolved:** ✅ <milestone> (<date>) — <what was done>.` line (convention introduced in M8.4). Look at `git log` if you need older history.
 
 ---
 
@@ -240,6 +240,7 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Files:** `ryo-frontend/src/ownership.rs` (`OwnerState`)
 **Summary:** `OwnerState::Borrowed` is set only at parameter init; no expression produces it. The two sites that read it (E0021, E0022) could equivalently look up `tir.params` for the underlying owner's source param and check `is_move`. The state is anticipating real borrow expressions (`&x`) which the spec migrated to in commit 2ccf6b6 but the compiler doesn't lower yet.
 **Resolution:** Document the invariant inline ("only ever set at param init in M8.1b; transitions arrive when `&x` borrow expressions land in a future milestone"). No code change today.
+**Resolved:** ✅ M8.4 (2026-07-26) — superseded: projections (`live_projections` P2 freeze ranges) introduce the non-param borrowed/projection states the issue anticipated.
 
 ### I-054 — `parse_source` and lex error paths bypass `finalize_diags`
 
@@ -274,6 +275,7 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-frontend/src/ownership.rs` (last-use/anon-temp/dead-store post passes), `ryo-backend/src/codegen.rs` (`sweep_due_frees`)
 **Summary:** The post passes push `FreePoint`s while iterating std `HashMap`s/`HashSet`s (`own.states` :430, `own.temp_owners` :487, `own.pending_dead_store` :520), whose iteration order varies per run (`RandomState`). Codegen consumes `free_schedule` in order, so emitted binaries are not reproducible run-to-run; frees commute semantically, so this is invisible today.
 **Resolution:** Sort owners (by `TirRef`/`StringId`) before scheduling frees in each post pass, or switch the three collections to ordered iteration. Add a determinism test: compile the same program twice, assert identical `free_schedule` (or identical object bytes).
+**Resolved:** ✅ M8.4 (2026-07-26) — post passes sort owners by a stable key (`owner_sort_key`) before scheduling frees, so `free_schedule` emission is deterministic.
 
 ### I-069 — Loop fixed-point re-walk leaves speculative sidecar entries behind
 
@@ -286,6 +288,7 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-backend/src/codegen.rs` (`sweep_due_frees` :1480, filter at :1494-1495)
 **Summary:** The sweep only fires a `FreePoint` when `inst_values.contains_key(&fp.after)`; a free anchored to an instruction codegen never materialized stays in `pending_sweep` forever — a silent leak with no diagnostic. Correctness currently depends on the ownership pass only anchoring frees to materialized instructions, an implicit cross-crate invariant.
 **Resolution:** Assert the invariant: `debug_assert!(pending_sweep.is_empty())` at function end, or emit an internal diagnostic listing dropped frees.
+**Resolved:** ✅ M8.4 (2026-07-26) — codegen debug-asserts sweep coverage at function end: every pending free must have a fired same-target counterpart (coverage form, not a literal `is_empty`, because return-anchored duplicate frees legitimately remain pending).
 
 ### I-071 — Non-void function can fall off the end with no diagnostic
 
@@ -298,6 +301,7 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-core/src/tir.rs` (`TirRef::param` :80-82), `ryo-frontend/src/ownership.rs` (:90), `ryo-backend/src/codegen.rs` (:575)
 **Summary:** `TirRef::param(idx)` = `u32::MAX - idx` produces a valid `NonZeroU32` indistinguishable from a real instruction index; there is no `is_param()`/`as_param()` predicate anywhere. Passing one to `Tir::inst()` panics out-of-bounds. Correctness rests entirely on consumer discipline — current consumers use param refs as map keys only.
 **Resolution:** Add `TirRef::is_param()`/`as_param_index()` and a `debug_assert!(!r.is_param())` in `Tir::inst()`. Longer term, replace the informal encoding with a clean `Owner` enum as planned in `docs/dev/implementation_roadmap.md` (:1046).
+**Resolved:** ✅ M8.4 (2026-07-26) — added `TirRef::is_param()`/`as_param_index()` and the `debug_assert!(!r.is_param())` guard in `Tir::inst()`.
 
 ### I-073 — Zig download has no integrity verification and races concurrent installs
 
@@ -376,12 +380,14 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-driver/src/pipeline.rs` (`diag_code_str` :219-257), `docs/dev/implementation_roadmap.md` (:1039, :1050, :1069)
 **Summary:** The `DiagCode`→E-number mapping exists only in `diag_code_str`. The roadmap's M8.2 section uses **E0023** for move-while-borrowed-in-calls, but code assigns `MoveWhileBorrowedInCall = "E0031"` (E0023 is `FloatModulo`). Arms are unordered (E0019 between E0012/E0013), ranges have gaps, and no test pins code stability/uniqueness — a transposition typo would silently renumber a diagnostic. `diag.rs:51` calls `DiagCode` the "stable error identity" while the actual stable strings live in the driver.
 **Resolution:** Add a test asserting each `DiagCode` maps to its expected unique string (explicit list); fix the roadmap references; consider moving the code strings onto `DiagCode` itself.
+**Resolved:** ✅ M8.4 (2026-07-26) — added the E-code stability test pinning every `DiagCode`→string mapping for uniqueness, and fixed the roadmap's stale E-number references.
 
 ### I-087 — Loop fixed-point convergence compares only Moved-ness
 
 **Files:** `ryo-frontend/src/ownership.rs` (`states_differ_snapshot` :1206-1234)
 **Summary:** The re-walk gate compares only Moved-ness between snapshots; `Valid`↔`Borrowed` flips don't force another iteration. Sound today only because `Borrowed` never transitions after param init (I-053) and merges are monotone — the maintainer note at :1168-1172 already flags this must become a real fixed point if either changes.
 **Resolution:** Fold into I-045's propagate-only refactor: iterate until the full state tuple (not just Moved-ness) is stable, or document the reduced comparison as load-bearing next to the gate.
+**Resolved:** ✅ M8.4 (2026-07-26) — loop fixed-point convergence now compares the full state tuple (owner states plus live-projection sets), not just Moved-ness.
 
 ### I-088 — Ownership sidecar is keyed by function name
 
@@ -470,6 +476,7 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `examples/*.ryo`, `examples/future/`
 **Summary:** 12 top-level examples plus ~20 aspirational files are referenced by no test, script, or workflow; nothing verifies they even parse.
 **Resolution:** Add a CI step (or integration test) that runs `ryo parse` over `examples/` (excluding `future/`), and ideally `ryo run` on the runnable ones.
+**Resolved:** ✅ M8.4 (2026-07-26) — top-level examples are exercised by the in-tree parse sweep (`test_examples_parse`) and the upstream Examples CI workflow (#95).
 
 ### I-102 — Smoke suites duplicate work across lanes and fixture builds
 
@@ -494,6 +501,7 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `runtime/src/lib.rs` (:156-160, :168), `ryo-backend/src/codegen.rs` (:1851-1857)
 **Summary:** The one signed length in the runtime ABI is silently clamped via `suffix_len.max(0)`; every other length parameter is `u64`. Negative values from a buggy caller are accepted rather than rejected.
 **Resolution:** Change the parameter to `u64` on both sides (codegen declares `types::I64` at :1855), or assert non-negative in debug builds.
+**Resolved:** ✅ M8.4 (2026-07-26) — `__ryo_str_push` now takes `suffix_len: u64`, matching every other length in the runtime ABI.
 
 ### I-106 — Decode paths panic instead of reporting an internal error
 
