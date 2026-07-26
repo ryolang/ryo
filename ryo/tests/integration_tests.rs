@@ -3518,8 +3518,8 @@ fn test_slice_out_of_range_panics() {
     let output = run_ryo_command(&["run", "slice_oob.ryo"], &test_file).expect("run ryo");
     assert!(!output.status.success());
     // `__ryo_str_slice` panics with the `__ryo_panic` convention:
-    // stderr message + exit 101. No earlier panic test asserts the
-    // code, so this establishes the convention.
+    // stderr message + exit 101 (matches the existing panic tests at
+    // :1526-1530).
     assert_eq!(
         output.status.code(),
         Some(101),
