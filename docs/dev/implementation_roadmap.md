@@ -1864,6 +1864,8 @@ fn main():
 - **Copy-on-write at the buffer level** — `list[T]`, `map[K, V]`, and `str` are class-backed but present value semantics to the user. A mutating method checks the backing buffer's refcount; if > 1, it clones the buffer first. This is the Swift collection model (`Array`, `Dictionary`, `String`) and is the prerequisite for `shared[T]`'s performance story (spec 5.6).
 - **ARC optimizer pass** ([arc_optimizer.md](arc_optimizer.md)) must land alongside or shortly after this milestone. Without retain/release elision, every collection access in shared-state code pays atomic refcount cost. Sequencing: design and prototype the pass during this milestone; commit it before any benchmark publication.
 - Dependencies: Milestone 8.3 (`inout` for append/remove), Milestone 21 (array slices for iteration)
+- **String iteration (sequencing, with spec §4.7):** `char` (§4.2, Unicode scalar value) lands first; `.chars()` is a decoding iterator over it; `.char_count()` is the explicit-O(n) convenience — `.len()` stays byte length, so no linear scan hides behind constant-looking syntax. `s.chars().collect() -> list[char]` is the decode-once-then-index escape hatch (explicit allocation).
+- **String `for` shape:** `for (offset, c) in text.chars():` — each step yields the byte offset (aligned with slice bounds, for `text[start:i]`-style scanning) and the decoded `char` (for classification). No silent U+FFFD: `str` is valid UTF-8 by construction, so decoding is total — the Go ergonomics without the Go error-swallowing.
 
 ### Milestone 23: RAII & Drop (Compiler Intrinsic)
 

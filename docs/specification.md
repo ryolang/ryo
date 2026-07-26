@@ -496,6 +496,7 @@ To prevent "Iterator Invalidation" bugs (modifying a collection while iterating)
 
 #### **String Indexing**
 *   Direct indexing `s[i]` is **forbidden** for strings.
+*   `.len()` returns the **byte length**, not a character count. Character-level access comes from explicit decoding APIs that advertise their cost: `.chars()` (an iterator of `char` — Unicode scalar values, §4.2) and `.char_count()` (explicit O(n)); `s.chars().collect() -> list[char]` is the "decode once, then index freely" escape hatch, as an explicit allocation.
 *   *(Rationale: Strings are UTF-8. Byte indexing is dangerous (can split characters), and O(N) character indexing is a performance trap. Use `.bytes()` or `.chars()` explicitly).*
 
 *Note: User-defined generics are planned for future implementation. For v0.1 polymorphism, use **Enum Wrappers** (Enum Dispatch) instead of `dyn Trait`. Advanced generics with trait bounds are detailed in Section 19 (Future Work).*

@@ -573,6 +573,31 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
 	print(word)</code></pre>
             </div>
 
+            <p>
+              Bounds are <strong>byte offsets</strong>, not character
+              indices — slicing inside a multi-byte character panics at
+              creation:
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">utf8_boundary.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn main():
+	s: str = "héllo"
+	print(s[0:1])      # h — byte 0 is a boundary
+	print(s[1:2])      # panics: byte 2 falls inside 'é' (bytes 1–2)</code></pre>
+            </div>
+
+            <p>
+              Scanning for ASCII delimiters (spaces, commas, newlines)
+              byte-wise is always safe — UTF-8 never reuses ASCII bytes
+              inside a multi-byte character. Character-level access comes
+              from explicit decoding APIs (<code>.chars()</code>, planned),
+              never from indexing.
+            </p>
+
             <div class="callout callout--warn">
               <svg
                 viewBox="0 0 24 24"
