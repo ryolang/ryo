@@ -190,3 +190,32 @@ fn asan_early_return_live_local() {
         "early_return_live_local",
     );
 }
+
+#[test]
+fn asan_slice_view_no_free() {
+    run_asan_smoke(
+        common::find_fixture("slice_view_no_free"),
+        "slice_view_no_free",
+    );
+}
+
+#[test]
+fn asan_slice_owner_freed_after_view() {
+    run_asan_smoke(
+        common::find_fixture("slice_owner_freed_after_view"),
+        "slice_owner_freed_after_view",
+    );
+}
+
+#[test]
+fn asan_slice_of_literal() {
+    run_asan_smoke(common::find_fixture("slice_of_literal"), "slice_of_literal");
+}
+
+#[test]
+fn asan_slice_across_blocks() {
+    run_asan_smoke(
+        common::find_fixture("slice_across_blocks"),
+        "slice_across_blocks",
+    );
+}

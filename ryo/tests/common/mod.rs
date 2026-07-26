@@ -367,6 +367,53 @@ fn main():
 \tf()
 ",
     ),
+    (
+        // M8.4: a view must not be freed (it owns nothing), and the
+        // owner is freed once at its own last use — after the view's.
+        "slice_view_no_free",
+        "\
+fn main():
+\ts: str = int_to_str(42)
+\tv = s[0:1]
+\tprint(v)
+",
+    ),
+    (
+        // The owner outlives the view: s's Free anchors after the
+        // last read of EITHER s or its projection v — freeing s at
+        // print(s) would be a use-after-free on print(v).
+        "slice_owner_freed_after_view",
+        "\
+fn main():
+\ts: str = int_to_str(12345)
+\tv = s[0:3]
+\tprint(s)
+\tprint(v)
+",
+    ),
+    (
+        // Slicing a string literal projects rodata (cap=0 sentinel):
+        // nothing to free on either side, and no double-free.
+        "slice_of_literal",
+        "\
+fn main():
+\tprint(\"hello\"[1:3])
+",
+    ),
+    (
+        // A view created before a branch and read inside it: the
+        // branch must not prune the projection (P2 freeze survives
+        // the if-join), and the owner frees once after the join.
+        "slice_across_blocks",
+        "\
+fn main():
+\ts: str = int_to_str(7)
+\tv = s[0:1]
+\tif s[0:1] == \"7\":
+\t\tprint(v)
+\tprint(s)
+",
+    ),
 ];
 
 pub fn find_fixture(name: &str) -> &'static str {
