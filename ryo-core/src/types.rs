@@ -592,12 +592,12 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::Bool => write!(f, "bool"),
             TypeKind::Int => write!(f, "int"),
             TypeKind::Str => write!(f, "str"),
-            TypeKind::View(ViewKind::Str) => write!(f, "&str"),
+            TypeKind::View(ViewKind::Str) => write!(f, "strview"),
             // Bytes/Slice are uninhabited at M8.4 — pure decode arms
             // that keep the match honest for D2 (8.5) / M21.
-            TypeKind::View(ViewKind::Bytes) => write!(f, "&bytes"),
+            TypeKind::View(ViewKind::Bytes) => write!(f, "bytesview"),
             TypeKind::View(ViewKind::Slice(elem)) => {
-                write!(f, "&[{}]", self.pool.display(elem))
+                write!(f, "slice[{}]", self.pool.display(elem))
             }
             TypeKind::Float => write!(f, "float"),
             TypeKind::Error => write!(f, "<error>"),
@@ -689,7 +689,7 @@ mod tests {
         // `None` for `&str` until D2/M21 gives elements a pool
         // representation.
         assert_eq!(pool.view_elem(v), None);
-        assert_eq!(pool.display(v).to_string(), "&str");
+        assert_eq!(pool.display(v).to_string(), "strview");
         assert_ne!(v, pool.str_());
     }
 

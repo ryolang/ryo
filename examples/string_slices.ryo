@@ -3,7 +3,7 @@
 # moved, or stored past the current function); the owner is frozen
 # against moves and mutation while a view is live.
 
-fn print_first_word(text: &str):
+fn print_first_word(text: strview):
 	# &str views cannot be returned (Rule 5 / E1), so this function
 	# prints the slice instead of returning it.
 	mut i: int = 0
@@ -14,7 +14,7 @@ fn print_first_word(text: &str):
 		i += 1
 	print(text)
 
-fn print_csv_fields(line: &str):
+fn print_csv_fields(line: strview):
 	# The projection use case (final spec §2.3): parsers are projection
 	# sinks — views flow in (`&str` input), scanning is zero-copy, and
 	# owned values flow out. This walk allocates nothing.

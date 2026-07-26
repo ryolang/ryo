@@ -429,7 +429,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
                 param.span,
                 DiagCode::TypeMismatch,
                 format!(
-                    "views cannot be `{}` parameters — `&str` is already a borrow",
+                    "views cannot be `{}` parameters — `strview` is already a borrow",
                     mode_str,
                 ),
             ));
@@ -439,7 +439,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         sema.sink.emit(Diag::error(
             body.span,
             DiagCode::ReturnBorrowedValue,
-            "functions cannot return views (`&str`) — return an owned `str` instead (Rule 5)"
+            "functions cannot return views (`strview`) — return an owned `str` instead (Rule 5)"
                 .to_string(),
         ));
     }
@@ -1843,7 +1843,7 @@ fn emit_builtin_call(
                 sema.sink.emit(Diag::error(
                     sema.uir.span(a0),
                     DiagCode::TypeMismatch,
-                    "str_push(s: inout str, suffix: &str): first argument must be str, suffix must be str or &str".to_string(),
+                    "str_push(s: inout str, suffix: strview): first argument must be str, suffix must be str or strview".to_string(),
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
@@ -2020,7 +2020,7 @@ fn check_print_args(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
             format!(
-                "print() argument must be str or &str, got {}",
+                "print() argument must be str or strview, got {}",
                 sema.pool.display(arg_ty)
             ),
         ));
@@ -3414,7 +3414,7 @@ mod tests {
 
     #[test]
     fn view_param_declared_type_and_borrow_mode() {
-        let (tirs, diags, pool) = run_with_errors("fn f(x: &str):\n\tprint(x)\n");
+        let (tirs, diags, pool) = run_with_errors("fn f(x: strview):\n\tprint(x)\n");
         assert!(diags.is_empty(), "got {:?}", diags);
         let f = tir_named(&tirs, &pool, "f");
         assert_eq!(f.params[0].ty, pool.str_view());
@@ -3424,7 +3424,7 @@ mod tests {
     #[test]
     fn view_param_accepts_owned_str_via_conversion() {
         let (tirs, diags, pool) = run_with_errors(
-            "fn shout(text: &str):\n\tprint(text)\n\nfn main():\n\ts: str = \"hi\"\n\tshout(s)\n",
+            "fn shout(text: strview):\n\tprint(text)\n\nfn main():\n\ts: str = \"hi\"\n\tshout(s)\n",
         );
         assert!(diags.is_empty(), "got {:?}", diags);
         let main = tir_named(&tirs, &pool, "main");
@@ -3438,7 +3438,7 @@ mod tests {
     fn view_param_accepts_view_arg_directly() {
         // E4: a view argument to a view parameter needs no conversion.
         let (tirs, diags, pool) = run_with_errors(
-            "fn shout(text: &str):\n\tprint(text)\n\nfn main():\n\ts: str = \"hi\"\n\tshout(s[0:1])\n",
+            "fn shout(text: strview):\n\tprint(text)\n\nfn main():\n\ts: str = \"hi\"\n\tshout(s[0:1])\n",
         );
         assert!(diags.is_empty(), "got {:?}", diags);
         let main = tir_named(&tirs, &pool, "main");
@@ -3458,7 +3458,8 @@ mod tests {
 
     #[test]
     fn view_return_rejected() {
-        let (_tirs, diags, _pool) = run_with_errors("fn bad(s: str) -> &str:\n\treturn s[0:1]\n");
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn bad(s: str) -> strview:\n\treturn s[0:1]\n");
         assert!(
             any_code(&diags, DiagCode::ReturnBorrowedValue),
             "got {:?}",
@@ -3468,14 +3469,14 @@ mod tests {
 
     #[test]
     fn move_and_inout_view_params_rejected() {
-        let (_tirs, diags, _pool) = run_with_errors("fn f(move x: &str):\n\tprint(x)\n");
+        let (_tirs, diags, _pool) = run_with_errors("fn f(move x: strview):\n\tprint(x)\n");
         assert!(
             diags.iter().any(|d| d.code == DiagCode::TypeMismatch
                 && d.message.contains("already a borrow")),
             "got {:?}",
             diags
         );
-        let (_tirs, diags, _pool) = run_with_errors("fn g(inout x: &str):\n\tprint(x)\n");
+        let (_tirs, diags, _pool) = run_with_errors("fn g(inout x: strview):\n\tprint(x)\n");
         assert!(
             diags.iter().any(|d| d.code == DiagCode::TypeMismatch
                 && d.message.contains("already a borrow")),
@@ -3496,14 +3497,14 @@ mod tests {
     #[test]
     fn owned_to_view_binding_rejected() {
         let (_tirs, diags, _pool) =
-            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: &str = s\n");
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: strview = s\n");
         assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
     }
 
     #[test]
     fn view_annotation_over_slice_ok() {
         let (tirs, diags, pool) =
-            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: &str = s[0:1]\n");
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: strview = s[0:1]\n");
         assert!(diags.is_empty(), "got {:?}", diags);
         let main = tir_named(&tirs, &pool, "main");
         assert_eq!(main.inst(stmt_at(main, 1)).ty, pool.str_view());

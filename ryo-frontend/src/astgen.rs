@@ -30,17 +30,18 @@ fn synthetic_span() -> Span {
     SimpleSpan::new((), 0..0)
 }
 
-/// Pre-interned `StringId`s for the three primitive type names.
+/// Pre-interned `StringId`s for the primitive type names.
 ///
 /// Phase 2 made identifiers `StringId` handles, so `resolve_type`
 /// used to call `pool.str(name)` on every type annotation just to
-/// reach the &str-keyed match. Interning the three names once at
+/// reach the &str-keyed match. Interning the names once at
 /// the top of `generate` lets subsequent comparisons be a `StringId`
 /// equality check (`u32` compare) instead of a `pool.str` lookup
 /// followed by a string compare.
 struct Primitives {
     int: StringId,
     str_: StringId,
+    strview: StringId,
     bool_: StringId,
     float: StringId,
 }
@@ -50,6 +51,7 @@ impl Primitives {
         Primitives {
             int: pool.intern_str("int"),
             str_: pool.intern_str("str"),
+            strview: pool.intern_str("strview"),
             bool_: pool.intern_str("bool"),
             float: pool.intern_str("float"),
         }
@@ -117,25 +119,25 @@ fn resolve_type(
     sink: &mut DiagSink,
 ) -> TypeId {
     if is_view {
-        // `&str` is the only view type (final spec §3.1). Any other
-        // `&T` is rejected, never silently demoted to `T`.
-        if name == prims.str_ {
-            return pool.str_view();
-        }
-        sink.emit(Diag::error(
-            span,
-            DiagCode::UnknownType,
+        // Legacy `&name` type syntax (M8.4 pre-Q5). Only `&str` was ever
+        // valid; it is now a targeted migration error (final spec Q5).
+        let msg = if name == prims.str_ {
+            "`&str` was renamed to `strview` (final spec Q5)".to_string()
+        } else {
             format!(
-                "unknown view type: '&{}' (only `&str` is a view type)",
+                "unknown view type: '&{}' (view types are named: `strview`)",
                 pool.str(name)
-            ),
-        ));
+            )
+        };
+        sink.emit(Diag::error(span, DiagCode::UnknownType, msg));
         return pool.error_type();
     }
     if name == prims.int {
         pool.int()
     } else if name == prims.str_ {
         pool.str_()
+    } else if name == prims.strview {
+        pool.str_view()
     } else if name == prims.bool_ {
         pool.bool_()
     } else if name == prims.float {
@@ -792,10 +794,19 @@ mod tests {
     }
 
     #[test]
-    fn lower_view_param_type() {
-        let (uir, pool) = parse_and_lower("fn f(text: &str):\n\tprint(text)\n").unwrap();
-        let body = &uir.func_bodies[0];
-        assert_eq!(body.params[0].ty, pool.str_view());
+    fn strview_param_resolves_to_view() {
+        let (uir, pool) = parse_and_lower("fn f(text: strview):\n\tprint(text)\n").unwrap();
+        assert_eq!(uir.func_bodies[0].params[0].ty, pool.str_view());
+    }
+
+    #[test]
+    fn legacy_amp_str_is_a_migration_error() {
+        let diags = parse_and_lower("fn f(text: &str):\n\tprint(text)\n").unwrap_err();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("`&str` was renamed to `strview`"))
+        );
     }
 
     #[test]

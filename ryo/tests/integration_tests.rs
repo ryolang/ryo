@@ -3487,7 +3487,7 @@ fn test_view_param_with_owned_and_view_args() {
     // view returns (see test_view_return_diag).
     assert_ryo_runs!(
         "view_param.ryo",
-        "fn print_first_word(text: &str):\n\tmut i: int = 0\n\twhile i < text.len():\n\t\tif text[i:i+1] == \" \":\n\t\t\tprint(text[0:i])\n\t\t\treturn\n\t\ti += 1\n\tprint(text)\n\nfn main():\n\ts: str = \"hello world\"\n\tprint_first_word(s)\n\tprint_first_word(s[6:])\n"
+        "fn print_first_word(text: strview):\n\tmut i: int = 0\n\twhile i < text.len():\n\t\tif text[i:i+1] == \" \":\n\t\t\tprint(text[0:i])\n\t\t\treturn\n\t\ti += 1\n\tprint(text)\n\nfn main():\n\ts: str = \"hello world\"\n\tprint_first_word(s)\n\tprint_first_word(s[6:])\n"
     );
 }
 
@@ -3590,7 +3590,7 @@ fn test_view_return_diag() {
     // rejects the `-> &str` signature with E0022 (ownership's E0034
     // backstop also fires on the `return s[0:1]` body).
     let temp_dir = TempDir::new().expect("temp");
-    let code = "fn bad(s: str) -> &str:\n\treturn s[0:1]\n";
+    let code = "fn bad(s: str) -> strview:\n\treturn s[0:1]\n";
     let test_file = create_test_file(temp_dir.path(), "view_return.ryo", code);
     let output = run_ryo_command(&["run", "view_return.ryo"], &test_file).expect("run");
     assert!(!output.status.success(), "expected compile error");
@@ -3609,7 +3609,7 @@ fn test_slice_of_borrowed_param() {
     // spec §3.3), so this program must not compile. The runnable
     // borrowed-param case is test_slice_of_borrowed_param_ok above.
     let temp_dir = TempDir::new().expect("temp");
-    let code = "fn head(s: str) -> &str:\n\tprint(s[0:1])\nfn main():\n\tbad()\nfn bad():\n\tx: str = \"hi\"\n\thead(x)\n";
+    let code = "fn head(s: str) -> strview:\n\tprint(s[0:1])\nfn main():\n\tbad()\nfn bad():\n\tx: str = \"hi\"\n\thead(x)\n";
     let test_file = create_test_file(temp_dir.path(), "slice_param.ryo", code);
     let output = run_ryo_command(&["run", "slice_param.ryo"], &test_file).expect("run");
     assert!(!output.status.success(), "expected compile error");
@@ -3687,7 +3687,7 @@ fn test_view_to_owned_param_diag() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("E0012"), "expected E0012: {}", stderr);
     assert!(
-        stderr.contains("has type '&str', expected 'str'"),
+        stderr.contains("has type 'strview', expected 'str'"),
         "expected type-mismatch message: {}",
         stderr
     );
