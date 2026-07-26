@@ -1038,7 +1038,7 @@ fn main():
 
 ### Milestone 8.2: Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE
 
-**Goal:** Implement implicit borrow liveness tracking (under Rule 2) and major ownership-pass architectural refactors, enabling safe multi-phase borrow evaluation and preventing moves while borrowed in calls (E0023).
+**Goal:** Implement implicit borrow liveness tracking (under Rule 2) and major ownership-pass architectural refactors, enabling safe multi-phase borrow evaluation and preventing moves while borrowed in calls (E0031).
 
 **Status:** ✅ COMPLETE (2026-07-11)
 
@@ -1049,7 +1049,7 @@ fn main():
 - Restructure ownership state tracking: replace `named_owners` with a unified two-part classifier (`owner_is_named` and `owner_underlying`) based strictly on instruction classification.
 - Unify parameter modes: introduce `ParamMode` to represent the compile-time ABI contract (borrow vs. move) in the TIR ABI registry and codegen, eliminating string-matching hacks like `__ryo_panic`.
 - Refactor the ownership walker structure: extract common loop processing logic to a shared loop-body helper, and optimize branch/loop analysis to deep-clone only mutable state fields rather than the full `Ownership` struct.
-- Prevent move-while-borrowed-in-calls (E0023): implement safe multi-phase call argument evaluation, ensuring arguments are not moved if they have active/pending borrows in other parameters within the same call.
+- Prevent move-while-borrowed-in-calls (E0031): implement safe multi-phase call argument evaluation, ensuring arguments are not moved if they have active/pending borrows in other parameters within the same call.
 
 **Visible Progress:** Robust dataflow analysis with correct implicit borrow-liveness, automatic resource tracking, and compilation errors for invalid use-after-move or move-while-borrowed actions in multi-argument call structures.
 
@@ -1068,7 +1068,7 @@ fn main():
  # Implicitly borrowed (Rule 2) here since it is read but its lifetime continues
  print_message(msg)
  
- # E0023 compile error: cannot move 'msg' into 'consume_and_print' while it's also implicitly borrowed
+ # E0031 compile error: cannot move 'msg' into 'consume_and_print' while it's also implicitly borrowed
  consume_and_print(msg, msg)
 ```
 

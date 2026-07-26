@@ -125,6 +125,13 @@ pub enum DiagCode {
     MutableAliasingViolation,
     /// A Move-typed value is declared (or assigned) but never used.
     DeadStore,
+    /// A scope-locked view escaped: returned from a function, passed
+    /// to a `move` parameter, or otherwise stored beyond its function
+    /// (M8.4, E1/E2).
+    ViewEscape,
+    /// Rule P2 violation: an owner was moved, mutated, or passed
+    /// `inout` while a slice projection of it is live (M8.4).
+    SourceProjected,
 
     // --- parser ---
     ParseError,
