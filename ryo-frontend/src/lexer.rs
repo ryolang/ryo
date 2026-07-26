@@ -326,17 +326,42 @@ pub struct LexError {
     pub message: String,
 }
 
+/// Rough upper bound on the number of raw tokens in `input`, used to
+/// pre-size the token buffers so the collect/indent passes don't
+/// repeatedly reallocate. Every token spans at least one source byte,
+/// so byte length is a safe over-estimate; dividing by a small average
+/// token width keeps the estimate from wildly over-allocating on
+/// keyword/identifier-heavy sources while still avoiding growth on the
+/// common case. It is only a hint — correctness never depends on it.
+fn estimated_token_count(input: &str) -> usize {
+    // Average observed token width across representative Ryo sources is
+    // ~3 bytes (identifiers/keywords/literals dominate over 1-byte
+    // punctuation). Bias slightly low so we never under-allocate on the
+    // punctuation-dense case, and always reserve at least a little.
+    (input.len() / 2).max(16)
+}
+
 /// Run logos, indentation processing, and string/int interning in
 /// one pass. Returns the spanned token stream the parser consumes,
 /// or the first lex-time error encountered.
 pub fn lex(input: &str, pool: &mut InternPool) -> Result<Vec<(Token, Span)>, LexError> {
-    let raw_tokens: Vec<(RawToken<'_>, Span)> = RawToken::lexer(input)
-        .spanned()
-        .map(|(tok, span)| match tok {
-            Ok(t) => (t, span.into()),
-            Err(()) => (RawToken::Error, span.into()),
-        })
-        .collect();
+    // Pre-size the raw-token buffer instead of growing it from zero.
+    // logos' `SpannedIter` reports only a trivial `(0, None)` size
+    // hint, so `collect` would otherwise repeatedly reallocate and
+    // memcpy the whole buffer as it grows. A byte-length-derived
+    // upper bound (tokens are at least one byte each) avoids every
+    // one of those reallocations; the estimate is a hint only, so an
+    // over-estimate merely trims once at the end.
+    let mut raw_tokens: Vec<(RawToken<'_>, Span)> =
+        Vec::with_capacity(estimated_token_count(input));
+    raw_tokens.extend(
+        RawToken::lexer(input)
+            .spanned()
+            .map(|(tok, span)| match tok {
+                Ok(t) => (t, span.into()),
+                Err(()) => (RawToken::Error, span.into()),
+            }),
+    );
 
     // TODO: have `indent::process` return a span/offset for the
     // offending newline so we can point Ariadne at the exact line.
