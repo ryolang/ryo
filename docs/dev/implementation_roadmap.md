@@ -27,6 +27,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.2 — Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE](#milestone-82-implicit-borrow-liveness--ownership-pass-refactors-alpha--complete)
 - [x] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha] ✅ COMPLETE](#milestone-83-mutable-borrows-inout-alpha--complete)
 - [x] [Milestone 8.4 — String Slices (`&str`) [alpha] ✅ COMPLETE](#milestone-84-string-slices-str-alpha--complete)
+- [ ] [Milestone 8.4.2 — `bytes` Type & `&bytes` [alpha]](#milestone-842-bytes-type--bytes-alpha)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
 - [ ] [Milestone 9.1 — Synthesized Eq & Debug for Structs](#milestone-91-synthesized-eq--debug-for-structs)
@@ -56,6 +57,22 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 ### Phase 5: Post-v0.1.0 Extensions (v0.2+)
 
 Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Try/Catch, F-strings, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, etc.).
+
+**From the final slicing & memory-model spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md` §14) and the gap register (`docs/dev/ryo-missing-features-and-gaps.md`):**
+
+| Item | Target | Notes |
+|------|--------|-------|
+| `sbytes` (ARC buffer, slicing, COW warnings) | v0.2–v0.3 | D3; needs `shared[T]` atomic-refcount runtime |
+| Runtime profile split (`core`/`hosted`, `--profile=core`) | v0.2 | D9; stdlib layering, no backend changes |
+| Bounded operator overloading (`Add`… traits) | v0.2–v0.3 | D10; concrete types first, generic traits with user generics |
+| `unsafe` policy implementation (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | D4; lands with FFI/unsafe work |
+| Volatile MMIO intrinsics | v0.2 | GAP-3; `core` profile intrinsic package |
+| `#[repr(packed)]` | v0.2 | GAP-4; rides with FFI |
+| Scoped task borrows + stdlib `par_*` | v0.4 | D5; concurrency runtime |
+| Context propagation & cancellation deadlines | v0.4 | GAP-1; must land **with** the scheduler (see `ryo-context-and-otel-proposal.md`) |
+| Binary pattern matching (if adopted) | post-v0.4 | deferred; stdlib parser facility first |
+| GUI Phase 1 (immediate-mode toolkit PoC) | post-v0.2 | ecosystem, not language; D4 + `ryo-bindgen` |
+| `yield` subroutines | separate RFC | measured re-entry condition only (final spec §11.4) |
 
 ---
 
@@ -108,7 +125,7 @@ Full alpha definition, litmus test, non-goals, release tagging, and gating test 
 - Comments handled correctly (skipped from token stream)
 - Comprehensive test suite covers edge cases (keyword keyword-as-part-of-identifier distinction, comment handling, etc.)
 - CLI tested with realistic Ryo code samples
-- **Design Decision:** Struct literals use parentheses with named arguments `Point(x=1, y=2)`, not braces. Curly braces are reserved exclusively for f-string interpolation (e.g., `f"Hello {name}"`) which will be implemented in later milestones.
+- **Design Decision (amended by D11, 2026-07-22):** Struct literals use brace construction `Point{x=1, y=2}` — the Brace Law (final spec §10). ~~Original: parentheses with named arguments; braces reserved for f-string interpolation.~~
 
 ### Milestone 2: Parser & AST Basics [alpha] ✅ COMPLETE
 
@@ -150,8 +167,7 @@ Full alpha definition, litmus test, non-goals, release tagging, and gating test 
 **Design Decisions:**
 
 - Full rewrite approach for cleaner AST foundation
-- Struct literals use named arguments: `Point(x=1, y=2)` (not braces)
-- Curly braces reserved for f-string interpolation (future milestone)
+- Struct literals use brace construction: `Point{x=1, y=2}` (amended by D11 — was parens)
 - Supports both explicit type annotations and implicit type inference
 - Expression initializers support full arithmetic expressions
 
@@ -1163,6 +1179,45 @@ fn main():
 - Array slices `&[T]` are **not** included here; they ship in M21 alongside list literal syntax. `TypeKind::View(ViewKind)` already reserves their representation.
 - Dependencies: Milestone 8.2 (immutable borrows provide the reference machinery), Milestone 8.3 (explicit borrow syntax)
 
+### Milestone 8.4.2: `bytes` Type & `&bytes` [alpha]
+
+**Goal:** An owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` — plus its read-only projection, filling the gap where `list[u8]` is the only (awkward) option. Per the final slicing spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md`, D2).
+
+**Status:** ⏳ Planned
+
+**Tasks:**
+
+- `bytes` as a new fundamental type: fat pointer `{ ptr, len, cap }`, move semantics, mutability by binding; parameters borrow by default; `inout`/`move` as usual (ownership rules identical to `str`)
+- Bytes literal `b"\x00\x01"`; `bytes.from_list([0x01, 0x02, 0x03])` construction
+- Slicing `raw[start:end]` yields `&bytes` — a projection governed by the D1 rules (P1–P6, E1–E4) with **no** UTF-8 boundary check (bytes are not text); bounds check at creation, panics
+- `&bytes` activates `TypeKind::View(ViewKind::Bytes)` (slot reserved since M8.4's Task 10.1); generalize `TirTag::ViewOfStr` → owner→view conversion per the `owner_view` table
+- Scalar indexing `b[i]` **is** allowed on `bytes` (unlike `str` — no UTF-8 hazard), yielding `u8`
+- Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated, `try`-able) and `text.to_bytes() -> bytes` (owned copy)
+- Buffer building via the builder idiom: `bytes.builder().u8(v).u16_be(n).bytes(b).build()` (`move self -> Self` chaining, spec §5.2.1)
+- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice mirroring the `str` ABI; memory fixtures for both JIT and AOT (ASan/Valgrind)
+
+**Visible Progress:** Protocol/binary code reads and slices raw buffers zero-copy; text bridging is explicit and error-checked.
+
+**Example:**
+
+```ryo
+fn main():
+	raw = bytes.from_list([0x01, 0x02, 0x03])
+	header = raw[0:2]             # &bytes — projection, no copy
+	print(int_to_str(header[0]))  # 1
+
+	text = try raw.to_str()       # Utf8Error!str — UTF-8 validated
+	raw2 = text.to_bytes()        # owned copy
+```
+
+**Implementation Notes:**
+
+- The projection machinery is shared with `&str` (M8.4): same root-owner side tables, P2 freeze, P5 deferral; only the UTF-8 boundary check is `&str`-specific
+- `sbytes` (shared-backed, escaping) is **not** part of this milestone — it ships with `shared[T]` machinery (v0.2–v0.3, final spec §5)
+- `str` indexing remains forbidden (spec §4.7); `b[i]` applies to `bytes` only
+- Mutable view types remain rejected (final spec §12); mutable sub-ranges use `inout` + range parameters (Q4)
+- Dependencies: Milestone 8.4 (projection machinery, `TypeKind::View(ViewKind)`, slice codegen)
+
 ### Milestone 8.5: Default Parameters & Named Arguments
 
 **Goal:** Support default parameter values and named arguments for all functions (user-defined and builtins), with named-by-default calling convention
@@ -1248,7 +1303,7 @@ print("hello", "")          # compile error — end is keyword-only
 
 **Implementation Notes:**
 
-- Struct literal syntax `Point(x=1, y=2)` and function named args `f(x=1)` use identical `name=value` grammar — the parser doesn't need to distinguish them at parse time, resolution happens during lowering
+- Struct construction `Point{x=1, y=2}` (D11 braces) and function named args `f(x=1)` share the `name=value` grammar inside their delimiters — the parser distinguishes them by delimiter (`{}` vs `()`), resolution happens during lowering
 - No function overloading in Ryo, so defaults don't create ambiguity
 - Languages analyzed: Go (no defaults — too limiting), Rust (no defaults — relies on builders/traits Ryo lacks), Python (`*` separator — good but `_` is cleaner), Swift (named by default — best fit for Ryo)
 - Dependencies: Milestone 8 (control flow for conditional default handling), Milestone 7 (comparison operators)
@@ -1273,7 +1328,7 @@ print("hello", "")          # compile error — end is keyword-only
    y: float
   ```
 
-- Parse struct literals with parentheses: `Point(x=1.0, y=2.0)`
+- Parse struct literals with braces: `Point{x=1.0, y=2.0}` (the Brace Law, D11)
 - Parse field access: `point.x`, `point.y`
 - Extend type system:
   - Track struct definitions in symbol table
@@ -1298,7 +1353,7 @@ fn area(rect: Rectangle) -> float:
  return rect.width * rect.height
 
 fn main():
- r = Rectangle(width=10.0, height=5.0)
+ r = Rectangle{width=10.0, height=5.0}
  a = area(r)
 ```
 
@@ -1308,8 +1363,7 @@ fn main():
 - Default layout is **unspecified** — the compiler may reorder fields to minimize padding (source-invisible; field access is by name). `#[repr(C)]` opts into declaration-order C layout (added in Milestone 9.1, consumed by FFI in v0.2)
 - No default values for fields (all must be initialized)
 - No methods yet (added in Milestone 17)
-- Parentheses with named arguments used for struct literals: `Point(x=1, y=2)`, reuses `name=value` parsing infrastructure from Milestone 8.5
-- Braces reserved exclusively for f-string interpolation
+- **D11 (final spec §10):** struct literals use brace construction — `Point{x=1, y=2}` — per the Brace Law (braces group by name; construction is visibly distinct from calls). The named-argument grammar for *calls* still comes from Milestone 8.5; braces are no longer reserved exclusively for f-string interpolation
 - Dependencies: Milestone 4 (functions for passing structs), Milestone 8.5 (named argument parsing)
 
 ### Milestone 9.1: Synthesized Eq & Debug for Structs
@@ -1322,7 +1376,7 @@ fn main():
 
 - Parse one-off attributes on struct definitions: `#[derive(Eq)]`, `#[repr(C)]` (the general attribute system formalizes at Milestone 26)
 - **Debug (always-on):** synthesize a debug string for every struct
-  - Format mirrors the literal syntax: `Point(x=1.0, y=2.0)`, fields in declaration order
+  - Format mirrors the literal syntax: `Point{x=1.0, y=2.0}`, fields in declaration order
   - Recursive: nested structs render through their own Debug
   - Extend `print()` to accept any struct value via this path
   - Lazy emission: generate Debug code only for structs that are actually printed (no bloat)
@@ -1345,9 +1399,9 @@ struct Point:
  y: float
 
 fn main():
- p = Point(x=1.0, y=2.0)
- print(p)                          # "Point(x=1.0, y=2.0)" — always-on Debug
- print(p == Point(x=3.0, y=4.0))   # false — enabled by #[derive(Eq)]
+ p = Point{x=1.0, y=2.0}
+ print(p)                          # "Point{x=1.0, y=2.0}" — always-on Debug
+ print(p == Point{x=3.0, y=4.0})   # false — enabled by #[derive(Eq)]
 ```
 
 **Implementation Notes:**
@@ -1357,53 +1411,45 @@ fn main():
 - Enums (M11) get the same derive/Debug treatment as a follow-up; out of scope here
 - Dependencies: Milestone 9 (structs)
 
-### Milestone 10: Tuples
+### Milestone 10: Tuples (Tuple Sugar over Anonymous Structs)
 
-**Goal:** Implement tuple types for multiple return values and grouping
+**Goal:** Ad-hoc grouping and multiple return values via the single grouping type adopted in D11
 
-> **Decision Review (before implementation):** Reconsider whether this milestone ships a distinct tuple *type* at all. Candidate direction (preferred as of 2026-07): **remove tuples and use anonymous structs** — Zig's model — both for structural grouping and for wrapping multi-value returns (wrapped struct return, not a Go-style multi-return convention). Rationale: one product-type mechanism (simplicity goal), no second ABI/ownership path, kills the positional swap-bug class (`(int, str)` vs `(str, int)`), and error unions (`!T`, M13) absorb the main tuple use case. Cost: loses the Python-familiar `(a, b)` literal/unpack syntax; needs spec edits (`specification.md` literal list, "return single value (can be tuple)") and deletes the `types.rs` tuple interning stubs. Cheap to decide now, expensive after M10/M12 land — revisit here before starting.
+> **Decision (adopted 2026-07-22, final spec §10, D11):** This milestone's Decision Review is **resolved**. Ryo has exactly one ad-hoc grouping type — the **anonymous struct** (`{x=1, y=2}`, type literal `{q: int, r: int}`) — and tuples are **positional sugar** over it: `(17, "alice")` ≡ `{0=17, 1="alice"}`, keeping the Python-familiar surface (literal, `(q, r) = divmod(...)` unpacking, `pair.0` access, `(x,)` trailing comma). There is no separate tuple type, ABI, or ownership path. Named-struct construction moves to braces (`Point{x=1, y=2}` — the Brace Law), as do named enum payloads (`Variant{field=value}`); positional enum payloads keep parens. Identity is structural, exact-match only; no implicit coercion to named types. `{}` stays reserved for the future empty map literal. This milestone folds into **Milestone 9** (shared construction/layout machinery — anonymous structs need no declarations or defaults); what remains here is only the **sugar layer** (parser forms + destructuring), estimated far smaller than a standalone tuple type.
+>
+> ~~Candidate direction (superseded): remove tuples and use anonymous structs — Zig's model~~ — D11 adopted the sugar-preserving variant of this direction instead of dropping the Python syntax.
 
 **Tasks:**
 
-- Add tuple syntax to lexer/parser
-- Extend type system: `Type::Tuple(Vec<Type>)`
-- Parse tuple type annotations: `(int, str)`
-- Parse tuple literals: `(42, "hello")`
-- Parse tuple destructuring:
+- Parse anonymous-struct value literals `{x=1, y=2}` and type literals `{q: int, r: int}` (folds into M9's construction/layout machinery)
+- Parse the tuple sugar forms: `(v1, v2, ...)` literals ≡ positional fields `"0"`, `"1"`, ...; `(x,)` trailing comma; positional type annotations `(int, str)` ≡ `{0: int, 1: str}`
+- Parse destructuring: positional `(q, r) = f()` (paren-less allowed), named punning `{q, r} = f()`, rename `{x = quot} = f()`
+- Type system: structural identity, exact match only (no subtyping/width rules); no implicit coercion to named structs
+- Codegen: reuse M9 struct layout for `{...}` values; positional access `pair.0`; destructuring in assignments
+- Write tests: anonymous literals, sugar round-trips (`(17, "a")` ≡ `{0=17, 1="a"}`), destructuring forms, match patterns `{x=0, y=_}` / `(0, _)`, structural mismatch errors
 
-  ```ryo
-  (x, y) = get_point()
-  ```
-
-- Extend Codegen: Generate IR for:
-  - Tuple construction (stack allocation)
-  - Tuple field access by index
-  - Tuple destructuring in assignments
-- Write tests for tuple types, literals, and destructuring
-
-**Visible Progress:** Can return multiple values from functions and destructure them
+**Visible Progress:** Functions return multiple values with self-documenting or Python-familiar syntax
 
 **Example:**
 
 ```ryo
-fn divmod(a: int, b: int) -> (int, int):
- quotient = a / b
- remainder = a % b
- return (quotient, remainder)
+fn divmod(a: int, b: int) -> {q: int, r: int}:
+ return {q=a / b, r=a % b}
 
 fn main():
- (q, r) = divmod(10, 3)
- # q = 3, r = 1
+ (q, r) = divmod(10, 3)       # positional sugar
+ {x = quot} = divmod(10, 3)   # named rename
+ pair = (17, "alice")         # ≡ {0=17, 1="alice"}
+ # q = 3, r = 1, quot = 3
 ```
 
 **Implementation Notes:**
 
-- Tuples are **anonymous structs** (no named fields)
-- Fixed size (known at compile time)
-- Can be nested: `((int, int), str)`
-- Tuple indexing syntax deferred (use destructuring for now)
-- Tuples are **moved** like structs (ownership)
-- Dependencies: Milestone 9 (structs provide foundation)
+- One grouping type only (D11): no separate tuple type, ABI, or ownership path; `Type::Tuple` interning stubs in `types.rs` are removed or repurposed
+- `void` remains the unit type (there is no empty anonymous struct; `{}` is reserved for the future empty map literal)
+- Lint: anonymous structs returned from public functions of other packages get a "consider naming this shape" style lint (tooling, not semantics)
+- Match patterns accept both forms: `{x=0, y=_}` and `(0, _)`
+- Dependencies: Milestone 9 (anonymous structs share the struct machinery)
 
 ### Milestone 11: Enums (Algebraic Data Types) [alpha]
 
@@ -2515,6 +2561,7 @@ fn test_fetch():
 - Prevents resource leaks and zombie tasks
 - All tasks in scope must complete before scope exits
 - **Fire-and-forget is opt-in:** `task.spawn_detached()` for rare cases
+- **Scoped task borrows (final spec §7, D5):** children inside `task.scope` may capture by immutable borrow (compiler-verified against the scope join; projections capturable too) — enables fork-join data parallelism; stdlib `par_*` APIs build on it. `task.run`/`spawn_detached` keep implicit move capture.
 
 ```ryo
 import std.task
@@ -2752,7 +2799,7 @@ printer = fn(): print(data.len())  # immutable borrow of data
 **Features:**
 
 - `extern "C"` function declarations
-- `unsafe` blocks for FFI calls (Requires `kind = "system"` in `ryo.toml`)
+- `unsafe` blocks for FFI calls (manifest-gated capability: `allow_unsafe = true` in `ryo.toml`, mandatory `#: SAFETY:` comments, `ryo audit` visibility, `--deny-unsafe=deps` — final spec §6, D4)
 - Automatic binding generation (bindgen-like tool)
 - C struct layout compatibility
 - Callback support (C calling Ryo functions)
@@ -3369,6 +3416,7 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 - ❌ FFI/unsafe blocks (v0.2+)
 - ❌ Full generics system (v0.3+)
 - ✅ Named parameters & default values (v0.1 — Milestone 8.5)
+- ✅ Integer overflow semantics frozen (v0.1 — GAP-2: traps in all build modes; spec §18)
 - ❌ LSP/advanced tooling (v0.2+)
 
 This foundation enables building **synchronous applications** including CLI tools, build systems, compilers, data processing pipelines, and game engines. Concurrency/FFI features will follow based on community needs.

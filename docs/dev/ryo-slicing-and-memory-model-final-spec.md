@@ -529,7 +529,7 @@ Mobile note: iOS and Android are **`hosted` environments** under D9 — the full
 |------|-----------|--------------|
 | `&str`, slice expressions, P1–P6, E1–E4, implicit view conversion | 8.4 | Ownership-pass extensions (§3.5.3); spec wording edits (§3.5) |
 | Anonymous structs, tuple sugar, `Name{...}` construction (D11) | M9–M10 | Parser grammar (§10.2); base-spec edits (§10.5); zero implementation cost pre-alpha |
-| `bytes` type, `&bytes`, builder API | 8.5 | D1 |
+| `bytes` type, `&bytes`, builder API | 8.4.2 | D1 |
 | Conformance edits to spec §4.4/§5.7 | 8.4 | — (ship with the feature) |
 | `&[T]` over fixed arrays `[T]` | 21 | `[T]` array type |
 | `for x in slice` iteration | 22 | for-over-iterable |

@@ -189,7 +189,9 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 
 3. **Predictable patterns over clever shortcuts.** An AI benefits from a small set of orthogonal primitives with consistent behavior. A human benefits from reading code that always follows the same patterns. Both are served by fewer features, done well.
 
-4. **Readable by default.** Ryo is implicit where ceremony would hurt clarity (parameter borrowing, type narrowing after null checks) and explicit where the reviewer needs to see intent (`shared[mutex[map[str, int]]]`, `try` for error propagation, `move` for ownership transfer). The test: *can a human reviewer understand the semantics by reading the code, without memorizing special rules?* No operator overloading, no exceptions, no implicit numeric conversions — but also no unnecessary annotations that add noise without aiding comprehension.
+4. **Readable by default.** Ryo is implicit where ceremony would hurt clarity (parameter borrowing, type narrowing after null checks) and explicit where the reviewer needs to see intent (`shared[mutex[map[str, int]]]`, `try` for error propagation, `move` for ownership transfer). The test: *can a human reviewer understand the semantics by reading the code, without memorizing special rules?* No exceptions, no implicit numeric conversions — but also no unnecessary annotations that add noise without aiding comprehension. Operator overloading is **bounded** (final spec §9, D10): trait-based, fixed operator set (`+ - * / %`, comparisons, unary negation, `[]`), same-type operands, static dispatch, no user-defined symbols — built-ins unchanged (`str + str` stays excluded; f-strings and `push_str` are the idiom).
+
+5. **Not limiting where an elegant solution exists.** A solution is **elegant** if and only if: (a) it is statically verified, with no annotations required at the use site; (b) any runtime cost it carries is **opt-in and visible in the type or signature**; (c) code that does not use it pays nothing — no hidden costs; (d) it passes the reviewer test: a human can understand the semantics by reading the code, without memorizing special rules. Elegance is never achieved by making the *default* dynamic.
 
 **Balance:** Ryo prioritizes DX over theoretical purity. Python-style syntax, clean error messages, and readable stack traces serve the human side of the workflow. The AI handles the ceremony; the human benefits from the clarity.
 
@@ -235,6 +237,8 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 ## 3. Syntax & Grammar
 
 *   *(Note: A formal grammar (EBNF) is required for full implementation but omitted here).*
+*   **The Binding Rule:** `=` binds a name to a value. `:` never binds — it *relates* (name↔type, header↔block, key↔value, position↔position). Everywhere a name gets a value, the mark is `=`; everywhere the mark is `:`, no name gets a value. **Corollary (the field/key rule):** struct fields are **names** (accessed as identifiers, compiler-known) → `=`; map keys are **data** (accessed as runtime values) → `:`. Scope: the law governs bindings, types, scopes, and pairings; bracket/string micro-syntax (slice ranges, format specs) satisfies "never binds" without being governed by it.
+*   **The Brace Law:** parens group positionally; braces group by name. Construction is visibly distinct from calls: `Point{x=1, y=2}` cannot be mistaken for `fetch(x=1, y=2)` — construction allocates, establishes invariants, and creates ownership.
 *   **Function Definition:** `fn name(param: Type, ...) -> RetType: ...`
 *   **Variable Declaration:** Variables are **immutable by default** and do not require a keyword. Use `mut` for mutable variables.
     *   Immutable: `name = value` (type inferred)
@@ -358,14 +362,45 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 *   `float`: Defaults to `float64` (64-bit IEEE 754 float).
 *   `bool`: Boolean type with two values: `true` and `false`. Produced by equality operators (`==`, `!=`). No implicit conversion to or from `int`. *(Rationale: Explicit boolean semantics prevent common bugs from implicit truthy/falsy conversions, following Zig's design philosophy).*
 *   `str`: Owned, heap-allocated, UTF-8 string. Can grow and shrink dynamically when bound to a `mut` variable. *(Rationale: Provides a primary, easy-to-use string type. Mutability controlled by binding aligns with general variable mutability).*
+*   `bytes`: Owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` (final spec §4, D2). Fat pointer `{ ptr, len, cap }`, move semantics, mutability by binding. Literal: `b"\x00\x01"`. Slicing yields a `&bytes` projection (§4.4 rules; no UTF-8 hazard, so scalar indexing `b[i]` **is** allowed, yielding `u8`). Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated), `text.to_bytes() -> bytes` (owned copy). *(Rationale: `list[u8]` was the only — awkward — option for protocol/binary data; `bytes` fills it with the same ownership story as `str`.)*
 *   `char`: Unicode Scalar Value. Literal: `'a'`.
 *   `void`: Unit type. Represents a value with no data. Used for functions that return no meaningful value. *(Rationale: Provides explicit way to represent "no return value" concept, common in many programming languages for side-effecting functions)*.
 *   `never`: Bottom type. Represents a computation that never completes (e.g., `panic`, infinite loop, `exit`). *(Rationale: Useful for control flow analysis and type theory completeness).*
 *   Explicit Sizes: `i8`-`i64`, `u8`-`u64`, `usize`, `float32`. *(Rationale: Necessary for control over representation, performance, and FFI).**
 
-### 4.3 Tuple Type
+### 4.3 Anonymous Structs & Tuple Sugar
 
-*   **Tuple Type:** `(T1, T2, ...)`. Literal `(v1, v2, ...)`. Access `.0`, `.1`, etc. Destructuring. *(Rationale: High Pythonic familiarity. Ergonomic for returning multiple values and simple ad-hoc grouping without needing named structs. Note: The unit type is represented by the `void` keyword, not an empty tuple, to avoid syntax ambiguity)*.*
+Ryo has exactly **one** ad-hoc grouping type — the **anonymous struct** (final spec §10, D11). Tuples are positional sugar over it, not a separate type.
+
+```ryo
+# value literal: = (fields are names — the Binding Rule)
+point  = {x=1, y=2}
+packet = {header=sb[0:4], payload=sb[4:]}
+
+# type literal: : (field declarations, mirroring struct bodies)
+fn divmod(a: int, b: int) -> {q: int, r: int}
+
+# tuple sugar: positional syntax for fields named "0", "1" — UNCHANGED surface syntax
+pair = (17, "alice")              # ≡ {0=17, 1="alice"}
+(q, r) = divmod(17, 5)            # positional destructure (paren-less allowed)
+print(f"{pair.0}")                # positional access
+
+# named destructuring: punning and renaming
+{q, r}       = divmod(17, 5)
+{x = quot}   = divmod(17, 5)
+
+# match patterns
+match point:
+	{x=0, y=_}: "on y-axis"
+	(0, _):     "tuple form"
+```
+
+*   **Identity is structural:** same field names, same types, same order. **Exact match only** — no subtyping, no width rules. Structural typing applies *only* to anonymous structs; named structs remain nominal forever.
+*   **No implicit coercion** between anonymous and named structs. Graduating a value from anonymous to named is an explicit, greppable act (§4.5's `Name{...}` construction).
+*   **Usage rule:** crossing a boundary (public API, package, long-term storage) or carrying domain meaning → named; local/transient (multi-return, unpacking, throwaway shapes) → anonymous. A lint flags anonymous structs returned from public functions of other packages.
+*   **`{}` is reserved** for the future empty map literal (Python intuition). There is no empty anonymous struct — use `none`.
+*   Single-element tuple keeps Python's trailing comma: `(x,)`. Trailing commas allowed in all literals.
+*   *(Rationale: one product-type mechanism instead of two — no second ABI/ownership path, no positional swap-bug class (`(int, str)` vs `(str, int)`); the Python-familiar `(a, b)` literal/unpack syntax survives as sugar; named groupings gain self-documenting returns (`result.q` over `result.0`).)*
 
 ### 4.4 Slice Types (Scope-Locked Views)
 
@@ -392,9 +427,9 @@ fn mutate_list(inout items: list[int]): # Explicit mutable borrow
 ### 4.5 Struct Type (Product Type)
 
 *   User-defined data aggregation: `struct Name: field: Type ...`.
-*   Instances created via struct literals with named arguments: `Name(field=value, ...)`.
+*   Instances created via brace construction with named fields: `Name{field=value, ...}` (the Brace Law: braces group by name — visibly distinct from a call).
 *   Access via dot notation: `instance.field`. Mutable if instance bound `mut`.
-*   **Debug Representation:** Every struct has a compiler-synthesized debug string mirroring the literal syntax (`Point(x=1.0, y=2.0)`), fields in declaration order, nested structs rendered recursively. `print()` accepts any struct value via this path. Always-on — no opt-in required. *(Rationale: a field rendering cannot be semantically wrong, so there is nothing to opt into — the same reason Swift prints any struct.)*
+*   **Debug Representation:** Every struct has a compiler-synthesized debug string mirroring the literal syntax (`Point{x=1.0, y=2.0}`), fields in declaration order, nested structs rendered recursively. `print()` accepts any struct value via this path. Always-on — no opt-in required. *(Rationale: a field rendering cannot be semantically wrong, so there is nothing to opt into — the same reason Swift prints any struct.)*
 *   **Equality:** `#[derive(Eq)]` on the struct definition opts into memberwise `==` / `!=`. Every field must be Eq-capable (primitives, `str`, other derived structs — recursive); float fields use IEEE `==`, so a struct containing NaN never equals itself. *(Rationale: equality is a semantic claim the type must declare — meaningless comparisons on future Move-only types must not compile, unlike the always-on Debug representation.)*
 *   **Memory Layout:** Unspecified by default; the compiler may reorder fields to minimize padding (source-invisible, since access is by name). `#[repr(C)]` forces declaration order with standard C padding, for FFI (Section 4.11).
 *   `Eq` and `Debug` are **compiler-known interfaces** in v0.1 (like the `Copy` marker and `Drop`); they promote to real traits with identical surface syntax when the trait system lands (v0.2/v0.3).
@@ -409,11 +444,11 @@ fn mutate_list(inout items: list[int]): # Explicit mutable borrow
 		TupleVariant(Type1, Type2) # Variant holding ordered data
 		StructVariant(name1: TypeA, name2: TypeB) # Variant holding named fields
 	```
-*   **Instantiation:** Use `EnumName.VariantName`. Provide data for tuple/struct variants.
+*   **Instantiation:** Use `EnumName.VariantName`. Named payloads use brace construction (`Variant{field=value}` — the Brace Law); positional payloads keep parens.
     ```ryo
 	msg1 = Message.Quit
 	msg2 = Message.Write("hello")
-	msg3 = Message.Coords(x=10, y=-5)
+	msg3 = Message.Coords{x=10, y=-5}
 	```
 *   **Pattern Matching (`match`):** The primary way to use enum values. `match` destructures variants and allows executing code based on the current variant.
     ```ryo
@@ -1019,7 +1054,8 @@ need to leave the caller?**
 
 | Need | Use |
 |------|-----|
-| Read-only access | Default borrow (no annotation) |
+| Read contents (strings, buffers) | `&str` / `&bytes` view parameter — the preferred read-only string/buffer convention (§4.4); owned values convert implicitly |
+| Read-only access (keep or extend the value) | Default borrow (no annotation) |
 | Modify in place, caller keeps the value | `inout` |
 | Take ownership permanently | `move` |
 | Take ownership temporarily and return it | `move T -> T` |
@@ -1392,12 +1428,12 @@ fn process(items: list[int]):
 
 **Rules for scope-locked views:**
 
-*   Views **cannot be stored** in variables that outlive the current block.
+*   Views **cannot be stored** in variables that outlive the current block (iterator views); string slices are slightly wider — usable anywhere within the current function (§4.4).
 *   Views **cannot be returned** from functions (follows Rule 5).
 *   Views **cannot be passed to other functions** that would store them.
 *   The compiler enforces that the source collection is not mutated while a view exists (follows Rule 7).
 
-String slices (`&str`, M8.4) follow the same rules; see §4.4.
+String slices (`&str`, M8.4) follow these escape restrictions at function scope; see §4.4.
 
 ```ryo
 # NOT allowed — storing an iterator escapes the borrow scope
@@ -1425,7 +1461,7 @@ flowchart TD
     L4 --> L3 --> L2 --> L1
 ```
 
-**The trade-off, stated honestly:** Ryo trades lifetime annotations for simplicity. Where Rust would return a borrowed `&str` slice tied to the caller's scope, Ryo returns an owned `str` — but most returns are free thanks to NRVO and move semantics (see Section 5.9). Actual clones are limited to cases where the caller genuinely needs an independent copy. For shared-state scenarios, Ryo's `shared[mutex[T]]` is comparable in ceremony to Rust's `Arc<Mutex<T>>` — neither language makes concurrent mutation invisible. For web backends, CLI tools, and scripts, these costs are negligible. For performance-critical inner loops, `unsafe` blocks (restricted to system packages) provide an escape hatch to raw pointers.
+**The trade-off, stated honestly:** Ryo trades lifetime annotations for simplicity. Where Rust would return a borrowed `&str` slice tied to the caller's scope, Ryo returns an owned `str` — but most returns are free thanks to NRVO and move semantics (see Section 5.9). Actual clones are limited to cases where the caller genuinely needs an independent copy. For shared-state scenarios, Ryo's `shared[mutex[T]]` is comparable in ceremony to Rust's `Arc<Mutex<T>>` — neither language makes concurrent mutation invisible. For web backends, CLI tools, and scripts, these costs are negligible. For performance-critical inner loops, manifest-gated `unsafe` blocks (Section 17) provide an auditable escape hatch to raw pointers.
 
 All four layers work together to deliver Ryo's promise: **memory safety that feels like Python.**
 
@@ -2644,6 +2680,19 @@ Ryo uses a **Green Thread (M:N) Concurrency Model**, similar to Go.
 *   **Ambient Runtime:** The runtime context is stored in Thread-Local Storage (TLS), allowing functions to spawn tasks without passing a runtime handle.
 *   **Work Stealing:** A multi-threaded scheduler distributes tasks across CPU cores.
 
+**Runtime Profiles (final spec §8, D9):** the ambient runtime is a *deployment assumption*, not a language property. Ryo ships two profiles:
+
+| Capability | `core` | `hosted` (default) |
+|------------|:------:|:------------------:|
+| Ownership, borrowing, Drop, eager destruction, bounds checks | ✅ | ✅ |
+| `panic` | abort / trap (handler overridable) | full stack trace |
+| Error unions, `try`/`catch` | ✅ types; `.location()`/`.stack_trace()` return `none` | ✅ full capture |
+| `str`, `bytes`, `list`, `map` | ✅ (requires a linked allocator) | ✅ |
+| `sbytes`, `shared[T]` (atomic ARC) | ✅ (atomics only) | ✅ |
+| `task.*`, `future`, channels, `select` | ❌ compile error with targeted message | ✅ |
+
+The default is `hosted`; `ryo build --profile=core` or `runtime = "core"` in `ryo.toml` opts out. One language, no dialect: source that uses only `core` capabilities compiles identically under both profiles. `core` targets Wasm, CLI tools/small binaries, and freestanding environments (no scheduler, `panic` = abort, traces off, allocator-provided). Stdlib layering mirrors Rust's `core`/`std` precedent, adapted: `core` is always available; `std` re-exports it and adds hosted facilities.
+
 This model aligns with Ryo's goal of **Python-like Simplicity** by making concurrency look and feel like synchronous code, while maintaining high performance.
 
 ### 9.2 Core Primitives and Safety
@@ -2661,7 +2710,7 @@ Tasks are Ryo's lightweight, non-OS-thread concurrency unit (like Go's goroutine
 | **Spawn Detached** | `task.spawn_detached: ...` | `fn(f: fn() -> void) -> void` | **Fire-and-forget (explicit opt-out)**. No future returned. Errors are logged to stderr. Cancelled on process exit. |
 | **Await** | `fut.await` | **`future[T]`** | **Suspends the current green thread** until the value is ready. Does NOT block the OS thread. |
 
-**Ownership Safety:** Task closures implicitly capture by **move** — the compiler enforces this because tasks may outlive the spawning scope (see §6.2.2). To share data across tasks, use `shared[T]` with `.clone()`.
+**Ownership Safety:** Task closures implicitly capture by **move** — the compiler enforces this because tasks may outlive the spawning scope (see §6.2.2). To share data across tasks, use `shared[T]` with `.clone()`. **Exception (scoped task borrows, final spec §7, D5):** inside a `task.scope` body — structured concurrency, where the scope joins all children before exiting — child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as P2, §4.4) and that no capture escapes the scope. Projections (`&str`, `&[T]`, `&bytes`) may be captured too: the scope join is lexically inside the defining function, so the view still cannot escape it — the owner's freeze extends to the end of the `task.scope` block. `task.run` and `task.spawn_detached` are unchanged: implicit move capture, enforced.
 **FFI Warning:** Calling blocking C functions (like `sleep`) will block the underlying OS thread. Use `#[blocking]` attribute on FFI imports to hint the runtime to spawn a dedicated thread.
 
 #### 9.2.2 Channels (Communication and Synchronization)
@@ -2942,7 +2991,7 @@ mywebapp/              # Package "mywebapp"
 [package]
 name = "mywebapp"
 version = "1.0.0"
-kind = "application" # Default. Use "system" to enable unsafe blocks.
+kind = "application" # Default. Set `allow_unsafe = true` to enable unsafe blocks (Section 17).
 authors = ["Your Name <you@example.com>"]
 
 [dependencies]
@@ -3801,14 +3850,22 @@ Ryo provides a powerful, high-level workflow for C interoperability, as detailed
 
 However, the underlying mechanisms involve `unsafe` code and `extern "C"` blocks, which are strictly controlled.
 
-*   **Gatekeeping:** Direct use of `unsafe` blocks and manual `extern "C"` declarations is **forbidden** by default.
-*   **System Packages:** To enable these low-level FFI features for manual binding or to build foundational libraries, the package must be declared as `kind = "system"` in `ryo.toml`.
-*   *Rationale:* This prevents accidental unsafety in application code. The primary way to interact with C code should be through the automated `ryo-bindgen` workflow. Manual `unsafe` FFI is reserved for library authors who are building the safe abstractions that application developers will consume.
+*   **Gatekeeping:** `unsafe` is a **manifest-declared capability** available to any package (final spec §6, D4). Packages without the flag cannot contain `unsafe` blocks.
+    ```toml
+	# ryo.toml
+	[package]
+	name = "fastcodec"
+	allow_unsafe = true        # required, or unsafe blocks are compile errors
+    ```
+*   **Visibility:** the capability is stated in the manifest, printed by `ryo audit` (dependency-tree report), and surfaced by tooling. Consumers can build with `--deny-unsafe=deps` to reject any dependency that uses it.
+*   **Mandatory safety documentation:** every `unsafe` block must be preceded by a `#: SAFETY:` doc comment explaining why its invariants hold; a missing or empty `SAFETY:` comment is a compile error.
+*   **Safe-API norm (lint):** `pub` functions whose bodies contain `unsafe` trigger a pedantic lint unless documented as safe abstractions. Raw pointers (`*T`) remain confined to `unsafe` blocks; they never appear in safe signatures.
+*   *Rationale:* memory safety stays the default, but the boundary becomes **auditable** rather than **prohibitive** — the ecosystem can build safe abstractions (containers, FFI wrappers, concurrency primitives) that the language team didn't anticipate. The primary way to interact with C code remains the automated `ryo-bindgen` workflow.
 
 ## 18. Integer Overflow Behavior
 
-*   **Default:** Panic (debug), Wrap (release). *(Rationale: Balance safety during dev with performance in release).*
-*   **Explicit Methods:** `checked_* -> Optional`, `wrapping_*`, `saturating_*` (on types or in `math`).
+*   **Default:** Integer arithmetic **traps (panics) on overflow in all build modes**, debug and release alike. No behavior drift between development and production. *(Rationale (GAP-2): Swift-proven; consistent with DX-first. Code that intends wrapping, saturation, or testability spells it — the reviewer always knows which regime applies by reading the operation. Cost: one predictable, branch-predictable check per integer op.)*
+*   **Explicit Methods:** `wrapping_*` / `saturating_*` / `checked_*` (the latter returning `?T`) as stdlib operations or D10-overloadable explicit operators.
 *   **Division by Zero:** Always panics.
 *   **Numeric Conversions (`TargetType(value)`):** Safe, explicitly defined behavior (widening ok, float->int truncates towards zero, narrowing int wraps/truncates). Does *not* require `unsafe`. This defined behavior ensures portability and avoids undefined behavior common in some other languages for certain conversions.
 
@@ -3828,6 +3885,14 @@ Future features and extensions are listed in this section below.
 *   **WebAssembly Target Details** (ABI, JS interop bindings, WASI support).
 
 **Planned Future Extensions:**
+*   **`sbytes`** — shared-backed byte buffer (opt-in ARC + COW with compiler warnings) for views that must escape (final spec §5, D3; v0.2–v0.3)
+*   **Runtime Profiles** — `core` (freestanding) / `hosted` (default) split (final spec §8, D9; v0.2; see Section 9.1)
+*   **Bounded Operator Overloading** — trait-based, fixed operator set, same-type operands, static dispatch (final spec §9, D10; v0.2–v0.3)
+*   **Scoped Task Borrows** — borrow captures inside `task.scope` + stdlib `par_*` (final spec §7, D5; v0.4; see Section 9.2.1)
+*   **Context Propagation & Cancellation Deadlines** — ambient request-scoped context over the task tree (GAP-1; v0.4, with the concurrency runtime)
+*   **Volatile Memory Access (MMIO)** — `volatile_read`/`volatile_write` unsafe intrinsics (GAP-3; v0.2)
+*   **`#[repr(packed)]`** — packed struct layout for wire protocols and register maps (GAP-4; v0.2)
+*   **`bytes` / `&bytes`** — contiguous binary data + projections (D2; v0.1, Milestone 8.4.2 — see Section 4.2)
 *   **Constrained Types** (Range types with compile-time/runtime bounds checking — see Section 4.13)
 *   **Distinct Types** (Strong typedefs for unit safety — see Section 4.14)
 *   **Contracts** (`#[pre]`/`#[post]` function contracts — see Section 7.11)
