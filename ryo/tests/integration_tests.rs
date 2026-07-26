@@ -3675,21 +3675,15 @@ fn test_freeze_inout_diag() {
 }
 
 #[test]
-fn test_view_to_owned_param_diag() {
-    // No implicit `&str` → `str` conversion exists (§3.4 only goes
-    // owner → view), so passing a slice to an owned `str` parameter
-    // is a plain type mismatch.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "fn keep(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\tkeep(s[0:1])\n";
-    let test_file = create_test_file(temp_dir.path(), "view_to_owned.ryo", code);
-    let output = run_ryo_command(&["run", "view_to_owned.ryo"], &test_file).expect("run");
-    assert!(!output.status.success(), "expected compile error");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("E0012"), "expected E0012: {}", stderr);
-    assert!(
-        stderr.contains("has type 'strview', expected 'str'"),
-        "expected type-mismatch message: {}",
-        stderr
+fn test_view_to_str_param_end_to_end() {
+    // P6' (M8.4.1): a view passed to an owned `str` parameter
+    // re-borrows — codegen materializes a cap=0 triple (no allocation,
+    // call-scoped), so both slice args compile and run. (`assert`'s
+    // message stays string-literal-only: the panic text is formatted
+    // at compile time, so a runtime view cannot flow through it.)
+    assert_ryo_runs!(
+        "view_str_param.ryo",
+        "fn show(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hello\"\n\tshow(s[0:3])\n\tshow(s[0:2])\n"
     );
 }
 

@@ -785,6 +785,15 @@ fn resolve_view_alias(own: &Ownership, tir: &Tir, init: TirRef) -> Owner {
 /// destruction tracking here.
 fn projection_root(own: &Ownership, tir: &Tir, pool: &InternPool, r: TirRef) -> Option<Owner> {
     let inst = *tir.inst(r);
+    // P6': a `strview → str` re-borrow is `str`-typed (so the
+    // `needs_tracking` arm below would resolve the conversion inst
+    // itself as a bogus fresh owner), but ownership-wise it IS the
+    // view's borrow, call-scoped — resolve the operand's root.
+    if inst.tag == TirTag::ViewAsStr
+        && let TirData::UnOp(inner) = inst.data
+    {
+        return projection_root(own, tir, pool, inner);
+    }
     if needs_tracking(inst.ty, pool) {
         return Some(underlying_owner(own, r));
     }
@@ -3375,7 +3384,18 @@ fn visit_expr(
                     }
                     continue;
                 }
-                let owner = underlying_owner(own, *arg);
+                // P6': a view re-borrowed into a `str` arg (ViewAsStr)
+                // borrows the view's ROOT owner for the call's duration
+                // — look through the conversion exactly like the
+                // str → strview direction above, or `two(&s, s[0:1])`
+                // would escape the Rule-7 partition.
+                let owner = if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::ViewAsStr
+                {
+                    projection_root(own, tir, pool, *arg)
+                        .unwrap_or_else(|| underlying_owner(own, *arg))
+                } else {
+                    underlying_owner(own, *arg)
+                };
                 if mode == ParamMode::Borrow {
                     check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
                     borrowed.insert(owner);
@@ -7246,6 +7266,111 @@ mod tests {
         assert!(
             sink.is_empty(),
             "expected no diagnostics — the ViewOfStr read must count as a use of s"
+        );
+    }
+
+    #[test]
+    fn viewasstr_arg_counts_as_borrow_rule7() {
+        // P6' carry-forward: fn two(inout a: str, b: str) called as
+        // two(&s, s[0:1]) — sema wraps the second arg in ViewAsStr; the
+        // Rule-7 borrow partition must look through the conversion and
+        // diagnose the aliasing (E0032), same as the ViewOfStr case.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let two = pool.intern_str("two");
+        let s = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let inout_arg = tb.var(s, str_ty, span);
+        let slice_base = tb.var(s, str_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let one = tb.int_const(1, int_ty, span);
+        let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
+        let reborrow = tb.view_as_str(slice, str_ty, span);
+        let call = tb.call(
+            two,
+            &[inout_arg, reborrow],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::MutableAliasingViolation),
+            "expected E0032 MutableAliasingViolation; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn viewasstr_reborrow_is_call_scoped() {
+        // P6': the re-borrow lives only for the call's duration — the
+        // root owner can still be moved afterwards (no freeze, no
+        // aliasing), unlike a bound slice projection.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let show = pool.intern_str("show");
+        let eat = pool.intern_str("eat");
+        let s = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let slice_base = tb.var(s, str_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let one = tb.int_const(1, int_ty, span);
+        let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
+        let reborrow = tb.view_as_str(slice, str_ty, span);
+        let show_call = tb.call(show, &[reborrow], &[ParamMode::Borrow], void, span);
+        let show_stmt = tb.unary(TirTag::ExprStmt, void, show_call, span);
+        // `s` moved later in the caller — fine: the re-borrow ended
+        // with the `show` call.
+        let moved = tb.var(s, str_ty, span);
+        let eat_call = tb.call(eat, &[moved], &[ParamMode::Move], void, span);
+        let eat_stmt = tb.unary(TirTag::ExprStmt, void, eat_call, span);
+        let tir = tb.finish(&[decl, show_stmt, eat_stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics — the re-borrow is call-scoped; got: {:?}",
+            sink.into_diags()
         );
     }
 }

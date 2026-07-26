@@ -220,6 +220,11 @@ pub enum TirTag {
     /// inserted by sema at view-parameter call sites and mixed-str
     /// equality operands. Operand in `data.un_op`.
     ViewOfStr,
+    /// `strview → str` re-borrow (final spec P6'): materializes the
+    /// cap=0 fat triple — no allocation, call-scoped. Inserted by sema
+    /// when a view is passed to an owned `str` borrow parameter.
+    /// Operand in `data.un_op`.
+    ViewAsStr,
 
     /// `return <expr>`. Operand in `TirData::UnOp`.
     Return,
@@ -632,6 +637,14 @@ impl TirBuilder {
     /// equality. `view_ty` is the pool's `str_view()`.
     pub fn view_of_str(&mut self, inner: TirRef, view_ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::ViewOfStr, view_ty, TirData::UnOp(inner), span)
+    }
+
+    /// `strview → str` re-borrow (final spec P6'): materializes the
+    /// cap=0 fat triple at the call site — no allocation, call-scoped.
+    /// Inserted by sema when a view is passed to an owned `str` borrow
+    /// parameter. `ty` is the pool's `str_()`.
+    pub fn view_as_str(&mut self, inner: TirRef, ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::ViewAsStr, ty, TirData::UnOp(inner), span)
     }
 
     fn extra_offset(&self) -> u32 {
@@ -1280,6 +1293,7 @@ fn un_op_name(t: TirTag) -> &'static str {
         TirTag::ExprStmt => "expr_stmt",
         TirTag::StrLen => "str_len",
         TirTag::ViewOfStr => "view_of_str",
+        TirTag::ViewAsStr => "view_as_str",
         _ => "?un",
     }
 }

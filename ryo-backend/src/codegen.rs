@@ -1966,6 +1966,20 @@ impl<M: Module> Codegen<M> {
 
                 ValueRepr::Str { ptr, len, cap }
             }
+            TirTag::ViewAsStr => {
+                let operand = match inst.data {
+                    TirData::UnOp(o) => o,
+                    _ => unreachable!("ViewAsStr must carry TirData::UnOp"),
+                };
+                // Re-borrow into the fat triple: cap=0 static sentinel,
+                // identical to string literals. No allocation.
+                let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, operand)?
+                else {
+                    unreachable!("ViewAsStr operand must produce ValueRepr::View")
+                };
+                let cap = builder.ins().iconst(types::I64, 0);
+                ValueRepr::Str { ptr, len, cap }
+            }
             _ => {
                 // Delegate to scalar eval_inst for non-str instructions
                 let val = Self::eval_inst(builder, ctx, r)?;

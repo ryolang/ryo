@@ -1571,11 +1571,25 @@ fn check_call(
             .enumerate()
         {
             let actual = fcx.builder.ty_of(*arg_tir);
-            // Implicit `str → &str` view conversion (§3.4): passing an
-            // owned `str` to a `&str` parameter drops the `cap` word —
-            // a representation coercion, not a copy. Routed through the
-            // pool's owner → view table, not a bare kind comparison.
-            let arg_tir = if sema.pool.owner_view(actual) == Some(exp_ty) {
+            let arg_tir = if sema.pool.is_view(actual)
+                && exp_ty == sema.pool.str_()
+                && modes[idx] == ParamMode::Borrow
+            {
+                // P6': view → str param re-borrows (cap=0, no copy),
+                // call-scoped — same shape as the str → strview
+                // conversion below. Borrow-mode only: a `move` param
+                // would let the view escape the call (E2), and an
+                // `inout` param is rejected by the `&` check below.
+                let v = fcx
+                    .builder
+                    .view_as_str(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
+                converted[idx] = v;
+                v
+            } else if sema.pool.owner_view(actual) == Some(exp_ty) {
+                // Implicit `str → &str` view conversion (§3.4): passing an
+                // owned `str` to a `&str` parameter drops the `cap` word —
+                // a representation coercion, not a copy. Routed through the
+                // pool's owner → view table, not a bare kind comparison.
                 let v = fcx
                     .builder
                     .view_of_str(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
@@ -3449,9 +3463,36 @@ mod tests {
     }
 
     #[test]
-    fn view_to_owned_param_rejected() {
+    fn view_passes_to_owned_str_param_via_reborrow() {
+        // P6': a view passed to an owned `str` parameter re-borrows —
+        // sema inserts a ViewAsStr conversion (cap=0 triple at codegen,
+        // no allocation, call-scoped).
+        let (tirs, diags, pool) = run_with_errors(
+            "fn show(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\tshow(s[0:1])\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(
+            main.instructions.iter().any(|i| i.tag == TirTag::ViewAsStr),
+            "strview → str param must insert a ViewAsStr re-borrow (P6')"
+        );
+    }
+
+    #[test]
+    fn view_binding_to_str_still_rejected() {
+        // The re-borrow is call-scoped only: binding-form conversion
+        // (`x: str = view`) stays E0012.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: str = s[0:1]\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn view_to_move_str_param_still_rejected() {
+        // E2 (final spec §3.3): the re-borrow is borrow-mode only — a
+        // `move` str parameter would let the view escape the call.
         let (_tirs, diags, _pool) = run_with_errors(
-            "fn keep(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\tkeep(s[0:1])\n",
+            "fn eat(move s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\teat(s[0:1])\n",
         );
         assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
     }
