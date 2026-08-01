@@ -127,7 +127,7 @@ Slice expressions: `s[start:end]`, `s[start:]`, `s[:end]`, `s[:]` — half-open 
 - **P1.** A slice is a projection: it exposes a sub-region of its owner's storage, owns nothing, allocates nothing.
 - **P2.** While any projection of owner `o` is live, `o` is frozen: mutation, `inout` passing, and `move` of `o` are compile errors. Reading `o` (including more slices) is legal.
 - **P3.** Projection is transitive: re-slicing a slice projects the original owner; P2 still applies to that owner.
-- **P4.** A slice's lifetime ends at its last use; P2's restriction lifts at that point.
+- **P4.** A slice's lifetime ends at its last use; P2's restriction lifts at that point. Across branches the last use is per-path: a read in a sibling arm does not keep the slice live on this arm's path, while a read after the join keeps it live on every arm's path.
 - **P5.** The owner's destruction is deferred to the later of its own last use and the last use of any live projection. This overrides ASAP destruction (§5.4) wherever they disagree; when no projection is live, behavior is unchanged (zero cost).
 - **P6.** Producing an owned copy of viewed contents creates a new object, not a projection. Views never implicitly copy: passing a view to a `str` parameter re-borrows it (`cap=0`, no allocation), exactly like a string literal.
 
