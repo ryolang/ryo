@@ -578,5 +578,53 @@ mod tests {
             assert_eq!(diag_code_str(*code), *s, "{code:?} moved");
             assert!(seen.insert(*s), "duplicate code string {s}");
         }
+        // Maintenance tripwire (I-086): a match naming every DiagCode
+        // variant with no wildcard arm fails to compile the moment a
+        // variant is added, forcing the author to this test — extend
+        // the table above in the same edit or the new code goes
+        // untested. (Rust cannot iterate enum variants, so the table
+        // stays the enumeration source; the match just makes "forgot
+        // the test" a compile error instead of a silent drop.)
+        for code in expected.iter().map(|(c, _)| c) {
+            match code {
+                DiagCode::UnknownType
+                | DiagCode::NestedFunctionDef
+                | DiagCode::TopLevelWithExplicitMain
+                | DiagCode::MainSignature
+                | DiagCode::UndefinedVariable
+                | DiagCode::UndefinedFunction
+                | DiagCode::TypeMismatch
+                | DiagCode::ReservedIdentifier
+                | DiagCode::ArityMismatch
+                | DiagCode::BuiltinArgKind
+                | DiagCode::UnsupportedOperator
+                | DiagCode::VoidValueInExpression
+                | DiagCode::ConditionNotBool
+                | DiagCode::ImmutableAssign
+                | DiagCode::DuplicateDeclaration
+                | DiagCode::UndefinedAssignTarget
+                | DiagCode::FloatModulo
+                | DiagCode::BreakOutsideLoop
+                | DiagCode::ContinueOutsideLoop
+                | DiagCode::RangeArgType
+                | DiagCode::ReservedBuiltinName
+                | DiagCode::RedundantMove
+                | DiagCode::UseAfterMove
+                | DiagCode::MoveOutOfBorrowedParam
+                | DiagCode::ReturnBorrowedValue
+                | DiagCode::MoveWhileBorrowedInCall
+                | DiagCode::BorrowMismatch
+                | DiagCode::MutableAliasingViolation
+                | DiagCode::DeadStore
+                | DiagCode::ViewEscape
+                | DiagCode::SourceProjected
+                | DiagCode::CycleInResolution
+                | DiagCode::ParseError
+                | DiagCode::TooManyDiagnostics
+                | DiagCode::ConstEvalFailure
+                | DiagCode::CycleInComptime
+                | DiagCode::GenericInstantiation => {}
+            }
+        }
     }
 }
