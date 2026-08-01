@@ -16,7 +16,7 @@ This document records the final decision on how Ryo handles slicing, zero-copy v
 
 | # | Decision | Origin |
 |---|----------|--------|
-| D1 | **Adopt Slice Projections** as Ryo's slice semantics: `&str`, `&[T]`, `&bytes` — bindable, passable, non-escaping, statically verified, zero runtime cost | Projections proposal (adopted in full) |
+| D1 | **Adopt Slice Projections** as Ryo's slice semantics: `strview`, `slice[T]`, `bytesview` — bindable, passable, non-escaping, statically verified, zero runtime cost | Projections proposal (adopted in full) |
 | D2 | **Adopt `bytes`** as a new fundamental owned type for contiguous binary data | Binary proposal (salvaged) |
 | D3 | **Adopt `sbytes`**, a shared-backed buffer (opt-in ARC + COW with compiler warnings), for views that must escape | New — replaces the binary proposal's universal memory model |
 | D4 | **Lift the `unsafe` restriction.** Unsafe blocks move from "system packages only" to a manifest-gated, auditable capability available to all packages | New — amends spec §5.8/§17 |
@@ -61,7 +61,7 @@ The taxonomy that falls out:
 
 | Direction | Mechanism | Cost |
 |-----------|-----------|------|
-| Views flow **down** (params, callees) | Projections (`&str`, `&[T]`, `&bytes`) | Zero, statically verified |
+| Views flow **down** (params, callees) | Projections (`strview`, `slice[T]`, `bytesview`) | Zero, statically verified |
 | Views live **within** a scope (locals, re-slices, iterator chains) | Projections + scope-locked views | Zero, statically verified |
 | Views flow **up/out** (returns, struct fields, containers) | `sbytes` (opt-in ARC+COW), or owned values, or offset/ID idioms | Opt-in, type-visible |
 | Views cross **tasks** | `sbytes` by move; borrows within `task.scope` | Opt-in, statically verified |
@@ -70,7 +70,7 @@ The taxonomy that falls out:
 
 Two architecture walkthroughs confirmed the model fits Ryo's target domains:
 
-- **JSON:** parsers are natural projection sinks — views flow in (`&str` input, zero-copy scanning), owned values flow out (DOM or structs). Output strings are owned; the cost is blunted because escaped strings must allocate in every language (this is why serde_json uses `Cow`), and short keys/values hit the small-string optimization. Serialization writes directly into the response buffer via the `inout` sink pattern — zero intermediate allocations, arguably better than borrowed-view languages.
+- **JSON:** parsers are natural projection sinks — views flow in (`strview` input, zero-copy scanning), owned values flow out (DOM or structs). Output strings are owned; the cost is blunted because escaped strings must allocate in every language (this is why serde_json uses `Cow`), and short keys/values hit the small-string optimization. Serialization writes directly into the response buffer via the `inout` sink pattern — zero intermediate allocations, arguably better than borrowed-view languages.
 - **View–Controller–DB–Response:** the request lifecycle is a pipeline of owned values crossing stage boundaries (free in Ryo: move + NRVO) with views living inside each stage. DB results are owned in *every* language (socket buffers are reused), so Ownership Lite costs nothing there. T-strings give injection-safe SQL and XSS-safe HTML by construction.
 
 ### 2.4 Where the walls were
@@ -110,15 +110,15 @@ Mojo is a declared Ryo inspiration (spec §1), and Ryo already imports its best 
 
 ## 3. Final Specification: Slice Projections (D1)
 
-*This section is normative. It adopts the projections proposal (v2) in full; only the `&bytes` extension is new.*
+*This section is normative. It adopts the projections proposal (v2) in full; only the `bytesview` extension is new.*
 
 ### 3.1 Types
 
 | Type | Meaning | Representation |
 |------|---------|----------------|
-| `&str` | Read-only UTF-8 view into a `str` buffer | `{ ptr, len }` — 16 bytes |
-| `&[T]` | Read-only view into contiguous element storage (fixed arrays `[T]`, later `list[T]`) | `{ ptr, len }` — 16 bytes |
-| `&bytes` | Read-only view into a `bytes` buffer | `{ ptr, len }` — 16 bytes |
+| `strview` | Read-only UTF-8 view into a `str` buffer | `{ ptr, len }` — 16 bytes |
+| `slice[T]` | Read-only view into contiguous element storage (fixed arrays `[T]`, later `list[T]`) | `{ ptr, len }` — 16 bytes |
+| `bytesview` | Read-only view into a `bytes` buffer | `{ ptr, len }` — 16 bytes |
 
 Slice expressions: `s[start:end]`, `s[start:]`, `s[:end]`, `s[:]` — half-open `[start, end)`. Indices are non-negative `int`; out-of-range and reversed ranges (`start > end`) panic. For `str`, indices are byte offsets and must lie on UTF-8 boundaries, otherwise panic. No negative indexing (consistent with §4.7).
 
@@ -129,24 +129,24 @@ Slice expressions: `s[start:end]`, `s[start:]`, `s[:end]`, `s[:]` — half-open 
 - **P3.** Projection is transitive: re-slicing a slice projects the original owner; P2 still applies to that owner.
 - **P4.** A slice's lifetime ends at its last use; P2's restriction lifts at that point.
 - **P5.** The owner's destruction is deferred to the later of its own last use and the last use of any live projection. This overrides ASAP destruction (§5.4) wherever they disagree; when no projection is live, behavior is unchanged (zero cost).
-- **P6.** Producing an owned copy of viewed contents creates a new object, not a projection.
+- **P6.** Producing an owned copy of viewed contents creates a new object, not a projection. Views never implicitly copy: passing a view to a `str` parameter re-borrows it (`cap=0`, no allocation), exactly like a string literal.
 
 ### 3.3 Escape rules
 
 - **E1.** Slices cannot be returned from functions. *(Exception per Rule 5: method views tied to `self`'s scope.)*
 - **E2.** Slices cannot be passed to `move` parameters.
-- **E3.** Slices cannot be stored in aggregates: no struct fields, no `list[&str]`.
+- **E3.** Slices cannot be stored in aggregates: no struct fields, no `list[strview]`.
 - **E4.** Slices may be passed to default borrow parameters — the callee's borrow is bounded by the call.
 
 For views that must escape: use `sbytes` (§5).
 
 ### 3.4 Interaction with borrow modes
 
-`&str` / `&[T]` / `&bytes` become the preferred parameter types for read-only access. Passing an owned value to a view parameter triggers an implicit view conversion (`str → &str` drops the `cap` word; representation coercion, not just a borrow).
+`strview` / `slice[T]` / `bytesview` become the preferred parameter types for read-only access. Passing an owned value to a view parameter triggers an implicit view conversion (`str → strview` drops the `cap` word; representation coercion, not just a borrow). The reverse direction also works: passing a view to an ordinary `str` parameter re-borrows it (`cap=0`, no allocation) — call-scoped only; binding `x: str = view` or passing to a `move str` parameter remains an error.
 
 | Parameter type | Use when |
 |----------------|----------|
-| `&str` / `&[T]` / `&bytes` | Reading contents (replaces most `s: str` parameters) |
+| `strview` / `slice[T]` / `bytesview` | Reading contents (replaces most `s: str` parameters) |
 | `str` / `bytes` | Keeping or extending the value |
 | `inout str` / `inout bytes` | Mutating the caller's value in place |
 | `move str` / `move bytes` | Taking ownership |
@@ -154,7 +154,7 @@ For views that must escape: use `sbytes` (§5).
 ### 3.5 Conformance edits to the base spec
 
 1. **§4.4 wording:** replace "Slices cannot be stored in variables" with: *"A slice may be bound to a local variable whose uses remain within the current function; a slice cannot be stored in a variable, field, or container that outlives that function (see §5.7 and Rule 5)."*
-2. **§4.4 rationale:** replace "borrows are parameter-passing conventions, not general-purpose types" with: *"Mutable borrows remain a parameter-passing convention, not a type (M8.3). Immutable views (`&str`, `&[T]`, `&bytes`) are a narrow exception: they are first-class types that may be bound and passed, but they are non-escaping — they cannot be returned, moved, or stored in aggregates — so they cannot play the role of general-purpose reference types."*
+2. **§4.4 rationale:** replace "borrows are parameter-passing conventions, not general-purpose types" with: *"Mutable borrows remain a parameter-passing convention, not a type (M8.3). Immutable views (`strview`, `slice[T]`, `bytesview`) are a narrow exception: they are first-class types that may be bound and passed, but they are non-escaping — they cannot be returned, moved, or stored in aggregates — so they cannot play the role of general-purpose reference types."*
 3. **Implementation:** the ownership pass gains projection-origin tracking (root-owner side table), freeze ranges (live-projection set per owner), and P5-deferred destruction. No new pass; the existing forward walk is extended. Diagnostics are emitted post-liveness so "last use" spans are accurate.
 
 ---
@@ -168,7 +168,7 @@ raw = bytes.from_list([0x01, 0x02, 0x03])
 lit = b"\x00\x01"              # bytes literal
 
 # Slicing yields a projection (D1 rules apply: non-escaping, zero-copy)
-header = raw[0:2]              # &bytes
+header = raw[0:2]              # bytesview
 
 # Bridging
 text = try raw.to_str()        # UTF-8 validated, Utf8Error!str
@@ -214,7 +214,7 @@ fn parse_packet(move buf: bytes) -> ParseError!Packet:
 `sbytes` participates in *both* aliasing regimes, and the boundary is exact:
 
 1. **Slicing an `sbytes` with `sb[a:b]` yields an owned `sbytes`, not a projection.** The P/E rules do not apply: the result does not borrow, so the source is *not* frozen, and later mutation falls under the COW rule above (runtime aliasing).
-2. **An `sbytes` may be viewed as `&bytes`** (implicit view conversion at a `&bytes` parameter, or `sb.view()` for a local binding). That *is* a projection: P1–P6 apply in full, so the `sbytes` is frozen for the view's lifetime — mutation is a **compile error**, and no COW event can occur while a projection is live.
+2. **An `sbytes` may be viewed as `bytesview`** (implicit view conversion at a `bytesview` parameter, or `sb.view()` for a local binding). That *is* a projection: P1–P6 apply in full, so the `sbytes` is frozen for the view's lifetime — mutation is a **compile error**, and no COW event can occur while a projection is live.
 
 The rule of thumb: **compile-time-visible aliasing (projections) is enforced by freeze; runtime-visible aliasing (`sbytes`↔`sbytes`) is handled by COW with a warning.** The two never overlap, because a frozen value cannot reach a mutation site.
 
@@ -273,7 +273,7 @@ Tasks captured by move only (§9.2.1) and borrows never cross task boundaries (R
 Inside a `task.scope` body:
 
 1. Child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as P2) and that no capture escapes the scope (children cannot be detached; the scope joins before any captured binding dies).
-2. **Projections may be captured too.** A `&str` / `&[T]` / `&bytes` captured by a scope child does not violate E1–E4: the scope join is lexically inside the defining function, so the view still cannot escape it. The effect is that the owner's freeze (P2) extends to the end of the `task.scope` block rather than the view's last use.
+2. **Projections may be captured too.** A `strview` / `slice[T]` / `bytesview` captured by a scope child does not violate E1–E4: the scope join is lexically inside the defining function, so the view still cannot escape it. The effect is that the owner's freeze (P2) extends to the end of the `task.scope` block rather than the view's last use.
 3. `task.run` and `task.spawn_detached` are **unchanged**: implicit move capture, enforced.
 4. Mutable parallel access is provided by **stdlib APIs built on D4**, not by language-level mutable captures:
 
@@ -488,7 +488,7 @@ Mobile note: iOS and Android are **`hosted` environments** under D9 — the full
 | Item | Disposition | Rationale |
 |------|-------------|-----------|
 | Universal ARC + COW for `str`/`list[T]` | **Rejected** | Hidden per-operation cost on all code; data-dependent mutation cost fails the reviewer test; COW stale reads convert semantic hazards into warnings. Superseded by `sbytes` (opt-in). |
-| Binary pattern-matching syntax (`match bytes[...]`) | **Deferred** | Real value for protocol parsing, but "no magic syntax when functions suffice." Prototype as a stdlib parser facility first; revisit syntax only on demonstrated demand. If adopted, bindings must be projections (`&bytes`) or `sbytes` — never a third sharing model. |
+| Binary pattern-matching syntax (`match bytes[...]`) | **Deferred** | Real value for protocol parsing, but "no magic syntax when functions suffice." Prototype as a stdlib parser facility first; revisit syntax only on demonstrated demand. If adopted, bindings must be projections (`bytesview`) or `sbytes` — never a third sharing model. |
 | Mutable view types (`inout` slices as bindable types) | **Rejected (reaffirm M8.3)** | Reopens the `MutRef` question M8.3 settled; aliasing mutable views are Go's hazard, not Ryo's model. Mitigation: range-based `inout` stdlib APIs (Q4). |
 | `yield`-style subroutines for escaping projections | **Deferred** | The elegant endgame for returning views without annotations or ARC. Significant language machinery; revisit only if `sbytes` proves insufficient in practice. |
 | Mojo-style origin parameters (`Span[T, origin]`) for escaping views | **Rejected (D8, §2.6)** | Origins are lifetimes under another name: viral through signatures, inference failures reproduce Rust's diagnostic class, and the reviewer test fails. Ryo pays a bounded opt-in runtime cost (`sbytes`) instead of unbounded signature complexity. |
@@ -501,7 +501,7 @@ Mobile note: iOS and Android are **`hosted` environments** under D9 — the full
 
 | Use case | Status | Mechanism |
 |----------|--------|-----------|
-| Read-only params (`fn f(s: &str)`) | ✅ | Projections, implicit view conversion |
+| Read-only params (`fn f(s: strview)`) | ✅ | Projections, implicit view conversion |
 | Local slicing / scanning / lexing / parse loops | ✅ | Projections (P1–P6) |
 | Iterator & transformation chains | ✅ | Scope-locked views (§5.7) |
 | JSON parse → structs / DOM; JSON serialize | ✅ | Views in, owned out; `inout` buffer sink |
@@ -512,7 +512,7 @@ Mobile note: iOS and Android are **`hosted` environments** under D9 — the full
 | Numeric / financial / scientific notation (`Decimal`, units, matrices) | ✅ (D10) | Bounded operator overloading on library types; ecosystem maturity is the real gate |
 | Fork-join data parallelism | ✅ (D5) | `task.scope` borrows + stdlib `par_*` |
 | Third-party systems libraries (containers, FFI wrappers, concurrency primitives) | ✅ (D4) | Gated, documented `unsafe` |
-| `first_word(s: &str) -> &str` | ⚠️ Idiom | Return `(offset, len)`, owned value, or invert control (closure) |
+| `first_word(s: strview) -> strview` | ⚠️ Idiom | Return `(offset, len)`, owned value, or invert control (closure) |
 | String interning / symbol tables | ⚠️ Idiom | Arena + ID indices |
 | Mutable sub-range algorithms | ⚠️ Idiom | `inout` + range APIs (Q4) |
 | GUI applications (desktop / mobile) | ⚠️ Framework-dependent (§11) | Phase 1: immediate-mode, zero language changes; Phase 2: MVU with enum messages; Phase 3: `yield` only if measured. Mobile runtimes are `hosted` — gate is bindings, not runtime |
@@ -527,11 +527,11 @@ Mobile note: iOS and Android are **`hosted` environments** under D9 — the full
 
 | Item | Milestone | Dependencies |
 |------|-----------|--------------|
-| `&str`, slice expressions, P1–P6, E1–E4, implicit view conversion | 8.4 | Ownership-pass extensions (§3.5.3); spec wording edits (§3.5) |
+| `strview`, slice expressions, P1–P6, E1–E4, implicit view conversion | 8.4 | Ownership-pass extensions (§3.5.3); spec wording edits (§3.5) |
 | Anonymous structs, tuple sugar, `Name{...}` construction (D11) | M9–M10 | Parser grammar (§10.2); base-spec edits (§10.5); zero implementation cost pre-alpha |
-| `bytes` type, `&bytes`, builder API | 8.4.2 | D1 |
+| `bytes` type, `bytesview`, builder API | 8.4.2 | D1 |
 | Conformance edits to spec §4.4/§5.7 | 8.4 | — (ship with the feature) |
-| `&[T]` over fixed arrays `[T]` | 21 | `[T]` array type |
+| `slice[T]` over fixed arrays `[T]` | 21 | `[T]` array type |
 | `for x in slice` iteration | 22 | for-over-iterable |
 | `unsafe` policy revision (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | Lands with FFI/unsafe work |
 | `sbytes` (ARC buffer, slicing, COW warnings) | v0.2–v0.3 | `shared[T]` atomic-refcount runtime (§5.6, already specified); slicing + COW machinery |
@@ -551,7 +551,7 @@ Mobile note: iOS and Android are **`hosted` environments** under D9 — the full
 - **Q2 — COW warning default level:** `warn` for all sizes, or `info` below a small-buffer threshold (the binary proposal suggested 64 bytes)? Decide with real telemetry.
 - **Q3 — `sstr`:** defer until `shared[str]` pain is demonstrated (§5.3).
 - **Q4 — Mutable sub-ranges:** is `inout` + explicit range parameters (`f(&buf, start, end)`) sufficient for codec-style code, or does the stdlib need a dedicated `RangeMut[T]` opaque token (definably safe, implemented via D4)? Prototype in stdlib first.
-- **Q5 — `&` in type position:** spelling `&str` vs `str_slice`. Grammar is clean either way (carried over from the projections proposal, U1).
+- **Q5 — `&` in type position:** **RESOLVED — `strview` / `bytesview` / `slice[T]`** (word family; `&` remains exclusively the `inout` call-site marker). The collision that forced the rename was flipped mutability: `&` at a call site (`f(&x)`) marks a *mutable* borrow, so spelling the *read-only* view type `&str` gave one sigil opposite mutability meanings in type position versus call position — a permanent teaching and review hazard. Shipped in M8.4.1: legacy `&str` in type position is a targeted migration error ("`&str` was renamed to `strview` (final spec Q5)").
 - **Q6 — LLVM backend:** the sole remaining gate for Arduino-class bare metal (D9 removed the runtime gate). Commitment, timing, and ownership (core team vs. community) are deliberately undecided — the `core` profile is justified by Wasm and small binaries on its own merits, so this question is free to wait for real demand.
 - **Q7 — Profile naming ratification:** `core` / `hosted` is the recommendation (§8.3); confirm before the v0.2 stdlib layering lands, since the names will appear in manifests and error messages.
 - **Q8 — Mixed-type operator forms:** `matrix * scalar`, `Decimal * int` — deferred by D10's same-type rule (§9.2 rule 3). Revisit only with a concrete proposal (broadcast traits? explicit widening?) after the same-type core ships and real friction is measured.

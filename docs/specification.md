@@ -362,7 +362,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 *   `float`: Defaults to `float64` (64-bit IEEE 754 float).
 *   `bool`: Boolean type with two values: `true` and `false`. Produced by equality operators (`==`, `!=`). No implicit conversion to or from `int`. *(Rationale: Explicit boolean semantics prevent common bugs from implicit truthy/falsy conversions, following Zig's design philosophy).*
 *   `str`: Owned, heap-allocated, UTF-8 string. Can grow and shrink dynamically when bound to a `mut` variable. *(Rationale: Provides a primary, easy-to-use string type. Mutability controlled by binding aligns with general variable mutability).*
-*   `bytes`: Owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` (final spec §4, D2). Fat pointer `{ ptr, len, cap }`, move semantics, mutability by binding. Literal: `b"\x00\x01"`. Slicing yields a `&bytes` projection (§4.4 rules; no UTF-8 hazard, so scalar indexing `b[i]` **is** allowed, yielding `u8`). Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated), `text.to_bytes() -> bytes` (owned copy). *(Rationale: `list[u8]` was the only — awkward — option for protocol/binary data; `bytes` fills it with the same ownership story as `str`.)*
+*   `bytes`: Owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` (final spec §4, D2). Fat pointer `{ ptr, len, cap }`, move semantics, mutability by binding. Literal: `b"\x00\x01"`. Slicing yields a `bytesview` projection (§4.4 rules; no UTF-8 hazard, so scalar indexing `b[i]` **is** allowed, yielding `u8`). Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated), `text.to_bytes() -> bytes` (owned copy). *(Rationale: `list[u8]` was the only — awkward — option for protocol/binary data; `bytes` fills it with the same ownership story as `str`.)*
 *   `char`: Unicode Scalar Value. Literal: `'a'`.
 *   `void`: Unit type. Represents a value with no data. Used for functions that return no meaningful value. *(Rationale: Provides explicit way to represent "no return value" concept, common in many programming languages for side-effecting functions)*.
 *   `never`: Bottom type. Represents a computation that never completes (e.g., `panic`, infinite loop, `exit`). *(Rationale: Useful for control flow analysis and type theory completeness).*
@@ -406,13 +406,13 @@ match point:
 
 Slices are lightweight borrowed views into owned data. They are **scope-locked**: a slice may be bound to a local variable whose uses remain within the current function; a slice cannot be stored in a variable, field, or container that outlives that function (see §5.7 and Rule 5).
 
-*   `str` slice: Immutable UTF-8 view (pointer + byte length). Created via `my_str[start:end]` or string slicing operations. Supports shorthand: `s[:end]` (from start), `s[start:]` (to end).
-*   `list[T]` slice: Immutable view of `T` elements (pointer + element length). Created via `my_list[start:end]`. Supports shorthand: `items[:3]`, `items[2:]`.
+*   `strview` (`str` slice): Immutable UTF-8 view (pointer + byte length). Created via `my_str[start:end]` or string slicing operations. Supports shorthand: `s[:end]` (from start), `s[start:]` (to end).
+*   `slice[T]` (`list[T]` slice): Immutable view of `T` elements (pointer + element length). Created via `my_list[start:end]`. Supports shorthand: `items[:3]`, `items[2:]`.
 *   `inout list[T]` parameter: Mutable list access passed via explicit `inout` parameter and call-site `&` (see Section 5.3, Rule 3).
 
-**Read-only string parameters prefer `&str`** — passing an owned `str` converts implicitly; owned-type parameters remain supported and are still borrowed implicitly (Rule 2):
+**Read-only string parameters prefer `strview`** — passing an owned `str` converts implicitly; owned-type parameters remain supported and are still borrowed implicitly (Rule 2), and views also pass to them via a call-scoped `cap=0` re-borrow — no copy, exactly like a string literal (final spec §3.2, P6'):
 ```ryo
-fn process_string(s: &str):              # Preferred: read-only view — zero-copy
+fn process_string(s: strview):           # Preferred: read-only view — zero-copy
 	# ... read s ...
 
 fn keep_string(s: str):                 # Also fine: implicit immutable borrow (Rule 2)
@@ -425,7 +425,7 @@ fn mutate_list(inout items: list[int]): # Explicit mutable borrow
 	# ... modify items ...                # caller writes `mutate_list(&my_list)`
 ```
 
-*(Rationale: Mutable borrows remain a parameter-passing convention, not a type (M8.3). Immutable views (`&str`, `&[T]`, `&bytes`) are a narrow exception: they are first-class types that may be bound and passed, but they are non-escaping — they cannot be returned, moved, or stored in aggregates — so they cannot play the role of general-purpose reference types. This eliminates the need for lifetime annotations while preserving zero-copy performance within expression chains.)*
+*(Rationale: Mutable borrows remain a parameter-passing convention, not a type (M8.3). Immutable views (`strview`, `slice[T]`, `bytesview`) are a narrow exception: they are first-class types that may be bound and passed, but they are non-escaping — they cannot be returned, moved, or stored in aggregates — so they cannot play the role of general-purpose reference types. This eliminates the need for lifetime annotations while preserving zero-copy performance within expression chains.)*
 
 ### 4.5 Struct Type (Product Type)
 
@@ -1058,7 +1058,7 @@ need to leave the caller?**
 
 | Need | Use |
 |------|-----|
-| Read contents (strings, buffers) | `&str` / `&bytes` view parameter — the preferred read-only string/buffer convention (§4.4); owned values convert implicitly |
+| Read contents (strings, buffers) | `strview` / `bytesview` view parameter — the preferred read-only string/buffer convention (§4.4); owned values convert implicitly |
 | Read-only access (keep or extend the value) | Default borrow (no annotation) |
 | Modify in place, caller keeps the value | `inout` |
 | Take ownership permanently | `move` |
@@ -1222,11 +1222,11 @@ fn main():
 
 #### Rule 5: Functions Cannot Return Borrows
 
-**Functions always return owned values.** A return type cannot be a borrow or scope-locked view (`&str`, `&[T]`, or any other view type). `inout` is a parameter-only convention and cannot appear in a return position. This is the rule that eliminates lifetime annotations — if borrows never escape a function, the compiler always knows exactly when they end.
+**Functions always return owned values.** A return type cannot be a borrow or scope-locked view (`strview`, `slice[T]`, or any other view type). `inout` is a parameter-only convention and cannot appear in a return position. This is the rule that eliminates lifetime annotations — if borrows never escape a function, the compiler always knows exactly when they end.
 
 ```ryo
 # NOT allowed — returning a borrow requires lifetime tracking
-fn longest(a: str, b: str) -> &str:     # compile error
+fn longest(a: str, b: str) -> strview:  # compile error
 	if len(a) > len(b): return a
 	return b
 
@@ -1247,7 +1247,7 @@ Struct fields must be **owned values**, `shared[T]`, or IDs — never `&T`. This
 ```ryo
 # NOT allowed — reference fields need lifetime tracking
 struct Parser:
-	source: &str        # compile error: struct fields must be owned
+	source: strview     # compile error: struct fields must be owned
 
 # The Ryo way — own the data
 struct Parser:
@@ -1437,7 +1437,7 @@ fn process(items: list[int]):
 *   Views **cannot be passed to other functions** that would store them.
 *   The compiler enforces that the source collection is not mutated while a view exists (follows Rule 7).
 
-String slices (`&str`, M8.4) follow these escape restrictions at function scope; see §4.4.
+String slices (`strview`, M8.4) follow these escape restrictions at function scope; see §4.4.
 
 ```ryo
 # NOT allowed — storing an iterator escapes the borrow scope
@@ -1630,7 +1630,7 @@ print(f"user={id} action={action}")    # f-strings replace print(a, b, c)
 *   **Conflicts with "Strict over convenient."** Variadics are pure call-site sugar. They save a pair of brackets (`[`, `]`) at the cost of a non-orthogonal parameter mode that interacts awkwardly with generics, traits, and the borrow checker.
 *   **No good answer in a statically-typed, no-GC language.** Homogeneous variadics (`*args: &T`) are equivalent to `args: &list[T]` with sugar. Heterogeneous variadics require either dynamic dispatch (`&dyn Display`, deferred — see `docs/dev/dyn_trait.md`), variadic generics (massive type-system complexity), or compile-time macros (Ryo has no macro system; `comptime` is not a macro). Each option violates "Simplicity First."
 *   **Hidden allocations conflict with Ownership Lite.** Any backing storage for `*args` either silently allocates a slice on every call (against "no hidden costs") or silently moves arguments (against Rule 2: parameters default to immutable borrow).
-*   **F-strings already cover the main use case.** `print(f"{a} {b} {c}")` is strictly more powerful than `print(a, b, c)`: it gives the caller control over spacing and formatting, is fully type-checked, and produces a single `&str` that downstream consumers (loggers, sinks) can handle uniformly.
+*   **F-strings already cover the main use case.** `print(f"{a} {b} {c}")` is strictly more powerful than `print(a, b, c)`: it gives the caller control over spacing and formatting, is fully type-checked, and produces a single `str` that downstream consumers (loggers, sinks) can handle uniformly.
 *   **List literals cover the rest.** `min([1, 2, 3, 4])`, `sum([1, 2, 3])`, `log(["a", "b"])` — one extra pair of brackets, zero new language features.
 *   **AI-era reviewability.** At a call site, `log(a, b, c, d)` hides the role of each argument; `log([a, b, c, d])` or `log(f"...")` makes the shape obvious to the human reviewer.
 
@@ -1642,19 +1642,19 @@ unsafe extern "C":
     fn printf(fmt: *const char, ...) -> int
 ```
 
-**Implication for `print` / `println`:** Both functions take exactly one `&str` argument and return `void`. They do not accept multiple values, formatting placeholders, or non-string types. To print non-string values, use an f-string, which calls the value's `Display` implementation at the interpolation site.
+**Implication for `print` / `println`:** Both functions take exactly one `str` argument and return `void` (a `strview` passes to it via the re-borrow, §4.4). They do not accept multiple values, formatting placeholders, or non-string types. To print non-string values, use an f-string, which calls the value's `Display` implementation at the interpolation site.
 
 ```ryo
 # Signatures (in the implicit `core`/`builtin` module)
-fn print(_ s: &str)
-fn println(_ s: &str)
+fn print(_ s: str)
+fn println(_ s: str)
 
 # Usage
 print("hello\n")
 println("hello")                       # newline appended
 println(f"x = {x}, y = {y}")           # f-string handles formatting
 # println(x, y)                        # compile error: no variadic params
-# println(42)                          # compile error: expected &str, got int
+# println(42)                          # compile error: expected str, got int
 ```
 
 ### 6.2 Closures & Lambda Expressions
@@ -2714,7 +2714,7 @@ Tasks are Ryo's lightweight, non-OS-thread concurrency unit (like Go's goroutine
 | **Spawn Detached** | `task.spawn_detached: ...` | `fn(f: fn() -> void) -> void` | **Fire-and-forget (explicit opt-out)**. No future returned. Errors are logged to stderr. Cancelled on process exit. |
 | **Await** | `fut.await` | **`future[T]`** | **Suspends the current green thread** until the value is ready. Does NOT block the OS thread. |
 
-**Ownership Safety:** Task closures implicitly capture by **move** — the compiler enforces this because tasks may outlive the spawning scope (see §6.2.2). To share data across tasks, use `shared[T]` with `.clone()`. **Exception (scoped task borrows, final spec §7, D5):** inside a `task.scope` body — structured concurrency, where the scope joins all children before exiting — child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as P2, §4.4) and that no capture escapes the scope. Projections (`&str`, `&[T]`, `&bytes`) may be captured too: the scope join is lexically inside the defining function, so the view still cannot escape it — the owner's freeze extends to the end of the `task.scope` block. `task.run` and `task.spawn_detached` are unchanged: implicit move capture, enforced.
+**Ownership Safety:** Task closures implicitly capture by **move** — the compiler enforces this because tasks may outlive the spawning scope (see §6.2.2). To share data across tasks, use `shared[T]` with `.clone()`. **Exception (scoped task borrows, final spec §7, D5):** inside a `task.scope` body — structured concurrency, where the scope joins all children before exiting — child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as P2, §4.4) and that no capture escapes the scope. Projections (`strview`, `slice[T]`, `bytesview`) may be captured too: the scope join is lexically inside the defining function, so the view still cannot escape it — the owner's freeze extends to the end of the `task.scope` block. `task.run` and `task.spawn_detached` are unchanged: implicit move capture, enforced.
 **FFI Warning:** Calling blocking C functions (like `sleep`) will block the underlying OS thread. Use `#[blocking]` attribute on FFI imports to hint the runtime to spawn a dedicated thread.
 
 #### 9.2.2 Channels (Communication and Synchronization)
@@ -3503,11 +3503,11 @@ fn main():
     *   **Ryo Standard Library (`std`):** High-level APIs written in Ryo, wrapping the runtime via internal FFI.
 *   **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
 *   **Core Packages (Initial):**
-    *   `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`, `assert`, `range`), error and optional type support. **`print` and `println` accept exactly one `&str` argument** — there are no variadic forms (see Section 6.1.2). For non-string values, use an f-string: `println(f"x = {x}")`.
+    *   `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`, `assert`, `range`), error and optional type support. **`print` and `println` accept exactly one `str` argument** — there are no variadic forms (see Section 6.1.2). For non-string values, use an f-string: `println(f"x = {x}")`.
     *   `template`: Native support for parsing and evaluating `t"..."` strings. Includes builder traits and HTML/SQL sanitization utilities (similar to Dave Peck's `tdom` concept for Python) to safely construct DOM trees or queries from Template types.
         *   Includes `template.include("path")`: A compiler-backed function that reads an external file (like `.html` or `.sql`) at compile-time and treats it as an inline `t-string`. This allows designers to edit plain HTML files without logic, while the Ryo compiler statically checks and interpolates variables into the Template object at compile-time with zero runtime parsing cost. Control flow (loops/conditionals) must be handled in Ryo via component composition (joining multiple Templates) to maintain strict MVC separation.
     *   `io`: Console (`readln`), Files (`File`), Buffering (functions return `IoError!T`), implements `Drop`.
-    *   `string`: `&str` manipulation, parsing (functions return `ParseError!T`).
+    *   `string`: `str`/`strview` manipulation, parsing (functions return `ParseError!T`).
     *   `collections`: `list[T]`, `map[K, V]` types and methods.
     *   `math`: Functions, constants, explicit overflow methods.
     *   `time`: `Instant`, `SystemTime`, `Duration`.
@@ -3519,7 +3519,7 @@ fn main():
     *   `testing`: `#[test]` attribute, `assert()`, `assert_eq()`. *(Planned)*
     *   `sync`: `shared[T]`/`weak[T]` types for optional shared ownership, `mutex[T]` and `rwlock[T]` for thread-safe interior mutability. *(Planned)*
     *   `mem`: Basic memory utilities, `Drop` trait definition.
-    *   `utf8`: Utilities for `str`/`&str` validation, char iteration.
+    *   `utf8`: Utilities for `str`/`strview` validation, char iteration.
 
 ### 14.5 Concurrency Model
 
@@ -3896,7 +3896,7 @@ Future features and extensions are listed in this section below.
 *   **Context Propagation & Cancellation Deadlines** — ambient request-scoped context over the task tree (GAP-1; v0.4, with the concurrency runtime)
 *   **Volatile Memory Access (MMIO)** — `volatile_read`/`volatile_write` unsafe intrinsics (GAP-3; v0.2)
 *   **`#[repr(packed)]`** — packed struct layout for wire protocols and register maps (GAP-4; v0.2)
-*   **`bytes` / `&bytes`** — contiguous binary data + projections (D2; v0.1, Milestone 8.4.2 — see Section 4.2)
+*   **`bytes` / `bytesview`** — contiguous binary data + projections (D2; v0.1, Milestone 8.4.2 — see Section 4.2)
 *   **Constrained Types** (Range types with compile-time/runtime bounds checking — see Section 4.13)
 *   **Distinct Types** (Strong typedefs for unit safety — see Section 4.14)
 *   **Contracts** (`#[pre]`/`#[post]` function contracts — see Section 7.11)

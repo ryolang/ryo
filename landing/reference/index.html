@@ -547,7 +547,7 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
 
             <h3>Slices</h3>
             <p>
-              <code>s[start:end]</code> yields an <code>&amp;str</code> — a
+              <code>s[start:end]</code> yields a <code>strview</code> — a
               read-only, zero-copy view into the string's buffer.
               Shorthands: <code>s[start:]</code>, <code>s[:end]</code>,
               <code>s[:]</code>. Bounds are byte offsets; they panic at
@@ -555,7 +555,9 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
               (<code>start &gt; end</code>), or not on a UTF-8 boundary.
               Views are non-escaping: they can't be returned or stored
               past the current function, and the owner is frozen while
-              a view is live.
+              a view is live. Views also pass to ordinary
+              <code>str</code> parameters — a call-scoped re-borrow, no
+              copy.
             </p>
 
             <div class="code-block">
@@ -569,7 +571,7 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
 	print(s[6:])       # world
 	print(s[:5])       # hello
 
-	word = s[0:5]      # word: &amp;str — a view, no copy
+	word = s[0:5]      # word: strview — a view, no copy
 	print(word)</code></pre>
             </div>
 

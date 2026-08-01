@@ -1,10 +1,10 @@
-# String slices (&str) — zero-copy views into a str buffer (M8.4).
+# String slices (strview) — zero-copy views into a str buffer (M8.4).
 # Rules: views are read-only and non-escaping (they cannot be returned,
 # moved, or stored past the current function); the owner is frozen
 # against moves and mutation while a view is live.
 
 fn print_first_word(text: strview):
-	# &str views cannot be returned (Rule 5 / E1), so this function
+	# strview values cannot be returned (Rule 5 / E1), so this function
 	# prints the slice instead of returning it.
 	mut i: int = 0
 	while i < text.len():
@@ -16,7 +16,7 @@ fn print_first_word(text: strview):
 
 fn print_csv_fields(line: strview):
 	# The projection use case (final spec §2.3): parsers are projection
-	# sinks — views flow in (`&str` input), scanning is zero-copy, and
+	# sinks — views flow in (`strview` input), scanning is zero-copy, and
 	# owned values flow out. This walk allocates nothing.
 	# (Views can't be `+`-concatenated — P6 — so fields print as-is.)
 	mut start: int = 0
@@ -38,16 +38,16 @@ fn main():
 	print(s[:5])           # hello
 	print(s[:])            # hello world
 
-	word = s[0:5]          # word: &str — a view, no copy
+	word = s[0:5]          # word: strview — a view, no copy
 	print(word)
 	print(word[1:3])       # re-slice projects the same owner: el
 
-	print_first_word(s)    # owned str arg converts implicitly to &str
+	print_first_word(s)    # owned str arg converts implicitly to strview
 	print(s)               # ok — s still owned
 
 	# The projection use case: zero-copy scanning of a whole record
 	print_csv_fields("ada,lovelace,1815")
-	print_csv_fields(s)    # works on any str or &str — no copies made
+	print_csv_fields(s)    # works on any str or strview — no copies made
 
 	# P4 last-use lifting: a view freezes its owner only until the
 	# view's last use. `word` is last used above, so the freeze has
