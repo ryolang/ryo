@@ -96,6 +96,13 @@ impl TirRef {
     /// instructions (enforced by a `debug_assert!` in `from_index`,
     /// the arena-push path) and `idx` stays below 2^31.
     pub fn param(idx: usize) -> Self {
+        // Same domain as `from_index`: `idx` must stay below 2^31 or the
+        // sentinel collides with real instruction indices (and the
+        // `u32::MAX - idx` subtraction wraps past the sentinel band).
+        debug_assert!(
+            idx < (1 << 31),
+            "TirRef param index out of domain: param indices must stay below 2^31"
+        );
         Self::from_raw(u32::MAX - idx as u32)
     }
 
@@ -362,6 +369,7 @@ impl Tir {
     }
 
     pub fn span(&self, r: TirRef) -> Span {
+        debug_assert!(!r.is_param(), "Tir::span called with a param sentinel ref");
         self.spans[r.index()]
     }
 
