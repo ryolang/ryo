@@ -3481,7 +3481,7 @@ fn test_slice_multibyte_utf8() {
 
 #[test]
 fn test_view_param_with_owned_and_view_args() {
-    // A `&str` parameter accepts both an owned `str` (implicit
+    // A `strview` parameter accepts both an owned `str` (implicit
     // owner → view conversion, §3.4) and an existing view. The
     // function prints rather than returns the slice — E1 forbids
     // view returns (see test_view_return_diag).
@@ -3587,7 +3587,7 @@ fn test_slice_reversed_range_panics() {
 #[test]
 fn test_view_return_diag() {
     // E1 (final spec §3.3): views cannot escape via return. Sema
-    // rejects the `-> &str` signature with E0022 (ownership's E0034
+    // rejects the `-> strview` signature with E0022 (ownership's E0034
     // backstop also fires on the `return s[0:1]` body).
     let temp_dir = TempDir::new().expect("temp");
     let code = "fn bad(s: str) -> strview:\n\treturn s[0:1]\n";
@@ -3605,7 +3605,7 @@ fn test_view_return_diag() {
 
 #[test]
 fn test_slice_of_borrowed_param() {
-    // `head` declares `-> &str`: view returns are E1-rejected (final
+    // `head` declares `-> strview`: view returns are E1-rejected (final
     // spec §3.3), so this program must not compile. The runnable
     // borrowed-param case is test_slice_of_borrowed_param_ok above.
     let temp_dir = TempDir::new().expect("temp");

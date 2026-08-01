@@ -214,9 +214,9 @@ pub enum TirTag {
     /// Variable payload in `extra` — see [`compound_assign_extra`].
     CompoundAssign,
 
-    /// Slice projection `base[start:end]` → `&str` (M8.4).
+    /// Slice projection `base[start:end]` → `strview` (M8.4).
     Slice,
-    /// Explicit `str → &str` representation conversion (drops `cap`),
+    /// Explicit `str → strview` representation conversion (drops `cap`),
     /// inserted by sema at view-parameter call sites and mixed-str
     /// equality operands. Operand in `data.un_op`.
     ViewOfStr,
@@ -611,7 +611,7 @@ impl TirBuilder {
         self.push(tag, ty, data, span)
     }
 
-    /// Slice projection `base[start:end]` → `&str` (final spec §3.1).
+    /// Slice projection `base[start:end]` → `strview` (final spec §3.1).
     /// `start` / `end` are `None` for the `s[start:]`, `s[:end]`,
     /// `s[:]` shorthands; codegen substitutes 0 / len-of-base.
     /// `view_ty` is the pool's `str_view()` — the builder holds no pool.
@@ -631,9 +631,9 @@ impl TirBuilder {
         )
     }
 
-    /// Explicit `str → &str` representation conversion (final spec
+    /// Explicit `str → strview` representation conversion (final spec
     /// §3.4): drops the `cap` word. Inserted by sema at view-parameter
-    /// call sites and on the owned side of mixed `str`/`&str`
+    /// call sites and on the owned side of mixed `str`/`strview`
     /// equality. `view_ty` is the pool's `str_view()`.
     pub fn view_of_str(&mut self, inner: TirRef, view_ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::ViewOfStr, view_ty, TirData::UnOp(inner), span)
@@ -1510,7 +1510,7 @@ mod tests {
         let lo = b.int_const(0, pool.int(), sp());
         // `s[0:]` — end omitted, exercising the `None` bound.
         let slice = b.slice(base, Some(lo), None, view_ty, sp());
-        // `str → &str` conversion of the same base.
+        // `str → strview` conversion of the same base.
         let view = b.view_of_str(base, view_ty, sp());
         let tir = b.finish(&[slice, view]);
 

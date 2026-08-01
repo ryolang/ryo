@@ -4,7 +4,7 @@
 //! ownership state for every Move-typed value. Catches use-after-move,
 //! moves out of borrowed parameters, and returns of borrowed values.
 //! M8.4 adds slice-projection tracking (final spec §3.2/§3.3): bound
-//! `&str` views register against their root owner (P3), an owner with
+//! `strview` views register against their root owner (P3), an owner with
 //! a live projection is frozen against moves and mutation (P2),
 //! projections end at their last use (P4), destruction defers to the
 //! last projection use (P5), and views cannot escape (E1/E2). Emits
@@ -182,7 +182,7 @@ pub(crate) struct Ownership {
 
     /// P2 freeze ranges (final spec §3.2): root owner → its currently
     /// live view bindings. A view is registered when bound (a
-    /// `&str`-typed `VarDecl`/`Assign`) and removed when its
+    /// `strview`-typed `VarDecl`/`Assign`) and removed when its
     /// projection ends (P4: at its last read, at a rebind that kills
     /// it, at a loop exit for loop-deferred reads, or at a branch
     /// join for branch-local deaths). Consume/mutate sites of the
@@ -765,7 +765,7 @@ fn owner_sort_key(owner: &Owner) -> (u8, u32) {
     }
 }
 
-/// The `Owner` a `&str`-typed binding should point at: through `Var`
+/// The `Owner` a `strview`-typed binding should point at: through `Var`
 /// copies of other views to the original slice (P3), or the
 /// initializer instruction itself.
 fn resolve_view_alias(own: &Ownership, tir: &Tir, init: TirRef) -> Owner {
@@ -777,10 +777,10 @@ fn resolve_view_alias(own: &Ownership, tir: &Tir, init: TirRef) -> Owner {
     Owner::Inst(init)
 }
 
-/// The root owner a `&str`-typed value projects (P3, final spec §3.2):
+/// The root owner a `strview`-typed value projects (P3, final spec §3.2):
 /// a `str` base resolves to its underlying owner; a view base resolves
 /// transitively to the original owner. `None` when the view projects
-/// storage this function does not own (a `&str` parameter's buffer
+/// storage this function does not own (a `strview` parameter's buffer
 /// belongs to the caller) — such projections need no freeze or
 /// destruction tracking here.
 fn projection_root(own: &Ownership, tir: &Tir, pool: &InternPool, r: TirRef) -> Option<Owner> {
@@ -1037,7 +1037,7 @@ struct ViewLiveness {
     defer_to_loop: HashMap<TirRef, TirRef>,
 }
 
-/// Simulates the walk's `current_owner` discipline for `&str`-typed
+/// Simulates the walk's `current_owner` discipline for `strview`-typed
 /// bindings only (snapshot per branch arm, first-wins merge;
 /// entry-first-wins at loop back-edges) and records each bound view's
 /// last read. Runs before the forward walk so the walk knows when it
@@ -1168,7 +1168,7 @@ fn view_liveness_loop_body(
     }
 }
 
-/// Record every `&str`-typed `Var` read within expression `r` as the
+/// Record every `strview`-typed `Var` read within expression `r` as the
 /// (latest) last use of the view it currently aliases. Overwriting
 /// insert: the latest forward-order read wins.
 fn record_view_reads(
@@ -1191,9 +1191,9 @@ fn record_view_reads(
     });
 }
 
-/// The view instruction a `&str`-typed binding aliases: through `Var`
+/// The view instruction a `strview`-typed binding aliases: through `Var`
 /// copies to the original slice (P3), or the initializer itself.
-/// `None` for views of non-local storage (e.g. a `&str` parameter).
+/// `None` for views of non-local storage (e.g. a `strview` parameter).
 fn view_binding_target(
     tir: &Tir,
     bindings: &HashMap<StringId, TirRef>,
@@ -1202,7 +1202,7 @@ fn view_binding_target(
     match tir.inst(init).data {
         TirData::Var(name) => bindings.get(&name).copied(),
         TirData::Slice { .. } => Some(init),
-        // A bound ViewOfStr (`u: &str = s`) projects the operand's
+        // A bound ViewOfStr (`u: strview = s`) projects the operand's
         // owner full-range; the conversion inst stands in as the view.
         _ if tir.inst(init).tag == TirTag::ViewOfStr => Some(init),
         _ => None,
@@ -2789,7 +2789,7 @@ fn merge_non_monotone(
 /// wins — semantically equivalent to the previous reverse-walk +
 /// `or_insert` approach for a tree-shaped IR. Recurses through
 /// `walk_operands` so reads buried inside calls, loops, and if-arms
-/// are still seen. M8.4 (P4/P5, final spec §3.2): `&str`-typed reads
+/// are still seen. M8.4 (P4/P5, final spec §3.2): `strview`-typed reads
 /// are recorded too — keyed by the view's slice instruction — so the
 /// P5 deferral can compare an owner's last use against its
 /// projections' last uses.
@@ -3366,9 +3366,9 @@ fn visit_expr(
                         // A view arg borrows its root owner for the
                         // call's duration (E4). `projection_root` looks
                         // through ViewOfStr conversions (the implicit
-                        // str → &str coercion) to the underlying owner
+                        // str → strview coercion) to the underlying owner
                         // — without this, `two(&s, s)` with an
-                        // (inout, &str) signature would escape the
+                        // (inout, strview) signature would escape the
                         // Rule-7 partition.
                         if let Some(root) = projection_root(own, tir, pool, *arg) {
                             view_borrowed.insert(root);
@@ -6863,7 +6863,7 @@ mod tests {
 
     #[test]
     fn view_return_is_escape() {
-        // fn bad(s: str) -> &str: return s[0:1]
+        // fn bad(s: str) -> strview: return s[0:1]
         // → sema rejects at signature level (Task 5); this is the
         //   ownership backstop: hand-built TIR with a view return
         //   must produce ViewEscape (E1, final spec §3.3).
@@ -7169,7 +7169,7 @@ mod tests {
 
     #[test]
     fn viewofstr_arg_counts_as_borrow_rule7() {
-        // T5/T7 carry-forward: fn two(inout a: str, b: &str) called as
+        // T5/T7 carry-forward: fn two(inout a: str, b: strview) called as
         // two(&s, s) — sema wraps the second arg in ViewOfStr; the
         // Rule-7 borrow partition must look through the conversion and
         // diagnose the aliasing (E0032).
@@ -7226,7 +7226,7 @@ mod tests {
     fn viewofstr_read_counts_as_use_dead_store() {
         // T5/T7 carry-forward: an owned `str` used ONLY via a ViewOfStr
         // conversion must count as used — no W0001. Here s's sole read
-        // is the owned side of the mixed `str == &str` comparison:
+        // is the owned side of the mixed `str == strview` comparison:
         //   s: str = "hi"; other: str = "yo"; if s == other[0:1]: print("x")
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::TirBuilder;

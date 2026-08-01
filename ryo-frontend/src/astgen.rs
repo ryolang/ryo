@@ -423,7 +423,7 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
         ast::ExprKind::Slice { base, start, end } => {
             // Slice projection `base[start:end]` (final spec §3);
             // bounds are optional shorthands. Sema type-checks the
-            // base and yields `&str`.
+            // base and yields `strview`.
             let base_ref = gen_expr(b, base);
             let start_ref = start.as_ref().map(|e| gen_expr(b, e));
             let end_ref = end.as_ref().map(|e| gen_expr(b, e));
@@ -811,8 +811,10 @@ mod tests {
 
     #[test]
     fn lower_view_of_non_str_rejected() {
-        // Only `&str` is a view type (final spec §3.1); `&int` must
-        // be a diagnostic, not a silent fallthrough to `int`.
+        // Legacy `&name` view syntax (M8.4 pre-Q5): only `&str` was ever
+        // valid, and it is now a targeted rename error (final spec Q5);
+        // `&int` must be an unknown-view-type diagnostic, not a silent
+        // fallthrough to `int`.
         let diags = parse_and_lower("fn f(x: &int):\n\tprint(\"\")\n").unwrap_err();
         assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
     }

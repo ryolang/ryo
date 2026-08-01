@@ -304,9 +304,11 @@ where
     top_level_statement_parser()
 }
 
-/// Type annotation: a plain name (`str`, `int`, ...) or the `&str`
-/// read-only view form (M8.4). The view alternative comes first so the
-/// `&` is consumed before the plain form can reject it.
+/// Type annotation: a plain name (`str`, `int`, ...) or the legacy
+/// `&name` view form (M8.4 pre-Q5). Post-M8.4.1 the `&` form is retired
+/// syntax — it survives here only so astgen can emit the targeted
+/// migration error. The view alternative comes first so the `&` is
+/// consumed before the plain form can reject it.
 fn type_expr_parser<'a, I>()
 -> impl Parser<'a, I, TypeExpr, extra::Err<Rich<'a, Token>>> + Clone + 'a
 where

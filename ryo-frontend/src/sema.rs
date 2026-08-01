@@ -395,7 +395,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     // parameters. Copy types (int, float, bool) are duplicated on
     // every read regardless of the annotation, so `move` is
     // redundant noise. `move` on `str` (and other heap types) stays
-    // silent — that's the whole reason the keyword exists. `&str`
+    // silent — that's the whole reason the keyword exists. `strview`
     // views are excluded here: `move`/`inout` on a view is an
     // *error* (see below), and the warning would only cascade.
     for param in &body.params {
@@ -416,7 +416,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         }
     }
 
-    // M8.4: `&str` is already a borrow, so `move` / `inout` on a view
+    // M8.4: `strview` is already a borrow, so `move` / `inout` on a view
     // parameter is meaningless (final spec §3.3 E2, §3.4); views
     // cannot be returned either (§3.3 E1 / Rule 5).
     for param in &body.params {
@@ -1063,7 +1063,7 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                 analyze_expr(sema, fcx, scope, arg);
             }
 
-            // Only `str` and `&str` views have methods (M8.4).
+            // Only `str` and `strview` views have methods (M8.4).
             if !matches!(
                 sema.pool.kind(receiver_ty),
                 TypeKind::Str | TypeKind::View(_)
@@ -1133,7 +1133,7 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
             let base_ty = fcx.builder.ty_of(base_tir);
             let base_kind = sema.pool.kind(base_ty);
             // §3.2 P1: a slice projects a `str` (or re-projects an
-            // existing `&str`, P3); anything else is not sliceable.
+            // existing `strview`, P3); anything else is not sliceable.
             if !matches!(base_kind, TypeKind::Str | TypeKind::View(ViewKind::Str))
                 && !sema.pool.is_error(base_ty)
             {
@@ -1217,10 +1217,10 @@ fn check_binary_op(
     rhs: TirRef,
     span: Span,
 ) -> TirRef {
-    // M8.4 §3.3/§3.4: mixed `str`/`&str` equality — wrap the owned
+    // M8.4 §3.3/§3.4: mixed `str`/`strview` equality — wrap the owned
     // side in an explicit `ViewOfStr` conversion so the comparison
     // runs view-vs-view. This must happen before the generic
-    // `compatible` check below, which rightly rejects `str` ≠ `&str`
+    // `compatible` check below, which rightly rejects `str` ≠ `strview`
     // for every other operator.
     let (lhs, rhs, lhs_ty, rhs_ty) = if matches!(tag, InstTag::Eq | InstTag::NotEq) {
         match (sema.pool.kind(lhs_ty), sema.pool.kind(rhs_ty)) {
@@ -1586,8 +1586,8 @@ fn check_call(
                 converted[idx] = v;
                 v
             } else if sema.pool.owner_view(actual) == Some(exp_ty) {
-                // Implicit `str → &str` view conversion (§3.4): passing an
-                // owned `str` to a `&str` parameter drops the `cap` word —
+                // Implicit `str → strview` view conversion (§3.4): passing an
+                // owned `str` to a `strview` parameter drops the `cap` word —
                 // a representation coercion, not a copy. Routed through the
                 // pool's owner → view table, not a bare kind comparison.
                 let v = fcx
@@ -1828,7 +1828,7 @@ fn emit_builtin_call(
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         "str_push" => {
-            // str_push(s: inout str, suffix: &str) -> void. Builtins
+            // str_push(s: inout str, suffix: strview) -> void. Builtins
             // bypass `check_call`, so the `&`/`inout` agreement +
             // mutable-lvalue checks are replayed here against arg 0.
             // M8.4: the suffix is a view — an owned `str` passes as
@@ -3395,7 +3395,7 @@ mod tests {
         );
     }
 
-    // ---- M8.4: &str slices / views (final spec §3) ----
+    // ---- M8.4: strview slices / views (final spec §3) ----
 
     #[test]
     fn slice_yields_str_view() {
@@ -3422,7 +3422,7 @@ mod tests {
         assert_eq!(slices.len(), 3, "one Slice inst per slice expression");
         assert!(
             slices.iter().all(|i| i.ty == pool.str_view()),
-            "every slice is typed &str"
+            "every slice is typed strview"
         );
     }
 
@@ -3444,7 +3444,7 @@ mod tests {
         let main = tir_named(&tirs, &pool, "main");
         assert!(
             main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr),
-            "owned str → &str param must insert a ViewOfStr conversion (§3.4)"
+            "owned str → strview param must insert a ViewOfStr conversion (§3.4)"
         );
     }
 
@@ -3628,7 +3628,7 @@ mod tests {
 
     #[test]
     fn str_push_accepts_view_suffix() {
-        // 4b: str_push's suffix parameter is `&str`; a slice passes
+        // 4b: str_push's suffix parameter is `strview`; a slice passes
         // directly, keeping [Inout, Borrow] modes.
         let (_tirs, diags, _pool) =
             run_with_errors("fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, s[0:1])\n");

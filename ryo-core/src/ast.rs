@@ -288,7 +288,9 @@ impl Ident {
 }
 
 /// A type expression. Currently just a name like `int`, `bool`, etc.,
-/// plus the `&str` view flag (M8.4).
+/// plus the `is_view` flag for legacy `&name` view syntax (M8.4
+/// pre-Q5) — post-M8.4.1 that syntax only feeds the targeted
+/// migration error in astgen.
 ///
 /// Field order keeps the struct at 24 bytes: `span` (16 B, align 8)
 /// first, then `name` (4 B) and `is_view` (1 B) pack into the tail
@@ -297,7 +299,9 @@ impl Ident {
 pub struct TypeExpr {
     pub span: SimpleSpan,
     pub name: StringId,
-    /// `&str` annotation: this type is a read-only view (M8.4).
+    /// Legacy `&name` view-syntax flag (M8.4 pre-Q5): the annotation used
+    /// the retired `&` prefix. Post-M8.4.1 this only feeds astgen's
+    /// targeted migration error; it never constructs a view type.
     pub is_view: bool,
 }
 
@@ -417,7 +421,7 @@ pub enum ExprKind {
     /// expression must resolve to an assignable lvalue (checked in sema).
     Borrow(Box<Expression>),
     /// Slice projection `base[start:end]` (M8.4). Either bound may be
-    /// omitted (`s[start:]`, `s[:end]`, `s[:]`). Yields `&str` in sema.
+    /// omitted (`s[start:]`, `s[:end]`, `s[:]`). Yields `strview` in sema.
     Slice {
         base: Box<Expression>,
         start: Option<Box<Expression>>,

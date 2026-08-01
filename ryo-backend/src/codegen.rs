@@ -57,7 +57,7 @@ fn is_str_type(ty: TypeId, pool: &InternPool) -> bool {
 /// `Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
 /// `Str` is a fat pointer (ptr, len, cap) — it cannot map to a single type;
 /// callers must gate with `is_str_type` before reaching this function.
-/// Views (`&str`, M8.4) are likewise multi-word `{ptr, len}`; callers
+/// Views (`strview`, M8.4) are likewise multi-word `{ptr, len}`; callers
 /// must gate with `pool.is_view()` before reaching this function.
 /// `Void` has no Cranelift representation and should not be mapped here.
 fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) -> types::Type {
@@ -65,7 +65,7 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
         TypeKind::Int => pointer_ty,
         TypeKind::Str => panic!("cranelift_type_for: str is multi-value; use is_str_type gate"),
         TypeKind::View(_) => {
-            panic!("cranelift_type_for: &str is two-word; use pool.is_view() gate")
+            panic!("cranelift_type_for: strview is two-word; use pool.is_view() gate")
         }
         TypeKind::Bool => types::I8,
         TypeKind::Float => types::F64,
@@ -185,7 +185,7 @@ struct FunctionContext<'a, M: Module> {
     pending_sweep: Vec<usize>,
     loop_stack: Vec<LoopContext>,
     str_locals: HashMap<StringId, StrLocals>,
-    /// `&str` view bindings (M8.4): two SSA `Variable`s per binding,
+    /// `strview` view bindings (M8.4): two SSA `Variable`s per binding,
     /// mirroring `str_locals`. Views are non-owning — they never
     /// appear in the free schedule.
     view_locals: HashMap<StringId, ViewLocals>,
@@ -445,7 +445,7 @@ impl<M: Module> Codegen<M> {
                 sig.params.push(AbiParam::new(types::I64)); // len
                 sig.params.push(AbiParam::new(types::I64)); // cap
             } else if pool.is_view(param.ty) {
-                // `&str` view: 2-word ABI (ptr, len) — no cap word (M8.4).
+                // `strview` view: 2-word ABI (ptr, len) — no cap word (M8.4).
                 sig.params.push(AbiParam::new(self.int_type)); // ptr
                 sig.params.push(AbiParam::new(types::I64)); // len
             } else {
@@ -579,7 +579,7 @@ impl<M: Module> Codegen<M> {
                     );
                     block_idx += 3;
                 } else if pool.is_view(param.ty) {
-                    // `&str` view param: two ABI words (ptr, len). Views
+                    // `strview` view param: two ABI words (ptr, len). Views
                     // are borrows — no cap, never freed.
                     let var_ptr = builder.declare_var(int_type);
                     let var_len = builder.declare_var(types::I64);
@@ -952,7 +952,7 @@ impl<M: Module> Codegen<M> {
                     };
                     let locals = ctx.view_locals.get(&view.name).ok_or_else(|| {
                         format!(
-                            "Undefined &str view variable in assign: '{}'",
+                            "Undefined strview variable in assign: '{}'",
                             ctx.pool.str(view.name)
                         )
                     })?;
@@ -1312,7 +1312,7 @@ impl<M: Module> Codegen<M> {
                 // reaching eval_inst means a consumer forgot to gate on
                 // pool.is_view() and route through eval_inst_view.
                 ValueRepr::View { .. } => panic!(
-                    "eval_inst: &str view %{} is two-word; use a view-aware consumer (I-083)",
+                    "eval_inst: strview %{} is two-word; use a view-aware consumer (I-083)",
                     r.index()
                 ),
             });
@@ -1502,7 +1502,7 @@ impl<M: Module> Codegen<M> {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                // M8.4 §3.3: operands may be owned str triples or &str
+                // M8.4 §3.3: operands may be owned str triples or strview
                 // view pairs (mixed equality wraps the owned side in
                 // ViewOfStr); ryo_str_eq only needs (ptr, len).
                 let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
@@ -1707,7 +1707,7 @@ impl<M: Module> Codegen<M> {
             // repr check below doubles as the release-mode guard.
             debug_assert!(
                 !matches!(repr, ValueRepr::View { .. }),
-                "ownership pass scheduled Free for &str view %{}; views are never freed",
+                "ownership pass scheduled Free for strview %{}; views are never freed",
                 target.index()
             );
             match repr {
@@ -1716,7 +1716,7 @@ impl<M: Module> Codegen<M> {
                 }
                 ValueRepr::View { .. } => {
                     return Err(format!(
-                        "ownership pass scheduled Free for non-owning &str view %{}; views are never owners",
+                        "ownership pass scheduled Free for non-owning strview %{}; views are never owners",
                         target.index()
                     ));
                 }
@@ -1990,7 +1990,7 @@ impl<M: Module> Codegen<M> {
         Ok(repr)
     }
 
-    /// Materialize a `&str`-typed TIR instruction as a `ValueRepr::View`
+    /// Materialize a `strview`-typed TIR instruction as a `ValueRepr::View`
     /// pair (M8.4). Views are 16-byte non-owning `{ptr, len}` values —
     /// they never materialize into the 24-byte str triple and never
     /// enter the free schedule. Views do NOT go through `eval_inst`'s
@@ -2070,7 +2070,7 @@ impl<M: Module> Codegen<M> {
                     _ => unreachable!("Var must carry TirData::Var"),
                 };
                 let locals = ctx.view_locals.get(&name).ok_or_else(|| {
-                    format!("Undefined &str view variable: '{}'", ctx.pool.str(name))
+                    format!("Undefined strview variable: '{}'", ctx.pool.str(name))
                 })?;
                 ValueRepr::View {
                     ptr: builder.use_var(locals.ptr),
@@ -2078,16 +2078,16 @@ impl<M: Module> Codegen<M> {
                 }
             }
             TirTag::Call => {
-                // Sema rejects `&str` return types (Rule 5), so no call
+                // Sema rejects `strview` return types (Rule 5), so no call
                 // can produce a view today.
                 return Err(
-                    "eval_inst_view: calls returning &str are rejected by sema (Rule 5)"
+                    "eval_inst_view: calls returning strview are rejected by sema (Rule 5)"
                         .to_string(),
                 );
             }
             other => {
                 return Err(format!(
-                    "eval_inst_view: instruction at %{} is not a &str value (tag={:?})",
+                    "eval_inst_view: instruction at %{} is not a strview value (tag={:?})",
                     r.index(),
                     other
                 ));
@@ -2097,7 +2097,7 @@ impl<M: Module> Codegen<M> {
         Ok(repr)
     }
 
-    /// Evaluate a `str`/`&str`-typed operand and hand back its
+    /// Evaluate a `str`/`strview`-typed operand and hand back its
     /// `(ptr, len)` words regardless of representation — owned triple
     /// or borrowed view pair (M8.4). Consumers that only need the
     /// viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`, the
@@ -2119,13 +2119,13 @@ impl<M: Module> Codegen<M> {
             ValueRepr::Str { ptr, len, .. } => Ok((ptr, len)),
             ValueRepr::View { ptr, len } => Ok((ptr, len)),
             ValueRepr::Scalar(_) => Err(format!(
-                "eval_str_or_view_parts: instruction at %{} is not a str/&str value",
+                "eval_str_or_view_parts: instruction at %{} is not a str/strview value",
                 r.index()
             )),
         }
     }
 
-    /// The `len` word of a `str`/`&str`-typed operand, from either
+    /// The `len` word of a `str`/`strview`-typed operand, from either
     /// representation (M8.4). Backs the `StrLen` arm.
     fn eval_str_or_view_len(
         builder: &mut FunctionBuilder,
@@ -2357,7 +2357,7 @@ impl<M: Module> Codegen<M> {
                     _ => unreachable!("str-typed arg must produce ValueRepr::Str"),
                 }
             } else if ctx.pool.is_view(arg_ty) {
-                // `&str` arg → 2-word ABI (ptr, len), matching the
+                // `strview` arg → 2-word ABI (ptr, len), matching the
                 // callee's build_signature. Sema has already inserted
                 // ViewOfStr for owned-str actuals (§3.4).
                 let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg)?;
@@ -2491,7 +2491,7 @@ impl<M: Module> Codegen<M> {
             "sema should reject non-str print() args",
         );
 
-        // Accepts either repr — owned str triple or &str view pair;
+        // Accepts either repr — owned str triple or strview view pair;
         // write(1, ptr, len) only needs the viewed bytes.
         let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
 

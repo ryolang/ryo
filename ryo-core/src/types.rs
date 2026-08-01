@@ -21,7 +21,7 @@
 //!
 //! Primitive types live at fixed item indices (0..=7), populated by
 //! `new()`. The slot order is `void, bool, int, str, float, error,
-//! never, view` — slot 7 is the `&str` singleton, `View(ViewKind::Str)`
+//! never, view` — slot 7 is the `strview` singleton, `View(ViewKind::Str)`
 //! (final spec §3.1). The `const fn` accessors (`void`, `bool_`,
 //! `int`, ...) return those indices without consulting the dedup
 //! table — hot paths never hash.
@@ -41,7 +41,7 @@ use std::hash::{BuildHasher, Hasher};
 /// A compact, copyable handle to an interned type.
 ///
 /// Primitive ids are stable: `TypeId(0..=7)` are `void`, `bool`,
-/// `int`, `str`, `float`, `error`, `never`, `view(&str)` (in that
+/// `int`, `str`, `float`, `error`, `never`, `view(strview)` (in that
 /// order; the constants `ID_VOID`..`ID_STRVIEW` below are the
 /// source of truth). Use the `const fn` accessors on `InternPool`
 /// instead of constructing these directly.
@@ -173,11 +173,11 @@ pub enum TypeKind {
 /// 8.5, `Slice` with `[T]` arrays in M21).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ViewKind {
-    /// `&str` — owner: `str`; element: UTF-8 unit.
+    /// `strview` — owner: `str`; element: UTF-8 unit.
     Str,
-    /// `&bytes` — owners: `bytes` | `sbytes`; element: `u8`. (D2, 8.5.)
+    /// `bytesview` — owners: `bytes` | `sbytes`; element: `u8`. (D2, 8.5.)
     Bytes,
-    /// `&[T]` — owners: `[T]` | `list[T]` | `[T; N]`; element: `T`. (M21.)
+    /// `slice[T]` — owners: `[T]` | `list[T]` | `[T; N]`; element: `T`. (M21.)
     Slice(TypeId),
 }
 
@@ -394,7 +394,7 @@ impl InternPool {
     /// True for types whose values are duplicated on `=` without
     /// invalidating the source. Mirrors Mojo's `Copyable` trait for
     /// the scalar primitives Ryo currently has: `int`, `float`,
-    /// `bool`, plus the non-owning views (`&str`, M8.4) — copying a
+    /// `bool`, plus the non-owning views (`strview`, M8.4) — copying a
     /// view aliases the buffer but owns nothing. Used by sema (to
     /// flag redundant `move` annotations) and by the ownership pass
     /// (to short-circuit liveness on these values — they never
@@ -412,10 +412,10 @@ impl InternPool {
         matches!(self.kind(t), TypeKind::View(_))
     }
 
-    /// Element type of a view (`T` for `&[T]`; the UTF-8 code unit for
-    /// `&str`).
+    /// Element type of a view (`T` for `slice[T]`; the UTF-8 code unit for
+    /// `strview`).
     ///
-    /// At M8.4 the pool has no char/u8 primitive, so the `&str`
+    /// At M8.4 the pool has no char/u8 primitive, so the `strview`
     /// element type is not representable and this returns `None` for
     /// `View(Str)`; `Some(elem)` only decodes for `View(Slice(elem))`
     /// (uninhabited until M21). Callers needing UTF-8 semantics
@@ -429,7 +429,7 @@ impl InternPool {
     }
 
     /// Implicit view conversion table (§3.4): owner → view. Lookup, not
-    /// scattered conditionals. Only `str → &str` exists at M8.4.
+    /// scattered conditionals. Only `str → strview` exists at M8.4.
     pub fn owner_view(&self, owner: TypeId) -> Option<TypeId> {
         if owner == self.str_() {
             Some(self.str_view())
@@ -686,7 +686,7 @@ mod tests {
         assert!(pool.is_view(v));
         // The pool has no char/u8 primitive at M8.4 — the UTF-8 code
         // unit is not interned as a type, so `view_elem` reports
-        // `None` for `&str` until D2/M21 gives elements a pool
+        // `None` for `strview` until D2/M21 gives elements a pool
         // representation.
         assert_eq!(pool.view_elem(v), None);
         assert_eq!(pool.display(v).to_string(), "strview");

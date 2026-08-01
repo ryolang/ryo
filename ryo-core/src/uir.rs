@@ -211,7 +211,7 @@ pub enum InstTag {
     Borrow,
 
     /// Slice projection `base[start:end]` (M8.4, final spec §3).
-    /// Bounds optional; see [`InstData::Slice`]. Type-checks to `&str`
+    /// Bounds optional; see [`InstData::Slice`]. Type-checks to `strview`
     /// in sema.
     Slice,
     // Reserved for the comptime milestone:
