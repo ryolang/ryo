@@ -37,7 +37,6 @@ use target_lexicon::Triple;
 
 /// Fat-str triple layout (24 bytes): ptr at 0, len at 8, cap at 16.
 /// View layout (16 bytes): ptr at 0, len at 8. Derived, not re-hardcoded.
-#[allow(dead_code)] // documents the str layout for I-076; new code uses the view constants
 const STR_SLOT_SIZE: u32 = 24;
 const VIEW_SLOT_SIZE: u32 = 16;
 const OFF_PTR: i32 = 0;
@@ -677,6 +676,11 @@ impl<M: Module> Codegen<M> {
             // is fine as long as the target was freed once. A pending
             // entry with NO fired same-target counterpart means the
             // allocation leaks.
+            //
+            // This assertion covers the LEAK direction only. Double-free
+            // is prevented upstream in the ownership scheduler (the
+            // covered/on_path dedup), so no target-uniqueness check is
+            // needed here.
             debug_assert!(
                 ctx.pending_sweep.iter().all(|&idx| {
                     let target = ctx.sidecar.free_schedule[idx].target;
@@ -1872,7 +1876,7 @@ impl<M: Module> Codegen<M> {
 
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
-                        24,
+                        STR_SLOT_SIZE,
                         3,
                     ));
                     let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -1932,7 +1936,7 @@ impl<M: Module> Codegen<M> {
 
                 let slot = builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    24,
+                    STR_SLOT_SIZE,
                     3,
                 ));
                 let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -2150,8 +2154,11 @@ impl<M: Module> Codegen<M> {
         let lit_len = builder.ins().iconst(types::I64, content.len() as i64);
 
         // Allocate 24-byte stack slot for out parameter (8-byte aligned)
-        let slot =
-            builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 24, 3));
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
         let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
 
         // Call ryo_str_from_literal(data, len, out)
@@ -2225,7 +2232,7 @@ impl<M: Module> Codegen<M> {
 
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                24,
+                STR_SLOT_SIZE,
                 3,
             ));
             let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -2258,7 +2265,7 @@ impl<M: Module> Codegen<M> {
             let suffix_ref = view.args[1];
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                24,
+                STR_SLOT_SIZE,
                 3,
             ));
             let s_addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -2319,7 +2326,7 @@ impl<M: Module> Codegen<M> {
                 if is_str_type(arg_ty, ctx.pool) {
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
-                        24,
+                        STR_SLOT_SIZE,
                         3,
                     ));
                     let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -2388,7 +2395,7 @@ impl<M: Module> Codegen<M> {
             // sret: allocate 24-byte slot, prepend pointer to args
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                24,
+                STR_SLOT_SIZE,
                 3,
             ));
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
