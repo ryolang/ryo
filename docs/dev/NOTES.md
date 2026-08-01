@@ -8,11 +8,7 @@
 - [ ] Debug Breakpoints https://ziglang.org/documentation/0.1.1/#builtin-breakpoint
 - [ ] my_str: str = "hello" when pass as reference fn world(hello: str) ->, should not include the derref world(&str), python and new developers do not understand &, we should use a short english word as we do for && -> and
 - [ ] Zen of ryo. https://dave.cheney.net/2020/02/23/the-zen-of-go
-- [ ] review https://docs.modular.com/mojo/manual/values/ownership copy design
-- [ ] Set up benchmarks for performance and memory in github workflows and keep track of them.
-- [ ] get the domain https://ryo-lang.org
 - [ ] Add https://scorecard.dev/
-- [ ] set up https://codspeed.io/
 - [ ] review for more https://github.com/astral-sh/ruff/tree/main/.github/workflows
 - [ ] Effective Go. review and get insigths https://go.dev/doc/effective_go
 - [ ] Integration with Notebooks [Jupytext](https://jupytext.readthedocs.io/en/latest/formats-scripts.html)
@@ -31,6 +27,7 @@
 - [Rustc Dev Guide - Type Inference](https://rustc-dev-guide.rust-lang.org/type-inference.html)
 - [Pony Tutorial - Actors](https://tutorial.ponylang.io/types/actors) - Concurrency via actors
 - [Lattner's Concurrency Gist](https://gist.github.com/lattner/31ed37682ef1576b16bca1432ea9f782)
+- [Hylo Programming Language](https://www.hylo-lang.org)
 
 **Implementation Guides**:
 - [Create Your Own Language with Rust](https://github.com/ehsanmok/create-your-own-lang-with-rust/tree/master)
@@ -69,7 +66,7 @@
 - [CRISP Code Principles](https://bitfieldconsulting.com/posts/crisp-code) - Correct, Readable, Idiomatic, Simple, Performant
 
 **Community Resources**:
-- [Mojo Dojo](https://mojodojo.dev/)
+
 
 **Color palette**:
 - [Color Hunt](https://colorhunt.co/palette/ffd400ffc300ff8c00ff5f00)
