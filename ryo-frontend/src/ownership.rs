@@ -2331,10 +2331,22 @@ fn stmts_subtree(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
 ///
 /// Both cases skip loop-deferred views (`view_defer_loop`): a later
 /// iteration re-reads them through the back-edge, so they are live on
-/// every arm's path regardless of this arm's reads. Neither applies
-/// when the global last use is OUTSIDE the if's subtree — a post-join
-/// read lies on every path and keeps the view live in every arm.
+/// every arm's path regardless of this arm's reads. The deferral table
+/// is computed from the GLOBAL max read only, so the override applies
+/// the same deferral test per candidate: an arm-local last read inside
+/// a loop the creation is outside of (`created_in < read_in`, the
+/// pre-pass's condition) blocks the override — installing it would let
+/// the death site drain the projection mid-loop and un-freeze a later
+/// owner mutation in the same body. (Skipped, the view stays live to
+/// the join: conservative.) The kill needs no such per-candidate test:
+/// it fires only when the arm has NO reads in its subtree, so there is
+/// no deeper arm-local read to strand; a deeper read in a SIBLING arm
+/// is itself a global-max read the pre-pass deferral already covers.
+/// Neither case applies when the global last use is OUTSIDE the if's
+/// subtree — a post-join read lies on every path and keeps the view
+/// live in every arm.
 fn refine_view_liveness_for_arm(
+    tir: &Tir,
     own: &mut Ownership,
     if_ref: TirRef,
     arm_index: usize,
@@ -2365,6 +2377,13 @@ fn refine_view_liveness_for_arm(
     for (vi, arm_lu, global_lu) in actions {
         match arm_lu {
             Some(lu) => {
+                // P4 deferral, per candidate: `view_defer_loop` covers
+                // only the global max read, so re-apply the pre-pass's
+                // `created_in < read_in` test to the arm-local read the
+                // override would install.
+                if loop_nesting_of(tir, vi).len() < loop_nesting_of(tir, lu).len() {
+                    continue;
+                }
                 saved.push((vi, global_lu));
                 own.view_last_use.insert(vi, lu);
             }
@@ -2452,7 +2471,7 @@ fn analyze_if_stmt(
     let snap_live_projections = own.live_projections.clone();
 
     let then_subtree = stmts_subtree(tir, &view.then_stmts);
-    let saved = refine_view_liveness_for_arm(own, r, 0, &if_subtree, &then_subtree);
+    let saved = refine_view_liveness_for_arm(tir, own, r, 0, &if_subtree, &then_subtree);
     for stmt in &view.then_stmts {
         analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
     }
@@ -2472,7 +2491,7 @@ fn analyze_if_stmt(
         drain_dying_views(own);
         let elif_subtree = stmts_subtree(tir, &elif.body);
         let saved =
-            refine_view_liveness_for_arm(own, r, 1 + elif_index, &if_subtree, &elif_subtree);
+            refine_view_liveness_for_arm(tir, own, r, 1 + elif_index, &if_subtree, &elif_subtree);
         for stmt in &elif.body {
             analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
         }
@@ -2488,6 +2507,7 @@ fn analyze_if_stmt(
 
         let else_subtree = stmts_subtree(tir, else_stmts);
         let saved = refine_view_liveness_for_arm(
+            tir,
             own,
             r,
             1 + view.elif_branches.len(),
@@ -7182,6 +7202,164 @@ mod tests {
             sink.is_empty(),
             "expected no diagnostics (v is dead on the then-path before the move); got: {:?}",
             sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn per_arm_override_respects_loop_deferral() {
+        // Regression (review Critical on 2cbaa06): the per-arm override
+        // must not install an arm-local last read that sits inside a
+        // loop the creation is outside of — the walk-constant
+        // `view_defer_loop` is computed from the GLOBAL max read only,
+        // so the death site would drain the projection mid-loop and
+        // un-freeze a later owner mutation in the same body.
+        //   s: str = "hello"; v = s[0:2]
+        //   if true:
+        //       while true:
+        //           print(v)          # arm-local last read, inside loop
+        //           str_push(&s, "xxxx")  # realloc; iteration 2 re-reads v
+        //   else:
+        //       print(v)              # global max read — outside any loop
+        // → exactly one SourceProjected naming `s` (P4 deferral holds
+        //   per arm: the in-loop read keeps v live through the loop).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let x4 = pool.intern_str("xxxx");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let if_cond = tb.bool_const(true, bool_ty, span);
+        let wcond = tb.bool_const(true, bool_ty, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(x4, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let wl = tb.while_loop(wcond, &[pstmt, push_stmt], void, span);
+        let vread_e = tb.var(v, view_ty, span);
+        let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+        let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
+        let ifs = tb.if_stmt(if_cond, &[wl], &[], Some(&[pstmt_e]), void, span);
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn per_arm_kill_respects_loop_deferral() {
+        // Kill-side companion to `per_arm_override_respects_loop_deferral`:
+        // the arm-kill fires only when the arm has NO reads of the view
+        // in its subtree, so there is no deeper arm-local read to
+        // strand — and a deeper read in a SIBLING arm is itself the
+        // global max read, which the pre-pass deferral already covers.
+        //   s: str = "hello"; v = s[0:2]
+        //   if true:
+        //       consume(s)        # kill candidate: no reads of v here
+        //   else:
+        //       while true:
+        //           print(v)      # global max read, deeper than creation
+        //                         #   → loop-deferred → kill/override skipped
+        // → exactly one SourceProjected naming `s` (v is live in the
+        //   then-arm through the deferral exemption).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let if_cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
+        let wcond = tb.bool_const(true, bool_ty, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let wl = tb.while_loop(wcond, &[pstmt], void, span);
+        let ifs = tb.if_stmt(if_cond, &[cstmt], &[], Some(&[wl]), void, span);
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
         );
     }
 
