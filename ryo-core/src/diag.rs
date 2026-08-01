@@ -127,7 +127,8 @@ pub enum DiagCode {
     DeadStore,
     /// A scope-locked view escaped: returned from a function, passed
     /// to a `move` parameter, or otherwise stored beyond its function
-    /// (M8.4, E1/E2).
+    /// (M8.4, E1/E2). Ownership-pass backstop — sema handles the
+    /// signature/binding escape forms first (E0022).
     ViewEscape,
     /// Rule P2 violation: an owner was moved, mutated, or passed
     /// `inout` while a slice projection of it is live (M8.4).

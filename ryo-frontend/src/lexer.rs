@@ -326,18 +326,18 @@ pub struct LexError {
     pub message: String,
 }
 
-/// Rough upper bound on the number of raw tokens in `input`, used to
+/// Heuristic estimate of the number of raw tokens in `input`, used to
 /// pre-size the token buffers so the collect/indent passes don't
-/// repeatedly reallocate. Every token spans at least one source byte,
-/// so byte length is a safe over-estimate; dividing by a small average
-/// token width keeps the estimate from wildly over-allocating on
-/// keyword/identifier-heavy sources while still avoiding growth on the
-/// common case. It is only a hint — correctness never depends on it.
+/// repeatedly reallocate. It is only a hint — correctness never
+/// depends on it.
 fn estimated_token_count(input: &str) -> usize {
     // Average observed token width across representative Ryo sources is
     // ~3 bytes (identifiers/keywords/literals dominate over 1-byte
-    // punctuation). Bias slightly low so we never under-allocate on the
-    // punctuation-dense case, and always reserve at least a little.
+    // punctuation), so len/2 avoids wild over-allocation on the common
+    // case. It is NOT an upper bound: punctuation-dense input (a run of
+    // 1-byte tokens like `(((((`) yields close to one token per byte —
+    // more than len/2 — so the buffer may still grow there. That costs
+    // a reallocation, nothing more. Always reserve at least a little.
     (input.len() / 2).max(16)
 }
 

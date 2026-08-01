@@ -18,8 +18,10 @@ pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, 
     // Indent/Dedent markers, so `tokens.len()` is a tight lower bound.
     // Growing from zero here meant repeatedly reallocating and copying
     // the whole buffer (a large share of the lex-stage cost); reserve
-    // the input length plus a little headroom for the inserted markers
-    // so the push loop lands in already-allocated space.
+    // the token count plus a heuristic headroom for the inserted
+    // markers. The headroom is not a bound — a deep dedent emits one
+    // Dedent per popped level, which can exceed it — it just keeps the
+    // common case in already-allocated space.
     let mut result: Vec<Spanned<'a>> = Vec::with_capacity(tokens.len() + tokens.len() / 8 + 8);
     let mut indent_stack: Vec<usize> = vec![0];
     let mut i = 0;
