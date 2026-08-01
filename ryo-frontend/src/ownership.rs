@@ -7373,4 +7373,209 @@ mod tests {
             sink.into_diags()
         );
     }
+
+    #[test]
+    fn loop_view_created_after_owner_mutation_dies_within_iteration() {
+        // A view VarDecl AFTER an inout-consume of the owner inside the
+        // SAME while body:
+        //   s: str = "hello"
+        //   while true:
+        //       str_push(&s, "!")   # mutates the owner
+        //       v = s[0:2]          # projection created after the consume
+        //       print(v)            # v's only read, same iteration
+        // → NO diagnostic. The view is created and read inside the same
+        // loop body, so it is NOT loop-deferred (deferral requires the
+        // last read in a loop the creation is outside of — see
+        // collect_view_liveness); it dies at `print(v)` within pass 1,
+        // the back-edge state tuple is unchanged, and no re-walk fires.
+        // That is the sound outcome: every iteration's `str_push` runs
+        // before that iteration's fresh slice is taken, so no stale
+        // view pointer is ever read. (The unsound sibling — view
+        // created OUTSIDE the loop, mutated inside — is covered by
+        // `loop_deferred_view_survives_if_join_prune`.)
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let wl = tb.while_loop(cond, &[push_stmt, vdecl, pstmt], void, span);
+        let tir = tb.finish(&[decl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics — the view dies within each iteration, \
+             before the next iteration's str_push; got: {:?}",
+            sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn view_and_move_args_same_owner_rejected() {
+        // fn two(a: strview, move b: str) called as two(s[0:1], s) —
+        // both args share root owner `s`. The view arg borrows the root
+        // for the whole call (E4), so the move in the same call is a
+        // P2 freeze violation: exactly one SourceProjected (E0035).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let two = pool.intern_str("two");
+        let s = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i1 = tb.int_const(1, int_ty, span);
+        let view_arg = tb.slice(base, Some(i0), Some(i1), view_ty, span);
+        let move_arg = tb.var(s, str_ty, span);
+        let call = tb.call(
+            two,
+            &[view_arg, move_arg],
+            &[ParamMode::Borrow, ParamMode::Move],
+            void,
+            span,
+        );
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        // Diagnostic-quality gap: the message names "value", not `s` —
+        // the view/move-overlap path resolves the name via
+        // `owner_name_for_diag`, which inspects the owner's initializer
+        // (a StrConst) and falls back to "value", unlike the Rule-7
+        // E0032 path that scans the call args for the `Var` read
+        // (`rule7_owner_name`). Pinned as-is; a future fix should name
+        // the binding.
+        assert!(
+            diags[0].message.contains("value"),
+            "expected the current message wording; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
+        // P5 deferral ACROSS a branch — distinct from the plain last-use
+        // lift in `last_use_inside_if_anchors_after_if`: the owner's own
+        // last read is the slice creation OUTSIDE the if; only the
+        // projection's last read is inside the then-arm. P5 defers the
+        // owner's destruction to that read (final spec §3.2), and the
+        // conditional re-anchor must lift the FreePoint to the IfStmt
+        // exit — anchoring inside the arm would leak on the not-taken
+        // path.
+        //   s: str = "hello"
+        //   v = s[0:2]
+        //   if true: print(v)
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(cond, &[pstmt], &[], None, void, span);
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics; got: {:?}",
+            sink.into_diags()
+        );
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == lit && fp.after == ifs && fp.branch.is_none()),
+            "expected s's Free anchored at the IfStmt exit (P5 deferral across the branch); schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == lit && fp.after != ifs),
+            "no Free for s may anchor inside the arm (leaks on the not-taken path); schedule = {:?}",
+            sc.free_schedule
+        );
+    }
 }
