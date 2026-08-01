@@ -7447,6 +7447,98 @@ mod tests {
     }
 
     #[test]
+    fn loop_view_live_at_back_edge_flags_earlier_mutation_on_rewalk() {
+        // Pins the I-087 re-walk DISCOVERY path (the sibling acceptance
+        // test above pins the converge side): a body-created view that
+        // is STILL LIVE at the back-edge forces pass 2, and only pass 2
+        // sees the projection at the earlier owner-consume.
+        //   s: str = "hello"
+        //   suffix: str = "!"
+        //   while true:
+        //       str_push(&s, suffix)  # pass 1: no projection exists yet
+        //       v = s[0:2]            # registers the projection
+        // v is never read: an unread view has no last use, so its
+        // projection lives to scope end (P4) and is non-empty at the
+        // back-edge → the live-projection leg of the state tuple
+        // differs → re-walk → pass 2 walks `str_push` with the
+        // projection live → exactly one SourceProjected (E0035) naming
+        // `s`. The mutation IS unsound here: iteration 2's push
+        // reallocs while v (never killed by a read) points into the
+        // old buffer.
+        //
+        // The suffix is deliberately bound OUTSIDE the loop: a StrConst
+        // inside the body would enter `states` as a fresh Valid temp
+        // and flip the owner-state leg of the tuple, forcing the
+        // re-walk even without the projection-emptiness comparison.
+        // With the body kept allocation-free, the projection leg is the
+        // ONLY re-walk trigger — verified by mutation: skipping the
+        // live-projection comparison in `states_differ_snapshot` makes
+        // this test fail with 0 diagnostics. A refactor re-narrowing
+        // the convergence comparison (e.g. back to Moved-ness only)
+        // drops the re-walk and MUST fail this test.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let suffix = pool.intern_str("suffix");
+        let v = pool.intern_str("v");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let bang_lit = tb.str_const(bang, str_ty, span);
+        let suffix_decl = tb.var_decl(suffix, false, str_ty, bang_lit, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix_read = tb.var(suffix, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix_read],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let wl = tb.while_loop(cond, &[push_stmt, vdecl], void, span);
+        let tir = tb.finish(&[decl, suffix_decl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
     fn view_and_move_args_same_owner_rejected() {
         // fn two(a: strview, move b: str) called as two(s[0:1], s) —
         // both args share root owner `s`. The view arg borrows the root
