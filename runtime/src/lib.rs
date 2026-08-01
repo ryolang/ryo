@@ -9,6 +9,10 @@ pub struct RyoStrFat {
 
 /// Read-only view into a `str` buffer (M8.4): pointer + byte length.
 /// Owns nothing; never freed.
+///
+/// Load-bearing invariant: `__ryo_slice` stores a NULL ptr when
+/// `len == 0`, and every consumer guards on `len == 0` before
+/// dereferencing — so `ptr` may be null/dangling whenever `len == 0`.
 #[repr(C)]
 pub struct RyoSlice {
     pub ptr: *const u8,
@@ -108,7 +112,9 @@ pub unsafe extern "C" fn ryo_str_from_literal(data: *const u8, len: u64, out: *m
 }
 
 fn slice_fail(msg: &str) -> ! {
-    eprintln!("ryo: {msg}");
+    // Raw message, no prefix — matches the codegen-synthesized
+    // `__ryo_panic` path (both exit 101 with the message on stderr).
+    eprintln!("{msg}");
     std::process::exit(101)
 }
 
