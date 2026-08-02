@@ -229,7 +229,9 @@ copy can be *moved*:
 ```ryo
 fn handle(req: &Request):
 	body = req.body             # strview — borrowed from the request buffer
-	spawn log_async(str(body))  # moved: the task owns its copy
+	copy: str = str(body)       # owned copy made here, in the caller
+	task.spawn_detached:
+		log_async(copy)         # moved: the task owns its copy
 	# scoped-borrow alternative exists for short-lived tasks;
 	# str(view) is for fire-and-forget
 ```
@@ -239,7 +241,7 @@ fn handle(req: &Request):
 ```ryo
 ring = RingBuffer(4096)
 while pkt = ring.read():
-	header = pkt[..16]          # bytesview into the ring
+	header = pkt[:16]           # bytesview into the ring
 	if is_interesting(header):
 		queue.push(bytes(header))    # copy BEFORE the ring overwrites it (M8.4.2)
 ```
@@ -252,7 +254,7 @@ fn tag_frame(view: bytesview):
 	n = bytes.copy_into(view, &buf)     # explicit buffer, no allocator
 	if n == 0:
 		return                          # didn't fit — visible, handled
-	transmit(&buf[..n])
+	transmit(&buf[:n])
 ```
 
 ### 5.6 FFI adjacency (same idiom, extra argument)

@@ -507,11 +507,11 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** The ~25-30-line sret pattern (`create_sized_stack_slot(STR_SLOT_SIZE)` → `stack_addr` → `declare_runtime_fn` → `call` → 3× `load`) is copied in both the `eval_inst_str` and `emit_call` arms for `__ryo_str_from_view` and the int/float/bool formatters. The formatter statement-arm copy is the one that drifted — it skips the reload/`inst_values` caching and produced I-112.
 **Resolution:** Extract a shared `emit_sret_str_call(builder, ctx, fn_name, args) -> ValueRepr::Str` helper used by all four arms; the I-112 fix falls out of the dedup.
 
-### I-116 — Deliberate view-freeze conservatisms live only in code comments
+### I-119 — `loop_nesting_of` recomputes nesting stacks per query
 
-**Files:** `ryo-frontend/src/ownership.rs` (:944-945, :2505-2517, :908-914)
-**Summary:** Two safe-direction conservatisms from the per-arm freeze work (12bc3f8, 774f06a): (1) a never-read view has no `view_last_use` entry, so its projection lives to scope end and freezes its root owner from creation; (2) the per-arm last-use override is skipped when the arm-local last read sits inside a loop the creation is outside of — the view stays live to the join. Both are documented only in comments, not in the final spec's P4 section.
-**Resolution:** Document both conservatisms in `docs/dev/ryo-slicing-and-memory-model-final-spec.md` (P4); optionally treat never-read views as dead immediately after their binding statement.
+**Files:** `ryo-frontend/src/ownership.rs` (`loop_nesting_of` :1000-1047; call sites :1089-1090, :1541-1545, :2557)
+**Summary:** Each call walks the whole function body to rebuild the target's loop-nesting stack, and it is queried per view/read pair in `collect_view_liveness`, per candidate in `refine_view_liveness_for_arm`, and per materialize site in `warn_redundant_materialize` — O(sites × body) recomputation with no memo.
+**Resolution:** Build a `TirRef`→nesting-stack map in a single pre-pass over the body and reuse it at the three call sites, preserving the cond/bounds-counts-as-inside and nested-loop semantics.
 
 ---
 
