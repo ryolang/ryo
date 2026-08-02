@@ -61,7 +61,7 @@ fn os_write(fd: c_int, ptr: *const u8, len: usize) -> isize {
     }
 }
 
-/// Write all `len` bytes to `fd`, retrying short writes (I-010). Gives
+/// Write all `len` bytes to `fd`, retrying short writes. Gives
 /// up silently on hard errors (return <= 0): stdout/stderr output is
 /// best-effort and there is no error channel to report through.
 fn write_all(fd: c_int, mut ptr: *const u8, mut len: usize) {
@@ -77,7 +77,7 @@ fn write_all(fd: c_int, mut ptr: *const u8, mut len: usize) {
     }
 }
 
-/// Runtime backing for the `print` builtin (I-006): write the viewed
+/// Runtime backing for the `print` builtin: write the viewed
 /// bytes to stdout. No added newline, no formatting — print policy is
 /// a spec-level decision, not a runtime one.
 ///
@@ -93,9 +93,8 @@ pub unsafe extern "C" fn ryo_print(ptr: *const u8, len: u64) {
     write_all(STDOUT_FD, ptr, len as usize);
 }
 
-/// Runtime backing for `__ryo_panic` (panic/assert, I-006): write the
-/// sema-formatted message to stderr and exit 101. Replaces the
-/// codegen-synthesized `__ryo_panic` function.
+/// Runtime backing for `__ryo_panic` (panic/assert): write the
+/// sema-formatted message to stderr and exit 101.
 ///
 /// # Safety
 /// `ptr` must point to `len` readable bytes. Never returns.

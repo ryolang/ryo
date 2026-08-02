@@ -2204,7 +2204,7 @@ impl<M: Module> Codegen<M> {
         let name_id = view.name;
         let name_str = ctx.pool.str(name_id);
 
-        // print and __ryo_panic are ordinary runtime calls (I-006). They
+        // print and __ryo_panic are ordinary runtime calls. They
         // do NOT use the str-triple expansion that user functions use.
         if name_str == "__ryo_panic" {
             // __ryo_panic(ptr, len) keeps its raw scalar ABI — the StrConst
@@ -2232,7 +2232,7 @@ impl<M: Module> Codegen<M> {
         }
 
         if name_str == "print" {
-            // print is an ordinary runtime call (I-006). Accepts either
+            // print is an ordinary runtime call. Accepts either
             // repr — owned str triple or strview pair; ryo_print(ptr,
             // len) only needs the viewed bytes.
             debug_assert_eq!(

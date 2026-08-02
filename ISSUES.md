@@ -16,23 +16,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 ## 🟡 Correctness / Hygiene
 
-### I-006 — `print` is special-cased in codegen
-
-**Files:** `ryo-backend/src/codegen.rs` (`generate_print_call`), `ryo-frontend/src/sema.rs` (`check_builtin_call`)
-**Summary:** Codegen emits a raw `write(2)` syscall wrapper inline for the `print` builtin, and sema has a builtin-specific validator hook to match. Consequences:
-
-- Rejects `print(some_var)` even when the variable is a string.
-- No formatting, no automatic newline.
-- Already stubbed out on Windows (`return Err(...)`).
-- Mixes runtime concerns into the compiler.
-**Resolution:** Move `print` to a runtime crate (`ryort` or similar) compiled to an object file and linked in via `zig cc`. Codegen emits a normal call; `sema::check_builtin_call` goes away.
-
-### I-010 — Unused `_bytes_written` from `write(2)` call
-
-**Files:** `ryo-backend/src/codegen.rs` (`generate_print_call`)
-**Summary:** The result of the `write` syscall is fetched and ignored. A short write or `EINTR` will silently truncate output. Acceptable for a bootstrap, but should be documented or fixed when `print` moves to the runtime (I-006).
-**Resolution:** Tracked under I-006.
-
 ### I-014 — Lexer errors bypass `DiagSink`
 
 **Files:** `ryo-frontend/src/lexer.rs` (`LexError`), `ryo-driver/src/pipeline.rs` (`parse_source`, `display_tokens`)
@@ -214,14 +197,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Files:** `ryo-backend/src/codegen.rs`
 **Summary:** Currently, `for-range` loops have bespoke code generation that manually emits basic blocks, jump instructions, and raw counter increments. When general iterators are added, loops should be desugared during the AST-to-UIR phase into standard `while` loops that call `.next()`.
 **Resolution:** Once iterators land, remove the `generate_for_range` codegen entirely and rely on standard `while` codegen to emit loops.
-
-### I-043 — Migrate `ryo-runtime` to `#![no_std]`
-
-**Files:** `runtime/src/lib.rs`, `runtime/Cargo.toml`, `ryo-backend/src/linker.rs`
-**Summary:** The runtime staticlib only uses `std::alloc`, `std::process::abort()`, and `eprintln!`, yet linking against precompiled `std` bundles objects with `_Unwind_*` symbol references. This forces the linker to pass `-lunwind` on Linux (workaround in `ryo-backend/src/linker.rs`). Migrating to `#![no_std]` with `extern crate alloc` eliminates the dependency entirely.
-**Resolution:** Replace `std::alloc` with `alloc::alloc` (identical API). Replace `eprintln!` + `process::abort()` with `extern "C" { fn abort() -> !; }`. Add `#[panic_handler]` that aborts. Keep the `rlib` crate-type for `cargo test` via a `#[cfg(test)]` std gate. `ryu` already supports `no_std`. Benefits: smaller archive, faster link times, no hidden unwind dependency, simpler cross-compilation.
-
-**Note:** `no_std` scopes only the core floor; OS-backed modules (`net`/`fs`/`time`) are linked on reachability, not forced into `no_std` — see `docs/dev/built_in.md` (`no_std` scope).
 
 ### I-045 — Loop fixed-point uses a scratch sink and re-walks the body to suppress duplicates
 
