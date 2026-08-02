@@ -26,7 +26,10 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.1 — Heap-Allocated `str` Type & Move Semantics [alpha]](#milestone-81-heap-allocated-str-type--move-semantics-alpha--complete) ✅
 - [x] [Milestone 8.2 — Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE](#milestone-82-implicit-borrow-liveness--ownership-pass-refactors-alpha--complete)
 - [x] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha] ✅ COMPLETE](#milestone-83-mutable-borrows-inout-alpha--complete)
-- [ ] [Milestone 8.4 — String Slices (`&str`) [alpha]](#milestone-84-string-slices-str-alpha)
+- [x] [Milestone 8.4 — String Slices (`strview`) [alpha] ✅ COMPLETE](#milestone-84-string-slices-strview-alpha--complete)
+- [x] [Milestone 8.4.1 — `strview` Spelling & View→`str` Re-borrow [alpha] ✅ COMPLETE](#milestone-841-strview-spelling--viewstr-re-borrow-alpha--complete)
+- [x] [Milestone 8.4.1.2 — View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE](#milestone-8412-view-materialization-strview--w0003-alpha--complete)
+- [ ] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha]](#milestone-842-bytes-type--bytesview-alpha)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
 - [ ] [Milestone 9.1 — Synthesized Eq & Debug for Structs](#milestone-91-synthesized-eq--debug-for-structs)
@@ -39,7 +42,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 
 - [ ] [Milestone 16 — Optional Types (`?T`) [alpha]](#milestone-16-optional-types-t-alpha)
 - [ ] [Milestone 17 — Method Implementations](#milestone-17-method-implementations)
-- [ ] [Milestone 21 — Array Slices (`&[T]`)](#milestone-21-array-slices-t)
+- [ ] [Milestone 21 — Array Slices (`slice[T]`)](#milestone-21-array-slices-slicet)
 - [ ] [Milestone 22 — Collections (List, Map)](#milestone-22-collections-list-map)
 - [ ] [Milestone 23 — RAII & Drop (Compiler Intrinsic)](#milestone-23-raii--drop-compiler-intrinsic)
 
@@ -56,6 +59,22 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 ### Phase 5: Post-v0.1.0 Extensions (v0.2+)
 
 Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Try/Catch, F-strings, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, etc.).
+
+**From the final slicing & memory-model spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md` §14) and the gap register (`docs/dev/ryo-missing-features-and-gaps.md`):**
+
+| Item | Target | Notes |
+|------|--------|-------|
+| `sbytes` (ARC buffer, slicing, COW warnings) | v0.2–v0.3 | D3; needs `shared[T]` atomic-refcount runtime |
+| Runtime profile split (`core`/`hosted`, `--profile=core`) | v0.2 | D9; stdlib layering, no backend changes |
+| Bounded operator overloading (`Add`… traits) | v0.2–v0.3 | D10; concrete types first, generic traits with user generics |
+| `unsafe` policy implementation (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | D4; lands with FFI/unsafe work |
+| Volatile MMIO intrinsics | v0.2 | GAP-3; `core` profile intrinsic package |
+| `#[repr(packed)]` | v0.2 | GAP-4; rides with FFI |
+| Scoped task borrows + stdlib `par_*` | v0.4 | D5; concurrency runtime |
+| Context propagation & cancellation deadlines | v0.4 | GAP-1; must land **with** the scheduler (see `ryo-context-and-otel-proposal.md`) |
+| Binary pattern matching (if adopted) | post-v0.4 | deferred; stdlib parser facility first |
+| GUI Phase 1 (immediate-mode toolkit PoC) | post-v0.2 | ecosystem, not language; D4 + `ryo-bindgen` |
+| `yield` subroutines | separate RFC | measured re-entry condition only (final spec §11.4) |
 
 ---
 
@@ -108,7 +127,7 @@ Full alpha definition, litmus test, non-goals, release tagging, and gating test 
 - Comments handled correctly (skipped from token stream)
 - Comprehensive test suite covers edge cases (keyword keyword-as-part-of-identifier distinction, comment handling, etc.)
 - CLI tested with realistic Ryo code samples
-- **Design Decision:** Struct literals use parentheses with named arguments `Point(x=1, y=2)`, not braces. Curly braces are reserved exclusively for f-string interpolation (e.g., `f"Hello {name}"`) which will be implemented in later milestones.
+- **Design Decision (amended by D11, 2026-07-22):** Struct literals use brace construction `Point{x=1, y=2}` — the Brace Law (final spec §10). ~~Original: parentheses with named arguments; braces reserved for f-string interpolation.~~
 
 ### Milestone 2: Parser & AST Basics [alpha] ✅ COMPLETE
 
@@ -150,8 +169,7 @@ Full alpha definition, litmus test, non-goals, release tagging, and gating test 
 **Design Decisions:**
 
 - Full rewrite approach for cleaner AST foundation
-- Struct literals use named arguments: `Point(x=1, y=2)` (not braces)
-- Curly braces reserved for f-string interpolation (future milestone)
+- Struct literals use brace construction: `Point{x=1, y=2}` (amended by D11 — was parens)
 - Supports both explicit type annotations and implicit type inference
 - Expression initializers support full arithmetic expressions
 
@@ -945,7 +963,7 @@ fn main():
 
 ### Milestone 8.1: Heap-Allocated `str` Type & Move Semantics [alpha] ✅ COMPLETE
 
-**Goal:** Promote string literals from read-only data to a real heap-allocated `str` type, introduce the ownership-tracking pass that catches use-after-move on named bindings, and land the **implicit immutable borrow** for function parameters (spec Rule 2) together with the **`move` keyword** that opts into ownership transfer (spec Rule 4). Explicit `&T` / `inout T` borrow syntax and string slices (`&str`) follow in M8.2–M8.4.
+**Goal:** Promote string literals from read-only data to a real heap-allocated `str` type, introduce the ownership-tracking pass that catches use-after-move on named bindings, and land the **implicit immutable borrow** for function parameters (spec Rule 2) together with the **`move` keyword** that opts into ownership transfer (spec Rule 4). Explicit `&T` / `inout T` borrow syntax and string slices (`strview`) follow in M8.2–M8.4.
 
 **Status:** ✅ COMPLETE
 
@@ -1038,7 +1056,7 @@ fn main():
 
 ### Milestone 8.2: Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE
 
-**Goal:** Implement implicit borrow liveness tracking (under Rule 2) and major ownership-pass architectural refactors, enabling safe multi-phase borrow evaluation and preventing moves while borrowed in calls (E0023).
+**Goal:** Implement implicit borrow liveness tracking (under Rule 2) and major ownership-pass architectural refactors, enabling safe multi-phase borrow evaluation and preventing moves while borrowed in calls (E0031).
 
 **Status:** ✅ COMPLETE (2026-07-11)
 
@@ -1049,7 +1067,7 @@ fn main():
 - Restructure ownership state tracking: replace `named_owners` with a unified two-part classifier (`owner_is_named` and `owner_underlying`) based strictly on instruction classification.
 - Unify parameter modes: introduce `ParamMode` to represent the compile-time ABI contract (borrow vs. move) in the TIR ABI registry and codegen, eliminating string-matching hacks like `__ryo_panic`.
 - Refactor the ownership walker structure: extract common loop processing logic to a shared loop-body helper, and optimize branch/loop analysis to deep-clone only mutable state fields rather than the full `Ownership` struct.
-- Prevent move-while-borrowed-in-calls (E0023): implement safe multi-phase call argument evaluation, ensuring arguments are not moved if they have active/pending borrows in other parameters within the same call.
+- Prevent move-while-borrowed-in-calls (E0031): implement safe multi-phase call argument evaluation, ensuring arguments are not moved if they have active/pending borrows in other parameters within the same call.
 
 **Visible Progress:** Robust dataflow analysis with correct implicit borrow-liveness, automatic resource tracking, and compilation errors for invalid use-after-move or move-while-borrowed actions in multi-argument call structures.
 
@@ -1068,7 +1086,7 @@ fn main():
  # Implicitly borrowed (Rule 2) here since it is read but its lifetime continues
  print_message(msg)
  
- # E0023 compile error: cannot move 'msg' into 'consume_and_print' while it's also implicitly borrowed
+ # E0031 compile error: cannot move 'msg' into 'consume_and_print' while it's also implicitly borrowed
  consume_and_print(msg, msg)
 ```
 
@@ -1121,46 +1139,166 @@ fn main():
 - Rule 7 exclusion builds on M8.2's intra-call borrowed/moved partition (`ryo-frontend/src/ownership.rs`); edge cases to be documented in the M8.3 design doc
 - Dependencies: Milestone 8.2 (intra-call borrowed/moved partition and `ParamMode` plumbing that `inout` extends)
 
-### Milestone 8.4: String Slices (`&str`) [alpha]
+### Milestone 8.4: String Slices (`strview`) [alpha] ✅ COMPLETE
 
-**Goal:** Borrowed views into `str` — zero-copy substrings and string parameters.
+**Goal:** Borrowed views into `str` — zero-copy substrings and read-only string parameters.
+
+**Status:** ✅ COMPLETE (2026-07-26)
+
+**What was implemented:**
+
+- `strview` as a first-class read-only view type (`{ptr, len}`, 16 bytes), per the final slicing spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md`, D1). Slice expressions `s[start:end]`, `s[start:]`, `s[:end]`, `s[:]` yield `strview`; bounds are `int`, checked at creation (out-of-range, reversed ranges `start > end`, and non-UTF-8-boundary all panic). Views are unified behind `TypeKind::View(ViewKind)` — `strview` today, `slice[T]`/`bytesview` reserved.
+- `strview` parameters are the preferred read-only string convention (§3.4); passing an owned `str` to a `strview` parameter triggers the implicit view conversion (`str → strview` drops `cap`). `inout strview`, `move strview`, and `-> strview` are rejected (E1/E2).
+- Projection rules P1–P6 in the ownership pass: freeze of the owner while any slice is live (`SourceProjected`, E0035), transitive re-slicing, last-use projection lifetimes (P4 lift), and P5-deferred owner destruction. Escapes diagnose on two levels: `-> strview` signatures are rejected in sema as Rule-5 type errors (E0022 `ReturnBorrowedValue`); body-level ownership violations — returning a view value, passing a view to a `move` parameter — report `ViewEscape` (E0034) from the ownership pass.
+- Builtin read-only string consumers accept views: `print`, `.len()`, `.is_empty()`, `==`.
+- Hardening landed alongside: deterministic `free_schedule` emission (I-068), the sweep-coverage assertion for anchored frees (I-070), `TirRef::is_param`/`as_param_index` guards (I-072), the E-code stability test + roadmap E-number fixes (I-086), full-tuple loop fixed-point convergence (I-087), the examples parse sweep + Examples CI (I-101), and `__ryo_str_push`'s `suffix_len: u64` (I-105).
+- **M8.4.1:** views pass to `str` params via `cap=0` re-borrow; `&str` renamed `strview` (Q5).
+
+**Visible Progress:** `fn f(text: strview)` read-only string parameters work with zero copies; `s[a:b]` slicing, re-slicing, and shorthand forms compile and run; the owner stays usable while views are live and is freed exactly once after they end. String parsing and tokenization no longer require copying.
+
+**Example:**
+
+```ryo
+fn print_first_word(text: strview):
+	mut i: int = 0
+	while i < text.len():
+		if text[i:i+1] == " ":
+			print(text[0:i])  # slice into text, no copy
+			return
+		i += 1
+	print(text)
+
+fn main():
+	s: str = "hello world"
+	print_first_word(s)      # s borrowed implicitly as strview — prints "hello"
+	print(s)                 # ok — s still owned
+```
+
+**Implementation Notes:**
+
+- `strview` is a **borrowed view** (immutable, fixed-length); the owning `str` remains the source of truth and is frozen against moves/mutation while any view is live (P2), with the freeze lifting at the view's last use (P4).
+- Views are non-escaping (Rule 5): they cannot be returned, passed to `move` parameters, or stored past the current function — so `first_word`-style helpers print or otherwise consume the slice in place rather than returning it. See `examples/string_slices.ryo`.
+- UTF-8 validity is checked at slice creation, not on every read — so iteration is allocation-free.
+- Array slices `slice[T]` are **not** included here; they ship in M21 alongside list literal syntax. `TypeKind::View(ViewKind)` already reserves their representation.
+- Dependencies: Milestone 8.2 (immutable borrows provide the reference machinery), Milestone 8.3 (explicit borrow syntax)
+
+### Milestone 8.4.1: `strview` Spelling & View→`str` Re-borrow [alpha] ✅ COMPLETE
+
+**Goal:** Resolve final-spec Q5 (the view-type spelling) and let views flow into ordinary `str` parameters without a copy.
+
+**Status:** ✅ COMPLETE (2026-07-26)
+
+**What was implemented:**
+
+- The view type is spelled `strview` (final spec Q5 — RESOLVED); `bytesview` / `slice[T]` follow the same word family. `&` remains exclusively the `inout` call-site marker; legacy `&str` in type position is a targeted migration error: "`&str` was renamed to `strview` (final spec Q5)".
+- Views pass to ordinary `str` parameters via a `cap=0` re-borrow (`TirTag::ViewAsStr`): no allocation, call-scoped — exactly like a string literal (final spec §3.2, P6'). The binding form `x: str = view` stays an error (E0012), and `move str` parameters still reject views.
+- Docs migrated to the new spelling: final spec (Q5, §3), base spec (§4.4), this roadmap, the landing reference, and `examples/string_slices.ryo`.
+
+**Visible Progress:** read-only helpers keep plain `s: str` signatures and accept owned strings and views alike with zero copies; code still spelling the view type `&str` fails with a diagnostic that names the fix.
+
+**Example:**
+
+```ryo
+fn show(s: str):
+	print(s)
+
+fn first_word(text: strview):
+	mut i: int = 0
+	while i < text.len():
+		if text[i:i+1] == " ":
+			show(text[0:i])   # view re-borrows into the str param — no copy
+			return
+		i += 1
+	show(text)
+
+fn main():
+	s: str = "hello world"
+	first_word(s)           # str → strview: implicit view conversion
+	show(s[0:2])            # strview → str: cap=0 re-borrow — prints "he"
+```
+
+**Implementation Notes:**
+
+- The re-borrow manufactures a temporary `str` header with `cap=0` over the view's bytes (`TirTag::ViewAsStr`) — no allocation, valid for the duration of the call only.
+- Dependencies: Milestone 8.4 (view type, projection machinery)
+
+### Milestone 8.4.1.2: View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE
+
+**Goal:** Close the escape story for views: `str(view)` produces an owned `str` copy of a `strview` (allocates + copies), and a new warning flags materializations that buy nothing. Per the decision record (`docs/dev/ryo-view-materialization.md`, spelling decided 2026-08-01) and final spec §3.4.1.
+
+**Status:** ✅ COMPLETE (2026-08-02)
+
+**What was implemented:**
+
+- `str(view)` as a sema-intercepted call-form builtin (no parser change — `str` is not a keyword). Type rule: the argument must be `strview`; anything else, including an owned `str`, is E0012 TypeMismatch — there is no `str(owned)` clone form. The result is an ordinary str-returning call to the runtime builtin `ryo_str_from_view`, so the copy is a fresh owner by construction (`{ptr, len, cap=len}` — allocates, memcpys, independent of the source buffer).
+- Binding rule changes exactly here: `x: str = str(view)` is legal (fresh owner); `x: str = view` stays E0012. The compiler never materializes implicitly; the M8.4.1 re-borrow (P6') is unaffected — free, call-scoped.
+- Warning **W0003 `RedundantMaterialize`** in two shapes: (A) a materialize call in an argument position the `cap=0` re-borrow already serves (borrowed `str` parameter or a view-accepting builtin) — not fired for `move`/`inout` parameters; (B) a bound materialize result that never escapes while the view's root owner is never moved, mutated, or `inout`-passed afterward (the defensive-copy exception). Heuristic and conservative: when unsure, no warning.
+- Docs: final spec §3.4.1, base spec §4.4, this roadmap, the landing reference, and the refreshed decision record.
+
+**Visible Progress:** `fn first(text: strview) -> str: return str(text)` compiles — the E0034 escape fix is one explicit, greppable call — and redundant copies are flagged instead of silently allocating.
+
+**Example:**
+
+```ryo
+fn first(text: strview) -> str:
+	return str(text)        # owned copy escapes — no W0003
+
+fn show(s: str):
+	print(s)
+
+fn main():
+	mut s: str = "hello"
+	x: str = str(s[0:2])    # fresh owner; the binding is legal
+	str_push(&s, "!")       # source mutated after the copy — defensive, no W0003
+	show(str(s[0:1]))       # W0003: the re-borrow covers this call site for free
+	print(x)                # he — unaffected by the push
+```
+
+**Implementation Notes:**
+
+- The e2e test proves the copy is deep: materialize, then mutate the original — the copy is unaffected.
+- Out of scope (deferred): `bytes(bview)` (ships with M8.4.2), `slice[T]` materialization (M21), the `Clone` trait and the trait-forward resolution hook (trait milestone — `str(view)` will resolve through a converting-initializer protocol, call sites unchanged), and a machine-applicable E0034 suggestion (needs Diag suggestion-payload machinery that doesn't exist — belongs with the agent-interface milestone).
+- Dependencies: Milestone 8.4.1 (re-borrow, view machinery)
+
+### Milestone 8.4.2: `bytes` Type & `bytesview` [alpha]
+
+**Goal:** An owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` — plus its read-only projection, filling the gap where `list[u8]` is the only (awkward) option. Per the final slicing spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md`, D2).
 
 **Status:** ⏳ Planned
 
 **Tasks:**
 
-- Recognize `&str` as a fat pointer (ptr + len) borrowed from a `str`
-- Parse the slice operator on strings: `s[start:end]`
-- Codegen:
-  - Slice representation (pointer + length)
-  - UTF-8 boundary check at slice creation (panic on invalid boundary)
-  - Bounds check at runtime (panic on out-of-range)
-- Update standard library and method receivers to prefer `&str` for read-only string parameters
+- `bytes` as a new fundamental type: fat pointer `{ ptr, len, cap }`, move semantics, mutability by binding; parameters borrow by default; `inout`/`move` as usual (ownership rules identical to `str`)
+- Bytes literal `b"\x00\x01"`; `bytes.from_list([0x01, 0x02, 0x03])` construction
+- Slicing `raw[start:end]` yields `bytesview` — a projection governed by the D1 rules (P1–P6, E1–E4) with **no** UTF-8 boundary check (bytes are not text); bounds check at creation, panics
+- `bytesview` activates `TypeKind::View(ViewKind::Bytes)` (slot reserved since M8.4's Task 10.1); generalize `TirTag::ViewOfStr` → owner→view conversion per the `owner_view` table
+- Scalar indexing `b[i]` **is** allowed on `bytes` (unlike `str` — no UTF-8 hazard), yielding `u8`
+- Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated, `try`-able) and `text.to_bytes() -> bytes` (owned copy)
+- `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`)
+- Buffer building via the builder idiom: `bytes.builder().u8(v).u16_be(n).bytes(b).build()` (`move self -> Self` chaining, spec §5.2.1)
+- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice mirroring the `str` ABI; memory fixtures for both JIT and AOT (ASan/Valgrind)
 
-**Visible Progress:** Functions like `first_word(text: &str) -> &str` work. String parsing and tokenization no longer require copying.
+**Visible Progress:** Protocol/binary code reads and slices raw buffers zero-copy; text bridging is explicit and error-checked.
 
 **Example:**
 
 ```ryo
-fn first_word(text: &str) -> &str:
- for i in range(0, text.len()):
-  if text[i] == ' ':
-   return text[0:i]      # slice into text, no copy
- return text
-
 fn main():
- s: str = "hello world"
- word = first_word(&s)         # word: &str borrowed from s
- print(word)                   # "hello"
- print(s)                      # ok — s still owned
+	raw = bytes.from_list([0x01, 0x02, 0x03])
+	header = raw[0:2]             # bytesview — projection, no copy
+	print(int_to_str(header[0]))  # 1
+
+	text = try raw.to_str()       # Utf8Error!str — UTF-8 validated
+	raw2 = text.to_bytes()        # owned copy
 ```
 
 **Implementation Notes:**
 
-- `&str` is a **borrowed view** (immutable, fixed-length); the owning `str` remains the source of truth
-- UTF-8 validity is checked at slice creation, not on every read — so iteration is allocation-free
-- Array slices `&[T]` are **not** included here; they ship in M21 alongside list literal syntax
-- Dependencies: Milestone 8.2 (immutable borrows provide the reference machinery), Milestone 8.3 (explicit borrow syntax)
+- The projection machinery is shared with `strview` (M8.4): same root-owner side tables, P2 freeze, P5 deferral; only the UTF-8 boundary check is `strview`-specific
+- `sbytes` (shared-backed, escaping) is **not** part of this milestone — it ships with `shared[T]` machinery (v0.2–v0.3, final spec §5)
+- `str` indexing remains forbidden (spec §4.7); `b[i]` applies to `bytes` only
+- Mutable view types remain rejected (final spec §12); mutable sub-ranges use `inout` + range parameters (Q4)
+- Dependencies: Milestone 8.4 (projection machinery, `TypeKind::View(ViewKind)`, slice codegen)
 
 ### Milestone 8.5: Default Parameters & Named Arguments
 
@@ -1247,7 +1385,7 @@ print("hello", "")          # compile error — end is keyword-only
 
 **Implementation Notes:**
 
-- Struct literal syntax `Point(x=1, y=2)` and function named args `f(x=1)` use identical `name=value` grammar — the parser doesn't need to distinguish them at parse time, resolution happens during lowering
+- Struct construction `Point{x=1, y=2}` (D11 braces) and function named args `f(x=1)` share the `name=value` grammar inside their delimiters — the parser distinguishes them by delimiter (`{}` vs `()`), resolution happens during lowering
 - No function overloading in Ryo, so defaults don't create ambiguity
 - Languages analyzed: Go (no defaults — too limiting), Rust (no defaults — relies on builders/traits Ryo lacks), Python (`*` separator — good but `_` is cleaner), Swift (named by default — best fit for Ryo)
 - Dependencies: Milestone 8 (control flow for conditional default handling), Milestone 7 (comparison operators)
@@ -1272,7 +1410,7 @@ print("hello", "")          # compile error — end is keyword-only
    y: float
   ```
 
-- Parse struct literals with parentheses: `Point(x=1.0, y=2.0)`
+- Parse struct literals with braces: `Point{x=1.0, y=2.0}` (the Brace Law, D11)
 - Parse field access: `point.x`, `point.y`
 - Extend type system:
   - Track struct definitions in symbol table
@@ -1297,7 +1435,7 @@ fn area(rect: Rectangle) -> float:
  return rect.width * rect.height
 
 fn main():
- r = Rectangle(width=10.0, height=5.0)
+ r = Rectangle{width=10.0, height=5.0}
  a = area(r)
 ```
 
@@ -1307,8 +1445,7 @@ fn main():
 - Default layout is **unspecified** — the compiler may reorder fields to minimize padding (source-invisible; field access is by name). `#[repr(C)]` opts into declaration-order C layout (added in Milestone 9.1, consumed by FFI in v0.2)
 - No default values for fields (all must be initialized)
 - No methods yet (added in Milestone 17)
-- Parentheses with named arguments used for struct literals: `Point(x=1, y=2)`, reuses `name=value` parsing infrastructure from Milestone 8.5
-- Braces reserved exclusively for f-string interpolation
+- **D11 (final spec §10):** struct literals use brace construction — `Point{x=1, y=2}` — per the Brace Law (braces group by name; construction is visibly distinct from calls). The named-argument grammar for *calls* still comes from Milestone 8.5; braces are no longer reserved exclusively for f-string interpolation
 - Dependencies: Milestone 4 (functions for passing structs), Milestone 8.5 (named argument parsing)
 
 ### Milestone 9.1: Synthesized Eq & Debug for Structs
@@ -1321,7 +1458,7 @@ fn main():
 
 - Parse one-off attributes on struct definitions: `#[derive(Eq)]`, `#[repr(C)]` (the general attribute system formalizes at Milestone 26)
 - **Debug (always-on):** synthesize a debug string for every struct
-  - Format mirrors the literal syntax: `Point(x=1.0, y=2.0)`, fields in declaration order
+  - Format mirrors the literal syntax: `Point{x=1.0, y=2.0}`, fields in declaration order
   - Recursive: nested structs render through their own Debug
   - Extend `print()` to accept any struct value via this path
   - Lazy emission: generate Debug code only for structs that are actually printed (no bloat)
@@ -1344,9 +1481,9 @@ struct Point:
  y: float
 
 fn main():
- p = Point(x=1.0, y=2.0)
- print(p)                          # "Point(x=1.0, y=2.0)" — always-on Debug
- print(p == Point(x=3.0, y=4.0))   # false — enabled by #[derive(Eq)]
+ p = Point{x=1.0, y=2.0}
+ print(p)                          # "Point{x=1.0, y=2.0}" — always-on Debug
+ print(p == Point{x=3.0, y=4.0})   # false — enabled by #[derive(Eq)]
 ```
 
 **Implementation Notes:**
@@ -1356,53 +1493,45 @@ fn main():
 - Enums (M11) get the same derive/Debug treatment as a follow-up; out of scope here
 - Dependencies: Milestone 9 (structs)
 
-### Milestone 10: Tuples
+### Milestone 10: Tuples (Tuple Sugar over Anonymous Structs)
 
-**Goal:** Implement tuple types for multiple return values and grouping
+**Goal:** Ad-hoc grouping and multiple return values via the single grouping type adopted in D11
 
-> **Decision Review (before implementation):** Reconsider whether this milestone ships a distinct tuple *type* at all. Candidate direction (preferred as of 2026-07): **remove tuples and use anonymous structs** — Zig's model — both for structural grouping and for wrapping multi-value returns (wrapped struct return, not a Go-style multi-return convention). Rationale: one product-type mechanism (simplicity goal), no second ABI/ownership path, kills the positional swap-bug class (`(int, str)` vs `(str, int)`), and error unions (`!T`, M13) absorb the main tuple use case. Cost: loses the Python-familiar `(a, b)` literal/unpack syntax; needs spec edits (`specification.md` literal list, "return single value (can be tuple)") and deletes the `types.rs` tuple interning stubs. Cheap to decide now, expensive after M10/M12 land — revisit here before starting.
+> **Decision (adopted 2026-07-22, final spec §10, D11):** This milestone's Decision Review is **resolved**. Ryo has exactly one ad-hoc grouping type — the **anonymous struct** (`{x=1, y=2}`, type literal `{q: int, r: int}`) — and tuples are **positional sugar** over it: `(17, "alice")` ≡ `{0=17, 1="alice"}`, keeping the Python-familiar surface (literal, `(q, r) = divmod(...)` unpacking, `pair.0` access, `(x,)` trailing comma). There is no separate tuple type, ABI, or ownership path. Named-struct construction moves to braces (`Point{x=1, y=2}` — the Brace Law), as do named enum payloads (`Variant{field=value}`); positional enum payloads keep parens. Identity is structural, exact-match only; no implicit coercion to named types. `{}` stays reserved for the future empty map literal. This milestone folds into **Milestone 9** (shared construction/layout machinery — anonymous structs need no declarations or defaults); what remains here is only the **sugar layer** (parser forms + destructuring), estimated far smaller than a standalone tuple type.
+>
+> ~~Candidate direction (superseded): remove tuples and use anonymous structs — Zig's model~~ — D11 adopted the sugar-preserving variant of this direction instead of dropping the Python syntax.
 
 **Tasks:**
 
-- Add tuple syntax to lexer/parser
-- Extend type system: `Type::Tuple(Vec<Type>)`
-- Parse tuple type annotations: `(int, str)`
-- Parse tuple literals: `(42, "hello")`
-- Parse tuple destructuring:
+- Parse anonymous-struct value literals `{x=1, y=2}` and type literals `{q: int, r: int}` (folds into M9's construction/layout machinery)
+- Parse the tuple sugar forms: `(v1, v2, ...)` literals ≡ positional fields `"0"`, `"1"`, ...; `(x,)` trailing comma; positional type annotations `(int, str)` ≡ `{0: int, 1: str}`
+- Parse destructuring: positional `(q, r) = f()` (paren-less allowed), named punning `{q, r} = f()`, rename `{x = quot} = f()`
+- Type system: structural identity, exact match only (no subtyping/width rules); no implicit coercion to named structs
+- Codegen: reuse M9 struct layout for `{...}` values; positional access `pair.0`; destructuring in assignments
+- Write tests: anonymous literals, sugar round-trips (`(17, "a")` ≡ `{0=17, 1="a"}`), destructuring forms, match patterns `{x=0, y=_}` / `(0, _)`, structural mismatch errors
 
-  ```ryo
-  (x, y) = get_point()
-  ```
-
-- Extend Codegen: Generate IR for:
-  - Tuple construction (stack allocation)
-  - Tuple field access by index
-  - Tuple destructuring in assignments
-- Write tests for tuple types, literals, and destructuring
-
-**Visible Progress:** Can return multiple values from functions and destructure them
+**Visible Progress:** Functions return multiple values with self-documenting or Python-familiar syntax
 
 **Example:**
 
 ```ryo
-fn divmod(a: int, b: int) -> (int, int):
- quotient = a / b
- remainder = a % b
- return (quotient, remainder)
+fn divmod(a: int, b: int) -> {q: int, r: int}:
+ return {q=a / b, r=a % b}
 
 fn main():
- (q, r) = divmod(10, 3)
- # q = 3, r = 1
+ (q, r) = divmod(10, 3)       # positional sugar
+ {x = quot} = divmod(10, 3)   # named rename
+ pair = (17, "alice")         # ≡ {0=17, 1="alice"}
+ # q = 3, r = 1, quot = 3
 ```
 
 **Implementation Notes:**
 
-- Tuples are **anonymous structs** (no named fields)
-- Fixed size (known at compile time)
-- Can be nested: `((int, int), str)`
-- Tuple indexing syntax deferred (use destructuring for now)
-- Tuples are **moved** like structs (ownership)
-- Dependencies: Milestone 9 (structs provide foundation)
+- One grouping type only (D11): no separate tuple type, ABI, or ownership path; `Type::Tuple` interning stubs in `types.rs` are removed or repurposed
+- `void` remains the unit type (there is no empty anonymous struct; `{}` is reserved for the future empty map literal)
+- Lint: anonymous structs returned from public functions of other packages get a "consider naming this shape" style lint (tooling, not semantics)
+- Match patterns accept both forms: `{x=0, y=_}` and `(0, _)`
+- Dependencies: Milestone 9 (anonymous structs share the struct machinery)
 
 ### Milestone 11: Enums (Algebraic Data Types) [alpha]
 
@@ -1595,7 +1724,7 @@ fn main():
 > - **Milestone 8.1** — heap-allocated `str` type and move tracking
 > - **Milestone 8.2** — immutable borrows `&T`
 > - **Milestone 8.3** — mutable borrows `inout`
-> - **Milestone 8.4** — string slices `&str`
+> - **Milestone 8.4** — string slices `strview`
 >
 > Closure capture analysis (originally Milestone 15.5) is **deferred to v0.2** — see Phase 5: Closures & Lambda Expressions.
 
@@ -1717,18 +1846,18 @@ fn main():
 
 > **Note:** Milestone 20 (Mutable Borrows) has been **moved to Milestone 8.3** — see Phase 2.
 
-### Milestone 21: Array Slices (`&[T]`)
+### Milestone 21: Array Slices (`slice[T]`)
 
-**Goal:** Borrowed views into arrays — zero-copy iteration over sub-ranges. (String slices `&str` are planned in M8.4.)
+**Goal:** Borrowed views into arrays — zero-copy iteration over sub-ranges. (String slices `strview` are planned in M8.4.)
 
 **Tasks:**
 
 - Add `[T]` array literal syntax to lexer/parser: `[1, 2, 3]`
-- Extend type system: `Type::Slice(Box<Type>)` for array slices `&[T]` and `inout [T]`
+- Extend type system: `Type::Slice(Box<Type>)` for array slices `slice[T]` and `inout [T]`
 - Parse slice operations on arrays:
   - `array[start:end]` — partial slice
   - `array[:]` — full slice
-  - `&array[1:4]` — slice borrow (mutability determined by the parameter type: `&[T]` vs `inout [T]`)
+  - `array[1:4]` — slice value (view kind determined by the parameter type: `slice[T]` vs `inout [T]`)
 - Codegen:
   - Slice representation (pointer + length, fat pointer)
   - Bounds checking at runtime (panic on out-of-range)
@@ -1739,7 +1868,7 @@ fn main():
 **Example:**
 
 ```ryo
-fn sum_slice(numbers: &[int]) -> int:
+fn sum_slice(numbers: slice[int]) -> int:
  mut total = 0
  for n in numbers:
   total += n
@@ -1747,13 +1876,13 @@ fn sum_slice(numbers: &[int]) -> int:
 
 fn main():
  nums = [1, 2, 3, 4, 5]
- total = sum_slice(&nums[1:4])    # pass slice [2, 3, 4]
+ total = sum_slice(nums[1:4])    # pass slice [2, 3, 4]
  print(int_to_str(total))         # 9
 ```
 
 **Implementation Notes:**
 
-- Array slices are **fat pointers** (pointer + length); the same representation `&str` already uses
+- Array slices are **fat pointers** (pointer + length); the same representation `strview` already uses
 - Bounds checking at runtime; out-of-range slicing panics
 - `[T]` array literals create stack-allocated fixed-size arrays in v0.1; growable `list[T]` lands in M22
 - Dependencies: Milestone 8.2 (immutable borrows), Milestone 8.3 (`inout [T]` slices)
@@ -1817,6 +1946,8 @@ fn main():
 - **Copy-on-write at the buffer level** — `list[T]`, `map[K, V]`, and `str` are class-backed but present value semantics to the user. A mutating method checks the backing buffer's refcount; if > 1, it clones the buffer first. This is the Swift collection model (`Array`, `Dictionary`, `String`) and is the prerequisite for `shared[T]`'s performance story (spec 5.6).
 - **ARC optimizer pass** ([arc_optimizer.md](arc_optimizer.md)) must land alongside or shortly after this milestone. Without retain/release elision, every collection access in shared-state code pays atomic refcount cost. Sequencing: design and prototype the pass during this milestone; commit it before any benchmark publication.
 - Dependencies: Milestone 8.3 (`inout` for append/remove), Milestone 21 (array slices for iteration)
+- **String iteration (sequencing, with spec §4.7):** `char` (§4.2, Unicode scalar value) lands first; `.chars()` is a decoding iterator over it; `.char_count()` is the explicit-O(n) convenience — `.len()` stays byte length, so no linear scan hides behind constant-looking syntax. `s.chars().collect() -> list[char]` is the decode-once-then-index escape hatch (explicit allocation).
+- **String `for` shape:** `for (offset, c) in text.chars():` — each step yields the byte offset (aligned with slice bounds, for `text[start:i]`-style scanning) and the decoded `char` (for classification). No silent U+FFFD: `str` is valid UTF-8 by construction, so decoding is total — the Go ergonomics without the Go error-swallowing.
 
 ### Milestone 23: RAII & Drop (Compiler Intrinsic)
 
@@ -1853,7 +1984,7 @@ impl File:
  fn drop(inout self):
   close_file(self.handle)  # FFI call
 
-fn process_file(path: &str):
+fn process_file(path: strview):
  file = open_file(path)  # File opened
  # ... use file ...
  # File automatically closed at end of scope (drop called)
@@ -1981,14 +2112,14 @@ fn main():
   - `println(str) -> void`: Print with newline
   - `eprint(str) -> void`, `eprintln(str) -> void`: Print to stderr
   - `input() -> io.Error!str`: Read from stdin
-  - `read_file(path: &str) -> io.Error!str`: Read file contents
-  - `write_file(path: &str, content: &str) -> io.Error!void`: Write to file
-  - `append_file(path: &str, content: &str) -> io.Error!void`: Append to file
+  - `read_file(path: strview) -> io.Error!str`: Read file contents
+  - `write_file(path: strview, content: strview) -> io.Error!void`: Write to file
+  - `append_file(path: strview, content: strview) -> io.Error!void`: Append to file
 - Implement `string` module:
-  - `split(s: &str, delimiter: &str) -> list[str]`
-  - `join(parts: &[str], separator: &str) -> str`
-  - `trim(s: &str) -> &str`
-  - `to_upper(s: &str) -> str`, `to_lower(s: &str) -> str`
+  - `split(s: strview, delimiter: strview) -> list[str]`
+  - `join(parts: slice[str], separator: strview) -> str`
+  - `trim(s: strview) -> strview`
+  - `to_upper(s: strview) -> str`, `to_lower(s: strview) -> str`
 - Implement `collections` module:
   - `list[T]` methods: `push`, `pop`, `len`, `get`, `clear`
   - `map[K, V]` methods: `insert`, `remove`, `get`, `keys`, `values`
@@ -2000,7 +2131,7 @@ fn main():
   - Constants: `PI`, `E`
 - Implement `os` module:
   - `args() -> list[str]`: Command-line arguments
-  - `env(key: &str) -> ?str`: Environment variables
+  - `env(key: strview) -> ?str`: Environment variables
   - `exit(code: int)`: Exit program
 - Write comprehensive tests for stdlib
 
@@ -2514,6 +2645,7 @@ fn test_fetch():
 - Prevents resource leaks and zombie tasks
 - All tasks in scope must complete before scope exits
 - **Fire-and-forget is opt-in:** `task.spawn_detached()` for rare cases
+- **Scoped task borrows (final spec §7, D5):** children inside `task.scope` may capture by immutable borrow (compiler-verified against the scope join; projections capturable too) — enables fork-join data parallelism; stdlib `par_*` APIs build on it. `task.run`/`spawn_detached` keep implicit move capture.
 
 ```ryo
 import std.task
@@ -2751,7 +2883,7 @@ printer = fn(): print(data.len())  # immutable borrow of data
 **Features:**
 
 - `extern "C"` function declarations
-- `unsafe` blocks for FFI calls (Requires `kind = "system"` in `ryo.toml`)
+- `unsafe` blocks for FFI calls (manifest-gated capability: `allow_unsafe = true` in `ryo.toml`, mandatory `#: SAFETY:` comments, `ryo audit` visibility, `--deny-unsafe=deps` — final spec §6, D4)
 - Automatic binding generation (bindgen-like tool)
 - C struct layout compatibility
 - Callback support (C calling Ryo functions)
@@ -2851,7 +2983,7 @@ impl[T] Stack[T]:
 
 ```ryo
 # v0.2 `try` propagation sugar (`catch as e:` handling below is already v0.1 — see M13)
-fn load_config(path: &str) -> (file.NotFound | parse.InvalidFormat)!Config:
+fn load_config(path: strview) -> (file.NotFound | parse.InvalidFormat)!Config:
  content = try read_file(path)
  config = try parse_config(content)
  return config
@@ -2865,7 +2997,7 @@ result = load_config("config.toml") catch as e:
 
 ```ryo
 # v0.1 equivalent (verbose but expressive)
-fn load_config(path: &str) -> (file.NotFound | parse.InvalidFormat)!Config:
+fn load_config(path: strview) -> (file.NotFound | parse.InvalidFormat)!Config:
  content = match read_file(path):
   Ok(c): c
   Err(e): return e
@@ -3368,6 +3500,7 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 - ❌ FFI/unsafe blocks (v0.2+)
 - ❌ Full generics system (v0.3+)
 - ✅ Named parameters & default values (v0.1 — Milestone 8.5)
+- ✅ Integer overflow semantics frozen (v0.1 — GAP-2: traps in all build modes; spec §18)
 - ❌ LSP/advanced tooling (v0.2+)
 
 This foundation enables building **synchronous applications** including CLI tools, build systems, compilers, data processing pipelines, and game engines. Concurrency/FFI features will follow based on community needs.
@@ -3377,7 +3510,7 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Realistic Estimates (2-4 weeks per milestone)
 
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
-**Phase 2 (M4-M13):** 14 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (&str); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~42 weeks (~10 months)
+**Phase 2 (M4-M13):** 14 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (strview); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~42 weeks (~10 months)
 **Phase 3 (M16, M17, M21, M22, M23):** 5 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~15 weeks (~4 months)
 **Phase 4 (M24-M27):** 6 milestones (includes M26.5 Distribution & Installer and M26.6 Cross-Compilation) × 4 weeks avg = ~24 weeks (~6 months)
 

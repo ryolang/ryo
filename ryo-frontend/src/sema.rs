@@ -49,7 +49,7 @@ use crate::builtins;
 use ryo_core::ast::CompoundOp;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirData, TirParam, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
+use ryo_core::types::{InternPool, StringId, TypeId, TypeKind, ViewKind};
 use ryo_core::uir::{CallView, FuncBody, InstData, InstRef, InstTag, Span, Uir, VarDeclView};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -395,9 +395,14 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     // parameters. Copy types (int, float, bool) are duplicated on
     // every read regardless of the annotation, so `move` is
     // redundant noise. `move` on `str` (and other heap types) stays
-    // silent — that's the whole reason the keyword exists.
+    // silent — that's the whole reason the keyword exists. `strview`
+    // views are excluded here: `move`/`inout` on a view is an
+    // *error* (see below), and the warning would only cascade.
     for param in &body.params {
-        if param.mode == ParamMode::Move && sema.pool.is_copy(param.ty) {
+        if param.mode == ParamMode::Move
+            && sema.pool.is_copy(param.ty)
+            && !sema.pool.is_view(param.ty)
+        {
             let name = sema.pool.str(param.name).to_string();
             let ty_str = sema.pool.display(param.ty).to_string();
             sema.sink.emit(Diag::warning(
@@ -409,6 +414,34 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
                 ),
             ));
         }
+    }
+
+    // M8.4: `strview` is already a borrow, so `move` / `inout` on a view
+    // parameter is meaningless (final spec §3.3 E2, §3.4); views
+    // cannot be returned either (§3.3 E1 / Rule 5).
+    for param in &body.params {
+        if param.mode != ParamMode::Borrow && sema.pool.is_view(param.ty) {
+            let mode_str = match param.mode {
+                ParamMode::Move => "move",
+                _ => "inout",
+            };
+            sema.sink.emit(Diag::error(
+                param.span,
+                DiagCode::TypeMismatch,
+                format!(
+                    "views cannot be `{}` parameters — `strview` is already a borrow",
+                    mode_str,
+                ),
+            ));
+        }
+    }
+    if sema.pool.is_view(body.return_type) {
+        sema.sink.emit(Diag::error(
+            body.span,
+            DiagCode::ReturnBorrowedValue,
+            "functions cannot return views (`strview`) — return an owned `str` instead (Rule 5)"
+                .to_string(),
+        ));
     }
 
     let params: Vec<TirParam> = body
@@ -1030,8 +1063,11 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                 analyze_expr(sema, fcx, scope, arg);
             }
 
-            // For now, only str has methods
-            if sema.pool.kind(receiver_ty) != TypeKind::Str {
+            // Only `str` and `strview` views have methods (M8.4).
+            if !matches!(
+                sema.pool.kind(receiver_ty),
+                TypeKind::Str | TypeKind::View(_)
+            ) {
                 if !sema.pool.is_error(receiver_ty) {
                     sema.sink.emit(Diag::error(
                         span,
@@ -1088,6 +1124,39 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
                 }
             }
         }
+        InstTag::Slice => {
+            let (base_uir, start_uir, end_uir) = match inst.data {
+                InstData::Slice { base, start, end } => (base, start, end),
+                _ => unreachable!("Slice must carry InstData::Slice"),
+            };
+            let base_tir = analyze_expr(sema, fcx, scope, base_uir);
+            let base_ty = fcx.builder.ty_of(base_tir);
+            let base_kind = sema.pool.kind(base_ty);
+            // §3.2 P1: a slice projects a `str` (or re-projects an
+            // existing `strview`, P3); anything else is not sliceable.
+            if !matches!(base_kind, TypeKind::Str | TypeKind::View(ViewKind::Str))
+                && !sema.pool.is_error(base_ty)
+            {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::TypeMismatch,
+                    format!("cannot slice type '{}'", sema.pool.display(base_ty)),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let start_tir = start_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
+            let end_tir = end_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
+            fcx.builder.push_typed(
+                TirTag::Slice,
+                TirData::Slice {
+                    base: base_tir,
+                    start: start_tir,
+                    end: end_tir,
+                },
+                sema.pool.str_view(),
+                span,
+            )
+        }
         InstTag::Borrow => {
             let inner = match inst.data {
                 InstData::Borrow(inner) => inner,
@@ -1120,6 +1189,23 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
     emitted
 }
 
+/// Type-check one slice bound (`start` / `end`): §3.1 requires
+/// non-negative `int` indices. The bound's TIR ref is returned either
+/// way so the enclosing `Slice` inst stays well-formed on the error
+/// path.
+fn check_slice_bound(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, b: InstRef) -> TirRef {
+    let t = analyze_expr(sema, fcx, scope, b);
+    let ty = fcx.builder.ty_of(t);
+    if sema.pool.kind(ty) != TypeKind::Int && !sema.pool.is_error(ty) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(b),
+            DiagCode::TypeMismatch,
+            format!("slice bound must be int, got '{}'", sema.pool.display(ty)),
+        ));
+    }
+    t
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_binary_op(
     sema: &mut Sema<'_>,
@@ -1131,6 +1217,26 @@ fn check_binary_op(
     rhs: TirRef,
     span: Span,
 ) -> TirRef {
+    // M8.4 §3.3/§3.4: mixed `str`/`strview` equality — wrap the owned
+    // side in an explicit `ViewOfStr` conversion so the comparison
+    // runs view-vs-view. This must happen before the generic
+    // `compatible` check below, which rightly rejects `str` ≠ `strview`
+    // for every other operator.
+    let (lhs, rhs, lhs_ty, rhs_ty) = if matches!(tag, InstTag::Eq | InstTag::NotEq) {
+        match (sema.pool.kind(lhs_ty), sema.pool.kind(rhs_ty)) {
+            (TypeKind::Str, TypeKind::View(ViewKind::Str)) => {
+                let v = fcx.builder.view_of_str(lhs, sema.pool.str_view(), span);
+                (v, rhs, sema.pool.str_view(), rhs_ty)
+            }
+            (TypeKind::View(ViewKind::Str), TypeKind::Str) => {
+                let v = fcx.builder.view_of_str(rhs, sema.pool.str_view(), span);
+                (lhs, v, lhs_ty, sema.pool.str_view())
+            }
+            _ => (lhs, rhs, lhs_ty, rhs_ty),
+        }
+    } else {
+        (lhs, rhs, lhs_ty, rhs_ty)
+    };
     if !sema.pool.compatible(lhs_ty, rhs_ty) {
         sema.sink.emit(Diag::error(
             span,
@@ -1213,7 +1319,19 @@ fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
-            TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
+            // M8.4 §3.3: view equality compares viewed contents. Same
+            // `StrCmpEq`/`StrCmpNe` tags — operands are `{ptr, len}`
+            // pairs instead of full fat pointers (Task 7 codegen).
+            TypeKind::View(ViewKind::Str) => {
+                let tir_tag = match tag {
+                    InstTag::Eq => TirTag::StrCmpEq,
+                    InstTag::NotEq => TirTag::StrCmpNe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+            }
+            TypeKind::Void | TypeKind::Never | TypeKind::Tuple | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -1261,7 +1379,11 @@ fn check_binary_op(
                 ));
                 fcx.builder.unreachable(sema.pool.error_type(), span)
             }
-            TypeKind::Bool | TypeKind::Void | TypeKind::Never | TypeKind::Tuple => {
+            TypeKind::Bool
+            | TypeKind::Void
+            | TypeKind::Never
+            | TypeKind::Tuple
+            | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -1360,6 +1482,14 @@ fn check_call(
 ) -> TirRef {
     let name_id = view.name;
 
+    // M8.4.1.2: `str(view)` materialization — a call-form intercept,
+    // NOT a BUILTINS-table builtin. Type names are not reserved names,
+    // so a user-defined `fn str` must win over the intercept (least
+    // surprise): it fires only when no user declaration carries the name.
+    if sema.pool.str(name_id) == "str" && !sema.name_to_decl.contains_key(&name_id) {
+        return emit_str_materialize(sema, fcx, view, arg_tirs, span);
+    }
+
     // Builtins short-circuit: they're not in `signatures` /
     // `name_to_decl`, so signature resolution and the worklist
     // never see them.
@@ -1424,6 +1554,11 @@ fn check_call(
         vec![ParamMode::Borrow; view.args.len()]
     };
 
+    // Per-argument validation may replace an arg's TirRef with a
+    // conversion inst (M8.4 §3.4), so the call is built from this
+    // copy rather than the incoming slice.
+    let mut converted: Vec<TirRef> = arg_tirs.to_vec();
+
     if view.args.len() != expected.len() {
         sema.sink.emit(Diag::error(
             span,
@@ -1443,7 +1578,54 @@ fn check_call(
             .zip(expected.iter())
             .enumerate()
         {
+            // W0003 case A (M8.4.1.2): a `str(view)` materialize call
+            // sitting directly in a borrowed `str` parameter's argument
+            // position is redundant — the view would pass via the P6'
+            // re-borrow below (cap=0, no allocation). Borrow-mode only:
+            // `move`/`inout` params cannot be served by the re-borrow,
+            // so the copy is legitimate there. The `ty_of == str` guard
+            // keeps error paths (a failed intercept yields an
+            // error-typed Unreachable) warning-free.
+            if exp_ty == sema.pool.str_()
+                && modes[idx] == ParamMode::Borrow
+                && fcx.builder.ty_of(*arg_tir) == sema.pool.str_()
+                && is_str_materialize_arg(sema, *arg_uir)
+            {
+                sema.sink.emit(Diag::warning(
+                    sema.uir.span(*arg_uir),
+                    DiagCode::RedundantMaterialize,
+                    "redundant `str(...)` — views pass to `str` parameters via the re-borrow with no allocation (drop the `str(...)` call)",
+                ));
+            }
             let actual = fcx.builder.ty_of(*arg_tir);
+            let arg_tir = if sema.pool.is_view(actual)
+                && exp_ty == sema.pool.str_()
+                && modes[idx] == ParamMode::Borrow
+            {
+                // P6': view → str param re-borrows (cap=0, no copy),
+                // call-scoped — same shape as the str → strview
+                // conversion below. Borrow-mode only: a `move` param
+                // would let the view escape the call (E2), and an
+                // `inout` param is rejected by the `&` check below.
+                let v = fcx
+                    .builder
+                    .view_as_str(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
+                converted[idx] = v;
+                v
+            } else if sema.pool.owner_view(actual) == Some(exp_ty) {
+                // Implicit `str → strview` view conversion (§3.4): passing an
+                // owned `str` to a `strview` parameter drops the `cap` word —
+                // a representation coercion, not a copy. Routed through the
+                // pool's owner → view table, not a bare kind comparison.
+                let v = fcx
+                    .builder
+                    .view_of_str(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
+                converted[idx] = v;
+                v
+            } else {
+                *arg_tir
+            };
+            let actual = fcx.builder.ty_of(arg_tir);
             if !sema.pool.compatible(actual, exp_ty) {
                 sema.sink.emit(Diag::error(
                     sema.uir.span(*arg_uir),
@@ -1503,7 +1685,7 @@ fn check_call(
         }
     }
     fcx.builder
-        .call(name_id, arg_tirs, &modes, return_type, span)
+        .call(name_id, &converted, &modes, return_type, span)
 }
 
 /// Returns `None` if `inner` is an assignable lvalue (a `mut` local or
@@ -1577,6 +1759,8 @@ fn emit_builtin_call(
             if !check_print_args(sema, fcx, view, arg_tirs, span) {
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
+            // W0003 case A: `print` takes `strview` directly.
+            warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], "print");
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
@@ -1673,9 +1857,15 @@ fn emit_builtin_call(
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         "str_push" => {
-            // str_push(s: inout str, suffix: str) -> void. Builtins
+            // str_push(s: inout str, suffix: strview) -> void. Builtins
             // bypass `check_call`, so the `&`/`inout` agreement +
             // mutable-lvalue checks are replayed here against arg 0.
+            // M8.4: the suffix is a view — an owned `str` passes as
+            // today (codegen reads its ptr+len), a slice passes
+            // directly. No `ViewOfStr` wrap here: builtins bypass
+            // check_call's §3.4 conversion, and wrapping an owned
+            // `str` would leave an inst codegen can't lower yet
+            // (Task 7) in previously-valid programs.
             if view.args.len() != 2 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -1691,12 +1881,12 @@ fn emit_builtin_call(
             let t0 = fcx.builder.ty_of(arg_tirs[0]);
             let t1 = fcx.builder.ty_of(arg_tirs[1]);
             if !matches!(sema.pool.kind(t0), TypeKind::Str)
-                || !matches!(sema.pool.kind(t1), TypeKind::Str)
+                || !matches!(sema.pool.kind(t1), TypeKind::Str | TypeKind::View(_))
             {
                 sema.sink.emit(Diag::error(
                     sema.uir.span(a0),
                     DiagCode::TypeMismatch,
-                    "str_push(s: inout str, suffix: str): both arguments must be str".to_string(),
+                    "str_push(s: inout str, suffix: strview): first argument must be str, suffix must be str or strview".to_string(),
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
@@ -1721,6 +1911,15 @@ fn emit_builtin_call(
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
+            // W0003 case A: the suffix parameter is `strview` —
+            // materializing a slice to feed it is a redundant copy.
+            warn_redundant_materialize_builtin_arg(
+                sema,
+                fcx,
+                view.args[1],
+                arg_tirs[1],
+                "str_push",
+            );
             let modes = vec![ParamMode::Inout, ParamMode::Borrow];
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
@@ -1730,6 +1929,106 @@ fn emit_builtin_call(
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
     }
+}
+
+/// W0003 case A (M8.4.1.2): is this UIR argument syntactically a
+/// `str(view)` materialize call? Mirrors the intercept condition in
+/// `check_call` — a call-form `str` with no user declaration carrying
+/// the name (a user-defined `fn str` shadows the intercept, so its
+/// calls never warn). Callers pair this with a `ty_of == str` check on
+/// the argument's TIR so error paths stay warning-free.
+fn is_str_materialize_arg(sema: &Sema<'_>, arg_uir: InstRef) -> bool {
+    if sema.uir.inst(arg_uir).tag != InstTag::Call {
+        return false;
+    }
+    let name = sema.uir.call_view(arg_uir).name;
+    sema.pool.str(name) == "str" && !sema.name_to_decl.contains_key(&name)
+}
+
+/// W0003 case A for view-accepting builtins (M8.4.1.2): `print` and
+/// str_push's suffix take `strview` arguments directly, so a
+/// `str(view)` materialize call in that position is a redundant
+/// allocation.
+fn warn_redundant_materialize_builtin_arg(
+    sema: &mut Sema<'_>,
+    fcx: &FuncCtx,
+    arg_uir: InstRef,
+    arg_tir: TirRef,
+    builtin: &str,
+) {
+    if fcx.builder.ty_of(arg_tir) == sema.pool.str_() && is_str_materialize_arg(sema, arg_uir) {
+        sema.sink.emit(Diag::warning(
+            sema.uir.span(arg_uir),
+            DiagCode::RedundantMaterialize,
+            format!(
+                "redundant `str(...)` — `{builtin}` accepts `strview` arguments directly, with no allocation (drop the `str(...)` call)"
+            ),
+        ));
+    }
+}
+
+/// M8.4.1.2 `str(view)` materialization: validate the single `strview`
+/// argument and emit the str-returning call to the synthesized
+/// `__ryo_str_from_view` runtime callee (mirrors the `int_to_str` arm of
+/// `emit_builtin_call`). The ownership pass seeds the str-returning Call
+/// as a fresh owner by construction; codegen lowers it via the same sret
+/// stack-slot pattern as `int_to_str`.
+fn emit_str_materialize(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+) -> TirRef {
+    if view.args.len() != 1 {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            format!("str() takes exactly 1 argument, got {}", view.args.len()),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    // Builtins never take `inout`: `&` is rejected exactly like the
+    // table builtins (mirrors `int_to_str(&c)`).
+    if matches!(sema.uir.inst(view.args[0]).tag, InstTag::Borrow) {
+        sema.sink.emit(
+            Diag::error(
+                sema.uir.span(view.args[0]),
+                DiagCode::BorrowMismatch,
+                "argument 1 is passed by `&` but parameter is not `inout`".to_string(),
+            )
+            .with_help("remove the `&`, or declare the parameter `inout`"),
+        );
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+    if sema.pool.is_error(arg_ty) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if !sema.pool.is_view(arg_ty) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[0]),
+            DiagCode::TypeMismatch,
+            format!(
+                "str() argument must be strview, got {}",
+                sema.pool.display(arg_ty)
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    // The synthesized callee name is unshadowable — user code cannot
+    // declare `__ryo_`-prefixed identifiers (ReservedIdentifier) — so
+    // codegen's name-match on the callee is unambiguous, and a
+    // user-defined `fn str` (which wins in `check_call`) still lowers
+    // as an ordinary user call.
+    let callee = sema.pool.intern_str("__ryo_str_from_view");
+    fcx.builder.call(
+        callee,
+        arg_tirs,
+        &[ParamMode::Borrow],
+        sema.pool.str_(),
+        span,
+    )
 }
 
 fn emit_panic(sema: &mut Sema<'_>, fcx: &mut FuncCtx, view: &CallView, span: Span) -> TirRef {
@@ -1868,12 +2167,12 @@ fn check_print_args(
     if sema.pool.is_error(arg_ty) {
         return false;
     }
-    if !matches!(sema.pool.kind(arg_ty), TypeKind::Str) {
+    if !matches!(sema.pool.kind(arg_ty), TypeKind::Str | TypeKind::View(_)) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
             format!(
-                "print() argument must be str, got {}",
+                "print() argument must be str or strview, got {}",
                 sema.pool.display(arg_ty)
             ),
         ));
@@ -2002,6 +2301,10 @@ mod tests {
 
     fn any_code(diags: &[Diag], code: DiagCode) -> bool {
         diags.iter().any(|d| d.code == code)
+    }
+
+    fn count_code(diags: &[Diag], code: DiagCode) -> usize {
+        diags.iter().filter(|d| d.code == code).count()
     }
 
     fn tir_named<'a>(tirs: &'a [Tir], pool: &InternPool, name: &str) -> &'a Tir {
@@ -3231,6 +3534,384 @@ mod tests {
         assert!(
             !any_code(&diags, DiagCode::UndefinedVariable),
             "should not cascade into UndefinedVariable"
+        );
+    }
+
+    // ---- M8.4: strview slices / views (final spec §3) ----
+
+    #[test]
+    fn slice_yields_str_view() {
+        let (tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hello\"\n\tx = s[1:3]\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = &tirs[0];
+        assert!(main.instructions.iter().any(|i| i.tag == TirTag::Slice));
+    }
+
+    #[test]
+    fn slice_shorthand_forms_yield_views() {
+        // `s[a:]`, `s[:b]`, `s[:]` — bounds omitted (§3.1).
+        let (tirs, diags, pool) = run_with_errors(
+            "fn main():\n\ts: str = \"hello\"\n\ta = s[1:]\n\tb = s[:2]\n\tc = s[:]\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        let slices: Vec<_> = main
+            .instructions
+            .iter()
+            .filter(|i| i.tag == TirTag::Slice)
+            .collect();
+        assert_eq!(slices.len(), 3, "one Slice inst per slice expression");
+        assert!(
+            slices.iter().all(|i| i.ty == pool.str_view()),
+            "every slice is typed strview"
+        );
+    }
+
+    #[test]
+    fn view_param_declared_type_and_borrow_mode() {
+        let (tirs, diags, pool) = run_with_errors("fn f(x: strview):\n\tprint(x)\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let f = tir_named(&tirs, &pool, "f");
+        assert_eq!(f.params[0].ty, pool.str_view());
+        assert_eq!(f.params[0].mode, ParamMode::Borrow);
+    }
+
+    #[test]
+    fn view_param_accepts_owned_str_via_conversion() {
+        let (tirs, diags, pool) = run_with_errors(
+            "fn shout(text: strview):\n\tprint(text)\n\nfn main():\n\ts: str = \"hi\"\n\tshout(s)\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(
+            main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr),
+            "owned str → strview param must insert a ViewOfStr conversion (§3.4)"
+        );
+    }
+
+    #[test]
+    fn view_param_accepts_view_arg_directly() {
+        // E4: a view argument to a view parameter needs no conversion.
+        let (tirs, diags, pool) = run_with_errors(
+            "fn shout(text: strview):\n\tprint(text)\n\nfn main():\n\ts: str = \"hi\"\n\tshout(s[0:1])\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(
+            !main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr),
+            "view → view must not insert ViewOfStr"
+        );
+    }
+
+    #[test]
+    fn view_passes_to_owned_str_param_via_reborrow() {
+        // P6': a view passed to an owned `str` parameter re-borrows —
+        // sema inserts a ViewAsStr conversion (cap=0 triple at codegen,
+        // no allocation, call-scoped).
+        let (tirs, diags, pool) = run_with_errors(
+            "fn show(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\tshow(s[0:1])\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(
+            main.instructions.iter().any(|i| i.tag == TirTag::ViewAsStr),
+            "strview → str param must insert a ViewAsStr re-borrow (P6')"
+        );
+    }
+
+    #[test]
+    fn view_binding_to_str_still_rejected() {
+        // The re-borrow is call-scoped only: binding-form conversion
+        // (`x: str = view`) stays E0012.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: str = s[0:1]\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn view_to_move_str_param_still_rejected() {
+        // E2 (final spec §3.3): the re-borrow is borrow-mode only — a
+        // `move` str parameter would let the view escape the call.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn eat(move s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\teat(s[0:1])\n",
+        );
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn view_return_rejected() {
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn bad(s: str) -> strview:\n\treturn s[0:1]\n");
+        assert!(
+            any_code(&diags, DiagCode::ReturnBorrowedValue),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn move_and_inout_view_params_rejected() {
+        let (_tirs, diags, _pool) = run_with_errors("fn f(move x: strview):\n\tprint(x)\n");
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::TypeMismatch
+                && d.message.contains("already a borrow")),
+            "got {:?}",
+            diags
+        );
+        let (_tirs, diags, _pool) = run_with_errors("fn g(inout x: strview):\n\tprint(x)\n");
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::TypeMismatch
+                && d.message.contains("already a borrow")),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn owned_annotation_over_slice_rejected() {
+        // P6: an owned copy of viewed contents needs an explicit copy
+        // API (future work); plain annotation is a mismatch.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: str = s[0:1]\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn owned_to_view_binding_rejected() {
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: strview = s\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn view_annotation_over_slice_ok() {
+        let (tirs, diags, pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: strview = s[0:1]\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert_eq!(main.inst(stmt_at(main, 1)).ty, pool.str_view());
+    }
+
+    #[test]
+    fn print_and_len_accept_views() {
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn main():\n\ts: str = \"hello\"\n\tprint(s[0:2])\n\tprint(int_to_str(s[0:2].len()))\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn is_empty_accepts_view() {
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn main():\n\ts: str = \"hi\"\n\tif s[0:1].is_empty():\n\t\tprint(\"e\")\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn mixed_str_view_equality_accepted() {
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn main():\n\ts: str = \"he\"\n\tif s == s[0:2]:\n\t\tprint(\"eq\")\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn mixed_equality_wraps_str_side_in_view() {
+        // §3.3/§3.4: the owned side of a mixed comparison is converted.
+        let (tirs, diags, pool) =
+            run_with_errors("fn main():\n\ts: str = \"he\"\n\tx = s == s[0:2]\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr));
+        assert!(main.instructions.iter().any(|i| i.tag == TirTag::StrCmpEq));
+    }
+
+    #[test]
+    fn view_view_equality_accepted() {
+        let (tirs, diags, pool) = run_with_errors(
+            "fn main():\n\ts: str = \"he\"\n\tif s[0:1] != s[1:2]:\n\t\tprint(\"ne\")\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(main.instructions.iter().any(|i| i.tag == TirTag::StrCmpNe));
+        assert!(
+            !main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr),
+            "view vs view needs no conversion"
+        );
+    }
+
+    #[test]
+    fn view_concat_rejected() {
+        // `+` is owned-str concatenation only; a view operand falls
+        // through to E0015 UnsupportedOperator.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"ab\"\n\tx = s[0:1] + s[0:1]\n");
+        assert!(
+            any_code(&diags, DiagCode::UnsupportedOperator),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn slice_of_int_rejected() {
+        let (_tirs, diags, _pool) = run_with_errors("fn main():\n\tn: int = 5\n\tx = n[0:1]\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn slice_bound_must_be_int() {
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx = s[0.5:1]\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn str_push_accepts_view_suffix() {
+        // 4b: str_push's suffix parameter is `strview`; a slice passes
+        // directly, keeping [Inout, Borrow] modes.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, s[0:1])\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn str_materialize_typechecks_to_owned_str() {
+        // M8.4.1.2: `str(view)` materializes an owned copy — the result
+        // type-checks as `str` and lowers to the synthesized
+        // `__ryo_str_from_view` call.
+        let (tirs, diags, pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: str = str(s[0:1])\n\tprint(x)\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        let init = main.var_decl_view(stmt_at(main, 1)).initializer;
+        let call = main.inst(init);
+        assert!(matches!(call.tag, TirTag::Call), "got {:?}", call.tag);
+        assert_eq!(call.ty, pool.str_(), "materialize result is owned str");
+        assert_eq!(pool.str(main.call_view(init).name), "__ryo_str_from_view");
+    }
+
+    #[test]
+    fn str_materialize_rejects_non_view_arg() {
+        // An owned `str` argument is NOT accepted — materializing it
+        // would be a same-type copy, which is the future `Clone` trait's
+        // job; the call form is `strview`-only.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: str = str(s)\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+        assert!(
+            first_msg(&diags).contains("str() argument must be strview"),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn str_materialize_arity_mismatch() {
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: str = str(s[0:1], s[1:2])\n");
+        assert!(any_code(&diags, DiagCode::ArityMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn str_materialize_borrow_arg_rejected() {
+        // Builtins never take `inout`: `&` is rejected exactly like the
+        // table builtins (mirrors `int_to_str(&c)`).
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\tmut s: str = \"hi\"\n\tx: str = str(&s)\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn user_str_function_shadows_materialize_intercept() {
+        // Least surprise: a user-defined `fn str` wins over the call-form
+        // intercept — `str(41)` resolves to the user function, so an int
+        // argument is fine and no strview diagnostic fires.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn str(x: int) -> int:\n\treturn x + 1\n\nfn main():\n\ty: int = str(41)\n\tprint(int_to_str(y))\n",
+        );
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn w0003_materialize_arg_to_borrowed_str_param_warns() {
+        // W0003 case A: `str(view)` fed straight into a borrowed `str`
+        // parameter is redundant — the view would pass via the P6'
+        // re-borrow (cap=0, no allocation).
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn show(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\tshow(str(s[0:1]))\n",
+        );
+        assert_eq!(
+            count_code(&diags, DiagCode::RedundantMaterialize),
+            1,
+            "expected exactly one W0003; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn w0003_materialize_arg_to_move_param_does_not_warn() {
+        // A `move` parameter cannot be served by the re-borrow — the
+        // materialized copy is legitimate there.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn eat(move s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\teat(str(s[0:1]))\n",
+        );
+        assert!(
+            !any_code(&diags, DiagCode::RedundantMaterialize),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn w0003_materialize_arg_to_inout_param_does_not_warn() {
+        // An `inout` parameter cannot be served by the re-borrow either
+        // (its argument requires `&`) — the copy is legitimate there.
+        // The call below is rejected for the missing `&`; W0003 must
+        // stay silent on that error path too.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn eat(inout s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\teat(str(s[0:1]))\n",
+        );
+        assert!(
+            !any_code(&diags, DiagCode::RedundantMaterialize),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn w0003_materialize_arg_to_print_warns() {
+        // W0003 case A, builtin shape: `print` accepts `strview`
+        // arguments directly — materializing first buys nothing.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tprint(str(s[0:1]))\n");
+        assert_eq!(
+            count_code(&diags, DiagCode::RedundantMaterialize),
+            1,
+            "expected exactly one W0003; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn w0003_materialize_suffix_to_str_push_warns() {
+        // W0003 case A, builtin shape: str_push's suffix is `strview` —
+        // materializing it first is a redundant allocation. (Source and
+        // suffix come from DISTINCT strings so Rule 7 stays quiet.)
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn main():\n\tmut s: str = \"hi\"\n\tt: str = \"yo\"\n\tstr_push(&s, str(t[0:1]))\n",
+        );
+        assert_eq!(
+            count_code(&diags, DiagCode::RedundantMaterialize),
+            1,
+            "expected exactly one W0003; got {:?}",
+            diags
         );
     }
 }

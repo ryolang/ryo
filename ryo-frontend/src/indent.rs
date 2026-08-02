@@ -14,7 +14,15 @@ use crate::lexer::RawToken;
 type Spanned<'a> = (RawToken<'a>, SimpleSpan);
 
 pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, String> {
-    let mut result: Vec<Spanned<'a>> = Vec::new();
+    // The output preserves every input token and only *adds*
+    // Indent/Dedent markers, so `tokens.len()` is a tight lower bound.
+    // Growing from zero here meant repeatedly reallocating and copying
+    // the whole buffer (a large share of the lex-stage cost); reserve
+    // the token count plus a heuristic headroom for the inserted
+    // markers. The headroom is not a bound — a deep dedent emits one
+    // Dedent per popped level, which can exceed it — it just keeps the
+    // common case in already-allocated space.
+    let mut result: Vec<Spanned<'a>> = Vec::with_capacity(tokens.len() + tokens.len() / 8 + 8);
     let mut indent_stack: Vec<usize> = vec![0];
     let mut i = 0;
 

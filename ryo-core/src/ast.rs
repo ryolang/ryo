@@ -287,16 +287,39 @@ impl Ident {
     }
 }
 
-/// A type expression. Currently just a name like `int`, `bool`, etc.
+/// A type expression. Currently just a name like `int`, `bool`, etc.,
+/// plus the `is_view` flag for legacy `&name` view syntax (M8.4
+/// pre-Q5) — post-M8.4.1 that syntax only feeds the targeted
+/// migration error in astgen.
+///
+/// Field order keeps the struct at 24 bytes: `span` (16 B, align 8)
+/// first, then `name` (4 B) and `is_view` (1 B) pack into the tail
+/// padding. Declaring `name` before `span` would grow it to 32 B.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeExpr {
-    pub name: StringId,
     pub span: SimpleSpan,
+    pub name: StringId,
+    /// Legacy `&name` view-syntax flag (M8.4 pre-Q5): the annotation used
+    /// the retired `&` prefix. Post-M8.4.1 this only feeds astgen's
+    /// targeted migration error; it never constructs a view type.
+    pub is_view: bool,
 }
 
 impl TypeExpr {
     pub fn new(name: StringId, span: SimpleSpan) -> Self {
-        TypeExpr { name, span }
+        TypeExpr {
+            span,
+            name,
+            is_view: false,
+        }
+    }
+
+    pub fn view(name: StringId, span: SimpleSpan) -> Self {
+        TypeExpr {
+            span,
+            name,
+            is_view: true,
+        }
     }
 }
 
@@ -331,6 +354,7 @@ impl Expression {
                 format!("MethodCall(.{})", pool.str(*method))
             }
             ExprKind::Borrow(_) => "Borrow".to_string(),
+            ExprKind::Slice { .. } => "Slice".to_string(),
         };
 
         println!(
@@ -366,6 +390,17 @@ impl Expression {
             ExprKind::Borrow(inner) => {
                 inner.pretty_print(&format!("{}└── ", new_prefix), pool);
             }
+            ExprKind::Slice { base, start, end } => {
+                base.pretty_print(&format!("{}├── base: ", new_prefix), pool);
+                match start {
+                    Some(start) => start.pretty_print(&format!("{}├── start: ", new_prefix), pool),
+                    None => println!("{}├── start: <none>", new_prefix),
+                }
+                match end {
+                    Some(end) => end.pretty_print(&format!("{}└── end: ", new_prefix), pool),
+                    None => println!("{}└── end: <none>", new_prefix),
+                }
+            }
         }
     }
 }
@@ -385,6 +420,13 @@ pub enum ExprKind {
     /// Call-site mutable borrow marker: `&expr` (M8.3). The inner
     /// expression must resolve to an assignable lvalue (checked in sema).
     Borrow(Box<Expression>),
+    /// Slice projection `base[start:end]` (M8.4). Either bound may be
+    /// omitted (`s[start:]`, `s[:end]`, `s[:]`). Yields `strview` in sema.
+    Slice {
+        base: Box<Expression>,
+        start: Option<Box<Expression>>,
+        end: Option<Box<Expression>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -524,5 +566,12 @@ mod tests {
     #[test]
     fn unary_operator_display_for_not() {
         assert_eq!(format!("{}", UnaryOperator::Not), "not");
+    }
+
+    #[test]
+    fn type_expr_stays_small() {
+        // `span` (16 B) + `name` (4 B) + `is_view` (1 B) must pack
+        // into 24 B — see the field-order note on `TypeExpr`.
+        assert_eq!(std::mem::size_of::<TypeExpr>(), 24);
     }
 }

@@ -62,6 +62,13 @@ pub struct TirRef(NonZeroU32);
 impl TirRef {
     fn from_index(idx: usize) -> Self {
         let raw = u32::try_from(idx).expect("TirRef index out of range (>= 2^32)");
+        // Real indices must stay below the param-sentinel band
+        // (`> u32::MAX / 2`); see the invariant on [`TirRef::param`].
+        debug_assert!(
+            raw <= u32::MAX / 2,
+            "TirRef index entered the param-sentinel band: function bodies \
+             must stay below 2^31 instructions"
+        );
         TirRef(NonZeroU32::new(raw).expect("TirRef index must be >= 1"))
     }
 
@@ -77,8 +84,40 @@ impl TirRef {
         TirRef(NonZeroU32::new(raw).expect("TirRef raw must be non-zero"))
     }
 
+    /// Param sentinel: `u32::MAX - idx`, so sentinels occupy the top
+    /// of the `u32` range and real instruction indices the bottom.
+    /// Ownership / codegen use these as map keys for param-origin
+    /// values; they are never valid indices into `instructions`.
+    ///
+    /// # Invariant
+    ///
+    /// Sentinels land at `> u32::MAX / 2`, so the encoding only stays
+    /// collision-free while a function body has fewer than 2^31
+    /// instructions (enforced by a `debug_assert!` in `from_index`,
+    /// the arena-push path) and `idx` stays below 2^31.
     pub fn param(idx: usize) -> Self {
+        // Same domain as `from_index`: `idx` must stay below 2^31 or the
+        // sentinel collides with real instruction indices (and the
+        // `u32::MAX - idx` subtraction wraps past the sentinel band).
+        debug_assert!(
+            idx < (1 << 31),
+            "TirRef param index out of domain: param indices must stay below 2^31"
+        );
         Self::from_raw(u32::MAX - idx as u32)
+    }
+
+    /// True for sentinel refs produced by [`TirRef::param`].
+    pub const fn is_param(self) -> bool {
+        self.0.get() > u32::MAX / 2
+    }
+
+    /// The param index for sentinel refs, `None` for real instructions.
+    pub const fn as_param_index(self) -> Option<u32> {
+        if self.is_param() {
+            Some(u32::MAX - self.0.get())
+        } else {
+            None
+        }
     }
 }
 
@@ -182,6 +221,18 @@ pub enum TirTag {
     /// Variable payload in `extra` — see [`compound_assign_extra`].
     CompoundAssign,
 
+    /// Slice projection `base[start:end]` → `strview` (M8.4).
+    Slice,
+    /// Explicit `str → strview` representation conversion (drops `cap`),
+    /// inserted by sema at view-parameter call sites and mixed-str
+    /// equality operands. Operand in `data.un_op`.
+    ViewOfStr,
+    /// `strview → str` re-borrow (final spec P6'): materializes the
+    /// cap=0 fat triple — no allocation, call-scoped. Inserted by sema
+    /// when a view is passed to an owned `str` borrow parameter.
+    /// Operand in `data.un_op`.
+    ViewAsStr,
+
     /// `return <expr>`. Operand in `TirData::UnOp`.
     Return,
 
@@ -259,7 +310,17 @@ pub enum TirData {
     Bool(bool),
     Var(StringId),
     UnOp(TirRef),
-    BinOp { lhs: TirRef, rhs: TirRef },
+    BinOp {
+        lhs: TirRef,
+        rhs: TirRef,
+    },
+    /// Slice projection. Bounds `None` for shorthands (codegen
+    /// substitutes 0 / len-of-base).
+    Slice {
+        base: TirRef,
+        start: Option<TirRef>,
+        end: Option<TirRef>,
+    },
     Extra(ExtraRange),
 }
 
@@ -303,10 +364,12 @@ pub struct Tir {
 
 impl Tir {
     pub fn inst(&self, r: TirRef) -> &TypedInst {
+        debug_assert!(!r.is_param(), "Tir::inst called with a param sentinel ref");
         &self.instructions[r.index()]
     }
 
     pub fn span(&self, r: TirRef) -> Span {
+        debug_assert!(!r.is_param(), "Tir::span called with a param sentinel ref");
         self.spans[r.index()]
     }
 
@@ -554,6 +617,42 @@ impl TirBuilder {
     /// method-call lowerings like `StrLen`.
     pub fn push_typed(&mut self, tag: TirTag, data: TirData, ty: TypeId, span: Span) -> TirRef {
         self.push(tag, ty, data, span)
+    }
+
+    /// Slice projection `base[start:end]` → `strview` (final spec §3.1).
+    /// `start` / `end` are `None` for the `s[start:]`, `s[:end]`,
+    /// `s[:]` shorthands; codegen substitutes 0 / len-of-base.
+    /// `view_ty` is the pool's `str_view()` — the builder holds no pool.
+    pub fn slice(
+        &mut self,
+        base: TirRef,
+        start: Option<TirRef>,
+        end: Option<TirRef>,
+        view_ty: TypeId,
+        span: Span,
+    ) -> TirRef {
+        self.push(
+            TirTag::Slice,
+            view_ty,
+            TirData::Slice { base, start, end },
+            span,
+        )
+    }
+
+    /// Explicit `str → strview` representation conversion (final spec
+    /// §3.4): drops the `cap` word. Inserted by sema at view-parameter
+    /// call sites and on the owned side of mixed `str`/`strview`
+    /// equality. `view_ty` is the pool's `str_view()`.
+    pub fn view_of_str(&mut self, inner: TirRef, view_ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::ViewOfStr, view_ty, TirData::UnOp(inner), span)
+    }
+
+    /// `strview → str` re-borrow (final spec P6'): materializes the
+    /// cap=0 fat triple at the call site — no allocation, call-scoped.
+    /// Inserted by sema when a view is passed to an owned `str` borrow
+    /// parameter. `ty` is the pool's `str_()`.
+    pub fn view_as_str(&mut self, inner: TirRef, ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::ViewAsStr, ty, TirData::UnOp(inner), span)
     }
 
     fn extra_offset(&self) -> u32 {
@@ -1062,6 +1161,19 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
         (TirTag::BoolConst, TirData::Bool(b)) => writeln!(f, "bconst {}", b),
         (TirTag::StrConst, TirData::Str(s)) => writeln!(f, "sconst {:?}", pool.str(s)),
         (TirTag::Var, TirData::Var(s)) => writeln!(f, "var {}", pool.str(s)),
+        (TirTag::Slice, TirData::Slice { base, start, end }) => {
+            let bound = |b: Option<TirRef>| match b {
+                Some(b) => format!("%{}", b.index()),
+                None => "_".to_string(),
+            };
+            writeln!(
+                f,
+                "slice %{}, {}..{}",
+                base.index(),
+                bound(start),
+                bound(end)
+            )
+        }
         (op, TirData::BinOp { lhs, rhs }) => {
             writeln!(f, "{} %{}, %{}", bin_op_name(op), lhs.index(), rhs.index())
         }
@@ -1188,6 +1300,8 @@ fn un_op_name(t: TirTag) -> &'static str {
         TirTag::Return => "ret",
         TirTag::ExprStmt => "expr_stmt",
         TirTag::StrLen => "str_len",
+        TirTag::ViewOfStr => "view_of_str",
+        TirTag::ViewAsStr => "view_as_str",
         _ => "?un",
     }
 }
@@ -1206,6 +1320,16 @@ mod tests {
             std::mem::size_of::<Option<TirRef>>(),
             std::mem::size_of::<u32>()
         );
+    }
+
+    #[test]
+    fn param_ref_predicates() {
+        let p = TirRef::param(3);
+        assert!(p.is_param());
+        assert_eq!(p.as_param_index(), Some(3));
+        let real = TirRef::from_raw(7);
+        assert!(!real.is_param());
+        assert_eq!(real.as_param_index(), None);
     }
 
     #[test]
@@ -1379,5 +1503,43 @@ mod tests {
         let tir = b.finish(&[u]);
         assert!(matches!(tir.inst(u).tag, TirTag::Unreachable));
         assert_eq!(tir.inst(u).ty, err_ty);
+    }
+
+    #[test]
+    fn slice_and_view_of_str_round_trip_and_dump() {
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+
+        let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
+        let base = b.var(s, str_ty, sp());
+        let lo = b.int_const(0, pool.int(), sp());
+        // `s[0:]` — end omitted, exercising the `None` bound.
+        let slice = b.slice(base, Some(lo), None, view_ty, sp());
+        // `str → strview` conversion of the same base.
+        let view = b.view_of_str(base, view_ty, sp());
+        let tir = b.finish(&[slice, view]);
+
+        assert_eq!(tir.inst(slice).ty, view_ty);
+        match tir.inst(slice).data {
+            TirData::Slice {
+                base: bb,
+                start,
+                end,
+            } => {
+                assert_eq!(bb, base);
+                assert_eq!(start, Some(lo));
+                assert_eq!(end, None);
+            }
+            other => panic!("expected TirData::Slice, got {:?}", other),
+        }
+        assert!(matches!(tir.inst(view).tag, TirTag::ViewOfStr));
+        assert_eq!(tir.inst(view).ty, view_ty);
+
+        let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));
+        assert!(out.contains("= slice %1, %2.._"), "got:\n{}", out);
+        assert!(out.contains("= view_of_str %1"), "got:\n{}", out);
     }
 }

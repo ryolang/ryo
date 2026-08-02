@@ -2,7 +2,7 @@
 
 Compiler issues identified during source review. Each entry is independently actionable; severity reflects impact on correctness, future feature work, or code health — not user impact today (the compiler is pre-alpha).
 
-Resolved entries are removed (not kept around as a changelog). Look at `git log` if you need history.
+Resolved entries are **removed** from this file (convention changed in M8.4.1 — before that they were marked in place with a `**Resolved:** ✅ <milestone> (<date>)` line). Language-visible decisions behind a resolution are recorded in `docs/specification.md`; for anything else, look at `git log` (or this file's history) for the removed entry. `I-xxx` references in code comments and `docs/dev/architecture_analysis.md` may point to removed entries.
 
 ---
 
@@ -235,12 +235,6 @@ Resolved entries are removed (not kept around as a changelog). Look at `git log`
 **Summary:** `is_move` is threaded lexer → parser → AST → UIR → TIR. The UIR copy is never read: astgen propagates the AST flag in, sema reads it back out into `TirParam`, and no UIR pass inspects it. UIR is structural lowering with no semantic meaning, so `UirParam::is_move` is dead weight that exists only to bridge two layers it shouldn't.
 **Resolution:** Drop `UirParam::is_move`. Sema can read the flag straight from the AST `FuncBody` (or via a side-channel keyed by FuncBody) when it constructs `TirParam`. Wait until any other UIR-level pass needs the flag before re-introducing it.
 
-### I-053 — `OwnerState::Borrowed` is currently parameter-only
-
-**Files:** `ryo-frontend/src/ownership.rs` (`OwnerState`)
-**Summary:** `OwnerState::Borrowed` is set only at parameter init; no expression produces it. The two sites that read it (E0021, E0022) could equivalently look up `tir.params` for the underlying owner's source param and check `is_move`. The state is anticipating real borrow expressions (`&x`) which the spec migrated to in commit 2ccf6b6 but the compiler doesn't lower yet.
-**Resolution:** Document the invariant inline ("only ever set at param init in M8.1b; transitions arrive when `&x` borrow expressions land in a future milestone"). No code change today.
-
 ### I-054 — `parse_source` and lex error paths bypass `finalize_diags`
 
 **Files:** `ryo-driver/src/pipeline.rs` (`parse_source`, `display_tokens`)
@@ -269,35 +263,17 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `walk_operands` is documented as the single source of truth for TIR-shape coverage. The three new helpers introduced for I-058 (`collect_loop_body_refs`, `collect_refs_recursive`, `collect_jump_path`) are pure structural reachability over TIR shape — they consult no ownership state, just walk the IR. Today they live as private helpers in `ryo-frontend/src/ownership.rs` and re-encode the same dispatch on `WhileLoop`/`ForRange`/`IfStmt` that `walk_operands` performs internally. Adding any new control-flow shape (e.g. `match` arms) means editing `walk_operands` plus three call sites in `ownership.rs`. The same pattern keeps reappearing — `find_consumers` and `collect_last_uses` already drive recursion via `walk_operands` closures.
 **Resolution:** Promote a small TIR-reachability surface to `ryo-core/src/tir.rs`. Suggested API: `Tir::collect_reachable(r) -> HashSet<TirRef>` (transitive closure of `walk_operands`) and `Tir::collect_jump_path(body, target) -> Option<HashSet<TirRef>>` (path-set reachability). Ownership-pass scheduling becomes a thin policy layer; future passes (early-return ownership, exception-arm Frees, `match`-arm Frees) reuse the same reachability primitives. Folds with I-051 (loop helper extraction) on the same TIR module.
 
-### I-068 — `free_schedule` emission order is nondeterministic
-
-**Files:** `ryo-frontend/src/ownership.rs` (last-use/anon-temp/dead-store post passes), `ryo-backend/src/codegen.rs` (`sweep_due_frees`)
-**Summary:** The post passes push `FreePoint`s while iterating std `HashMap`s/`HashSet`s (`own.states` :430, `own.temp_owners` :487, `own.pending_dead_store` :520), whose iteration order varies per run (`RandomState`). Codegen consumes `free_schedule` in order, so emitted binaries are not reproducible run-to-run; frees commute semantically, so this is invisible today.
-**Resolution:** Sort owners (by `TirRef`/`StringId`) before scheduling frees in each post pass, or switch the three collections to ordered iteration. Add a determinism test: compile the same program twice, assert identical `free_schedule` (or identical object bytes).
-
 ### I-069 — Loop fixed-point re-walk leaves speculative sidecar entries behind
 
 **Files:** `ryo-frontend/src/ownership.rs` (`analyze_loop_body`, `analyze_if_stmt`)
 **Summary:** `analyze_loop_body` passes the live sidecar to both the scratch walk (:1097) and the real re-walk (:1117). A diverged `if` inside a loop body runs `analyze_if_stmt` twice: it pushes branch-gated `FreePoint`s (:1058-1063) and `if_branches` entries (:928) both times, while `next_branch_id` is monotone and never restored. Pass-1 `FreePoint`s end up gated on `BranchId`s codegen never activates. Benign today only because ids are function-unique; the "speculative writes are not rolled back" invariant is undocumented.
 **Resolution:** Either have the scratch walk write to a staging sidecar merged only on convergence (folds with I-045's propagate-only refactor), or document the invariant and assert in codegen that unknown `BranchId`s are inert.
 
-### I-070 — `sweep_due_frees` silently drops frees anchored to unmaterialized instructions
-
-**Files:** `ryo-backend/src/codegen.rs` (`sweep_due_frees` :1480, filter at :1494-1495)
-**Summary:** The sweep only fires a `FreePoint` when `inst_values.contains_key(&fp.after)`; a free anchored to an instruction codegen never materialized stays in `pending_sweep` forever — a silent leak with no diagnostic. Correctness currently depends on the ownership pass only anchoring frees to materialized instructions, an implicit cross-crate invariant.
-**Resolution:** Assert the invariant: `debug_assert!(pending_sweep.is_empty())` at function end, or emit an internal diagnostic listing dropped frees.
-
 ### I-071 — Non-void function can fall off the end with no diagnostic
 
 **Files:** `ryo-frontend/src/sema.rs`, `ryo-backend/src/codegen.rs` (:414 fallthrough)
 **Summary:** Sema validates an explicit bare `return` in a non-void fn and value/void mismatches, but a non-void function whose body simply ends gets no diagnostic; codegen just "falls through". No `MissingReturn` diag code exists. I-031 covers the inverse direction (spurious diagnostics on exhaustive if/else returns).
 **Resolution:** Add return-flow analysis in sema (shared with I-031's `block_definitely_returns`): a non-void function must return on all paths; emit `MissingReturn` otherwise.
-
-### I-072 — `TirRef::param` encoding has no predicate or guard
-
-**Files:** `ryo-core/src/tir.rs` (`TirRef::param` :80-82), `ryo-frontend/src/ownership.rs` (:90), `ryo-backend/src/codegen.rs` (:575)
-**Summary:** `TirRef::param(idx)` = `u32::MAX - idx` produces a valid `NonZeroU32` indistinguishable from a real instruction index; there is no `is_param()`/`as_param()` predicate anywhere. Passing one to `Tir::inst()` panics out-of-bounds. Correctness rests entirely on consumer discipline — current consumers use param refs as map keys only.
-**Resolution:** Add `TirRef::is_param()`/`as_param_index()` and a `debug_assert!(!r.is_param())` in `Tir::inst()`. Longer term, replace the informal encoding with a clean `Owner` enum as planned in `docs/dev/implementation_roadmap.md` (:1046).
 
 ### I-073 — Zig download has no integrity verification and races concurrent installs
 
@@ -371,23 +347,29 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `run_valgrind_smoke` prints "skipping" and returns success when valgrind is not installed, so local green runs may have exercised nothing. Only the CI lane that `apt-get install`s valgrind guarantees coverage; the suite exists because LSan misses leaks from Cranelift-emitted code (not ASan-instrumented).
 **Resolution:** Fail loudly (or require an opt-in env var to skip) outside CI; at minimum print a prominent end-of-suite summary of skipped tests.
 
-### I-086 — E-code taxonomy conflicts with the roadmap and has no stability test
-
-**Files:** `ryo-driver/src/pipeline.rs` (`diag_code_str` :219-257), `docs/dev/implementation_roadmap.md` (:1039, :1050, :1069)
-**Summary:** The `DiagCode`→E-number mapping exists only in `diag_code_str`. The roadmap's M8.2 section uses **E0023** for move-while-borrowed-in-calls, but code assigns `MoveWhileBorrowedInCall = "E0031"` (E0023 is `FloatModulo`). Arms are unordered (E0019 between E0012/E0013), ranges have gaps, and no test pins code stability/uniqueness — a transposition typo would silently renumber a diagnostic. `diag.rs:51` calls `DiagCode` the "stable error identity" while the actual stable strings live in the driver.
-**Resolution:** Add a test asserting each `DiagCode` maps to its expected unique string (explicit list); fix the roadmap references; consider moving the code strings onto `DiagCode` itself.
-
-### I-087 — Loop fixed-point convergence compares only Moved-ness
-
-**Files:** `ryo-frontend/src/ownership.rs` (`states_differ_snapshot` :1206-1234)
-**Summary:** The re-walk gate compares only Moved-ness between snapshots; `Valid`↔`Borrowed` flips don't force another iteration. Sound today only because `Borrowed` never transitions after param init (I-053) and merges are monotone — the maintainer note at :1168-1172 already flags this must become a real fixed point if either changes.
-**Resolution:** Fold into I-045's propagate-only refactor: iterate until the full state tuple (not just Moved-ness) is stable, or document the reduced comparison as load-bearing next to the gate.
-
 ### I-088 — Ownership sidecar is keyed by function name
 
 **Files:** `ryo-core/src/ownership.rs` (`OwnershipSidecar` :50-52), `ryo-frontend/src/ownership.rs` (:301-309)
 **Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
 **Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
+
+### I-112 — Bare-statement formatter builtins fail codegen
+
+**Files:** `ryo-backend/src/codegen.rs` (`emit_call` formatter arm :2316-2343; contrast the `__ryo_str_from_view` statement arm :2273-2310)
+**Summary:** A formatter builtin called as a bare statement — `int_to_str(5)` with the result discarded — fails with `CodegenError("ownership pass scheduled Free for borrowed-scalar value %2; the ABI registry should have excluded it. See I-057/I-059.")`. The statement arm emits the sret call into a stack slot, throws the triple away, and never records it in `ctx.inst_values`, so the anon-temp Free the ownership pass scheduled for the result cannot resolve the buffer and trips the scalar-Free guard. Assigned uses (`s: str = int_to_str(5)`) route through `eval_inst_str` and are unaffected. M8.4.1.2's `__ryo_str_from_view` statement arm dodges the bug by caching the loaded triple in `inst_values` before returning the dummy scalar — the next str-returning builtin will bite this again if it copies the older formatter arm instead.
+**Resolution:** Mirror the `__ryo_str_from_view` statement arm in the formatter arm: load the sret triple, insert it into `inst_values`, then return the dummy scalar, so the scheduled Free finds the buffer. Cover `int_to_str` / `float_to_str` / `bool_to_str` bare statements with integration tests. (Falls out of the I-113 dedup if that lands first.)
+
+### I-114 — E0031 "borrowed here" note missing through ViewAsStr
+
+**Files:** `ryo-frontend/src/ownership.rs` (note-span finder :3868-3884; contrast the Rule-7 partition's ViewAsStr look-through :3780-3791)
+**Summary:** `two(move s, s[0:1])` against a `(move, str)` signature fires E0031 without the "borrowed here" secondary note. The finder matches args with `underlying_owner(own, arg) == owner`, but a str-typed `ViewAsStr` conversion inst has no `origin` entry, so `underlying_owner` falls back to `Owner::Inst(view_as_str)`, which never equals the root owner and `borrow_span` stays `None`. The `(move, strview)` shape does get a "slice passed here" note via the `SourceProjected` path (:3906-3934) — only the P6'-converted shape loses its note.
+**Resolution:** Mirror the partition's P6' logic in the finder (`projection_root` first when the arg is a ViewAsStr/Slice, else `underlying_owner`); add a regression test pinning both notes for `two(move s, s[0:1])`.
+
+### I-115 — `Tir::span`/`Tir::inst` still panic on param sentinel refs in release
+
+**Files:** `ryo-core/src/tir.rs` (`Tir::span` :371-374, `Tir::inst` :366-368, `TirRef::index` :75-77)
+**Summary:** Both accessors debug-assert `!r.is_param()`, but `TirRef::index()` is a bare `as usize` cast, so in a release build a param sentinel ref (≥ 2³¹) still flows into `self.spans[r.index()]` / `self.instructions[r.index()]` and panics index-out-of-bounds instead of being handled. The debug_assert only surfaces the contract violation in dev/test.
+**Resolution:** Promote to a real guard (return `Option` / fallback span, or `expect` with a clear message), or document the by-construction invariant that param sentinels never reach these accessors and keep the debug_assert as the contract.
 
 ---
 
@@ -465,12 +447,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** Correction of the earlier text: the AOT lanes DO have registered benchmarks — `codspeed.yml` (root, since e7efcc4) maps `fibonacci-aot` and `eager-destruction-aot` to the compiled binaries, and `codspeed run` executes `codspeed.yml` entries per the [CodSpeed CLI docs](https://codspeed.io/docs/cli). The walltime lane (`codspeed-macro`) and the memory lane (`ubuntu-latest`, eBPF-capable) should both report data, and the memory lane is the closest thing to automated validation of the "2× less heap" claim that exists. Real gaps: (1) both lanes set `allow-empty: true`, so any future drift (renamed binary, broken config, deleted `codspeed.yml`) silently degrades them to measuring nothing again — the I-085 pattern; (2) no Cranelift-codegen/linking instrumented benchmarks (frontend benches cover the frontend only); (3) the 2× ratio itself is computed by hand from `benchmarks/eager_destruction/run_benchmarks.sh`, not asserted anywhere.
 **Resolution:** Root cause of the historical empty output found (2026-07): the jobs passed `run: codspeed run`, nesting the CLI inside the action's runner — CodSpeed's docs state config-file benchmarks must OMIT `run:` so the action reads `codspeed.yml` directly. Fixed by dropping `run:` from both AOT jobs and removing `allow-empty: true` so any future drift (renamed binary, broken config, deleted `codspeed.yml`) fails CI loudly. Remaining: verify in the CodSpeed dashboard that both lanes report data for both registered benchmarks; optionally add a CI step asserting eager_destruction's peak RSS stays under a fixed bound (the manual script's check, automated).
 
-### I-101 — `examples/` is exercised by nothing
-
-**Files:** `examples/*.ryo`, `examples/future/`
-**Summary:** 12 top-level examples plus ~20 aspirational files are referenced by no test, script, or workflow; nothing verifies they even parse.
-**Resolution:** Add a CI step (or integration test) that runs `ryo parse` over `examples/` (excluding `future/`), and ideally `ryo run` on the runnable ones.
-
 ### I-102 — Smoke suites duplicate work across lanes and fixture builds
 
 **Files:** `ryo/tests/asan_smoke.rs`, `ryo/tests/valgrind_smoke.rs`, `ryo/tests/common/mod.rs`, `.github/workflows/ci.yml` (:83)
@@ -488,12 +464,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-core/src/diag.rs` (:18-20), `ryo-core/Cargo.toml`
 **Summary:** The "core" IR/types crate pulls in a parser crate for one span type, coupling every consumer of `ryo-core` to chumsky's release cycle.
 **Resolution:** Define a small `Span` newtype in `ryo-core` and convert at the parser boundary (`pipeline.rs` already adapts spans).
-
-### I-105 — `__ryo_str_push` takes `suffix_len: i64` while all other lengths are `u64`
-
-**Files:** `runtime/src/lib.rs` (:156-160, :168), `ryo-backend/src/codegen.rs` (:1851-1857)
-**Summary:** The one signed length in the runtime ABI is silently clamped via `suffix_len.max(0)`; every other length parameter is `u64`. Negative values from a buggy caller are accepted rather than rejected.
-**Resolution:** Change the parameter to `u64` on both sides (codegen declares `types::I64` at :1855), or assert non-negative in debug builds.
 
 ### I-106 — Decode paths panic instead of reporting an internal error
 
@@ -530,6 +500,18 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken` :176-300, `Token` :30-103, `intern_token` :392-495, `Display` :105-170)
 **Summary:** Adding a token means editing `RawToken`, `Token`, the giant manual `intern_token` match, and `Display` (plus the parser downstream) — ~45 non-payload variants of pure boilerplate.
 **Resolution:** Generate the quadruple from a single macro table (variant name, logos pattern, payload kind).
+
+### I-113 — Codegen sret stack-slot pattern duplicated four times
+
+**Files:** `ryo-backend/src/codegen.rs` (`eval_inst_str` arms :1887-1913 and :1920-1953; `emit_call` arms :2282-2309 and :2319-2342)
+**Summary:** The ~25-30-line sret pattern (`create_sized_stack_slot(STR_SLOT_SIZE)` → `stack_addr` → `declare_runtime_fn` → `call` → 3× `load`) is copied in both the `eval_inst_str` and `emit_call` arms for `__ryo_str_from_view` and the int/float/bool formatters. The formatter statement-arm copy is the one that drifted — it skips the reload/`inst_values` caching and produced I-112.
+**Resolution:** Extract a shared `emit_sret_str_call(builder, ctx, fn_name, args) -> ValueRepr::Str` helper used by all four arms; the I-112 fix falls out of the dedup.
+
+### I-119 — `loop_nesting_of` recomputes nesting stacks per query
+
+**Files:** `ryo-frontend/src/ownership.rs` (`loop_nesting_of` :1000-1047; call sites :1089-1090, :1541-1545, :2557)
+**Summary:** Each call walks the whole function body to rebuild the target's loop-nesting stack, and it is queried per view/read pair in `collect_view_liveness`, per candidate in `refine_view_liveness_for_arm`, and per materialize site in `warn_redundant_materialize` — O(sites × body) recomputation with no memo.
+**Resolution:** Build a `TirRef`→nesting-stack map in a single pre-pass over the body and reuse it at the three call sites, preserving the cond/bounds-counts-as-inside and nested-loop semantics.
 
 ---
 

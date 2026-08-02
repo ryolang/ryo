@@ -284,6 +284,8 @@ cargo test -- --nocapture       # Show output
 
 - `docs/dev/pipeline_alignment.md` — detailed UIR/TIR pipeline design and Zig alignment rationale
 - `docs/dev/implementation_roadmap.md` — feature roadmap
+- `docs/dev/ryo-compiler-llm-instructions.md` — **normative contributor rules (R1–R21)** for compiler work: data-oriented design, Rust discipline, diagnostics, Cranelift discipline, testing
+- `docs/dev/ryo-slicing-and-memory-model-final-spec.md` — slicing/views/memory-model decisions (D1–D11); amends the base spec
 - `docs/CLAUDE.md` — language design and syntax rules
 
 ---

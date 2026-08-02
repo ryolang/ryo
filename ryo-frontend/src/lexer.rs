@@ -93,6 +93,8 @@ pub enum Token {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     Comma,
     Dot,
 
@@ -160,6 +162,8 @@ impl fmt::Display for Token {
             Self::RParen => write!(f, ")"),
             Self::LBrace => write!(f, "{{"),
             Self::RBrace => write!(f, "}}"),
+            Self::LBracket => write!(f, "["),
+            Self::RBracket => write!(f, "]"),
             Self::Comma => write!(f, ","),
             Self::Dot => write!(f, "."),
             Self::Newline => write!(f, "<newline>"),
@@ -281,6 +285,10 @@ pub(crate) enum RawToken<'a> {
     LBrace,
     #[token("}")]
     RBrace,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
     #[token(",")]
     Comma,
     #[token(".")]
@@ -318,17 +326,43 @@ pub struct LexError {
     pub message: String,
 }
 
+/// Heuristic estimate of the number of raw tokens in `input`, used to
+/// pre-size the token buffers so the collect/indent passes don't
+/// repeatedly reallocate. It is only a hint — correctness never
+/// depends on it.
+fn estimated_token_count(input: &str) -> usize {
+    // Average observed token width across representative Ryo sources is
+    // ~3 bytes (identifiers/keywords/literals dominate over 1-byte
+    // punctuation), so len/2 avoids wild over-allocation on the common
+    // case. It is NOT an upper bound: punctuation-dense input (a run of
+    // 1-byte tokens like `(((((`) yields close to one token per byte —
+    // more than len/2 — so the buffer may still grow there. That costs
+    // a reallocation, nothing more. Always reserve at least a little.
+    (input.len() / 2).max(16)
+}
+
 /// Run logos, indentation processing, and string/int interning in
 /// one pass. Returns the spanned token stream the parser consumes,
 /// or the first lex-time error encountered.
 pub fn lex(input: &str, pool: &mut InternPool) -> Result<Vec<(Token, Span)>, LexError> {
-    let raw_tokens: Vec<(RawToken<'_>, Span)> = RawToken::lexer(input)
-        .spanned()
-        .map(|(tok, span)| match tok {
-            Ok(t) => (t, span.into()),
-            Err(()) => (RawToken::Error, span.into()),
-        })
-        .collect();
+    // Pre-size the raw-token buffer instead of growing it from zero.
+    // logos' `SpannedIter` reports only a trivial `(0, None)` size
+    // hint, so `collect` would otherwise repeatedly reallocate and
+    // memcpy the whole buffer as it grows. The estimate avoids most
+    // of those reallocations on typical input — but it is NOT an
+    // upper bound (see estimated_token_count): punctuation-dense
+    // input may still grow the buffer, costing a reallocation,
+    // nothing more.
+    let mut raw_tokens: Vec<(RawToken<'_>, Span)> =
+        Vec::with_capacity(estimated_token_count(input));
+    raw_tokens.extend(
+        RawToken::lexer(input)
+            .spanned()
+            .map(|(tok, span)| match tok {
+                Ok(t) => (t, span.into()),
+                Err(()) => (RawToken::Error, span.into()),
+            }),
+    );
 
     // TODO: have `indent::process` return a span/offset for the
     // offending newline so we can point Ariadne at the exact line.
@@ -477,6 +511,8 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
         RawToken::RParen => Token::RParen,
         RawToken::LBrace => Token::LBrace,
         RawToken::RBrace => Token::RBrace,
+        RawToken::LBracket => Token::LBracket,
+        RawToken::RBracket => Token::RBracket,
         RawToken::Comma => Token::Comma,
         RawToken::Dot => Token::Dot,
 
@@ -697,5 +733,27 @@ mod tests {
 
         let (toks, _) = lex_strings("x %= 5");
         assert_eq!(toks[1], Token::PercentAssign);
+    }
+
+    #[test]
+    fn lex_brackets() {
+        let (toks, pool) = lex_strings("s[1:2]");
+        assert_eq!(toks.len(), 6);
+        assert!(matches!(toks[0], Token::Ident(_)));
+        assert_eq!(toks[1], Token::LBracket);
+        assert_eq!(toks[2], Token::IntLit(1));
+        assert_eq!(toks[3], Token::Colon);
+        assert_eq!(toks[4], Token::IntLit(2));
+        assert_eq!(toks[5], Token::RBracket);
+        ident(&toks, 0, &pool, "s");
+    }
+
+    #[test]
+    fn lex_full_slice_shorthand() {
+        let (toks, _) = lex_strings("s[:]");
+        assert_eq!(toks.len(), 4);
+        assert_eq!(toks[1], Token::LBracket);
+        assert_eq!(toks[2], Token::Colon);
+        assert_eq!(toks[3], Token::RBracket);
     }
 }

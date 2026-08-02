@@ -209,6 +209,11 @@ pub enum InstTag {
     /// the inner expression's ref; the `&` carries no runtime op —
     /// codegen decides pass-by-pointer from `ParamMode::Inout`.
     Borrow,
+
+    /// Slice projection `base[start:end]` (M8.4, final spec §3).
+    /// Bounds optional; see [`InstData::Slice`]. Type-checks to `strview`
+    /// in sema.
+    Slice,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -237,6 +242,14 @@ pub enum InstData {
     /// Call-site mutable-borrow marker `&expr`; operand is the inner
     /// ref. See [`InstTag::Borrow`].
     Borrow(InstRef),
+    /// Slice projection. `start`/`end` are `None` for the `s[start:]`,
+    /// `s[:end]`, `s[:]` shorthands. `Option<InstRef>` niche-packs to 32
+    /// bits, so this stays inline — no `extra` arena needed.
+    Slice {
+        base: InstRef,
+        start: Option<InstRef>,
+        end: Option<InstRef>,
+    },
     /// Both operands of a binary op.
     BinOp {
         lhs: InstRef,
@@ -499,6 +512,19 @@ impl UirBuilder {
     /// and codegen decides pass-by-pointer from `ParamMode::Inout`.
     pub fn borrow(&mut self, inner: InstRef, span: Span) -> InstRef {
         self.push(InstTag::Borrow, InstData::Borrow(inner), span)
+    }
+
+    /// Emit a slice projection `base[start:end]` (M8.4, final spec
+    /// §3). `start`/`end` are `None` for the `s[start:]`, `s[:end]`,
+    /// `s[:]` shorthands.
+    pub fn slice(
+        &mut self,
+        base: InstRef,
+        start: Option<InstRef>,
+        end: Option<InstRef>,
+        span: Span,
+    ) -> InstRef {
+        self.push(InstTag::Slice, InstData::Slice { base, start, end }, span)
     }
 
     pub fn binary(&mut self, tag: InstTag, lhs: InstRef, rhs: InstRef, span: Span) -> InstRef {
@@ -1213,6 +1239,19 @@ fn write_inst(
         (InstTag::Borrow, InstData::Borrow(inner)) => {
             writeln!(f, "borrow %{}", inner.index())
         }
+        (InstTag::Slice, InstData::Slice { base, start, end }) => {
+            let bound = |b: Option<InstRef>| match b {
+                Some(b) => format!("%{}", b.index()),
+                None => "_".to_string(),
+            };
+            writeln!(
+                f,
+                "slice %{}, {}..{}",
+                base.index(),
+                bound(start),
+                bound(end)
+            )
+        }
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
 }
@@ -1261,6 +1300,15 @@ mod tests {
             std::mem::size_of::<Option<InstRef>>(),
             std::mem::size_of::<u32>()
         );
+    }
+
+    #[test]
+    fn inst_stays_small() {
+        // I-091's warning: `Inst` is the per-instruction footprint of
+        // the whole UIR arena, so it must not grow unnoticed. The
+        // `Slice` payload (`base` + two niche-packed `Option<InstRef>`)
+        // fits inline at 12 B — same budget as before.
+        assert!(std::mem::size_of::<Inst>() <= 24, "Inst grew past 24 bytes");
     }
 
     #[test]

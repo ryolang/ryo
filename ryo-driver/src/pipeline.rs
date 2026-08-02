@@ -240,6 +240,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::RangeArgType => "E0026",
         DiagCode::ReservedBuiltinName => "E0027",
         DiagCode::RedundantMove => "W0002",
+        DiagCode::RedundantMaterialize => "W0003",
         DiagCode::UseAfterMove => "E0020",
         DiagCode::MoveOutOfBorrowedParam => "E0021",
         DiagCode::ReturnBorrowedValue => "E0022",
@@ -247,6 +248,8 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::BorrowMismatch => "E0033",
         DiagCode::MutableAliasingViolation => "E0032",
         DiagCode::DeadStore => "W0001",
+        DiagCode::ViewEscape => "E0034",
+        DiagCode::SourceProjected => "E0035",
         DiagCode::CycleInResolution => "E0016",
         DiagCode::ParseError => "E0100",
         DiagCode::TooManyDiagnostics => "E0101",
@@ -523,4 +526,108 @@ pub fn build_file(file: &Path) -> Result<(), CompilerError> {
 
 fn display_result(result: i32) {
     println!("[Result] => {}", result);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn diag_code_strings_are_stable_and_unique() {
+        let expected: &[(DiagCode, &str)] = &[
+            (DiagCode::UnknownType, "E0001"),
+            (DiagCode::NestedFunctionDef, "E0002"),
+            (DiagCode::TopLevelWithExplicitMain, "E0003"),
+            (DiagCode::MainSignature, "E0004"),
+            (DiagCode::UndefinedVariable, "E0010"),
+            (DiagCode::UndefinedFunction, "E0011"),
+            (DiagCode::TypeMismatch, "E0012"),
+            (DiagCode::ArityMismatch, "E0013"),
+            (DiagCode::BuiltinArgKind, "E0014"),
+            (DiagCode::UnsupportedOperator, "E0015"),
+            (DiagCode::CycleInResolution, "E0016"),
+            (DiagCode::VoidValueInExpression, "E0017"),
+            (DiagCode::ConditionNotBool, "E0018"),
+            (DiagCode::ReservedIdentifier, "E0019"),
+            (DiagCode::UseAfterMove, "E0020"),
+            (DiagCode::MoveOutOfBorrowedParam, "E0021"),
+            (DiagCode::ReturnBorrowedValue, "E0022"),
+            (DiagCode::FloatModulo, "E0023"),
+            (DiagCode::BreakOutsideLoop, "E0024"),
+            (DiagCode::ContinueOutsideLoop, "E0025"),
+            (DiagCode::RangeArgType, "E0026"),
+            (DiagCode::ReservedBuiltinName, "E0027"),
+            (DiagCode::ImmutableAssign, "E0028"),
+            (DiagCode::DuplicateDeclaration, "E0029"),
+            (DiagCode::UndefinedAssignTarget, "E0030"),
+            (DiagCode::MoveWhileBorrowedInCall, "E0031"),
+            (DiagCode::MutableAliasingViolation, "E0032"),
+            (DiagCode::BorrowMismatch, "E0033"),
+            (DiagCode::ViewEscape, "E0034"),
+            (DiagCode::SourceProjected, "E0035"),
+            (DiagCode::ParseError, "E0100"),
+            (DiagCode::TooManyDiagnostics, "E0101"),
+            (DiagCode::ConstEvalFailure, "E0200"),
+            (DiagCode::CycleInComptime, "E0201"),
+            (DiagCode::GenericInstantiation, "E0202"),
+            (DiagCode::DeadStore, "W0001"),
+            (DiagCode::RedundantMove, "W0002"),
+            (DiagCode::RedundantMaterialize, "W0003"),
+        ];
+        let mut seen = HashSet::new();
+        for (code, s) in expected {
+            assert_eq!(diag_code_str(*code), *s, "{code:?} moved");
+            assert!(seen.insert(*s), "duplicate code string {s}");
+        }
+        // Maintenance tripwire (I-086): a match naming every DiagCode
+        // variant with no wildcard arm fails to compile the moment a
+        // variant is added, forcing the author to this test — extend
+        // the table above in the same edit or the new code goes
+        // untested. (Rust cannot iterate enum variants, so the table
+        // stays the enumeration source; the match just makes "forgot
+        // the test" a compile error instead of a silent drop.)
+        for code in expected.iter().map(|(c, _)| c) {
+            match code {
+                DiagCode::UnknownType
+                | DiagCode::NestedFunctionDef
+                | DiagCode::TopLevelWithExplicitMain
+                | DiagCode::MainSignature
+                | DiagCode::UndefinedVariable
+                | DiagCode::UndefinedFunction
+                | DiagCode::TypeMismatch
+                | DiagCode::ReservedIdentifier
+                | DiagCode::ArityMismatch
+                | DiagCode::BuiltinArgKind
+                | DiagCode::UnsupportedOperator
+                | DiagCode::VoidValueInExpression
+                | DiagCode::ConditionNotBool
+                | DiagCode::ImmutableAssign
+                | DiagCode::DuplicateDeclaration
+                | DiagCode::UndefinedAssignTarget
+                | DiagCode::FloatModulo
+                | DiagCode::BreakOutsideLoop
+                | DiagCode::ContinueOutsideLoop
+                | DiagCode::RangeArgType
+                | DiagCode::ReservedBuiltinName
+                | DiagCode::RedundantMove
+                | DiagCode::RedundantMaterialize
+                | DiagCode::UseAfterMove
+                | DiagCode::MoveOutOfBorrowedParam
+                | DiagCode::ReturnBorrowedValue
+                | DiagCode::MoveWhileBorrowedInCall
+                | DiagCode::BorrowMismatch
+                | DiagCode::MutableAliasingViolation
+                | DiagCode::DeadStore
+                | DiagCode::ViewEscape
+                | DiagCode::SourceProjected
+                | DiagCode::CycleInResolution
+                | DiagCode::ParseError
+                | DiagCode::TooManyDiagnostics
+                | DiagCode::ConstEvalFailure
+                | DiagCode::CycleInComptime
+                | DiagCode::GenericInstantiation => {}
+            }
+        }
+    }
 }

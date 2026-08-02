@@ -7,6 +7,18 @@ pub struct RyoStrFat {
     pub cap: u64,
 }
 
+/// Read-only view into a `str` buffer (M8.4): pointer + byte length.
+/// Owns nothing; never freed.
+///
+/// Load-bearing invariant: `__ryo_slice` stores a NULL ptr when
+/// `len == 0`, and every consumer guards on `len == 0` before
+/// dereferencing — so `ptr` may be null/dangling whenever `len == 0`.
+#[repr(C)]
+pub struct RyoSlice {
+    pub ptr: *const u8,
+    pub len: u64,
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ryo_str_alloc(cap: u64) -> *mut u8 {
     if cap == 0 {
@@ -99,6 +111,93 @@ pub unsafe extern "C" fn ryo_str_from_literal(data: *const u8, len: u64, out: *m
     }
 }
 
+/// Materialize an owned `str` copy from a `strview` (M8.4.1.2). The
+/// result owns a fresh heap buffer of exactly `len` bytes
+/// (`cap == len`); `len == 0` yields the empty `{null, 0, 0}` triple.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes — or be null/dangling when
+/// `len == 0` (the `RyoSlice` invariant). `out` must point to a valid
+/// `RyoStrFat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_str_from_view(ptr: *const u8, len: u64, out: *mut RyoStrFat) {
+    // SAFETY: caller contract — ptr/len describe a readable byte range
+    // (or len == 0, in which case ptr is never dereferenced) and out
+    // points to a valid RyoStrFat.
+    unsafe {
+        if len == 0 {
+            (*out).ptr = std::ptr::null_mut();
+            (*out).len = 0;
+            (*out).cap = 0;
+            return;
+        }
+        let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+        let buf = ryo_str_alloc(len);
+        debug_assert!(!ptr.is_null());
+        core::ptr::copy_nonoverlapping(ptr, buf, n);
+        (*out).ptr = buf;
+        (*out).len = len;
+        (*out).cap = len;
+    }
+}
+
+fn slice_fail(msg: &str) -> ! {
+    // Raw message, no prefix — matches the codegen-synthesized
+    // `__ryo_panic` path (both exit 101 with the message on stderr).
+    eprintln!("{msg}");
+    std::process::exit(101)
+}
+
+/// True when byte offset `i` in `s[..len]` lies on a UTF-8 char
+/// boundary (start, end, or a non-continuation byte).
+///
+/// # Safety
+/// `s` must point to `len` readable bytes (or be null/dangling if `len == 0`).
+unsafe fn is_char_boundary(s: *const u8, len: u64, i: u64) -> bool {
+    if i == 0 || i == len {
+        return true;
+    }
+    // SAFETY: caller contract — s points to len readable bytes; 0 < i < len here.
+    let b = unsafe { *s.add(i as usize) };
+    b & 0xC0 != 0x80
+}
+
+/// Runtime backing for M8.4 `str` slicing (`s[start:end]`). Out-of-range
+/// and non-boundary indices panic at slice creation (final spec §3.1);
+/// panic here means stderr message + exit 101, matching `__ryo_panic`.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes (or be null if `len == 0`).
+/// `out` must point to a valid `RyoSlice`. Panics (exit 101) when
+/// `start > end`, `end > len`, or either bound is not a UTF-8 char
+/// boundary.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __ryo_slice(
+    ptr: *const u8,
+    len: u64,
+    start: u64,
+    end: u64,
+    out: *mut RyoSlice,
+) {
+    if start > end || end > len {
+        slice_fail("slice index out of range");
+    }
+    // SAFETY: caller contract — ptr points to len readable bytes.
+    let bounds_ok = unsafe { is_char_boundary(ptr, len, start) && is_char_boundary(ptr, len, end) };
+    if !bounds_ok {
+        slice_fail("slice index is not a UTF-8 char boundary");
+    }
+    // SAFETY: caller contract for `out`; `start <= end <= len` checked above.
+    unsafe {
+        (*out).ptr = if len == 0 {
+            std::ptr::null()
+        } else {
+            ptr.add(start as usize)
+        };
+        (*out).len = end - start;
+    }
+}
+
 /// # Safety
 /// `l_ptr` must point to `l_len` readable bytes (or be null if l_len==0).
 /// Same for `r_ptr`/`r_len`. `out` must point to a valid `RyoStrFat`.
@@ -153,7 +252,7 @@ pub unsafe extern "C" fn ryo_str_concat(
 pub unsafe extern "C" fn __ryo_str_push(
     s_ptr: *mut RyoStrFat,
     suffix_ptr: *const u8,
-    suffix_len: i64,
+    suffix_len: u64,
 ) {
     // SAFETY: s_ptr is a valid RyoStrFat per the ABI contract; the suffix
     // range is valid for reading and does not overlap the destination
@@ -162,7 +261,7 @@ pub unsafe extern "C" fn __ryo_str_push(
         let cur_ptr = (*s_ptr).ptr;
         let cur_len = (*s_ptr).len;
         let cur_cap = (*s_ptr).cap;
-        let add: u64 = suffix_len.max(0) as u64;
+        let add: u64 = suffix_len;
         let new_len = match cur_len.checked_add(add) {
             Some(l) => l,
             None => oom_abort(),
@@ -734,6 +833,113 @@ mod tests {
             ryo_str_free(left_fat.ptr, left_fat.cap);
             ryo_str_free(right_fat.ptr, right_fat.cap);
             ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn slice_basic() {
+        let s = "héllo wörld".as_bytes();
+        let mut out = RyoSlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        };
+        // "héllo" is 6 bytes (é = 2 bytes)
+        // SAFETY: s is readable for its byte length and out is writable;
+        // the range 0..6 is in-bounds (see above).
+        unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 0, 6, &mut out) };
+        assert_eq!(out.len, 6);
+        // SAFETY: __ryo_slice returned a valid view into s for out.len bytes.
+        let got = unsafe { core::slice::from_raw_parts(out.ptr, out.len as usize) };
+        assert_eq!(got, "héllo".as_bytes());
+    }
+
+    #[test]
+    fn slice_empty_at_len_is_ok() {
+        let s = "abc".as_bytes();
+        let mut out = RyoSlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        };
+        // SAFETY: "abc" provides three readable bytes and out is writable;
+        // start == end == len is the empty-at-end case the ABI allows.
+        unsafe { __ryo_slice(s.as_ptr(), 3, 3, 3, &mut out) };
+        assert_eq!(out.len, 0);
+    }
+
+    #[test]
+    fn slice_nonzero_offset() {
+        let s = "héllo wörld".as_bytes();
+        let mut out = RyoSlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        };
+        // "wörld" starts at byte 7 (h=1, é=2, "llo "=4) and is 6 bytes
+        // — exercises the non-zero pointer-offset path.
+        // SAFETY: s is readable for its byte length and out is writable;
+        // the range 7..13 is in-bounds (see above).
+        unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 7, 13, &mut out) };
+        assert_eq!(out.len, 6);
+        // SAFETY: __ryo_slice returned a valid view into s for out.len bytes.
+        let got = unsafe { core::slice::from_raw_parts(out.ptr, out.len as usize) };
+        assert_eq!(got, "wörld".as_bytes());
+    }
+
+    #[test]
+    fn str_from_view_copies_bytes() {
+        unsafe {
+            let src = b"hello";
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_str_from_view(src.as_ptr(), 5, &mut out);
+            assert_eq!(out.len, 5);
+            assert_eq!(out.cap, 5, "materialized copy owns exactly len bytes");
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            assert_eq!(slice, b"hello");
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn str_from_view_buffer_is_independent() {
+        unsafe {
+            // Heap-backed source: the copy must own a fresh buffer.
+            let src = ryo_str_alloc(3);
+            core::ptr::copy_nonoverlapping(b"abc".as_ptr(), src, 3);
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_str_from_view(src, 3, &mut out);
+            assert!(
+                !std::ptr::eq(out.ptr, src),
+                "copy must not alias the source"
+            );
+            // Overwrite and free the source; the copy is unaffected.
+            core::ptr::write_bytes(src, b'x', 3);
+            ryo_str_free(src, 3);
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            assert_eq!(slice, b"abc");
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn str_from_view_empty() {
+        // RyoSlice invariant: ptr may be null/dangling when len == 0.
+        unsafe {
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_str_from_view(std::ptr::null(), 0, &mut out);
+            assert!(out.ptr.is_null());
+            assert_eq!(out.len, 0);
+            assert_eq!(out.cap, 0);
         }
     }
 }

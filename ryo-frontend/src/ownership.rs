@@ -3,8 +3,13 @@
 //! Runs between sema and codegen. Walks each `Tir` forward, tracking
 //! ownership state for every Move-typed value. Catches use-after-move,
 //! moves out of borrowed parameters, and returns of borrowed values.
-//! Emits diagnostics into the shared `DiagSink` — does not mutate TIR
-//! and does not insert Free instructions (that lands in M8.1c).
+//! M8.4 adds slice-projection tracking (final spec §3.2/§3.3): bound
+//! `strview` views register against their root owner (P3), an owner with
+//! a live projection is frozen against moves and mutation (P2),
+//! projections end at their last use (P4), destruction defers to the
+//! last projection use (P5), and views cannot escape (E1/E2). Emits
+//! diagnostics into the shared `DiagSink` — does not mutate TIR and
+//! does not insert Free instructions (that lands in M8.1c).
 //!
 //! ## State lattice
 //!
@@ -21,7 +26,7 @@
 //!
 //! See `docs/dev/mojo_reference.md`.
 
-use crate::builtins::is_borrowed_scalar_param;
+use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 pub use ryo_core::ownership::{
     BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
@@ -166,6 +171,63 @@ pub(crate) struct Ownership {
     /// Monotone-accumulating; loop convergence re-walks may record the
     /// same return twice — deduped at scheduling time.
     pub return_epilogue: Vec<(TirRef, Vec<Owner>)>,
+
+    /// P3 (final spec §3.2): each bound view → the root owner it
+    /// projects (re-slices resolve transitively to the original
+    /// owner). Monotone (insert-only): a view's root never changes,
+    /// and branch-scope-dropped views keep their entry so the P5
+    /// deferral on the root survives the merge. Merges first-wins,
+    /// mirroring `origin`. Sparse keys, like `states`.
+    pub root_owner: HashMap<Owner, Owner>,
+
+    /// P2 freeze ranges (final spec §3.2): root owner → its currently
+    /// live view bindings. A view is registered when bound (a
+    /// `strview`-typed `VarDecl`/`Assign`) and removed when its
+    /// projection ends (P4: at its last read, at a rebind that kills
+    /// it, at a loop exit for loop-deferred reads, or at a branch
+    /// join for branch-local deaths). Consume/mutate sites of the
+    /// owner consult this set. `Vec` values are in registration
+    /// (walk) order, which keeps the freeze note's span choice
+    /// deterministic.
+    pub live_projections: HashMap<Owner, Vec<Owner>>,
+
+    /// Walk-constant pre-pass liveness (P4): bound view instruction →
+    /// its last reading instruction. Views with no entry are never
+    /// read — their projection lives to scope end. Constant per
+    /// function (computed before the walk), so branch merges need no
+    /// per-field rule for it. `analyze_if_stmt` temporarily refines
+    /// entries per arm (see `if_arm_last_reads`) and restores them at
+    /// each arm's end.
+    pub view_last_use: HashMap<TirRef, TirRef>,
+
+    /// Walk-constant pre-pass liveness (P4 per-arm refinement): if
+    /// stmt → per-arm (view instruction → its last read within that
+    /// arm's subtree), in walk order [then, elif..., else]. Consulted
+    /// by `analyze_if_stmt`; constant per function, so branch merges
+    /// need no per-field rule for it.
+    pub if_arm_last_reads: HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
+
+    /// Walk-constant pre-pass liveness (P4): view instruction → the
+    /// loop at whose exit the projection dies. A view whose last read
+    /// sits inside a loop its creation is outside of re-executes on
+    /// later iterations, so it stays live through the whole loop.
+    pub view_defer_loop: HashMap<TirRef, TirRef>,
+
+    /// Views whose projection ends at the current statement's end
+    /// (P4). Drained by `analyze_stmt` after every statement, so a
+    /// read and a consume within the same statement both see the view
+    /// as live (borrow-for-the-whole-statement semantics, matching
+    /// Rule 7).
+    pub pending_dying: Vec<Owner>,
+
+    /// W0003 case-B support (M8.4.1.2): every move, mutation
+    /// (reassign), or `inout` pass of a tracked owner the walk
+    /// observed, as `(owner, site)` pairs. Monotone-accumulating like
+    /// `reseat_drops` — loop convergence re-walks may push duplicates
+    /// (queries are `any()`-shaped, so no dedup is needed). Read by
+    /// the post-walk redundant-materialize pass to classify escapes of
+    /// the copy and defensive-copy hazards on the view's root owner.
+    pub owner_hazards: Vec<(Owner, TirRef)>,
 }
 
 /// One conditional-reseat observation, recorded by
@@ -200,6 +262,14 @@ impl Ownership {
     /// - `pending_dead_store`: pre-branch keys intersect (any branch that
     ///   read the binding clears the dead-store warning); branch-local keys
     ///   union.
+    /// - `root_owner`: first-write-wins, mirroring `origin` (a view's root
+    ///   never changes, so conflicts don't happen in practice).
+    /// - `live_projections`: union per root — a view live on any branch is
+    ///   live at the join (P2). `analyze_if_stmt` prunes views whose last
+    ///   use is inside the branch afterwards (they are dead on every path
+    ///   at the join).
+    /// - `owner_hazards`: union — the hazard log is monotone; duplicates
+    ///   are harmless to its `any()`-shaped queries.
     /// - Final pass: per-binding state is recomputed through whichever
     ///   end-of-branch owner each branch left, so reseats inside a branch
     ///   contribute their state to the merged binding.
@@ -264,6 +334,23 @@ impl Ownership {
             for (&read, &owner) in &b.owner_at_read {
                 self.owner_at_read.entry(read).or_insert(owner);
             }
+            // P3 root mapping: first-wins, mirroring `origin`.
+            for (k, v) in &b.root_owner {
+                self.root_owner.entry(*k).or_insert(*v);
+            }
+            // P2 freeze ranges: union per root — a view live on any
+            // branch is live at the join (final spec §3.2). The caller
+            // prunes views whose last use is inside the branch.
+            for (root, views) in &b.live_projections {
+                let entry = self.live_projections.entry(*root).or_default();
+                for v in views {
+                    if !entry.contains(v) {
+                        entry.push(*v);
+                    }
+                }
+            }
+            // W0003 hazard log: union (monotone; duplicates harmless).
+            self.owner_hazards.extend(b.owner_hazards.iter().copied());
         }
 
         // Binding-aware override: for each name that existed before
@@ -688,6 +775,571 @@ fn owner_binding_name(tir: &Tir, owner: TirRef) -> Option<StringId> {
     walk(tir, &tir.body_stmts(), owner)
 }
 
+// ---------- M8.4: slice projections (final spec §3.2/§3.3) ----------
+
+/// Deterministic iteration order for owners (I-068): the post passes
+/// push `FreePoint`s while iterating owner-keyed `HashMap`s, whose
+/// iteration order varies per run — sort by a stable key first.
+fn owner_sort_key(owner: &Owner) -> (u8, u32) {
+    match owner {
+        Owner::Param(name) => (0, name.raw()),
+        Owner::Inst(r) => (1, r.raw()),
+    }
+}
+
+/// The `Owner` a `strview`-typed binding should point at: through `Var`
+/// copies of other views to the original slice (P3), or the
+/// initializer instruction itself.
+fn resolve_view_alias(own: &Ownership, tir: &Tir, init: TirRef) -> Owner {
+    if let TirData::Var(name) = tir.inst(init).data
+        && let Some(&owner) = own.current_owner.get(&name)
+    {
+        return owner;
+    }
+    Owner::Inst(init)
+}
+
+/// The root owner a `strview`-typed value projects (P3, final spec §3.2):
+/// a `str` base resolves to its underlying owner; a view base resolves
+/// transitively to the original owner. `None` when the view projects
+/// storage this function does not own (a `strview` parameter's buffer
+/// belongs to the caller) — such projections need no freeze or
+/// destruction tracking here.
+fn projection_root(own: &Ownership, tir: &Tir, pool: &InternPool, r: TirRef) -> Option<Owner> {
+    let inst = *tir.inst(r);
+    // P6': a `strview → str` re-borrow is `str`-typed (so the
+    // `needs_tracking` arm below would resolve the conversion inst
+    // itself as a bogus fresh owner), but ownership-wise it IS the
+    // view's borrow, call-scoped — resolve the operand's root.
+    if inst.tag == TirTag::ViewAsStr
+        && let TirData::UnOp(inner) = inst.data
+    {
+        return projection_root(own, tir, pool, inner);
+    }
+    if needs_tracking(inst.ty, pool) {
+        return Some(underlying_owner(own, r));
+    }
+    if !pool.is_view(inst.ty) {
+        return None;
+    }
+    match inst.data {
+        TirData::Var(name) => match own.current_owner.get(&name) {
+            Some(owner @ Owner::Inst(_)) => own.root_owner.get(owner).copied(),
+            _ => None,
+        },
+        TirData::Slice { base, .. } => {
+            // A slice already registered by its binding resolves to the
+            // recorded root; an unbound (transient) slice resolves
+            // through its own base.
+            if let Some(&root) = own.root_owner.get(&Owner::Inst(r)) {
+                return Some(root);
+            }
+            projection_root(own, tir, pool, base)
+        }
+        TirData::UnOp(inner) if inst.tag == TirTag::ViewOfStr => {
+            projection_root(own, tir, pool, inner)
+        }
+        _ => None,
+    }
+}
+
+/// P3 (final spec §3.2): register `view_owner` as a live projection of
+/// the root owner its initializer resolves to. Idempotent — loop
+/// convergence re-walks and `Var` copies re-register the same view.
+fn register_projection(
+    own: &mut Ownership,
+    tir: &Tir,
+    pool: &InternPool,
+    init: TirRef,
+    view_owner: Owner,
+) {
+    if let Some(root) = projection_root(own, tir, pool, init) {
+        own.root_owner.insert(view_owner, root);
+        let projections = own.live_projections.entry(root).or_default();
+        if !projections.contains(&view_owner) {
+            projections.push(view_owner);
+        }
+    }
+}
+
+/// Remove a view from its root's live set (P4). No-op for views that
+/// were never registered (e.g. projections of non-local storage).
+fn remove_projection(own: &mut Ownership, view: Owner) {
+    if let Some(&root) = own.root_owner.get(&view)
+        && let Some(projections) = own.live_projections.get_mut(&root)
+    {
+        projections.retain(|p| p != &view);
+    }
+}
+
+/// End-of-statement projection death (P4, final spec §3.2). Runs after
+/// a whole statement so a read and a consume within the same statement
+/// both see the view as live (borrow-for-the-whole-statement
+/// semantics, matching Rule 7).
+fn drain_dying_views(own: &mut Ownership) {
+    for view in std::mem::take(&mut own.pending_dying) {
+        remove_projection(own, view);
+    }
+}
+
+/// P4 (final spec §3.2): projections whose last read is inside this
+/// loop but whose creation is outside it stayed live through the body
+/// (a later iteration re-reads them); they die at the loop's exit.
+fn remove_loop_deferred_views(own: &mut Ownership, loop_ref: TirRef) {
+    let dead: Vec<Owner> = own
+        .view_defer_loop
+        .iter()
+        .filter(|(_, l)| **l == loop_ref)
+        .map(|(v, _)| Owner::Inst(*v))
+        .collect();
+    for view in dead {
+        remove_projection(own, view);
+    }
+}
+
+/// Branch-merge liveness (P4, final spec §3.2): a view whose last read
+/// is inside this `if`'s subtree has no reads after the join on ANY
+/// path (the last-use map records the final read), so it is dead at
+/// the join even though the union rule in `merge_branches` kept it
+/// live. Views bound inside an arm are scope-dropped with it — their
+/// last read is necessarily inside the branch — but their P5 deferral
+/// on the root survives via `root_owner` (never pruned).
+///
+/// Loop-deferred views (`view_defer_loop`) are exempt: their last read
+/// re-executes on later iterations, so their death is owned by
+/// `remove_loop_deferred_views` at the enclosing loop's exit. Pruning
+/// one here would lift the root's P2 freeze mid-loop-body and silently
+/// accept owner mutations whose realloc a later iteration reads
+/// through the view's stale pointer; conservative over-liveness is the
+/// sound direction.
+fn prune_branch_dead_projections(tir: &Tir, own: &mut Ownership, if_ref: TirRef) {
+    let mut subtree: HashSet<TirRef> = HashSet::new();
+    collect_refs_recursive(tir, if_ref, &mut subtree);
+    let dead: Vec<Owner> = own
+        .root_owner
+        .keys()
+        .filter(|view| {
+            let Some(vi) = view.inst_tirref() else {
+                return false;
+            };
+            // P2/P4: loop-deferred views die at loop exit, not here.
+            if own.view_defer_loop.contains_key(&vi) {
+                return false;
+            }
+            own.view_last_use
+                .get(&vi)
+                .is_some_and(|lu| subtree.contains(lu))
+        })
+        .copied()
+        .collect();
+    for view in dead {
+        remove_projection(own, view);
+    }
+}
+
+/// P2 freeze (final spec §3.2): while any slice projection of an owner
+/// is live, moving or mutating the owner is a compile error. `verb` is
+/// "move" (consume sites) or "mutate" (`inout` args, reassignment).
+/// The diagnostic points at the consume site with a note at the
+/// projection's last use (post-liveness, §3.5.3); a projection that is
+/// never read notes its creation instead. Suppressed when the owner is
+/// already `Moved` (E0020 covers it) or, for "move", when it is
+/// `Borrowed` (E0021/E0022 cover it).
+#[allow(clippy::too_many_arguments)]
+fn check_source_projected(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &Ownership,
+    sink: &mut DiagSink,
+    owner: Owner,
+    span: Span,
+    verb: &str,
+    name: Option<StringId>,
+) {
+    let state = own.states.get(&owner);
+    if matches!(state, Some(OwnerState::Moved { .. }))
+        || (verb == "move" && matches!(state, Some(OwnerState::Borrowed)))
+    {
+        return;
+    }
+    let Some(projections) = own.live_projections.get(&owner) else {
+        return;
+    };
+    if projections.is_empty() {
+        return;
+    }
+    // Registration order is walk order, so projections[0] is a
+    // deterministic choice for the note's span (I-068).
+    let (note_span, note_msg) = match projections[0].inst_tirref() {
+        Some(vi) => match own.view_last_use.get(&vi) {
+            Some(&lu) => (tir.span(lu), "last slice use here"),
+            None => (tir.span(vi), "slice created here"),
+        },
+        None => (span, "slice projection live here"),
+    };
+    sink.emit(
+        Diag::error(
+            span,
+            DiagCode::SourceProjected,
+            format!(
+                "cannot {verb} {} while a slice of it is live",
+                format_binding(name, pool)
+            ),
+        )
+        .with_note(Some(note_span), note_msg)
+        .with_help(
+            "move or mutate the owner before slicing it, or keep all slice uses before this point",
+        ),
+    );
+}
+
+/// The `WhileLoop`/`ForRange` instructions whose bodies (or conditions,
+/// which re-evaluate per iteration) contain `target`, outermost first.
+/// Used to decide whether a view's last read re-executes on a later
+/// iteration than its creation (P4, final spec §3.2).
+fn loop_nesting_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
+    fn walk(tir: &Tir, stmts: &[TirRef], target: TirRef, stack: &mut Vec<TirRef>) -> bool {
+        for &r in stmts {
+            if r == target {
+                return true;
+            }
+            let mut sub: HashSet<TirRef> = HashSet::new();
+            collect_refs_recursive(tir, r, &mut sub);
+            if !sub.contains(&target) {
+                continue;
+            }
+            match tir.inst(r).tag {
+                TirTag::WhileLoop | TirTag::ForRange => {
+                    stack.push(r);
+                    if let Some(body) = loop_body(tir, r)
+                        && walk(tir, &body, target, stack)
+                    {
+                        return true;
+                    }
+                    // The target is in this loop's cond/bounds — those
+                    // re-evaluate per iteration, so it counts as
+                    // inside the loop.
+                    return true;
+                }
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(r);
+                    if walk(tir, &view.then_stmts, target, stack) {
+                        return true;
+                    }
+                    for elif in &view.elif_branches {
+                        if walk(tir, &elif.body, target, stack) {
+                            return true;
+                        }
+                    }
+                    if let Some(else_stmts) = &view.else_stmts
+                        && walk(tir, else_stmts, target, stack)
+                    {
+                        return true;
+                    }
+                    // In the if's condition — same nesting as the if.
+                    return true;
+                }
+                _ => return true,
+            }
+        }
+        false
+    }
+    let mut stack = Vec::new();
+    walk(tir, &tir.body_stmts(), target, &mut stack);
+    stack
+}
+
+/// Pre-walk liveness for bound views (P4, final spec §3.2). See
+/// [`collect_view_liveness`].
+struct ViewLiveness {
+    /// Bound view instruction → its last reading instruction.
+    last_use: HashMap<TirRef, TirRef>,
+    /// View instruction → the loop at whose exit the projection dies
+    /// (its last read sits inside a loop the creation is outside of).
+    defer_to_loop: HashMap<TirRef, TirRef>,
+    /// Per-`if` arm-local reads (P4 per-arm refinement): if stmt →
+    /// per-arm (view instruction → its last read within that arm's
+    /// subtree), in walk order [then, elif..., else]. Consulted by
+    /// `analyze_if_stmt` to refine `view_last_use` during arm walks.
+    arm_last_reads: HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
+}
+
+/// Simulates the walk's `current_owner` discipline for `strview`-typed
+/// bindings only (snapshot per branch arm, first-wins merge;
+/// entry-first-wins at loop back-edges) and records each bound view's
+/// last read. Runs before the forward walk so the walk knows when it
+/// passes a projection's last use. A read inside a loop that does not
+/// contain the view's creation re-executes on later iterations, so
+/// the projection's death is deferred to that loop's exit.
+fn collect_view_liveness(tir: &Tir, pool: &InternPool) -> ViewLiveness {
+    let mut bindings: HashMap<StringId, TirRef> = HashMap::new();
+    let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
+    let mut arm_last_reads: HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>> = HashMap::new();
+    let body = tir.body_stmts();
+    view_liveness_stmts(
+        tir,
+        pool,
+        &body,
+        &mut bindings,
+        &mut last_use,
+        &mut arm_last_reads,
+    );
+    let mut defer_to_loop = HashMap::new();
+    for (view, read) in &last_use {
+        let created_in = loop_nesting_of(tir, *view);
+        let read_in = loop_nesting_of(tir, *read);
+        // Scope rules guarantee `created_in` is a prefix of `read_in`
+        // (a view's reads cannot escape its binding's scope). A
+        // strictly deeper read re-executes on later iterations of the
+        // first loop beyond the creation's nesting.
+        if created_in.len() < read_in.len() {
+            defer_to_loop.insert(*view, read_in[created_in.len()]);
+        }
+    }
+    ViewLiveness {
+        last_use,
+        defer_to_loop,
+        arm_last_reads,
+    }
+}
+
+fn view_liveness_stmts(
+    tir: &Tir,
+    pool: &InternPool,
+    stmts: &[TirRef],
+    bindings: &mut HashMap<StringId, TirRef>,
+    last_use: &mut HashMap<TirRef, TirRef>,
+    arm_last_reads: &mut HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
+) {
+    for &s in stmts {
+        view_liveness_stmt(tir, pool, s, bindings, last_use, arm_last_reads);
+    }
+}
+
+fn view_liveness_stmt(
+    tir: &Tir,
+    pool: &InternPool,
+    r: TirRef,
+    bindings: &mut HashMap<StringId, TirRef>,
+    last_use: &mut HashMap<TirRef, TirRef>,
+    arm_last_reads: &mut HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
+) {
+    match tir.inst(r).tag {
+        TirTag::VarDecl => {
+            let view = tir.var_decl_view(r);
+            record_view_reads(tir, pool, view.initializer, bindings, last_use);
+            if pool.is_view(tir.inst(r).ty)
+                && let Some(target) = view_binding_target(tir, bindings, view.initializer)
+            {
+                bindings.insert(view.name, target);
+            }
+        }
+        TirTag::Assign => {
+            let view = tir.assign_view(r);
+            record_view_reads(tir, pool, view.value, bindings, last_use);
+            if pool.is_view(tir.inst(r).ty) {
+                match view_binding_target(tir, bindings, view.value) {
+                    Some(target) => {
+                        bindings.insert(view.name, target);
+                    }
+                    None => {
+                        bindings.remove(&view.name);
+                    }
+                }
+            }
+        }
+        TirTag::IfStmt => {
+            let view = tir.if_stmt_view(r);
+            record_view_reads(tir, pool, view.cond, bindings, last_use);
+            // Snapshot per arm; merge first-wins, mirroring the walk's
+            // `current_owner` discipline. Each arm body walks with a
+            // fresh read map so the per-arm table can distinguish
+            // arm-local reads; the records are then merged into
+            // `last_use` in walk order (overwriting insert), leaving
+            // the global map identical to a single shared walk.
+            let pre = bindings.clone();
+            let mut arm_maps = Vec::with_capacity(2 + view.elif_branches.len());
+            let mut arm_reads: Vec<HashMap<TirRef, TirRef>> = Vec::with_capacity(
+                1 + view.elif_branches.len() + usize::from(view.else_stmts.is_some()),
+            );
+            let mut then_reads = HashMap::new();
+            view_liveness_stmts(
+                tir,
+                pool,
+                &view.then_stmts,
+                bindings,
+                &mut then_reads,
+                arm_last_reads,
+            );
+            for (k, v) in &then_reads {
+                last_use.insert(*k, *v);
+            }
+            arm_reads.push(then_reads);
+            arm_maps.push(std::mem::replace(bindings, pre.clone()));
+            for elif in &view.elif_branches {
+                record_view_reads(tir, pool, elif.cond, bindings, last_use);
+                let mut body_reads = HashMap::new();
+                view_liveness_stmts(
+                    tir,
+                    pool,
+                    &elif.body,
+                    bindings,
+                    &mut body_reads,
+                    arm_last_reads,
+                );
+                for (k, v) in &body_reads {
+                    last_use.insert(*k, *v);
+                }
+                arm_reads.push(body_reads);
+                arm_maps.push(std::mem::replace(bindings, pre.clone()));
+            }
+            if let Some(else_stmts) = &view.else_stmts {
+                let mut else_reads = HashMap::new();
+                view_liveness_stmts(
+                    tir,
+                    pool,
+                    else_stmts,
+                    bindings,
+                    &mut else_reads,
+                    arm_last_reads,
+                );
+                for (k, v) in &else_reads {
+                    last_use.insert(*k, *v);
+                }
+                arm_reads.push(else_reads);
+                arm_maps.push(std::mem::replace(bindings, pre.clone()));
+            }
+            arm_last_reads.insert(r, arm_reads);
+            let mut merged = pre;
+            for arm in arm_maps {
+                for (k, v) in arm {
+                    merged.entry(k).or_insert(v);
+                }
+            }
+            *bindings = merged;
+        }
+        TirTag::WhileLoop => {
+            let view = tir.while_loop_view(r);
+            record_view_reads(tir, pool, view.cond, bindings, last_use);
+            view_liveness_loop_body(tir, pool, &view.body, bindings, last_use, arm_last_reads);
+        }
+        TirTag::ForRange => {
+            let view = tir.for_range_view(r);
+            record_view_reads(tir, pool, view.start, bindings, last_use);
+            record_view_reads(tir, pool, view.end, bindings, last_use);
+            view_liveness_loop_body(tir, pool, &view.body, bindings, last_use, arm_last_reads);
+        }
+        _ => record_view_reads(tir, pool, r, bindings, last_use),
+    }
+}
+
+/// Loop-body liveness with entry-first-wins at the back-edge (one pass
+/// suffices: `last_use` records are monotone).
+fn view_liveness_loop_body(
+    tir: &Tir,
+    pool: &InternPool,
+    body: &[TirRef],
+    bindings: &mut HashMap<StringId, TirRef>,
+    last_use: &mut HashMap<TirRef, TirRef>,
+    arm_last_reads: &mut HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
+) {
+    let pre = bindings.clone();
+    view_liveness_stmts(tir, pool, body, bindings, last_use, arm_last_reads);
+    let after = std::mem::replace(bindings, pre);
+    for (k, v) in after {
+        bindings.entry(k).or_insert(v);
+    }
+}
+
+/// Record every `strview`-typed `Var` read within expression `r` as the
+/// (latest) last use of the view it currently aliases. Overwriting
+/// insert: the latest forward-order read wins.
+fn record_view_reads(
+    tir: &Tir,
+    pool: &InternPool,
+    r: TirRef,
+    bindings: &HashMap<StringId, TirRef>,
+    last_use: &mut HashMap<TirRef, TirRef>,
+) {
+    let inst = *tir.inst(r);
+    if inst.tag == TirTag::Var
+        && pool.is_view(inst.ty)
+        && let TirData::Var(name) = inst.data
+        && let Some(&view_inst) = bindings.get(&name)
+    {
+        last_use.insert(view_inst, r);
+    }
+    walk_operands(tir, r, &mut |_parent, child, _kind| {
+        record_view_reads(tir, pool, child, bindings, last_use);
+    });
+}
+
+/// The view instruction a `strview`-typed binding aliases: through `Var`
+/// copies to the original slice (P3), or the initializer itself.
+/// `None` for views of non-local storage (e.g. a `strview` parameter).
+fn view_binding_target(
+    tir: &Tir,
+    bindings: &HashMap<StringId, TirRef>,
+    init: TirRef,
+) -> Option<TirRef> {
+    match tir.inst(init).data {
+        TirData::Var(name) => bindings.get(&name).copied(),
+        TirData::Slice { .. } => Some(init),
+        // A bound ViewOfStr (`u: strview = s`) projects the operand's
+        // owner full-range; the conversion inst stands in as the view.
+        _ if tir.inst(init).tag == TirTag::ViewOfStr => Some(init),
+        _ => None,
+    }
+}
+
+/// Assign every instruction in the function a monotonic rank in
+/// forward walk order (the same traversal `collect_last_uses` uses),
+/// so two last-use anchors can be compared for "later" (P5).
+fn program_order(tir: &Tir) -> HashMap<TirRef, u32> {
+    fn assign(tir: &Tir, r: TirRef, order: &mut HashMap<TirRef, u32>, next: &mut u32) {
+        if order.contains_key(&r) {
+            return;
+        }
+        order.insert(r, *next);
+        *next += 1;
+        walk_operands(tir, r, &mut |_parent, child, _kind| {
+            assign(tir, child, order, next);
+        });
+    }
+    let mut order = HashMap::new();
+    let mut next = 0u32;
+    for &stmt in &tir.body_stmts() {
+        assign(tir, stmt, &mut order, &mut next);
+    }
+    order
+}
+
+/// P5 (final spec §3.2): an owner's destruction is deferred to the
+/// last use of any projection of it. Returns the later of the owner's
+/// own `anchor` and its projections' last uses by program order. A
+/// projection that is never read defers nothing — no one can observe
+/// the buffer through it.
+fn defer_anchor(
+    anchor: TirRef,
+    owner: &Owner,
+    projections_of: &HashMap<Owner, Vec<TirRef>>,
+    last_use: &HashMap<TirRef, TirRef>,
+    order: &HashMap<TirRef, u32>,
+) -> TirRef {
+    let rank = |r: TirRef| order.get(&r).copied().unwrap_or(0);
+    let mut best = anchor;
+    if let Some(views) = projections_of.get(owner) {
+        for &view in views {
+            if let Some(&read) = last_use.get(&view)
+                && rank(read) > rank(best)
+            {
+                best = read;
+            }
+        }
+    }
+    best
+}
+
 /// Validate move safety for every function body. Emits diagnostics
 /// into `sink`. Returns an [`OwnershipSidecar`] that codegen consults
 /// to decide where to emit `ryo_str_free` calls. The TIR itself is
@@ -763,6 +1415,148 @@ fn collect_named_inits_rec(tir: &Tir, r: TirRef, set: &mut HashSet<TirRef>) {
     }
 }
 
+/// True when `r` is a call to the synthesized `__ryo_str_from_view`
+/// materialize callee (M8.4.1.2) with a single view-typed argument.
+/// The callee name is unshadowable (`__ryo_` is reserved), so a name
+/// match is unambiguous.
+fn is_materialize_call(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+    if tir.inst(r).tag != TirTag::Call {
+        return false;
+    }
+    let view = tir.call_view(r);
+    pool.str(view.name) == "__ryo_str_from_view"
+        && view.args.len() == 1
+        && pool.is_view(tir.inst(view.args[0]).ty)
+}
+
+/// Collect every bound materialize site — a `VarDecl`/`Assign` whose
+/// value satisfies [`is_materialize_call`] — as `(decl_stmt, call)`
+/// pairs, recursing into nested control flow like
+/// [`collect_named_inits`]. Unbound materialize results (call
+/// arguments, return operands) are case A's / the escape-fix's
+/// jurisdiction, not case B's.
+fn collect_materialize_sites(
+    tir: &Tir,
+    stmts: &[TirRef],
+    pool: &InternPool,
+    out: &mut Vec<(TirRef, TirRef)>,
+) {
+    for &r in stmts {
+        match tir.inst(r).tag {
+            TirTag::VarDecl => {
+                let init = tir.var_decl_view(r).initializer;
+                if is_materialize_call(tir, pool, init) {
+                    out.push((r, init));
+                }
+            }
+            TirTag::Assign => {
+                let value = tir.assign_view(r).value;
+                if is_materialize_call(tir, pool, value) {
+                    out.push((r, value));
+                }
+            }
+            TirTag::IfStmt => {
+                let v = tir.if_stmt_view(r);
+                collect_materialize_sites(tir, &v.then_stmts, pool, out);
+                for arm in &v.elif_branches {
+                    collect_materialize_sites(tir, &arm.body, pool, out);
+                }
+                if let Some(else_stmts) = v.else_stmts.as_deref() {
+                    collect_materialize_sites(tir, else_stmts, pool, out);
+                }
+            }
+            TirTag::WhileLoop => {
+                collect_materialize_sites(tir, &tir.while_loop_view(r).body, pool, out);
+            }
+            TirTag::ForRange => {
+                collect_materialize_sites(tir, &tir.for_range_view(r).body, pool, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// W0003 case B (M8.4.1.2): a bound `x = str(view)` whose copy never
+/// escapes and whose source is never mutated after the copy is a
+/// redundant allocation — the view could have been used directly.
+///
+/// Heuristic, warning-only. The escape classification REUSES the
+/// walk's results instead of inventing a second escape analysis: the
+/// copy's owner ends `Moved` exactly when a consume (return, `move`
+/// argument, rebinding assign) followed its binding, and
+/// `owner_hazards` records every `inout` pass and mutation the walk
+/// observed. Two deliberate non-goals, both resolved toward NO
+/// warning (conservative direction):
+///
+///  - interprocedural flow: a copy passed by borrow to a function
+///    that stores it somewhere is invisible here and treated as a
+///    non-escape — borrow reads are precisely the uses the view could
+///    have served;
+///  - conditionally-executed escapes: a move/mutation on ANY branch
+///    counts (the merged lattice and the monotone hazard log are
+///    path-insensitive), so a maybe-escape suppresses the warning.
+fn warn_redundant_materialize(tir: &Tir, pool: &InternPool, own: &Ownership, sink: &mut DiagSink) {
+    let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
+    collect_materialize_sites(tir, &tir.body_stmts(), pool, &mut sites);
+    if sites.is_empty() {
+        return;
+    }
+    let order = program_order(tir);
+    let rank = |r: TirRef| order.get(&r).copied().unwrap_or(0);
+    for (decl, call) in sites {
+        let copy = Owner::Inst(call);
+        // Escape check: the copy was consumed (returned, move-passed,
+        // rebound away) after its binding, or mutated / `inout`-passed
+        // anywhere — either makes the owned allocation legitimate. The
+        // hazard at `site == decl` is the binding's own consume, how
+        // the walk models `x = <value>` — not an escape.
+        if matches!(own.states.get(&copy), Some(OwnerState::Moved { .. })) {
+            continue;
+        }
+        if own
+            .owner_hazards
+            .iter()
+            .any(|&(o, site)| o == copy && site != decl)
+        {
+            continue;
+        }
+        // Never read at all: W0001 dead-store's jurisdiction, not W0003's.
+        if own.pending_dead_store.contains_key(&copy) {
+            continue;
+        }
+        // The view's root must be local and resolvable; a `strview`
+        // parameter's buffer belongs to the caller, and the pass
+        // cannot judge mutations it cannot see — no warning.
+        let view_arg = tir.call_view(call).args[0];
+        let Some(root) = projection_root(own, tir, pool, view_arg) else {
+            continue;
+        };
+        // Defensive-copy exception: the root owner is moved, mutated,
+        // or `inout`-passed after the materialize point — copying to
+        // survive the source's later mutation is the sanctioned use
+        // (e.g. ring-buffer reuse). A hazard inside a shared loop
+        // re-executes between iterations regardless of source order,
+        // so it suppresses too (conservative).
+        let mat_rank = rank(call);
+        let mat_loops = loop_nesting_of(tir, call);
+        let defensive = own.owner_hazards.iter().any(|&(o, site)| {
+            o == root
+                && (rank(site) > mat_rank
+                    || loop_nesting_of(tir, site)
+                        .iter()
+                        .any(|l| mat_loops.contains(l)))
+        });
+        if defensive {
+            continue;
+        }
+        sink.emit(Diag::warning(
+            tir.span(call),
+            DiagCode::RedundantMaterialize,
+            "`str(...)` copy never escapes and its source is never mutated — the view can be used directly, without the allocation",
+        ));
+    }
+}
+
 fn analyze_function(
     tir: &Tir,
     pool: &InternPool,
@@ -770,6 +1564,14 @@ fn analyze_function(
     sidecar: &mut FunctionSidecar,
 ) {
     let mut own = Ownership::default();
+
+    // M8.4: view-liveness pre-pass (P4, final spec §3.2). The walk
+    // consults these walk-constant tables to know when it passes a
+    // projection's last use (and which loop exit defers it).
+    let liveness = collect_view_liveness(tir, pool);
+    own.view_last_use = liveness.last_use;
+    own.view_defer_loop = liveness.defer_to_loop;
+    own.if_arm_last_reads = liveness.arm_last_reads;
 
     // Initialise per-parameter state. Move-typed params start at
     // `Valid` (the callee owns them); borrowed and inout params start
@@ -813,6 +1615,18 @@ fn analyze_function(
     for &stmt in &body_stmts {
         collect_last_uses(tir, pool, &own, stmt, &mut last_use);
     }
+    // P5 (final spec §3.2): root owner → every view that ever
+    // projected it (sorted for deterministic iteration, I-068).
+    let order = program_order(tir);
+    let mut projections_of: HashMap<Owner, Vec<TirRef>> = HashMap::new();
+    for (view, root) in &own.root_owner {
+        if let Some(vi) = view.inst_tirref() {
+            projections_of.entry(*root).or_default().push(vi);
+        }
+    }
+    for views in projections_of.values_mut() {
+        views.sort_by_key(|v| v.raw());
+    }
     // Owners already covered by `free_on_reassign` must not be
     // scheduled again via the last-use pass — that would double-free
     // the same allocation. (Pre-rebind owners are now reachable from
@@ -842,7 +1656,12 @@ fn analyze_function(
         .iter()
         .filter_map(|n| own.current_owner.get(n).copied())
         .collect();
-    for (owner, state) in &own.states {
+    // I-068: iterate owners in a sorted order so `free_schedule` push
+    // order does not depend on HashMap iteration order.
+    let mut sorted_states: Vec<(Owner, OwnerState)> =
+        own.states.iter().map(|(o, s)| (*o, s.clone())).collect();
+    sorted_states.sort_by_key(|(o, _)| owner_sort_key(o));
+    for (owner, state) in &sorted_states {
         if !matches!(state, OwnerState::Valid) {
             continue;
         }
@@ -854,6 +1673,9 @@ fn analyze_function(
                     continue;
                 }
                 if let Some(&after) = last_use.get(r) {
+                    // P5 (final spec §3.2): defer the destruction to
+                    // the last use of any projection of this owner.
+                    let after = defer_anchor(after, owner, &projections_of, &last_use, &order);
                     // Conditional last use: a named binding whose LAST
                     // READ is inside a branch is freed at the branch's
                     // exit — the earliest point where the value is dead
@@ -928,7 +1750,9 @@ fn analyze_function(
     for &stmt in &body_stmts {
         find_consumers(tir, stmt, &mut consumer_of);
     }
-    for &temp in &own.temp_owners {
+    let mut sorted_temps: Vec<Owner> = own.temp_owners.iter().copied().collect();
+    sorted_temps.sort_by_key(owner_sort_key);
+    for temp in sorted_temps {
         // Temps are always `Inst` owners, never `Param`.
         let Some(t) = temp.inst_tirref() else {
             continue;
@@ -943,8 +1767,12 @@ fn analyze_function(
             continue;
         }
         if let Some(&consumer) = consumer_of.get(&t) {
+            // P5 (final spec §3.2): a sliced temp stays alive until
+            // the projection's last use (e.g. `v = (a + b)[0:1]` keeps
+            // the concat buffer alive through reads of `v`).
+            let anchor = defer_anchor(consumer, &temp, &projections_of, &last_use, &order);
             sidecar.free_schedule.push(FreePoint {
-                after: consumer,
+                after: anchor,
                 target: t,
                 span: tir.span(t),
                 branch: None,
@@ -961,7 +1789,13 @@ fn analyze_function(
     // allocation. Today no `free_on_reassign` entries exist; this
     // guard activates with Task 6. (`reassign_targets` was computed
     // above for the last-use pass.)
-    for (owner, (name, span, decl_inst)) in &own.pending_dead_store {
+    let mut sorted_dead: Vec<(Owner, (StringId, Span, TirRef))> = own
+        .pending_dead_store
+        .iter()
+        .map(|(o, v)| (*o, *v))
+        .collect();
+    sorted_dead.sort_by_key(|(o, _)| owner_sort_key(o));
+    for (owner, (name, span, decl_inst)) in &sorted_dead {
         // Bound to an `inout str` param: the value escapes through the
         // write-back — it IS used, just not by any TIR instruction the
         // pass can see. Checked by NAME (not by current owner): a rebind
@@ -1026,6 +1860,11 @@ fn analyze_function(
         }
     }
 
+    // W0003 case B (M8.4.1.2): redundant bound materializations. Runs
+    // after the walk so the escape classification it reuses — final
+    // lattice states plus the hazard log — is complete.
+    warn_redundant_materialize(tir, pool, &own, sink);
+
     // Convert honored reseat records into arm-gated
     // `ConditionalDeadDrop`s. A record is honored when a pending entry
     // for one of its reseated owners survived to the drain — i.e. the
@@ -1042,6 +1881,9 @@ fn analyze_function(
             }
         }
     }
+    // I-068: sorted iteration for deterministic sidecar emission order.
+    let mut honored: Vec<usize> = honored.into_iter().collect();
+    honored.sort_unstable();
     for idx in honored {
         let drop = &own.reseat_drops[idx];
         sidecar.conditional_dead_drops.push(ConditionalDeadDrop {
@@ -1145,6 +1987,11 @@ fn analyze_stmt(
             visit_expr(tir, pool, own, sink, sidecar, stmt);
         }
     }
+    // P4 lift (final spec §3.2): projections whose last use this
+    // statement contained die here — after the whole statement, so a
+    // read and a consume within the same statement both see the view
+    // as live.
+    drain_dying_views(own);
 }
 
 /// Move-typed `VarDecl` is a consumer: the new binding takes
@@ -1167,13 +2014,32 @@ fn analyze_var_decl(
     if needs_tracking(init_ty, pool) {
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, init);
-        consume_for_assignment(tir, pool, own, sink, init, span, consumed_name);
+        // P2 freeze (final spec §3.2): the consume moves the owner.
+        check_source_projected(
+            tir,
+            pool,
+            own,
+            sink,
+            underlying_owner(own, init),
+            span,
+            "move",
+            consumed_name,
+        );
+        consume_for_assignment(tir, pool, own, sink, init, span, consumed_name, r);
         rebind_to_init(own, view.name, init);
         // Register the new binding as pending dead-store. The walk
         // clears this entry on any later read or consumption; a
         // surviving entry at function end fires W0001. Keyed by
         // `init`, the same TirRef `rebind_to_init` stamped Valid.
         register_pending_dead_store(own, init, view.name, span, r);
+    } else if pool.is_view(init_ty) {
+        // P3 (final spec §3.2): binding a slice registers a projection
+        // against the root owner (re-slices resolve transitively).
+        // Var copies alias the original slice rather than projecting
+        // again.
+        let view_owner = resolve_view_alias(own, tir, init);
+        own.current_owner.insert(view.name, view_owner);
+        register_projection(own, tir, pool, init, view_owner);
     } else {
         own.current_owner.insert(view.name, Owner::Inst(init));
     }
@@ -1210,10 +2076,25 @@ fn analyze_assign(
                 _ => false,
             };
             if old_droppable {
+                // P2 freeze (final spec §3.2): reassignment mutates the
+                // owner — illegal while a slice of it is live.
+                check_source_projected(
+                    tir,
+                    pool,
+                    own,
+                    sink,
+                    old_owner,
+                    tir.span(r),
+                    "mutate",
+                    Some(view.name),
+                );
                 // `tirref` (not `inst_tirref`): an inout param's old owner
                 // is a `Param`, resolved here to its virtual ref — codegen
                 // caches that ref's repr at the prologue.
                 sidecar.free_on_reassign.insert(r, old_owner.tirref(tir));
+                // W0003 case-B support: reassignment mutates the binding's
+                // owner — a defensive-copy hazard on it.
+                own.owner_hazards.push((old_owner, r));
                 // Reassignment runs the old value's destructor (the
                 // free_on_reassign Free above) — that's an observable use,
                 // so the prior VarDecl/Assign isn't a dead store. Drop the
@@ -1224,9 +2105,36 @@ fn analyze_assign(
         }
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, view.value);
-        consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name);
+        // P2 freeze (final spec §3.2): the consume moves the owner.
+        check_source_projected(
+            tir,
+            pool,
+            own,
+            sink,
+            underlying_owner(own, view.value),
+            span,
+            "move",
+            consumed_name,
+        );
+        consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name, r);
         rebind_to_init(own, view.name, view.value);
         register_pending_dead_store(own, view.value, view.name, span, r);
+    } else if pool.is_view(value_ty) {
+        // P3/P4 (final spec §3.2): rebinding a view registers the new
+        // projection and ends the old binding's — unless another
+        // binding still aliases the old view (a Var copy keeps it
+        // alive).
+        let old_owner = own.current_owner.get(&view.name).copied();
+        let view_owner = resolve_view_alias(own, tir, view.value);
+        register_projection(own, tir, pool, view.value, view_owner);
+        own.current_owner.insert(view.name, view_owner);
+        if let Some(old) = old_owner
+            && old != view_owner
+            && own.root_owner.contains_key(&old)
+            && !own.current_owner.values().any(|o| *o == old)
+        {
+            own.pending_dying.push(old);
+        }
     }
 }
 
@@ -1236,12 +2144,14 @@ fn analyze_assign(
 /// so it is naturally excluded; inout-escape owners are excluded too —
 /// they leave through the write-back pointer, not through destruction.
 fn record_return_epilogue(own: &mut Ownership, return_stmt: TirRef) {
-    let live: Vec<Owner> = own
+    let mut live: Vec<Owner> = own
         .states
         .iter()
         .filter(|(o, s)| matches!(s, OwnerState::Valid) && !inout_escape_owner(own, **o))
         .map(|(o, _)| *o)
         .collect();
+    // I-068: sorted for deterministic sidecar emission order.
+    live.sort_by_key(owner_sort_key);
     if !live.is_empty() {
         own.return_epilogue.push((return_stmt, live));
     }
@@ -1266,11 +2176,35 @@ fn analyze_return(
     };
     let ty = tir.inst(operand).ty;
     visit_expr(tir, pool, own, sink, sidecar, operand);
+    if pool.is_view(ty) {
+        // E1 (final spec §3.3): slices cannot be returned from
+        // functions. Backstop to sema's signature-level rejection.
+        sink.emit(
+            Diag::error(
+                tir.span(r),
+                DiagCode::ViewEscape,
+                "cannot return a slice from a function",
+            )
+            .with_help("slices are non-escaping; return an owned `str` instead"),
+        );
+        return;
+    }
     if !needs_tracking(ty, pool) {
         return;
     }
     let span = tir.span(r);
     let consumed_name = consumed_binding_name(tir, operand);
+    // P2 freeze (final spec §3.2): returning moves the value out.
+    check_source_projected(
+        tir,
+        pool,
+        own,
+        sink,
+        underlying_owner(own, operand),
+        span,
+        "move",
+        consumed_name,
+    );
     consume_underlying(
         tir,
         pool,
@@ -1280,6 +2214,7 @@ fn analyze_return(
         span,
         consumed_name,
         BorrowedAction::ReturnBorrowed,
+        r,
     );
 }
 
@@ -1392,7 +2327,10 @@ enum BorrowedAction {
 
 /// Apply the consumption transition for a Move-typed initializer.
 /// Caller must have already populated origin/state for `init` via
-/// `visit_expr`.
+/// `visit_expr`. `site` is the consuming instruction (VarDecl /
+/// Assign / Return / move-typed Call), recorded in the W0003 hazard
+/// log when the consume lands.
+#[allow(clippy::too_many_arguments)]
 fn consume_for_assignment(
     tir: &Tir,
     pool: &InternPool,
@@ -1401,6 +2339,7 @@ fn consume_for_assignment(
     init: TirRef,
     span: Span,
     name: Option<StringId>,
+    site: TirRef,
 ) {
     consume_underlying(
         tir,
@@ -1411,6 +2350,7 @@ fn consume_for_assignment(
         span,
         name,
         BorrowedAction::MoveOutOfParam,
+        site,
     );
 }
 
@@ -1418,8 +2358,8 @@ fn consume_for_assignment(
 /// move-typed Call argument). Walks back to the underlying owner,
 /// reads its state, and either:
 ///
-/// * `Valid` → stamp `Moved { moved_at: span }` and clear any pending
-///   dead-store entry,
+/// * `Valid` → stamp `Moved { moved_at: span }`, clear any pending
+///   dead-store entry, and log a W0003 move-hazard at `site`,
 /// * `Borrowed` → emit E0021 or E0022 per `on_borrowed`,
 /// * `Moved` → now a use-after-move check authority (I-050).
 /// * `NotTracked` → no-op.
@@ -1433,6 +2373,7 @@ fn consume_underlying(
     span: Span,
     name: Option<StringId>,
     on_borrowed: BorrowedAction,
+    site: TirRef,
 ) {
     let underlying = underlying_owner(own, operand);
     let mut state = own
@@ -1451,6 +2392,9 @@ fn consume_underlying(
             own.pending_dead_store.remove(&underlying);
             own.states
                 .insert(underlying, OwnerState::Moved { moved_at: span });
+            // W0003 case-B support: the consume is a move-hazard on the
+            // owner, anchored at the consuming instruction.
+            own.owner_hazards.push((underlying, site));
         }
         OwnerState::Borrowed => {
             let (code, msg, help) = match on_borrowed {
@@ -1530,6 +2474,107 @@ fn rule7_owner_name(
     owner_name_for_diag(owner, tir, pool)
 }
 
+/// Subtree TirRef set of a statement list — every ref reachable from
+/// each statement, matching `prune_branch_dead_projections`'s notion
+/// of "inside the branch".
+fn stmts_subtree(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
+    let mut set = HashSet::new();
+    for &s in stmts {
+        collect_refs_recursive(tir, s, &mut set);
+    }
+    set
+}
+
+/// Per-arm freeze refinement (P2/P4, final spec §3.2): during an
+/// if-arm walk, a view's last use for freeze purposes is its last
+/// read on the path THROUGH this arm, not the global max over all
+/// arms. Applied before an arm body walks; two cases:
+///
+/// * Override: a view read in this arm whose global last use lies in
+///   a DIFFERENT arm of this if dies at its arm-local last read. The
+///   replaced entries are returned for `restore_view_last_use` (the
+///   walk-constant map must be whole again before the next arm and
+///   before the join-time prune).
+/// * Kill: a view whose every remaining read lies in OTHER arms of
+///   this if (global last use inside the if's subtree, none in this
+///   arm's) is already dead on this arm's path — its projection is
+///   removed for the duration of the arm walk. `analyze_if_stmt`'s
+///   per-arm snapshot/restore of `live_projections` scopes the
+///   removal to this arm.
+///
+/// Both cases skip loop-deferred views (`view_defer_loop`): a later
+/// iteration re-reads them through the back-edge, so they are live on
+/// every arm's path regardless of this arm's reads. The deferral table
+/// is computed from the GLOBAL max read only, so the override applies
+/// the same deferral test per candidate: an arm-local last read inside
+/// a loop the creation is outside of (`created_in < read_in`, the
+/// pre-pass's condition) blocks the override — installing it would let
+/// the death site drain the projection mid-loop and un-freeze a later
+/// owner mutation in the same body. (Skipped, the view stays live to
+/// the join: conservative.) The kill needs no such per-candidate test:
+/// it fires only when the arm has NO reads in its subtree, so there is
+/// no deeper arm-local read to strand; a deeper read in a SIBLING arm
+/// is itself a global-max read the pre-pass deferral already covers.
+/// Neither case applies when the global last use is OUTSIDE the if's
+/// subtree — a post-join read lies on every path and keeps the view
+/// live in every arm.
+fn refine_view_liveness_for_arm(
+    tir: &Tir,
+    own: &mut Ownership,
+    if_ref: TirRef,
+    arm_index: usize,
+    if_subtree: &HashSet<TirRef>,
+    arm_subtree: &HashSet<TirRef>,
+) -> Vec<(TirRef, TirRef)> {
+    let arm_reads = own
+        .if_arm_last_reads
+        .get(&if_ref)
+        .and_then(|arms| arms.get(arm_index));
+    let actions: Vec<(TirRef, Option<TirRef>, TirRef)> = own
+        .view_last_use
+        .iter()
+        .filter(|(vi, global_lu)| {
+            if_subtree.contains(*global_lu)
+                && !arm_subtree.contains(*global_lu)
+                && !own.view_defer_loop.contains_key(*vi)
+        })
+        .map(|(vi, global_lu)| {
+            (
+                *vi,
+                arm_reads.and_then(|reads| reads.get(vi)).copied(),
+                *global_lu,
+            )
+        })
+        .collect();
+    let mut saved = Vec::new();
+    for (vi, arm_lu, global_lu) in actions {
+        match arm_lu {
+            Some(lu) => {
+                // P4 deferral, per candidate: `view_defer_loop` covers
+                // only the global max read, so re-apply the pre-pass's
+                // `created_in < read_in` test to the arm-local read the
+                // override would install.
+                if loop_nesting_of(tir, vi).len() < loop_nesting_of(tir, lu).len() {
+                    continue;
+                }
+                saved.push((vi, global_lu));
+                own.view_last_use.insert(vi, lu);
+            }
+            None => remove_projection(own, Owner::Inst(vi)),
+        }
+    }
+    saved
+}
+
+/// Undo `refine_view_liveness_for_arm`'s overrides after an arm walk:
+/// the walk-constant global max is back in place for the next arm and
+/// for the join-time `prune_branch_dead_projections`.
+fn restore_view_last_use(own: &mut Ownership, saved: Vec<(TirRef, TirRef)>) {
+    for (vi, global_lu) in saved {
+        own.view_last_use.insert(vi, global_lu);
+    }
+}
+
 /// CFG join for `if` / `elif` / `else`. The naïve forward walk
 /// would let a move inside a then-branch persist past the merge
 /// regardless of whether else also moved — wrong for the spec's
@@ -1550,6 +2595,17 @@ fn analyze_if_stmt(
 ) {
     let view = tir.if_stmt_view(r);
     visit_expr(tir, pool, own, sink, sidecar, view.cond);
+    // P4 lift (final spec §3.2): a projection whose last use is the
+    // condition is dead before any arm runs — drain now so every arm
+    // starts from the same freeze state. (A consume inside the
+    // condition itself was already checked above, before the drain.)
+    drain_dying_views(own);
+    // Subtree sets for the per-arm freeze refinement: the whole if
+    // (same set `prune_branch_dead_projections` uses at the join) and,
+    // per arm, the arm's body statements (conditions belong to the
+    // shared flow, not to a specific arm).
+    let mut if_subtree: HashSet<TirRef> = HashSet::new();
+    collect_refs_recursive(tir, r, &mut if_subtree);
 
     // Allocate fresh BranchIds for this if's arms. Codegen consults
     // `sidecar.if_branches` when lowering the if so each arm pushes
@@ -1581,22 +2637,38 @@ fn analyze_if_stmt(
     let snap_states = own.states.clone();
     let snap_current_owner = own.current_owner.clone();
     let snap_pending_dead_store = own.pending_dead_store.clone();
+    // P2 freeze ranges are non-monotone (projections die at their last
+    // use), so they join the per-arm snapshot/restore set like the
+    // other non-monotone fields. `root_owner` is insert-only and stays
+    // live across arms, mirroring `origin`.
+    let snap_live_projections = own.live_projections.clone();
 
+    let then_subtree = stmts_subtree(tir, &view.then_stmts);
+    let saved = refine_view_liveness_for_arm(tir, own, r, 0, &if_subtree, &then_subtree);
     for stmt in &view.then_stmts {
         analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
     }
+    restore_view_last_use(own, saved);
     let then_state = own.clone();
 
     let mut branch_results = vec![then_state];
-    for elif in &view.elif_branches {
+    for (elif_index, elif) in view.elif_branches.iter().enumerate() {
         own.states = snap_states.clone();
         own.current_owner = snap_current_owner.clone();
         own.pending_dead_store = snap_pending_dead_store.clone();
+        own.live_projections = snap_live_projections.clone();
 
         visit_expr(tir, pool, own, sink, sidecar, elif.cond);
+        // See the then-cond note above: projections dying at an elif
+        // condition lift before its body runs.
+        drain_dying_views(own);
+        let elif_subtree = stmts_subtree(tir, &elif.body);
+        let saved =
+            refine_view_liveness_for_arm(tir, own, r, 1 + elif_index, &if_subtree, &elif_subtree);
         for stmt in &elif.body {
             analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
         }
+        restore_view_last_use(own, saved);
         branch_results.push(own.clone());
     }
 
@@ -1604,16 +2676,28 @@ fn analyze_if_stmt(
         own.states = snap_states.clone();
         own.current_owner = snap_current_owner.clone();
         own.pending_dead_store = snap_pending_dead_store.clone();
+        own.live_projections = snap_live_projections.clone();
 
+        let else_subtree = stmts_subtree(tir, else_stmts);
+        let saved = refine_view_liveness_for_arm(
+            tir,
+            own,
+            r,
+            1 + view.elif_branches.len(),
+            &if_subtree,
+            &else_subtree,
+        );
         for stmt in else_stmts {
             analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
         }
+        restore_view_last_use(own, saved);
         branch_results.push(own.clone());
     } else {
         let mut else_snap = own.clone();
         else_snap.states = snap_states.clone();
         else_snap.current_owner = snap_current_owner.clone();
         else_snap.pending_dead_store = snap_pending_dead_store.clone();
+        else_snap.live_projections = snap_live_projections.clone();
         branch_results.push(else_snap);
     }
 
@@ -1663,6 +2747,9 @@ fn analyze_if_stmt(
         .iter()
         .flat_map(|a| a.state.states.keys().copied())
         .collect();
+    // I-068: sorted iteration for deterministic free_schedule order.
+    let mut all_keys: Vec<Owner> = all_keys.into_iter().collect();
+    all_keys.sort_by_key(owner_sort_key);
     for owner in all_keys {
         let is_tracked = match owner {
             Owner::Inst(_) => true,
@@ -1773,14 +2860,20 @@ fn analyze_if_stmt(
     own.states = snap_states;
     own.current_owner = snap_current_owner;
     own.pending_dead_store = snap_pending_dead_store;
+    own.live_projections = snap_live_projections;
     let refs: Vec<&Ownership> = branch_results.iter().collect();
     own.merge_branches(&refs);
+    // P4 (final spec §3.2): a view whose last use is inside this if is
+    // dead at the join on every path — prune it from the merged freeze
+    // ranges (see prune_branch_dead_projections).
+    prune_branch_dead_projections(tir, own, r);
 }
 
 /// Shared loop-body fixed-point (I-051). Caller has already visited the
 /// prelude (cond / start+end). Walks the body once into a scratch sink,
-/// compares entry vs post-body Moved-ness, and either replays (converged)
-/// or re-walks from the merged state against the real sink.
+/// compares entry vs post-body state (I-087: the full tuple — owner
+/// states plus live-projection emptiness), and either replays
+/// (converged) or re-walks from the merged state against the real sink.
 fn analyze_loop_body(
     tir: &Tir,
     pool: &InternPool,
@@ -1790,9 +2883,12 @@ fn analyze_loop_body(
     body: &[TirRef],
 ) {
     // I-061: snapshot ONLY the non-monotone fields (see Step 2).
+    // `live_projections` joined that set in M8.4 (projections die at
+    // their last use); `root_owner` is insert-only and stays live.
     let snap_states = own.states.clone();
     let snap_current_owner = own.current_owner.clone();
     let snap_pending_dead_store = own.pending_dead_store.clone();
+    let snap_live_projections = own.live_projections.clone();
 
     let mut scratch = DiagSink::new();
     for stmt in body {
@@ -1802,9 +2898,10 @@ fn analyze_loop_body(
         own.states.clone(),
         own.current_owner.clone(),
         own.pending_dead_store.clone(),
+        own.live_projections.clone(),
     );
 
-    if states_differ_snapshot(&snap_states, &after.0) {
+    if states_differ_snapshot(&snap_states, &after.0, &snap_live_projections, &after.3) {
         // merge the non-monotone fields and re-walk against the real sink
         merge_non_monotone(
             own,
@@ -1814,6 +2911,8 @@ fn analyze_loop_body(
             &after.1,
             &snap_pending_dead_store,
             &after.2,
+            &snap_live_projections,
+            &after.3,
         );
         for stmt in body {
             analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
@@ -1822,6 +2921,7 @@ fn analyze_loop_body(
         let own_states_clone = own.states.clone();
         let own_current_owner_clone = own.current_owner.clone();
         let own_pending_dead_store_clone = own.pending_dead_store.clone();
+        let own_live_projections_clone = own.live_projections.clone();
         merge_non_monotone(
             own,
             &snap_states,
@@ -1830,6 +2930,8 @@ fn analyze_loop_body(
             &own_current_owner_clone,
             &snap_pending_dead_store,
             &own_pending_dead_store_clone,
+            &snap_live_projections,
+            &own_live_projections_clone,
         );
     } else {
         for d in scratch.into_diags() {
@@ -1844,15 +2946,18 @@ fn analyze_loop_body(
             &after.1,
             &snap_pending_dead_store,
             &after.2,
+            &snap_live_projections,
+            &after.3,
         );
     }
 }
 
 /// 2-pass approximation of a fixed-point ownership analysis for
 /// `while`. Walks the body once from the entry state into a scratch
-/// sink; if no tracked TirRef changed Moved-ness across the back-edge,
-/// the body is loop-invariant for ownership purposes and the scratch
-/// diagnostics are flushed. Otherwise we re-walk from the merged
+/// sink; if the full state tuple (owner states + live-projection
+/// emptiness, I-087) is unchanged across the back-edge, the body is
+/// loop-invariant for ownership purposes and the scratch diagnostics
+/// are flushed. Otherwise we re-walk from the merged
 /// (entry ⊔ post-body) state and emit diagnostics on the second pass
 /// — a binding moved inside the body without rebinding before the
 /// back-edge surfaces as E0020 on iteration two.
@@ -1860,7 +2965,8 @@ fn analyze_loop_body(
 /// Why two passes suffice for the M8.1 pattern set (instead of a
 /// general fixed-point loop): the merge is monotonic over the
 /// Moved-ness sub-lattice (`Valid → Moved` is the only transition,
-/// and merge takes "any branch Moved → Moved"), and there are no
+/// and merge takes "any branch Moved → Moved"), the projection merge
+/// is a plain union (also monotone), and there are no
 /// iteration-count-dependent conditionals — so a TirRef that flips
 /// from `Valid` to `Moved` in pass one stays `Moved` after the
 /// (entry ⊔ post-body) merge and a third walk would observe nothing
@@ -1883,6 +2989,9 @@ fn analyze_while_loop(
     let view = tir.while_loop_view(r);
     visit_expr(tir, pool, own, sink, sidecar, view.cond);
     analyze_loop_body(tir, pool, own, sink, sidecar, &view.body);
+    // P4 (final spec §3.2): projections whose last read is inside this
+    // loop (but whose creation is outside it) die at the loop's exit.
+    remove_loop_deferred_views(own, r);
 }
 
 /// `for i in range(start, end)` loop var is `int` (Copy), so the
@@ -1903,32 +3012,46 @@ fn analyze_for_range(
     visit_expr(tir, pool, own, sink, sidecar, view.start);
     visit_expr(tir, pool, own, sink, sidecar, view.end);
     analyze_loop_body(tir, pool, own, sink, sidecar, &view.body);
+    // P4 (final spec §3.2): projections whose last read is inside this
+    // loop (but whose creation is outside it) die at the loop's exit.
+    remove_loop_deferred_views(own, r);
 }
 
-/// Compare two lattices on the Moved-ness of every tracked `TirRef`.
-/// Per the M8.1b plan, the only transition that forces a re-walk is a
-/// `Valid`/`Borrowed` → `Moved` flip across the back-edge — non-Moved
-/// state changes (e.g. fresh definitions added inside the body) are
-/// loop-invariant for the use-after-move check.
-fn states_differ_snapshot(a: &HashMap<Owner, OwnerState>, b: &HashMap<Owner, OwnerState>) -> bool {
-    // Diverge iff some Owner is Moved in one and not the other.
-    // Walk each side once and check the other's matching entry —
-    // missing entries default to NotTracked, so a Moved with no
-    // counterpart counts as a divergence on its own.
-    for (k, av) in a {
-        let a_moved = matches!(av, OwnerState::Moved { .. });
-        let b_moved = matches!(b.get(k), Some(OwnerState::Moved { .. }));
-        if a_moved != b_moved {
+/// Loop fixed-point convergence comparison (I-087). Compares the full
+/// state tuple — every tracked owner's full `OwnerState` (not just its
+/// Moved-ness) plus the emptiness of each owner's live-projection set
+/// — between the entry and post-body snapshots. A `Valid` ↔ `Borrowed`
+/// flip or a change in freeze state across the back-edge must force a
+/// re-walk, or P2 freeze state inside loop bodies is unsound.
+fn states_differ_snapshot(
+    a: &HashMap<Owner, OwnerState>,
+    b: &HashMap<Owner, OwnerState>,
+    a_live: &HashMap<Owner, Vec<Owner>>,
+    b_live: &HashMap<Owner, Vec<Owner>>,
+) -> bool {
+    // Full OwnerState comparison. Missing entries default to
+    // NotTracked, so a key present on only one side diverges unless
+    // the other side's state is also NotTracked.
+    let mut keys: HashSet<Owner> = a.keys().copied().collect();
+    keys.extend(b.keys().copied());
+    for k in keys {
+        let av = a.get(&k).cloned().unwrap_or(OwnerState::NotTracked);
+        let bv = b.get(&k).cloned().unwrap_or(OwnerState::NotTracked);
+        if av != bv {
             return true;
         }
     }
-    for (k, bv) in b {
-        if !matches!(bv, OwnerState::Moved { .. }) {
-            continue;
-        }
-        // Only need to catch keys exclusive to b that are Moved —
-        // keys present in a were handled in the first loop.
-        if !a.contains_key(k) {
+    // Freeze-range comparison: a live projection on one side and none
+    // on the other changes what consume sites inside the body
+    // diagnose. Only EMPTINESS is compared — which particular view is
+    // live does not change the freeze decision, and the union merge
+    // is monotone over membership.
+    let mut owners: HashSet<Owner> = a_live.keys().copied().collect();
+    owners.extend(b_live.keys().copied());
+    for o in owners {
+        let a_live_o = a_live.get(&o).is_some_and(|v| !v.is_empty());
+        let b_live_o = b_live.get(&o).is_some_and(|v| !v.is_empty());
+        if a_live_o != b_live_o {
             return true;
         }
     }
@@ -1937,6 +3060,7 @@ fn states_differ_snapshot(a: &HashMap<Owner, OwnerState>, b: &HashMap<Owner, Own
 
 /// Merge only the non-monotone fields of two states (represented by their snapshots)
 /// into `own`'s corresponding fields, leaving the monotone fields intact.
+#[allow(clippy::too_many_arguments)]
 fn merge_non_monotone(
     own: &mut Ownership,
     snap_states: &HashMap<Owner, OwnerState>,
@@ -1945,6 +3069,8 @@ fn merge_non_monotone(
     after_current_owner: &HashMap<StringId, Owner>,
     snap_pending_dead_store: &HashMap<Owner, (StringId, Span, TirRef)>,
     after_pending_dead_store: &HashMap<Owner, (StringId, Span, TirRef)>,
+    snap_live_projections: &HashMap<Owner, Vec<Owner>>,
+    after_live_projections: &HashMap<Owner, Vec<Owner>>,
 ) {
     // 1. Merge states: any branch Moved -> Moved; otherwise first observed (snap_states) wins.
     let mut merged_states = snap_states.clone();
@@ -2006,9 +3132,23 @@ fn merge_non_monotone(
         }
     }
 
+    // 4. Merge live_projections: union per root (P2 freeze ranges,
+    // final spec §3.2) — a view live on either side of the back-edge
+    // stays live. Monotone, so the 2-pass fixed point still suffices.
+    let mut merged_live_projections = snap_live_projections.clone();
+    for (root, views) in after_live_projections {
+        let entry = merged_live_projections.entry(*root).or_default();
+        for v in views {
+            if !entry.contains(v) {
+                entry.push(*v);
+            }
+        }
+    }
+
     own.states = merged_states;
     own.current_owner = merged_current_owner;
     own.pending_dead_store = merged_pending_dead_store;
+    own.live_projections = merged_live_projections;
 }
 
 /// For every Move-typed owner that has at least one `Var` read,
@@ -2017,7 +3157,10 @@ fn merge_non_monotone(
 /// wins — semantically equivalent to the previous reverse-walk +
 /// `or_insert` approach for a tree-shaped IR. Recurses through
 /// `walk_operands` so reads buried inside calls, loops, and if-arms
-/// are still seen.
+/// are still seen. M8.4 (P4/P5, final spec §3.2): `strview`-typed reads
+/// are recorded too — keyed by the view's slice instruction — so the
+/// P5 deferral can compare an owner's last use against its
+/// projections' last uses.
 fn collect_last_uses(
     tir: &Tir,
     pool: &InternPool,
@@ -2036,7 +3179,7 @@ fn collect_last_uses(
     // subsequent rebinds.
     if let TirTag::Var = inst.tag
         && let TirData::Var(_) = inst.data
-        && needs_tracking(inst.ty, pool)
+        && (needs_tracking(inst.ty, pool) || pool.is_view(inst.ty))
         && let Some(&owner) = own.owner_at_read.get(&r)
     {
         // Overwriting insert: latest forward-order read wins =
@@ -2107,6 +3250,17 @@ fn walk_operands(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef, TirRef, ChildK
         TirData::BinOp { lhs, rhs } => {
             f(r, lhs, ChildKind::Operand);
             f(r, rhs, ChildKind::Operand);
+        }
+        TirData::Slice { base, start, end } => {
+            // M8.4: a slice reads its base and bounds; the base read
+            // is what keeps the owner live (final spec §3.2 P5).
+            f(r, base, ChildKind::Operand);
+            if let Some(s) = start {
+                f(r, s, ChildKind::Operand);
+            }
+            if let Some(e) = end {
+                f(r, e, ChildKind::Operand);
+            }
         }
         TirData::Extra(_) => match inst.tag {
             TirTag::Call => {
@@ -2412,7 +3566,11 @@ fn schedule_break_continue_frees(
 
     let is_break = matches!(tir.inst(jump_inst).tag, TirTag::Break);
 
-    for (owner, state) in &own.states {
+    // I-068: sorted iteration for deterministic free_schedule order.
+    let mut sorted_states: Vec<(Owner, OwnerState)> =
+        own.states.iter().map(|(o, s)| (*o, s.clone())).collect();
+    sorted_states.sort_by_key(|(o, _)| owner_sort_key(o));
+    for (owner, state) in &sorted_states {
         let r = match owner.inst_tirref() {
             Some(r) => r,
             None => continue,
@@ -2527,6 +3685,12 @@ fn visit_expr(
             // Phase 2 — use-safety check + borrow/move/inout partition.
             let mut borrowed: HashSet<Owner> = HashSet::new();
             let mut moved: HashSet<Owner> = HashSet::new();
+            // E4 (final spec §3.3): a view argument borrows its ROOT
+            // owner for the duration of the call — tracked separately
+            // from `borrowed` so a same-call move of the root is
+            // reported as a P2 freeze violation (SourceProjected)
+            // rather than as a plain borrow/move overlap (E0031).
+            let mut view_borrowed: HashSet<Owner> = HashSet::new();
             // inout occurrences: (owner, arg span) — a Vec, not a Set, so
             // a double-inout of one owner is detectable by count (Rule 7).
             let mut inout_uses: Vec<(Owner, Span)> = Vec::new();
@@ -2548,21 +3712,83 @@ fn visit_expr(
                     // Copy scalars, which never enter the lattice.
                     let owner = inout_owner(own, tir, *arg);
                     check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
+                    if needs_tracking(arg_ty, pool) {
+                        // P2 freeze (final spec §3.2): `inout` passing
+                        // mutates the owner.
+                        check_source_projected(
+                            tir,
+                            pool,
+                            own,
+                            sink,
+                            owner,
+                            tir.span(*arg),
+                            "mutate",
+                            consumed_binding_name(tir, *arg),
+                        );
+                    }
                     inout_uses.push((owner, tir.span(*arg)));
+                    // W0003 case-B support: an `inout` pass mutates the
+                    // owner — a defensive-copy hazard on it.
+                    own.owner_hazards.push((owner, r));
                     continue;
                 }
                 if !needs_tracking(arg_ty, pool) {
-                    // A Copy borrow is a no-op for liveness, but it still
-                    // aliases an `inout` of the same binding in this call —
-                    // record Var reads by name for the Rule 7 overlap check.
-                    // (A Copy `move` arg is rejected by sema's RedundantMove,
-                    // so only the Borrow arm is reachable from real code.)
-                    if mode == ParamMode::Borrow && matches!(tir.inst(*arg).tag, TirTag::Var) {
+                    if mode == ParamMode::Borrow && pool.is_view(arg_ty) {
+                        // A view arg borrows its root owner for the
+                        // call's duration (E4). `projection_root` looks
+                        // through ViewOfStr conversions (the implicit
+                        // str → strview coercion) to the underlying owner
+                        // — without this, `two(&s, s)` with an
+                        // (inout, strview) signature would escape the
+                        // Rule-7 partition.
+                        if let Some(root) = projection_root(own, tir, pool, *arg) {
+                            view_borrowed.insert(root);
+                        }
+                    } else if mode == ParamMode::Borrow && matches!(tir.inst(*arg).tag, TirTag::Var)
+                    {
+                        // A Copy borrow is a no-op for liveness, but it still
+                        // aliases an `inout` of the same binding in this call —
+                        // record Var reads by name for the Rule 7 overlap check.
+                        // (A Copy `move` arg is rejected by sema's RedundantMove,
+                        // so only the Borrow arm is reachable from real code.)
                         borrowed.insert(inout_owner(own, tir, *arg));
                     }
                     continue;
                 }
-                let owner = underlying_owner(own, *arg);
+                // M8.4.1.2: a `str(view)` materialization call passed as
+                // a borrow-mode arg READS the view's buffer at call time
+                // — the view's ROOT owner is immutably borrowed for the
+                // outer call's duration (E4), exactly like passing the
+                // view itself. The ABI registry (`view_borrow_params`)
+                // names the callees this applies to; the copy result is a
+                // fresh owner with no aliasing identity, so it is not
+                // itself recorded in `borrowed`.
+                if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::Call {
+                    let inner = tir.call_view(*arg);
+                    let vb_params = view_borrow_params(inner.name, pool);
+                    if !vb_params.is_empty() {
+                        for &idx in vb_params {
+                            if let Some(&varg) = inner.args.get(idx)
+                                && let Some(root) = projection_root(own, tir, pool, varg)
+                            {
+                                view_borrowed.insert(root);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                // P6': a view re-borrowed into a `str` arg (ViewAsStr)
+                // borrows the view's ROOT owner for the call's duration
+                // — look through the conversion exactly like the
+                // str → strview direction above, or `two(&s, s[0:1])`
+                // would escape the Rule-7 partition.
+                let owner = if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::ViewAsStr
+                {
+                    projection_root(own, tir, pool, *arg)
+                        .unwrap_or_else(|| underlying_owner(own, *arg))
+                } else {
+                    underlying_owner(own, *arg)
+                };
                 if mode == ParamMode::Borrow {
                     check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
                     borrowed.insert(owner);
@@ -2605,8 +3831,9 @@ fn visit_expr(
                     diag = diag.with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)");
                     sink.emit(diag);
                 }
-                // (2) inout ∩ borrowed.
-                if borrowed.contains(owner) {
+                // (2) inout ∩ borrowed (a view arg counts as an
+                // immutable borrow of its root, E4).
+                if borrowed.contains(owner) || view_borrowed.contains(owner) {
                     sink.emit(
                         Diag::error(
                             tir.span(r),
@@ -2671,12 +3898,87 @@ fn visit_expr(
                 sink.emit(diag);
             }
 
+            // P2 freeze (final spec §3.2): a view argument keeps its
+            // root owner live for the whole call, so a `move` of the
+            // same owner in the same call is a freeze violation. The
+            // projection's own last use may be this very call — the
+            // borrow is call-bounded (E4) but the move is not.
+            let mut view_move_overlap: Vec<Owner> =
+                view_borrowed.intersection(&moved).copied().collect();
+            view_move_overlap.sort_by_key(owner_sort_key);
+            for owner in view_move_overlap {
+                // E0020/E0021 already cover owners that are `Moved` or
+                // `Borrowed` — don't double-report (mirrors
+                // check_source_projected's "move" suppression).
+                if matches!(
+                    own.states.get(&owner),
+                    Some(OwnerState::Moved { .. }) | Some(OwnerState::Borrowed)
+                ) {
+                    continue;
+                }
+                let name = owner_name_for_diag(owner, tir, pool);
+                let mut diag = Diag::error(
+                    tir.span(r),
+                    DiagCode::SourceProjected,
+                    format!("cannot move {name} while a slice of it is live"),
+                );
+                // Note the view arg that keeps the owner live.
+                for arg in &view.args {
+                    if pool.is_view(tir.inst(*arg).ty)
+                        && projection_root(own, tir, pool, *arg) == Some(owner)
+                    {
+                        diag = diag.with_note(Some(tir.span(*arg)), "slice passed here");
+                        break;
+                    }
+                }
+                sink.emit(diag);
+            }
+
             // Phase 3 — commit the moves.
             for (i, arg) in view.args.iter().enumerate() {
                 let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
-                if mode == ParamMode::Move && needs_tracking(tir.inst(*arg).ty, pool) {
+                let arg_ty = tir.inst(*arg).ty;
+                // E2 (final spec §3.3): slices cannot be passed to
+                // `move` parameters. Backstop — sema rejects `move` on
+                // view-typed parameters already.
+                if mode == ParamMode::Move && pool.is_view(arg_ty) {
+                    sink.emit(
+                        Diag::error(
+                            tir.span(r),
+                            DiagCode::ViewEscape,
+                            "cannot pass a slice to a `move` parameter",
+                        )
+                        .with_help("slices are non-escaping; pass by default (borrow), or take an owned `str` parameter"),
+                    );
+                    continue;
+                }
+                if mode == ParamMode::Move && needs_tracking(arg_ty, pool) {
+                    let owner = underlying_owner(own, *arg);
+                    // P2 freeze (final spec §3.2) — unless the view
+                    // partition above already reported this owner.
+                    if !view_borrowed.contains(&owner) {
+                        check_source_projected(
+                            tir,
+                            pool,
+                            own,
+                            sink,
+                            owner,
+                            tir.span(r),
+                            "move",
+                            consumed_binding_name(tir, *arg),
+                        );
+                    }
                     let consumed_name = consumed_binding_name(tir, *arg);
-                    consume_for_assignment(tir, pool, own, sink, *arg, tir.span(r), consumed_name);
+                    consume_for_assignment(
+                        tir,
+                        pool,
+                        own,
+                        sink,
+                        *arg,
+                        tir.span(r),
+                        consumed_name,
+                        r,
+                    );
                 }
             }
 
@@ -2698,26 +4000,38 @@ fn visit_expr(
                 TirData::Var(n) => n,
                 _ => unreachable!("Var must carry TirData::Var"),
             };
-            if let Some(&owner) = own.current_owner.get(&name)
-                && needs_tracking(inst.ty, pool)
-            {
-                // Any read counts as "used" for dead-store purposes,
-                // even if it ultimately fires E0020 — once the
-                // programmer's code looked at the value, they
-                // didn't ignore it. Clear by NAME, not by current-owner
-                // key: a reseat inside a branch (Assign) is discarded
-                // by the branch merge, so the pending entry can survive
-                // under a branch-local owner key while the binding
-                // itself is provably read afterwards.
-                own.pending_dead_store.retain(|_, (n, _, _)| *n != name);
-                own.origin.insert(r, Some(owner));
-                // Snapshot owner-at-read so the post-walk
-                // `collect_last_uses` anchors the last-use Free to the
-                // owner that was live *at this read*, not whatever
-                // `current_owner[name]` happens to be at function exit
-                // (which would route pre-rebind reads to the post-
-                // rebind owner — wrong target, double-free).
-                own.owner_at_read.insert(r, owner);
+            if let Some(&owner) = own.current_owner.get(&name) {
+                if needs_tracking(inst.ty, pool) {
+                    // Any read counts as "used" for dead-store purposes,
+                    // even if it ultimately fires E0020 — once the
+                    // programmer's code looked at the value, they
+                    // didn't ignore it. Clear by NAME, not by current-owner
+                    // key: a reseat inside a branch (Assign) is discarded
+                    // by the branch merge, so the pending entry can survive
+                    // under a branch-local owner key while the binding
+                    // itself is provably read afterwards.
+                    own.pending_dead_store.retain(|_, (n, _, _)| *n != name);
+                    own.origin.insert(r, Some(owner));
+                    // Snapshot owner-at-read so the post-walk
+                    // `collect_last_uses` anchors the last-use Free to the
+                    // owner that was live *at this read*, not whatever
+                    // `current_owner[name]` happens to be at function exit
+                    // (which would route pre-rebind reads to the post-
+                    // rebind owner — wrong target, double-free).
+                    own.owner_at_read.insert(r, owner);
+                } else if pool.is_view(inst.ty) {
+                    // P4 lift (final spec §3.2): record the read for
+                    // `collect_last_uses`; when it is the projection's
+                    // precomputed last use (and not loop-deferred), the
+                    // projection dies at the end of this statement.
+                    own.owner_at_read.insert(r, owner);
+                    if let Owner::Inst(vi) = owner
+                        && !own.view_defer_loop.contains_key(&vi)
+                        && own.view_last_use.get(&vi) == Some(&r)
+                    {
+                        own.pending_dying.push(owner);
+                    }
+                }
             }
         }
         // ---- Everything else: recurse on operands so nested
@@ -2752,6 +4066,21 @@ fn recurse_operands(
             visit_expr(tir, pool, own, sink, sidecar, rhs);
             if needs_tracking(tir.inst(rhs).ty, pool) {
                 check_use_moved(tir, pool, own, sink, rhs, tir.span(rhs));
+            }
+        }
+        TirData::Slice { base, start, end } => {
+            // M8.4: slicing is a non-consuming read of the base
+            // (final spec §3.2 P1); slicing a moved `str` is a
+            // use-after-move like any other read. Bounds are ints.
+            visit_expr(tir, pool, own, sink, sidecar, base);
+            if needs_tracking(tir.inst(base).ty, pool) {
+                check_use_moved(tir, pool, own, sink, base, tir.span(base));
+            }
+            for bound in [start, end].into_iter().flatten() {
+                visit_expr(tir, pool, own, sink, sidecar, bound);
+                if needs_tracking(tir.inst(bound).ty, pool) {
+                    check_use_moved(tir, pool, own, sink, bound, tir.span(bound));
+                }
             }
         }
         // `Extra`-shaped instructions (VarDecl, Assign, Call,
@@ -5661,6 +6990,2184 @@ mod tests {
             "the drop must be gated on the else arm {:?}; got {:?}",
             else_id,
             drops[0].arms
+        );
+    }
+
+    // ---------- M8.4: projection tracking (final spec §3.2/§3.3) ----------
+
+    #[test]
+    fn view_creation_registers_projection() {
+        // fn main(): s: str = "hello"; v = s[0:2]; print(v)
+        // → no diags; root_owner[v] == s; s's free is anchored after
+        //   print(v), not after decl (P5 deferral, final spec §3.2).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let vread = tb.var(v, view_ty, span);
+        let call = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, vdecl, stmt]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+        assert!(sink.is_empty(), "expected no diagnostics");
+
+        // The FreePoint targeting s's owner fires after the print(v)
+        // statement (anchored on v's read inside the call), not after
+        // the slice-base read — the projection keeps the buffer alive.
+        assert!(
+            sidecar
+                .free_schedule
+                .iter()
+                .any(|fp| fp.target == lit && fp.after == vread && fp.branch.is_none()),
+            "expected s's Free anchored after print(v)'s read of v; got: {:?}",
+            sidecar.free_schedule
+        );
+        assert_eq!(
+            sidecar
+                .free_schedule
+                .iter()
+                .filter(|fp| fp.target == lit)
+                .count(),
+            1,
+            "expected exactly one Free for lit"
+        );
+    }
+
+    #[test]
+    fn freeze_blocks_move_while_view_live() {
+        // s: str = "hello"; v = s[0:2]; consume(s)  (move-mode callee)
+        // → SourceProjected at the consume call (P2, final spec §3.2).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let sread = tb.var(s, str_ty, span);
+        let call = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, vdecl, stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn freeze_blocks_inout_while_view_live() {
+        // s: str = "hello"; v = s[0:2]; str_push(&s, "!")
+        // → SourceProjected (inout passing mutates the owner; P2).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let call = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, vdecl, stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("mutate"),
+            "expected the diagnostic to say `mutate`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn freeze_lifts_after_last_view_use() {
+        // s: str = "hello"; v = s[0:2]; print(v); consume(s)
+        // → no diags; s moves legally after v's last use (P4).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let sread = tb.var(s, str_ty, span);
+        let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
+        let tir = tb.finish(&[decl, vdecl, pstmt, cstmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics (freeze lifted at v's last use)"
+        );
+    }
+
+    #[test]
+    fn reslice_projects_root_owner() {
+        // s: str = "hello"; v = s[0:3]; w = v[1:2]; consume(s) while w live
+        // → SourceProjected naming s; root_owner[w] == s (P3).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let w = pool.intern_str("w");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base1 = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i3 = tb.int_const(3, int_ty, span);
+        let sl1 = tb.slice(base1, Some(i0), Some(i3), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl1, span);
+        let base2 = tb.var(v, view_ty, span);
+        let i1 = tb.int_const(1, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl2 = tb.slice(base2, Some(i1), Some(i2), view_ty, span);
+        let wdecl = tb.var_decl(w, false, view_ty, sl2, span);
+        let sread = tb.var(s, str_ty, span);
+        let call = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, vdecl, wdecl, stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.code, DiagCode::SourceProjected) && d.message.contains("`s`")),
+            "expected SourceProjected naming `s` (the re-slice projects the root); got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn view_return_is_escape() {
+        // fn bad(s: str) -> strview: return s[0:1]
+        // → sema rejects at signature level (Task 5); this is the
+        //   ownership backstop: hand-built TIR with a view return
+        //   must produce ViewEscape (E1, final spec §3.3).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{TirBuilder, TirParam};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bad = pool.intern_str("bad");
+        let s = pool.intern_str("s");
+        let span = SimpleSpan::new((), 0..0);
+
+        let params = vec![TirParam {
+            name: s,
+            ty: str_ty,
+            mode: ParamMode::Borrow,
+            span,
+        }];
+        let mut tb = TirBuilder::new(bad, params, view_ty, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i1 = tb.int_const(1, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i1), view_ty, span);
+        let ret = tb.unary(TirTag::Return, view_ty, sl, span);
+        let tir = tb.finish(&[ret]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            diags.iter().any(|d| matches!(d.code, DiagCode::ViewEscape)),
+            "expected ViewEscape on the view return; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn view_across_branches() {
+        // s: str = "hello"; v = s[0:2]; if flag: print(v) else: print("x"); consume(s)
+        // → legal: v's last use is inside the branch; freeze lifted at
+        //   the join; P5 keeps s alive through the branch.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let x = pool.intern_str("x");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let xlit = tb.str_const(x, str_ty, span);
+        let xcall = tb.call(print, &[xlit], &all_borrow(&[xlit]), void, span);
+        let xstmt = tb.unary(TirTag::ExprStmt, void, xcall, span);
+        let ifs = tb.if_stmt(cond, &[pstmt], &[], Some(&[xstmt]), void, span);
+        let sread = tb.var(s, str_ty, span);
+        let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
+        let tir = tb.finish(&[decl, vdecl, ifs, cstmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics (freeze lifted at the join)"
+        );
+    }
+
+    #[test]
+    fn freeze_is_per_arm_precise_across_if_arms() {
+        // Per-arm view_last_use (author decision): during an arm walk a
+        // view's last use for freeze purposes is its last read on the
+        // path THROUGH that arm, not the global max over all arms.
+        //   s: str = "hello"; v = s[0:2]
+        //   if cond: print(v); consume(s)   # v dead before the move, this path
+        //   else: print(v)
+        // → legal: on the then-path v's last read completes before the
+        //   consume; the else-arm read is not on that path.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let vread_t = tb.var(v, view_ty, span);
+        let pcall_t = tb.call(print, &[vread_t], &all_borrow(&[vread_t]), void, span);
+        let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
+        let sread = tb.var(s, str_ty, span);
+        let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
+        let vread_e = tb.var(v, view_ty, span);
+        let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+        let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
+        let ifs = tb.if_stmt(cond, &[pstmt_t, cstmt], &[], Some(&[pstmt_e]), void, span);
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics (v is dead on the then-path before the move); got: {:?}",
+            sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn per_arm_override_respects_loop_deferral() {
+        // Regression (review Critical on 2cbaa06): the per-arm override
+        // must not install an arm-local last read that sits inside a
+        // loop the creation is outside of — the walk-constant
+        // `view_defer_loop` is computed from the GLOBAL max read only,
+        // so the death site would drain the projection mid-loop and
+        // un-freeze a later owner mutation in the same body.
+        //   s: str = "hello"; v = s[0:2]
+        //   if true:
+        //       while true:
+        //           print(v)          # arm-local last read, inside loop
+        //           str_push(&s, "xxxx")  # realloc; iteration 2 re-reads v
+        //   else:
+        //       print(v)              # global max read — outside any loop
+        // → exactly one SourceProjected naming `s` (P4 deferral holds
+        //   per arm: the in-loop read keeps v live through the loop).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let x4 = pool.intern_str("xxxx");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let if_cond = tb.bool_const(true, bool_ty, span);
+        let wcond = tb.bool_const(true, bool_ty, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(x4, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let wl = tb.while_loop(wcond, &[pstmt, push_stmt], void, span);
+        let vread_e = tb.var(v, view_ty, span);
+        let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+        let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
+        let ifs = tb.if_stmt(if_cond, &[wl], &[], Some(&[pstmt_e]), void, span);
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn per_arm_kill_respects_loop_deferral() {
+        // Kill-side companion to `per_arm_override_respects_loop_deferral`:
+        // the arm-kill fires only when the arm has NO reads of the view
+        // in its subtree, so there is no deeper arm-local read to
+        // strand — and a deeper read in a SIBLING arm is itself the
+        // global max read, which the pre-pass deferral already covers.
+        //   s: str = "hello"; v = s[0:2]
+        //   if true:
+        //       consume(s)        # kill candidate: no reads of v here
+        //   else:
+        //       while true:
+        //           print(v)      # global max read, deeper than creation
+        //                         #   → loop-deferred → kill/override skipped
+        // → exactly one SourceProjected naming `s` (v is live in the
+        //   then-arm through the deferral exemption).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let if_cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
+        let wcond = tb.bool_const(true, bool_ty, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let wl = tb.while_loop(wcond, &[pstmt], void, span);
+        let ifs = tb.if_stmt(if_cond, &[cstmt], &[], Some(&[wl]), void, span);
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn per_arm_kill_without_deferral_stays_scoped() {
+        // Non-deferred companion to `per_arm_kill_respects_loop_deferral`:
+        // the kill needs no loop guard because it fires only in an arm
+        // with NO reads of the view — a deeper read in a SIBLING arm is
+        // the global max read and lies on a different path, so the view
+        // is genuinely dead on the no-read arm's path and moving the
+        // owner there is sound. Soundness rests on the per-arm
+        // `live_projections` snapshot scoping the kill to that arm's
+        // walk: the else arm below must still see the view live.
+        //   s: str = "hello"; v = s[0:2]
+        //   if c1: print(v)               # sibling read of v
+        //   elif c2: consume(s)           # no reads of v → kill → LEGAL
+        //   else: consume(s); print(v)    # v live until its read → E0035
+        // → exactly one SourceProjected naming `s` (from the else arm):
+        //   the elif move is accepted (the kill fired without deferral)
+        //   and the else move is rejected (the kill did not leak across
+        //   arms — had the elif walk left the projection drained, the
+        //   else-arm move would be silently accepted too).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond1 = tb.bool_const(true, bool_ty, span);
+        let cond2 = tb.bool_const(true, bool_ty, span);
+        let vread_t = tb.var(v, view_ty, span);
+        let pcall_t = tb.call(print, &[vread_t], &all_borrow(&[vread_t]), void, span);
+        let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
+        let sread_elif = tb.var(s, str_ty, span);
+        let ccall_elif = tb.call(consume, &[sread_elif], &[ParamMode::Move], void, span);
+        let cstmt_elif = tb.unary(TirTag::ExprStmt, void, ccall_elif, span);
+        let sread_e = tb.var(s, str_ty, span);
+        let ccall_e = tb.call(consume, &[sread_e], &[ParamMode::Move], void, span);
+        let cstmt_e = tb.unary(TirTag::ExprStmt, void, ccall_e, span);
+        let vread_e = tb.var(v, view_ty, span);
+        let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+        let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
+        let ifs = tb.if_stmt(
+            cond1,
+            &[pstmt_t],
+            &[(cond2, vec![cstmt_elif])],
+            Some(&[cstmt_e, pstmt_e]),
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn per_arm_override_applies_to_elif_arms() {
+        // Elif arms go through `refine_view_liveness_for_arm` like the
+        // then/else arms (arm index 1 + elif_index, with the pre-pass's
+        // `arm_reads` laid out then/elif…/else): a view read in the elif
+        // arm whose global last use lies in a LATER arm dies at its
+        // elif-local last read, un-freezing the owner for the rest of
+        // the elif arm. Were elif arms skipped, the view would stay live
+        // to the else-arm read and the move below would be spuriously
+        // diagnosed — this is the only per-arm shape that distinguishes
+        // a working elif path from a missing one.
+        //   s: str = "hello"; v = s[0:2]
+        //   if c1: print("t")             # no reads of v (kill — inert)
+        //   elif c2: print(v); consume(s) # move AFTER v's elif-local
+        //                                 #   last read → LEGAL
+        //   else: print(v)                # global max read (later arm)
+        // → no diagnostics.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let tee = pool.intern_str("t");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond1 = tb.bool_const(true, bool_ty, span);
+        let cond2 = tb.bool_const(true, bool_ty, span);
+        let tlit = tb.str_const(tee, str_ty, span);
+        let pcall_t = tb.call(print, &[tlit], &all_borrow(&[tlit]), void, span);
+        let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
+        let vread_elif = tb.var(v, view_ty, span);
+        let pcall_elif = tb.call(print, &[vread_elif], &all_borrow(&[vread_elif]), void, span);
+        let pstmt_elif = tb.unary(TirTag::ExprStmt, void, pcall_elif, span);
+        let sread = tb.var(s, str_ty, span);
+        let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
+        let vread_e = tb.var(v, view_ty, span);
+        let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+        let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
+        let ifs = tb.if_stmt(
+            cond1,
+            &[pstmt_t],
+            &[(cond2, vec![pstmt_elif, cstmt])],
+            Some(&[pstmt_e]),
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics (v dies at its elif-local last read); got: {:?}",
+            sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn view_created_in_loop_body_per_arm_kill_applies() {
+        // Loop deferral (`view_defer_loop`) covers only views created
+        // OUTSIDE the loop their last read sits in (`created_in <
+        // read_in`). A view created INSIDE the loop body is re-sliced
+        // from the current buffer every iteration, so the back-edge
+        // cannot strand a stale read: the deferral does not apply and
+        // the per-arm kill fires — on the arm with no reads of v the
+        // owner mutation is sound and must NOT be diagnosed.
+        //   s: str = "hello"
+        //   while true:
+        //       v = s[0:2]
+        //       if c: str_push(&s, "!")   # no reads of v → kill → LEGAL
+        //       else: print(v)
+        // → no diagnostics (no spurious SourceProjected).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let wcond = tb.bool_const(true, bool_ty, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(cond, &[push_stmt], &[], Some(&[pstmt]), void, span);
+        let wl = tb.while_loop(wcond, &[vdecl, ifs], void, span);
+        let tir = tb.finish(&[decl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics (v is re-sliced each iteration and dead on the push arm); got: {:?}",
+            sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn view_created_in_loop_body_freeze_holds_before_read() {
+        // Flip side of `view_created_in_loop_body_per_arm_kill_applies`:
+        // in-loop creation must not disable the freeze on the arm that
+        // DOES read the view — the mutation precedes v's read on the
+        // same path, so v is live at the mutation site. This is the
+        // no-false-UAF-acceptance direction: the realloc in str_push
+        // would leave v pointing at freed memory when the read runs.
+        //   s: str = "hello"
+        //   while true:
+        //       v = s[0:2]
+        //       if c: str_push(&s, "!"); print(v)   # mutation while v live
+        // → exactly one SourceProjected naming `s`.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let wcond = tb.bool_const(true, bool_ty, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(cond, &[push_stmt, pstmt], &[], None, void, span);
+        let wl = tb.while_loop(wcond, &[vdecl, ifs], void, span);
+        let tir = tb.finish(&[decl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn freeze_holds_before_arm_local_last_read() {
+        // Contract: a move of the owner BEFORE the view's arm-local last
+        // read stays rejected — per-arm precision does not weaken the
+        // intra-arm freeze.
+        //   s: str = "hello"; v = s[0:2]
+        //   if cond: consume(s); print(v)   # move precedes v's last read
+        //   else: print(v)
+        // → exactly one SourceProjected naming `s`.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
+        let vread_t = tb.var(v, view_ty, span);
+        let pcall_t = tb.call(print, &[vread_t], &all_borrow(&[vread_t]), void, span);
+        let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
+        let vread_e = tb.var(v, view_ty, span);
+        let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+        let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
+        let ifs = tb.if_stmt(cond, &[cstmt, pstmt_t], &[], Some(&[pstmt_e]), void, span);
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn freeze_holds_in_arm_when_view_read_after_join() {
+        // Contract: a view read AFTER the join keeps the owner frozen in
+        // every arm — the post-join read lies on every path, so no arm
+        // may refine it away.
+        //   s: str = "hello"; v = s[0:2]
+        //   if cond: print(v)
+        //   else: consume(s)      # v still live (read after the if)
+        //   print(v)
+        // → exactly one SourceProjected naming `s`.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let vread_t = tb.var(v, view_ty, span);
+        let pcall_t = tb.call(print, &[vread_t], &all_borrow(&[vread_t]), void, span);
+        let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
+        let sread = tb.var(s, str_ty, span);
+        let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
+        let ifs = tb.if_stmt(cond, &[pstmt_t], &[], Some(&[cstmt]), void, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let tir = tb.finish(&[decl, vdecl, ifs, pstmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn move_in_arm_where_view_is_dead_ok_but_post_join_use_is_uam() {
+        // Contract: on a path with no remaining view reads the owner may
+        // move — but the conditional-move machinery still guards the
+        // join: using the owner after the if is use-after-move.
+        //   s: str = "hello"; v = s[0:2]
+        //   if cond: consume(s)   # v is never read on this path → legal
+        //   else: print(v)
+        //   print(s)              # moved on the then-path → E0020
+        // → exactly one UseAfterMove (and NO SourceProjected).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
+        let vread_e = tb.var(v, view_ty, span);
+        let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+        let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
+        let ifs = tb.if_stmt(cond, &[cstmt], &[], Some(&[pstmt_e]), void, span);
+        let sread2 = tb.var(s, str_ty, span);
+        let pcall = tb.call(print, &[sread2], &all_borrow(&[sread2]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let tir = tb.finish(&[decl, vdecl, ifs, pstmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::UseAfterMove),
+            "expected UseAfterMove; got: {:?}",
+            diags[0].code
+        );
+    }
+
+    #[test]
+    fn loop_deferred_view_stays_frozen_across_arm_without_read() {
+        // Contract: per-arm refinement must NOT apply to loop-deferred
+        // views — a later iteration re-reads the view through the
+        // back-edge, so it is live on every arm's path inside the loop.
+        //   s: str = "hello"; v = s[0:2]
+        //   while true:
+        //       if cond: str_push(&s, "!")   # v unread on this arm's path
+        //       else: print(v)               # …but re-read next iteration
+        // → exactly one SourceProjected naming `s`.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let wcond = tb.bool_const(true, bool_ty, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(cond, &[push_stmt], &[], Some(&[pstmt]), void, span);
+        let wl = tb.while_loop(wcond, &[ifs], void, span);
+        let tir = tb.finish(&[decl, vdecl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
+        // Same contract as loop_deferred_view_stays_frozen_across_arm_without_read
+        // but through the ForRange path (analyze_for_range →
+        // remove_loop_deferred_views at :3017 instead of the while-loop
+        // call at :2994):
+        //   s: str = "hello"; v = s[0:2]
+        //   for i in range(0, 3):
+        //       if cond: str_push(&s, "!")   # v unread on this arm's path
+        //       else: print(v)               # …but re-read next iteration
+        // → exactly one SourceProjected naming `s`.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let i = pool.intern_str("i");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(cond, &[push_stmt], &[], Some(&[pstmt]), void, span);
+        let i0b = tb.int_const(0, int_ty, span);
+        let i3 = tb.int_const(3, int_ty, span);
+        let fr = tb.for_range(i, i0b, i3, &[ifs], void, span);
+        let tir = tb.finish(&[decl, vdecl, fr]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn view_in_loop_body_converges() {
+        // s: str = "hello"; while true: v = s[0:2]; print(v)
+        // → converges (I-087 full-tuple comparison); no spurious
+        //   SourceProjected on the second iteration; s freed after the
+        //   loop.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let wl = tb.while_loop(cond, &[vdecl, pstmt], void, span);
+        let tir = tb.finish(&[decl, wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sidecar = sidecar
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics (no spurious SourceProjected)"
+        );
+        // s's Free is anchored after the loop (its last use — through
+        // the projection — is inside the loop body; the conditional
+        // re-anchor moves it to the loop exit).
+        assert!(
+            sidecar
+                .free_schedule
+                .iter()
+                .any(|fp| fp.target == lit && fp.after == wl && fp.branch.is_none()),
+            "expected s's Free anchored after the loop; got: {:?}",
+            sidecar.free_schedule
+        );
+    }
+
+    #[test]
+    fn loop_deferred_view_survives_if_join_prune() {
+        // Regression test (review Critical): prune_branch_dead_projections
+        // must not kill a loop-deferred view at the if join.
+        //   s: str = "hello"; v = s[0:2]
+        //   while true:
+        //       if true: print(v)     # v's last read → loop-deferred (P4)
+        //       str_push(&s, "!")     # mutates the owner while v is live
+        // → exactly one SourceProjected naming `s` (P2). Before the fix
+        //   the if-join prune emptied live_projections[s] mid-loop-body,
+        //   silently accepting a mutation whose realloc later iterations
+        //   would read through v's stale pointer — the UAF class P2
+        //   exists to reject.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let while_cond = tb.bool_const(true, bool_ty, span);
+        let if_cond = tb.bool_const(true, bool_ty, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(if_cond, &[pstmt], &[], None, void, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let wl = tb.while_loop(while_cond, &[ifs, push_stmt], void, span);
+        let tir = tb.finish(&[decl, vdecl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn free_schedule_is_deterministic() {
+        // Build a TIR with several owners + views; run `check` twice;
+        // assert identical free_schedule (I-068).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s1 = pool.intern_str("s1");
+        let s2 = pool.intern_str("s2");
+        let s3 = pool.intern_str("s3");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        // s1 = "a"; s2 = "b"; v = s1[0:1]; print(v); print(s2);
+        // s3 = "c" (dead store); if true: print(s1) else: print("x");
+        // print("tmp")
+        let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl1 = tb.var_decl(s1, false, str_ty, lit_a, span);
+        let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let decl2 = tb.var_decl(s2, false, str_ty, lit_b, span);
+        let base = tb.var(s1, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i1 = tb.int_const(1, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i1), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let vread = tb.var(v, view_ty, span);
+        let pv = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pv_stmt = tb.unary(TirTag::ExprStmt, void, pv, span);
+        let r2 = tb.var(s2, str_ty, span);
+        let ps2 = tb.call(print, &[r2], &all_borrow(&[r2]), void, span);
+        let ps2_stmt = tb.unary(TirTag::ExprStmt, void, ps2, span);
+        let lit_c = tb.str_const(pool.intern_str("c"), str_ty, span);
+        let decl3 = tb.var_decl(s3, false, str_ty, lit_c, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let r1 = tb.var(s1, str_ty, span);
+        let ps1 = tb.call(print, &[r1], &all_borrow(&[r1]), void, span);
+        let ps1_stmt = tb.unary(TirTag::ExprStmt, void, ps1, span);
+        let xlit = tb.str_const(pool.intern_str("x"), str_ty, span);
+        let px = tb.call(print, &[xlit], &all_borrow(&[xlit]), void, span);
+        let px_stmt = tb.unary(TirTag::ExprStmt, void, px, span);
+        let ifs = tb.if_stmt(cond, &[ps1_stmt], &[], Some(&[px_stmt]), void, span);
+        let tlit = tb.str_const(pool.intern_str("tmp"), str_ty, span);
+        let pt = tb.call(print, &[tlit], &all_borrow(&[tlit]), void, span);
+        let pt_stmt = tb.unary(TirTag::ExprStmt, void, pt, span);
+        let tir = tb.finish(&[decl1, decl2, vdecl, pv_stmt, ps2_stmt, decl3, ifs, pt_stmt]);
+
+        let run = |tir: &Tir| {
+            let mut sink = DiagSink::new();
+            let mut sidecar = check(std::slice::from_ref(tir), &pool, &mut sink);
+            let sc = sidecar
+                .functions
+                .remove(&main)
+                .expect("per-function sidecar entry");
+            sc.free_schedule
+                .iter()
+                .map(|fp| (fp.after.raw(), fp.target.raw(), fp.branch.map(|b| b.0)))
+                .collect::<Vec<_>>()
+        };
+        let first = run(&tir);
+        let second = run(&tir);
+        assert!(!first.is_empty(), "expected a non-empty free schedule");
+        assert_eq!(
+            first, second,
+            "free_schedule must be deterministic across runs (I-068)"
+        );
+    }
+
+    #[test]
+    fn viewofstr_arg_counts_as_borrow_rule7() {
+        // T5/T7 carry-forward: fn two(inout a: str, b: strview) called as
+        // two(&s, s) — sema wraps the second arg in ViewOfStr; the
+        // Rule-7 borrow partition must look through the conversion and
+        // diagnose the aliasing (E0032).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let two = pool.intern_str("two");
+        let s = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let inout_arg = tb.var(s, str_ty, span);
+        let view_base = tb.var(s, str_ty, span);
+        let view_arg = tb.view_of_str(view_base, view_ty, span);
+        let call = tb.call(
+            two,
+            &[inout_arg, view_arg],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::MutableAliasingViolation),
+            "expected E0032 MutableAliasingViolation; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn viewofstr_read_counts_as_use_dead_store() {
+        // T5/T7 carry-forward: an owned `str` used ONLY via a ViewOfStr
+        // conversion must count as used — no W0001. Here s's sole read
+        // is the owned side of the mixed `str == strview` comparison:
+        //   s: str = "hi"; other: str = "yo"; if s == other[0:1]: print("x")
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let other = pool.intern_str("other");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_hi = tb.str_const(pool.intern_str("hi"), str_ty, span);
+        let decl_s = tb.var_decl(s, false, str_ty, lit_hi, span);
+        let lit_yo = tb.str_const(pool.intern_str("yo"), str_ty, span);
+        let decl_o = tb.var_decl(other, false, str_ty, lit_yo, span);
+        let obase = tb.var(other, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i1 = tb.int_const(1, int_ty, span);
+        let sl = tb.slice(obase, Some(i0), Some(i1), view_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let vos = tb.view_of_str(sread, view_ty, span);
+        let eq = tb.binary(TirTag::StrCmpEq, bool_ty, vos, sl, span);
+        let xlit = tb.str_const(pool.intern_str("x"), str_ty, span);
+        let pcall = tb.call(print, &[xlit], &all_borrow(&[xlit]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(eq, &[pstmt], &[], None, void, span);
+        let tir = tb.finish(&[decl_s, decl_o, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics — the ViewOfStr read must count as a use of s"
+        );
+    }
+
+    #[test]
+    fn viewasstr_arg_counts_as_borrow_rule7() {
+        // P6' carry-forward: fn two(inout a: str, b: str) called as
+        // two(&s, s[0:1]) — sema wraps the second arg in ViewAsStr; the
+        // Rule-7 borrow partition must look through the conversion and
+        // diagnose the aliasing (E0032), same as the ViewOfStr case.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let two = pool.intern_str("two");
+        let s = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let inout_arg = tb.var(s, str_ty, span);
+        let slice_base = tb.var(s, str_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let one = tb.int_const(1, int_ty, span);
+        let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
+        let reborrow = tb.view_as_str(slice, str_ty, span);
+        let call = tb.call(
+            two,
+            &[inout_arg, reborrow],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::MutableAliasingViolation),
+            "expected E0032 MutableAliasingViolation; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn viewasstr_reborrow_is_call_scoped() {
+        // P6': the re-borrow lives only for the call's duration — the
+        // root owner can still be moved afterwards (no freeze, no
+        // aliasing), unlike a bound slice projection.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let show = pool.intern_str("show");
+        let eat = pool.intern_str("eat");
+        let s = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let slice_base = tb.var(s, str_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let one = tb.int_const(1, int_ty, span);
+        let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
+        let reborrow = tb.view_as_str(slice, str_ty, span);
+        let show_call = tb.call(show, &[reborrow], &[ParamMode::Borrow], void, span);
+        let show_stmt = tb.unary(TirTag::ExprStmt, void, show_call, span);
+        // `s` moved later in the caller — fine: the re-borrow ended
+        // with the `show` call.
+        let moved = tb.var(s, str_ty, span);
+        let eat_call = tb.call(eat, &[moved], &[ParamMode::Move], void, span);
+        let eat_stmt = tb.unary(TirTag::ExprStmt, void, eat_call, span);
+        let tir = tb.finish(&[decl, show_stmt, eat_stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics — the re-borrow is call-scoped; got: {:?}",
+            sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn str_materialize_result_is_fresh_owner() {
+        // M8.4.1.2: `fn show(text: strview) -> str: return str(text)` —
+        // the materialized copy is a fresh owner by construction (the
+        // str-returning-Call seeding), so returning it is the sanctioned
+        // escape fix: no diagnostics, no ownership special-casing.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirData, TirParam, TirTag};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let show = pool.intern_str("show");
+        let text = pool.intern_str("text");
+        let materialize = pool.intern_str("__ryo_str_from_view");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(
+            show,
+            vec![TirParam {
+                name: text,
+                ty: view_ty,
+                mode: ParamMode::Borrow,
+                span,
+            }],
+            str_ty,
+            span,
+        );
+        let arg = tb.var(text, view_ty, span);
+        let copy = tb.call(materialize, &[arg], &[ParamMode::Borrow], str_ty, span);
+        let ret = tb.push_typed(TirTag::Return, TirData::UnOp(copy), str_ty, span);
+        let tir = tb.finish(&[ret]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "materialize-and-return must be clean — the copy is a fresh owner; got: {:?}",
+            sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn str_materialize_arg_counts_as_borrow_rule7() {
+        // M8.4.1.2: fn two(inout a: str, b: str) called as
+        // two(&s, str(s[0:1])) — the materialization READS the view's
+        // buffer at call time, so it counts as an immutable borrow of
+        // `s` for the call's duration (E4): the Rule-7 partition must
+        // look through `__ryo_str_from_view` to the view's root, exactly
+        // like the ViewAsStr case (viewasstr_arg_counts_as_borrow_rule7).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let two = pool.intern_str("two");
+        let s = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let materialize = pool.intern_str("__ryo_str_from_view");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let inout_arg = tb.var(s, str_ty, span);
+        let slice_base = tb.var(s, str_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let one = tb.int_const(1, int_ty, span);
+        let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
+        let copy = tb.call(materialize, &[slice], &[ParamMode::Borrow], str_ty, span);
+        let call = tb.call(
+            two,
+            &[inout_arg, copy],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::MutableAliasingViolation),
+            "expected E0032 MutableAliasingViolation; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn loop_view_created_after_owner_mutation_dies_within_iteration() {
+        // A view VarDecl AFTER an inout-consume of the owner inside the
+        // SAME while body:
+        //   s: str = "hello"
+        //   while true:
+        //       str_push(&s, "!")   # mutates the owner
+        //       v = s[0:2]          # projection created after the consume
+        //       print(v)            # v's only read, same iteration
+        // → NO diagnostic. The view is created and read inside the same
+        // loop body, so it is NOT loop-deferred (deferral requires the
+        // last read in a loop the creation is outside of — see
+        // collect_view_liveness); it dies at `print(v)` within pass 1,
+        // the back-edge state tuple is unchanged, and no re-walk fires.
+        // That is the sound outcome: every iteration's `str_push` runs
+        // before that iteration's fresh slice is taken, so no stale
+        // view pointer is ever read. (The unsound sibling — view
+        // created OUTSIDE the loop, mutated inside — is covered by
+        // `loop_deferred_view_survives_if_join_prune`.)
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let wl = tb.while_loop(cond, &[push_stmt, vdecl, pstmt], void, span);
+        let tir = tb.finish(&[decl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics — the view dies within each iteration, \
+             before the next iteration's str_push; got: {:?}",
+            sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn loop_view_live_at_back_edge_flags_earlier_mutation_on_rewalk() {
+        // Pins the I-087 re-walk DISCOVERY path (the sibling acceptance
+        // test above pins the converge side): a body-created view that
+        // is STILL LIVE at the back-edge forces pass 2, and only pass 2
+        // sees the projection at the earlier owner-consume.
+        //   s: str = "hello"
+        //   suffix: str = "!"
+        //   while true:
+        //       str_push(&s, suffix)  # pass 1: no projection exists yet
+        //       v = s[0:2]            # registers the projection
+        // v is never read: an unread view has no last use, so its
+        // projection lives to scope end (P4) and is non-empty at the
+        // back-edge → the live-projection leg of the state tuple
+        // differs → re-walk → pass 2 walks `str_push` with the
+        // projection live → exactly one SourceProjected (E0035) naming
+        // `s`. The mutation IS unsound here: iteration 2's push
+        // reallocs while v (never killed by a read) points into the
+        // old buffer.
+        //
+        // The suffix is deliberately bound OUTSIDE the loop: a StrConst
+        // inside the body would enter `states` as a fresh Valid temp
+        // and flip the owner-state leg of the tuple, forcing the
+        // re-walk even without the projection-emptiness comparison.
+        // With the body kept allocation-free, the projection leg is the
+        // ONLY re-walk trigger — verified by mutation: skipping the
+        // live-projection comparison in `states_differ_snapshot` makes
+        // this test fail with 0 diagnostics. A refactor re-narrowing
+        // the convergence comparison (e.g. back to Moved-ness only)
+        // drops the re-walk and MUST fail this test.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let suffix = pool.intern_str("suffix");
+        let v = pool.intern_str("v");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let bang_lit = tb.str_const(bang, str_ty, span);
+        let suffix_decl = tb.var_decl(suffix, false, str_ty, bang_lit, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix_read = tb.var(suffix, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix_read],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let wl = tb.while_loop(cond, &[push_stmt, vdecl], void, span);
+        let tir = tb.finish(&[decl, suffix_decl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn view_and_move_args_same_owner_rejected() {
+        // fn two(a: strview, move b: str) called as two(s[0:1], s) —
+        // both args share root owner `s`. The view arg borrows the root
+        // for the whole call (E4), so the move in the same call is a
+        // P2 freeze violation: exactly one SourceProjected (E0035).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let two = pool.intern_str("two");
+        let s = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i1 = tb.int_const(1, int_ty, span);
+        let view_arg = tb.slice(base, Some(i0), Some(i1), view_ty, span);
+        let move_arg = tb.var(s, str_ty, span);
+        let call = tb.call(
+            two,
+            &[view_arg, move_arg],
+            &[ParamMode::Borrow, ParamMode::Move],
+            void,
+            span,
+        );
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        // Diagnostic-quality gap: the message names "value", not `s` —
+        // the view/move-overlap path resolves the name via
+        // `owner_name_for_diag`, which inspects the owner's initializer
+        // (a StrConst) and falls back to "value", unlike the Rule-7
+        // E0032 path that scans the call args for the `Var` read
+        // (`rule7_owner_name`). Pinned as-is; a future fix should name
+        // the binding.
+        assert!(
+            diags[0].message.contains("value"),
+            "expected the current message wording; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
+        // P5 deferral ACROSS a branch — distinct from the plain last-use
+        // lift in `last_use_inside_if_anchors_after_if`: the owner's own
+        // last read is the slice creation OUTSIDE the if; only the
+        // projection's last read is inside the then-arm. P5 defers the
+        // owner's destruction to that read (final spec §3.2), and the
+        // conditional re-anchor must lift the FreePoint to the IfStmt
+        // exit — anchoring inside the arm would leak on the not-taken
+        // path.
+        //   s: str = "hello"
+        //   v = s[0:2]
+        //   if true: print(v)
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(cond, &[pstmt], &[], None, void, span);
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&main).expect("sidecar");
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics; got: {:?}",
+            sink.into_diags()
+        );
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == lit && fp.after == ifs && fp.branch.is_none()),
+            "expected s's Free anchored at the IfStmt exit (P5 deferral across the branch); schedule = {:?}",
+            sc.free_schedule
+        );
+        assert!(
+            !sc.free_schedule
+                .iter()
+                .any(|fp| fp.target == lit && fp.after != ifs),
+            "no Free for s may anchor inside the arm (leaks on the not-taken path); schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    // ---------- W0003 RedundantMaterialize, case B (M8.4.1.2) ----------
+
+    /// Lex + parse + astgen + sema + ownership on a source snippet —
+    /// the full front-end, so the case-B tests read like the programs
+    /// users write. Returns every diagnostic from all four stages.
+    fn check_src(input: &str) -> Vec<Diag> {
+        use chumsky::Parser as _;
+        use chumsky::input::Input as _;
+        let mut pool = InternPool::new();
+        let tokens = crate::lexer::lex(input, &mut pool).expect("lex ok");
+        let token_stream = tokens[..].split_token_span((0..input.len()).into());
+        let program = crate::parser::program_parser()
+            .parse(token_stream)
+            .into_result()
+            .expect("parse ok");
+        let mut sink = DiagSink::new();
+        let uir = crate::astgen::generate(&program, &mut pool, &mut sink);
+        let tirs = crate::sema::analyze(
+            &uir,
+            &mut pool,
+            &mut sink,
+            input,
+            std::path::Path::new("<test>"),
+        );
+        check(&tirs, &pool, &mut sink);
+        sink.into_diags()
+    }
+
+    fn w0003_count(diags: &[Diag]) -> usize {
+        diags
+            .iter()
+            .filter(|d| d.code == DiagCode::RedundantMaterialize)
+            .count()
+    }
+
+    #[test]
+    fn w0003_bound_materialize_never_escapes_warns() {
+        // W0003 case B: `x = str(view)` where `x` is only borrow-read
+        // (`print(x)` — a use the view itself could have served) and the
+        // slice's root owner is never touched again: the allocation is
+        // redundant.
+        let diags =
+            check_src("fn main():\n\ts: str = \"hi\"\n\tx: str = str(s[0:1])\n\tprint(x)\n");
+        assert_eq!(
+            w0003_count(&diags),
+            1,
+            "expected exactly one W0003; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn w0003_defensive_copy_before_source_mutation_does_not_warn() {
+        // The defensive-copy exception: the source is mutated AFTER the
+        // materialize point, so the owned copy genuinely outlives its
+        // view (ring-buffer reuse shape) — no warning.
+        let diags = check_src(
+            "fn main():\n\tmut s: str = \"hi\"\n\tx: str = str(s[0:1])\n\tstr_push(&s, \"!\")\n\tprint(x)\n",
+        );
+        assert_eq!(
+            w0003_count(&diags),
+            0,
+            "defensive copy must not warn; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn w0003_materialize_returned_does_not_warn() {
+        // A bound copy later consumed by `return x` escapes — the
+        // `states == Moved` escape check must keep W0003 silent. (The
+        // unbound `return str(text)` shape never reaches the case-B
+        // analysis: return operands are not collected as materialize
+        // sites.)
+        let diags =
+            check_src("fn first(text: strview) -> str:\n\tx: str = str(text)\n\treturn x\n");
+        assert_eq!(
+            w0003_count(&diags),
+            0,
+            "escaping copy must not warn; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn w0003_strview_param_root_does_not_warn() {
+        // Conservative direction: the view's root owner is the caller's
+        // buffer, so `projection_root` yields None for a `strview`
+        // parameter and case B must stay silent — the pass cannot judge
+        // mutations it cannot see. Unlike
+        // `w0003_materialize_returned_does_not_warn`, the copy below only
+        // borrow-escapes (`print(x)`), so the escape check does NOT fire
+        // first: the unresolvable root is the only thing suppressing the
+        // warning.
+        let diags = check_src("fn f(text: strview):\n\tx: str = str(text)\n\tprint(x)\n");
+        assert_eq!(
+            w0003_count(&diags),
+            0,
+            "strview-parameter root must not warn; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn w0003_defensive_copy_before_inout_pass_does_not_warn() {
+        // Defensive-copy exception, `inout`-pass hazard kind: the source
+        // root is `inout`-passed AFTER the materialize point, so the
+        // callee may mutate the buffer the view aliases — the owned copy
+        // is a genuine snapshot, not a redundant allocation. (`owner_hazards`
+        // records inout passes and mutations alike; the mutation kind is
+        // pinned by `w0003_defensive_copy_before_source_mutation_does_not_warn`.)
+        let diags = check_src(
+            "fn eat(inout a: str):\n\tprint(a)\n\nfn main():\n\tmut s: str = \"hi\"\n\tx: str = str(s[0:1])\n\tprint(x)\n\teat(&s)\n",
+        );
+        assert_eq!(
+            w0003_count(&diags),
+            0,
+            "defensive copy before an inout pass must not warn; got: {diags:?}"
         );
     }
 }

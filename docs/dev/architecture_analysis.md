@@ -111,13 +111,13 @@ Dependency direction is acyclic: `ryo` (CLI, clap) → `ryo-driver` (orchestrati
 
 ### 2.9 Runtime (`runtime/src/lib.rs`, 746 lines) & toolchain
 
-- `#[repr(C)] RyoStrFat { ptr, len: u64, cap: u64 }`; **`cap == 0` = rodata/empty sentinel**, so freeing literals is a no-op. `__ryo_str_push`: doubling growth with a static-source special case (realloc with `old_cap == 0` allocates *without copying*). OOM → `oom_abort` (also fires on `Layout` errors, conflating bug with OOM). `suffix_len: i64` is the one signed length in the ABI (I-105). Not `no_std` (I-043).
+- `#[repr(C)] RyoStrFat { ptr, len: u64, cap: u64 }`; **`cap == 0` = rodata/empty sentinel**, so freeing literals is a no-op. `__ryo_str_push`: doubling growth with a static-source special case (realloc with `old_cap == 0` allocates *without copying*). OOM → `oom_abort` (also fires on `Layout` errors, conflating bug with OOM). All ABI lengths are `u64` (`suffix_len` was migrated off `i64` in M8.4). Not `no_std` (I-043).
 - **Dual packaging**: JIT links the runtime as an rlib (symbols registered at `codegen.rs:244-260`); AOT embeds a **~17 MB** staticlib archive via `include_bytes!` (bundles Rust std — root cause of the `-lunwind` workaround). Same source, two artifacts (I-097).
 - Toolchain: pinned zig 0.16.0 downloaded to `~/.ryo/toolchain` with **no integrity check** and a fixed temp path that races concurrent installs (I-073); `zig cc` used as linker driver (no cross-compile yet). Runtime cache in `~/.ryo/cache` never evicted — 42 archives / 556 MB observed (I-096). Build scripts duplicated verbatim (`TODO(dedup)` at `ryo-backend/build.rs:5-12`) — the **stale-archive hazard is fixed** (both always invoke `cargo build -p ryo-runtime`, cargo no-ops when fresh); the duplication remains.
 
 ### 2.10 Diagnostics & driver (`diag.rs`, `errors.rs`, `pipeline.rs`)
 
-- `Diag { severity, span, code, message, notes }`; exactly 35 `DiagCode`s mapped to stable `E0001..E0202`/`W0001..2` strings in `diag_code_str` (`pipeline.rs:219-257`; E0200–E0202 reserved for comptime). `DiagSink` caps at 100 with a `TooManyDiagnostics` marker; `error_count` survives truncation. Single ariadne render path; `finalize_diags` tail-block renders once, errs iff any error.
+- `Diag { severity, span, code, message, notes }`; 38 `DiagCode`s mapped to stable `E0001..E0202`/`W0001..3` strings in `diag_code_str` (`pipeline.rs:219-257`; E0200–E0202 reserved for comptime). `DiagSink` caps at 100 with a `TooManyDiagnostics` marker; `error_count` survives truncation. Single ariadne render path; `finalize_diags` tail-block renders once, errs iff any error.
 - Fragmentation at the edges: lexer/parser first-error `Result`s converted at the boundary (I-014, I-054); codegen `Result<_, String>`; hand-rolled `CompilerError` with 4 stringly variants (I-011); E-code ↔ roadmap conflict and no stability test (I-086); message printed twice + `Termination` second line (I-103).
 - `run_file` echoes source + AST + section headers on every run — **load-bearing**: ~63 integration-test assertions key on it (I-099). `ryo build` writes artifacts to the CWD (I-084).
 
@@ -192,4 +192,4 @@ Sequencing respects the milestone dependencies in `docs/dev/CLAUDE.md`. Each tie
 - Issues: [ISSUES.md](../../ISSUES.md) (I-068–I-111 filed from this analysis)
 - Dev: [pipeline_alignment.md](pipeline_alignment.md) (UIR/TIR design, §4.5 error recovery), [design_issues.md](design_issues.md) (language-design tracker), [implementation_roadmap.md](implementation_roadmap.md) (milestone sequencing)
 - Spec: [specification.md](../specification.md) — Section 5 (ownership & borrowing)
-- Milestone: M8.3 `inout` (current branch) — see implementation_roadmap.md
+- Milestone: M8.4 string-slice family (current branch) — see implementation_roadmap.md

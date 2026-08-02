@@ -1,0 +1,59 @@
+# String slices (strview) — zero-copy views into a str buffer (M8.4).
+# Rules: views are read-only and non-escaping (they cannot be returned,
+# moved, or stored past the current function); the owner is frozen
+# against moves and mutation while a view is live.
+
+fn print_first_word(text: strview):
+	# strview values cannot be returned (Rule 5 / E1), so this function
+	# prints the slice instead of returning it.
+	mut i: int = 0
+	while i < text.len():
+		if text[i:i+1] == " ":
+			print(text[0:i])
+			return
+		i += 1
+	print(text)
+
+fn print_csv_fields(line: strview):
+	# The projection use case (final spec §2.3): parsers are projection
+	# sinks — views flow in (`strview` input), scanning is zero-copy, and
+	# owned values flow out. This walk allocates nothing.
+	# (Views can't be `+`-concatenated — P6 — so fields print as-is.)
+	mut start: int = 0
+	mut i: int = 0
+	while i < line.len():
+		if line[i:i+1] == ",":
+			print(line[start:i])
+			print("\n")
+			start = i + 1
+		i += 1
+	print(line[start:])
+	print("\n")
+
+fn main():
+	s: str = "hello world"
+
+	print(s[0:5])          # hello
+	print(s[6:])           # world
+	print(s[:5])           # hello
+	print(s[:])            # hello world
+
+	word = s[0:5]          # word: strview — a view, no copy
+	print(word)
+	print(word[1:3])       # re-slice projects the same owner: el
+
+	print_first_word(s)    # owned str arg converts implicitly to strview
+	print(s)               # ok — s still owned
+
+	# The projection use case: zero-copy scanning of a whole record
+	print_csv_fields("ada,lovelace,1815")
+	print_csv_fields(s)    # works on any str or strview — no copies made
+
+	# P4 last-use lifting: a view freezes its owner only until the
+	# view's last use. `word` is last used above, so the freeze has
+	# lifted and `s` may be moved or mutated again here.
+	mut t: str = "abc"
+	tv = t[0:1]
+	print(tv)              # tv's last use — the freeze on t ends here
+	str_push(&t, "d")      # ok: t is mutable again after the lift
+	print(t)               # abcd

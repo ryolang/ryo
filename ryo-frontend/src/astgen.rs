@@ -30,17 +30,18 @@ fn synthetic_span() -> Span {
     SimpleSpan::new((), 0..0)
 }
 
-/// Pre-interned `StringId`s for the three primitive type names.
+/// Pre-interned `StringId`s for the primitive type names.
 ///
 /// Phase 2 made identifiers `StringId` handles, so `resolve_type`
 /// used to call `pool.str(name)` on every type annotation just to
-/// reach the &str-keyed match. Interning the three names once at
+/// reach the &str-keyed match. Interning the names once at
 /// the top of `generate` lets subsequent comparisons be a `StringId`
 /// equality check (`u32` compare) instead of a `pool.str` lookup
 /// followed by a string compare.
 struct Primitives {
     int: StringId,
     str_: StringId,
+    strview: StringId,
     bool_: StringId,
     float: StringId,
 }
@@ -50,6 +51,7 @@ impl Primitives {
         Primitives {
             int: pool.intern_str("int"),
             str_: pool.intern_str("str"),
+            strview: pool.intern_str("strview"),
             bool_: pool.intern_str("bool"),
             float: pool.intern_str("float"),
         }
@@ -110,15 +112,32 @@ pub fn generate(program: &ast::Program, pool: &mut InternPool, sink: &mut DiagSi
 
 fn resolve_type(
     name: StringId,
+    is_view: bool,
     span: Span,
     prims: &Primitives,
     pool: &InternPool,
     sink: &mut DiagSink,
 ) -> TypeId {
+    if is_view {
+        // Legacy `&name` type syntax (M8.4 pre-Q5). Only `&str` was ever
+        // valid; it is now a targeted migration error (final spec Q5).
+        let msg = if name == prims.str_ {
+            "`&str` was renamed to `strview` (final spec Q5)".to_string()
+        } else {
+            format!(
+                "unknown view type: '&{}' (view types are named: `strview`)",
+                pool.str(name)
+            )
+        };
+        sink.emit(Diag::error(span, DiagCode::UnknownType, msg));
+        return pool.error_type();
+    }
     if name == prims.int {
         pool.int()
     } else if name == prims.str_ {
         pool.str_()
+    } else if name == prims.strview {
+        pool.str_view()
     } else if name == prims.bool_ {
         pool.bool_()
     } else if name == prims.float {
@@ -185,6 +204,7 @@ fn gen_function_def(
             name: p.name.name,
             ty: resolve_type(
                 p.type_annotation.name,
+                p.type_annotation.is_view,
                 p.type_annotation.span,
                 prims,
                 pool,
@@ -196,7 +216,7 @@ fn gen_function_def(
         .collect();
 
     let return_type = match &func.return_type {
-        Some(ty) => resolve_type(ty.name, ty.span, prims, pool, sink),
+        Some(ty) => resolve_type(ty.name, ty.is_view, ty.span, prims, pool, sink),
         None => pool.void(),
     };
 
@@ -247,7 +267,7 @@ fn gen_stmt(
             let ty = decl
                 .type_annotation
                 .as_ref()
-                .map(|ann| resolve_type(ann.name, ann.span, prims, pool, sink));
+                .map(|ann| resolve_type(ann.name, ann.is_view, ann.span, prims, pool, sink));
             let r = b.var_decl(decl.name.name, decl.mutable, ty, initializer, stmt.span);
             out.push(r);
         }
@@ -399,6 +419,15 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
         ast::ExprKind::Borrow(inner) => {
             let inner_ref = gen_expr(b, inner);
             b.borrow(inner_ref, span)
+        }
+        ast::ExprKind::Slice { base, start, end } => {
+            // Slice projection `base[start:end]` (final spec §3);
+            // bounds are optional shorthands. Sema type-checks the
+            // base and yields `strview`.
+            let base_ref = gen_expr(b, base);
+            let start_ref = start.as_ref().map(|e| gen_expr(b, e));
+            let end_ref = end.as_ref().map(|e| gen_expr(b, e));
+            b.slice(base_ref, start_ref, end_ref, span)
         }
     }
 }
@@ -752,5 +781,41 @@ mod tests {
     fn for_non_range_iterator_rejected() {
         let result = parse_and_lower("fn main():\n\tfor i in something(0, 10):\n\t\tprint(i)\n");
         assert!(result.is_err(), "non-range iterator should be rejected");
+    }
+
+    #[test]
+    fn lower_slice_expression() {
+        // `s` is intentionally undefined — astgen is a purely
+        // structural pass; name resolution is sema's job. (Final
+        // spec §3: `base[start:end]` lowers to a Slice projection.)
+        let (uir, _pool) = parse_and_lower("fn main():\n\tx = s[1:2]\n").unwrap();
+        let has_slice = uir.instructions.iter().any(|i| i.tag == InstTag::Slice);
+        assert!(has_slice, "expected a Slice instruction");
+    }
+
+    #[test]
+    fn strview_param_resolves_to_view() {
+        let (uir, pool) = parse_and_lower("fn f(text: strview):\n\tprint(text)\n").unwrap();
+        assert_eq!(uir.func_bodies[0].params[0].ty, pool.str_view());
+    }
+
+    #[test]
+    fn legacy_amp_str_is_a_migration_error() {
+        let diags = parse_and_lower("fn f(text: &str):\n\tprint(text)\n").unwrap_err();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("`&str` was renamed to `strview`"))
+        );
+    }
+
+    #[test]
+    fn lower_view_of_non_str_rejected() {
+        // Legacy `&name` view syntax (M8.4 pre-Q5): only `&str` was ever
+        // valid, and it is now a targeted rename error (final spec Q5);
+        // `&int` must be an unknown-view-type diagnostic, not a silent
+        // fallthrough to `int`.
+        let diags = parse_and_lower("fn f(x: &int):\n\tprint(\"\")\n").unwrap_err();
+        assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
     }
 }

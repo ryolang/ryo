@@ -10,6 +10,13 @@ pub struct BuiltinFunction {
     /// only `__ryo_panic`'s message (param 0) is borrowed-scalar; every
     /// user-facing builtin in `BUILTINS` is `&[]`. See I-059.
     pub borrowed_scalar_params: &'static [usize],
+    /// Parameter indices passed as `strview` whose ROOT owner the call
+    /// borrows for its duration (E4). Read by the ownership pass's Rule-7
+    /// partition: when a call to this callee appears as a borrow-mode
+    /// argument of an outer call, the view's root counts as an immutable
+    /// borrow alongside the outer call's `inout` args. Today only
+    /// `__ryo_str_from_view` (param 0) borrows a view. See M8.4.1.2.
+    pub view_borrow_params: &'static [usize],
 }
 
 #[derive(Copy, Clone)]
@@ -34,52 +41,73 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         name: "print",
         return_ty: BuiltinReturn::Void,
         borrowed_scalar_params: &[],
+        view_borrow_params: &[],
     },
     BuiltinFunction {
         name: "assert",
         return_ty: BuiltinReturn::Void,
         borrowed_scalar_params: &[],
+        view_borrow_params: &[],
     },
     BuiltinFunction {
         name: "panic",
         return_ty: BuiltinReturn::Never,
         borrowed_scalar_params: &[],
+        view_borrow_params: &[],
     },
     BuiltinFunction {
         name: "int_to_str",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
+        view_borrow_params: &[],
     },
     BuiltinFunction {
         name: "float_to_str",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
+        view_borrow_params: &[],
     },
     BuiltinFunction {
         name: "bool_to_str",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
+        view_borrow_params: &[],
     },
     BuiltinFunction {
         name: "str_push",
         return_ty: BuiltinReturn::Void,
         borrowed_scalar_params: &[],
+        view_borrow_params: &[],
     },
 ];
 
-/// Synthesized (non-user-facing) runtime callees that use the
-/// borrowed-scalar ABI. These are NOT user-callable builtins — they are
-/// absent from `BUILTINS` and from sema's `emit_builtin_call` dispatch —
-/// but the ownership pass and codegen still need their ABI metadata.
+/// Synthesized (non-user-facing) runtime callees with ABI metadata the
+/// ownership pass and codegen need. These are NOT user-callable
+/// builtins — they are absent from `BUILTINS` and from sema's
+/// `emit_builtin_call` dispatch — but the calls sema synthesizes to
+/// them still need their ABI recorded here:
 /// `__ryo_panic` is emitted by `sema::build_panic_call`; its message
 /// (param 0) is passed as a raw `.rodata` pointer with cap=0 and never
 /// heap-owned. Kept as `BuiltinFunction`s so `borrowed_scalar_params` is
 /// the single source of truth for the ABI. See I-059.
-const ABI_CALLEES: &[BuiltinFunction] = &[BuiltinFunction {
-    name: "__ryo_panic",
-    return_ty: BuiltinReturn::Never,
-    borrowed_scalar_params: &[0],
-}];
+/// `__ryo_str_from_view` is emitted by `sema::emit_str_materialize` for
+/// the `str(view)` call form (M8.4.1.2); it returns an owned `str` and
+/// borrows its `strview` argument's root owner for the call's duration
+/// (E4, Rule-7 partition).
+const ABI_CALLEES: &[BuiltinFunction] = &[
+    BuiltinFunction {
+        name: "__ryo_panic",
+        return_ty: BuiltinReturn::Never,
+        borrowed_scalar_params: &[0],
+        view_borrow_params: &[],
+    },
+    BuiltinFunction {
+        name: "__ryo_str_from_view",
+        return_ty: BuiltinReturn::Str,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[0],
+    },
+];
 
 pub fn lookup(name: &str) -> Option<&'static BuiltinFunction> {
     BUILTINS.iter().find(|b| b.name == name)
@@ -103,6 +131,20 @@ pub fn is_borrowed_scalar_param(name_id: StringId, pool: &InternPool, idx: usize
         .or_else(|| abi_callee(name))
         .map(|b| b.borrowed_scalar_params.contains(&idx))
         .unwrap_or(false)
+}
+
+/// Parameter indices of callee `name_id` passed as `strview` whose root
+/// owner the call borrows for its duration (E4). Consults both the
+/// user-facing `BUILTINS` table and the synthesized `ABI_CALLEES`
+/// registry (e.g. `__ryo_str_from_view`). Read by the ownership pass's
+/// Rule-7 partition to look through materialization calls; empty for
+/// unknown names. See M8.4.1.2.
+pub fn view_borrow_params(name_id: StringId, pool: &InternPool) -> &'static [usize] {
+    let name = pool.str(name_id);
+    lookup(name)
+        .or_else(|| abi_callee(name))
+        .map(|b| b.view_borrow_params)
+        .unwrap_or(&[])
 }
 
 /// Names that are not callable builtins but cannot be redefined by user code.
@@ -167,5 +209,25 @@ mod tests {
         // Unknown callees are never borrowed-scalar.
         let unknown = pool.intern_str("not_a_builtin");
         assert!(!is_borrowed_scalar_param(unknown, &pool, 0));
+    }
+
+    #[test]
+    fn str_from_view_registered_as_str_returning_view_borrower() {
+        // M8.4.1.2: the ABI registry records that the synthesized
+        // `__ryo_str_from_view` callee returns an owned `str` and
+        // borrows its `strview` argument (param 0) for the call's
+        // duration (Rule-7 partition). It is NOT a user-facing builtin.
+        let mut pool = InternPool::new();
+        let name = pool.intern_str("__ryo_str_from_view");
+        assert!(lookup("__ryo_str_from_view").is_none());
+        let entry = abi_callee("__ryo_str_from_view").expect("ABI entry");
+        assert_eq!(entry.return_type(&pool), pool.str_());
+        assert_eq!(view_borrow_params(name, &pool), &[0]);
+
+        // User-facing builtins and unknown callees borrow no views.
+        let print = pool.intern_str("print");
+        assert!(view_borrow_params(print, &pool).is_empty());
+        let unknown = pool.intern_str("not_a_builtin");
+        assert!(view_borrow_params(unknown, &pool).is_empty());
     }
 }

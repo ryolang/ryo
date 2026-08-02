@@ -35,6 +35,13 @@ use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
+/// Fat-str triple layout (24 bytes): ptr at 0, len at 8, cap at 16.
+/// View layout (16 bytes): ptr at 0, len at 8. Derived, not re-hardcoded.
+const STR_SLOT_SIZE: u32 = 24;
+const VIEW_SLOT_SIZE: u32 = 16;
+const OFF_PTR: i32 = 0;
+const OFF_LEN: i32 = 8;
+
 /// Returns `true` if `ty` resolves to `Str` in the pool.
 ///
 /// Callers use this to gate multi-value (fat-pointer) paths before
@@ -49,11 +56,16 @@ fn is_str_type(ty: TypeId, pool: &InternPool) -> bool {
 /// `Bool` uses I8 (matches Cranelift's `icmp` result width and Rust's bool layout).
 /// `Str` is a fat pointer (ptr, len, cap) — it cannot map to a single type;
 /// callers must gate with `is_str_type` before reaching this function.
+/// Views (`strview`, M8.4) are likewise multi-word `{ptr, len}`; callers
+/// must gate with `pool.is_view()` before reaching this function.
 /// `Void` has no Cranelift representation and should not be mapped here.
 fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) -> types::Type {
     match pool.kind(ty) {
         TypeKind::Int => pointer_ty,
         TypeKind::Str => panic!("cranelift_type_for: str is multi-value; use is_str_type gate"),
+        TypeKind::View(_) => {
+            panic!("cranelift_type_for: strview is two-word; use pool.is_view() gate")
+        }
         TypeKind::Bool => types::I8,
         TypeKind::Float => types::F64,
         // Dead code after trap, but Cranelift needs a concrete type for every SSA value
@@ -99,7 +111,17 @@ struct LoopContext {
 #[derive(Debug, Clone, Copy)]
 enum ValueRepr {
     Scalar(Value),
-    Str { ptr: Value, len: Value, cap: Value },
+    Str {
+        ptr: Value,
+        len: Value,
+        cap: Value,
+    },
+    /// View pair: 16 bytes, non-owning (M8.4). Never freed. Mirrors
+    /// `TypeKind::View` — all view kinds share the `{ptr, len}` repr.
+    View {
+        ptr: Value,
+        len: Value,
+    },
 }
 
 impl ValueRepr {
@@ -108,6 +130,7 @@ impl ValueRepr {
         match self {
             ValueRepr::Scalar(v) => v,
             ValueRepr::Str { .. } => panic!("expected Scalar, got Str"),
+            ValueRepr::View { .. } => panic!("expected Scalar, got View"),
         }
     }
 }
@@ -117,6 +140,12 @@ struct StrLocals {
     ptr: Variable,
     len: Variable,
     cap: Variable,
+}
+
+#[derive(Clone)]
+struct ViewLocals {
+    ptr: Variable,
+    len: Variable,
 }
 
 /// Per-function emission state. Lives only for the duration of one
@@ -155,6 +184,10 @@ struct FunctionContext<'a, M: Module> {
     pending_sweep: Vec<usize>,
     loop_stack: Vec<LoopContext>,
     str_locals: HashMap<StringId, StrLocals>,
+    /// `strview` view bindings (M8.4): two SSA `Variable`s per binding,
+    /// mirroring `str_locals`. Views are non-owning — they never
+    /// appear in the free schedule.
+    view_locals: HashMap<StringId, ViewLocals>,
     /// Free-target (initializer / Assign value / str-param virtual ref)
     /// → binding-name map, built once per function by
     /// `build_free_binding_names`. `emit_frees` uses it to release a
@@ -255,8 +288,13 @@ impl Codegen<JITModule> {
             ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
             ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
             ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
+            ("__ryo_slice", ryo_runtime::__ryo_slice as *const u8),
             ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
             ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
+            (
+                "ryo_str_from_view",
+                ryo_runtime::ryo_str_from_view as *const u8,
+            ),
             (
                 "ryo_float_to_str",
                 ryo_runtime::ryo_float_to_str as *const u8,
@@ -409,6 +447,10 @@ impl<M: Module> Codegen<M> {
                 sig.params.push(AbiParam::new(self.int_type)); // ptr
                 sig.params.push(AbiParam::new(types::I64)); // len
                 sig.params.push(AbiParam::new(types::I64)); // cap
+            } else if pool.is_view(param.ty) {
+                // `strview` view: 2-word ABI (ptr, len) — no cap word (M8.4).
+                sig.params.push(AbiParam::new(self.int_type)); // ptr
+                sig.params.push(AbiParam::new(types::I64)); // len
             } else {
                 let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
                 sig.params.push(AbiParam::new(cl_ty));
@@ -479,6 +521,7 @@ impl<M: Module> Codegen<M> {
             };
 
             let mut str_param_locals: HashMap<StringId, StrLocals> = HashMap::new();
+            let mut view_param_locals: HashMap<StringId, ViewLocals> = HashMap::new();
             let mut inout_ptrs: HashMap<StringId, (Value, TypeId)> = HashMap::new();
 
             for param in tir.params.iter() {
@@ -538,6 +581,21 @@ impl<M: Module> Codegen<M> {
                         },
                     );
                     block_idx += 3;
+                } else if pool.is_view(param.ty) {
+                    // `strview` view param: two ABI words (ptr, len). Views
+                    // are borrows — no cap, never freed.
+                    let var_ptr = builder.declare_var(int_type);
+                    let var_len = builder.declare_var(types::I64);
+                    builder.def_var(var_ptr, builder.block_params(entry_block)[block_idx]);
+                    builder.def_var(var_len, builder.block_params(entry_block)[block_idx + 1]);
+                    view_param_locals.insert(
+                        param.name,
+                        ViewLocals {
+                            ptr: var_ptr,
+                            len: var_len,
+                        },
+                    );
+                    block_idx += 2;
                 } else {
                     let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                     let var = builder.declare_var(cl_ty);
@@ -569,6 +627,7 @@ impl<M: Module> Codegen<M> {
                 pending_sweep,
                 loop_stack: Vec::new(),
                 str_locals: str_param_locals,
+                view_locals: view_param_locals,
                 free_binding_names: Self::build_free_binding_names(tir, pool),
                 inout_ptrs,
                 sret_ptr,
@@ -584,6 +643,14 @@ impl<M: Module> Codegen<M> {
                         ptr: builder.use_var(locals.ptr),
                         len: builder.use_var(locals.len),
                         cap: builder.use_var(locals.cap),
+                    };
+                    ctx.inst_values.insert(virtual_ref, repr);
+                } else if pool.is_view(param.ty) {
+                    let locals = ctx.view_locals.get(&param.name).unwrap();
+                    let virtual_ref = TirRef::param(idx);
+                    let repr = ValueRepr::View {
+                        ptr: builder.use_var(locals.ptr),
+                        len: builder.use_var(locals.len),
                     };
                     ctx.inst_values.insert(virtual_ref, repr);
                 }
@@ -602,6 +669,32 @@ impl<M: Module> Codegen<M> {
                     Self::emit_return(&mut builder, &mut ctx, &[zero])?;
                 }
             }
+
+            // I-070: no scheduled Free may be dropped without a
+            // same-target substitute having fired. The ownership pass
+            // deliberately anchors some temp frees twice — once at the
+            // consuming sub-expression and once at the enclosing Return
+            // (its return-epilogue pass) — because codegen cannot sweep
+            // after a terminator. Firing the Return-anchored Free leaves
+            // the consumer-anchored duplicate in `pending_sweep`; that
+            // is fine as long as the target was freed once. A pending
+            // entry with NO fired same-target counterpart means the
+            // allocation leaks.
+            //
+            // This assertion covers the LEAK direction only. Double-free
+            // is prevented upstream in the ownership scheduler (the
+            // covered/on_path dedup), so no target-uniqueness check is
+            // needed here.
+            debug_assert!(
+                ctx.pending_sweep.iter().all(|&idx| {
+                    let target = ctx.sidecar.free_schedule[idx].target;
+                    ctx.freed_at
+                        .iter()
+                        .any(|&fired| ctx.sidecar.free_schedule[fired].target == target)
+                }),
+                "frees anchored to unmaterialized instructions were dropped: {:?}",
+                ctx.pending_sweep
+            );
 
             builder.finalize();
         }
@@ -651,9 +744,11 @@ impl<M: Module> Codegen<M> {
     ) -> Result<bool, String> {
         let saved_locals = ctx.locals.clone();
         let saved_str_locals = ctx.str_locals.clone();
+        let saved_view_locals = ctx.view_locals.clone();
         let block_terminated = Self::emit_body(builder, ctx, stmts)?;
         ctx.locals = saved_locals;
         ctx.str_locals = saved_str_locals;
+        ctx.view_locals = saved_view_locals;
         Ok(block_terminated)
     }
 
@@ -739,6 +834,26 @@ impl<M: Module> Codegen<M> {
                             );
                         }
                         _ => unreachable!("str-typed initializer should produce ValueRepr::Str"),
+                    }
+                    return Ok(false);
+                }
+                if ctx.pool.is_view(inst.ty) {
+                    let repr = Self::eval_inst_view(builder, ctx, view.initializer)?;
+                    match repr {
+                        ValueRepr::View { ptr, len } => {
+                            let var_ptr = builder.declare_var(ctx.int_type);
+                            let var_len = builder.declare_var(types::I64);
+                            builder.def_var(var_ptr, ptr);
+                            builder.def_var(var_len, len);
+                            ctx.view_locals.insert(
+                                view.name,
+                                ViewLocals {
+                                    ptr: var_ptr,
+                                    len: var_len,
+                                },
+                            );
+                        }
+                        _ => unreachable!("view-typed initializer should produce ValueRepr::View"),
                     }
                     return Ok(false);
                 }
@@ -836,6 +951,23 @@ impl<M: Module> Codegen<M> {
                     builder.def_var(locals.ptr, ptr);
                     builder.def_var(locals.len, len);
                     builder.def_var(locals.cap, cap);
+                    return Ok(false);
+                }
+                if ctx.pool.is_view(inst.ty) {
+                    let repr = Self::eval_inst_view(builder, ctx, view.value)?;
+                    let ValueRepr::View { ptr, len } = repr else {
+                        unreachable!("view-typed assign should produce ValueRepr::View");
+                    };
+                    let locals = ctx.view_locals.get(&view.name).ok_or_else(|| {
+                        format!(
+                            "Undefined strview variable in assign: '{}'",
+                            ctx.pool.str(view.name)
+                        )
+                    })?;
+                    // Views are borrows — no free-on-reassign; just
+                    // reseat the pair.
+                    builder.def_var(locals.ptr, ptr);
+                    builder.def_var(locals.len, len);
                     return Ok(false);
                 }
                 let val = Self::eval_inst(builder, ctx, view.value)?;
@@ -1184,6 +1316,13 @@ impl<M: Module> Codegen<M> {
                 // component as the scalar stand-in (callers that need the
                 // full triple use eval_inst_str).
                 ValueRepr::Str { ptr, .. } => *ptr,
+                // I-083: views have no scalar stand-in. A view-typed value
+                // reaching eval_inst means a consumer forgot to gate on
+                // pool.is_view() and route through eval_inst_view.
+                ValueRepr::View { .. } => panic!(
+                    "eval_inst: strview %{} is two-word; use a view-aware consumer (I-083)",
+                    r.index()
+                ),
             });
         }
         let inst = ctx.tir.inst(r);
@@ -1364,27 +1503,18 @@ impl<M: Module> Codegen<M> {
                     TirData::UnOp(r) => r,
                     _ => unreachable!("StrLen must carry TirData::UnOp"),
                 };
-                let repr = Self::eval_inst_str(builder, ctx, operand)?;
-                match repr {
-                    ValueRepr::Str { len, .. } => len,
-                    _ => unreachable!("StrLen operand must produce ValueRepr::Str"),
-                }
+                Self::eval_str_or_view_len(builder, ctx, operand)?
             }
             TirTag::StrCmpEq | TirTag::StrCmpNe => {
                 let (lhs, rhs) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                let l_repr = Self::eval_inst_str(builder, ctx, lhs)?;
-                let r_repr = Self::eval_inst_str(builder, ctx, rhs)?;
-                let (l_ptr, l_len) = match l_repr {
-                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
-                    _ => unreachable!(),
-                };
-                let (r_ptr, r_len) = match r_repr {
-                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
-                    _ => unreachable!(),
-                };
+                // M8.4 §3.3: operands may be owned str triples or strview
+                // view pairs (mixed equality wraps the owned side in
+                // ViewOfStr); ryo_str_eq only needs (ptr, len).
+                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
+                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
 
                 let eq_ref = Self::declare_runtime_fn(
                     ctx.module,
@@ -1580,9 +1710,23 @@ impl<M: Module> Codegen<M> {
                     target.index()
                 )
             })?;
+            // M8.4: views are borrows, never owners — the ownership pass
+            // must never schedule a Free for one (Task 9 invariant). The
+            // repr check below doubles as the release-mode guard.
+            debug_assert!(
+                !matches!(repr, ValueRepr::View { .. }),
+                "ownership pass scheduled Free for strview %{}; views are never freed",
+                target.index()
+            );
             match repr {
                 ValueRepr::Str { ptr, cap, .. } => {
                     builder.ins().call(free_ref, &[ptr, cap]);
+                }
+                ValueRepr::View { .. } => {
+                    return Err(format!(
+                        "ownership pass scheduled Free for non-owning strview %{}; views are never owners",
+                        target.index()
+                    ));
                 }
                 ValueRepr::Scalar(_) => {
                     return Err(format!(
@@ -1728,7 +1872,46 @@ impl<M: Module> Codegen<M> {
             TirTag::Call => {
                 let view = ctx.tir.call_view(r);
                 let name_str = ctx.pool.str(view.name);
-                if name_str == "int_to_str"
+                if name_str == "__ryo_str_from_view" {
+                    // M8.4.1.2 `str(view)` materialization: the same sret
+                    // stack-slot pattern as `int_to_str`, but the argument
+                    // is a view pair evaluated via `eval_inst_view`.
+                    let ValueRepr::View {
+                        ptr: v_ptr,
+                        len: v_len,
+                    } = Self::eval_inst_view(builder, ctx, view.args[0])?
+                    else {
+                        unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
+                    };
+
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        STR_SLOT_SIZE,
+                        3,
+                    ));
+                    let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+                    let func_ref = Self::declare_runtime_fn(
+                        ctx.module,
+                        builder,
+                        "ryo_str_from_view",
+                        &[ctx.int_type, types::I64, ctx.int_type],
+                        &[],
+                    )?;
+                    builder.ins().call(func_ref, &[v_ptr, v_len, out_ptr]);
+
+                    let ptr = builder
+                        .ins()
+                        .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+                    let len = builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+                    let cap = builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+
+                    ValueRepr::Str { ptr, len, cap }
+                } else if name_str == "int_to_str"
                     || name_str == "float_to_str"
                     || name_str == "bool_to_str"
                 {
@@ -1736,7 +1919,7 @@ impl<M: Module> Codegen<M> {
 
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
-                        24,
+                        STR_SLOT_SIZE,
                         3,
                     ));
                     let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -1796,7 +1979,7 @@ impl<M: Module> Codegen<M> {
 
                 let slot = builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    24,
+                    STR_SLOT_SIZE,
                     3,
                 ));
                 let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -1830,6 +2013,20 @@ impl<M: Module> Codegen<M> {
 
                 ValueRepr::Str { ptr, len, cap }
             }
+            TirTag::ViewAsStr => {
+                let operand = match inst.data {
+                    TirData::UnOp(o) => o,
+                    _ => unreachable!("ViewAsStr must carry TirData::UnOp"),
+                };
+                // Re-borrow into the fat triple: cap=0 static sentinel,
+                // identical to string literals. No allocation.
+                let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, operand)?
+                else {
+                    unreachable!("ViewAsStr operand must produce ValueRepr::View")
+                };
+                let cap = builder.ins().iconst(types::I64, 0);
+                ValueRepr::Str { ptr, len, cap }
+            }
             _ => {
                 // Delegate to scalar eval_inst for non-str instructions
                 let val = Self::eval_inst(builder, ctx, r)?;
@@ -1838,6 +2035,152 @@ impl<M: Module> Codegen<M> {
         };
         ctx.inst_values.insert(r, repr);
         Ok(repr)
+    }
+
+    /// Materialize a `strview`-typed TIR instruction as a `ValueRepr::View`
+    /// pair (M8.4). Views are 16-byte non-owning `{ptr, len}` values —
+    /// they never materialize into the 24-byte str triple and never
+    /// enter the free schedule. Views do NOT go through `eval_inst`'s
+    /// dummy-scalar pattern (I-083): only view-aware consumers
+    /// (`print`, `StrLen`, `StrCmpEq/Ne`, call args, view bindings)
+    /// reach them, via `eval_str_or_view_parts` or directly.
+    fn eval_inst_view(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<ValueRepr, String> {
+        if let Some(repr) = ctx.inst_values.get(&r) {
+            return Ok(*repr);
+        }
+        let inst = ctx.tir.inst(r);
+        let repr = match inst.tag {
+            TirTag::Slice => {
+                let (base, start, end) = match inst.data {
+                    TirData::Slice { base, start, end } => (base, start, end),
+                    _ => unreachable!("Slice must carry TirData::Slice"),
+                };
+                // Base may be an owned str (triple) or a view (pair).
+                let (base_ptr, base_len) = Self::eval_str_or_view_parts(builder, ctx, base)?;
+                let start_v = match start {
+                    Some(s) => Self::eval_inst(builder, ctx, s)?,
+                    None => builder.ins().iconst(types::I64, 0),
+                };
+                let end_v = match end {
+                    Some(e) => Self::eval_inst(builder, ctx, e)?,
+                    None => base_len,
+                };
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    VIEW_SLOT_SIZE,
+                    3,
+                ));
+                let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                let slice_ref = Self::declare_runtime_fn(
+                    ctx.module,
+                    builder,
+                    "__ryo_slice",
+                    &[
+                        ctx.int_type,
+                        types::I64,
+                        types::I64,
+                        types::I64,
+                        ctx.int_type,
+                    ],
+                    &[],
+                )?;
+                builder
+                    .ins()
+                    .call(slice_ref, &[base_ptr, base_len, start_v, end_v, out_ptr]);
+                let ptr = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlags::trusted(), out_ptr, OFF_PTR);
+                let len = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), out_ptr, OFF_LEN);
+                ValueRepr::View { ptr, len }
+            }
+            TirTag::ViewOfStr => {
+                let operand = match inst.data {
+                    TirData::UnOp(o) => o,
+                    _ => unreachable!("ViewOfStr must carry TirData::UnOp"),
+                };
+                // Representation conversion only: drop the cap word.
+                let ValueRepr::Str { ptr, len, .. } = Self::eval_inst_str(builder, ctx, operand)?
+                else {
+                    unreachable!("ViewOfStr operand must produce ValueRepr::Str")
+                };
+                ValueRepr::View { ptr, len }
+            }
+            TirTag::Var => {
+                let name = match inst.data {
+                    TirData::Var(name) => name,
+                    _ => unreachable!("Var must carry TirData::Var"),
+                };
+                let locals = ctx.view_locals.get(&name).ok_or_else(|| {
+                    format!("Undefined strview variable: '{}'", ctx.pool.str(name))
+                })?;
+                ValueRepr::View {
+                    ptr: builder.use_var(locals.ptr),
+                    len: builder.use_var(locals.len),
+                }
+            }
+            TirTag::Call => {
+                // Sema rejects `strview` return types (Rule 5), so no call
+                // can produce a view today.
+                return Err(
+                    "eval_inst_view: calls returning strview are rejected by sema (Rule 5)"
+                        .to_string(),
+                );
+            }
+            other => {
+                return Err(format!(
+                    "eval_inst_view: instruction at %{} is not a strview value (tag={:?})",
+                    r.index(),
+                    other
+                ));
+            }
+        };
+        ctx.inst_values.insert(r, repr);
+        Ok(repr)
+    }
+
+    /// Evaluate a `str`/`strview`-typed operand and hand back its
+    /// `(ptr, len)` words regardless of representation — owned triple
+    /// or borrowed view pair (M8.4). Consumers that only need the
+    /// viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`, the
+    /// `__ryo_str_push` suffix, the `__ryo_slice` base) use this;
+    /// anything needing the cap must stay on `eval_inst_str`.
+    fn eval_str_or_view_parts(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<(Value, Value), String> {
+        let ty = ctx.tir.inst(r).ty;
+        if ctx.pool.is_view(ty) {
+            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, r)? else {
+                unreachable!("eval_inst_view must produce ValueRepr::View");
+            };
+            return Ok((ptr, len));
+        }
+        match Self::eval_inst_str(builder, ctx, r)? {
+            ValueRepr::Str { ptr, len, .. } => Ok((ptr, len)),
+            ValueRepr::View { ptr, len } => Ok((ptr, len)),
+            ValueRepr::Scalar(_) => Err(format!(
+                "eval_str_or_view_parts: instruction at %{} is not a str/strview value",
+                r.index()
+            )),
+        }
+    }
+
+    /// The `len` word of a `str`/`strview`-typed operand, from either
+    /// representation (M8.4). Backs the `StrLen` arm.
+    fn eval_str_or_view_len(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<Value, String> {
+        let (_, len) = Self::eval_str_or_view_parts(builder, ctx, r)?;
+        Ok(len)
     }
 
     /// Emit a string literal as a fat pointer triple (ptr, len, cap)
@@ -1854,8 +2197,11 @@ impl<M: Module> Codegen<M> {
         let lit_len = builder.ins().iconst(types::I64, content.len() as i64);
 
         // Allocate 24-byte stack slot for out parameter (8-byte aligned)
-        let slot =
-            builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 24, 3));
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
         let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
 
         // Call ryo_str_from_literal(data, len, out)
@@ -1920,6 +2266,49 @@ impl<M: Module> Codegen<M> {
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
+        // M8.4.1.2: `str(view)` materialization as a bare statement —
+        // emit the copy, cache the triple so a scheduled temp Free can
+        // read it, and discard the value. The primary path (result
+        // bound or consumed) is `eval_inst_str`.
+        if name_str == "__ryo_str_from_view" {
+            let ValueRepr::View {
+                ptr: v_ptr,
+                len: v_len,
+            } = Self::eval_inst_view(builder, ctx, view.args[0])?
+            else {
+                unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
+            };
+
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                STR_SLOT_SIZE,
+                3,
+            ));
+            let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+            let func_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                "ryo_str_from_view",
+                &[ctx.int_type, types::I64, ctx.int_type],
+                &[],
+            )?;
+            builder.ins().call(func_ref, &[v_ptr, v_len, out_ptr]);
+
+            let ptr = builder
+                .ins()
+                .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+            let len = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+            let cap = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+            ctx.inst_values.insert(r, ValueRepr::Str { ptr, len, cap });
+
+            return Ok(builder.ins().iconst(ctx.int_type, 0));
+        }
+
         // Formatter builtins — when called as a bare statement (result
         // discarded), we still emit the call but throw away the output.
         // The primary path is eval_inst_str (used when result is assigned
@@ -1929,7 +2318,7 @@ impl<M: Module> Codegen<M> {
 
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                24,
+                STR_SLOT_SIZE,
                 3,
             ));
             let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -1962,7 +2351,7 @@ impl<M: Module> Codegen<M> {
             let suffix_ref = view.args[1];
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                24,
+                STR_SLOT_SIZE,
                 3,
             ));
             let s_addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -1973,11 +2362,11 @@ impl<M: Module> Codegen<M> {
             builder.ins().store(MemFlags::trusted(), ptr, s_addr, 0);
             builder.ins().store(MemFlags::trusted(), len, s_addr, 8);
             builder.ins().store(MemFlags::trusted(), cap, s_addr, 16);
-            let suf = Self::eval_inst_str(builder, ctx, suffix_ref)?;
-            let (suf_ptr, suf_len) = match suf {
-                ValueRepr::Str { ptr, len, .. } => (ptr, len),
-                _ => unreachable!("str_push suffix must be a str"),
-            };
+            // M8.4: the suffix may be either repr — an owned `str`
+            // passes its ptr+len, a slice/view passes directly (no
+            // ViewOfStr wrap: builtins bypass check_call's §3.4
+            // conversion, so sema accepts `Str | View(_)` here).
+            let (suf_ptr, suf_len) = Self::eval_str_or_view_parts(builder, ctx, suffix_ref)?;
             let func_ref = Self::declare_runtime_fn(
                 ctx.module,
                 builder,
@@ -2023,7 +2412,7 @@ impl<M: Module> Codegen<M> {
                 if is_str_type(arg_ty, ctx.pool) {
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
-                        24,
+                        STR_SLOT_SIZE,
                         3,
                     ));
                     let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -2060,6 +2449,13 @@ impl<M: Module> Codegen<M> {
                     }
                     _ => unreachable!("str-typed arg must produce ValueRepr::Str"),
                 }
+            } else if ctx.pool.is_view(arg_ty) {
+                // `strview` arg → 2-word ABI (ptr, len), matching the
+                // callee's build_signature. Sema has already inserted
+                // ViewOfStr for owned-str actuals (§3.4).
+                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg)?;
+                arg_values.push(ptr);
+                arg_values.push(len);
             } else {
                 arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
             }
@@ -2085,7 +2481,7 @@ impl<M: Module> Codegen<M> {
             // sret: allocate 24-byte slot, prepend pointer to args
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                24,
+                STR_SLOT_SIZE,
                 3,
             ));
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
@@ -2181,15 +2577,16 @@ impl<M: Module> Codegen<M> {
     ) -> Result<(), String> {
         debug_assert_eq!(args.len(), 1, "sema should reject print() arity errors");
         debug_assert!(
-            is_str_type(ctx.tir.inst(args[0]).ty, ctx.pool),
+            matches!(
+                ctx.pool.kind(ctx.tir.inst(args[0]).ty),
+                TypeKind::Str | TypeKind::View(_)
+            ),
             "sema should reject non-str print() args",
         );
 
-        let repr = Self::eval_inst_str(builder, ctx, args[0])?;
-        let (ptr, len) = match repr {
-            ValueRepr::Str { ptr, len, .. } => (ptr, len),
-            _ => unreachable!("str-typed arg produced Scalar"),
-        };
+        // Accepts either repr — owned str triple or strview view pair;
+        // write(1, ptr, len) only needs the viewed bytes.
+        let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
 
         check_platform_support(ctx.triple)?;
         let fd = builder.ins().iconst(types::I32, 1);
