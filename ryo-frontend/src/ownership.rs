@@ -8732,9 +8732,13 @@ mod tests {
 
     #[test]
     fn w0003_materialize_returned_does_not_warn() {
-        // The returned copy escapes — `return str(text)` is the
-        // sanctioned fix for the E1 view-escape error, never redundant.
-        let diags = check_src("fn first(text: strview) -> str:\n\treturn str(text)\n");
+        // A bound copy later consumed by `return x` escapes — the
+        // `states == Moved` escape check must keep W0003 silent. (The
+        // unbound `return str(text)` shape never reaches the case-B
+        // analysis: return operands are not collected as materialize
+        // sites.)
+        let diags =
+            check_src("fn first(text: strview) -> str:\n\tx: str = str(text)\n\treturn x\n");
         assert_eq!(
             w0003_count(&diags),
             0,

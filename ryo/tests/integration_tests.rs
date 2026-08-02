@@ -3730,9 +3730,15 @@ fn test_redundant_materialize_warning() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("W0003").count(),
+        1,
+        "expected exactly one W0003 warning: {}",
+        stderr
+    );
     assert!(
-        stderr.contains("W0003"),
-        "expected W0003 in stderr: {}",
+        stderr.contains("copy never escapes"),
+        "expected the case-B message in stderr: {}",
         stderr
     );
 }

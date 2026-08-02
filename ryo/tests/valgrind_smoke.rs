@@ -251,3 +251,11 @@ fn valgrind_slice_across_blocks() {
         "slice_across_blocks",
     );
 }
+
+#[test]
+fn valgrind_str_materialize_copy() {
+    run_valgrind_smoke(
+        common::find_fixture("str_materialize_copy"),
+        "str_materialize_copy",
+    );
+}

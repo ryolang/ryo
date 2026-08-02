@@ -3870,6 +3870,22 @@ mod tests {
     }
 
     #[test]
+    fn w0003_materialize_arg_to_inout_param_does_not_warn() {
+        // An `inout` parameter cannot be served by the re-borrow either
+        // (its argument requires `&`) — the copy is legitimate there.
+        // The call below is rejected for the missing `&`; W0003 must
+        // stay silent on that error path too.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn eat(inout s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\teat(str(s[0:1]))\n",
+        );
+        assert!(
+            !any_code(&diags, DiagCode::RedundantMaterialize),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
     fn w0003_materialize_arg_to_print_warns() {
         // W0003 case A, builtin shape: `print` accepts `strview`
         // arguments directly — materializing first buys nothing.

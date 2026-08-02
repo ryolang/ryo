@@ -414,6 +414,27 @@ fn main():
 \tprint(s)
 ",
     ),
+    (
+        // M8.4.1.2: str(view) materialization frees. The bound copy x
+        // is a defensive copy (the source is mutated after the
+        // materialize point, so W0003 stays silent) freed at its last
+        // use; the temp copy moves into `eat` (a move param, so no
+        // re-borrow redundancy warning) and is freed there. Both the
+        // named-init and anon-temp Free paths must release the copy's
+        // buffer exactly once.
+        "str_materialize_copy",
+        "\
+fn eat(move text: str):
+\tprint(text)
+
+fn main():
+\tmut s: str = \"hello\"
+\tx: str = str(s[0:2])
+\tstr_push(&s, \"!\")
+\tprint(x)
+\teat(str(s[0:2]))
+",
+    ),
 ];
 
 pub fn find_fixture(name: &str) -> &'static str {
