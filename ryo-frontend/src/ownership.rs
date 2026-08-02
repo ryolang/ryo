@@ -8155,6 +8155,84 @@ mod tests {
     }
 
     #[test]
+    fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
+        // Same contract as loop_deferred_view_stays_frozen_across_arm_without_read
+        // but through the ForRange path (analyze_for_range →
+        // remove_loop_deferred_views at :3017 instead of the while-loop
+        // call at :2994):
+        //   s: str = "hello"; v = s[0:2]
+        //   for i in range(0, 3):
+        //       if cond: str_push(&s, "!")   # v unread on this arm's path
+        //       else: print(v)               # …but re-read next iteration
+        // → exactly one SourceProjected naming `s`.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let i = pool.intern_str("i");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(cond, &[push_stmt], &[], Some(&[pstmt]), void, span);
+        let i0b = tb.int_const(0, int_ty, span);
+        let i3 = tb.int_const(3, int_ty, span);
+        let fr = tb.for_range(i, i0b, i3, &[ifs], void, span);
+        let tir = tb.finish(&[decl, vdecl, fr]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
     fn view_in_loop_body_converges() {
         // s: str = "hello"; while true: v = s[0:2]; print(v)
         // → converges (I-087 full-tuple comparison); no spurious
