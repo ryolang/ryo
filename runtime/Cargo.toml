@@ -10,3 +10,10 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 ryu = "1"
+
+[features]
+# Enabled only by build-support's archive build (`ensure_runtime_archive`)
+# so the staticlib carries a #[panic_handler]. The rlib linked into the
+# std JIT host (ryo-backend) must NOT define one — it would collide with
+# std's panic_impl lang item.
+staticlib = []

@@ -1,4 +1,126 @@
-use std::alloc::{Layout, alloc, dealloc, realloc};
+// The staticlib archive linked by `zig cc` is `#![no_std]` and allocates
+// through the C heap (malloc/free/realloc), so it bundles no precompiled
+// std/alloc objects — those carry `_Unwind_*`/`rust_eh_personality`
+// references that nothing satisfies at the final link. The rlib linked
+// into the std JIT host and the test harness use the same code paths
+// against the host libc.
+#![cfg_attr(feature = "staticlib", no_std)]
+
+// Test builds link std through the harness; the gate keeps `std::`
+// paths available in test code if needed.
+#[cfg(test)]
+extern crate std;
+
+use core::ffi::{c_int, c_void};
+
+const STDOUT_FD: c_int = 1;
+const STDERR_FD: c_int = 2;
+
+#[cfg(not(windows))]
+unsafe extern "C" {
+    fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+}
+
+#[cfg(windows)]
+unsafe extern "C" {
+    fn _write(fd: c_int, buf: *const c_void, count: u32) -> c_int;
+}
+
+unsafe extern "C" {
+    fn exit(code: c_int) -> !;
+    fn abort() -> !;
+}
+
+unsafe extern "C" {
+    #[link_name = "malloc"]
+    fn c_malloc(size: usize) -> *mut c_void;
+    #[link_name = "free"]
+    fn c_free(ptr: *mut c_void);
+    #[link_name = "realloc"]
+    fn c_realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
+}
+
+/// Thin wrapper over the C `write`/`_write` for one fd.
+/// Returns the byte count written, or <= 0 on error.
+fn os_write(fd: c_int, ptr: *const u8, len: usize) -> isize {
+    #[cfg(not(windows))]
+    // SAFETY: caller guarantees ptr is readable for len bytes; the call
+    // does not retain the buffer.
+    unsafe {
+        write(fd, ptr.cast::<c_void>(), len)
+    }
+    #[cfg(windows)]
+    // SAFETY: same. `_write` takes a u32 count; clamp (print/panic
+    // payloads are strings, far below 4 GiB in practice).
+    unsafe {
+        _write(fd, ptr.cast::<c_void>(), len.min(u32::MAX as usize) as u32) as isize
+    }
+}
+
+/// Write all `len` bytes to `fd`, retrying short writes. Gives
+/// up silently on hard errors (return <= 0): stdout/stderr output is
+/// best-effort and there is no error channel to report through.
+fn write_all(fd: c_int, mut ptr: *const u8, mut len: usize) {
+    while len > 0 {
+        let n = os_write(fd, ptr, len);
+        if n <= 0 {
+            return;
+        }
+        // SAFETY: os_write reported n bytes consumed, so advancing by n
+        // stays within (or at most one past) the caller's buffer.
+        ptr = unsafe { ptr.add(n as usize) };
+        len -= n as usize;
+    }
+}
+
+/// Runtime backing for the `print` builtin: write the viewed
+/// bytes to stdout. No added newline, no formatting — print policy is
+/// a spec-level decision, not a runtime one.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes (or be null/dangling when
+/// `len == 0`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_print(ptr: *const u8, len: u64) {
+    if len == 0 {
+        return;
+    }
+    debug_assert!(!ptr.is_null());
+    write_all(STDOUT_FD, ptr, len as usize);
+}
+
+/// Runtime backing for `__ryo_panic` (panic/assert): write the
+/// sema-formatted message to stderr and exit 101.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes. Never returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_panic(ptr: *const u8, len: u64) -> ! {
+    if len > 0 {
+        debug_assert!(!ptr.is_null());
+        write_all(STDERR_FD, ptr, len as usize);
+    }
+    // SAFETY: exit never returns.
+    unsafe { exit(101) }
+}
+
+#[cfg(feature = "staticlib")]
+#[panic_handler]
+fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
+    // The archive is linked by `zig cc` without Rust std; panics from
+    // bounds/overflow checks in runtime code land here. The workspace
+    // builds with panic = "abort", so there is no unwinding to support.
+    // SAFETY: abort never returns.
+    unsafe { abort() }
+}
+
+/// Precompiled `core` objects carry eh-frame references to
+/// `rust_eh_personality` even though the workspace builds with
+/// panic = "abort" and nothing ever unwinds. The symbol only needs to
+/// resolve at the final zig-cc link; it is never called.
+#[cfg(feature = "staticlib")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_eh_personality() {}
 
 #[repr(C)]
 pub struct RyoStrFat {
@@ -22,11 +144,11 @@ pub struct RyoSlice {
 #[unsafe(no_mangle)]
 pub extern "C" fn ryo_str_alloc(cap: u64) -> *mut u8 {
     if cap == 0 {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
-    let layout = layout_for(cap);
-    // SAFETY: layout has nonzero size (cap > 0 checked above) and align 1 is valid for u8.
-    let ptr = unsafe { alloc(layout) };
+    let size: usize = cap.try_into().unwrap_or_else(|_| oom_abort());
+    // SAFETY: malloc is called with a nonzero size.
+    let ptr = unsafe { c_malloc(size) as *mut u8 };
     if ptr.is_null() {
         oom_abort();
     }
@@ -41,9 +163,8 @@ pub unsafe extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64) {
     if ptr.is_null() || cap == 0 {
         return;
     }
-    let layout = layout_for(cap);
-    // SAFETY: caller contract — ptr came from ryo_str_alloc/realloc with this exact cap.
-    unsafe { dealloc(ptr, layout) };
+    // SAFETY: caller contract — ptr came from ryo_str_alloc/realloc.
+    unsafe { c_free(ptr as *mut c_void) };
 }
 
 /// # Safety
@@ -57,11 +178,11 @@ pub unsafe extern "C" fn ryo_str_realloc(ptr: *mut u8, old_cap: u64, new_cap: u6
     if new_cap == 0 {
         // SAFETY: ptr/old_cap came from a prior alloc per our # Safety doc.
         unsafe { ryo_str_free(ptr, old_cap) };
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
-    let layout = layout_for(old_cap);
-    // SAFETY: ptr/old_cap pair from prior alloc; new_cap > 0 checked above; layout matches old_cap.
-    let new_ptr = unsafe { realloc(ptr, layout, new_cap as usize) };
+    let new_size: usize = new_cap.try_into().unwrap_or_else(|_| oom_abort());
+    // SAFETY: ptr came from a prior alloc per our # Safety doc; new_size > 0 checked above.
+    let new_ptr = unsafe { c_realloc(ptr as *mut c_void, new_size) as *mut u8 };
     if new_ptr.is_null() {
         oom_abort();
     }
@@ -83,13 +204,11 @@ unsafe fn write_str_result(s: &[u8], out: *mut RyoStrFat) {
     }
 }
 
-fn layout_for(cap: u64) -> Layout {
-    Layout::from_size_align(cap as usize, 1).unwrap_or_else(|_| oom_abort())
-}
-
 fn oom_abort() -> ! {
-    eprintln!("ryo: out of memory");
-    std::process::abort();
+    let msg = b"ryo: out of memory\n";
+    write_all(STDERR_FD, msg.as_ptr(), msg.len());
+    // SAFETY: abort never returns.
+    unsafe { abort() }
 }
 
 /// # Safety
@@ -99,7 +218,7 @@ pub unsafe extern "C" fn ryo_str_from_literal(data: *const u8, len: u64, out: *m
     // SAFETY: caller contract — out points to a valid RyoStrFat.
     unsafe {
         if len == 0 {
-            (*out).ptr = std::ptr::null_mut();
+            (*out).ptr = core::ptr::null_mut();
             (*out).len = 0;
             (*out).cap = 0;
             return;
@@ -126,7 +245,7 @@ pub unsafe extern "C" fn ryo_str_from_view(ptr: *const u8, len: u64, out: *mut R
     // points to a valid RyoStrFat.
     unsafe {
         if len == 0 {
-            (*out).ptr = std::ptr::null_mut();
+            (*out).ptr = core::ptr::null_mut();
             (*out).len = 0;
             (*out).cap = 0;
             return;
@@ -142,10 +261,11 @@ pub unsafe extern "C" fn ryo_str_from_view(ptr: *const u8, len: u64, out: *mut R
 }
 
 fn slice_fail(msg: &str) -> ! {
-    // Raw message, no prefix — matches the codegen-synthesized
-    // `__ryo_panic` path (both exit 101 with the message on stderr).
-    eprintln!("{msg}");
-    std::process::exit(101)
+    // Raw message + newline, exit 101 — same contract as `ryo_panic`.
+    write_all(STDERR_FD, msg.as_ptr(), msg.len());
+    write_all(STDERR_FD, b"\n".as_ptr(), 1);
+    // SAFETY: exit never returns.
+    unsafe { exit(101) }
 }
 
 /// True when byte offset `i` in `s[..len]` lies on a UTF-8 char
@@ -190,7 +310,7 @@ pub unsafe extern "C" fn __ryo_slice(
     // SAFETY: caller contract for `out`; `start <= end <= len` checked above.
     unsafe {
         (*out).ptr = if len == 0 {
-            std::ptr::null()
+            core::ptr::null()
         } else {
             ptr.add(start as usize)
         };
@@ -216,7 +336,7 @@ pub unsafe extern "C" fn ryo_str_concat(
             None => oom_abort(),
         };
         if total == 0 {
-            (*out).ptr = std::ptr::null_mut();
+            (*out).ptr = core::ptr::null_mut();
             (*out).len = 0;
             (*out).cap = 0;
             return;
@@ -434,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_free_null_is_noop() {
-        unsafe { ryo_str_free(std::ptr::null_mut(), 0) };
+        unsafe { ryo_str_free(core::ptr::null_mut(), 0) };
     }
 
     #[test]
@@ -451,7 +571,7 @@ mod tests {
     #[test]
     fn test_realloc_from_null() {
         unsafe {
-            let ptr = ryo_str_realloc(std::ptr::null_mut(), 0, 16);
+            let ptr = ryo_str_realloc(core::ptr::null_mut(), 0, 16);
             assert!(!ptr.is_null());
             ryo_str_free(ptr, 16);
         }
@@ -472,7 +592,7 @@ mod tests {
         unsafe {
             let data = b"hello";
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -490,7 +610,7 @@ mod tests {
         unsafe {
             let data = b"hello";
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -506,7 +626,7 @@ mod tests {
         unsafe {
             let data = b"hello";
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -519,7 +639,7 @@ mod tests {
     fn test_from_literal_empty() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -534,7 +654,7 @@ mod tests {
     fn test_concat_two_strings() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -550,7 +670,7 @@ mod tests {
     fn test_concat_empty_left() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -566,11 +686,11 @@ mod tests {
     fn test_concat_both_empty() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
-            ryo_str_concat(std::ptr::null(), 0, std::ptr::null(), 0, &mut out);
+            ryo_str_concat(core::ptr::null(), 0, core::ptr::null(), 0, &mut out);
             assert!(out.ptr.is_null());
             assert_eq!(out.len, 0);
             assert_eq!(out.cap, 0);
@@ -591,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_eq_both_empty() {
-        let result = unsafe { ryo_str_eq(std::ptr::null(), 0, std::ptr::null(), 0) };
+        let result = unsafe { ryo_str_eq(core::ptr::null(), 0, core::ptr::null(), 0) };
         assert_eq!(result, 1);
     }
 
@@ -605,7 +725,7 @@ mod tests {
     fn test_int_to_str_positive() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -620,7 +740,7 @@ mod tests {
     fn test_int_to_str_negative() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -635,7 +755,7 @@ mod tests {
     fn test_int_to_str_zero() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -650,7 +770,7 @@ mod tests {
     fn test_int_to_str_min() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -665,7 +785,7 @@ mod tests {
     fn test_float_to_str_nan() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -680,7 +800,7 @@ mod tests {
     fn test_float_to_str_inf() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -695,7 +815,7 @@ mod tests {
     fn test_float_to_str_neg_inf() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -710,7 +830,7 @@ mod tests {
     fn test_float_to_str() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -726,7 +846,7 @@ mod tests {
     fn test_float_to_str_large_value() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -744,7 +864,7 @@ mod tests {
     fn test_float_to_str_precision() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -761,7 +881,7 @@ mod tests {
     fn test_bool_to_str_true() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -776,7 +896,7 @@ mod tests {
     fn test_bool_to_str_false() {
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -800,7 +920,7 @@ mod tests {
 
             // Create a heap string for the right side
             let mut right_fat = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -812,7 +932,7 @@ mod tests {
             right_fat.cap = 6;
 
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -840,7 +960,7 @@ mod tests {
     fn slice_basic() {
         let s = "héllo wörld".as_bytes();
         let mut out = RyoSlice {
-            ptr: std::ptr::null(),
+            ptr: core::ptr::null(),
             len: 0,
         };
         // "héllo" is 6 bytes (é = 2 bytes)
@@ -857,7 +977,7 @@ mod tests {
     fn slice_empty_at_len_is_ok() {
         let s = "abc".as_bytes();
         let mut out = RyoSlice {
-            ptr: std::ptr::null(),
+            ptr: core::ptr::null(),
             len: 0,
         };
         // SAFETY: "abc" provides three readable bytes and out is writable;
@@ -870,7 +990,7 @@ mod tests {
     fn slice_nonzero_offset() {
         let s = "héllo wörld".as_bytes();
         let mut out = RyoSlice {
-            ptr: std::ptr::null(),
+            ptr: core::ptr::null(),
             len: 0,
         };
         // "wörld" starts at byte 7 (h=1, é=2, "llo "=4) and is 6 bytes
@@ -889,7 +1009,7 @@ mod tests {
         unsafe {
             let src = b"hello";
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
@@ -909,13 +1029,13 @@ mod tests {
             let src = ryo_str_alloc(3);
             core::ptr::copy_nonoverlapping(b"abc".as_ptr(), src, 3);
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
             ryo_str_from_view(src, 3, &mut out);
             assert!(
-                !std::ptr::eq(out.ptr, src),
+                !core::ptr::eq(out.ptr, src),
                 "copy must not alias the source"
             );
             // Overwrite and free the source; the copy is unaffected.
@@ -932,14 +1052,23 @@ mod tests {
         // RyoSlice invariant: ptr may be null/dangling when len == 0.
         unsafe {
             let mut out = RyoStrFat {
-                ptr: std::ptr::null_mut(),
+                ptr: core::ptr::null_mut(),
                 len: 0,
                 cap: 0,
             };
-            ryo_str_from_view(std::ptr::null(), 0, &mut out);
+            ryo_str_from_view(core::ptr::null(), 0, &mut out);
             assert!(out.ptr.is_null());
             assert_eq!(out.len, 0);
             assert_eq!(out.cap, 0);
         }
+    }
+
+    #[test]
+    fn print_smoke_writes_to_stdout() {
+        // Smoke test only: asserts no crash on the happy path and on the
+        // len==0 / null-ptr edge. Output bytes themselves are verified
+        // end-to-end by the compiler integration tests.
+        unsafe { ryo_print(b"ryo-print-smoke\n".as_ptr(), 16) };
+        unsafe { ryo_print(core::ptr::null(), 0) };
     }
 }

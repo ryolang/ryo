@@ -1506,6 +1506,32 @@ fn assert_true_aot_run_succeeds() {
 }
 
 #[test]
+fn print_aot_run_stdout_exact() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tprint(\"Hello, World!\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "print_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = temp_dir.path().join("print_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+
+    assert!(run_output.status.success(), "compiled binary should exit 0");
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    assert_eq!(
+        stdout, "Hello, World!\n",
+        "binary stdout must be exactly the printed bytes"
+    );
+}
+
+#[test]
 fn assert_false_aot_run_exits_101() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\tassert(false, \"boom\")\n";

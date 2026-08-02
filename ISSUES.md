@@ -16,23 +16,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 ## 🟡 Correctness / Hygiene
 
-### I-006 — `print` is special-cased in codegen
-
-**Files:** `ryo-backend/src/codegen.rs` (`generate_print_call`), `ryo-frontend/src/sema.rs` (`check_builtin_call`)
-**Summary:** Codegen emits a raw `write(2)` syscall wrapper inline for the `print` builtin, and sema has a builtin-specific validator hook to match. Consequences:
-
-- Rejects `print(some_var)` even when the variable is a string.
-- No formatting, no automatic newline.
-- Already stubbed out on Windows (`return Err(...)`).
-- Mixes runtime concerns into the compiler.
-**Resolution:** Move `print` to a runtime crate (`ryort` or similar) compiled to an object file and linked in via `zig cc`. Codegen emits a normal call; `sema::check_builtin_call` goes away.
-
-### I-010 — Unused `_bytes_written` from `write(2)` call
-
-**Files:** `ryo-backend/src/codegen.rs` (`generate_print_call`)
-**Summary:** The result of the `write` syscall is fetched and ignored. A short write or `EINTR` will silently truncate output. Acceptable for a bootstrap, but should be documented or fixed when `print` moves to the runtime (I-006).
-**Resolution:** Tracked under I-006.
-
 ### I-014 — Lexer errors bypass `DiagSink`
 
 **Files:** `ryo-frontend/src/lexer.rs` (`LexError`), `ryo-driver/src/pipeline.rs` (`parse_source`, `display_tokens`)
@@ -214,14 +197,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Files:** `ryo-backend/src/codegen.rs`
 **Summary:** Currently, `for-range` loops have bespoke code generation that manually emits basic blocks, jump instructions, and raw counter increments. When general iterators are added, loops should be desugared during the AST-to-UIR phase into standard `while` loops that call `.next()`.
 **Resolution:** Once iterators land, remove the `generate_for_range` codegen entirely and rely on standard `while` codegen to emit loops.
-
-### I-043 — Migrate `ryo-runtime` to `#![no_std]`
-
-**Files:** `runtime/src/lib.rs`, `runtime/Cargo.toml`, `ryo-backend/src/linker.rs`
-**Summary:** The runtime staticlib only uses `std::alloc`, `std::process::abort()`, and `eprintln!`, yet linking against precompiled `std` bundles objects with `_Unwind_*` symbol references. This forces the linker to pass `-lunwind` on Linux (workaround in `ryo-backend/src/linker.rs`). Migrating to `#![no_std]` with `extern crate alloc` eliminates the dependency entirely.
-**Resolution:** Replace `std::alloc` with `alloc::alloc` (identical API). Replace `eprintln!` + `process::abort()` with `extern "C" { fn abort() -> !; }`. Add `#[panic_handler]` that aborts. Keep the `rlib` crate-type for `cargo test` via a `#[cfg(test)]` std gate. `ryu` already supports `no_std`. Benefits: smaller archive, faster link times, no hidden unwind dependency, simpler cross-compilation.
-
-**Note:** `no_std` scopes only the core floor; OS-backed modules (`net`/`fs`/`time`) are linked on reachability, not forced into `no_std` — see `docs/dev/built_in.md` (`no_std` scope).
 
 ### I-045 — Loop fixed-point uses a scratch sink and re-walks the body to suppress duplicates
 
@@ -512,6 +487,12 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-frontend/src/ownership.rs` (`loop_nesting_of` :1000-1047; call sites :1089-1090, :1541-1545, :2557)
 **Summary:** Each call walks the whole function body to rebuild the target's loop-nesting stack, and it is queried per view/read pair in `collect_view_liveness`, per candidate in `refine_view_liveness_for_arm`, and per materialize site in `warn_redundant_materialize` — O(sites × body) recomputation with no memo.
 **Resolution:** Build a `TirRef`→nesting-stack map in a single pre-pass over the body and reuse it at the three call sites, preserving the cond/bounds-counts-as-inside and nested-loop semantics.
+
+### I-120 — No Windows CI coverage; `build-support` assumes a `.a` archive name
+
+**Files:** `.github/workflows/ci.yml`, `build-support/src/lib.rs` (archive path), `ryo-backend/src/toolchain.rs` (`zig_target`)
+**Summary:** After I-006/I-043 the compiler has no POSIX-only codegen paths, but nothing compiles the Windows-gated code (`#[cfg(windows)] _write` in `runtime/src/lib.rs`) — macOS, Linux, and the Docker suite all skip it. A naive `windows-latest` matrix leg fails two ways: `build-support`'s `ensure_runtime_archive` expects `libryo_runtime.a`, while `windows-msvc` produces `ryo_runtime.lib` (the compiler's `build.rs` panics before anything compiles), and `zig_target()` has no Windows entry so the toolchain-install step and every AOT test fail.
+**Resolution:** Add a scoped `windows-latest` job: fix the archive filename per target (`ryo_runtime.lib` on `*-msvc`), then run `cargo check --workspace --all-targets` and unit tests only (`cargo test -p ryo-core -p ryo-frontend -p ryo-runtime -p ryo-backend --lib`) — no zig install, no AOT/ASan/valgrind legs. A full Windows leg (zig download entry for `x86_64-windows`, AOT tests) belongs with the future `--target` cross-compile plumbing (`Triple::host()` hardcoded in `ryo-driver/src/pipeline.rs`, no `-target` passed to zig cc, per-target runtime archive).
 
 ---
 

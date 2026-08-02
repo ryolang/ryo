@@ -1,6 +1,5 @@
 use crate::toolchain;
 use ryo_core::errors::CompilerError;
-use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 
@@ -14,14 +13,6 @@ pub fn link_executable(
     let mut cmd = Command::new(&zig_path);
     cmd.args(["cc", "-o", exe_file, obj_file]);
     cmd.arg(runtime_lib.as_os_str());
-
-    // Rust's staticlib bundles precompiled std objects that reference
-    // _Unwind_* symbols even with panic=abort (from backtrace support).
-    // On macOS the system libunwind satisfies them; on Linux we must
-    // explicitly link zig's bundled libunwind.
-    if cfg!(target_os = "linux") {
-        cmd.arg(OsStr::new("-lunwind"));
-    }
 
     let output = cmd
         .output()

@@ -51,7 +51,7 @@ pub fn build_and_link(
     let runtime_lib = runtime_lib_path();
     assert!(
         runtime_lib.exists(),
-        "runtime archive missing at {} — run `cargo build -p ryo-runtime --release` first",
+        "runtime archive missing at {} — it is built by ryo-backend's build.rs; run `cargo build` first",
         runtime_lib.display()
     );
 
@@ -63,9 +63,6 @@ pub fn build_and_link(
     cmd.arg(&exe);
     cmd.arg(&obj);
     cmd.arg(&runtime_lib);
-    if cfg!(target_os = "linux") {
-        cmd.arg("-lunwind");
-    }
     let out = cmd.output().expect("zig cc");
     assert!(
         out.status.success(),

@@ -31,21 +31,28 @@ pub fn ensure_runtime_archive(root_dir: &Path) -> String {
         .join("runtime-build");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut cmd = std::process::Command::new(&cargo);
-    cmd.arg("build")
+    // Build only the staticlib crate-type with the `staticlib` feature.
+    // The crate is otherwise an rlib so that `cargo test` and the std JIT
+    // host can link std's allocator/panic handler; the archive build forces
+    // `--crate-type staticlib` to emit the `.a` that `zig cc` links.
+    cmd.arg("rustc")
         .arg("-p")
         .arg("ryo-runtime")
         .arg("--target")
         .arg(&target)
         .arg("--target-dir")
-        .arg(&custom_target_dir);
+        .arg(&custom_target_dir)
+        .arg("--features")
+        .arg("staticlib");
     if profile == "release" {
         cmd.arg("--release");
     }
+    cmd.arg("--").arg("--crate-type").arg("staticlib");
     let status = cmd
         .status()
-        .unwrap_or_else(|e| panic!("failed to spawn `cargo build -p ryo-runtime`: {e}"));
+        .unwrap_or_else(|e| panic!("failed to spawn `cargo rustc -p ryo-runtime`: {e}"));
     if !status.success() {
-        panic!("`cargo build -p ryo-runtime` failed with {status}");
+        panic!("`cargo rustc -p ryo-runtime` failed with {status}");
     }
     // With an explicit `--target`, cargo namespaces the output under the
     // triple: <target-dir>/<triple>/<profile>/.
