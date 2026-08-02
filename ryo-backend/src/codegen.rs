@@ -158,7 +158,6 @@ struct FunctionContext<'a, M: Module> {
     data_ctx: &'a mut DataDescription,
     string_data: &'a mut HashMap<StringId, DataId>,
     int_type: types::Type,
-    triple: &'a Triple,
     pool: &'a InternPool,
     tir: &'a Tir,
     locals: HashMap<StringId, Variable>,
@@ -301,6 +300,7 @@ impl Codegen<JITModule> {
             ),
             ("ryo_bool_to_str", ryo_runtime::ryo_bool_to_str as *const u8),
             ("ryo_str_free", ryo_runtime::ryo_str_free as *const u8),
+            ("ryo_print", ryo_runtime::ryo_print as *const u8),
         ]);
 
         Ok(Self::from_module(
@@ -616,7 +616,6 @@ impl<M: Module> Codegen<M> {
                 data_ctx: &mut self.data_ctx,
                 string_data: &mut self.string_data,
                 int_type,
-                triple: &self.triple,
                 pool,
                 tir,
                 locals,
@@ -2262,7 +2261,26 @@ impl<M: Module> Codegen<M> {
         }
 
         if name_str == "print" {
-            Self::generate_print_call(builder, ctx, &view.args)?;
+            // print is an ordinary runtime call (I-006). Accepts either
+            // repr — owned str triple or strview pair; ryo_print(ptr,
+            // len) only needs the viewed bytes.
+            debug_assert_eq!(view.args.len(), 1, "sema should reject print() arity errors");
+            debug_assert!(
+                matches!(
+                    ctx.pool.kind(ctx.tir.inst(view.args[0]).ty),
+                    TypeKind::Str | TypeKind::View(_)
+                ),
+                "sema should reject non-str print() args",
+            );
+            let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+            let print_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                "ryo_print",
+                &[ctx.int_type, types::I64],
+                &[],
+            )?;
+            builder.ins().call(print_ref, &[ptr, len]);
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
@@ -2568,31 +2586,6 @@ impl<M: Module> Codegen<M> {
             },
             _ => None,
         }
-    }
-
-    fn generate_print_call(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        args: &[TirRef],
-    ) -> Result<(), String> {
-        debug_assert_eq!(args.len(), 1, "sema should reject print() arity errors");
-        debug_assert!(
-            matches!(
-                ctx.pool.kind(ctx.tir.inst(args[0]).ty),
-                TypeKind::Str | TypeKind::View(_)
-            ),
-            "sema should reject non-str print() args",
-        );
-
-        // Accepts either repr — owned str triple or strview view pair;
-        // write(1, ptr, len) only needs the viewed bytes.
-        let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
-
-        check_platform_support(ctx.triple)?;
-        let fd = builder.ins().iconst(types::I32, 1);
-        let write_ref = declare_write(ctx.module, builder, ctx.int_type)?;
-        builder.ins().call(write_ref, &[fd, ptr, len]);
-        Ok(())
     }
 }
 
