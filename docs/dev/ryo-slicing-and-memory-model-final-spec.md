@@ -1,7 +1,7 @@
 # Ryo Slicing, Views & Memory Model — Final Design Specification
 
 > **Document Status:** Design Decision Record + Specification (Pre-Implementation)
-> **Last Updated:** 2026-07-22
+> **Last Updated:** 2026-08-02
 > **Version:** 1.0.0-draft
 > **Supersedes:** `ryo-slice-projections-proposal.md` (adopted), `ryo_binary_pattern_matching_proposal.md` (partially adopted, memory model rejected)
 > **Amends:** Ryo Language Specification §1.2 (new principle), §3 (Binding Rule), §4.2, §4.3, §4.4, §4.5, §5.2.1 (concurrency constraint), §5.7, §5.8, §9.1 (ambient runtime), §9.2.1, §17 (unsafe)
@@ -150,6 +150,19 @@ For views that must escape: use `sbytes` (§5).
 | `str` / `bytes` | Keeping or extending the value |
 | `inout str` / `inout bytes` | Mutating the caller's value in place |
 | `move str` / `move bytes` | Taking ownership |
+
+### 3.4.1 Materialization — `str(view)` (M8.4.1.2)
+
+The re-borrow (P6') covers call sites for free; it cannot cover escapes, because the manufactured `str` is call-scoped. The owned-copy operation P6 alludes to is spelled **`str(view)`** (decision record: `ryo-view-materialization.md`):
+
+- **Type rule.** The argument must be a `strview`; anything else — including an owned `str` — is E0012 TypeMismatch. There is no `str(owned)` clone form: same-type duplication is the future `Clone` trait's story (trait milestone).
+- **Result.** A fresh owned `str` (`{ptr, len, cap=len}`): allocates, copies the viewed bytes, and is independent of the source buffer.
+- **Binding.** `x: str = str(view)` is legal (fresh owner); `x: str = view` remains E0012 — materialization is never implicit, here or anywhere.
+- **Division of labor.** Re-borrow (P6') for call sites: zero cost, call-scoped. Materialization for escapes: returns, stores into longer-lived structures, moves into spawned tasks, and defensive copies taken before the source is mutated. Reaching for `str(view)` at a call site pays an allocation the re-borrow avoids.
+- **W0003 RedundantMaterialize.** A heuristic, warnings-only lint flags the two bad shapes: (a) a materialize call in an argument position the re-borrow already serves, and (b) a bound materialize result that never escapes while its source is never mutated afterward (mutating the source later is a legitimate defensive copy and is not flagged). Conservative by design: when unsure, no warning.
+- **Trait-forward hook.** When traits land, `str(view)` resolves through a converting-initializer protocol (Swift `init(_:)`-style, or a `From`/`Materialize` trait with call syntax — name TBD at the trait milestone). Call sites unchanged; recorded as an open hook, not built now.
+
+`bytes(bview)` mirrors this with M8.4.2; `slice[T]` materialization defers to M21 with its bit-copy restriction (decision record §2.4).
 
 ### 3.5 Conformance edits to the base spec
 
@@ -528,6 +541,7 @@ Mobile note: iOS and Android are **`hosted` environments** under D9 — the full
 | Item | Milestone | Dependencies |
 |------|-----------|--------------|
 | `strview`, slice expressions, P1–P6, E1–E4, implicit view conversion | 8.4 | Ownership-pass extensions (§3.5.3); spec wording edits (§3.5) |
+| `str(view)` materialization, W0003 RedundantMaterialize (§3.4.1) | 8.4.1.2 | M8.4.1 re-borrow |
 | Anonymous structs, tuple sugar, `Name{...}` construction (D11) | M9–M10 | Parser grammar (§10.2); base-spec edits (§10.5); zero implementation cost pre-alpha |
 | `bytes` type, `bytesview`, builder API | 8.4.2 | D1 |
 | Conformance edits to spec §4.4/§5.7 | 8.4 | — (ship with the feature) |

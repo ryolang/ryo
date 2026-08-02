@@ -28,6 +28,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.3 — Mutable Borrows (`inout`) [alpha] ✅ COMPLETE](#milestone-83-mutable-borrows-inout-alpha--complete)
 - [x] [Milestone 8.4 — String Slices (`strview`) [alpha] ✅ COMPLETE](#milestone-84-string-slices-strview-alpha--complete)
 - [x] [Milestone 8.4.1 — `strview` Spelling & View→`str` Re-borrow [alpha] ✅ COMPLETE](#milestone-841-strview-spelling--viewstr-re-borrow-alpha--complete)
+- [x] [Milestone 8.4.1.2 — View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE](#milestone-8412-view-materialization-strview--w0003-alpha--complete)
 - [ ] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha]](#milestone-842-bytes-type--bytesview-alpha)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
@@ -1221,6 +1222,44 @@ fn main():
 - The re-borrow manufactures a temporary `str` header with `cap=0` over the view's bytes (`TirTag::ViewAsStr`) — no allocation, valid for the duration of the call only.
 - Dependencies: Milestone 8.4 (view type, projection machinery)
 
+### Milestone 8.4.1.2: View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE
+
+**Goal:** Close the escape story for views: `str(view)` produces an owned `str` copy of a `strview` (allocates + copies), and a new warning flags materializations that buy nothing. Per the decision record (`docs/dev/ryo-view-materialization.md`, spelling decided 2026-08-01) and final spec §3.4.1.
+
+**Status:** ✅ COMPLETE (2026-08-02)
+
+**What was implemented:**
+
+- `str(view)` as a sema-intercepted call-form builtin (no parser change — `str` is not a keyword). Type rule: the argument must be `strview`; anything else, including an owned `str`, is E0012 TypeMismatch — there is no `str(owned)` clone form. The result is an ordinary str-returning call to the runtime builtin `ryo_str_from_view`, so the copy is a fresh owner by construction (`{ptr, len, cap=len}` — allocates, memcpys, independent of the source buffer).
+- Binding rule changes exactly here: `x: str = str(view)` is legal (fresh owner); `x: str = view` stays E0012. The compiler never materializes implicitly; the M8.4.1 re-borrow (P6') is unaffected — free, call-scoped.
+- Warning **W0003 `RedundantMaterialize`** in two shapes: (A) a materialize call in an argument position the `cap=0` re-borrow already serves (borrowed `str` parameter or a view-accepting builtin) — not fired for `move`/`inout` parameters; (B) a bound materialize result that never escapes while the view's root owner is never moved, mutated, or `inout`-passed afterward (the defensive-copy exception). Heuristic and conservative: when unsure, no warning.
+- Docs: final spec §3.4.1, base spec §4.4, this roadmap, the landing reference, and the refreshed decision record.
+
+**Visible Progress:** `fn first(text: strview) -> str: return str(text)` compiles — the E0034 escape fix is one explicit, greppable call — and redundant copies are flagged instead of silently allocating.
+
+**Example:**
+
+```ryo
+fn first(text: strview) -> str:
+	return str(text)        # owned copy escapes — no W0003
+
+fn show(s: str):
+	print(s)
+
+fn main():
+	mut s: str = "hello"
+	x: str = str(s[0:2])    # fresh owner; the binding is legal
+	str_push(&s, "!")       # source mutated after the copy — defensive, no W0003
+	show(str(s[0:1]))       # W0003: the re-borrow covers this call site for free
+	print(x)                # he — unaffected by the push
+```
+
+**Implementation Notes:**
+
+- The e2e test proves the copy is deep: materialize, then mutate the original — the copy is unaffected.
+- Out of scope (deferred): `bytes(bview)` (ships with M8.4.2), `slice[T]` materialization (M21), the `Clone` trait and the trait-forward resolution hook (trait milestone — `str(view)` will resolve through a converting-initializer protocol, call sites unchanged), and a machine-applicable E0034 suggestion (needs Diag suggestion-payload machinery that doesn't exist — belongs with the agent-interface milestone).
+- Dependencies: Milestone 8.4.1 (re-borrow, view machinery)
+
 ### Milestone 8.4.2: `bytes` Type & `bytesview` [alpha]
 
 **Goal:** An owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` — plus its read-only projection, filling the gap where `list[u8]` is the only (awkward) option. Per the final slicing spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md`, D2).
@@ -1235,6 +1274,7 @@ fn main():
 - `bytesview` activates `TypeKind::View(ViewKind::Bytes)` (slot reserved since M8.4's Task 10.1); generalize `TirTag::ViewOfStr` → owner→view conversion per the `owner_view` table
 - Scalar indexing `b[i]` **is** allowed on `bytes` (unlike `str` — no UTF-8 hazard), yielding `u8`
 - Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated, `try`-able) and `text.to_bytes() -> bytes` (owned copy)
+- `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`)
 - Buffer building via the builder idiom: `bytes.builder().u8(v).u16_be(n).bytes(b).build()` (`move self -> Self` chaining, spec §5.2.1)
 - Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice mirroring the `str` ABI; memory fixtures for both JIT and AOT (ASan/Valgrind)
 

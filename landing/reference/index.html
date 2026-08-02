@@ -560,6 +560,18 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
               copy.
             </p>
 
+            <p>
+              When viewed data must outlive the call — returned, stored,
+              or moved — <code>str(view)</code> materializes an owned
+              <code>str</code> copy (allocates + copies). It is never
+              implicit: <code>x: str = view</code> stays a type error,
+              while <code>x: str = str(view)</code> is the explicit fix.
+              Materializing where the free re-borrow already suffices —
+              or copying data that never escapes and whose source is
+              never mutated — draws warning <code>W0003</code>
+              (<code>RedundantMaterialize</code>).
+            </p>
+
             <div class="code-block">
               <div class="code-block-head">
                 <span class="filename">slices.ryo</span>
