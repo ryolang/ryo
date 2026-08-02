@@ -45,9 +45,22 @@ fn zig_target() -> Result<&'static str, CompilerError> {
         ("macos", "aarch64") => Ok("aarch64-macos"),
         ("linux", "x86_64") => Ok("x86_64-linux"),
         ("linux", "aarch64") => Ok("aarch64-linux"),
+        ("windows", "x86_64") => Ok("x86_64-windows"),
         (os, arch) => Err(CompilerError::ToolchainError(format!(
             "Unsupported platform: {os}-{arch}"
         ))),
+    }
+}
+
+/// Archive format zig publishes for the given zig target: Windows
+/// builds ship as `.zip`, everything else as `.tar.xz`.
+// Consumed by the Windows download path in a follow-up task; keep the lint quiet until then.
+#[allow(dead_code)]
+fn archive_ext(target: &str) -> &'static str {
+    if target.contains("windows") {
+        "zip"
+    } else {
+        "tar.xz"
     }
 }
 
@@ -117,14 +130,24 @@ mod tests {
 
     #[test]
     fn test_zig_target_valid() {
-        match zig_target() {
-            Ok(target) => {
-                assert!(["aarch64-macos", "x86_64-linux", "aarch64-linux"].contains(&target));
-            }
-            // No Windows download entry yet: zig install stays POSIX-only
-            // until the `--target` cross-compile plumbing lands.
-            Err(_) => assert_eq!(std::env::consts::OS, "windows"),
-        }
+        let target = zig_target().unwrap();
+        assert!(
+            [
+                "aarch64-macos",
+                "x86_64-linux",
+                "aarch64-linux",
+                "x86_64-windows"
+            ]
+            .contains(&target)
+        );
+    }
+
+    #[test]
+    fn test_archive_ext_per_target() {
+        assert_eq!(archive_ext("x86_64-windows"), "zip");
+        assert_eq!(archive_ext("aarch64-macos"), "tar.xz");
+        assert_eq!(archive_ext("x86_64-linux"), "tar.xz");
+        assert_eq!(archive_ext("aarch64-linux"), "tar.xz");
     }
 
     #[test]
