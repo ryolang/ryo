@@ -1482,6 +1482,14 @@ fn check_call(
 ) -> TirRef {
     let name_id = view.name;
 
+    // M8.4.1.2: `str(view)` materialization — a call-form intercept,
+    // NOT a BUILTINS-table builtin. Type names are not reserved names,
+    // so a user-defined `fn str` must win over the intercept (least
+    // surprise): it fires only when no user declaration carries the name.
+    if sema.pool.str(name_id) == "str" && !sema.name_to_decl.contains_key(&name_id) {
+        return emit_str_materialize(sema, fcx, view, arg_tirs, span);
+    }
+
     // Builtins short-circuit: they're not in `signatures` /
     // `name_to_decl`, so signature resolution and the worklist
     // never see them.
@@ -1891,6 +1899,70 @@ fn emit_builtin_call(
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
     }
+}
+
+/// M8.4.1.2 `str(view)` materialization: validate the single `strview`
+/// argument and emit the str-returning call to the synthesized
+/// `__ryo_str_from_view` runtime callee (mirrors the `int_to_str` arm of
+/// `emit_builtin_call`). The ownership pass seeds the str-returning Call
+/// as a fresh owner by construction; codegen lowers it via the same sret
+/// stack-slot pattern as `int_to_str`.
+fn emit_str_materialize(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+) -> TirRef {
+    if view.args.len() != 1 {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            format!("str() takes exactly 1 argument, got {}", view.args.len()),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    // Builtins never take `inout`: `&` is rejected exactly like the
+    // table builtins (mirrors `int_to_str(&c)`).
+    if matches!(sema.uir.inst(view.args[0]).tag, InstTag::Borrow) {
+        sema.sink.emit(
+            Diag::error(
+                sema.uir.span(view.args[0]),
+                DiagCode::BorrowMismatch,
+                "argument 1 is passed by `&` but parameter is not `inout`".to_string(),
+            )
+            .with_help("remove the `&`, or declare the parameter `inout`"),
+        );
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+    if sema.pool.is_error(arg_ty) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if !sema.pool.is_view(arg_ty) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[0]),
+            DiagCode::TypeMismatch,
+            format!(
+                "str() argument must be strview, got {}",
+                sema.pool.display(arg_ty)
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    // The synthesized callee name is unshadowable — user code cannot
+    // declare `__ryo_`-prefixed identifiers (ReservedIdentifier) — so
+    // codegen's name-match on the callee is unambiguous, and a
+    // user-defined `fn str` (which wins in `check_call`) still lowers
+    // as an ordinary user call.
+    let callee = sema.pool.intern_str("__ryo_str_from_view");
+    fcx.builder.call(
+        callee,
+        arg_tirs,
+        &[ParamMode::Borrow],
+        sema.pool.str_(),
+        span,
+    )
 }
 
 fn emit_panic(sema: &mut Sema<'_>, fcx: &mut FuncCtx, view: &CallView, span: Span) -> TirRef {
@@ -3632,6 +3704,68 @@ mod tests {
         // directly, keeping [Inout, Borrow] modes.
         let (_tirs, diags, _pool) =
             run_with_errors("fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, s[0:1])\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn str_materialize_typechecks_to_owned_str() {
+        // M8.4.1.2: `str(view)` materializes an owned copy — the result
+        // type-checks as `str` and lowers to the synthesized
+        // `__ryo_str_from_view` call.
+        let (tirs, diags, pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: str = str(s[0:1])\n\tprint(x)\n");
+        assert!(diags.is_empty(), "got {:?}", diags);
+        let main = tir_named(&tirs, &pool, "main");
+        let init = main.var_decl_view(stmt_at(main, 1)).initializer;
+        let call = main.inst(init);
+        assert!(matches!(call.tag, TirTag::Call), "got {:?}", call.tag);
+        assert_eq!(call.ty, pool.str_(), "materialize result is owned str");
+        assert_eq!(pool.str(main.call_view(init).name), "__ryo_str_from_view");
+    }
+
+    #[test]
+    fn str_materialize_rejects_non_view_arg() {
+        // An owned `str` argument is NOT accepted — materializing it
+        // would be a same-type copy, which is the future `Clone` trait's
+        // job; the call form is `strview`-only.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: str = str(s)\n");
+        assert!(any_code(&diags, DiagCode::TypeMismatch), "got {:?}", diags);
+        assert!(
+            first_msg(&diags).contains("str() argument must be strview"),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn str_materialize_arity_mismatch() {
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tx: str = str(s[0:1], s[1:2])\n");
+        assert!(any_code(&diags, DiagCode::ArityMismatch), "got {:?}", diags);
+    }
+
+    #[test]
+    fn str_materialize_borrow_arg_rejected() {
+        // Builtins never take `inout`: `&` is rejected exactly like the
+        // table builtins (mirrors `int_to_str(&c)`).
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\tmut s: str = \"hi\"\n\tx: str = str(&s)\n");
+        assert!(
+            any_code(&diags, DiagCode::BorrowMismatch),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn user_str_function_shadows_materialize_intercept() {
+        // Least surprise: a user-defined `fn str` wins over the call-form
+        // intercept — `str(41)` resolves to the user function, so an int
+        // argument is fine and no strview diagnostic fires.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn str(x: int) -> int:\n\treturn x + 1\n\nfn main():\n\ty: int = str(41)\n\tprint(int_to_str(y))\n",
+        );
         assert!(diags.is_empty(), "got {:?}", diags);
     }
 }

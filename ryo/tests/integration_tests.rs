@@ -3688,6 +3688,34 @@ fn test_view_to_str_param_end_to_end() {
 }
 
 #[test]
+fn test_str_materialize_escape_and_independence() {
+    // M8.4.1.2: `str(view)` materializes an owned copy. Deep-copy proof:
+    // materialize, then mutate the original — the copy is unaffected;
+    // and `return str(text)` is the sanctioned fix for the E1 view
+    // escape (a `strview` cannot be returned, an owned copy can).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn first(text: strview) -> str:\n\treturn str(text)\n\nfn main():\n\tmut s: str = \"hello\"\n\tx: str = str(s[0:2])\n\tstr_push(&s, \"!\")\n\tprint(x)\n\tprint(first(s[0:3]))\n";
+    let test_file = create_test_file(temp_dir.path(), "str_materialize.ryo", code);
+    let output = run_ryo_command(&["run", "str_materialize.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The program's output sits between the "[Codegen]" dump and
+    // "[Result]". `print` is a raw write (no trailing newline), so the
+    // two prints concatenate: "he" (the copy, unaffected by the `!`
+    // push) then "hel" (the escape-fixed return).
+    let after_codegen = stdout.split("[Codegen]").nth(1).unwrap();
+    let program_out = after_codegen.split("[Result]").next().unwrap().trim();
+    assert_eq!(
+        program_out, "hehel",
+        "materialized copies must survive mutation of the original"
+    );
+}
+
+#[test]
 fn test_examples_parse() {
     // I-101 sweep: every top-level examples/*.ryo must parse. Local
     // complement to the upstream Examples CI workflow — no CI

@@ -111,6 +111,36 @@ pub unsafe extern "C" fn ryo_str_from_literal(data: *const u8, len: u64, out: *m
     }
 }
 
+/// Materialize an owned `str` copy from a `strview` (M8.4.1.2). The
+/// result owns a fresh heap buffer of exactly `len` bytes
+/// (`cap == len`); `len == 0` yields the empty `{null, 0, 0}` triple.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes — or be null/dangling when
+/// `len == 0` (the `RyoSlice` invariant). `out` must point to a valid
+/// `RyoStrFat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_str_from_view(ptr: *const u8, len: u64, out: *mut RyoStrFat) {
+    // SAFETY: caller contract — ptr/len describe a readable byte range
+    // (or len == 0, in which case ptr is never dereferenced) and out
+    // points to a valid RyoStrFat.
+    unsafe {
+        if len == 0 {
+            (*out).ptr = std::ptr::null_mut();
+            (*out).len = 0;
+            (*out).cap = 0;
+            return;
+        }
+        let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+        let buf = ryo_str_alloc(len);
+        debug_assert!(!ptr.is_null());
+        core::ptr::copy_nonoverlapping(ptr, buf, n);
+        (*out).ptr = buf;
+        (*out).len = len;
+        (*out).cap = len;
+    }
+}
+
 fn slice_fail(msg: &str) -> ! {
     // Raw message, no prefix — matches the codegen-synthesized
     // `__ryo_panic` path (both exit 101 with the message on stderr).
@@ -844,5 +874,64 @@ mod tests {
         assert_eq!(out.len, 6);
         let got = unsafe { core::slice::from_raw_parts(out.ptr, out.len as usize) };
         assert_eq!(got, "wörld".as_bytes());
+    }
+
+    #[test]
+    fn str_from_view_copies_bytes() {
+        unsafe {
+            let src = b"hello";
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_str_from_view(src.as_ptr(), 5, &mut out);
+            assert_eq!(out.len, 5);
+            assert_eq!(out.cap, 5, "materialized copy owns exactly len bytes");
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            assert_eq!(slice, b"hello");
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn str_from_view_buffer_is_independent() {
+        unsafe {
+            // Heap-backed source: the copy must own a fresh buffer.
+            let src = ryo_str_alloc(3);
+            core::ptr::copy_nonoverlapping(b"abc".as_ptr(), src, 3);
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_str_from_view(src, 3, &mut out);
+            assert!(
+                !std::ptr::eq(out.ptr, src),
+                "copy must not alias the source"
+            );
+            // Overwrite and free the source; the copy is unaffected.
+            core::ptr::write_bytes(src, b'x', 3);
+            ryo_str_free(src, 3);
+            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            assert_eq!(slice, b"abc");
+            ryo_str_free(out.ptr, out.cap);
+        }
+    }
+
+    #[test]
+    fn str_from_view_empty() {
+        // RyoSlice invariant: ptr may be null/dangling when len == 0.
+        unsafe {
+            let mut out = RyoStrFat {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            ryo_str_from_view(std::ptr::null(), 0, &mut out);
+            assert!(out.ptr.is_null());
+            assert_eq!(out.len, 0);
+            assert_eq!(out.cap, 0);
+        }
     }
 }

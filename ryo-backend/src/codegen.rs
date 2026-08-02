@@ -292,6 +292,10 @@ impl Codegen<JITModule> {
             ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
             ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
             (
+                "ryo_str_from_view",
+                ryo_runtime::ryo_str_from_view as *const u8,
+            ),
+            (
                 "ryo_float_to_str",
                 ryo_runtime::ryo_float_to_str as *const u8,
             ),
@@ -1868,7 +1872,46 @@ impl<M: Module> Codegen<M> {
             TirTag::Call => {
                 let view = ctx.tir.call_view(r);
                 let name_str = ctx.pool.str(view.name);
-                if name_str == "int_to_str"
+                if name_str == "__ryo_str_from_view" {
+                    // M8.4.1.2 `str(view)` materialization: the same sret
+                    // stack-slot pattern as `int_to_str`, but the argument
+                    // is a view pair evaluated via `eval_inst_view`.
+                    let ValueRepr::View {
+                        ptr: v_ptr,
+                        len: v_len,
+                    } = Self::eval_inst_view(builder, ctx, view.args[0])?
+                    else {
+                        unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
+                    };
+
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        STR_SLOT_SIZE,
+                        3,
+                    ));
+                    let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+                    let func_ref = Self::declare_runtime_fn(
+                        ctx.module,
+                        builder,
+                        "ryo_str_from_view",
+                        &[ctx.int_type, types::I64, ctx.int_type],
+                        &[],
+                    )?;
+                    builder.ins().call(func_ref, &[v_ptr, v_len, out_ptr]);
+
+                    let ptr = builder
+                        .ins()
+                        .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+                    let len = builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+                    let cap = builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+
+                    ValueRepr::Str { ptr, len, cap }
+                } else if name_str == "int_to_str"
                     || name_str == "float_to_str"
                     || name_str == "bool_to_str"
                 {
@@ -2220,6 +2263,49 @@ impl<M: Module> Codegen<M> {
 
         if name_str == "print" {
             Self::generate_print_call(builder, ctx, &view.args)?;
+            return Ok(builder.ins().iconst(ctx.int_type, 0));
+        }
+
+        // M8.4.1.2: `str(view)` materialization as a bare statement —
+        // emit the copy, cache the triple so a scheduled temp Free can
+        // read it, and discard the value. The primary path (result
+        // bound or consumed) is `eval_inst_str`.
+        if name_str == "__ryo_str_from_view" {
+            let ValueRepr::View {
+                ptr: v_ptr,
+                len: v_len,
+            } = Self::eval_inst_view(builder, ctx, view.args[0])?
+            else {
+                unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
+            };
+
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                STR_SLOT_SIZE,
+                3,
+            ));
+            let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+            let func_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                "ryo_str_from_view",
+                &[ctx.int_type, types::I64, ctx.int_type],
+                &[],
+            )?;
+            builder.ins().call(func_ref, &[v_ptr, v_len, out_ptr]);
+
+            let ptr = builder
+                .ins()
+                .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+            let len = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+            let cap = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+            ctx.inst_values.insert(r, ValueRepr::Str { ptr, len, cap });
+
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 

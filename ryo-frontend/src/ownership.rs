@@ -26,7 +26,7 @@
 //!
 //! See `docs/dev/mojo_reference.md`.
 
-use crate::builtins::is_borrowed_scalar_param;
+use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 pub use ryo_core::ownership::{
     BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
@@ -3578,6 +3578,28 @@ fn visit_expr(
                         borrowed.insert(inout_owner(own, tir, *arg));
                     }
                     continue;
+                }
+                // M8.4.1.2: a `str(view)` materialization call passed as
+                // a borrow-mode arg READS the view's buffer at call time
+                // — the view's ROOT owner is immutably borrowed for the
+                // outer call's duration (E4), exactly like passing the
+                // view itself. The ABI registry (`view_borrow_params`)
+                // names the callees this applies to; the copy result is a
+                // fresh owner with no aliasing identity, so it is not
+                // itself recorded in `borrowed`.
+                if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::Call {
+                    let inner = tir.call_view(*arg);
+                    let vb_params = view_borrow_params(inner.name, pool);
+                    if !vb_params.is_empty() {
+                        for &idx in vb_params {
+                            if let Some(&varg) = inner.args.get(idx)
+                                && let Some(root) = projection_root(own, tir, pool, varg)
+                            {
+                                view_borrowed.insert(root);
+                            }
+                        }
+                        continue;
+                    }
                 }
                 // P6': a view re-borrowed into a `str` arg (ViewAsStr)
                 // borrows the view's ROOT owner for the call's duration
@@ -8054,6 +8076,110 @@ mod tests {
             sink.is_empty(),
             "expected no diagnostics — the re-borrow is call-scoped; got: {:?}",
             sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn str_materialize_result_is_fresh_owner() {
+        // M8.4.1.2: `fn show(text: strview) -> str: return str(text)` —
+        // the materialized copy is a fresh owner by construction (the
+        // str-returning-Call seeding), so returning it is the sanctioned
+        // escape fix: no diagnostics, no ownership special-casing.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirData, TirParam, TirTag};
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let show = pool.intern_str("show");
+        let text = pool.intern_str("text");
+        let materialize = pool.intern_str("__ryo_str_from_view");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(
+            show,
+            vec![TirParam {
+                name: text,
+                ty: view_ty,
+                mode: ParamMode::Borrow,
+                span,
+            }],
+            str_ty,
+            span,
+        );
+        let arg = tb.var(text, view_ty, span);
+        let copy = tb.call(materialize, &[arg], &[ParamMode::Borrow], str_ty, span);
+        let ret = tb.push_typed(TirTag::Return, TirData::UnOp(copy), str_ty, span);
+        let tir = tb.finish(&[ret]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "materialize-and-return must be clean — the copy is a fresh owner; got: {:?}",
+            sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn str_materialize_arg_counts_as_borrow_rule7() {
+        // M8.4.1.2: fn two(inout a: str, b: str) called as
+        // two(&s, str(s[0:1])) — the materialization READS the view's
+        // buffer at call time, so it counts as an immutable borrow of
+        // `s` for the call's duration (E4): the Rule-7 partition must
+        // look through `__ryo_str_from_view` to the view's root, exactly
+        // like the ViewAsStr case (viewasstr_arg_counts_as_borrow_rule7).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let two = pool.intern_str("two");
+        let s = pool.intern_str("s");
+        let hello = pool.intern_str("hello");
+        let materialize = pool.intern_str("__ryo_str_from_view");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let inout_arg = tb.var(s, str_ty, span);
+        let slice_base = tb.var(s, str_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let one = tb.int_const(1, int_ty, span);
+        let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
+        let copy = tb.call(materialize, &[slice], &[ParamMode::Borrow], str_ty, span);
+        let call = tb.call(
+            two,
+            &[inout_arg, copy],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
+        let tir = tb.finish(&[decl, stmt]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::MutableAliasingViolation),
+            "expected E0032 MutableAliasingViolation; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
         );
     }
 
