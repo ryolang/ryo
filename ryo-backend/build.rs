@@ -27,7 +27,8 @@ fn main() {
     let mut hasher = Sha256::new();
     hasher.update(&runtime_bytes);
     let hash_result = hasher.finalize();
-    let hash_string = format!("{:x}", hash_result);
+    let hash_bytes: &[u8] = hash_result.as_ref();
+    let hash_string = hash_bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
     println!("cargo:rustc-env=RYO_RUNTIME_HASH={hash_string}");
 
     let runtime_src = root_dir.join("runtime/src");
