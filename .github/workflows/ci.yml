@@ -83,7 +83,7 @@ jobs:
       - run: cargo test --workspace
 
   windows:
-    name: Windows (check + unit tests)
+    name: Test (windows-latest)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -91,11 +91,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: windows
-      # Scoped leg: compile the #[cfg(windows)] code and run unit tests only.
-      # No zig install, no AOT/ASan/valgrind — a full Windows leg waits on the
-      # `--target` cross-compile plumbing (Triple::host() in pipeline.rs).
       - run: cargo check --workspace --all-targets
-      - run: cargo test -p ryo-core -p ryo-frontend -p ryo-runtime -p ryo-backend --lib
+      - name: Get Zig version
+        id: zig-version
+        shell: bash
+        run: |
+          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Cache Zig toolchain
+        id: zig-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.ryo/toolchain
+          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Install Zig toolchain
+        if: steps.zig-cache.outputs.cache-hit != 'true'
+        run: cargo run -- toolchain install
+      - run: cargo test --workspace
 
   asan:
     name: ASan leak check
