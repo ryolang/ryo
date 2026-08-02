@@ -844,8 +844,11 @@ mod tests {
             len: 0,
         };
         // "héllo" is 6 bytes (é = 2 bytes)
+        // SAFETY: s is readable for its byte length and out is writable;
+        // the range 0..6 is in-bounds (see above).
         unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 0, 6, &mut out) };
         assert_eq!(out.len, 6);
+        // SAFETY: __ryo_slice returned a valid view into s for out.len bytes.
         let got = unsafe { core::slice::from_raw_parts(out.ptr, out.len as usize) };
         assert_eq!(got, "héllo".as_bytes());
     }
@@ -857,6 +860,8 @@ mod tests {
             ptr: std::ptr::null(),
             len: 0,
         };
+        // SAFETY: "abc" provides three readable bytes and out is writable;
+        // start == end == len is the empty-at-end case the ABI allows.
         unsafe { __ryo_slice(s.as_ptr(), 3, 3, 3, &mut out) };
         assert_eq!(out.len, 0);
     }
@@ -870,8 +875,11 @@ mod tests {
         };
         // "wörld" starts at byte 7 (h=1, é=2, "llo "=4) and is 6 bytes
         // — exercises the non-zero pointer-offset path.
+        // SAFETY: s is readable for its byte length and out is writable;
+        // the range 7..13 is in-bounds (see above).
         unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 7, 13, &mut out) };
         assert_eq!(out.len, 6);
+        // SAFETY: __ryo_slice returned a valid view into s for out.len bytes.
         let got = unsafe { core::slice::from_raw_parts(out.ptr, out.len as usize) };
         assert_eq!(got, "wörld".as_bytes());
     }
