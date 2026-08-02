@@ -51,7 +51,7 @@ pub fn build_and_link(
     let runtime_lib = runtime_lib_path();
     assert!(
         runtime_lib.exists(),
-        "runtime archive missing at {} — run `cargo build -p ryo-runtime --release` first",
+        "runtime archive missing at {} — it is built by ryo-backend's build.rs; run `cargo build` first",
         runtime_lib.display()
     );
 
