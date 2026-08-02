@@ -219,6 +219,15 @@ pub(crate) struct Ownership {
     /// as live (borrow-for-the-whole-statement semantics, matching
     /// Rule 7).
     pub pending_dying: Vec<Owner>,
+
+    /// W0003 case-B support (M8.4.1.2): every move, mutation
+    /// (reassign), or `inout` pass of a tracked owner the walk
+    /// observed, as `(owner, site)` pairs. Monotone-accumulating like
+    /// `reseat_drops` — loop convergence re-walks may push duplicates
+    /// (queries are `any()`-shaped, so no dedup is needed). Read by
+    /// the post-walk redundant-materialize pass to classify escapes of
+    /// the copy and defensive-copy hazards on the view's root owner.
+    pub owner_hazards: Vec<(Owner, TirRef)>,
 }
 
 /// One conditional-reseat observation, recorded by
@@ -259,6 +268,8 @@ impl Ownership {
     ///   live at the join (P2). `analyze_if_stmt` prunes views whose last
     ///   use is inside the branch afterwards (they are dead on every path
     ///   at the join).
+    /// - `owner_hazards`: union — the hazard log is monotone; duplicates
+    ///   are harmless to its `any()`-shaped queries.
     /// - Final pass: per-binding state is recomputed through whichever
     ///   end-of-branch owner each branch left, so reseats inside a branch
     ///   contribute their state to the merged binding.
@@ -338,6 +349,8 @@ impl Ownership {
                     }
                 }
             }
+            // W0003 hazard log: union (monotone; duplicates harmless).
+            self.owner_hazards.extend(b.owner_hazards.iter().copied());
         }
 
         // Binding-aware override: for each name that existed before
@@ -1402,6 +1415,148 @@ fn collect_named_inits_rec(tir: &Tir, r: TirRef, set: &mut HashSet<TirRef>) {
     }
 }
 
+/// True when `r` is a call to the synthesized `__ryo_str_from_view`
+/// materialize callee (M8.4.1.2) with a single view-typed argument.
+/// The callee name is unshadowable (`__ryo_` is reserved), so a name
+/// match is unambiguous.
+fn is_materialize_call(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+    if tir.inst(r).tag != TirTag::Call {
+        return false;
+    }
+    let view = tir.call_view(r);
+    pool.str(view.name) == "__ryo_str_from_view"
+        && view.args.len() == 1
+        && pool.is_view(tir.inst(view.args[0]).ty)
+}
+
+/// Collect every bound materialize site — a `VarDecl`/`Assign` whose
+/// value satisfies [`is_materialize_call`] — as `(decl_stmt, call)`
+/// pairs, recursing into nested control flow like
+/// [`collect_named_inits`]. Unbound materialize results (call
+/// arguments, return operands) are case A's / the escape-fix's
+/// jurisdiction, not case B's.
+fn collect_materialize_sites(
+    tir: &Tir,
+    stmts: &[TirRef],
+    pool: &InternPool,
+    out: &mut Vec<(TirRef, TirRef)>,
+) {
+    for &r in stmts {
+        match tir.inst(r).tag {
+            TirTag::VarDecl => {
+                let init = tir.var_decl_view(r).initializer;
+                if is_materialize_call(tir, pool, init) {
+                    out.push((r, init));
+                }
+            }
+            TirTag::Assign => {
+                let value = tir.assign_view(r).value;
+                if is_materialize_call(tir, pool, value) {
+                    out.push((r, value));
+                }
+            }
+            TirTag::IfStmt => {
+                let v = tir.if_stmt_view(r);
+                collect_materialize_sites(tir, &v.then_stmts, pool, out);
+                for arm in &v.elif_branches {
+                    collect_materialize_sites(tir, &arm.body, pool, out);
+                }
+                if let Some(else_stmts) = v.else_stmts.as_deref() {
+                    collect_materialize_sites(tir, else_stmts, pool, out);
+                }
+            }
+            TirTag::WhileLoop => {
+                collect_materialize_sites(tir, &tir.while_loop_view(r).body, pool, out);
+            }
+            TirTag::ForRange => {
+                collect_materialize_sites(tir, &tir.for_range_view(r).body, pool, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// W0003 case B (M8.4.1.2): a bound `x = str(view)` whose copy never
+/// escapes and whose source is never mutated after the copy is a
+/// redundant allocation — the view could have been used directly.
+///
+/// Heuristic, warning-only. The escape classification REUSES the
+/// walk's results instead of inventing a second escape analysis: the
+/// copy's owner ends `Moved` exactly when a consume (return, `move`
+/// argument, rebinding assign) followed its binding, and
+/// `owner_hazards` records every `inout` pass and mutation the walk
+/// observed. Two deliberate non-goals, both resolved toward NO
+/// warning (conservative direction):
+///
+///  - interprocedural flow: a copy passed by borrow to a function
+///    that stores it somewhere is invisible here and treated as a
+///    non-escape — borrow reads are precisely the uses the view could
+///    have served;
+///  - conditionally-executed escapes: a move/mutation on ANY branch
+///    counts (the merged lattice and the monotone hazard log are
+///    path-insensitive), so a maybe-escape suppresses the warning.
+fn warn_redundant_materialize(tir: &Tir, pool: &InternPool, own: &Ownership, sink: &mut DiagSink) {
+    let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
+    collect_materialize_sites(tir, &tir.body_stmts(), pool, &mut sites);
+    if sites.is_empty() {
+        return;
+    }
+    let order = program_order(tir);
+    let rank = |r: TirRef| order.get(&r).copied().unwrap_or(0);
+    for (decl, call) in sites {
+        let copy = Owner::Inst(call);
+        // Escape check: the copy was consumed (returned, move-passed,
+        // rebound away) after its binding, or mutated / `inout`-passed
+        // anywhere — either makes the owned allocation legitimate. The
+        // hazard at `site == decl` is the binding's own consume, how
+        // the walk models `x = <value>` — not an escape.
+        if matches!(own.states.get(&copy), Some(OwnerState::Moved { .. })) {
+            continue;
+        }
+        if own
+            .owner_hazards
+            .iter()
+            .any(|&(o, site)| o == copy && site != decl)
+        {
+            continue;
+        }
+        // Never read at all: W0001 dead-store's jurisdiction, not W0003's.
+        if own.pending_dead_store.contains_key(&copy) {
+            continue;
+        }
+        // The view's root must be local and resolvable; a `strview`
+        // parameter's buffer belongs to the caller, and the pass
+        // cannot judge mutations it cannot see — no warning.
+        let view_arg = tir.call_view(call).args[0];
+        let Some(root) = projection_root(own, tir, pool, view_arg) else {
+            continue;
+        };
+        // Defensive-copy exception: the root owner is moved, mutated,
+        // or `inout`-passed after the materialize point — copying to
+        // survive the source's later mutation is the sanctioned use
+        // (e.g. ring-buffer reuse). A hazard inside a shared loop
+        // re-executes between iterations regardless of source order,
+        // so it suppresses too (conservative).
+        let mat_rank = rank(call);
+        let mat_loops = loop_nesting_of(tir, call);
+        let defensive = own.owner_hazards.iter().any(|&(o, site)| {
+            o == root
+                && (rank(site) > mat_rank
+                    || loop_nesting_of(tir, site)
+                        .iter()
+                        .any(|l| mat_loops.contains(l)))
+        });
+        if defensive {
+            continue;
+        }
+        sink.emit(Diag::warning(
+            tir.span(call),
+            DiagCode::RedundantMaterialize,
+            "`str(...)` copy never escapes and its source is never mutated — the view can be used directly, without the allocation",
+        ));
+    }
+}
+
 fn analyze_function(
     tir: &Tir,
     pool: &InternPool,
@@ -1705,6 +1860,11 @@ fn analyze_function(
         }
     }
 
+    // W0003 case B (M8.4.1.2): redundant bound materializations. Runs
+    // after the walk so the escape classification it reuses — final
+    // lattice states plus the hazard log — is complete.
+    warn_redundant_materialize(tir, pool, &own, sink);
+
     // Convert honored reseat records into arm-gated
     // `ConditionalDeadDrop`s. A record is honored when a pending entry
     // for one of its reseated owners survived to the drain — i.e. the
@@ -1865,7 +2025,7 @@ fn analyze_var_decl(
             "move",
             consumed_name,
         );
-        consume_for_assignment(tir, pool, own, sink, init, span, consumed_name);
+        consume_for_assignment(tir, pool, own, sink, init, span, consumed_name, r);
         rebind_to_init(own, view.name, init);
         // Register the new binding as pending dead-store. The walk
         // clears this entry on any later read or consumption; a
@@ -1932,6 +2092,9 @@ fn analyze_assign(
                 // is a `Param`, resolved here to its virtual ref — codegen
                 // caches that ref's repr at the prologue.
                 sidecar.free_on_reassign.insert(r, old_owner.tirref(tir));
+                // W0003 case-B support: reassignment mutates the binding's
+                // owner — a defensive-copy hazard on it.
+                own.owner_hazards.push((old_owner, r));
                 // Reassignment runs the old value's destructor (the
                 // free_on_reassign Free above) — that's an observable use,
                 // so the prior VarDecl/Assign isn't a dead store. Drop the
@@ -1953,7 +2116,7 @@ fn analyze_assign(
             "move",
             consumed_name,
         );
-        consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name);
+        consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name, r);
         rebind_to_init(own, view.name, view.value);
         register_pending_dead_store(own, view.value, view.name, span, r);
     } else if pool.is_view(value_ty) {
@@ -2051,6 +2214,7 @@ fn analyze_return(
         span,
         consumed_name,
         BorrowedAction::ReturnBorrowed,
+        r,
     );
 }
 
@@ -2163,7 +2327,10 @@ enum BorrowedAction {
 
 /// Apply the consumption transition for a Move-typed initializer.
 /// Caller must have already populated origin/state for `init` via
-/// `visit_expr`.
+/// `visit_expr`. `site` is the consuming instruction (VarDecl /
+/// Assign / Return / move-typed Call), recorded in the W0003 hazard
+/// log when the consume lands.
+#[allow(clippy::too_many_arguments)]
 fn consume_for_assignment(
     tir: &Tir,
     pool: &InternPool,
@@ -2172,6 +2339,7 @@ fn consume_for_assignment(
     init: TirRef,
     span: Span,
     name: Option<StringId>,
+    site: TirRef,
 ) {
     consume_underlying(
         tir,
@@ -2182,6 +2350,7 @@ fn consume_for_assignment(
         span,
         name,
         BorrowedAction::MoveOutOfParam,
+        site,
     );
 }
 
@@ -2189,8 +2358,8 @@ fn consume_for_assignment(
 /// move-typed Call argument). Walks back to the underlying owner,
 /// reads its state, and either:
 ///
-/// * `Valid` → stamp `Moved { moved_at: span }` and clear any pending
-///   dead-store entry,
+/// * `Valid` → stamp `Moved { moved_at: span }`, clear any pending
+///   dead-store entry, and log a W0003 move-hazard at `site`,
 /// * `Borrowed` → emit E0021 or E0022 per `on_borrowed`,
 /// * `Moved` → now a use-after-move check authority (I-050).
 /// * `NotTracked` → no-op.
@@ -2204,6 +2373,7 @@ fn consume_underlying(
     span: Span,
     name: Option<StringId>,
     on_borrowed: BorrowedAction,
+    site: TirRef,
 ) {
     let underlying = underlying_owner(own, operand);
     let mut state = own
@@ -2222,6 +2392,9 @@ fn consume_underlying(
             own.pending_dead_store.remove(&underlying);
             own.states
                 .insert(underlying, OwnerState::Moved { moved_at: span });
+            // W0003 case-B support: the consume is a move-hazard on the
+            // owner, anchored at the consuming instruction.
+            own.owner_hazards.push((underlying, site));
         }
         OwnerState::Borrowed => {
             let (code, msg, help) = match on_borrowed {
@@ -3554,6 +3727,9 @@ fn visit_expr(
                         );
                     }
                     inout_uses.push((owner, tir.span(*arg)));
+                    // W0003 case-B support: an `inout` pass mutates the
+                    // owner — a defensive-copy hazard on it.
+                    own.owner_hazards.push((owner, r));
                     continue;
                 }
                 if !needs_tracking(arg_ty, pool) {
@@ -3793,7 +3969,16 @@ fn visit_expr(
                         );
                     }
                     let consumed_name = consumed_binding_name(tir, *arg);
-                    consume_for_assignment(tir, pool, own, sink, *arg, tir.span(r), consumed_name);
+                    consume_for_assignment(
+                        tir,
+                        pool,
+                        own,
+                        sink,
+                        *arg,
+                        tir.span(r),
+                        consumed_name,
+                        r,
+                    );
                 }
             }
 
@@ -8477,6 +8662,83 @@ mod tests {
                 .any(|fp| fp.target == lit && fp.after != ifs),
             "no Free for s may anchor inside the arm (leaks on the not-taken path); schedule = {:?}",
             sc.free_schedule
+        );
+    }
+
+    // ---------- W0003 RedundantMaterialize, case B (M8.4.1.2) ----------
+
+    /// Lex + parse + astgen + sema + ownership on a source snippet —
+    /// the full front-end, so the case-B tests read like the programs
+    /// users write. Returns every diagnostic from all four stages.
+    fn check_src(input: &str) -> Vec<Diag> {
+        use chumsky::Parser as _;
+        use chumsky::input::Input as _;
+        let mut pool = InternPool::new();
+        let tokens = crate::lexer::lex(input, &mut pool).expect("lex ok");
+        let token_stream = tokens[..].split_token_span((0..input.len()).into());
+        let program = crate::parser::program_parser()
+            .parse(token_stream)
+            .into_result()
+            .expect("parse ok");
+        let mut sink = DiagSink::new();
+        let uir = crate::astgen::generate(&program, &mut pool, &mut sink);
+        let tirs = crate::sema::analyze(
+            &uir,
+            &mut pool,
+            &mut sink,
+            input,
+            std::path::Path::new("<test>"),
+        );
+        check(&tirs, &pool, &mut sink);
+        sink.into_diags()
+    }
+
+    fn w0003_count(diags: &[Diag]) -> usize {
+        diags
+            .iter()
+            .filter(|d| d.code == DiagCode::RedundantMaterialize)
+            .count()
+    }
+
+    #[test]
+    fn w0003_bound_materialize_never_escapes_warns() {
+        // W0003 case B: `x = str(view)` where `x` is only borrow-read
+        // (`print(x)` — a use the view itself could have served) and the
+        // slice's root owner is never touched again: the allocation is
+        // redundant.
+        let diags =
+            check_src("fn main():\n\ts: str = \"hi\"\n\tx: str = str(s[0:1])\n\tprint(x)\n");
+        assert_eq!(
+            w0003_count(&diags),
+            1,
+            "expected exactly one W0003; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn w0003_defensive_copy_before_source_mutation_does_not_warn() {
+        // The defensive-copy exception: the source is mutated AFTER the
+        // materialize point, so the owned copy genuinely outlives its
+        // view (ring-buffer reuse shape) — no warning.
+        let diags = check_src(
+            "fn main():\n\tmut s: str = \"hi\"\n\tx: str = str(s[0:1])\n\tstr_push(&s, \"!\")\n\tprint(x)\n",
+        );
+        assert_eq!(
+            w0003_count(&diags),
+            0,
+            "defensive copy must not warn; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn w0003_materialize_returned_does_not_warn() {
+        // The returned copy escapes — `return str(text)` is the
+        // sanctioned fix for the E1 view-escape error, never redundant.
+        let diags = check_src("fn first(text: strview) -> str:\n\treturn str(text)\n");
+        assert_eq!(
+            w0003_count(&diags),
+            0,
+            "escaping copy must not warn; got: {diags:?}"
         );
     }
 }

@@ -3716,6 +3716,28 @@ fn test_str_materialize_escape_and_independence() {
 }
 
 #[test]
+fn test_redundant_materialize_warning() {
+    // M8.4.1.2 W0003: a bound `str(view)` copy that never escapes and
+    // whose source is never mutated is a redundant allocation. It is a
+    // warning, not an error — the run still succeeds.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\ts: str = \"hi\"\n\tx: str = str(s[0:1])\n\tprint(x)\n";
+    let test_file = create_test_file(temp_dir.path(), "redundant_materialize.ryo", code);
+    let output = run_ryo_command(&["run", "redundant_materialize.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0003"),
+        "expected W0003 in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
 fn test_examples_parse() {
     // I-101 sweep: every top-level examples/*.ryo must parse. Local
     // complement to the upstream Examples CI workflow — no CI

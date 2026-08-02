@@ -99,6 +99,14 @@ pub enum DiagCode {
     /// assignment regardless. W-prefixed because it's a warning.
     RedundantMove,
 
+    /// A `str(view)` materialization copy is redundant (M8.4.1.2).
+    /// Two shapes: (A) the copy sits directly in an argument position
+    /// the view itself could fill with no allocation (sema), and (B)
+    /// the bound copy never escapes and its source is never mutated
+    /// after the copy (ownership). Heuristic warning only — it never
+    /// fires when the copy can outlive or outlast its view.
+    RedundantMaterialize,
+
     /// A declaration's resolution requires its own resolution to be
     /// already complete — e.g. a chain of decls whose types depend
     /// transitively on themselves. Today this is an infrastructure-

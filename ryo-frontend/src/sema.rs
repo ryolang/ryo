@@ -1578,6 +1578,25 @@ fn check_call(
             .zip(expected.iter())
             .enumerate()
         {
+            // W0003 case A (M8.4.1.2): a `str(view)` materialize call
+            // sitting directly in a borrowed `str` parameter's argument
+            // position is redundant — the view would pass via the P6'
+            // re-borrow below (cap=0, no allocation). Borrow-mode only:
+            // `move`/`inout` params cannot be served by the re-borrow,
+            // so the copy is legitimate there. The `ty_of == str` guard
+            // keeps error paths (a failed intercept yields an
+            // error-typed Unreachable) warning-free.
+            if exp_ty == sema.pool.str_()
+                && modes[idx] == ParamMode::Borrow
+                && fcx.builder.ty_of(*arg_tir) == sema.pool.str_()
+                && is_str_materialize_arg(sema, *arg_uir)
+            {
+                sema.sink.emit(Diag::warning(
+                    sema.uir.span(*arg_uir),
+                    DiagCode::RedundantMaterialize,
+                    "redundant `str(...)` — views pass to `str` parameters via the re-borrow with no allocation (drop the `str(...)` call)",
+                ));
+            }
             let actual = fcx.builder.ty_of(*arg_tir);
             let arg_tir = if sema.pool.is_view(actual)
                 && exp_ty == sema.pool.str_()
@@ -1740,6 +1759,8 @@ fn emit_builtin_call(
             if !check_print_args(sema, fcx, view, arg_tirs, span) {
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
+            // W0003 case A: `print` takes `strview` directly.
+            warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], "print");
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
@@ -1890,6 +1911,15 @@ fn emit_builtin_call(
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
+            // W0003 case A: the suffix parameter is `strview` —
+            // materializing a slice to feed it is a redundant copy.
+            warn_redundant_materialize_builtin_arg(
+                sema,
+                fcx,
+                view.args[1],
+                arg_tirs[1],
+                "str_push",
+            );
             let modes = vec![ParamMode::Inout, ParamMode::Borrow];
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
@@ -1898,6 +1928,42 @@ fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
+    }
+}
+
+/// W0003 case A (M8.4.1.2): is this UIR argument syntactically a
+/// `str(view)` materialize call? Mirrors the intercept condition in
+/// `check_call` — a call-form `str` with no user declaration carrying
+/// the name (a user-defined `fn str` shadows the intercept, so its
+/// calls never warn). Callers pair this with a `ty_of == str` check on
+/// the argument's TIR so error paths stay warning-free.
+fn is_str_materialize_arg(sema: &Sema<'_>, arg_uir: InstRef) -> bool {
+    if sema.uir.inst(arg_uir).tag != InstTag::Call {
+        return false;
+    }
+    let name = sema.uir.call_view(arg_uir).name;
+    sema.pool.str(name) == "str" && !sema.name_to_decl.contains_key(&name)
+}
+
+/// W0003 case A for view-accepting builtins (M8.4.1.2): `print` and
+/// str_push's suffix take `strview` arguments directly, so a
+/// `str(view)` materialize call in that position is a redundant
+/// allocation.
+fn warn_redundant_materialize_builtin_arg(
+    sema: &mut Sema<'_>,
+    fcx: &FuncCtx,
+    arg_uir: InstRef,
+    arg_tir: TirRef,
+    builtin: &str,
+) {
+    if fcx.builder.ty_of(arg_tir) == sema.pool.str_() && is_str_materialize_arg(sema, arg_uir) {
+        sema.sink.emit(Diag::warning(
+            sema.uir.span(arg_uir),
+            DiagCode::RedundantMaterialize,
+            format!(
+                "redundant `str(...)` — `{builtin}` accepts `strview` arguments directly, with no allocation (drop the `str(...)` call)"
+            ),
+        ));
     }
 }
 
@@ -2235,6 +2301,10 @@ mod tests {
 
     fn any_code(diags: &[Diag], code: DiagCode) -> bool {
         diags.iter().any(|d| d.code == code)
+    }
+
+    fn count_code(diags: &[Diag], code: DiagCode) -> usize {
+        diags.iter().filter(|d| d.code == code).count()
     }
 
     fn tir_named<'a>(tirs: &'a [Tir], pool: &InternPool, name: &str) -> &'a Tir {
@@ -3767,5 +3837,65 @@ mod tests {
             "fn str(x: int) -> int:\n\treturn x + 1\n\nfn main():\n\ty: int = str(41)\n\tprint(int_to_str(y))\n",
         );
         assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn w0003_materialize_arg_to_borrowed_str_param_warns() {
+        // W0003 case A: `str(view)` fed straight into a borrowed `str`
+        // parameter is redundant — the view would pass via the P6'
+        // re-borrow (cap=0, no allocation).
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn show(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\tshow(str(s[0:1]))\n",
+        );
+        assert_eq!(
+            count_code(&diags, DiagCode::RedundantMaterialize),
+            1,
+            "expected exactly one W0003; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn w0003_materialize_arg_to_move_param_does_not_warn() {
+        // A `move` parameter cannot be served by the re-borrow — the
+        // materialized copy is legitimate there.
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn eat(move s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\teat(str(s[0:1]))\n",
+        );
+        assert!(
+            !any_code(&diags, DiagCode::RedundantMaterialize),
+            "got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn w0003_materialize_arg_to_print_warns() {
+        // W0003 case A, builtin shape: `print` accepts `strview`
+        // arguments directly — materializing first buys nothing.
+        let (_tirs, diags, _pool) =
+            run_with_errors("fn main():\n\ts: str = \"hi\"\n\tprint(str(s[0:1]))\n");
+        assert_eq!(
+            count_code(&diags, DiagCode::RedundantMaterialize),
+            1,
+            "expected exactly one W0003; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn w0003_materialize_suffix_to_str_push_warns() {
+        // W0003 case A, builtin shape: str_push's suffix is `strview` —
+        // materializing it first is a redundant allocation. (Source and
+        // suffix come from DISTINCT strings so Rule 7 stays quiet.)
+        let (_tirs, diags, _pool) = run_with_errors(
+            "fn main():\n\tmut s: str = \"hi\"\n\tt: str = \"yo\"\n\tstr_push(&s, str(t[0:1]))\n",
+        );
+        assert_eq!(
+            count_code(&diags, DiagCode::RedundantMaterialize),
+            1,
+            "expected exactly one W0003; got {:?}",
+            diags
+        );
     }
 }

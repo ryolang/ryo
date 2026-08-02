@@ -240,6 +240,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::RangeArgType => "E0026",
         DiagCode::ReservedBuiltinName => "E0027",
         DiagCode::RedundantMove => "W0002",
+        DiagCode::RedundantMaterialize => "W0003",
         DiagCode::UseAfterMove => "E0020",
         DiagCode::MoveOutOfBorrowedParam => "E0021",
         DiagCode::ReturnBorrowedValue => "E0022",
@@ -572,6 +573,7 @@ mod tests {
             (DiagCode::GenericInstantiation, "E0202"),
             (DiagCode::DeadStore, "W0001"),
             (DiagCode::RedundantMove, "W0002"),
+            (DiagCode::RedundantMaterialize, "W0003"),
         ];
         let mut seen = HashSet::new();
         for (code, s) in expected {
@@ -609,6 +611,7 @@ mod tests {
                 | DiagCode::RangeArgType
                 | DiagCode::ReservedBuiltinName
                 | DiagCode::RedundantMove
+                | DiagCode::RedundantMaterialize
                 | DiagCode::UseAfterMove
                 | DiagCode::MoveOutOfBorrowedParam
                 | DiagCode::ReturnBorrowedValue
