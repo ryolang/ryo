@@ -30,7 +30,9 @@ pub fn pinned_version() -> &'static str {
 
 fn zig_binary_path() -> Result<PathBuf, CompilerError> {
     let base = toolchain_dir()?;
-    Ok(base.join(format!("zig-{ZIG_VERSION}")).join("zig"))
+    Ok(base
+        .join(format!("zig-{ZIG_VERSION}"))
+        .join(format!("zig{}", std::env::consts::EXE_SUFFIX)))
 }
 
 fn toolchain_dir() -> Result<PathBuf, CompilerError> {
@@ -212,7 +214,7 @@ mod tests {
         let path = zig_binary_path().unwrap();
         let path_str = path.to_string_lossy();
         assert!(path_str.contains(&format!("zig-{ZIG_VERSION}")));
-        assert!(path_str.ends_with("zig"));
+        assert!(path_str.ends_with(&format!("zig{}", std::env::consts::EXE_SUFFIX)));
     }
 
     #[test]
