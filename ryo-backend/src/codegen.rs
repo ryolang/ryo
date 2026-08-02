@@ -95,7 +95,6 @@ pub struct Codegen<M: Module> {
     /// Keyed on `StringId` so duplicate string literals reuse the
     /// same `.rodata` blob without an extra hash on the bytes.
     string_data: HashMap<StringId, DataId>,
-    triple: Triple,
 }
 
 /// Per-loop codegen state: the Cranelift blocks that `break` and
@@ -222,7 +221,7 @@ struct FunctionContext<'a, M: Module> {
 }
 
 impl<M: Module> Codegen<M> {
-    fn from_module(module: M, triple: Triple) -> Self {
+    fn from_module(module: M) -> Self {
         let int_type = module.target_config().pointer_type();
         Self {
             builder_context: FunctionBuilderContext::new(),
@@ -231,7 +230,6 @@ impl<M: Module> Codegen<M> {
             int_type,
             data_ctx: DataDescription::new(),
             string_data: HashMap::new(),
-            triple,
         }
     }
 }
@@ -259,10 +257,7 @@ impl Codegen<ObjectModule> {
             ObjectBuilder::new(isa, "ryo_module", cranelift_module::default_libcall_names())
                 .map_err(|e| format!("Failed to create ObjectBuilder: {}", e))?;
 
-        Ok(Self::from_module(
-            ObjectModule::new(obj_builder),
-            target_triple,
-        ))
+        Ok(Self::from_module(ObjectModule::new(obj_builder)))
     }
 
     pub fn finish(self) -> Result<Vec<u8>, String> {
@@ -301,12 +296,10 @@ impl Codegen<JITModule> {
             ("ryo_bool_to_str", ryo_runtime::ryo_bool_to_str as *const u8),
             ("ryo_str_free", ryo_runtime::ryo_str_free as *const u8),
             ("ryo_print", ryo_runtime::ryo_print as *const u8),
+            ("ryo_panic", ryo_runtime::ryo_panic as *const u8),
         ]);
 
-        Ok(Self::from_module(
-            JITModule::new(jit_builder),
-            Triple::host(),
-        ))
+        Ok(Self::from_module(JITModule::new(jit_builder)))
     }
 
     pub fn execute(mut self, main_id: FuncId) -> Result<i32, String> {
@@ -327,39 +320,12 @@ impl Codegen<JITModule> {
 }
 
 impl<M: Module> Codegen<M> {
-    fn declare_runtime_helpers(
-        module: &mut M,
-        builder_context: &mut FunctionBuilderContext,
-        ctx: &mut codegen::Context,
-        int_type: types::Type,
-        triple: &Triple,
-        pool: &InternPool,
-        func_ids: &mut HashMap<StringId, FuncId>,
-    ) -> Result<(), String> {
-        if let Some(panic_name) = pool.find_str("__ryo_panic") {
-            let panic_func_id =
-                emit_ryo_panic_function(module, builder_context, ctx, int_type, triple)?;
-            func_ids.insert(panic_name, panic_func_id);
-        }
-        Ok(())
-    }
-
     fn prepare_compilation(
         &mut self,
         tirs: &[Tir],
         pool: &InternPool,
     ) -> Result<HashMap<StringId, FuncId>, String> {
-        let mut func_ids = self.declare_all_functions(tirs, pool)?;
-        Self::declare_runtime_helpers(
-            &mut self.module,
-            &mut self.builder_context,
-            &mut self.ctx,
-            self.int_type,
-            &self.triple,
-            pool,
-            &mut func_ids,
-        )?;
-        Ok(func_ids)
+        self.declare_all_functions(tirs, pool)
     }
 
     pub fn compile(
@@ -2238,21 +2204,26 @@ impl<M: Module> Codegen<M> {
         let name_id = view.name;
         let name_str = ctx.pool.str(name_id);
 
-        // print and __ryo_panic have custom codegen (inline syscall / raw scalar ABI).
-        // They do NOT use the str-triple expansion that user functions use.
+        // print and __ryo_panic are ordinary runtime calls (I-006). They
+        // do NOT use the str-triple expansion that user functions use.
         if name_str == "__ryo_panic" {
-            // __ryo_panic(ptr, len) takes raw scalars — the StrConst .rodata
-            // pointer and an int len — NOT the str-triple ABI.
+            // __ryo_panic(ptr, len) keeps its raw scalar ABI — the StrConst
+            // .rodata pointer and an int len — now backed by ryo_panic in
+            // the runtime (stderr + exit 101). The trap after the call is
+            // unreachable in practice; it keeps Cranelift honest about the
+            // never-returns contract.
             let mut arg_values = Vec::with_capacity(view.args.len());
             for arg in &view.args {
                 arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
             }
-            let callee_id = *ctx
-                .func_ids
-                .get(&name_id)
-                .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
-            let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
-            builder.ins().call(callee_ref, &arg_values);
+            let panic_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                "ryo_panic",
+                &[ctx.int_type, ctx.int_type],
+                &[],
+            )?;
+            builder.ins().call(panic_ref, &arg_values);
             builder.ins().trap(TrapCode::user(1).unwrap());
             let dead = builder.create_block();
             builder.seal_block(dead);
@@ -2264,7 +2235,11 @@ impl<M: Module> Codegen<M> {
             // print is an ordinary runtime call (I-006). Accepts either
             // repr — owned str triple or strview pair; ryo_print(ptr,
             // len) only needs the viewed bytes.
-            debug_assert_eq!(view.args.len(), 1, "sema should reject print() arity errors");
+            debug_assert_eq!(
+                view.args.len(),
+                1,
+                "sema should reject print() arity errors"
+            );
             debug_assert!(
                 matches!(
                     ctx.pool.kind(ctx.tir.inst(view.args[0]).ty),
@@ -2587,89 +2562,6 @@ impl<M: Module> Codegen<M> {
             _ => None,
         }
     }
-}
-
-fn check_platform_support(triple: &Triple) -> Result<(), String> {
-    use target_lexicon::OperatingSystem;
-    match triple.operating_system {
-        OperatingSystem::Darwin { .. }
-        | OperatingSystem::MacOSX { .. }
-        | OperatingSystem::Linux => Ok(()),
-        _ => Err(format!(
-            "POSIX syscalls not yet supported on platform: {:?}",
-            triple.operating_system
-        )),
-    }
-}
-
-fn emit_ryo_panic_function<M: Module>(
-    module: &mut M,
-    builder_context: &mut FunctionBuilderContext,
-    ctx: &mut codegen::Context,
-    int_type: types::Type,
-    triple: &Triple,
-) -> Result<FuncId, String> {
-    check_platform_support(triple)?;
-
-    let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(int_type)); // ptr
-    sig.params.push(AbiParam::new(int_type)); // len
-
-    let func_id = module
-        .declare_function("__ryo_panic", Linkage::Local, &sig)
-        .map_err(|e| format!("Failed to declare __ryo_panic: {}", e))?;
-
-    ctx.func.signature = sig.clone();
-
-    {
-        let mut builder = FunctionBuilder::new(&mut ctx.func, builder_context);
-        let entry = builder.create_block();
-        builder.append_block_params_for_function_params(entry);
-        builder.switch_to_block(entry);
-        builder.seal_block(entry);
-
-        let ptr = builder.block_params(entry)[0];
-        let len = builder.block_params(entry)[1];
-        let fd = builder.ins().iconst(types::I32, 2); // stderr
-
-        let write_ref = declare_write(module, &mut builder, int_type)?;
-        builder.ins().call(write_ref, &[fd, ptr, len]);
-
-        let mut exit_sig = module.make_signature();
-        exit_sig.params.push(AbiParam::new(types::I32));
-        let exit_func = module
-            .declare_function("exit", Linkage::Import, &exit_sig)
-            .map_err(|e| format!("Failed to declare exit: {}", e))?;
-        let exit_ref = module.declare_func_in_func(exit_func, builder.func);
-        let exit_code = builder.ins().iconst(types::I32, 101);
-        builder.ins().call(exit_ref, &[exit_code]);
-
-        builder.ins().trap(TrapCode::user(1).unwrap());
-        builder.finalize();
-    }
-
-    module
-        .define_function(func_id, ctx)
-        .map_err(|e| format!("Failed to define __ryo_panic: {}", e))?;
-    ctx.clear();
-
-    Ok(func_id)
-}
-
-fn declare_write<M: Module>(
-    module: &mut M,
-    builder: &mut FunctionBuilder,
-    int_type: types::Type,
-) -> Result<FuncRef, String> {
-    let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(types::I32));
-    sig.params.push(AbiParam::new(int_type));
-    sig.params.push(AbiParam::new(int_type));
-    sig.returns.push(AbiParam::new(int_type));
-    let func_id = module
-        .declare_function("write", Linkage::Import, &sig)
-        .map_err(|e| format!("Failed to declare write function: {}", e))?;
-    Ok(module.declare_func_in_func(func_id, builder.func))
 }
 
 fn store_string<M: Module>(
