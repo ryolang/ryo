@@ -117,8 +117,14 @@ mod tests {
 
     #[test]
     fn test_zig_target_valid() {
-        let target = zig_target().unwrap();
-        assert!(["aarch64-macos", "x86_64-linux", "aarch64-linux"].contains(&target));
+        match zig_target() {
+            Ok(target) => {
+                assert!(["aarch64-macos", "x86_64-linux", "aarch64-linux"].contains(&target));
+            }
+            // No Windows download entry yet: zig install stays POSIX-only
+            // until the `--target` cross-compile plumbing lands.
+            Err(_) => assert_eq!(std::env::consts::OS, "windows"),
+        }
     }
 
     #[test]

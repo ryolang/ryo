@@ -82,6 +82,21 @@ jobs:
         run: cargo run -- toolchain install
       - run: cargo test --workspace
 
+  windows:
+    name: Windows (check + unit tests)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: windows
+      # Scoped leg: compile the #[cfg(windows)] code and run unit tests only.
+      # No zig install, no AOT/ASan/valgrind — a full Windows leg waits on the
+      # `--target` cross-compile plumbing (Triple::host() in pipeline.rs).
+      - run: cargo check --workspace --all-targets
+      - run: cargo test -p ryo-core -p ryo-frontend -p ryo-runtime -p ryo-backend --lib
+
   asan:
     name: ASan leak check
     runs-on: ubuntu-latest

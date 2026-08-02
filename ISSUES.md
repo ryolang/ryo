@@ -488,12 +488,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** Each call walks the whole function body to rebuild the target's loop-nesting stack, and it is queried per view/read pair in `collect_view_liveness`, per candidate in `refine_view_liveness_for_arm`, and per materialize site in `warn_redundant_materialize` — O(sites × body) recomputation with no memo.
 **Resolution:** Build a `TirRef`→nesting-stack map in a single pre-pass over the body and reuse it at the three call sites, preserving the cond/bounds-counts-as-inside and nested-loop semantics.
 
-### I-120 — No Windows CI coverage; `build-support` assumes a `.a` archive name
-
-**Files:** `.github/workflows/ci.yml`, `build-support/src/lib.rs` (archive path), `ryo-backend/src/toolchain.rs` (`zig_target`)
-**Summary:** After I-006/I-043 the compiler has no POSIX-only codegen paths, but nothing compiles the Windows-gated code (`#[cfg(windows)] _write` in `runtime/src/lib.rs`) — macOS, Linux, and the Docker suite all skip it. A naive `windows-latest` matrix leg fails two ways: `build-support`'s `ensure_runtime_archive` expects `libryo_runtime.a`, while `windows-msvc` produces `ryo_runtime.lib` (the compiler's `build.rs` panics before anything compiles), and `zig_target()` has no Windows entry so the toolchain-install step and every AOT test fail.
-**Resolution:** Add a scoped `windows-latest` job: fix the archive filename per target (`ryo_runtime.lib` on `*-msvc`), then run `cargo check --workspace --all-targets` and unit tests only (`cargo test -p ryo-core -p ryo-frontend -p ryo-runtime -p ryo-backend --lib`) — no zig install, no AOT/ASan/valgrind legs. A full Windows leg (zig download entry for `x86_64-windows`, AOT tests) belongs with the future `--target` cross-compile plumbing (`Triple::host()` hardcoded in `ryo-driver/src/pipeline.rs`, no `-target` passed to zig cc, per-target runtime archive).
-
 ---
 
 ## Cross-References
