@@ -65,8 +65,5 @@
 - [HTTPX - Python HTTP client](https://www.python-httpx.org/) - Reference for HTTP library design
 - [CRISP Code Principles](https://bitfieldconsulting.com/posts/crisp-code) - Correct, Readable, Idiomatic, Simple, Performant
 
-**Community Resources**:
-
-
 **Color palette**:
 - [Color Hunt](https://colorhunt.co/palette/ffd400ffc300ff8c00ff5f00)

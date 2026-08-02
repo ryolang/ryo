@@ -258,7 +258,7 @@ fn tag_frame(view: bytesview):
 ### 5.6 FFI adjacency (same idiom, extra argument)
 
 ```ryo
-raylib.set_window_title(str)        # needs cstr
+title: str = "Ryo"                  # raylib wants a cstr
 buf: [256]u8
 raylib.SetWindowTitle(cstr.from(title, &buf))   # from + explicit buffer
 ```
