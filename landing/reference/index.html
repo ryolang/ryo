@@ -850,7 +850,10 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
                   <tr>
                     <td><code>assert(cond: bool, msg: str)</code></td>
                     <td>
-                      Abort with <code>msg</code> if <code>cond</code> is false.
+                      Abort with <code>msg</code> if <code>cond</code> is
+                      false. <code>msg</code> must be a string literal —
+                      dynamic or view messages are rejected (the P6'
+                      re-borrow does not apply here).
                     </td>
                   </tr>
                   <tr>

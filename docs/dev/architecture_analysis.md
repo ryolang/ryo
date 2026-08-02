@@ -111,7 +111,7 @@ Dependency direction is acyclic: `ryo` (CLI, clap) → `ryo-driver` (orchestrati
 
 ### 2.9 Runtime (`runtime/src/lib.rs`, 746 lines) & toolchain
 
-- `#[repr(C)] RyoStrFat { ptr, len: u64, cap: u64 }`; **`cap == 0` = rodata/empty sentinel**, so freeing literals is a no-op. `__ryo_str_push`: doubling growth with a static-source special case (realloc with `old_cap == 0` allocates *without copying*). OOM → `oom_abort` (also fires on `Layout` errors, conflating bug with OOM). `suffix_len: i64` is the one signed length in the ABI (I-105). Not `no_std` (I-043).
+- `#[repr(C)] RyoStrFat { ptr, len: u64, cap: u64 }`; **`cap == 0` = rodata/empty sentinel**, so freeing literals is a no-op. `__ryo_str_push`: doubling growth with a static-source special case (realloc with `old_cap == 0` allocates *without copying*). OOM → `oom_abort` (also fires on `Layout` errors, conflating bug with OOM). All ABI lengths are `u64` (`suffix_len` was migrated off `i64` in M8.4). Not `no_std` (I-043).
 - **Dual packaging**: JIT links the runtime as an rlib (symbols registered at `codegen.rs:244-260`); AOT embeds a **~17 MB** staticlib archive via `include_bytes!` (bundles Rust std — root cause of the `-lunwind` workaround). Same source, two artifacts (I-097).
 - Toolchain: pinned zig 0.16.0 downloaded to `~/.ryo/toolchain` with **no integrity check** and a fixed temp path that races concurrent installs (I-073); `zig cc` used as linker driver (no cross-compile yet). Runtime cache in `~/.ryo/cache` never evicted — 42 archives / 556 MB observed (I-096). Build scripts duplicated verbatim (`TODO(dedup)` at `ryo-backend/build.rs:5-12`) — the **stale-archive hazard is fixed** (both always invoke `cargo build -p ryo-runtime`, cargo no-ops when fresh); the duplication remains.
 

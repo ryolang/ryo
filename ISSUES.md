@@ -353,6 +353,24 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
 **Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
 
+### I-112 — Bare-statement formatter builtins fail codegen
+
+**Files:** `ryo-backend/src/codegen.rs` (`emit_call` formatter arm :2316-2343; contrast the `__ryo_str_from_view` statement arm :2273-2310)
+**Summary:** A formatter builtin called as a bare statement — `int_to_str(5)` with the result discarded — fails with `CodegenError("ownership pass scheduled Free for borrowed-scalar value %2; the ABI registry should have excluded it. See I-057/I-059.")`. The statement arm emits the sret call into a stack slot, throws the triple away, and never records it in `ctx.inst_values`, so the anon-temp Free the ownership pass scheduled for the result cannot resolve the buffer and trips the scalar-Free guard. Assigned uses (`s: str = int_to_str(5)`) route through `eval_inst_str` and are unaffected. M8.4.1.2's `__ryo_str_from_view` statement arm dodges the bug by caching the loaded triple in `inst_values` before returning the dummy scalar — the next str-returning builtin will bite this again if it copies the older formatter arm instead.
+**Resolution:** Mirror the `__ryo_str_from_view` statement arm in the formatter arm: load the sret triple, insert it into `inst_values`, then return the dummy scalar, so the scheduled Free finds the buffer. Cover `int_to_str` / `float_to_str` / `bool_to_str` bare statements with integration tests. (Falls out of the I-113 dedup if that lands first.)
+
+### I-114 — E0031 "borrowed here" note missing through ViewAsStr
+
+**Files:** `ryo-frontend/src/ownership.rs` (note-span finder :3868-3884; contrast the Rule-7 partition's ViewAsStr look-through :3780-3791)
+**Summary:** `two(move s, s[0:1])` against a `(move, str)` signature fires E0031 without the "borrowed here" secondary note. The finder matches args with `underlying_owner(own, arg) == owner`, but a str-typed `ViewAsStr` conversion inst has no `origin` entry, so `underlying_owner` falls back to `Owner::Inst(view_as_str)`, which never equals the root owner and `borrow_span` stays `None`. The `(move, strview)` shape does get a "slice passed here" note via the `SourceProjected` path (:3906-3934) — only the P6'-converted shape loses its note.
+**Resolution:** Mirror the partition's P6' logic in the finder (`projection_root` first when the arg is a ViewAsStr/Slice, else `underlying_owner`); add a regression test pinning both notes for `two(move s, s[0:1])`.
+
+### I-115 — `Tir::span`/`Tir::inst` still panic on param sentinel refs in release
+
+**Files:** `ryo-core/src/tir.rs` (`Tir::span` :371-374, `Tir::inst` :366-368, `TirRef::index` :75-77)
+**Summary:** Both accessors debug-assert `!r.is_param()`, but `TirRef::index()` is a bare `as usize` cast, so in a release build a param sentinel ref (≥ 2³¹) still flows into `self.spans[r.index()]` / `self.instructions[r.index()]` and panics index-out-of-bounds instead of being handled. The debug_assert only surfaces the contract violation in dev/test.
+**Resolution:** Promote to a real guard (return `Option` / fallback span, or `expect` with a clear message), or document the by-construction invariant that param sentinels never reach these accessors and keep the debug_assert as the contract.
+
 ---
 
 ## 🟢 Cleanup
@@ -482,6 +500,18 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken` :176-300, `Token` :30-103, `intern_token` :392-495, `Display` :105-170)
 **Summary:** Adding a token means editing `RawToken`, `Token`, the giant manual `intern_token` match, and `Display` (plus the parser downstream) — ~45 non-payload variants of pure boilerplate.
 **Resolution:** Generate the quadruple from a single macro table (variant name, logos pattern, payload kind).
+
+### I-113 — Codegen sret stack-slot pattern duplicated four times
+
+**Files:** `ryo-backend/src/codegen.rs` (`eval_inst_str` arms :1887-1913 and :1920-1953; `emit_call` arms :2282-2309 and :2319-2342)
+**Summary:** The ~25-30-line sret pattern (`create_sized_stack_slot(STR_SLOT_SIZE)` → `stack_addr` → `declare_runtime_fn` → `call` → 3× `load`) is copied in both the `eval_inst_str` and `emit_call` arms for `__ryo_str_from_view` and the int/float/bool formatters. The formatter statement-arm copy is the one that drifted — it skips the reload/`inst_values` caching and produced I-112.
+**Resolution:** Extract a shared `emit_sret_str_call(builder, ctx, fn_name, args) -> ValueRepr::Str` helper used by all four arms; the I-112 fix falls out of the dedup.
+
+### I-116 — Deliberate view-freeze conservatisms live only in code comments
+
+**Files:** `ryo-frontend/src/ownership.rs` (:944-945, :2505-2517, :908-914)
+**Summary:** Two safe-direction conservatisms from the per-arm freeze work (12bc3f8, 774f06a): (1) a never-read view has no `view_last_use` entry, so its projection lives to scope end and freezes its root owner from creation; (2) the per-arm last-use override is skipped when the arm-local last read sits inside a loop the creation is outside of — the view stays live to the join. Both are documented only in comments, not in the final spec's P4 section.
+**Resolution:** Document both conservatisms in `docs/dev/ryo-slicing-and-memory-model-final-spec.md` (P4); optionally treat never-read views as dead immediately after their binding statement.
 
 ---
 
