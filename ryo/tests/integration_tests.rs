@@ -3744,6 +3744,27 @@ fn test_redundant_materialize_warning() {
 }
 
 #[test]
+fn test_str_materialize_rejects_owned_str() {
+    // M8.4.1.2: the `str(...)` materialize call form is strview-only —
+    // an owned `str` argument would be a same-type copy, which is the
+    // future `Clone` trait's job. Sema rejects it with E0012; this pins
+    // the rejection end-to-end (previously covered only by the sema
+    // unit test `str_materialize_rejects_non_view_arg`).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\ts: str = \"hi\"\n\tx: str = str(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "str_owned.ryo", code);
+    let output = run_ryo_command(&["run", "str_owned.ryo"], &test_file).expect("run");
+    assert!(!output.status.success(), "expected compile error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0012"), "expected E0012: {}", stderr);
+    assert!(
+        stderr.contains("str() argument must be strview"),
+        "expected strview-only message: {}",
+        stderr
+    );
+}
+
+#[test]
 fn test_examples_parse() {
     // I-101 sweep: every top-level examples/*.ryo must parse. Local
     // complement to the upstream Examples CI workflow — no CI

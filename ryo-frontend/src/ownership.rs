@@ -7571,6 +7571,317 @@ mod tests {
     }
 
     #[test]
+    fn per_arm_kill_without_deferral_stays_scoped() {
+        // Non-deferred companion to `per_arm_kill_respects_loop_deferral`:
+        // the kill needs no loop guard because it fires only in an arm
+        // with NO reads of the view — a deeper read in a SIBLING arm is
+        // the global max read and lies on a different path, so the view
+        // is genuinely dead on the no-read arm's path and moving the
+        // owner there is sound. Soundness rests on the per-arm
+        // `live_projections` snapshot scoping the kill to that arm's
+        // walk: the else arm below must still see the view live.
+        //   s: str = "hello"; v = s[0:2]
+        //   if c1: print(v)               # sibling read of v
+        //   elif c2: consume(s)           # no reads of v → kill → LEGAL
+        //   else: consume(s); print(v)    # v live until its read → E0035
+        // → exactly one SourceProjected naming `s` (from the else arm):
+        //   the elif move is accepted (the kill fired without deferral)
+        //   and the else move is rejected (the kill did not leak across
+        //   arms — had the elif walk left the projection drained, the
+        //   else-arm move would be silently accepted too).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond1 = tb.bool_const(true, bool_ty, span);
+        let cond2 = tb.bool_const(true, bool_ty, span);
+        let vread_t = tb.var(v, view_ty, span);
+        let pcall_t = tb.call(print, &[vread_t], &all_borrow(&[vread_t]), void, span);
+        let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
+        let sread_elif = tb.var(s, str_ty, span);
+        let ccall_elif = tb.call(consume, &[sread_elif], &[ParamMode::Move], void, span);
+        let cstmt_elif = tb.unary(TirTag::ExprStmt, void, ccall_elif, span);
+        let sread_e = tb.var(s, str_ty, span);
+        let ccall_e = tb.call(consume, &[sread_e], &[ParamMode::Move], void, span);
+        let cstmt_e = tb.unary(TirTag::ExprStmt, void, ccall_e, span);
+        let vread_e = tb.var(v, view_ty, span);
+        let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+        let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
+        let ifs = tb.if_stmt(
+            cond1,
+            &[pstmt_t],
+            &[(cond2, vec![cstmt_elif])],
+            Some(&[cstmt_e, pstmt_e]),
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn per_arm_override_applies_to_elif_arms() {
+        // Elif arms go through `refine_view_liveness_for_arm` like the
+        // then/else arms (arm index 1 + elif_index, with the pre-pass's
+        // `arm_reads` laid out then/elif…/else): a view read in the elif
+        // arm whose global last use lies in a LATER arm dies at its
+        // elif-local last read, un-freezing the owner for the rest of
+        // the elif arm. Were elif arms skipped, the view would stay live
+        // to the else-arm read and the move below would be spuriously
+        // diagnosed — this is the only per-arm shape that distinguishes
+        // a working elif path from a missing one.
+        //   s: str = "hello"; v = s[0:2]
+        //   if c1: print("t")             # no reads of v (kill — inert)
+        //   elif c2: print(v); consume(s) # move AFTER v's elif-local
+        //                                 #   last read → LEGAL
+        //   else: print(v)                # global max read (later arm)
+        // → no diagnostics.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let consume = pool.intern_str("consume");
+        let hello = pool.intern_str("hello");
+        let tee = pool.intern_str("t");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond1 = tb.bool_const(true, bool_ty, span);
+        let cond2 = tb.bool_const(true, bool_ty, span);
+        let tlit = tb.str_const(tee, str_ty, span);
+        let pcall_t = tb.call(print, &[tlit], &all_borrow(&[tlit]), void, span);
+        let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
+        let vread_elif = tb.var(v, view_ty, span);
+        let pcall_elif = tb.call(print, &[vread_elif], &all_borrow(&[vread_elif]), void, span);
+        let pstmt_elif = tb.unary(TirTag::ExprStmt, void, pcall_elif, span);
+        let sread = tb.var(s, str_ty, span);
+        let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+        let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
+        let vread_e = tb.var(v, view_ty, span);
+        let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+        let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
+        let ifs = tb.if_stmt(
+            cond1,
+            &[pstmt_t],
+            &[(cond2, vec![pstmt_elif, cstmt])],
+            Some(&[pstmt_e]),
+            void,
+            span,
+        );
+        let tir = tb.finish(&[decl, vdecl, ifs]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics (v dies at its elif-local last read); got: {:?}",
+            sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn view_created_in_loop_body_per_arm_kill_applies() {
+        // Loop deferral (`view_defer_loop`) covers only views created
+        // OUTSIDE the loop their last read sits in (`created_in <
+        // read_in`). A view created INSIDE the loop body is re-sliced
+        // from the current buffer every iteration, so the back-edge
+        // cannot strand a stale read: the deferral does not apply and
+        // the per-arm kill fires — on the arm with no reads of v the
+        // owner mutation is sound and must NOT be diagnosed.
+        //   s: str = "hello"
+        //   while true:
+        //       v = s[0:2]
+        //       if c: str_push(&s, "!")   # no reads of v → kill → LEGAL
+        //       else: print(v)
+        // → no diagnostics (no spurious SourceProjected).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let wcond = tb.bool_const(true, bool_ty, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(cond, &[push_stmt], &[], Some(&[pstmt]), void, span);
+        let wl = tb.while_loop(wcond, &[vdecl, ifs], void, span);
+        let tir = tb.finish(&[decl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "expected no diagnostics (v is re-sliced each iteration and dead on the push arm); got: {:?}",
+            sink.into_diags()
+        );
+    }
+
+    #[test]
+    fn view_created_in_loop_body_freeze_holds_before_read() {
+        // Flip side of `view_created_in_loop_body_per_arm_kill_applies`:
+        // in-loop creation must not disable the freeze on the arm that
+        // DOES read the view — the mutation precedes v's read on the
+        // same path, so v is live at the mutation site. This is the
+        // no-false-UAF-acceptance direction: the realloc in str_push
+        // would leave v pointing at freed memory when the read runs.
+        //   s: str = "hello"
+        //   while true:
+        //       v = s[0:2]
+        //       if c: str_push(&s, "!"); print(v)   # mutation while v live
+        // → exactly one SourceProjected naming `s`.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let v = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let str_push = pool.intern_str("str_push");
+        let hello = pool.intern_str("hello");
+        let bang = pool.intern_str("!");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(hello, str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let wcond = tb.bool_const(true, bool_ty, span);
+        let base = tb.var(s, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let sread = tb.var(s, str_ty, span);
+        let suffix = tb.str_const(bang, str_ty, span);
+        let push = tb.call(
+            str_push,
+            &[sread, suffix],
+            &[ParamMode::Inout, ParamMode::Borrow],
+            void,
+            span,
+        );
+        let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
+        let vread = tb.var(v, view_ty, span);
+        let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
+        let ifs = tb.if_stmt(cond, &[push_stmt, pstmt], &[], None, void, span);
+        let wl = tb.while_loop(wcond, &[vdecl, ifs], void, span);
+        let tir = tb.finish(&[decl, wl]);
+
+        let mut sink = DiagSink::new();
+        check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        assert!(
+            matches!(diags[0].code, DiagCode::SourceProjected),
+            "expected SourceProjected; got: {:?}",
+            diags[0].code
+        );
+        assert!(
+            diags[0].message.contains("`s`"),
+            "expected the diagnostic to name `s`; got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
     fn freeze_holds_before_arm_local_last_read() {
         // Contract: a move of the owner BEFORE the view's arm-local last
         // read stays rejected — per-arm precision does not weaken the
@@ -8743,6 +9054,42 @@ mod tests {
             w0003_count(&diags),
             0,
             "escaping copy must not warn; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn w0003_strview_param_root_does_not_warn() {
+        // Conservative direction: the view's root owner is the caller's
+        // buffer, so `projection_root` yields None for a `strview`
+        // parameter and case B must stay silent — the pass cannot judge
+        // mutations it cannot see. Unlike
+        // `w0003_materialize_returned_does_not_warn`, the copy below only
+        // borrow-escapes (`print(x)`), so the escape check does NOT fire
+        // first: the unresolvable root is the only thing suppressing the
+        // warning.
+        let diags = check_src("fn f(text: strview):\n\tx: str = str(text)\n\tprint(x)\n");
+        assert_eq!(
+            w0003_count(&diags),
+            0,
+            "strview-parameter root must not warn; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn w0003_defensive_copy_before_inout_pass_does_not_warn() {
+        // Defensive-copy exception, `inout`-pass hazard kind: the source
+        // root is `inout`-passed AFTER the materialize point, so the
+        // callee may mutate the buffer the view aliases — the owned copy
+        // is a genuine snapshot, not a redundant allocation. (`owner_hazards`
+        // records inout passes and mutations alike; the mutation kind is
+        // pinned by `w0003_defensive_copy_before_source_mutation_does_not_warn`.)
+        let diags = check_src(
+            "fn eat(inout a: str):\n\tprint(a)\n\nfn main():\n\tmut s: str = \"hi\"\n\tx: str = str(s[0:1])\n\tprint(x)\n\teat(&s)\n",
+        );
+        assert_eq!(
+            w0003_count(&diags),
+            0,
+            "defensive copy before an inout pass must not warn; got: {diags:?}"
         );
     }
 }
