@@ -348,10 +348,11 @@ pub fn lex(input: &str, pool: &mut InternPool) -> Result<Vec<(Token, Span)>, Lex
     // Pre-size the raw-token buffer instead of growing it from zero.
     // logos' `SpannedIter` reports only a trivial `(0, None)` size
     // hint, so `collect` would otherwise repeatedly reallocate and
-    // memcpy the whole buffer as it grows. A byte-length-derived
-    // upper bound (tokens are at least one byte each) avoids every
-    // one of those reallocations; the estimate is a hint only, so an
-    // over-estimate merely trims once at the end.
+    // memcpy the whole buffer as it grows. The estimate avoids most
+    // of those reallocations on typical input — but it is NOT an
+    // upper bound (see estimated_token_count): punctuation-dense
+    // input may still grow the buffer, costing a reallocation,
+    // nothing more.
     let mut raw_tokens: Vec<(RawToken<'_>, Span)> =
         Vec::with_capacity(estimated_token_count(input));
     raw_tokens.extend(
