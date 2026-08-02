@@ -63,9 +63,6 @@ pub fn build_and_link(
     cmd.arg(&exe);
     cmd.arg(&obj);
     cmd.arg(&runtime_lib);
-    if cfg!(target_os = "linux") {
-        cmd.arg("-lunwind");
-    }
     let out = cmd.output().expect("zig cc");
     assert!(
         out.status.success(),
