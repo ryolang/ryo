@@ -1,20 +1,17 @@
-// The staticlib archive linked by `zig cc` is `#![no_std]` so it does not
-// drag in precompiled std objects with `_Unwind_*` references. The rlib
-// linked into the std JIT host and the unit-test harness use std normally.
+// The staticlib archive linked by `zig cc` is `#![no_std]` and allocates
+// through the C heap (malloc/free/realloc), so it bundles no precompiled
+// std/alloc objects — those carry `_Unwind_*`/`rust_eh_personality`
+// references that nothing satisfies at the final link. The rlib linked
+// into the std JIT host and the test harness use the same code paths
+// against the host libc.
 #![cfg_attr(feature = "staticlib", no_std)]
 
-#[cfg(feature = "staticlib")]
-extern crate alloc;
 // Test builds link std through the harness; the gate keeps `std::`
 // paths available in test code if needed.
 #[cfg(test)]
 extern crate std;
 
-#[cfg(feature = "staticlib")]
-use alloc::alloc::{Layout, alloc, dealloc, realloc};
 use core::ffi::{c_int, c_void};
-#[cfg(not(feature = "staticlib"))]
-use std::alloc::{Layout, alloc, dealloc, realloc};
 
 const STDOUT_FD: c_int = 1;
 const STDERR_FD: c_int = 2;
@@ -34,7 +31,6 @@ unsafe extern "C" {
     fn abort() -> !;
 }
 
-#[cfg(feature = "staticlib")]
 unsafe extern "C" {
     #[link_name = "malloc"]
     fn c_malloc(size: usize) -> *mut c_void;
@@ -108,44 +104,6 @@ pub unsafe extern "C" fn ryo_panic(ptr: *const u8, len: u64) -> ! {
     unsafe { exit(101) }
 }
 
-/// C-heap allocator for the no_std staticlib. The final zig-cc link has
-/// no Rust std, so the archive must bring its own allocator. All runtime
-/// allocations are align-1 u8 buffers, so plain malloc alignment is
-/// sufficient.
-#[cfg(feature = "staticlib")]
-struct CAllocator;
-
-#[cfg(feature = "staticlib")]
-unsafe impl core::alloc::GlobalAlloc for CAllocator {
-    // SAFETY: delegates to the C heap. All runtime allocations use
-    // align 1 (u8 buffers), so malloc's alignment is sufficient.
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        // SAFETY: C malloc is called with the requested size.
-        unsafe { c_malloc(layout.size()) as *mut u8 }
-    }
-
-    // SAFETY: ptr must have been returned by this allocator.
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        // SAFETY: ptr came from a prior malloc/realloc call.
-        unsafe { c_free(ptr as *mut c_void) };
-    }
-
-    // SAFETY: ptr must have been returned by this allocator; new_size > 0.
-    unsafe fn realloc(
-        &self,
-        ptr: *mut u8,
-        _layout: core::alloc::Layout,
-        new_size: usize,
-    ) -> *mut u8 {
-        // SAFETY: ptr came from a prior malloc/realloc call; new_size > 0.
-        unsafe { c_realloc(ptr as *mut c_void, new_size) as *mut u8 }
-    }
-}
-
-#[cfg(feature = "staticlib")]
-#[global_allocator]
-static GLOBAL_ALLOCATOR: CAllocator = CAllocator;
-
 #[cfg(feature = "staticlib")]
 #[panic_handler]
 fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
@@ -155,6 +113,14 @@ fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
     // SAFETY: abort never returns.
     unsafe { abort() }
 }
+
+/// Precompiled `core` objects carry eh-frame references to
+/// `rust_eh_personality` even though the workspace builds with
+/// panic = "abort" and nothing ever unwinds. The symbol only needs to
+/// resolve at the final zig-cc link; it is never called.
+#[cfg(feature = "staticlib")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_eh_personality() {}
 
 #[repr(C)]
 pub struct RyoStrFat {
@@ -180,9 +146,9 @@ pub extern "C" fn ryo_str_alloc(cap: u64) -> *mut u8 {
     if cap == 0 {
         return core::ptr::null_mut();
     }
-    let layout = layout_for(cap);
-    // SAFETY: layout has nonzero size (cap > 0 checked above) and align 1 is valid for u8.
-    let ptr = unsafe { alloc(layout) };
+    let size: usize = cap.try_into().unwrap_or_else(|_| oom_abort());
+    // SAFETY: malloc is called with a nonzero size.
+    let ptr = unsafe { c_malloc(size) as *mut u8 };
     if ptr.is_null() {
         oom_abort();
     }
@@ -197,9 +163,8 @@ pub unsafe extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64) {
     if ptr.is_null() || cap == 0 {
         return;
     }
-    let layout = layout_for(cap);
-    // SAFETY: caller contract — ptr came from ryo_str_alloc/realloc with this exact cap.
-    unsafe { dealloc(ptr, layout) };
+    // SAFETY: caller contract — ptr came from ryo_str_alloc/realloc.
+    unsafe { c_free(ptr as *mut c_void) };
 }
 
 /// # Safety
@@ -215,9 +180,9 @@ pub unsafe extern "C" fn ryo_str_realloc(ptr: *mut u8, old_cap: u64, new_cap: u6
         unsafe { ryo_str_free(ptr, old_cap) };
         return core::ptr::null_mut();
     }
-    let layout = layout_for(old_cap);
-    // SAFETY: ptr/old_cap pair from prior alloc; new_cap > 0 checked above; layout matches old_cap.
-    let new_ptr = unsafe { realloc(ptr, layout, new_cap as usize) };
+    let new_size: usize = new_cap.try_into().unwrap_or_else(|_| oom_abort());
+    // SAFETY: ptr came from a prior alloc per our # Safety doc; new_size > 0 checked above.
+    let new_ptr = unsafe { c_realloc(ptr as *mut c_void, new_size) as *mut u8 };
     if new_ptr.is_null() {
         oom_abort();
     }
@@ -239,12 +204,9 @@ unsafe fn write_str_result(s: &[u8], out: *mut RyoStrFat) {
     }
 }
 
-fn layout_for(cap: u64) -> Layout {
-    Layout::from_size_align(cap as usize, 1).unwrap_or_else(|_| oom_abort())
-}
-
 fn oom_abort() -> ! {
-    write_all(STDERR_FD, b"ryo: out of memory\n".as_ptr(), 19);
+    let msg = b"ryo: out of memory\n";
+    write_all(STDERR_FD, msg.as_ptr(), msg.len());
     // SAFETY: abort never returns.
     unsafe { abort() }
 }
