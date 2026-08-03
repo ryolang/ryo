@@ -488,6 +488,24 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** Each call walks the whole function body to rebuild the target's loop-nesting stack, and it is queried per view/read pair in `collect_view_liveness`, per candidate in `refine_view_liveness_for_arm`, and per materialize site in `warn_redundant_materialize` — O(sites × body) recomputation with no memo.
 **Resolution:** Build a `TirRef`→nesting-stack map in a single pre-pass over the body and reuse it at the three call sites, preserving the cond/bounds-counts-as-inside and nested-loop semantics.
 
+### I-121 — Staged zig zip is carried into the toolchain dir on fallback rename
+
+**Files:** `ryo-backend/src/toolchain.rs` (`download_zig` fallback rename; staged `zig-download.zip`)
+**Summary:** The zip path stages the download as `zig-download.zip` inside the temp dir and never deletes it after `extract_zip` succeeds. If a future zig zip ever lacks the `zig-{target}-{version}/` top-level directory, `source` falls back to `temp_path` and the rename carries the ~100 MB staged archive into the installed toolchain dir. Inert (zig still runs), but sloppy, and the staged file is never cleaned up on the happy path either.
+**Resolution:** `fs::remove_file(&zip_path).ok()` immediately after `extract_zip` succeeds.
+
+### I-122 — `extract_zip` silently skips non-enclosed entries
+
+**Files:** `ryo-backend/src/toolchain.rs` (`extract_zip`, the `enclosed_name()` skip)
+**Summary:** Entries that fail the zip-slip guard are skipped with `continue` and no diagnostic. For the pinned, trusted upstream archive this is the right posture, but if zig ever ships an unexpected layout the install silently drops files and fails later with a confusing "Zig binary not found after download".
+**Resolution:** `eprintln!` a one-line warning naming the skipped entry before the `continue`.
+
+### I-123 — `test_extract_zip_roundtrip` leaks its temp dir on assertion failure
+
+**Files:** `ryo-backend/src/toolchain.rs` (`tests::test_extract_zip_roundtrip`)
+**Summary:** The `fs::remove_dir_all(&dir)` cleanup only runs on the happy path; a failing assert leaves the `ryo-zip-test-{pid}` dir behind in the system temp. Harmless (CI reaps temp dirs), but it accumulates junk on dev machines when the test is iterated.
+**Resolution:** Use `tempfile::TempDir` (add as a `ryo-backend` dev-dependency) or a drop guard so cleanup is panic-safe.
+
 ---
 
 ## Cross-References
