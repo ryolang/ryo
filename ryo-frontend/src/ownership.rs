@@ -2870,11 +2870,37 @@ fn analyze_if_stmt(
     prune_branch_dead_projections(tir, own, r);
 }
 
-/// Shared loop-body fixed-point. Caller has already visited the
-/// prelude (cond / start+end). Walks the body once into a scratch sink,
-/// compares entry vs post-body state (the full tuple — owner states
-/// plus live-projection emptiness), and either replays (converged) or
-/// re-walks from the merged state against the real sink.
+/// Shared loop-body fixed-point, in two phases. Caller has already
+/// visited the prelude (cond / start+end).
+///
+/// Phase 1 — propagate-only propagation, bounded to two walks (the
+/// bound is load-bearing — see the comment in the body). Walks the
+/// body with a throwaway `DiagSink` AND a staging sidecar (a clone of
+/// the real one), so speculative diagnostics and sidecar writes are
+/// discarded at the end of each iteration. After each walk, compares
+/// entry vs post-body via `states_differ_snapshot` (the full tuple —
+/// owner states plus live-projection emptiness) and always merges
+/// (entry ⊔ post-body) into `own` via `merge_non_monotone`. Converged
+/// → break early; otherwise the merged state becomes the new entry
+/// and the loop iterates up to the cap.
+///
+/// Phase 2 — single check pass. From the propagated entry
+/// state, walks the body exactly once against the REAL sink and
+/// sidecar, then does the final merge with the loop-entry snapshot
+/// (the loop may execute zero times), so post-loop state =
+/// entry ⊔ post-check-pass. Diagnostics are therefore always derived
+/// from the propagated lattice, never from whichever speculative
+/// iteration happened to emit them.
+///
+/// Monotone `Ownership` fields (`temp_owners`, `owner_at_read`,
+/// `root_owner`, `reseat_drops`, `return_epilogue`, `owner_hazards`,
+/// `origin`) keep accumulating across propagate passes and are deduped
+/// at scheduling time (documented on those fields) — they are
+/// deliberately not rolled back. `next_branch_id` likewise stays
+/// monotone (never snapshotted/restored): propagate passes may leave
+/// gaps in BranchId numbering, which is harmless because ids only
+/// need function-uniqueness (see `merge_branches`' BranchId
+/// monotonicity note and `merge_branches_takes_max_next_branch_id`).
 fn analyze_loop_body(
     tir: &Tir,
     pool: &InternPool,
@@ -2886,99 +2912,117 @@ fn analyze_loop_body(
     // Snapshot ONLY the non-monotone fields (see Step 2).
     // `live_projections` joined that set in M8.4 (projections die at
     // their last use); `root_owner` is insert-only and stays live.
+    // The loop-entry snapshot is kept for the final merge in Phase 2.
     let snap_states = own.states.clone();
     let snap_current_owner = own.current_owner.clone();
     let snap_pending_dead_store = own.pending_dead_store.clone();
     let snap_live_projections = own.live_projections.clone();
 
-    let mut scratch = DiagSink::new();
-    for stmt in body {
-        analyze_stmt(tir, pool, own, &mut scratch, sidecar, *stmt);
-    }
-    let after = (
-        own.states.clone(),
-        own.current_owner.clone(),
-        own.pending_dead_store.clone(),
-        own.live_projections.clone(),
-    );
-
-    if states_differ_snapshot(&snap_states, &after.0, &snap_live_projections, &after.3) {
-        // merge the non-monotone fields and re-walk against the real sink
-        merge_non_monotone(
-            own,
-            &snap_states,
-            &after.0,
-            &snap_current_owner,
-            &after.1,
-            &snap_pending_dead_store,
-            &after.2,
-            &snap_live_projections,
-            &after.3,
-        );
+    // Phase 1 — propagate-only fixed-point, bounded to
+    // MAX_PROPAGATE_PASSES walks. The bound is load-bearing, not just
+    // pragmatic: `merge_non_monotone`'s binding-aware override is NOT
+    // monotone — when the body reseats a binding (consume-then-rebind),
+    // the override merges the pre-reseat owner's entry state with the
+    // post-reseat owner's post-body state, which can flip `Moved` back
+    // to `Valid` on every merge. An unbounded loop then oscillates
+    // forever (`while: consume(name); name = "Bob"` never converges).
+    // Two walks reproduce the historical 2-pass precision: genuinely
+    // divergent bodies (move-without-rebind) converge by the second
+    // walk's comparison and break early; oscillating bodies stop at
+    // the cap with the same merged state the old re-walk started from.
+    const MAX_PROPAGATE_PASSES: usize = 2;
+    let mut entry_states = snap_states.clone();
+    let mut entry_current_owner = snap_current_owner.clone();
+    let mut entry_pending_dead_store = snap_pending_dead_store.clone();
+    let mut entry_live_projections = snap_live_projections.clone();
+    for _ in 0..MAX_PROPAGATE_PASSES {
+        let mut scratch = DiagSink::new();
+        let mut staging = sidecar.clone();
         for stmt in body {
-            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
+            analyze_stmt(tir, pool, own, &mut scratch, &mut staging, *stmt);
         }
-        // final merge with entry
-        let own_states_clone = own.states.clone();
-        let own_current_owner_clone = own.current_owner.clone();
-        let own_pending_dead_store_clone = own.pending_dead_store.clone();
-        let own_live_projections_clone = own.live_projections.clone();
-        merge_non_monotone(
-            own,
-            &snap_states,
-            &own_states_clone,
-            &snap_current_owner,
-            &own_current_owner_clone,
-            &snap_pending_dead_store,
-            &own_pending_dead_store_clone,
-            &snap_live_projections,
-            &own_live_projections_clone,
+        let after = (
+            own.states.clone(),
+            own.current_owner.clone(),
+            own.pending_dead_store.clone(),
+            own.live_projections.clone(),
         );
-    } else {
-        for d in scratch.into_diags() {
-            sink.emit(d);
-        }
-        // restore union-only fields are already live; reset non-monotone to entry-merged
+        let differ =
+            states_differ_snapshot(&entry_states, &after.0, &entry_live_projections, &after.3);
+        // Always merge (entry ⊔ post-body) into `own`; on convergence
+        // post-body == entry so the merge is a no-op and `own` already
+        // holds the converged entry state Phase 2 starts from.
         merge_non_monotone(
             own,
-            &snap_states,
+            &entry_states,
             &after.0,
-            &snap_current_owner,
+            &entry_current_owner,
             &after.1,
-            &snap_pending_dead_store,
+            &entry_pending_dead_store,
             &after.2,
-            &snap_live_projections,
+            &entry_live_projections,
             &after.3,
         );
+        if !differ {
+            break;
+        }
+        entry_states = own.states.clone();
+        entry_current_owner = own.current_owner.clone();
+        entry_pending_dead_store = own.pending_dead_store.clone();
+        entry_live_projections = own.live_projections.clone();
     }
+
+    // Phase 2 — single check pass against the real sink and sidecar.
+    for stmt in body {
+        analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
+    }
+    // Final merge with the loop-entry snapshot: the loop may execute
+    // zero times, so post-loop state = entry ⊔ post-check-pass.
+    let own_states_clone = own.states.clone();
+    let own_current_owner_clone = own.current_owner.clone();
+    let own_pending_dead_store_clone = own.pending_dead_store.clone();
+    let own_live_projections_clone = own.live_projections.clone();
+    merge_non_monotone(
+        own,
+        &snap_states,
+        &own_states_clone,
+        &snap_current_owner,
+        &own_current_owner_clone,
+        &snap_pending_dead_store,
+        &own_pending_dead_store_clone,
+        &snap_live_projections,
+        &own_live_projections_clone,
+    );
 }
 
-/// 2-pass approximation of a fixed-point ownership analysis for
-/// `while`. Walks the body once from the entry state into a scratch
-/// sink; if the full state tuple (owner states + live-projection
-/// emptiness) is unchanged across the back-edge, the body is
-/// loop-invariant for ownership purposes and the scratch diagnostics
-/// are flushed. Otherwise we re-walk from the merged
-/// (entry ⊔ post-body) state and emit diagnostics on the second pass
-/// — a binding moved inside the body without rebinding before the
-/// back-edge surfaces as E0020 on iteration two.
+/// Fixed-point ownership analysis for `while`, in the
+/// propagate-then-check shape of `analyze_loop_body`: Phase 1 walks
+/// the body against a throwaway sink and a staging sidecar, merging
+/// (entry ⊔ post-body) until the full state tuple (owner states +
+/// live-projection emptiness) is unchanged across the back-edge;
+/// Phase 2 then walks the body exactly once from the converged entry
+/// state against the real sink and sidecar — a binding moved inside
+/// the body without rebinding before the back-edge surfaces as E0020
+/// on that check pass, because the converged entry already records
+/// the move.
 ///
-/// Why two passes suffice for the M8.1 pattern set (instead of a
-/// general fixed-point loop): the merge is monotonic over the
-/// Moved-ness sub-lattice (`Valid → Moved` is the only transition,
-/// and merge takes "any branch Moved → Moved"), the projection merge
-/// is a plain union (also monotone), and there are no
-/// iteration-count-dependent conditionals — so a TirRef that flips
-/// from `Valid` to `Moved` in pass one stays `Moved` after the
-/// (entry ⊔ post-body) merge and a third walk would observe nothing
-/// new. Original phrasing for traceability:
-/// "Converges in at most 2 iterations for the M8.1 pattern set".
+/// Why two propagate walks suffice for the M8.1 pattern set: the
+/// state merge is monotonic over the Moved-ness sub-lattice
+/// (`Valid → Moved` is the only transition, and merge takes "any
+/// branch Moved → Moved") and the projection merge is a plain union
+/// (also monotone) — so a TirRef that flips from `Valid` to `Moved`
+/// in one pass stays `Moved` after the (entry ⊔ post-body) merge and
+/// a further propagate pass observes nothing new. Original phrasing
+/// for traceability: "Converges in at most 2 iterations for the M8.1
+/// pattern set".
 ///
-/// **Maintainer note.** If a future change introduces non-monotonic
-/// merges (e.g., `Moved → Valid` re-entry as a real lattice transition
-/// rather than via rebinding) or iteration-count-dependent control
-/// flow inside the body, revert this to a true fixed-point loop
-/// (iterate until `states_differ_snapshot` returns false).
+/// **Maintainer note.** The merge is NOT fully monotone: the
+/// binding-aware override in `merge_non_monotone` can flip `Moved`
+/// back to `Valid` when a body reseats its binding (consume-then-
+/// rebind), so an UNBOUNDED propagate loop oscillates forever on that
+/// pattern. The two-walk cap is what keeps Phase 1 total; do not
+/// replace it with an unbounded `loop` unless the override's
+/// monotonicity is addressed first.
 fn analyze_while_loop(
     tir: &Tir,
     pool: &InternPool,
@@ -2997,7 +3041,7 @@ fn analyze_while_loop(
 
 /// `for i in range(start, end)` loop var is `int` (Copy), so the
 /// induction variable never enters the lattice. The body runs the
-/// same fixed-point as `while`.
+/// same propagate-then-check fixed-point as `while`.
 fn analyze_for_range(
     tir: &Tir,
     pool: &InternPool,
@@ -8982,6 +9026,109 @@ mod tests {
             diags[0].message.contains("`s`"),
             "expected the diagnostic to name `s`; got: {}",
             diags[0].message
+        );
+    }
+
+    #[test]
+    fn diverged_loop_writes_branch_gated_free_exactly_once() {
+        // Regression: speculative sidecar writes from the loop
+        // fixed-point's first walk must not leak into the real sidecar.
+        //   m: str = "m"
+        //   while true:
+        //       x: str = "x"     # fresh owner every iteration
+        //       if true:
+        //           consume(x)   # then arm moves x
+        //       else:
+        //           print(x)     # else arm keeps x Valid
+        //       consume(m)       # moved without rebinding → divergence
+        //
+        // m flips Valid → Moved across the back-edge, so the state
+        // tuple differs and the diverged path runs. The if schedules a
+        // branch-gated Free for x on the else arm. Before the fix the
+        // scratch walk wrote that FreePoint into the REAL sidecar and
+        // the re-walk wrote it again under freshly minted BranchIds —
+        // two entries for one arm, the first gated on a BranchId that
+        // `if_branches` no longer records and codegen never activates.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let m = pool.intern_str("m");
+        let x = pool.intern_str("x");
+        let consume = pool.intern_str("consume");
+        let print = pool.intern_str("print");
+        let m_lit = pool.intern_str("m");
+        let x_lit = pool.intern_str("x");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_m = tb.str_const(m_lit, str_ty, span);
+        let decl_m = tb.var_decl(m, false, str_ty, lit_m, span);
+
+        let cond_w = tb.bool_const(true, bool_ty, span);
+        let lit_x = tb.str_const(x_lit, str_ty, span);
+        let decl_x = tb.var_decl(x, false, str_ty, lit_x, span);
+        let cond_i = tb.bool_const(true, bool_ty, span);
+        let x_then = tb.var(x, str_ty, span);
+        let consume_then = tb.call(consume, &[x_then], &[ParamMode::Move], void, span);
+        let then_stmt = tb.unary(TirTag::ExprStmt, void, consume_then, span);
+        let x_else = tb.var(x, str_ty, span);
+        let print_else = tb.call(print, &[x_else], &all_borrow(&[x_else]), void, span);
+        let else_stmt = tb.unary(TirTag::ExprStmt, void, print_else, span);
+        let if_inst = tb.if_stmt(cond_i, &[then_stmt], &[], Some(&[else_stmt]), void, span);
+        let m_read = tb.var(m, str_ty, span);
+        let consume_m = tb.call(consume, &[m_read], &[ParamMode::Move], void, span);
+        let consume_m_stmt = tb.unary(TirTag::ExprStmt, void, consume_m, span);
+        let wl = tb.while_loop(cond_w, &[decl_x, if_inst, consume_m_stmt], void, span);
+        let tir = tb.finish(&[decl_m, wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sc.functions.remove(&main).expect("per-function sidecar entry");
+
+        // Precondition: the loop actually diverged — the re-walk sees
+        // `consume(m)` with m already Moved and reports UAM once. If
+        // this ever fails, the fixed-point no longer takes the diverged
+        // path and the assertions below pass vacuously.
+        let uam = sink
+            .into_diags()
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::UseAfterMove))
+            .count();
+        assert_eq!(
+            uam, 1,
+            "expected exactly one UAM from the diverged re-walk; got {uam}"
+        );
+
+        // Exactly ONE branch-gated Free for the if's else arm,
+        // gated on the BranchId `if_branches` actually records.
+        assert_eq!(
+            sc.if_branches.len(),
+            1,
+            "one if → one entry set; got {:?}",
+            sc.if_branches
+        );
+        let ids = sc
+            .if_branches
+            .get(&if_inst)
+            .expect("if_branches entry for the loop-body if");
+        let gated: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.branch.is_some())
+            .collect();
+        assert_eq!(
+            gated.len(),
+            1,
+            "diverged loop must schedule the else-arm Free exactly once; got {gated:?}"
+        );
+        assert_eq!(
+            gated[0].branch, ids.else_branch,
+            "the gated Free must reference the live else BranchId; if_branches = {ids:?}"
         );
     }
 

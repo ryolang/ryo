@@ -198,12 +198,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** Currently, `for-range` loops have bespoke code generation that manually emits basic blocks, jump instructions, and raw counter increments. When general iterators are added, loops should be desugared during the AST-to-UIR phase into standard `while` loops that call `.next()`.
 **Resolution:** Once iterators land, remove the `generate_for_range` codegen entirely and rely on standard `while` codegen to emit loops.
 
-### I-045 — Loop fixed-point uses a scratch sink and re-walks the body to suppress duplicates
-
-**Files:** `ryo-frontend/src/ownership.rs` (`analyze_while_loop`, `analyze_for_range`)
-**Summary:** Both loop helpers walk the body once into a throwaway `DiagSink`, compare entry vs. post-body Moved-ness via `states_differ`, and then either replay the scratch diagnostics (converged) or re-walk the body from the merged state against the real sink (didn't converge). Diagnostic output is implicitly a function of *which iteration emitted it*, not of the converged lattice. Today this happens to work because the M8.1 patterns converge in ≤2 iterations, but the body-twice-with-discard shape couples diagnostic emission to control-flow analysis instead of running checks against a fixed-point.
-**Resolution:** Refactor to a propagate-only first pass (state mutations only, no diagnostics), iterate to fixed-point, then a single check pass at the converged lattice that emits diagnostics. Removes the scratch sink entirely and makes the loop helpers symmetric with `analyze_if_stmt`.
-
 ### I-047 — UIR `is_move` field is a pass-through
 
 **Files:** `ryo-core/src/uir.rs` (`UirParam`), `ryo-frontend/src/astgen.rs`, `ryo-frontend/src/sema.rs`
@@ -237,12 +231,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-frontend/src/ownership.rs` (`collect_loop_body_refs`, `collect_refs_recursive`, `collect_jump_path`); `ryo-core/src/tir.rs` (`walk_operands`)
 **Summary:** `walk_operands` is documented as the single source of truth for TIR-shape coverage. The three new helpers introduced for I-058 (`collect_loop_body_refs`, `collect_refs_recursive`, `collect_jump_path`) are pure structural reachability over TIR shape — they consult no ownership state, just walk the IR. Today they live as private helpers in `ryo-frontend/src/ownership.rs` and re-encode the same dispatch on `WhileLoop`/`ForRange`/`IfStmt` that `walk_operands` performs internally. Adding any new control-flow shape (e.g. `match` arms) means editing `walk_operands` plus three call sites in `ownership.rs`. The same pattern keeps reappearing — `find_consumers` and `collect_last_uses` already drive recursion via `walk_operands` closures.
 **Resolution:** Promote a small TIR-reachability surface to `ryo-core/src/tir.rs`. Suggested API: `Tir::collect_reachable(r) -> HashSet<TirRef>` (transitive closure of `walk_operands`) and `Tir::collect_jump_path(body, target) -> Option<HashSet<TirRef>>` (path-set reachability). Ownership-pass scheduling becomes a thin policy layer; future passes (early-return ownership, exception-arm Frees, `match`-arm Frees) reuse the same reachability primitives. Folds with I-051 (loop helper extraction) on the same TIR module.
-
-### I-069 — Loop fixed-point re-walk leaves speculative sidecar entries behind
-
-**Files:** `ryo-frontend/src/ownership.rs` (`analyze_loop_body`, `analyze_if_stmt`)
-**Summary:** `analyze_loop_body` passes the live sidecar to both the scratch walk (:1097) and the real re-walk (:1117). A diverged `if` inside a loop body runs `analyze_if_stmt` twice: it pushes branch-gated `FreePoint`s (:1058-1063) and `if_branches` entries (:928) both times, while `next_branch_id` is monotone and never restored. Pass-1 `FreePoint`s end up gated on `BranchId`s codegen never activates. Benign today only because ids are function-unique; the "speculative writes are not rolled back" invariant is undocumented.
-**Resolution:** Either have the scratch walk write to a staging sidecar merged only on convergence (folds with I-045's propagate-only refactor), or document the invariant and assert in codegen that unknown `BranchId`s are inert.
 
 ### I-071 — Non-void function can fall off the end with no diagnostic
 
