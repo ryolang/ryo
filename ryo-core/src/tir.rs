@@ -1284,6 +1284,26 @@ impl Tir {
         });
     }
 
+    /// Return `true` iff `target` is reachable from `root` — `target`
+    /// is `root` itself or a transitive operand / nested body
+    /// statement. Allocation-free short-circuiting DFS: returns at the
+    /// first hit instead of materializing the reachable set the way
+    /// [`Tir::collect_reachable`] does. Used for containment probes
+    /// (e.g. `collect_jump_path`'s arm selection) where the set itself
+    /// is never needed.
+    pub fn contains_reachable(&self, root: TirRef, target: TirRef) -> bool {
+        if root == target {
+            return true;
+        }
+        let mut found = false;
+        self.walk_operands(root, &mut |_parent, child, _kind| {
+            if !found && self.contains_reachable(child, target) {
+                found = true;
+            }
+        });
+        found
+    }
+
     /// Collect the set of TirRefs evaluated on the path that reaches
     /// `target` within `body`. Returns `true` if `target` was located.
     ///
@@ -1313,9 +1333,7 @@ impl Tir {
                 set.insert(target);
                 return true;
             }
-            let mut sub: HashSet<TirRef> = HashSet::new();
-            self.collect_reachable(stmt, &mut sub);
-            if sub.contains(&target) {
+            if self.contains_reachable(stmt, target) {
                 // `stmt` contains the target. Descend along the right arm.
                 match self.inst(stmt).tag {
                     TirTag::IfStmt => {
@@ -1326,20 +1344,12 @@ impl Tir {
                         // arm's statements are on-path. Earlier elif
                         // conds executed (their bodies skipped) so
                         // collect just the conds up to the chosen arm.
-                        let mut then_sub: HashSet<TirRef> = HashSet::new();
-                        for &s in &view.then_stmts {
-                            self.collect_reachable(s, &mut then_sub);
-                        }
-                        if then_sub.contains(&target) {
+                        if view.then_stmts.iter().any(|&s| self.contains_reachable(s, target)) {
                             return self.collect_jump_path(&view.then_stmts, target, set);
                         }
                         for elif in &view.elif_branches {
                             self.collect_reachable(elif.cond, set);
-                            let mut elif_sub: HashSet<TirRef> = HashSet::new();
-                            for &s in &elif.body {
-                                self.collect_reachable(s, &mut elif_sub);
-                            }
-                            if elif_sub.contains(&target) {
+                            if elif.body.iter().any(|&s| self.contains_reachable(s, target)) {
                                 return self.collect_jump_path(&elif.body, target, set);
                             }
                         }

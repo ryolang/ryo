@@ -3259,48 +3259,96 @@ fn find_consumers(tir: &Tir, r: TirRef, consumer_of: &mut HashMap<TirRef, TirRef
     });
 }
 
+/// Per-loop invariants for jump-exit Free scheduling, computed once
+/// when the traversal enters a `WhileLoop`/`ForRange` and shared by
+/// every `break`/`continue` jump inside the loop:
+///
+/// * `body` — the loop's top-level body statements.
+/// * `inside_loop` — every TirRef reachable from the loop body.
+///   Classifies owners as inside-loop vs pre-loop; raw-index
+///   comparisons are unsound (producer refs sit numerically below
+///   their parent body stmt).
+/// * `has_any` — targets of Frees scheduled anywhere at loop entry.
+///   Jump-exit scheduling only appends Frees anchored inside the loop,
+///   which the per-jump `free_inside_loop` check already accounts for,
+///   so this snapshot stays exact for every jump in the loop.
+/// * `top_level` — each ref inside the loop body mapped to the
+///   top-level body statement that contains it (the first container in
+///   source order wins). Turns "which body stmt reaches the jump" into
+///   one lookup instead of a per-stmt containment walk of the body.
+struct LoopExitCtx {
+    body: Vec<TirRef>,
+    inside_loop: HashSet<TirRef>,
+    has_any: HashSet<TirRef>,
+    top_level: HashMap<TirRef, TirRef>,
+}
+
+impl LoopExitCtx {
+    fn new(tir: &Tir, sidecar: &FunctionSidecar, loop_inst: TirRef) -> Option<Self> {
+        let body = tir.loop_body(loop_inst)?;
+        let mut inside_loop: HashSet<TirRef> = HashSet::new();
+        tir.collect_loop_body_refs(loop_inst, &mut inside_loop);
+        let has_any: HashSet<TirRef> =
+            sidecar.free_schedule.iter().map(|fp| fp.target).collect();
+        let mut top_level: HashMap<TirRef, TirRef> = HashMap::new();
+        for &stmt in &body {
+            let mut reachable: HashSet<TirRef> = HashSet::new();
+            tir.collect_reachable(stmt, &mut reachable);
+            for r in reachable {
+                top_level.entry(r).or_insert(stmt);
+            }
+        }
+        Some(Self {
+            body,
+            inside_loop,
+            has_any,
+            top_level,
+        })
+    }
+}
+
 /// Schedule unconditional Frees on `break`/`continue` paths. Runs after
 /// the last-use, anonymous-temp, and dead-store passes have populated
 /// `sidecar.free_schedule`, so per-jump scheduling can read existing
 /// entries to decide whether an inside-loop owner is already covered
-/// (see `schedule_break_continue_frees`). `enclosing_loop` is the
-/// nearest enclosing `WhileLoop`/`ForRange` instruction reference, or
-/// `None` at top-level (where `Break`/`Continue` would already have
-/// been rejected by sema).
+/// (see `schedule_break_continue_frees`). `enclosing` is the per-loop
+/// context of the nearest enclosing `WhileLoop`/`ForRange`, or `None`
+/// at top-level (where `Break`/`Continue` would already have been
+/// rejected by sema).
 fn schedule_loop_exit_frees_in(
     tir: &Tir,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
     stmts: &[TirRef],
-    enclosing_loop: Option<TirRef>,
+    enclosing: Option<&LoopExitCtx>,
 ) {
     for &r in stmts {
         let inst = *tir.inst(r);
         match inst.tag {
             TirTag::Break | TirTag::Continue => {
-                if let Some(loop_ref) = enclosing_loop {
-                    schedule_break_continue_frees(tir, own, sidecar, r, loop_ref);
+                if let Some(ctx) = enclosing {
+                    schedule_break_continue_frees(tir, own, sidecar, r, ctx);
                 }
                 // Else: outside any loop — sema rejects this with a
                 // dedicated diagnostic, so well-formed TIR never
                 // reaches here.
             }
-            TirTag::WhileLoop => {
-                let view = tir.while_loop_view(r);
-                schedule_loop_exit_frees_in(tir, own, sidecar, &view.body, Some(r));
-            }
-            TirTag::ForRange => {
-                let view = tir.for_range_view(r);
-                schedule_loop_exit_frees_in(tir, own, sidecar, &view.body, Some(r));
+            TirTag::WhileLoop | TirTag::ForRange => {
+                // The loop-body reachability and scheduled-Free index
+                // are invariant across jumps in the same loop — compute
+                // them once here, not per break/continue.
+                if let Some(ctx) = LoopExitCtx::new(tir, sidecar, r) {
+                    schedule_loop_exit_frees_in(tir, own, sidecar, &ctx.body, Some(&ctx));
+                }
             }
             TirTag::IfStmt => {
                 let view = tir.if_stmt_view(r);
-                schedule_loop_exit_frees_in(tir, own, sidecar, &view.then_stmts, enclosing_loop);
+                schedule_loop_exit_frees_in(tir, own, sidecar, &view.then_stmts, enclosing);
                 for elif in &view.elif_branches {
-                    schedule_loop_exit_frees_in(tir, own, sidecar, &elif.body, enclosing_loop);
+                    schedule_loop_exit_frees_in(tir, own, sidecar, &elif.body, enclosing);
                 }
                 if let Some(else_stmts) = &view.else_stmts {
-                    schedule_loop_exit_frees_in(tir, own, sidecar, else_stmts, enclosing_loop);
+                    schedule_loop_exit_frees_in(tir, own, sidecar, else_stmts, enclosing);
                 }
             }
             _ => {}
@@ -3328,43 +3376,55 @@ fn schedule_loop_exit_frees_in(
 ///     — natural Free is anchored INSIDE the then-arm; the else-arm's
 ///     break is not on the same path, so the Free doesn't cover it.
 ///
-/// `inside_loop` and `on_path` are computed by transitive reachability
-/// from the loop's body — `raw()` comparisons are unsound (producer
-/// refs sit numerically below their parent body stmt, and sibling
-/// if-arms compare lexically but are not on the same control-flow
-/// path).
+/// `inside_loop` comes precomputed from the per-loop context; only
+/// `on_path` is per-jump (it depends on `jump_inst`). Both are derived
+/// by transitive reachability from the loop's body — `raw()`
+/// comparisons are unsound (producer refs sit numerically below their
+/// parent body stmt, and sibling if-arms compare lexically but are not
+/// on the same control-flow path).
 fn schedule_break_continue_frees(
     tir: &Tir,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
     jump_inst: TirRef,
-    loop_inst: TirRef,
+    ctx: &LoopExitCtx,
 ) {
-    // Classify owners by transitive reachability from the loop body.
-    // raw() comparisons are unsound here — producer refs sit
-    // numerically below their parent body stmt.
-    let mut inside_loop: HashSet<TirRef> = HashSet::new();
-    tir.collect_loop_body_refs(loop_inst, &mut inside_loop);
+    let inside_loop = &ctx.inside_loop;
 
     // Compute the set of TirRefs evaluated on the path that takes
     // the jump. A Free covers this jump iff its `after` anchor is
     // in this set — purely lexical raw() ordering misclassifies
-    // anchors in sibling if-arms.
+    // anchors in sibling if-arms. The jump's enclosing top-level body
+    // stmt is one map lookup; stmts before it run to completion, so
+    // they are collected directly and the path walk descends only
+    // from the enclosing stmt — no per-stmt containment probes along
+    // the body.
     let mut on_path: HashSet<TirRef> = HashSet::new();
-    let Some(body) = tir.loop_body(loop_inst) else {
-        return;
-    };
-    let _ = tir.collect_jump_path(&body, jump_inst, &mut on_path);
+    match ctx.top_level.get(&jump_inst) {
+        Some(&enclosing_stmt) => {
+            for &stmt in ctx.body.iter().take_while(|&&s| s != enclosing_stmt) {
+                tir.collect_reachable(stmt, &mut on_path);
+            }
+            let _ = tir.collect_jump_path(
+                std::slice::from_ref(&enclosing_stmt),
+                jump_inst,
+                &mut on_path,
+            );
+        }
+        // Defensive: every jump visited from this loop's body is in
+        // the map, so this only guards against malformed input.
+        None => {
+            let _ = tir.collect_jump_path(&ctx.body, jump_inst, &mut on_path);
+        }
+    }
 
     // Index sidecar.free_schedule by target.
-    //   has_any           — Free scheduled anywhere
     //   covers_this_jump  — Free anchored on a TirRef in `on_path`
     //                       (i.e. fires on the path that takes the jump)
-    let mut has_any: HashSet<TirRef> = HashSet::new();
+    //   free_inside_loop  — Free anchored anywhere inside the loop
     let mut covers_this_jump: HashSet<TirRef> = HashSet::new();
     let mut free_inside_loop: HashSet<TirRef> = HashSet::new();
     for fp in &sidecar.free_schedule {
-        has_any.insert(fp.target);
         if on_path.contains(&fp.after) {
             covers_this_jump.insert(fp.target);
         }
@@ -3425,7 +3485,7 @@ fn schedule_break_continue_frees(
         // break. On `continue` the next iteration would re-read the freed buffer
         // (UAF); the principled fix is path-relative liveness, but until then we
         // accept a potential leak over a UAF.
-        if is_break && has_any.contains(&r) {
+        if is_break && ctx.has_any.contains(&r) {
             continue;
         }
         if is_break {
