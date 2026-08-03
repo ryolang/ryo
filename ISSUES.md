@@ -10,20 +10,19 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-031 + I-071** — return-flow analysis: non-void fn falling off the end gets no diagnostic.
-2. **I-020** — `inst_values` memoizer is cross-block: stale values across control flow.
-3. **I-082** — `never`-returning call path skips inout write-back.
-4. **I-075** — duplicate function definitions silently accepted.
-5. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
-6. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
-7. **I-106** — decode paths panic instead of reporting an internal error.
-8. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
-9. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
-10. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
-11. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
-12. **I-017** — `i64::MIN` integer literal is unrepresentable.
-13. **I-088** — ownership sidecar keyed by function name.
-14. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+1. **I-020** — `inst_values` memoizer is cross-block: stale values across control flow.
+2. **I-082** — `never`-returning call path skips inout write-back.
+3. **I-075** — duplicate function definitions silently accepted.
+4. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
+5. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
+6. **I-106** — decode paths panic instead of reporting an internal error.
+7. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
+8. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
+9. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
+10. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
+11. **I-017** — `i64::MIN` integer literal is unrepresentable.
+12. **I-088** — ownership sidecar keyed by function name.
+13. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -78,12 +77,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-backend/src/codegen.rs` (`inst_values: HashMap<TirRef, Value>`)
 **Summary:** Codegen lazily memoizes Cranelift `Value`s keyed by `TirRef` in a single flat HashMap shared across all basic blocks within a function. This is sound today because: (a) TIR instructions are unique per use (no shared sub-expressions), (b) BoolAnd/BoolOr use block params (phi nodes) so the memoized result is the merge-block param which dominates downstream uses, and (c) IfStmt is statement-level so no values flow out of branches. However, if future features introduce expression-level if (ternary) or shared sub-expressions across blocks, the memoizer will produce Cranelift dominator errors.
 **Resolution:** Scope the memoizer to per-block when expression-level control flow lands. For now the cross-block cache is correct given the TIR invariants.
-
-### I-031 — No return-flow analysis for if/elif/else
-
-**Files:** `ryo-frontend/src/sema.rs`, `ryo-backend/src/codegen.rs`
-**Summary:** Sema does not track whether all paths through an if/elif/else return a value. The codegen `emit_stmt` returns `all_branches_return` correctly, but sema has no equivalent — a function with `if/else` where all branches return still gets a "missing return" warning from the implicit `ReturnVoid` appended by the codegen fallthrough path. Currently papered over because void-returning `main` doesn't need a return, and non-void functions with complete coverage happen to work because codegen skips the merge block when all branches return.
-**Resolution:** Add `block_definitely_returns` analysis in sema so that functions with exhaustive if/else returns don't get spurious diagnostics. This becomes necessary when `while` loops and `match` land.
 
 ### I-032 — IfStmt is statement-only, no expression-level conditional
 
@@ -242,12 +235,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-driver/src/pipeline.rs` (`parse_source`, `display_tokens`)
 **Summary:** `finalize_diags` consolidates the drain + render + `Err(CompilerError::Diagnostics(_))` shape for the sink-using stages (`lower_and_analyze`, `ir_command`). The lex error paths and `parse_source`'s parse-error branch still hand-roll the same pattern over a `Vec<Diag>` they build directly (no `DiagSink`). Drift risk is real: parse/lex paths skip the `Severity::Error` filter (they assume every diag they emit is an error, which holds today but isn't enforced), and any future change to the rendering convention has to be applied in three places.
 **Resolution:** Generalize `finalize_diags` to take `Vec<Diag>` (or `impl IntoIterator<Item = Diag>`); have `DiagSink::into_diags()` feed the new entry point. Then the three lex/parse error paths become `finalize_diags(vec![diag], input, &name)` and the render+wrap pattern lives in exactly one place. Folds naturally with I-014's lexer-DiagSink migration.
-
-### I-071 — Non-void function can fall off the end with no diagnostic
-
-**Files:** `ryo-frontend/src/sema.rs`, `ryo-backend/src/codegen.rs` (:414 fallthrough)
-**Summary:** Sema validates an explicit bare `return` in a non-void fn and value/void mismatches, but a non-void function whose body simply ends gets no diagnostic; codegen just "falls through". No `MissingReturn` diag code exists. I-031 covers the inverse direction (spurious diagnostics on exhaustive if/else returns).
-**Resolution:** Add return-flow analysis in sema (shared with I-031's `block_definitely_returns`): a non-void function must return on all paths; emit `MissingReturn` otherwise.
 
 ### I-073 — Zig download has no integrity verification and races concurrent installs
 

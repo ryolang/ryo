@@ -115,6 +115,10 @@ pub enum DiagCode {
     /// worklist driver in Phase 5 catches the case so future
     /// comptime / inferred-return-type work doesn't stack-overflow.
     CycleInResolution,
+    /// A non-void function can reach the end of its body without
+    /// returning a value. Return-flow analysis: every path through
+    /// the body must end in `return` (or diverge via `never`).
+    MissingReturn,
 
     // --- ownership (M8.1b) ---
     /// Use of a value after it has been moved.

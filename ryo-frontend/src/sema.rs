@@ -467,7 +467,28 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         stmt_refs.push(analyze_stmt(sema, &mut fcx, &mut scope, stmt_ref));
     }
 
-    fcx.builder.finish(&stmt_refs)
+    let tir = fcx.builder.finish(&stmt_refs);
+
+    // Return-flow analysis: a non-void function must return (or
+    // diverge via `never`) on every path through its body. Error-
+    // typed returns already produced their diagnostic — skip to
+    // avoid a cascade.
+    if fcx.return_type != sema.pool.void()
+        && !sema.pool.is_error(fcx.return_type)
+        && !tir.block_definitely_returns(&tir.body_stmts(), sema.pool)
+    {
+        sema.sink.emit(Diag::error(
+            body.span,
+            DiagCode::MissingReturn,
+            format!(
+                "missing return: function '{}' expects '{}' but can reach the end of its body without returning",
+                sema.pool.str(body.name),
+                sema.pool.display(fcx.return_type),
+            ),
+        ));
+    }
+
+    tir
 }
 
 /// Per-function emission state. Lives only for the duration of one
@@ -2765,6 +2786,82 @@ mod tests {
     #[test]
     fn void_function_without_explicit_return_accepted() {
         let (_tirs, _pool) = run("fn greet():\n\tprint(\"hi\")\n").unwrap();
+    }
+
+    #[test]
+    fn nonvoid_falloff_reports_missing_return() {
+        let diags = run("fn f() -> int:\n\tx = 1\n").unwrap_err();
+        assert_eq!(
+            count_code(&diags, DiagCode::MissingReturn),
+            1,
+            "expected exactly one MissingReturn; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn exhaustive_if_else_returns_accepted() {
+        let code = "fn f(x: int) -> int:\n\tif x > 0:\n\t\treturn 1\n\telse:\n\t\treturn 2\n";
+        let (_tirs, _pool) = run(code).unwrap();
+    }
+
+    #[test]
+    fn exhaustive_elif_chain_returns_accepted() {
+        let code = "fn f(x: int) -> int:\n\tif x > 0:\n\t\treturn 1\n\telif x < 0:\n\t\treturn 0 - 1\n\telse:\n\t\treturn 0\n";
+        let (_tirs, _pool) = run(code).unwrap();
+    }
+
+    #[test]
+    fn if_without_else_still_reports_missing_return() {
+        let code = "fn f(x: int) -> int:\n\tif x > 0:\n\t\treturn 1\n";
+        let diags = run(code).unwrap_err();
+        assert!(any_code(&diags, DiagCode::MissingReturn));
+    }
+
+    #[test]
+    fn return_inside_while_does_not_count() {
+        // Conservative: a loop body can execute zero times, so a
+        // return inside `while` never satisfies return-flow.
+        let code = "fn f(x: int) -> int:\n\twhile x > 0:\n\t\treturn 1\n";
+        let diags = run(code).unwrap_err();
+        assert!(any_code(&diags, DiagCode::MissingReturn));
+    }
+
+    #[test]
+    fn trailing_return_after_if_accepted() {
+        let code = "fn f(x: int) -> int:\n\tif x > 0:\n\t\treturn 1\n\treturn 0\n";
+        let (_tirs, _pool) = run(code).unwrap();
+    }
+
+    #[test]
+    fn panic_tail_counts_as_diverging() {
+        // `panic` returns `never` — a function ending in it cannot
+        // fall through, so no MissingReturn.
+        let code = "fn f() -> int:\n\tpanic(\"boom\")\n";
+        let (_tirs, _pool) = run(code).unwrap();
+    }
+
+    #[test]
+    fn genuine_missing_return_reported_alongside_other_errors() {
+        // An unrelated error doesn't mask return-flow: this function
+        // genuinely lacks a return, so both diags fire.
+        let (_tirs, diags, _pool) = run_with_errors("fn f() -> int:\n\tx = missing_var + 1\n");
+        assert!(any_code(&diags, DiagCode::UndefinedVariable));
+        assert!(any_code(&diags, DiagCode::MissingReturn));
+    }
+
+    #[test]
+    fn stmt_error_sentinel_suppresses_missing_return() {
+        // A statement that failed analysis lowers to the Unreachable
+        // sentinel; its structure is unknown, so return-flow must not
+        // cascade a MissingReturn on top of the real error.
+        let (_tirs, diags, _pool) = run_with_errors("fn f() -> int:\n\tx += 1\n");
+        assert!(any_code(&diags, DiagCode::UndefinedAssignTarget));
+        assert!(
+            !any_code(&diags, DiagCode::MissingReturn),
+            "no cascading MissingReturn; got {:?}",
+            diags
+        );
     }
 
     #[test]
