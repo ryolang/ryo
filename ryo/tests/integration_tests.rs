@@ -2065,16 +2065,23 @@ fn test_bare_int_to_str_statement() {
 #[test]
 fn test_bare_float_to_str_statement() {
     // Same, for the float formatter.
-    assert_ryo_runs!(
-        "bare_float_to_str.ryo",
-        "fn main():\n\tfloat_to_str(2.5)\n"
-    );
+    assert_ryo_runs!("bare_float_to_str.ryo", "fn main():\n\tfloat_to_str(2.5)\n");
 }
 
 #[test]
 fn test_bare_bool_to_str_statement() {
     // Same, for the bool formatter.
     assert_ryo_runs!("bare_bool_to_str.ryo", "fn main():\n\tbool_to_str(true)\n");
+}
+
+#[test]
+fn test_bare_slice_statement() {
+    // A bare view-typed expression statement (result discarded) must
+    // evaluate through the view entry point, not the scalar path.
+    assert_ryo_runs!(
+        "bare_slice.ryo",
+        "fn main():\n\ts: str = \"hello\"\n\ts[0:2]\n"
+    );
 }
 
 #[test]

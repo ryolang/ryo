@@ -5763,15 +5763,19 @@ mod tests {
         let s = pool.intern_str("s");
         let two = pool.intern_str("two");
         let span = SimpleSpan::new((), 0..0);
+        // Distinct spans for the move arg and the reborrow chain, so
+        // the note can be pinned to the reborrow specifically.
+        let move_span = SimpleSpan::new((), 10..11);
+        let reborrow_span = SimpleSpan::new((), 20..26);
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
         let decl = tb.var_decl(s, false, str_ty, lit, span);
-        let sv1 = tb.var(s, str_ty, span);
-        let sv2 = tb.var(s, str_ty, span);
-        let zero = tb.int_const(0, int_ty, span);
-        let one = tb.int_const(1, int_ty, span);
-        let sl = tb.slice(sv2, Some(zero), Some(one), view_ty, span);
-        let reborrow = tb.view_as_str(sl, str_ty, span);
+        let sv1 = tb.var(s, str_ty, move_span);
+        let sv2 = tb.var(s, str_ty, reborrow_span);
+        let zero = tb.int_const(0, int_ty, reborrow_span);
+        let one = tb.int_const(1, int_ty, reborrow_span);
+        let sl = tb.slice(sv2, Some(zero), Some(one), view_ty, reborrow_span);
+        let reborrow = tb.view_as_str(sl, str_ty, reborrow_span);
         let modes = vec![ParamMode::Move, ParamMode::Borrow];
         let call = tb.call(two, &[sv1, reborrow], &modes, void, span);
         let tir = tb.finish(&[decl, call]);
@@ -5783,13 +5787,20 @@ mod tests {
             .filter(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall))
             .collect();
         assert_eq!(e0031.len(), 1, "expected exactly one E0031; got {diags:?}");
-        assert!(
-            e0031[0]
-                .notes
-                .iter()
-                .any(|n| n.message == "borrowed here"),
-            "E0031 must carry the 'borrowed here' note through ViewAsStr; got {:?}",
-            e0031[0].notes
+        let note = e0031[0]
+            .notes
+            .iter()
+            .find(|n| n.message == "borrowed here")
+            .unwrap_or_else(|| {
+                panic!(
+                    "E0031 must carry the 'borrowed here' note through ViewAsStr; got {:?}",
+                    e0031[0].notes
+                )
+            });
+        assert_eq!(
+            note.span,
+            Some(tir.span(reborrow)),
+            "the note must attach to the reborrow, not the move arg ({move_span:?})"
         );
     }
 
