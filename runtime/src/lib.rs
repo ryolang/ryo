@@ -30,7 +30,7 @@ unsafe extern "C" {
 // Rustc-linked binaries get it from the CRT, but the no_std archive is
 // linked by `zig cc`, which provides no definition — supply it here.
 #[cfg(all(windows, feature = "staticlib"))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[used]
 pub static _fltused: c_int = 0;
 
