@@ -328,12 +328,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
 **Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
 
-### I-112 — Bare-statement formatter builtins fail codegen
-
-**Files:** `ryo-backend/src/codegen.rs` (`emit_call` formatter arm :2316-2343; contrast the `__ryo_str_from_view` statement arm :2273-2310)
-**Summary:** A formatter builtin called as a bare statement — `int_to_str(5)` with the result discarded — fails with `CodegenError("ownership pass scheduled Free for borrowed-scalar value %2; the ABI registry should have excluded it. See I-057/I-059.")`. The statement arm emits the sret call into a stack slot, throws the triple away, and never records it in `ctx.inst_values`, so the anon-temp Free the ownership pass scheduled for the result cannot resolve the buffer and trips the scalar-Free guard. Assigned uses (`s: str = int_to_str(5)`) route through `eval_inst_str` and are unaffected. M8.4.1.2's `__ryo_str_from_view` statement arm dodges the bug by caching the loaded triple in `inst_values` before returning the dummy scalar — the next str-returning builtin will bite this again if it copies the older formatter arm instead.
-**Resolution:** Mirror the `__ryo_str_from_view` statement arm in the formatter arm: load the sret triple, insert it into `inst_values`, then return the dummy scalar, so the scheduled Free finds the buffer. Cover `int_to_str` / `float_to_str` / `bool_to_str` bare statements with integration tests. (Falls out of the I-113 dedup if that lands first.)
-
 ### I-114 — E0031 "borrowed here" note missing through ViewAsStr
 
 **Files:** `ryo-frontend/src/ownership.rs` (note-span finder :3868-3884; contrast the Rule-7 partition's ViewAsStr look-through :3780-3791)
@@ -481,12 +475,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken` :176-300, `Token` :30-103, `intern_token` :392-495, `Display` :105-170)
 **Summary:** Adding a token means editing `RawToken`, `Token`, the giant manual `intern_token` match, and `Display` (plus the parser downstream) — ~45 non-payload variants of pure boilerplate.
 **Resolution:** Generate the quadruple from a single macro table (variant name, logos pattern, payload kind).
-
-### I-113 — Codegen sret stack-slot pattern duplicated four times
-
-**Files:** `ryo-backend/src/codegen.rs` (`eval_inst_str` arms :1887-1913 and :1920-1953; `emit_call` arms :2282-2309 and :2319-2342)
-**Summary:** The ~25-30-line sret pattern (`create_sized_stack_slot(STR_SLOT_SIZE)` → `stack_addr` → `declare_runtime_fn` → `call` → 3× `load`) is copied in both the `eval_inst_str` and `emit_call` arms for `__ryo_str_from_view` and the int/float/bool formatters. The formatter statement-arm copy is the one that drifted — it skips the reload/`inst_values` caching and produced I-112.
-**Resolution:** Extract a shared `emit_sret_str_call(builder, ctx, fn_name, args) -> ValueRepr::Str` helper used by all four arms; the I-112 fix falls out of the dedup.
 
 ### I-119 — `loop_nesting_of` recomputes nesting stacks per query
 

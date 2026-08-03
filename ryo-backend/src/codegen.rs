@@ -1800,6 +1800,43 @@ impl<M: Module> Codegen<M> {
     /// Materialize a str-typed TIR instruction, returning a
     /// `ValueRepr::Str` triple. Falls back to scalar `eval_inst`
     /// for non-str instructions.
+    /// Shared sret pattern for runtime calls that produce a `str`
+    /// through a caller-allocated stack slot: pass `args` plus the
+    /// slot address, then reload the (ptr, len, cap) triple. Used by
+    /// both the value path (`eval_inst_str`) and the bare-statement
+    /// path (`emit_call`) so the two cannot drift (I-112/I-113).
+    /// Does NOT touch `ctx.inst_values` — caching is the caller's job.
+    fn emit_sret_str_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &str,
+        args: &[(Type, Value)],
+    ) -> Result<ValueRepr, String> {
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+        let param_tys: Vec<Type> = args.iter().map(|(ty, _)| *ty).chain([ctx.int_type]).collect();
+        let func_ref = Self::declare_runtime_fn(ctx.module, builder, fn_name, &param_tys, &[])?;
+        let mut call_args: Vec<Value> = args.iter().map(|(_, val)| *val).collect();
+        call_args.push(out_ptr);
+        builder.ins().call(func_ref, &call_args);
+
+        let ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+        let cap = builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+        Ok(ValueRepr::Str { ptr, len, cap })
+    }
+
     fn eval_inst_str(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1838,8 +1875,7 @@ impl<M: Module> Codegen<M> {
                 let view = ctx.tir.call_view(r);
                 let name_str = ctx.pool.str(view.name);
                 if name_str == "__ryo_str_from_view" {
-                    // M8.4.1.2 `str(view)` materialization: the same sret
-                    // stack-slot pattern as `int_to_str`, but the argument
+                    // M8.4.1.2 `str(view)` materialization: the argument
                     // is a view pair evaluated via `eval_inst_view`.
                     let ValueRepr::View {
                         ptr: v_ptr,
@@ -1848,74 +1884,24 @@ impl<M: Module> Codegen<M> {
                     else {
                         unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
                     };
-
-                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        StackSlotKind::ExplicitSlot,
-                        STR_SLOT_SIZE,
-                        3,
-                    ));
-                    let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
-                    let func_ref = Self::declare_runtime_fn(
-                        ctx.module,
+                    Self::emit_sret_str_call(
                         builder,
+                        ctx,
                         "ryo_str_from_view",
-                        &[ctx.int_type, types::I64, ctx.int_type],
-                        &[],
-                    )?;
-                    builder.ins().call(func_ref, &[v_ptr, v_len, out_ptr]);
-
-                    let ptr = builder
-                        .ins()
-                        .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
-                    let len = builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), out_ptr, 8);
-                    let cap = builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), out_ptr, 16);
-
-                    ValueRepr::Str { ptr, len, cap }
+                        &[(ctx.int_type, v_ptr), (types::I64, v_len)],
+                    )?
                 } else if name_str == "int_to_str"
                     || name_str == "float_to_str"
                     || name_str == "bool_to_str"
                 {
                     let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
-
-                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        StackSlotKind::ExplicitSlot,
-                        STR_SLOT_SIZE,
-                        3,
-                    ));
-                    let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
                     let (fn_name, param_ty) = match name_str {
                         "int_to_str" => ("ryo_int_to_str", ctx.int_type),
                         "float_to_str" => ("ryo_float_to_str", types::F64),
                         "bool_to_str" => ("ryo_bool_to_str", types::I8),
                         _ => unreachable!(),
                     };
-
-                    let func_ref = Self::declare_runtime_fn(
-                        ctx.module,
-                        builder,
-                        fn_name,
-                        &[param_ty, ctx.int_type],
-                        &[],
-                    )?;
-                    builder.ins().call(func_ref, &[arg_val, out_ptr]);
-
-                    let ptr = builder
-                        .ins()
-                        .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
-                    let len = builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), out_ptr, 8);
-                    let cap = builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), out_ptr, 16);
-
-                    ValueRepr::Str { ptr, len, cap }
+                    Self::emit_sret_str_call(builder, ctx, fn_name, &[(param_ty, arg_val)])?
                 } else {
                     // User call — eval_inst triggers emit_call which handles
                     // sret for str-returning calls and caches ValueRepr::Str.
@@ -2271,66 +2257,33 @@ impl<M: Module> Codegen<M> {
             else {
                 unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
             };
-
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                STR_SLOT_SIZE,
-                3,
-            ));
-            let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
-            let func_ref = Self::declare_runtime_fn(
-                ctx.module,
+            let repr = Self::emit_sret_str_call(
                 builder,
+                ctx,
                 "ryo_str_from_view",
-                &[ctx.int_type, types::I64, ctx.int_type],
-                &[],
+                &[(ctx.int_type, v_ptr), (types::I64, v_len)],
             )?;
-            builder.ins().call(func_ref, &[v_ptr, v_len, out_ptr]);
-
-            let ptr = builder
-                .ins()
-                .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
-            let len = builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), out_ptr, 8);
-            let cap = builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), out_ptr, 16);
-            ctx.inst_values.insert(r, ValueRepr::Str { ptr, len, cap });
+            ctx.inst_values.insert(r, repr);
 
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
         // Formatter builtins — when called as a bare statement (result
-        // discarded), we still emit the call but throw away the output.
-        // The primary path is eval_inst_str (used when result is assigned
-        // to a str variable or passed to print).
+        // discarded), we still emit the call and cache the triple so the
+        // anon-temp Free the ownership pass scheduled for the result can
+        // resolve the buffer (I-112). The primary path is eval_inst_str
+        // (used when result is assigned to a str variable or passed to
+        // print).
         if name_str == "int_to_str" || name_str == "float_to_str" || name_str == "bool_to_str" {
             let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
-
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                STR_SLOT_SIZE,
-                3,
-            ));
-            let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
             let (fn_name, param_ty) = match name_str {
                 "int_to_str" => ("ryo_int_to_str", ctx.int_type),
                 "float_to_str" => ("ryo_float_to_str", types::F64),
                 "bool_to_str" => ("ryo_bool_to_str", types::I8),
                 _ => unreachable!(),
             };
-
-            let func_ref = Self::declare_runtime_fn(
-                ctx.module,
-                builder,
-                fn_name,
-                &[param_ty, ctx.int_type],
-                &[],
-            )?;
-            builder.ins().call(func_ref, &[arg_val, out_ptr]);
+            let repr = Self::emit_sret_str_call(builder, ctx, fn_name, &[(param_ty, arg_val)])?;
+            ctx.inst_values.insert(r, repr);
 
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }

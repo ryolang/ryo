@@ -2056,6 +2056,28 @@ fn test_slice_print_roundtrip() {
 }
 
 #[test]
+fn test_bare_int_to_str_statement() {
+    // I-112: a formatter builtin called as a bare statement (result
+    // discarded) must not trip the scalar-Free guard in codegen.
+    assert_ryo_runs!("bare_int_to_str.ryo", "fn main():\n\tint_to_str(5)\n");
+}
+
+#[test]
+fn test_bare_float_to_str_statement() {
+    // I-112: same, for the float formatter.
+    assert_ryo_runs!(
+        "bare_float_to_str.ryo",
+        "fn main():\n\tfloat_to_str(2.5)\n"
+    );
+}
+
+#[test]
+fn test_bare_bool_to_str_statement() {
+    // I-112: same, for the bool formatter.
+    assert_ryo_runs!("bare_bool_to_str.ryo", "fn main():\n\tbool_to_str(true)\n");
+}
+
+#[test]
 fn test_int_to_str_builtin() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\ts: str = int_to_str(42)\n\tprint(s)\n";
