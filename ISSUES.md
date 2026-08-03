@@ -226,12 +226,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 - (b) Precompute, alongside `inside_loop` (see I-064), a `HashMap<TirRef, TirRef>` from each ref to its enclosing top-level loop-body stmt. `collect_jump_path` then does a single lookup to find the chosen arm's containing stmt — no per-stmt walks.
 Option (b) composes naturally with I-064's per-loop precomputation.
 
-### I-066 — TIR reachability helpers belong next to `walk_operands` in `ryo-core/src/tir.rs`
-
-**Files:** `ryo-frontend/src/ownership.rs` (`collect_loop_body_refs`, `collect_refs_recursive`, `collect_jump_path`); `ryo-core/src/tir.rs` (`walk_operands`)
-**Summary:** `walk_operands` is documented as the single source of truth for TIR-shape coverage. The three new helpers introduced for I-058 (`collect_loop_body_refs`, `collect_refs_recursive`, `collect_jump_path`) are pure structural reachability over TIR shape — they consult no ownership state, just walk the IR. Today they live as private helpers in `ryo-frontend/src/ownership.rs` and re-encode the same dispatch on `WhileLoop`/`ForRange`/`IfStmt` that `walk_operands` performs internally. Adding any new control-flow shape (e.g. `match` arms) means editing `walk_operands` plus three call sites in `ownership.rs`. The same pattern keeps reappearing — `find_consumers` and `collect_last_uses` already drive recursion via `walk_operands` closures.
-**Resolution:** Promote a small TIR-reachability surface to `ryo-core/src/tir.rs`. Suggested API: `Tir::collect_reachable(r) -> HashSet<TirRef>` (transitive closure of `walk_operands`) and `Tir::collect_jump_path(body, target) -> Option<HashSet<TirRef>>` (path-set reachability). Ownership-pass scheduling becomes a thin policy layer; future passes (early-return ownership, exception-arm Frees, `match`-arm Frees) reuse the same reachability primitives. Folds with I-051 (loop helper extraction) on the same TIR module.
-
 ### I-071 — Non-void function can fall off the end with no diagnostic
 
 **Files:** `ryo-frontend/src/sema.rs`, `ryo-backend/src/codegen.rs` (:414 fallthrough)

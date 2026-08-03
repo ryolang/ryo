@@ -31,7 +31,7 @@ use ryo_core::diag::{Diag, DiagCode, DiagSink};
 pub use ryo_core::ownership::{
     BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
 };
-use ryo_core::tir::{ParamMode, Span, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{ChildKind, ParamMode, Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
 
@@ -566,7 +566,7 @@ fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
-                if let Some(body) = loop_body(tir, r)
+                if let Some(body) = tir.loop_body(r)
                     && body_may_return(tir, &body)
                 {
                     return true;
@@ -595,7 +595,7 @@ fn branch_may_not_return(tir: &Tir, branch_stmt: TirRef) -> bool {
                     .as_ref()
                     .is_some_and(|es| body_may_return(tir, es))
         }
-        TirTag::WhileLoop | TirTag::ForRange => match loop_body(tir, branch_stmt) {
+        TirTag::WhileLoop | TirTag::ForRange => match tir.loop_body(branch_stmt) {
             Some(body) => !body_may_return(tir, &body),
             None => false,
         },
@@ -619,7 +619,7 @@ fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                 return stack.first().copied();
             }
             let mut sub: HashSet<TirRef> = HashSet::new();
-            collect_refs_recursive(tir, r, &mut sub);
+            tir.collect_reachable(r, &mut sub);
             if !sub.contains(&target) {
                 continue;
             }
@@ -648,7 +648,7 @@ fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
                     stack.push(r);
-                    let found = match loop_body(tir, r) {
+                    let found = match tir.loop_body(r) {
                         Some(body) => walk(tir, &body, target, stack),
                         None => None,
                     };
@@ -682,7 +682,7 @@ fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
                 return Some(stack.clone());
             }
             let mut sub: HashSet<TirRef> = HashSet::new();
-            collect_refs_recursive(tir, r, &mut sub);
+            tir.collect_reachable(r, &mut sub);
             if !sub.contains(&target) {
                 continue;
             }
@@ -708,7 +708,7 @@ fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
                     stack.push(r);
-                    let found = match loop_body(tir, r) {
+                    let found = match tir.loop_body(r) {
                         Some(body) => walk(tir, &body, target, stack),
                         None => None,
                     };
@@ -761,7 +761,7 @@ fn owner_binding_name(tir: &Tir, owner: TirRef) -> Option<StringId> {
                     }
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
-                    if let Some(body) = loop_body(tir, r)
+                    if let Some(body) = tir.loop_body(r)
                         && let Some(found) = walk(tir, &body, owner)
                     {
                         return Some(found);
@@ -914,7 +914,7 @@ fn remove_loop_deferred_views(own: &mut Ownership, loop_ref: TirRef) {
 /// sound direction.
 fn prune_branch_dead_projections(tir: &Tir, own: &mut Ownership, if_ref: TirRef) {
     let mut subtree: HashSet<TirRef> = HashSet::new();
-    collect_refs_recursive(tir, if_ref, &mut subtree);
+    tir.collect_reachable(if_ref, &mut subtree);
     let dead: Vec<Owner> = own
         .root_owner
         .keys()
@@ -1004,14 +1004,14 @@ fn loop_nesting_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
                 return true;
             }
             let mut sub: HashSet<TirRef> = HashSet::new();
-            collect_refs_recursive(tir, r, &mut sub);
+            tir.collect_reachable(r, &mut sub);
             if !sub.contains(&target) {
                 continue;
             }
             match tir.inst(r).tag {
                 TirTag::WhileLoop | TirTag::ForRange => {
                     stack.push(r);
-                    if let Some(body) = loop_body(tir, r)
+                    if let Some(body) = tir.loop_body(r)
                         && walk(tir, &body, target, stack)
                     {
                         return true;
@@ -1269,7 +1269,7 @@ fn record_view_reads(
     {
         last_use.insert(view_inst, r);
     }
-    walk_operands(tir, r, &mut |_parent, child, _kind| {
+    tir.walk_operands(r, &mut |_parent, child, _kind| {
         record_view_reads(tir, pool, child, bindings, last_use);
     });
 }
@@ -1302,7 +1302,7 @@ fn program_order(tir: &Tir) -> HashMap<TirRef, u32> {
         }
         order.insert(r, *next);
         *next += 1;
-        walk_operands(tir, r, &mut |_parent, child, _kind| {
+        tir.walk_operands(r, &mut |_parent, child, _kind| {
             assign(tir, child, order, next);
         });
     }
@@ -1908,7 +1908,7 @@ fn analyze_function(
     let mut epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
     for (return_stmt, owners) in &own.return_epilogue {
         let mut on_path: HashSet<TirRef> = HashSet::new();
-        let _ = collect_jump_path(tir, &body_stmts, *return_stmt, &mut on_path);
+        let _ = tir.collect_jump_path(&body_stmts, *return_stmt, &mut on_path);
         // A Free anchored after a branch CONTAINING the return never
         // fires on the return's path — the branch statement does not
         // complete before the return exits. Exclude ancestors from the
@@ -2481,7 +2481,7 @@ fn rule7_owner_name(
 fn stmts_subtree(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
     let mut set = HashSet::new();
     for &s in stmts {
-        collect_refs_recursive(tir, s, &mut set);
+        tir.collect_reachable(s, &mut set);
     }
     set
 }
@@ -2606,7 +2606,7 @@ fn analyze_if_stmt(
     // per arm, the arm's body statements (conditions belong to the
     // shared flow, not to a specific arm).
     let mut if_subtree: HashSet<TirRef> = HashSet::new();
-    collect_refs_recursive(tir, r, &mut if_subtree);
+    tir.collect_reachable(r, &mut if_subtree);
 
     // Allocate fresh BranchIds for this if's arms. Codegen consults
     // `sidecar.if_branches` when lowering the if so each arm pushes
@@ -3201,7 +3201,7 @@ fn merge_non_monotone(
 /// populated by overwriting (not `or_insert`), so the latest read
 /// wins — semantically equivalent to the previous reverse-walk +
 /// `or_insert` approach for a tree-shaped IR. Recurses through
-/// `walk_operands` so reads buried inside calls, loops, and if-arms
+/// `Tir::walk_operands` so reads buried inside calls, loops, and if-arms
 /// are still seen. M8.4 (P4/P5, final spec §3.2): `strview`-typed reads
 /// are recorded too — keyed by the view's slice instruction — so the
 /// P5 deferral can compare an owner's last use against its
@@ -3233,7 +3233,7 @@ fn collect_last_uses(
             last_use.insert(r_owner, r);
         }
     }
-    walk_operands(tir, r, &mut |_parent, operand, _kind| {
+    tir.walk_operands(r, &mut |_parent, operand, _kind| {
         collect_last_uses(tir, pool, own, operand, last_use);
     });
 }
@@ -3251,123 +3251,12 @@ fn collect_last_uses(
 /// descends through `BodyStmt` edges to reach operands buried
 /// inside those nested statements.
 fn find_consumers(tir: &Tir, r: TirRef, consumer_of: &mut HashMap<TirRef, TirRef>) {
-    walk_operands(tir, r, &mut |parent, operand, kind| {
+    tir.walk_operands(r, &mut |parent, operand, kind| {
         if matches!(kind, ChildKind::Operand) {
             consumer_of.entry(operand).or_insert(parent);
         }
         find_consumers(tir, operand, consumer_of);
     });
-}
-
-/// Distinguishes the two kinds of (parent, child) edges announced
-/// by [`walk_operands`]:
-///
-/// * [`ChildKind::Operand`] — a direct data dependency (e.g. a
-///   binary-op LHS, a call arg, a `VarDecl`'s initializer, an
-///   `if`/`while`/`for` condition or range bound). Consumer of
-///   the parent.
-/// * [`ChildKind::BodyStmt`] — a statement nested inside an
-///   `if`/`while`/`for` body. Reachable from the parent for
-///   traversal, but not a consumer of the parent.
-#[derive(Clone, Copy)]
-enum ChildKind {
-    Operand,
-    BodyStmt,
-}
-
-/// Visit every direct operand and body-statement edge of TIR
-/// instruction `r`, invoking `f(parent, child, kind)` for each
-/// `(parent, child)` edge in forward source order. **Shallow** —
-/// does not recurse on its own; callers' closures drive recursion
-/// (see [`collect_last_uses`] / [`find_consumers`]). Avoids the
-/// O(2^N) re-walking that an internally-recursive walker would
-/// produce when callers also recurse via their closures.
-///
-/// Single source of truth for TIR-shape coverage across the
-/// ownership pass's post-walk analyses (last-use, consumer-of, …).
-/// Adding a new TIR shape requires updating exactly this function.
-fn walk_operands(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef, TirRef, ChildKind)) {
-    let inst = *tir.inst(r);
-    match inst.data {
-        TirData::UnOp(o) => {
-            f(r, o, ChildKind::Operand);
-        }
-        TirData::BinOp { lhs, rhs } => {
-            f(r, lhs, ChildKind::Operand);
-            f(r, rhs, ChildKind::Operand);
-        }
-        TirData::Slice { base, start, end } => {
-            // M8.4: a slice reads its base and bounds; the base read
-            // is what keeps the owner live (final spec §3.2 P5).
-            f(r, base, ChildKind::Operand);
-            if let Some(s) = start {
-                f(r, s, ChildKind::Operand);
-            }
-            if let Some(e) = end {
-                f(r, e, ChildKind::Operand);
-            }
-        }
-        TirData::Extra(_) => match inst.tag {
-            TirTag::Call => {
-                let view = tir.call_view(r);
-                for &arg in &view.args {
-                    f(r, arg, ChildKind::Operand);
-                }
-            }
-            TirTag::VarDecl => {
-                let v = tir.var_decl_view(r);
-                f(r, v.initializer, ChildKind::Operand);
-            }
-            TirTag::Assign => {
-                let v = tir.assign_view(r);
-                f(r, v.value, ChildKind::Operand);
-            }
-            TirTag::CompoundAssign => {
-                let v = tir.compound_assign_view(r);
-                f(r, v.value, ChildKind::Operand);
-            }
-            TirTag::IfStmt => {
-                let v = tir.if_stmt_view(r);
-                f(r, v.cond, ChildKind::Operand);
-                for &s in &v.then_stmts {
-                    f(r, s, ChildKind::BodyStmt);
-                }
-                for elif in &v.elif_branches {
-                    f(r, elif.cond, ChildKind::Operand);
-                    for &s in &elif.body {
-                        f(r, s, ChildKind::BodyStmt);
-                    }
-                }
-                if let Some(else_stmts) = &v.else_stmts {
-                    for &s in else_stmts {
-                        f(r, s, ChildKind::BodyStmt);
-                    }
-                }
-            }
-            TirTag::WhileLoop => {
-                let v = tir.while_loop_view(r);
-                f(r, v.cond, ChildKind::Operand);
-                for &s in &v.body {
-                    f(r, s, ChildKind::BodyStmt);
-                }
-            }
-            TirTag::ForRange => {
-                let v = tir.for_range_view(r);
-                f(r, v.start, ChildKind::Operand);
-                f(r, v.end, ChildKind::Operand);
-                for &s in &v.body {
-                    f(r, s, ChildKind::BodyStmt);
-                }
-            }
-            _ => {}
-        },
-        TirData::None
-        | TirData::Int(_)
-        | TirData::Float(_)
-        | TirData::Str(_)
-        | TirData::Bool(_)
-        | TirData::Var(_) => {}
-    }
 }
 
 /// Schedule unconditional Frees on `break`/`continue` paths. Runs after
@@ -3419,131 +3308,6 @@ fn schedule_loop_exit_frees_in(
     }
 }
 
-/// Slice of body statements for a `WhileLoop`/`ForRange` instruction,
-/// materialized into an owned `Vec<TirRef>` so the caller can re-borrow
-/// `tir` for recursive walks. Returns `None` for non-loop refs.
-fn loop_body(tir: &Tir, loop_inst: TirRef) -> Option<Vec<TirRef>> {
-    match tir.inst(loop_inst).tag {
-        TirTag::WhileLoop => Some(tir.while_loop_view(loop_inst).body.to_vec()),
-        TirTag::ForRange => Some(tir.for_range_view(loop_inst).body.to_vec()),
-        _ => None,
-    }
-}
-
-/// Collect every `TirRef` reachable from `loop_inst`'s body —
-/// transitive operands AND nested body statements — into `set`.
-/// Used to classify owners as inside-loop vs pre-loop without
-/// relying on the broken `raw()` proxy (producer refs are pushed
-/// before their parent body stmt, so a producer's `raw()` can be
-/// below the parent body-stmt's `raw()` even though it's
-/// semantically inside).
-///
-/// `walk_operands` is shallow; this helper drives the recursion.
-fn collect_loop_body_refs(tir: &Tir, loop_inst: TirRef, set: &mut HashSet<TirRef>) {
-    let Some(body) = loop_body(tir, loop_inst) else {
-        return;
-    };
-    for stmt in body {
-        collect_refs_recursive(tir, stmt, set);
-    }
-}
-
-fn collect_refs_recursive(tir: &Tir, r: TirRef, set: &mut HashSet<TirRef>) {
-    if !set.insert(r) {
-        return;
-    }
-    walk_operands(tir, r, &mut |_parent, child, _kind| {
-        collect_refs_recursive(tir, child, set);
-    });
-}
-
-/// Collect the set of TirRefs evaluated on the path that reaches
-/// `target` (a `break`/`continue` instruction) within `body`. Returns
-/// `true` if `target` was located.
-///
-/// Walk-down rule: a body-stmt that does NOT contain `target` runs
-/// to completion before the jump's stmt is reached, so all of its
-/// operand-reachable refs are on-path. The body-stmt that DOES
-/// contain `target` recurses: into the right `IfStmt` arm, or into
-/// a nested loop's body. For an `IfStmt` we collect the cond
-/// unconditionally (it always runs); we then locate the single arm
-/// (then / a specific elif / else) that contains `target` and only
-/// recurse into that arm — sibling arms are off-path. For elif
-/// arms we also collect each preceding elif's cond (those conds
-/// executed; their bodies were skipped).
-///
-/// Used by `schedule_break_continue_frees` to decide whether an
-/// existing `FreePoint` actually fires on the jump's path. A Free
-/// anchored in a sibling arm has its `after` ref outside this set,
-/// so it's correctly classified as not-covering.
-fn collect_jump_path(
-    tir: &Tir,
-    body: &[TirRef],
-    target: TirRef,
-    set: &mut HashSet<TirRef>,
-) -> bool {
-    for &stmt in body {
-        if stmt == target {
-            set.insert(target);
-            return true;
-        }
-        let mut sub: HashSet<TirRef> = HashSet::new();
-        collect_refs_recursive(tir, stmt, &mut sub);
-        if sub.contains(&target) {
-            // `stmt` contains the jump. Descend along the right arm.
-            match tir.inst(stmt).tag {
-                TirTag::IfStmt => {
-                    let view = tir.if_stmt_view(stmt);
-                    set.insert(stmt);
-                    collect_refs_recursive(tir, view.cond, set);
-                    // Locate the arm containing `target`; only that arm's
-                    // statements are on-path. Earlier elif conds executed
-                    // (their bodies skipped) so collect just the conds up
-                    // to the chosen arm.
-                    let mut then_sub: HashSet<TirRef> = HashSet::new();
-                    for &s in &view.then_stmts {
-                        collect_refs_recursive(tir, s, &mut then_sub);
-                    }
-                    if then_sub.contains(&target) {
-                        return collect_jump_path(tir, &view.then_stmts, target, set);
-                    }
-                    for elif in &view.elif_branches {
-                        collect_refs_recursive(tir, elif.cond, set);
-                        let mut elif_sub: HashSet<TirRef> = HashSet::new();
-                        for &s in &elif.body {
-                            collect_refs_recursive(tir, s, &mut elif_sub);
-                        }
-                        if elif_sub.contains(&target) {
-                            return collect_jump_path(tir, &elif.body, target, set);
-                        }
-                    }
-                    if let Some(else_stmts) = &view.else_stmts {
-                        return collect_jump_path(tir, else_stmts, target, set);
-                    }
-                    return true;
-                }
-                TirTag::WhileLoop | TirTag::ForRange => {
-                    // Inner loop containing the jump. Should not
-                    // happen when called from the innermost-enclosing-
-                    // loop's break-pass — the inner loop runs its own
-                    // schedule_break_continue_frees pass for that jump.
-                    return true;
-                }
-                _ => {
-                    // Other shapes (ExprStmt, etc.). The stmt's
-                    // operands are evaluated as part of reaching
-                    // `target`.
-                    collect_refs_recursive(tir, stmt, set);
-                    return true;
-                }
-            }
-        }
-        // `stmt` does not contain target — fully evaluated before target.
-        collect_refs_recursive(tir, stmt, set);
-    }
-    false
-}
-
 /// Schedule one Free per `Valid` owner not already covered by a Free
 /// that fires on the jump's path.
 ///
@@ -3580,17 +3344,17 @@ fn schedule_break_continue_frees(
     // raw() comparisons are unsound here — producer refs sit
     // numerically below their parent body stmt.
     let mut inside_loop: HashSet<TirRef> = HashSet::new();
-    collect_loop_body_refs(tir, loop_inst, &mut inside_loop);
+    tir.collect_loop_body_refs(loop_inst, &mut inside_loop);
 
     // Compute the set of TirRefs evaluated on the path that takes
     // the jump. A Free covers this jump iff its `after` anchor is
     // in this set — purely lexical raw() ordering misclassifies
     // anchors in sibling if-arms.
     let mut on_path: HashSet<TirRef> = HashSet::new();
-    let Some(body) = loop_body(tir, loop_inst) else {
+    let Some(body) = tir.loop_body(loop_inst) else {
         return;
     };
-    let _ = collect_jump_path(tir, &body, jump_inst, &mut on_path);
+    let _ = tir.collect_jump_path(&body, jump_inst, &mut on_path);
 
     // Index sidecar.free_schedule by target.
     //   has_any           — Free scheduled anywhere
