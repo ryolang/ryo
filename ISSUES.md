@@ -298,12 +298,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** A callee typed `never` (today only `__ryo_panic`) is emitted as call + trap + dead block and skips `reload_inout_args` — any inout argument's mutated value is dropped. Latent: `__ryo_panic` takes no inout params today, but the path exists for any future `never`-typed function.
 **Resolution:** Call `reload_inout_args` before the trap, or assert at sema that `never`-typed callees cannot take inout params.
 
-### I-083 — `eval_inst` returns a str's data pointer as a dummy scalar
-
-**Files:** `ryo-backend/src/codegen.rs` (`eval_inst` :1141-1148, :1976; dual entry points with `eval_inst_str`)
-**Summary:** The scalar entry point returns the str `ptr` as a "dummy scalar" stand-in for str-typed insts, so any scalar-path consumer of a str inst silently gets the data pointer. The two entry points share the `inst_values` memo with an ordering dependency (`or_insert` at :1384), and `StrConst` has different meanings per entry point (:1164-1173 vs :1574-1580).
-**Resolution:** Make `eval_inst` reject str-typed insts (or return the full repr), and split the memo by entry point. Related to I-020's memoizer scoping.
-
 ### I-084 — `ryo build` writes artifacts to the CWD; same-stem sources collide
 
 **Files:** `ryo-driver/src/pipeline.rs` (`get_output_filenames` :34-44, `build_file` :485-522)

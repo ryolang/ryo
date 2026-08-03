@@ -889,7 +889,15 @@ impl<M: Module> Codegen<M> {
                     TirData::UnOp(o) => o,
                     _ => unreachable!("ExprStmt must carry TirData::UnOp"),
                 };
-                let _ = Self::eval_inst(builder, ctx, operand)?;
+                // Str-typed operands (bare formatter calls, str(view),
+                // user str-returning calls) go through the str entry
+                // point, which caches the triple for the scheduled temp
+                // Free; the scalar path rejects them (I-083/I-112).
+                if is_str_type(ctx.tir.inst(operand).ty, ctx.pool) {
+                    let _ = Self::eval_inst_str(builder, ctx, operand)?;
+                } else {
+                    let _ = Self::eval_inst(builder, ctx, operand)?;
+                }
                 Ok(Terminator::None)
             }
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
@@ -1311,22 +1319,31 @@ impl<M: Module> Codegen<M> {
         r: TirRef,
     ) -> Result<Value, String> {
         if let Some(repr) = ctx.inst_values.get(&r) {
-            return Ok(match repr {
-                ValueRepr::Scalar(v) => *v,
-                // str-returning calls cache ValueRepr::Str; return the ptr
-                // component as the scalar stand-in (callers that need the
-                // full triple use eval_inst_str).
-                ValueRepr::Str { ptr, .. } => *ptr,
-                // I-083: views have no scalar stand-in. A view-typed value
-                // reaching eval_inst means a consumer forgot to gate on
-                // pool.is_view() and route through eval_inst_view.
-                ValueRepr::View { .. } => panic!(
-                    "eval_inst: strview %{} is two-word; use a view-aware consumer (I-083)",
+            return match repr {
+                ValueRepr::Scalar(v) => Ok(*v),
+                // I-083: str/view-typed values have no scalar stand-in.
+                // A multi-word repr reaching the scalar entry point
+                // means a consumer forgot to gate through eval_inst_str
+                // / eval_inst_view — reject loudly instead of silently
+                // handing out the data pointer.
+                ValueRepr::Str { .. } | ValueRepr::View { .. } => Err(format!(
+                    "eval_inst: str/view-typed inst %{} reached the scalar entry point; use eval_inst_str / eval_inst_view (I-083)",
                     r.index()
-                ),
-            });
+                )),
+            };
         }
         let inst = ctx.tir.inst(r);
+        // I-083: str- and view-typed insts are multi-word and have no
+        // business on the scalar path. Calls are checked separately in
+        // the Call arm below (bare-statement str calls route through
+        // emit_call / eval_inst_str instead).
+        if inst.tag != TirTag::Call && (is_str_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty))
+        {
+            return Err(format!(
+                "eval_inst: str/view-typed inst %{} reached the scalar entry point; use eval_inst_str / eval_inst_view (I-083)",
+                r.index()
+            ));
+        }
         let value = match inst.tag {
             TirTag::IntConst => match inst.data {
                 TirData::Int(v) => builder.ins().iconst(ctx.int_type, v),
@@ -1340,19 +1357,15 @@ impl<M: Module> Codegen<M> {
                 TirData::Float(v) => builder.ins().f64const(v),
                 _ => unreachable!("FloatConst must carry TirData::Float"),
             },
-            TirTag::StrConst => match inst.data {
-                TirData::Str(id) => {
-                    // Returns the raw .rodata pointer — used by __ryo_panic
-                    // which takes (ptr, len) scalars. For fat-pointer str
-                    // materialisation, callers use eval_inst_str instead.
-                    let content = ctx.pool.str(id);
-                    let data_id =
-                        store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
-                    let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-                    builder.ins().global_value(ctx.int_type, data_ref)
-                }
-                _ => unreachable!("StrConst must carry TirData::Str"),
-            },
+            TirTag::StrConst => {
+                // Unreachable — the entry guard above rejects str-typed
+                // insts. __ryo_panic's message pointer goes through
+                // emit_strconst_rodata_ptr instead (I-083).
+                Err(format!(
+                    "eval_inst: StrConst %{} reached the scalar entry point (I-083)",
+                    r.index()
+                ))?
+            }
             TirTag::Var => match inst.data {
                 TirData::Var(name) => {
                     let var = ctx
@@ -1494,7 +1507,18 @@ impl<M: Module> Codegen<M> {
                 builder.switch_to_block(merge_block);
                 builder.block_params(merge_block)[0]
             }
-            TirTag::Call => Self::emit_call(builder, ctx, r)?,
+            TirTag::Call => {
+                // I-083: str/view-returning calls are multi-word — they
+                // must come through eval_inst_str / eval_inst_view (or
+                // emit_call for bare statements), never the scalar path.
+                if is_str_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty) {
+                    return Err(format!(
+                        "eval_inst: str/view-returning call %{} reached the scalar entry point; use eval_inst_str (I-083)",
+                        r.index()
+                    ));
+                }
+                Self::emit_call(builder, ctx, r)?
+            }
             TirTag::IfStmt => {
                 Self::generate_if_stmt(builder, ctx, r)?;
                 builder.ins().iconst(ctx.int_type, 0)
@@ -1550,9 +1574,26 @@ impl<M: Module> Codegen<M> {
                 ));
             }
         };
-        // Don't overwrite if emit_call already cached a Str repr (sret convention).
-        ctx.inst_values.entry(r).or_insert(ValueRepr::Scalar(value));
+        // Scalar-only entry point (I-083): str/view-typed insts are
+        // rejected above, so no path here can have cached a non-scalar
+        // repr for `r` mid-evaluation.
+        ctx.inst_values.insert(r, ValueRepr::Scalar(value));
         Ok(value)
+    }
+
+    /// Emit a string literal's raw `.rodata` pointer (no fat-pointer
+    /// triple). Used by `__ryo_panic`'s scalar (ptr, len) ABI — the one
+    /// deliberate exception to the I-083 rule that str-typed insts never
+    /// flow through the scalar entry point.
+    fn emit_strconst_rodata_ptr(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        id: StringId,
+    ) -> Result<Value, String> {
+        let content = ctx.pool.str(id);
+        let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+        Ok(builder.ins().global_value(ctx.int_type, data_ref))
     }
 
     /// Declare an external runtime function by name and return a
@@ -1939,9 +1980,11 @@ impl<M: Module> Codegen<M> {
                     };
                     Self::emit_sret_str_call(builder, ctx, fn_name, &[(param_ty, arg_val)])?
                 } else {
-                    // User call — eval_inst triggers emit_call which handles
-                    // sret for str-returning calls and caches ValueRepr::Str.
-                    Self::eval_inst(builder, ctx, r)?;
+                    // User call — emit_call handles sret for str-returning
+                    // calls and caches ValueRepr::Str. Called directly
+                    // (not via eval_inst): the scalar path rejects
+                    // str-returning calls (I-083).
+                    Self::emit_call(builder, ctx, r)?;
                     if let Some(repr) = ctx.inst_values.get(&r) {
                         return Ok(*repr);
                     }
@@ -2236,7 +2279,15 @@ impl<M: Module> Codegen<M> {
             // never-returns contract.
             let mut arg_values = Vec::with_capacity(view.args.len());
             for arg in &view.args {
-                arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
+                // The message is a StrConst whose .rodata pointer the
+                // scalar (ptr, len) ABI consumes directly — the one
+                // deliberate exception to the I-083 scalar-path rule.
+                match ctx.tir.inst(*arg).data {
+                    TirData::Str(id) => {
+                        arg_values.push(Self::emit_strconst_rodata_ptr(builder, ctx, id)?)
+                    }
+                    _ => arg_values.push(Self::eval_inst(builder, ctx, *arg)?),
+                }
             }
             let panic_ref = Self::declare_runtime_fn(
                 ctx.module,
