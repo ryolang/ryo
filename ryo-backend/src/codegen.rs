@@ -42,7 +42,7 @@ const VIEW_SLOT_SIZE: u32 = 16;
 const OFF_PTR: i32 = 0;
 const OFF_LEN: i32 = 8;
 
-/// How a statement or body ended the current block, if it did (I-081).
+/// How a statement or body ended the current block, if it did.
 /// Replaces the `bool` that conflated Break/Continue with Return:
 /// callers distinguish "block ended" (`!= None`) from "the function
 /// definitely returns" (`== Return`) explicitly.
@@ -647,7 +647,7 @@ impl<M: Module> Codegen<M> {
                 }
             }
 
-            // I-070: no scheduled Free may be dropped without a
+            // No scheduled Free may be dropped without a
             // same-target substitute having fired. The ownership pass
             // deliberately anchors some temp frees twice — once at the
             // consuming sub-expression and once at the enclosing Return
@@ -784,7 +784,7 @@ impl<M: Module> Codegen<M> {
     /// Emit a top-level statement instruction. Returns the statement's
     /// [`Terminator`] — anything other than `Terminator::None` ends the
     /// current block, and the caller stops the body walk on the first
-    /// one (I-081).
+    /// one.
     fn emit_stmt(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -892,7 +892,7 @@ impl<M: Module> Codegen<M> {
                 // Str-typed operands (bare formatter calls, str(view),
                 // user str-returning calls) go through the str entry
                 // point, which caches the triple for the scheduled temp
-                // Free; the scalar path rejects them (I-083/I-112).
+                // Free; the scalar path rejects them.
                 if is_str_type(ctx.tir.inst(operand).ty, ctx.pool) {
                     let _ = Self::eval_inst_str(builder, ctx, operand)?;
                 } else {
@@ -1101,7 +1101,7 @@ impl<M: Module> Codegen<M> {
             builder.ins().jump(merge_block, &[]);
         }
 
-        // I-081: two separate questions the old bool conflated —
+        // Two separate questions the old bool conflated —
         // `all_terminated` (every arm ends the block, so the merge
         // block is unreachable) and `all_return` (every arm actually
         // returns, which is what the if reports to its caller).
@@ -1321,26 +1321,26 @@ impl<M: Module> Codegen<M> {
         if let Some(repr) = ctx.inst_values.get(&r) {
             return match repr {
                 ValueRepr::Scalar(v) => Ok(*v),
-                // I-083: str/view-typed values have no scalar stand-in.
+                // Str/view-typed values have no scalar stand-in.
                 // A multi-word repr reaching the scalar entry point
                 // means a consumer forgot to gate through eval_inst_str
                 // / eval_inst_view — reject loudly instead of silently
                 // handing out the data pointer.
                 ValueRepr::Str { .. } | ValueRepr::View { .. } => Err(format!(
-                    "eval_inst: str/view-typed inst %{} reached the scalar entry point; use eval_inst_str / eval_inst_view (I-083)",
+                    "eval_inst: str/view-typed inst %{} reached the scalar entry point; use eval_inst_str / eval_inst_view",
                     r.index()
                 )),
             };
         }
         let inst = ctx.tir.inst(r);
-        // I-083: str- and view-typed insts are multi-word and have no
+        // Str- and view-typed insts are multi-word and have no
         // business on the scalar path. Calls are checked separately in
         // the Call arm below (bare-statement str calls route through
         // emit_call / eval_inst_str instead).
         if inst.tag != TirTag::Call && (is_str_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty))
         {
             return Err(format!(
-                "eval_inst: str/view-typed inst %{} reached the scalar entry point; use eval_inst_str / eval_inst_view (I-083)",
+                "eval_inst: str/view-typed inst %{} reached the scalar entry point; use eval_inst_str / eval_inst_view",
                 r.index()
             ));
         }
@@ -1360,9 +1360,9 @@ impl<M: Module> Codegen<M> {
             TirTag::StrConst => {
                 // Unreachable — the entry guard above rejects str-typed
                 // insts. __ryo_panic's message pointer goes through
-                // emit_strconst_rodata_ptr instead (I-083).
+                // emit_strconst_rodata_ptr instead.
                 Err(format!(
-                    "eval_inst: StrConst %{} reached the scalar entry point (I-083)",
+                    "eval_inst: StrConst %{} reached the scalar entry point",
                     r.index()
                 ))?
             }
@@ -1508,12 +1508,12 @@ impl<M: Module> Codegen<M> {
                 builder.block_params(merge_block)[0]
             }
             TirTag::Call => {
-                // I-083: str/view-returning calls are multi-word — they
+                // Str/view-returning calls are multi-word — they
                 // must come through eval_inst_str / eval_inst_view (or
                 // emit_call for bare statements), never the scalar path.
                 if is_str_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty) {
                     return Err(format!(
-                        "eval_inst: str/view-returning call %{} reached the scalar entry point; use eval_inst_str (I-083)",
+                        "eval_inst: str/view-returning call %{} reached the scalar entry point; use eval_inst_str",
                         r.index()
                     ));
                 }
@@ -1574,7 +1574,7 @@ impl<M: Module> Codegen<M> {
                 ));
             }
         };
-        // Scalar-only entry point (I-083): str/view-typed insts are
+        // Scalar-only entry point: str/view-typed insts are
         // rejected above, so no path here can have cached a non-scalar
         // repr for `r` mid-evaluation.
         ctx.inst_values.insert(r, ValueRepr::Scalar(value));
@@ -1583,7 +1583,7 @@ impl<M: Module> Codegen<M> {
 
     /// Emit a string literal's raw `.rodata` pointer (no fat-pointer
     /// triple). Used by `__ryo_panic`'s scalar (ptr, len) ABI — the one
-    /// deliberate exception to the I-083 rule that str-typed insts never
+    /// deliberate exception to the rule that str-typed insts never
     /// flow through the scalar entry point.
     fn emit_strconst_rodata_ptr(
         builder: &mut FunctionBuilder,
@@ -1645,9 +1645,8 @@ impl<M: Module> Codegen<M> {
     /// Scheduled Frees only target `Str`-cached owners. A
     /// `Scalar`-cached target is an ownership-pass bug — the
     /// borrowed-scalar ABI never owns its argument and the ownership
-    /// pass excludes such args from `temp_owners` (see I-057). If a
-    /// `Scalar` target is observed here, this function returns `Err`
-    /// with a diagnostic pointing at I-057.
+    /// pass excludes such args from `temp_owners`. If a
+    /// `Scalar` target is observed here, this function returns `Err`.
     ///
     /// `freed_at` (a set of `free_schedule` indices) guards against
     /// double-emission across the eval-end hooks and the end-of-stmt
@@ -1716,7 +1715,7 @@ impl<M: Module> Codegen<M> {
     /// each index as fired in `ctx.freed_at`. A `Scalar`-cached target
     /// (borrowed-scalar ABI, never heap-owned) returns an error and aborts
     /// code generation — the ABI registry is supposed to keep such args out
-    /// of `temp_owners`. See I-057/I-059.
+    /// of `temp_owners`.
     ///
     /// When the target is a named binding's initializer/value (or a str
     /// param's virtual ref), the Free is emitted from the binding's
@@ -1772,7 +1771,7 @@ impl<M: Module> Codegen<M> {
                 }
                 ValueRepr::Scalar(_) => {
                     return Err(format!(
-                        "ownership pass scheduled Free for borrowed-scalar value %{}; the ABI registry should have excluded it. See I-057/I-059.",
+                        "ownership pass scheduled Free for borrowed-scalar value %{}; the ABI registry should have excluded it.",
                         target.index()
                     ));
                 }
@@ -1881,7 +1880,7 @@ impl<M: Module> Codegen<M> {
     /// through a caller-allocated stack slot: pass `args` plus the
     /// slot address, then reload the (ptr, len, cap) triple. Used by
     /// both the value path (`eval_inst_str`) and the bare-statement
-    /// path (`emit_call`) so the two cannot drift (I-112/I-113).
+    /// path (`emit_call`) so the two cannot drift.
     /// Does NOT touch `ctx.inst_values` — caching is the caller's job.
     fn emit_sret_str_call(
         builder: &mut FunctionBuilder,
@@ -1983,7 +1982,7 @@ impl<M: Module> Codegen<M> {
                     // User call — emit_call handles sret for str-returning
                     // calls and caches ValueRepr::Str. Called directly
                     // (not via eval_inst): the scalar path rejects
-                    // str-returning calls (I-083).
+                    // str-returning calls.
                     Self::emit_call(builder, ctx, r)?;
                     if let Some(repr) = ctx.inst_values.get(&r) {
                         return Ok(*repr);
@@ -2071,7 +2070,7 @@ impl<M: Module> Codegen<M> {
     /// pair (M8.4). Views are 16-byte non-owning `{ptr, len}` values —
     /// they never materialize into the 24-byte str triple and never
     /// enter the free schedule. Views do NOT go through `eval_inst`'s
-    /// dummy-scalar pattern (I-083): only view-aware consumers
+    /// dummy-scalar pattern: only view-aware consumers
     /// (`print`, `StrLen`, `StrCmpEq/Ne`, call args, view bindings)
     /// reach them, via `eval_str_or_view_parts` or directly.
     fn eval_inst_view(
@@ -2281,7 +2280,7 @@ impl<M: Module> Codegen<M> {
             for arg in &view.args {
                 // The message is a StrConst whose .rodata pointer the
                 // scalar (ptr, len) ABI consumes directly — the one
-                // deliberate exception to the I-083 scalar-path rule.
+                // deliberate exception to the scalar-path rule.
                 match ctx.tir.inst(*arg).data {
                     TirData::Str(id) => {
                         arg_values.push(Self::emit_strconst_rodata_ptr(builder, ctx, id)?)
@@ -2358,7 +2357,7 @@ impl<M: Module> Codegen<M> {
         // Formatter builtins — when called as a bare statement (result
         // discarded), we still emit the call and cache the triple so the
         // anon-temp Free the ownership pass scheduled for the result can
-        // resolve the buffer (I-112). The primary path is eval_inst_str
+        // resolve the buffer. The primary path is eval_inst_str
         // (used when result is assigned to a str variable or passed to
         // print).
         if name_str == "int_to_str" || name_str == "float_to_str" || name_str == "bool_to_str" {

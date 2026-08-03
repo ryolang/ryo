@@ -8,7 +8,7 @@ pub struct BuiltinFunction {
     /// ABI (raw `.rodata` pointer, cap=0, never heap-owned). Read by the
     /// ownership pass and codegen instead of name-string matching. Today
     /// only `__ryo_panic`'s message (param 0) is borrowed-scalar; every
-    /// user-facing builtin in `BUILTINS` is `&[]`. See I-059.
+    /// user-facing builtin in `BUILTINS` is `&[]`.
     pub borrowed_scalar_params: &'static [usize],
     /// Parameter indices passed as `strview` whose ROOT owner the call
     /// borrows for its duration (E4). Read by the ownership pass's Rule-7
@@ -89,7 +89,7 @@ pub const BUILTINS: &[BuiltinFunction] = &[
 /// `__ryo_panic` is emitted by `sema::build_panic_call`; its message
 /// (param 0) is passed as a raw `.rodata` pointer with cap=0 and never
 /// heap-owned. Kept as `BuiltinFunction`s so `borrowed_scalar_params` is
-/// the single source of truth for the ABI. See I-059.
+/// the single source of truth for the ABI.
 /// `__ryo_str_from_view` is emitted by `sema::emit_str_materialize` for
 /// the `str(view)` call form (M8.4.1.2); it returns an owned `str` and
 /// borrows its `strview` argument's root owner for the call's duration
@@ -114,7 +114,7 @@ pub fn lookup(name: &str) -> Option<&'static BuiltinFunction> {
 }
 
 /// Look up a synthesized borrowed-scalar-ABI callee (e.g. `__ryo_panic`)
-/// that is not a user-facing builtin. See I-059.
+/// that is not a user-facing builtin.
 fn abi_callee(name: &str) -> Option<&'static BuiltinFunction> {
     ABI_CALLEES.iter().find(|b| b.name == name)
 }
@@ -124,7 +124,7 @@ fn abi_callee(name: &str) -> Option<&'static BuiltinFunction> {
 /// user-facing `BUILTINS` table and the synthesized `ABI_CALLEES` registry
 /// (e.g. `__ryo_panic`). Returns false for unknown names and out-of-range
 /// indices. Replaces the old `pool.str(name) == "__ryo_panic"` name-match
-/// in the ownership pass. See I-059.
+/// in the ownership pass.
 pub fn is_borrowed_scalar_param(name_id: StringId, pool: &InternPool, idx: usize) -> bool {
     let name = pool.str(name_id);
     lookup(name)
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn ryo_panic_uses_borrowed_scalar_abi_for_param_0_only() {
-        // I-059: `__ryo_panic`'s message (param 0) is the only
+        // `__ryo_panic`'s message (param 0) is the only
         // borrowed-scalar ABI parameter; param 1 (length) is not, and
         // the registry must reject out-of-range / unknown callees.
         let mut pool = InternPool::new();

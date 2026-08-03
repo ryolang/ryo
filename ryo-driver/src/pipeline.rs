@@ -334,8 +334,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
 
     // Tail block: drains the sink whether sema/ownership were
     // clean or only emitted warnings. Without this `ryo ir` would
-    // silently swallow W0001/W0002 on success — the bug I-044
-    // tracked.
+    // silently swallow W0001/W0002 on success.
     finalize_diags(sink, &input, &name)
 }
 
@@ -580,7 +579,7 @@ mod tests {
             assert_eq!(diag_code_str(*code), *s, "{code:?} moved");
             assert!(seen.insert(*s), "duplicate code string {s}");
         }
-        // Maintenance tripwire (I-086): a match naming every DiagCode
+        // Maintenance tripwire: a match naming every DiagCode
         // variant with no wildcard arm fails to compile the moment a
         // variant is added, forcing the author to this test — extend
         // the table above in the same edit or the new code goes

@@ -1304,8 +1304,8 @@ mod tests {
 
     #[test]
     fn inst_stays_small() {
-        // I-091's warning: `Inst` is the per-instruction footprint of
-        // the whole UIR arena, so it must not grow unnoticed. The
+        // `Inst` is the per-instruction footprint of the whole UIR
+        // arena, so it must not grow unnoticed. The
         // `Slice` payload (`base` + two niche-packed `Option<InstRef>`)
         // fits inline at 12 B — same budget as before.
         assert!(std::mem::size_of::<Inst>() <= 24, "Inst grew past 24 bytes");
