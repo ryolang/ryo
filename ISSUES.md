@@ -382,12 +382,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** View decoders `debug_assert` the tag then `unreachable!` on mismatch; sema hard-trusts astgen with `panic!`/`unreachable!` on tag mismatches; codegen mixes `Result<_, String>` with panics. Malformed IR crashes the compiler with no internal-error diagnostic. Fine with exactly one producer per IR; brittle for any future producer (caches, plugins, alternative front ends).
 **Resolution:** Low priority by design. If a second UIR/TIR producer ever lands, convert the decode paths to an internal-error `Diag`; until then, document the "trusted producer" invariant at each IR boundary.
 
-### I-108 — Owned params are freed after the last body statement, not their last use
-
-**Files:** `ryo-frontend/src/ownership.rs` (:448-462)
-**Summary:** A still-`Valid` `Owner::Param` at function exit is freed after the last body statement; only `Inst` owners get true last-use anchoring. Owned params thus live longer than necessary — coarser than the local-variable policy.
-**Resolution:** Extend last-use tracking to params (they have stable `Owner`s already); verify against the valgrind suite.
-
 ### I-109 — No instruction→function reverse mapping in UIR
 
 **Files:** `ryo-core/src/uir.rs` (`func_bodies` :272, :279-284)

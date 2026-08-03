@@ -1827,15 +1827,46 @@ fn analyze_function(
                 if own.inout_str_params.contains(name) {
                     continue;
                 }
-                if let Some(&after) = body_stmts.last() {
-                    let idx = *own.param_index.get(name).expect("param exists");
-                    sidecar.free_schedule.push(FreePoint {
-                        after,
-                        target: owner.tirref(&own.param_index),
-                        span: tir.params[idx].span,
-                        branch: None,
-                    });
-                }
+                let idx = *own.param_index.get(name).expect("param exists");
+                // Anchor the Free after the param's last read — the
+                // same policy locals get — so later statements that
+                // never touch the param don't keep its buffer alive.
+                // A never-read param keeps the old anchor (after the
+                // last body statement): it must still be freed exactly
+                // once.
+                let Some(after) = (match last_use.get(&TirRef::param(idx)) {
+                    Some(&after) => {
+                        // P5 (final spec §3.2): defer the destruction to
+                        // the last use of any projection of this param
+                        // (a slice of it keeps the buffer alive).
+                        let after = defer_anchor(after, owner, &projections_of, &last_use, &order);
+                        // Conditional last use: same re-anchor as `Inst`
+                        // owners — a last read inside a branch frees at
+                        // the branch's exit. Anchoring after the read
+                        // itself fires per-iteration in loops (UAF on
+                        // later reads) and never fires on not-taken
+                        // arms (leak). Skip when the branch may
+                        // `return` (the exit anchor is unreachable on
+                        // the return path). The declared-before check
+                        // locals need is trivially true here: params
+                        // precede the body.
+                        match outermost_branch_of(tir, after) {
+                            Some(branch_stmt) if branch_may_not_return(tir, branch_stmt) => {
+                                Some(branch_stmt)
+                            }
+                            _ => Some(after),
+                        }
+                    }
+                    None => body_stmts.last().copied(),
+                }) else {
+                    continue;
+                };
+                sidecar.free_schedule.push(FreePoint {
+                    after,
+                    target: TirRef::param(idx),
+                    span: tir.params[idx].span,
+                    branch: None,
+                });
             }
         }
     }
@@ -3289,10 +3320,12 @@ fn collect_last_uses(
         && let Some(&owner) = own.owner_at_read.get(&r)
     {
         // Overwriting insert: latest forward-order read wins =
-        // last source-order read.
-        if let Some(r_owner) = owner.inst_tirref() {
-            last_use.insert(r_owner, r);
-        }
+        // last source-order read. `Owner::tirref` keys a `Param`
+        // owner under its sentinel ref, so reads of a param-owned
+        // binding register a last use for the param too — the
+        // last-use pass can then anchor its Free after the param's
+        // true last read instead of the last body statement.
+        last_use.insert(owner.tirref(&own.param_index), r);
     }
     tir.walk_operands(r, &mut |_parent, operand, _kind| {
         collect_last_uses(tir, pool, own, operand, last_use);
@@ -5199,6 +5232,234 @@ mod tests {
     }
 
     #[test]
+    fn read_move_param_frees_after_last_read_not_last_stmt() {
+        // fn f(move s: str): print(s); print(42) — the param's Free
+        // anchors after its last read (the `Var` inside print(s)),
+        // not after the later statement that never touches it.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s_name = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s_name,
+                ty: str_ty,
+                mode: ParamMode::Move,
+                span,
+            }],
+            void,
+            span,
+        );
+        let s_read = tb.var(s_name, str_ty, span);
+        let call1 = tb.call(print, &[s_read], &all_borrow(&[s_read]), void, span);
+        let n = tb.int_const(42, int_ty, span);
+        let call2 = tb.call(print, &[n], &all_borrow(&[n]), void, span);
+        let tir = tb.finish(&[call1, call2]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+
+        let frees: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == TirRef::param(0))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the owned param; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert_eq!(
+            frees[0].after, s_read,
+            "the Free must anchor after the param's last read; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn param_last_read_inside_loop_frees_after_loop() {
+        // fn f(move s: str, cond: bool): while cond: print(s) — the
+        // last read sits inside the loop; anchoring after it would fire
+        // the Free per iteration (UAF on the next iteration's read), so
+        // the Free moves to after the loop statement.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s_name = pool.intern_str("s");
+        let cond_name = pool.intern_str("cond");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![
+                TirParam {
+                    name: s_name,
+                    ty: str_ty,
+                    mode: ParamMode::Move,
+                    span,
+                },
+                TirParam {
+                    name: cond_name,
+                    ty: bool_ty,
+                    mode: ParamMode::Borrow,
+                    span,
+                },
+            ],
+            void,
+            span,
+        );
+        let cond = tb.var(cond_name, bool_ty, span);
+        let s_read = tb.var(s_name, str_ty, span);
+        let call = tb.call(print, &[s_read], &all_borrow(&[s_read]), void, span);
+        let while_stmt = tb.while_loop(cond, &[call], void, span);
+        let tir = tb.finish(&[while_stmt]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+
+        let frees: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == TirRef::param(0))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the owned param; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert_eq!(
+            frees[0].after, while_stmt,
+            "a param last read inside a loop must be freed after the loop, not inside it; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn param_slice_read_defers_free_to_projection_last_use() {
+        // fn f(move s: str): v = s[0:2]; print(v); print(42) — the
+        // slice projects the param, so its Free defers to the
+        // projection's last use (the read inside print(v)), past the
+        // param's own last direct read.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s_name = pool.intern_str("s");
+        let v_name = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s_name,
+                ty: str_ty,
+                mode: ParamMode::Move,
+                span,
+            }],
+            void,
+            span,
+        );
+        let base = tb.var(s_name, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v_name, false, view_ty, sl, span);
+        let vread = tb.var(v_name, view_ty, span);
+        let call1 = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let n = tb.int_const(42, int_ty, span);
+        let call2 = tb.call(print, &[n], &all_borrow(&[n]), void, span);
+        let tir = tb.finish(&[vdecl, call1, call2]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+
+        let frees: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == TirRef::param(0))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the owned param; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert_eq!(
+            frees[0].after, vread,
+            "a slice of the param defers its Free to the projection's last use; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn never_read_move_param_still_freed_once_after_last_stmt() {
+        // fn f(move s: str): print(42) — a never-read owned param must
+        // still be freed exactly once, anchored after the last body
+        // statement (there is no last read to anchor on).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s_name = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s_name,
+                ty: str_ty,
+                mode: ParamMode::Move,
+                span,
+            }],
+            void,
+            span,
+        );
+        let n = tb.int_const(42, int_ty, span);
+        let call = tb.call(print, &[n], &all_borrow(&[n]), void, span);
+        let tir = tb.finish(&[call]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+
+        let frees: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == TirRef::param(0))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the owned param; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert_eq!(
+            frees[0].after, call,
+            "a never-read param keeps the last-body-statement anchor; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
     fn conditional_move_param_schedules_branch_gated_free() {
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
@@ -6855,8 +7116,8 @@ mod tests {
     fn return_epilogue_covers_move_param() {
         // `fn f(move s: str): if d: return` — the owned param is still
         // Valid at the early return; the callee must destroy it there
-        // (the exit-time param Free anchors after the last body stmt,
-        // which the early-return path never reaches).
+        // (the never-read param's Free anchors after the last body
+        // stmt, which the early-return path never reaches).
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
         let mut pool = InternPool::new();
