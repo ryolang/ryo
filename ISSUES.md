@@ -388,12 +388,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** View decoders `debug_assert` the tag then `unreachable!` on mismatch; sema hard-trusts astgen with `panic!`/`unreachable!` on tag mismatches; codegen mixes `Result<_, String>` with panics. Malformed IR crashes the compiler with no internal-error diagnostic. Fine with exactly one producer per IR; brittle for any future producer (caches, plugins, alternative front ends).
 **Resolution:** Low priority by design. If a second UIR/TIR producer ever lands, convert the decode paths to an internal-error `Diag`; until then, document the "trusted producer" invariant at each IR boundary.
 
-### I-107 — Ownership pass does linear, panicking param lookups in hot paths
-
-**Files:** `ryo-frontend/src/ownership.rs` (`Owner::tirref` :81-93, :450-454, :1026-1031, :1049-1055)
-**Summary:** Four sites do `tir.params.iter().position(...).expect("param exists")` — O(P) per call inside per-owner loops, and a panic (not a diagnostic) on malformed TIR.
-**Resolution:** Build a name→param-index map once per function (or key `Owner` by param index directly); keep the `expect` as a `debug_assert` once the invariant is verified at entry.
-
 ### I-108 — Owned params are freed after the last body statement, not their last use
 
 **Files:** `ryo-frontend/src/ownership.rs` (:448-462)
@@ -405,12 +399,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Files:** `ryo-core/src/uir.rs` (`func_bodies` :272, :279-284)
 **Summary:** `func_bodies` lists only top-level statement refs; given an arbitrary `InstRef` you cannot tell which function owns it without walking every body. Any pass wanting per-function slices of the shared arena (diagnostics, per-function codegen, future incremental sema) re-derives this by traversal.
 **Resolution:** Add a computed inst→body index map (built lazily or at `finish()`), or move to per-function UIR arenas mirroring TIR when Phase 5 lands.
-
-### I-110 — Tree-shaped-TIR assumption is undocumented
-
-**Files:** `ryo-frontend/src/ownership.rs` (`find_consumers` :1351-1369)
-**Summary:** `find_consumers` uses first-parent-wins `or_insert` because "TIR is tree-shaped per function"; the anon-temp free anchor silently breaks if TIR ever becomes a DAG (shared subexpressions, CSE). The invariant lives in one comment.
-**Resolution:** Document the tree-shape invariant on `Tir` itself (`ryo-core/src/tir.rs`) and add a debug assertion or validation pass that each inst has at most one parent.
 
 ### I-111 — Lexer token boilerplate is four touch points per variant
 

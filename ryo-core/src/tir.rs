@@ -349,6 +349,13 @@ pub struct TirParam {
 /// arenas; refs are scoped to the body. This is the shape that lets
 /// monomorphization (Phase 5) clone-and-substitute one body without
 /// renumbering everything else.
+///
+/// The body is tree-shaped: every instruction has at most one parent
+/// (one incoming operand or body-statement edge), so the body roots
+/// plus [`Tir::walk_operands`] edges form a forest, not a DAG.
+/// Analyses that record one parent per instruction — e.g. the
+/// ownership pass's first-parent-wins consumer map — rely on this;
+/// [`TirBuilder::finish`] debug-asserts it on every built body.
 #[derive(Debug, Clone)]
 pub struct Tir {
     pub name: StringId,
@@ -901,7 +908,7 @@ impl TirBuilder {
             self.extra.push(r.raw());
         }
         let len = Self::len_u32(stmts.len());
-        Tir {
+        let tir = Tir {
             name: self.name,
             params: self.params,
             return_type: self.return_type,
@@ -910,7 +917,10 @@ impl TirBuilder {
             spans: self.spans,
             body: ExtraRange { offset, len },
             span: self.span,
-        }
+        };
+        #[cfg(debug_assertions)]
+        tir.validate_tree_shape();
+        tir
     }
 }
 
@@ -1240,6 +1250,34 @@ impl Tir {
             | TirData::Str(_)
             | TirData::Bool(_)
             | TirData::Var(_) => {}
+        }
+    }
+
+    /// Debug-only check of the tree-shape invariant documented on
+    /// [`Tir`]: walking every operand / body-statement edge from the
+    /// body roots, no instruction may be reached twice — each inst has
+    /// at most one parent. Called from [`TirBuilder::finish`]; costs
+    /// one O(N) walk per built body in debug builds only.
+    #[cfg(debug_assertions)]
+    fn validate_tree_shape(&self) {
+        fn walk(tir: &Tir, r: TirRef, seen: &mut HashSet<TirRef>) {
+            tir.walk_operands(r, &mut |_parent, child, _kind| {
+                debug_assert!(
+                    seen.insert(child),
+                    "TIR body is not tree-shaped: instruction raw={} has more than one parent",
+                    child.raw()
+                );
+                walk(tir, child, seen);
+            });
+        }
+        let mut seen: HashSet<TirRef> = HashSet::new();
+        for stmt in self.body_stmts() {
+            debug_assert!(
+                seen.insert(stmt),
+                "TIR body is not tree-shaped: statement raw={} is listed twice in the body roots",
+                stmt.raw()
+            );
+            walk(self, stmt, &mut seen);
         }
     }
 
@@ -1819,8 +1857,11 @@ mod tests {
         let lo = b.int_const(0, pool.int(), sp());
         // `s[0:]` — end omitted, exercising the `None` bound.
         let slice = b.slice(base, Some(lo), None, view_ty, sp());
-        // `str → strview` conversion of the same base.
-        let view = b.view_of_str(base, view_ty, sp());
+        // `str → strview` conversion of the same variable — a fresh
+        // read: each use of a binding emits its own `Var` instruction,
+        // so the body stays tree-shaped.
+        let base2 = b.var(s, str_ty, sp());
+        let view = b.view_of_str(base2, view_ty, sp());
         let tir = b.finish(&[slice, view]);
 
         assert_eq!(tir.inst(slice).ty, view_ty);
@@ -1841,6 +1882,6 @@ mod tests {
 
         let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));
         assert!(out.contains("= slice %1, %2.._"), "got:\n{}", out);
-        assert!(out.contains("= view_of_str %1"), "got:\n{}", out);
+        assert!(out.contains("= view_of_str %4"), "got:\n{}", out);
     }
 }

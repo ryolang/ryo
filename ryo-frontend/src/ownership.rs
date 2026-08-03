@@ -83,17 +83,10 @@ impl Owner {
         }
     }
 
-    pub(crate) fn tirref(self, tir: &Tir) -> TirRef {
+    pub(crate) fn tirref(self, param_index: &HashMap<StringId, usize>) -> TirRef {
         match self {
             Owner::Inst(r) => r,
-            Owner::Param(name) => {
-                let idx = tir
-                    .params
-                    .iter()
-                    .position(|p| p.name == name)
-                    .expect("param exists");
-                TirRef::param(idx)
-            }
+            Owner::Param(name) => TirRef::param(*param_index.get(&name).expect("param exists")),
         }
     }
 }
@@ -111,6 +104,14 @@ pub(crate) struct Ownership {
     pub states: HashMap<Owner, OwnerState>,
     pub current_owner: HashMap<StringId, Owner>,
     pub origin: HashMap<TirRef, Option<Owner>>,
+    /// Param name → index into `tir.params`, built once per function
+    /// in `analyze_function`. Resolving a `Param` owner to its virtual
+    /// `TirRef`, type, or span happens inside per-owner loops, so a
+    /// linear scan of `tir.params` per lookup would be O(P) each time.
+    /// Every `Owner::Param` name originates from `tir.params` by
+    /// construction, so a missing key is an internal invariant
+    /// violation (`expect` at the lookup sites), not a diagnostic.
+    pub param_index: HashMap<StringId, usize>,
     /// VarDecls of Move-typed values, keyed by the underlying owner
     /// `TirRef`. Cleared when the binding is read (`Var`) or consumed
     /// (move/return). Whatever remains at function end is a dead
@@ -1563,7 +1564,18 @@ fn analyze_function(
     sink: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
 ) {
-    let mut own = Ownership::default();
+    let mut own = Ownership {
+        // Name → param-index map, built once so the per-owner lookups
+        // below (Param owner → TirRef / type / span) are O(1) instead
+        // of a linear scan of `tir.params` per call.
+        param_index: tir
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.name, i))
+            .collect(),
+        ..Ownership::default()
+    };
 
     // M8.4: view-liveness pre-pass (P4, final spec §3.2). The walk
     // consults these walk-constant tables to know when it passes a
@@ -1713,14 +1725,10 @@ fn analyze_function(
                     continue;
                 }
                 if let Some(&after) = body_stmts.last() {
-                    let idx = tir
-                        .params
-                        .iter()
-                        .position(|p| p.name == *name)
-                        .expect("param exists");
+                    let idx = *own.param_index.get(name).expect("param exists");
                     sidecar.free_schedule.push(FreePoint {
                         after,
-                        target: owner.tirref(tir),
+                        target: owner.tirref(&own.param_index),
                         span: tir.params[idx].span,
                         branch: None,
                     });
@@ -1888,7 +1896,7 @@ fn analyze_function(
         let drop = &own.reseat_drops[idx];
         sidecar.conditional_dead_drops.push(ConditionalDeadDrop {
             if_stmt: drop.if_stmt,
-            target: drop.pre_owner.tirref(tir),
+            target: drop.pre_owner.tirref(&own.param_index),
             arms: drop.untouched_arms.clone(),
         });
     }
@@ -1921,7 +1929,7 @@ fn analyze_function(
             if own.pending_dead_store.contains_key(owner) {
                 continue;
             }
-            let r = owner.tirref(tir);
+            let r = owner.tirref(&own.param_index);
             if !epilogue_emitted.insert((*return_stmt, r)) {
                 continue;
             }
@@ -2090,7 +2098,7 @@ fn analyze_assign(
                 // `tirref` (not `inst_tirref`): an inout param's old owner
                 // is a `Param`, resolved here to its virtual ref — codegen
                 // caches that ref's repr at the prologue.
-                sidecar.free_on_reassign.insert(r, old_owner.tirref(tir));
+                sidecar.free_on_reassign.insert(r, old_owner.tirref(&own.param_index));
                 // W0003 case-B support: reassignment mutates the binding's
                 // owner — a defensive-copy hazard on it.
                 own.owner_hazards.push((old_owner, r));
@@ -2755,11 +2763,7 @@ fn analyze_if_stmt(
         let is_tracked = match owner {
             Owner::Inst(_) => true,
             Owner::Param(name) => {
-                let idx = tir
-                    .params
-                    .iter()
-                    .position(|p| p.name == name)
-                    .expect("param exists");
+                let idx = *own.param_index.get(&name).expect("param exists");
                 needs_tracking(tir.params[idx].ty, pool)
             }
         };
@@ -2779,17 +2783,13 @@ fn analyze_if_stmt(
                 let span = match owner {
                     Owner::Inst(r) => tir.span(r),
                     Owner::Param(name) => {
-                        let idx = tir
-                            .params
-                            .iter()
-                            .position(|p| p.name == name)
-                            .expect("param exists");
+                        let idx = *own.param_index.get(&name).expect("param exists");
                         tir.params[idx].span
                     }
                 };
                 sidecar.free_schedule.push(FreePoint {
                     after,
-                    target: owner.tirref(tir),
+                    target: owner.tirref(&own.param_index),
                     span,
                     branch: Some(arm.branch_id),
                 });
@@ -3239,8 +3239,9 @@ fn collect_last_uses(
 }
 
 /// Build a `child_TirRef → parent_TirRef` map. Each temporary owner
-/// has at most one direct parent in the TIR (TIR is tree-shaped per
-/// function), so `or_insert` correctly preserves the first parent
+/// has at most one direct parent in the TIR (the tree-shape invariant
+/// documented on `Tir`, checked by `validate_tree_shape` in debug
+/// builds), so `or_insert` correctly preserves the first parent
 /// observed. Used by the anonymous-temporary-free pass to anchor
 /// each temp's Free after its single consumer.
 ///
