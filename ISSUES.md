@@ -316,12 +316,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
 **Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
 
-### I-114 — E0031 "borrowed here" note missing through ViewAsStr
-
-**Files:** `ryo-frontend/src/ownership.rs` (note-span finder :3868-3884; contrast the Rule-7 partition's ViewAsStr look-through :3780-3791)
-**Summary:** `two(move s, s[0:1])` against a `(move, str)` signature fires E0031 without the "borrowed here" secondary note. The finder matches args with `underlying_owner(own, arg) == owner`, but a str-typed `ViewAsStr` conversion inst has no `origin` entry, so `underlying_owner` falls back to `Owner::Inst(view_as_str)`, which never equals the root owner and `borrow_span` stays `None`. The `(move, strview)` shape does get a "slice passed here" note via the `SourceProjected` path (:3906-3934) — only the P6'-converted shape loses its note.
-**Resolution:** Mirror the partition's P6' logic in the finder (`projection_root` first when the arg is a ViewAsStr/Slice, else `underlying_owner`); add a regression test pinning both notes for `two(move s, s[0:1])`.
-
 ### I-115 — `Tir::span`/`Tir::inst` still panic on param sentinel refs in release
 
 **Files:** `ryo-core/src/tir.rs` (`Tir::span` :371-374, `Tir::inst` :366-368, `TirRef::index` :75-77)

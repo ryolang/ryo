@@ -3869,10 +3869,22 @@ fn visit_expr(
                 let mut borrow_span = None;
                 let mut move_span = None;
                 for (i, arg) in view.args.iter().enumerate() {
-                    if needs_tracking(tir.inst(*arg).ty, pool)
-                        && underlying_owner(own, *arg) == *owner
-                    {
-                        let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+                    if !needs_tracking(tir.inst(*arg).ty, pool) {
+                        continue;
+                    }
+                    let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+                    // P6' (mirrors the Rule-7 partition above, I-114): a
+                    // view re-borrowed into a `str` arg via ViewAsStr
+                    // borrows the view's ROOT owner — look through the
+                    // conversion or the "borrowed here" note is lost.
+                    let arg_owner =
+                        if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::ViewAsStr {
+                            projection_root(own, tir, pool, *arg)
+                                .unwrap_or_else(|| underlying_owner(own, *arg))
+                        } else {
+                            underlying_owner(own, *arg)
+                        };
+                    if arg_owner == *owner {
                         match mode {
                             ParamMode::Borrow => borrow_span = Some(tir.span(*arg)),
                             ParamMode::Move => move_span = Some(tir.span(*arg)),
@@ -5727,6 +5739,53 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
             "two borrows of one owner is fine (Rule 7 many readers); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn move_and_viewasstr_borrow_of_one_owner_reports_borrow_note() {
+        // I-114: `two(move s, s[0:1])` against a `(move, str)` signature
+        // — the P6'-converted ViewAsStr arg borrows the view's ROOT
+        // owner, so E0031 must carry the "borrowed here" note (look
+        // through the conversion, like the Rule-7 partition does).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let two = pool.intern_str("two");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let sv1 = tb.var(s, str_ty, span);
+        let sv2 = tb.var(s, str_ty, span);
+        let zero = tb.int_const(0, int_ty, span);
+        let one = tb.int_const(1, int_ty, span);
+        let sl = tb.slice(sv2, Some(zero), Some(one), view_ty, span);
+        let reborrow = tb.view_as_str(sl, str_ty, span);
+        let modes = vec![ParamMode::Move, ParamMode::Borrow];
+        let call = tb.call(two, &[sv1, reborrow], &modes, void, span);
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        let e0031: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall))
+            .collect();
+        assert_eq!(e0031.len(), 1, "expected exactly one E0031; got {diags:?}");
+        assert!(
+            e0031[0]
+                .notes
+                .iter()
+                .any(|n| n.message == "borrowed here"),
+            "E0031 must carry the 'borrowed here' note through ViewAsStr; got {:?}",
+            e0031[0].notes
         );
     }
 
