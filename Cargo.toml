@@ -43,3 +43,28 @@ panic = "abort"
 
 [profile.dev]
 panic = "abort"
+
+# Lint policy derived from docs/dev/ryo-compiler-llm-instructions.md.
+# Compiler crates opt in with `[lints] workspace = true`; `runtime/` is the
+# curated FFI/unsafe boundary (R5) and deliberately does not.
+[workspace.lints.rust]
+# R5 — no `unsafe` in the compiler. The two grandfathered sites carry
+# `#[allow(unsafe_code)]` with a SAFETY comment + linked issue (I-127).
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# R1 — flat arrays and typed indices, never pointer trees. The banned types
+# are listed with reasons in clippy.toml (`disallowed-types`).
+disallowed_types = "deny"
+# R7 — small functions. `too-many-lines-threshold` in clippy.toml is a
+# ratchet set just above today's worst offender (I-128); lower it as the
+# oversized pass entry points are split.
+too_many_lines = "deny"
+# R8/R13 — never panic on user input, no `todo!()` in shipped milestones.
+# Warn until the tracked panic sites (I-103, I-106, I-107, I-115) are
+# converted, then promote to deny. Tests are exempt via clippy.toml.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"

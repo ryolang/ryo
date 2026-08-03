@@ -308,9 +308,16 @@ impl Codegen<JITModule> {
             .map_err(|e| format!("Failed to finalize JIT definitions: {}", e))?;
 
         let code_ptr = self.module.get_finalized_function(main_id);
+        // SAFETY (R5 exception, I-127): `code_ptr` was finalized by
+        // cranelift-jit for this module above, and the compiled entry point
+        // has the `fn() -> isize` signature we emit for `main`.
+        #[allow(unsafe_code)]
         let main_fn: fn() -> isize = unsafe { std::mem::transmute(code_ptr) };
         let result = main_fn();
 
+        // SAFETY (R5 exception, I-127): execution finished above; freeing the
+        // module's memory cannot invalidate any live code.
+        #[allow(unsafe_code)]
         unsafe {
             self.module.free_memory();
         }

@@ -8,3 +8,6 @@ rust-version.workspace = true
 ariadne = { workspace = true }
 chumsky = { workspace = true }
 hashbrown = { workspace = true }
+
+[lints]
+workspace = true
