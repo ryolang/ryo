@@ -22,6 +22,11 @@ fn create_test_file(dir: &Path, filename: &str, content: &str) -> std::path::Pat
     file_path
 }
 
+/// Path to an AOT-built binary, with the platform `.exe` suffix.
+fn exe_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
+}
+
 macro_rules! assert_ryo_runs {
     ($test_name:expr, $code:expr) => {{
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
@@ -1487,7 +1492,7 @@ fn assert_true_aot_run_succeeds() {
         String::from_utf8_lossy(&build_output.stderr)
     );
 
-    let binary_path = temp_dir.path().join("assert_aot");
+    let binary_path = exe_path(temp_dir.path(), "assert_aot");
     let run_output = Command::new(&binary_path)
         .output()
         .expect("Failed to execute compiled binary");
@@ -1518,7 +1523,7 @@ fn print_aot_run_stdout_exact() {
         String::from_utf8_lossy(&build_output.stderr)
     );
 
-    let binary_path = temp_dir.path().join("print_aot");
+    let binary_path = exe_path(temp_dir.path(), "print_aot");
     let run_output = Command::new(&binary_path)
         .output()
         .expect("Failed to execute compiled binary");
@@ -1544,7 +1549,7 @@ fn assert_false_aot_run_exits_101() {
         String::from_utf8_lossy(&build_output.stderr)
     );
 
-    let binary_path = temp_dir.path().join("assert_false_aot");
+    let binary_path = exe_path(temp_dir.path(), "assert_false_aot");
     let run_output = Command::new(&binary_path)
         .output()
         .expect("Failed to execute compiled binary");
@@ -1577,7 +1582,7 @@ fn panic_with_emojis_aot_run_exits_101() {
         String::from_utf8_lossy(&build_output.stderr)
     );
 
-    let binary_path = temp_dir.path().join("panic_emoji_aot");
+    let binary_path = exe_path(temp_dir.path(), "panic_emoji_aot");
     let run_output = Command::new(&binary_path)
         .output()
         .expect("Failed to execute compiled binary");
@@ -1610,7 +1615,7 @@ fn panic_aot_run_exits_101() {
         String::from_utf8_lossy(&build_output.stderr)
     );
 
-    let binary_path = temp_dir.path().join("panic_aot");
+    let binary_path = exe_path(temp_dir.path(), "panic_aot");
     let run_output = Command::new(&binary_path)
         .output()
         .expect("Failed to execute compiled binary");
@@ -1822,7 +1827,7 @@ fn while_loop_aot_build_and_run() {
         String::from_utf8_lossy(&build_output.stderr)
     );
 
-    let binary_path = temp_dir.path().join("while_aot");
+    let binary_path = exe_path(temp_dir.path(), "while_aot");
     let run_output = Command::new(&binary_path)
         .output()
         .expect("Failed to run compiled binary");
@@ -3454,7 +3459,7 @@ fn test_benchmark_files_aot_compile_and_run() {
         "fib.ryo build failed. STDERR: {}",
         String::from_utf8_lossy(&fib_build.stderr)
     );
-    let fib_exe = temp_dir.path().join("fib");
+    let fib_exe = exe_path(temp_dir.path(), "fib");
     let fib_run = Command::new(&fib_exe)
         .output()
         .expect("Failed to run compiled fib");
@@ -3471,7 +3476,7 @@ fn test_benchmark_files_aot_compile_and_run() {
         "eager_destruction.ryo build failed. STDERR: {}",
         String::from_utf8_lossy(&eager_build.stderr)
     );
-    let eager_exe = temp_dir.path().join("eager_destruction");
+    let eager_exe = exe_path(temp_dir.path(), "eager_destruction");
     let eager_run = Command::new(&eager_exe)
         .output()
         .expect("Failed to run compiled eager_destruction");

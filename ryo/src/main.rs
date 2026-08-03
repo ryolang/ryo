@@ -68,7 +68,20 @@ enum ToolchainAction {
     },
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Windows reserves 1 MiB for the main-thread stack (8 MiB on
+    // macOS/Linux); the recursive front-end and JIT-executed programs
+    // overflow that in debug builds. Run the CLI on a thread with an
+    // explicit larger stack — a lazily-committed reserve, so it costs
+    // nothing until used.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(cli_main)?
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+}
+
+fn cli_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
 
     match cli.command {

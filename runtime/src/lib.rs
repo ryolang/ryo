@@ -24,7 +24,20 @@ unsafe extern "C" {
 #[cfg(windows)]
 unsafe extern "C" {
     fn _write(fd: c_int, buf: *const c_void, count: u32) -> c_int;
+    fn _setmode(fd: c_int, mode: c_int) -> c_int;
 }
+
+/// `_O_BINARY` — no `\n` → `\r\n` translation on write.
+#[cfg(windows)]
+const O_BINARY: c_int = 0x8000;
+
+// MSVC's CRT defines `_fltused`; float code in core/ryu references it.
+// Rustc-linked binaries get it from the CRT, but the no_std archive is
+// linked by `zig cc`, which provides no definition — supply it here.
+#[cfg(all(windows, feature = "staticlib"))]
+#[unsafe(no_mangle)]
+#[used]
+pub static _fltused: c_int = 0;
 
 unsafe extern "C" {
     fn exit(code: c_int) -> !;
@@ -51,8 +64,12 @@ fn os_write(fd: c_int, ptr: *const u8, len: usize) -> isize {
     }
     #[cfg(windows)]
     // SAFETY: same. `_write` takes a u32 count; clamp (print/panic
-    // payloads are strings, far below 4 GiB in practice).
+    // payloads are strings, far below 4 GiB in practice). `_setmode`
+    // only flips a per-fd CRT flag; repeated calls are idempotent.
+    // Binary mode is required: the CRT's default text mode translates
+    // \n → \r\n, and print/panic must emit the exact bytes given.
     unsafe {
+        _setmode(fd, O_BINARY);
         _write(fd, ptr.cast::<c_void>(), len.min(u32::MAX as usize) as u32) as isize
     }
 }

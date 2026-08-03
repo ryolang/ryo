@@ -24,6 +24,7 @@ cranelift-jit = "0.131"
 cranelift-module = "0.131"
 cranelift-object = "0.131"
 xz2 = "0.1"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 logos = "0.16"
 tar = "0.4"
 target-lexicon = "0.13.5"

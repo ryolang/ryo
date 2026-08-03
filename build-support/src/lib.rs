@@ -4,6 +4,17 @@
 
 use std::path::{Path, PathBuf};
 
+/// Archive filename cargo emits for a `staticlib` crate on the given
+/// target triple: `ryo_runtime.lib` under MSVC, `libryo_runtime.a`
+/// everywhere else (including `*-windows-gnu`).
+fn archive_name(target: &str) -> &'static str {
+    if target.contains("msvc") {
+        "ryo_runtime.lib"
+    } else {
+        "libryo_runtime.a"
+    }
+}
+
 /// Resolve the `ryo-runtime` static archive for the current cargo
 /// profile and target triple, building it on demand, and return its
 /// path as a `String`.
@@ -34,7 +45,8 @@ pub fn ensure_runtime_archive(root_dir: &Path) -> String {
     // Build only the staticlib crate-type with the `staticlib` feature.
     // The crate is otherwise an rlib so that `cargo test` and the std JIT
     // host can link std's allocator/panic handler; the archive build forces
-    // `--crate-type staticlib` to emit the `.a` that `zig cc` links.
+    // `--crate-type staticlib` to emit the archive (`libryo_runtime.a`, or
+    // `ryo_runtime.lib` on MSVC) that `zig cc` links.
     cmd.arg("rustc")
         .arg("-p")
         .arg("ryo-runtime")
@@ -56,13 +68,11 @@ pub fn ensure_runtime_archive(root_dir: &Path) -> String {
     }
     // With an explicit `--target`, cargo namespaces the output under the
     // triple: <target-dir>/<triple>/<profile>/.
-    let path = custom_target_dir
-        .join(&target)
-        .join(&profile)
-        .join("libryo_runtime.a");
+    let archive = archive_name(&target);
+    let path = custom_target_dir.join(&target).join(&profile).join(archive);
     if !path.exists() {
         panic!(
-            "libryo_runtime.a still missing at {} after build attempt",
+            "{archive} still missing at {} after build attempt",
             path.display()
         );
     }
@@ -76,5 +86,23 @@ pub fn ensure_runtime_archive(root_dir: &Path) -> String {
                 path.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_name_msvc_uses_lib() {
+        assert_eq!(archive_name("x86_64-pc-windows-msvc"), "ryo_runtime.lib");
+        assert_eq!(archive_name("aarch64-pc-windows-msvc"), "ryo_runtime.lib");
+    }
+
+    #[test]
+    fn archive_name_everywhere_else_uses_a() {
+        assert_eq!(archive_name("x86_64-unknown-linux-gnu"), "libryo_runtime.a");
+        assert_eq!(archive_name("aarch64-apple-darwin"), "libryo_runtime.a");
+        assert_eq!(archive_name("x86_64-pc-windows-gnu"), "libryo_runtime.a");
     }
 }

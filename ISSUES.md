@@ -346,6 +346,12 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** Both accessors debug-assert `!r.is_param()`, but `TirRef::index()` is a bare `as usize` cast, so in a release build a param sentinel ref (≥ 2³¹) still flows into `self.spans[r.index()]` / `self.instructions[r.index()]` and panics index-out-of-bounds instead of being handled. The debug_assert only surfaces the contract violation in dev/test.
 **Resolution:** Promote to a real guard (return `Option` / fallback span, or `expect` with a clear message), or document the by-construction invariant that param sentinels never reach these accessors and keep the debug_assert as the contract.
 
+### I-124 — Lexer rejects CRLF line endings
+
+**Files:** `ryo-frontend/src/lexer.rs`
+**Summary:** `\r` matches no token pattern, so any CRLF source fails with `found '<error>'` at the end of the first line — a confusing diagnostic for the most common Windows editor default. Surfaced by the windows CI leg: git's `core.autocrlf=true` checked `examples/` and `benchmarks/` out as CRLF and every repo-file parse failed (worked around for CI by `.gitattributes` forcing `eol=lf` on `*.ryo`, but user-written CRLF files still fail).
+**Resolution:** Accept `\r\n` as a newline in the lexer (treat `\r` as whitespace adjacent to `\n`, keeping span accounting byte-accurate), and add a CRLF fixture test.
+
 ---
 
 ## 🟢 Cleanup
@@ -488,11 +494,23 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** Each call walks the whole function body to rebuild the target's loop-nesting stack, and it is queried per view/read pair in `collect_view_liveness`, per candidate in `refine_view_liveness_for_arm`, and per materialize site in `warn_redundant_materialize` — O(sites × body) recomputation with no memo.
 **Resolution:** Build a `TirRef`→nesting-stack map in a single pre-pass over the body and reuse it at the three call sites, preserving the cond/bounds-counts-as-inside and nested-loop semantics.
 
-### I-120 — No Windows CI coverage; `build-support` assumes a `.a` archive name
+### I-121 — Staged zig zip is carried into the toolchain dir on fallback rename
 
-**Files:** `.github/workflows/ci.yml`, `build-support/src/lib.rs` (archive path), `ryo-backend/src/toolchain.rs` (`zig_target`)
-**Summary:** After I-006/I-043 the compiler has no POSIX-only codegen paths, but nothing compiles the Windows-gated code (`#[cfg(windows)] _write` in `runtime/src/lib.rs`) — macOS, Linux, and the Docker suite all skip it. A naive `windows-latest` matrix leg fails two ways: `build-support`'s `ensure_runtime_archive` expects `libryo_runtime.a`, while `windows-msvc` produces `ryo_runtime.lib` (the compiler's `build.rs` panics before anything compiles), and `zig_target()` has no Windows entry so the toolchain-install step and every AOT test fail.
-**Resolution:** Add a scoped `windows-latest` job: fix the archive filename per target (`ryo_runtime.lib` on `*-msvc`), then run `cargo check --workspace --all-targets` and unit tests only (`cargo test -p ryo-core -p ryo-frontend -p ryo-runtime -p ryo-backend --lib`) — no zig install, no AOT/ASan/valgrind legs. A full Windows leg (zig download entry for `x86_64-windows`, AOT tests) belongs with the future `--target` cross-compile plumbing (`Triple::host()` hardcoded in `ryo-driver/src/pipeline.rs`, no `-target` passed to zig cc, per-target runtime archive).
+**Files:** `ryo-backend/src/toolchain.rs` (`download_zig` fallback rename; staged `zig-download.zip`)
+**Summary:** The zip path stages the download as `zig-download.zip` inside the temp dir and never deletes it after `extract_zip` succeeds. If a future zig zip ever lacks the `zig-{target}-{version}/` top-level directory, `source` falls back to `temp_path` and the rename carries the ~100 MB staged archive into the installed toolchain dir. Inert (zig still runs), but sloppy, and the staged file is never cleaned up on the happy path either.
+**Resolution:** `fs::remove_file(&zip_path).ok()` immediately after `extract_zip` succeeds.
+
+### I-122 — `extract_zip` silently skips non-enclosed entries
+
+**Files:** `ryo-backend/src/toolchain.rs` (`extract_zip`, the `enclosed_name()` skip)
+**Summary:** Entries that fail the zip-slip guard are skipped with `continue` and no diagnostic. For the pinned, trusted upstream archive this is the right posture, but if zig ever ships an unexpected layout the install silently drops files and fails later with a confusing "Zig binary not found after download".
+**Resolution:** `eprintln!` a one-line warning naming the skipped entry before the `continue`.
+
+### I-123 — `test_extract_zip_roundtrip` leaks its temp dir on assertion failure
+
+**Files:** `ryo-backend/src/toolchain.rs` (`tests::test_extract_zip_roundtrip`)
+**Summary:** The `fs::remove_dir_all(&dir)` cleanup only runs on the happy path; a failing assert leaves the `ryo-zip-test-{pid}` dir behind in the system temp. Harmless (CI reaps temp dirs), but it accumulates junk on dev machines when the test is iterated.
+**Resolution:** Use `tempfile::TempDir` (add as a `ryo-backend` dev-dependency) or a drop guard so cleanup is panic-safe.
 
 ---
 
