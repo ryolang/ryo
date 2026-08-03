@@ -406,12 +406,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** Adding a token means editing `RawToken`, `Token`, the giant manual `intern_token` match, and `Display` (plus the parser downstream) — ~45 non-payload variants of pure boilerplate.
 **Resolution:** Generate the quadruple from a single macro table (variant name, logos pattern, payload kind).
 
-### I-119 — `loop_nesting_of` recomputes nesting stacks per query
-
-**Files:** `ryo-frontend/src/ownership.rs` (`loop_nesting_of` :1000-1047; call sites :1089-1090, :1541-1545, :2557)
-**Summary:** Each call walks the whole function body to rebuild the target's loop-nesting stack, and it is queried per view/read pair in `collect_view_liveness`, per candidate in `refine_view_liveness_for_arm`, and per materialize site in `warn_redundant_materialize` — O(sites × body) recomputation with no memo.
-**Resolution:** Build a `TirRef`→nesting-stack map in a single pre-pass over the body and reuse it at the three call sites, preserving the cond/bounds-counts-as-inside and nested-loop semantics.
-
 ### I-121 — Staged zig zip is carried into the toolchain dir on fallback rename
 
 **Files:** `ryo-backend/src/toolchain.rs` (`download_zig` fallback rename; staged `zig-download.zip`)

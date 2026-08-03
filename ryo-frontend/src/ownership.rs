@@ -214,6 +214,15 @@ pub(crate) struct Ownership {
     /// later iterations, so it stays live through the whole loop.
     pub view_defer_loop: HashMap<TirRef, TirRef>,
 
+    /// Walk-constant pre-pass structure: instruction → the
+    /// `WhileLoop`/`ForRange` instructions whose body, condition, or
+    /// bounds contain it, outermost first. Computed in one traversal
+    /// before the walk so the liveness passes and the
+    /// redundant-materialize pass look nesting up instead of
+    /// re-walking the body per query. Constant per function, so
+    /// branch merges need no per-field rule for it.
+    pub loop_nesting: HashMap<TirRef, Vec<TirRef>>,
+
     /// Views whose projection ends at the current statement's end
     /// (P4). Drained by `analyze_stmt` after every statement, so a
     /// read and a consume within the same statement both see the view
@@ -994,60 +1003,79 @@ fn check_source_projected(
     );
 }
 
-/// The `WhileLoop`/`ForRange` instructions whose bodies (or conditions,
-/// which re-evaluate per iteration) contain `target`, outermost first.
-/// Used to decide whether a view's last read re-executes on a later
-/// iteration than its creation (P4, final spec §3.2).
-fn loop_nesting_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
-    fn walk(tir: &Tir, stmts: &[TirRef], target: TirRef, stack: &mut Vec<TirRef>) -> bool {
+/// Compute every instruction's loop-nesting stack — the
+/// `WhileLoop`/`ForRange` instructions whose bodies (or conditions,
+/// which re-evaluate per iteration) contain it, outermost first — in
+/// a single traversal. Replaces per-query body walks: the stack is
+/// walk-constant, so the liveness passes and the
+/// redundant-materialize pass look it up instead (P4, final spec
+/// §3.2).
+///
+/// A loop's whole subtree (condition, bounds, body) counts as inside
+/// the loop; an if's subtree keeps the if's own nesting. Recording a
+/// loop's full subtree before recursing into its body lets nested
+/// loops overwrite their own subtrees with deeper stacks — the TIR is
+/// tree-shaped, so each instruction's final entry is the one written
+/// by its unique outermost-in path.
+fn collect_loop_nesting(tir: &Tir) -> HashMap<TirRef, Vec<TirRef>> {
+    fn walk(
+        tir: &Tir,
+        stmts: &[TirRef],
+        stack: &[TirRef],
+        nesting: &mut HashMap<TirRef, Vec<TirRef>>,
+    ) {
         for &r in stmts {
-            if r == target {
-                return true;
-            }
             let mut sub: HashSet<TirRef> = HashSet::new();
             tir.collect_reachable(r, &mut sub);
-            if !sub.contains(&target) {
-                continue;
-            }
             match tir.inst(r).tag {
                 TirTag::WhileLoop | TirTag::ForRange => {
-                    stack.push(r);
-                    if let Some(body) = tir.loop_body(r)
-                        && walk(tir, &body, target, stack)
-                    {
-                        return true;
+                    // Everything the loop evaluates re-executes per
+                    // iteration, so it all counts as inside the loop.
+                    let mut inner = stack.to_vec();
+                    inner.push(r);
+                    sub.remove(&r);
+                    for x in sub {
+                        nesting.insert(x, inner.clone());
                     }
-                    // The target is in this loop's cond/bounds — those
-                    // re-evaluate per iteration, so it counts as
-                    // inside the loop.
-                    return true;
+                    // The loop instruction itself sits at the
+                    // enclosing nesting.
+                    nesting.insert(r, stack.to_vec());
+                    if let Some(body) = tir.loop_body(r) {
+                        walk(tir, &body, &inner, nesting);
+                    }
                 }
-                TirTag::IfStmt => {
-                    let view = tir.if_stmt_view(r);
-                    if walk(tir, &view.then_stmts, target, stack) {
-                        return true;
+                _ => {
+                    // Plain statements and ifs (condition included)
+                    // keep the enclosing nesting.
+                    for x in sub {
+                        nesting.insert(x, stack.to_vec());
                     }
-                    for elif in &view.elif_branches {
-                        if walk(tir, &elif.body, target, stack) {
-                            return true;
+                    if tir.inst(r).tag == TirTag::IfStmt {
+                        let view = tir.if_stmt_view(r);
+                        walk(tir, &view.then_stmts, stack, nesting);
+                        for elif in &view.elif_branches {
+                            walk(tir, &elif.body, stack, nesting);
+                        }
+                        if let Some(else_stmts) = &view.else_stmts {
+                            walk(tir, else_stmts, stack, nesting);
                         }
                     }
-                    if let Some(else_stmts) = &view.else_stmts
-                        && walk(tir, else_stmts, target, stack)
-                    {
-                        return true;
-                    }
-                    // In the if's condition — same nesting as the if.
-                    return true;
                 }
-                _ => return true,
             }
         }
-        false
     }
-    let mut stack = Vec::new();
-    walk(tir, &tir.body_stmts(), target, &mut stack);
-    stack
+    let mut nesting = HashMap::new();
+    walk(tir, &tir.body_stmts(), &[], &mut nesting);
+    nesting
+}
+
+/// `target`'s pre-computed nesting stack. The map covers every
+/// instruction reachable from the body — all callers query body
+/// instructions (views, reads, materialize calls, hazard sites) — and
+/// a ref outside the body nests in no loop anyway, so a missing entry
+/// means the empty stack, exactly what a fresh body walk would find.
+fn nesting_of(nesting: &HashMap<TirRef, Vec<TirRef>>, target: TirRef) -> &[TirRef] {
+    nesting.get(&target).map_or(&[], Vec::as_slice)
 }
 
 /// Pre-walk liveness for bound views (P4, final spec §3.2). See
@@ -1072,7 +1100,11 @@ struct ViewLiveness {
 /// passes a projection's last use. A read inside a loop that does not
 /// contain the view's creation re-executes on later iterations, so
 /// the projection's death is deferred to that loop's exit.
-fn collect_view_liveness(tir: &Tir, pool: &InternPool) -> ViewLiveness {
+fn collect_view_liveness(
+    tir: &Tir,
+    pool: &InternPool,
+    nesting: &HashMap<TirRef, Vec<TirRef>>,
+) -> ViewLiveness {
     let mut bindings: HashMap<StringId, TirRef> = HashMap::new();
     let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
     let mut arm_last_reads: HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>> = HashMap::new();
@@ -1087,8 +1119,8 @@ fn collect_view_liveness(tir: &Tir, pool: &InternPool) -> ViewLiveness {
     );
     let mut defer_to_loop = HashMap::new();
     for (view, read) in &last_use {
-        let created_in = loop_nesting_of(tir, *view);
-        let read_in = loop_nesting_of(tir, *read);
+        let created_in = nesting_of(nesting, *view);
+        let read_in = nesting_of(nesting, *read);
         // Scope rules guarantee `created_in` is a prefix of `read_in`
         // (a view's reads cannot escape its binding's scope). A
         // strictly deeper read re-executes on later iterations of the
@@ -1539,11 +1571,11 @@ fn warn_redundant_materialize(tir: &Tir, pool: &InternPool, own: &Ownership, sin
         // re-executes between iterations regardless of source order,
         // so it suppresses too (conservative).
         let mat_rank = rank(call);
-        let mat_loops = loop_nesting_of(tir, call);
+        let mat_loops = nesting_of(&own.loop_nesting, call);
         let defensive = own.owner_hazards.iter().any(|&(o, site)| {
             o == root
                 && (rank(site) > mat_rank
-                    || loop_nesting_of(tir, site)
+                    || nesting_of(&own.loop_nesting, site)
                         .iter()
                         .any(|l| mat_loops.contains(l)))
         });
@@ -1579,8 +1611,12 @@ fn analyze_function(
 
     // M8.4: view-liveness pre-pass (P4, final spec §3.2). The walk
     // consults these walk-constant tables to know when it passes a
-    // projection's last use (and which loop exit defers it).
-    let liveness = collect_view_liveness(tir, pool);
+    // projection's last use (and which loop exit defers it). The
+    // nesting map the deferral table is derived from is computed
+    // first, so the walk's per-arm refinement and the
+    // redundant-materialize pass reuse the same table.
+    own.loop_nesting = collect_loop_nesting(tir);
+    let liveness = collect_view_liveness(tir, pool, &own.loop_nesting);
     own.view_last_use = liveness.last_use;
     own.view_defer_loop = liveness.defer_to_loop;
     own.if_arm_last_reads = liveness.arm_last_reads;
@@ -2528,7 +2564,6 @@ fn stmts_subtree(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
 /// subtree — a post-join read lies on every path and keeps the view
 /// live in every arm.
 fn refine_view_liveness_for_arm(
-    tir: &Tir,
     own: &mut Ownership,
     if_ref: TirRef,
     arm_index: usize,
@@ -2563,7 +2598,8 @@ fn refine_view_liveness_for_arm(
                 // only the global max read, so re-apply the pre-pass's
                 // `created_in < read_in` test to the arm-local read the
                 // override would install.
-                if loop_nesting_of(tir, vi).len() < loop_nesting_of(tir, lu).len() {
+                if nesting_of(&own.loop_nesting, vi).len() < nesting_of(&own.loop_nesting, lu).len()
+                {
                     continue;
                 }
                 saved.push((vi, global_lu));
@@ -2653,7 +2689,7 @@ fn analyze_if_stmt(
     let snap_live_projections = own.live_projections.clone();
 
     let then_subtree = stmts_subtree(tir, &view.then_stmts);
-    let saved = refine_view_liveness_for_arm(tir, own, r, 0, &if_subtree, &then_subtree);
+    let saved = refine_view_liveness_for_arm(own, r, 0, &if_subtree, &then_subtree);
     for stmt in &view.then_stmts {
         analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
     }
@@ -2673,7 +2709,7 @@ fn analyze_if_stmt(
         drain_dying_views(own);
         let elif_subtree = stmts_subtree(tir, &elif.body);
         let saved =
-            refine_view_liveness_for_arm(tir, own, r, 1 + elif_index, &if_subtree, &elif_subtree);
+            refine_view_liveness_for_arm(own, r, 1 + elif_index, &if_subtree, &elif_subtree);
         for stmt in &elif.body {
             analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
         }
@@ -2689,7 +2725,6 @@ fn analyze_if_stmt(
 
         let else_subtree = stmts_subtree(tir, else_stmts);
         let saved = refine_view_liveness_for_arm(
-            tir,
             own,
             r,
             1 + view.elif_branches.len(),
