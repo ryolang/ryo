@@ -445,12 +445,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Summary:** R18's rule: side tables keyed by a dense arena index belong in a `Vec` indexed by that index; hash maps are for sparse/string-keyed/unbounded data only. The ownership pass keeps five per-inst `HashMap<TirRef, _>` tables on the hot per-expression path, builds a whole-body `HashMap<TirRef, u32>` program-order map twice per function, and sema keeps a whole-program `HashSet<InstRef>` queried per `Borrow` inst — all keyed by dense `u32` arena indices. Distinct from I-064/I-065/I-107/I-119, which cover recomputation and linear lookups in other helpers.
 **Resolution:** Convert to `Vec<Option<…>>`/`Vec<bool>` side tables sized from the arena length (`TirRef::index()`/`InstRef::index()`), built once per function (per program for `call_arg_refs`). Same refactor shape as I-107's param-index map; do them together.
 
-### I-130 — Windows CI leg runs a redundant `cargo check` before `cargo test`
-
-**Files:** `.github/workflows/ci.yml` (windows job)
-**Summary:** The windows-latest leg runs `cargo check --workspace --all-targets` (~50s) immediately before `cargo test --workspace`, which compiles the same targets with full codegen — the check artifacts don't speed the test build up, and any compile error would fail the test step just as clearly. It was added in #99 when the native Windows leg was introduced. This is the largest avoidable chunk of why the windows leg takes ~4:30 vs ~1:45 for the other legs (the rest is intrinsic: ~43s Zig cache extraction and ~2x process-spawn cost under Defender/NTFS — caches hit correctly on all legs).
-**Resolution:** Delete the `cargo check` step from the windows job. Quick win — fold into any m8.4.2 branch.
-
 ---
 
 ## Cross-References
