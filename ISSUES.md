@@ -523,18 +523,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** The zip path stages the download as `zig-download.zip` inside the temp dir and never deletes it after `extract_zip` succeeds. If a future zig zip ever lacks the `zig-{target}-{version}/` top-level directory, `source` falls back to `temp_path` and the rename carries the ~100 MB staged archive into the installed toolchain dir. Inert (zig still runs), but sloppy, and the staged file is never cleaned up on the happy path either.
 **Resolution:** `fs::remove_file(&zip_path).ok()` immediately after `extract_zip` succeeds.
 
-### I-122 — `extract_zip` silently skips non-enclosed entries
-
-**Files:** `ryo-backend/src/toolchain.rs` (`extract_zip`, the `enclosed_name()` skip)
-**Summary:** Entries that fail the zip-slip guard are skipped with `continue` and no diagnostic. For the pinned, trusted upstream archive this is the right posture, but if zig ever ships an unexpected layout the install silently drops files and fails later with a confusing "Zig binary not found after download".
-**Resolution:** `eprintln!` a one-line warning naming the skipped entry before the `continue`.
-
-### I-123 — `test_extract_zip_roundtrip` leaks its temp dir on assertion failure
-
-**Files:** `ryo-backend/src/toolchain.rs` (`tests::test_extract_zip_roundtrip`)
-**Summary:** The `fs::remove_dir_all(&dir)` cleanup only runs on the happy path; a failing assert leaves the `ryo-zip-test-{pid}` dir behind in the system temp. Harmless (CI reaps temp dirs), but it accumulates junk on dev machines when the test is iterated.
-**Resolution:** Use `tempfile::TempDir` (add as a `ryo-backend` dev-dependency) or a drop guard so cleanup is panic-safe.
-
 ### I-128 — Pass entry points far exceed the R7 size discipline
 
 **Files:** measured by brace-depth scan, tests excluded — worst offenders: `ryo-frontend/src/ownership.rs` `visit_expr` :3633 (~411 lines), `analyze_function` :1560 (~383), `analyze_if_stmt` :2588 (~283); `ryo-frontend/src/sema.rs` `analyze_stmt` :483 (~370), `check_binary_op` :1210 (~264), `analyze_expr` :932 (~259), `emit_builtin_call` :1715 (~218), `check_call` :1475 (~215); `ryo-backend/src/codegen.rs` `emit_call` :2198 (~310), `eval_inst` :1272 (~249), `emit_stmt` :773 (~245), `compile_function` :448 (~228), `eval_inst_str` :1803 (~201); `ryo-frontend/src/parser.rs` `expression_parser` :400 (~228); `ryo-core/src/uir.rs` `write_inst` :1106 (~152) and the same pattern in `ryo-core/src/tir.rs:1155` (~108)
@@ -546,18 +534,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Files:** `ryo-frontend/src/ownership.rs` (`origin` :113, `owner_at_read` :140, `view_last_use` :201, `view_defer_loop` :214, `consumer_of` :1749, `program_order` :1298-1315 built per function at :1504 and :1620), `ryo-frontend/src/sema.rs` (`call_arg_refs: HashSet<InstRef>` :198, :204-215, queried at :1169)
 **Summary:** R18's rule: side tables keyed by a dense arena index belong in a `Vec` indexed by that index; hash maps are for sparse/string-keyed/unbounded data only. The ownership pass keeps five per-inst `HashMap<TirRef, _>` tables on the hot per-expression path, builds a whole-body `HashMap<TirRef, u32>` program-order map twice per function, and sema keeps a whole-program `HashSet<InstRef>` queried per `Borrow` inst — all keyed by dense `u32` arena indices. Distinct from I-064/I-065/I-107/I-119, which cover recomputation and linear lookups in other helpers.
 **Resolution:** Convert to `Vec<Option<…>>`/`Vec<bool>` side tables sized from the arena length (`TirRef::index()`/`InstRef::index()`), built once per function (per program for `call_arg_refs`). Same refactor shape as I-107's param-index map; do them together.
-
-### I-130 — `ryo-core` depends on `ariadne` but never uses it
-
-**Files:** `ryo-core/Cargo.toml` (:8)
-**Summary:** `ariadne` (the diagnostic rendering crate) is declared as a dependency of `ryo-core` but no code in the crate references it — grep finds only the Cargo.toml line. R6 requires a one-line justification per dependency; this one has zero usage, and it couples the "core" IR crate to a rendering crate's release cycle for nothing. Same smell as I-104 (chumsky-for-`SimpleSpan`), except that one is at least used.
-**Resolution:** Delete the dependency line. Fold into the same PR as I-104's `Span` newtype if that lands first, otherwise standalone.
-
-### I-131 — Spec citations missing on pre-M8 language-rule diagnostics (R12)
-
-**Files:** `ryo-frontend/src/sema.rs` (`BreakOutsideLoop` :826-833, `ConditionNotBool` :893-898, `UndefinedVariable` :961-966, `ArityMismatch` :1562-1565 and :2035-2039), `ryo-frontend/src/ownership.rs` (`check_use_moved` / E0020 :2295-2307 — no citation anywhere in the function)
-**Summary:** R12 requires every language-rule implementation to carry a comment with the spec section reference. The M8.x-era rules comply (`sema.rs:1192` §3.1, `sema.rs:420-421` final spec §3.3/§3.4, `ownership.rs:3688` E4 §3.3, `ownership.rs:1618` P5 §3.2), but the older core diagnostics cite nothing — a reviewer cannot check them against the spec without hunting. Partial compliance, not absence.
-**Resolution:** Add the section-reference comments to the five sites above (and audit neighbors while there). Pure comment change; safe to batch.
 
 ---
 

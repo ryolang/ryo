@@ -159,6 +159,11 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), CompilerError> {
             CompilerError::ToolchainError(format!("Failed to read zip entry {i}: {e}"))
         })?;
         let Some(enclosed) = entry.enclosed_name() else {
+            // Surface dropped entries: a trusted upstream archive should
+            // never trip the zip-slip guard, so a skip means an unexpected
+            // layout that would otherwise fail later with a confusing
+            // "Zig binary not found after download".
+            eprintln!("warning: skipping non-enclosed zip entry '{}'", entry.name());
             continue;
         };
         let outpath = dest.join(enclosed);
@@ -220,10 +225,10 @@ mod tests {
     #[test]
     fn test_extract_zip_roundtrip() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("ryo-zip-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let zip_path = dir.join("test.zip");
-        let dest = dir.join("out");
+        // TempDir cleans up on drop even when an assertion fails mid-test.
+        let dir = tempfile::TempDir::new().unwrap();
+        let zip_path = dir.path().join("test.zip");
+        let dest = dir.path().join("out");
         {
             let file = fs::File::create(&zip_path).unwrap();
             let mut writer = zip::ZipWriter::new(file);
@@ -239,7 +244,6 @@ mod tests {
             fs::read(dest.join("zig-x86_64-windows-0.16.0/zig.exe")).unwrap(),
             b"fake"
         );
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
