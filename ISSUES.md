@@ -298,12 +298,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** Decoding an unknown mode word yields `Borrow` — the least restrictive convention — instead of an error. Harmless today; a footgun if the enum grows or a payload is corrupted.
 **Resolution:** Return `Option<ParamMode>` and internal-error on unknown values at the single decode site (`call_view`).
 
-### I-090 — Two near-verbatim branch-merge implementations in the ownership pass
-
-**Files:** `ryo-frontend/src/ownership.rs` (`merge_branches` :163-294, `merge_non_monotone` :1238-1310)
-**Summary:** The N-way and 2-way merges re-implement the same any-Moved-wins + binding-aware-override + dead-store intersect/union logic; the override blocks (:226-260 vs :1261-1290) are near-verbatim copies. Changing merge semantics requires editing both.
-**Resolution:** Express `merge_non_monotone` in terms of the shared merge core, or extract the override/intersect helpers used by both.
-
 ### I-091 — UIR/TIR view decoders allocate a `Vec` per decode
 
 **Files:** `ryo-core/src/uir.rs` (`call_view` :843-847, `if_stmt_view` :980-1001, `body_stmts` :320-326, `while_loop_view` :915, `for_range_view` :931-935, `method_call_view` :955-959), `ryo-core/src/tir.rs` (`call_view`), `ryo-backend/src/codegen.rs` (call view args/modes)
