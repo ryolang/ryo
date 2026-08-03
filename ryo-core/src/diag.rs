@@ -73,9 +73,12 @@ pub enum DiagCode {
     /// A valueless result — `void` (e.g. the result of a
     /// void-returning call like `print(...)`) or `never` (a
     /// diverging expression like `panic(...)`, which yields no
-    /// value at all) — appeared in a binding position that requires
-    /// a real value (var decl initializer, assignment right-hand
-    /// side).
+    /// value at all) — appeared in a position that requires a real
+    /// value: a binding (var decl initializer, assignment
+    /// right-hand side), a `return` operand, an operator operand,
+    /// a call argument, or a condition / slice / range bound. A
+    /// `never` value's only legal form is a bare expression
+    /// statement (e.g. `panic("...")` on its own line).
     VoidValueInExpression,
     /// An `if` or `elif` condition expression evaluated to a non-bool
     /// type. Ryo requires conditions to be `bool` (no truthy coercion).
