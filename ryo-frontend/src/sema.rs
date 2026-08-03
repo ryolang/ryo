@@ -507,7 +507,7 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
     match inst.tag {
         InstTag::VarDecl => {
             let view = sema.uir.var_decl_view(r);
-            let init_tir = analyze_expr(sema, fcx, scope, view.initializer);
+            let init_tir = analyze_expr_allow_never(sema, fcx, scope, view.initializer);
             let inferred = fcx.builder.ty_of(init_tir);
             // Reject void/never RHS and recover with the error
             // sentinel so downstream uses don't cascade.
@@ -592,7 +592,9 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                 InstData::UnOp(o) => o,
                 _ => unreachable!("ExprStmt must carry InstData::UnOp"),
             };
-            let val_tir = analyze_expr(sema, fcx, scope, operand);
+            // The one position where a `never` value is legal: a bare
+            // `panic(...)` statement diverges by design.
+            let val_tir = analyze_expr_allow_never(sema, fcx, scope, operand);
             fcx.builder
                 .unary(TirTag::ExprStmt, sema.pool.void(), val_tir, span)
         }
@@ -628,7 +630,7 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
         }
         InstTag::AssignOrDecl => {
             let view = sema.uir.assign_or_decl_view(r);
-            let value_tir = analyze_expr(sema, fcx, scope, view.value);
+            let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
             let value_ty = fcx.builder.ty_of(value_tir);
 
             match scope.lookup_full(view.name) {
@@ -693,7 +695,7 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
         }
         InstTag::CompoundAssign => {
             let view = sema.uir.compound_assign_view(r);
-            let value_tir = analyze_expr(sema, fcx, scope, view.value);
+            let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
             let value_ty = fcx.builder.ty_of(value_tir);
 
             let (existing_ty, is_mutable) = match scope.lookup_full(view.name) {
@@ -951,7 +953,35 @@ fn resolve_var_decl_type(view: &VarDeclView, inferred: TypeId, sema: &mut Sema<'
     }
 }
 
+/// Expression-position analysis. A `never`-typed result (e.g. a
+/// `panic` call) is rejected: `panic` may only appear as a bare
+/// statement, never where a value is required (return operand,
+/// operator operands, call args, conditions, slice/range bounds).
+/// All recursive descent goes through this wrapper, so the rule
+/// covers every operand position uniformly. The never-tolerant
+/// entry points — a bare ExprStmt and the binding sites, which run
+/// their own valueless-RHS check — call [`analyze_expr_allow_never`].
 fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRef) -> TirRef {
+    let t = analyze_expr_allow_never(sema, fcx, scope, r);
+    if sema.pool.is_never(fcx.builder.ty_of(t)) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(r),
+            DiagCode::VoidValueInExpression,
+            "a 'never' value (e.g. `panic(...)`) can only be used as a statement".to_string(),
+        ));
+        return fcx
+            .builder
+            .unreachable(sema.pool.error_type(), sema.uir.span(r));
+    }
+    t
+}
+
+fn analyze_expr_allow_never(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+) -> TirRef {
     if let Some(t) = fcx.inst_map[r.index()] {
         return t;
     }
@@ -2901,11 +2931,24 @@ mod tests {
     }
 
     #[test]
-    fn return_panic_accepted() {
-        // `return <never>` is the idiomatic diverging form — the
-        // never value coerces to any return type.
-        let code = "fn f() -> int:\n\treturn panic(\"boom\")\n";
-        let (_tirs, _pool) = run(code).unwrap();
+    fn return_panic_rejected() {
+        // `return <never>` is rejected like every other value
+        // position: `panic` may only appear as a bare statement.
+        let diags = run("fn f() -> int:\n\treturn panic(\"boom\")\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::VoidValueInExpression));
+    }
+
+    #[test]
+    fn never_binop_operand_rejected() {
+        let diags = run("fn f() -> int:\n\treturn 1 + panic(\"boom\")\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::VoidValueInExpression));
+    }
+
+    #[test]
+    fn never_call_arg_rejected() {
+        let code = "fn g(x: int):\n\tprint(\"{x}\")\n\nfn main():\n\tg(panic(\"boom\"))\n";
+        let diags = run(code).unwrap_err();
+        assert!(any_code(&diags, DiagCode::VoidValueInExpression));
     }
 
     #[test]
