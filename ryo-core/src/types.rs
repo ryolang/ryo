@@ -348,10 +348,10 @@ impl InternPool {
             Tag::Never => TypeKind::Never,
             Tag::View => match item.data {
                 0 => TypeKind::View(ViewKind::Str),
-                // I-106 trusted-producer invariant: no Bytes/Slice
+                // Trusted-producer invariant: no Bytes/Slice
                 // constructor exists at M8.4, so the pool can never
                 // hold a `data == 1` or `data >= 2` payload.
-                _ => unreachable!("I-106: no Bytes/Slice constructor exists"),
+                _ => unreachable!("no Bytes/Slice constructor exists"),
             },
             Tag::Tuple => TypeKind::Tuple,
         }
@@ -497,8 +497,8 @@ impl InternPool {
     /// reinterpreting that as `&[TypeId]` requires
     /// `#[repr(transparent)]` on `TypeId` plus an unsafe transmute.
     /// Only used today by `Display` for diagnostic formatting and
-    /// by tests, neither of which is hot. Tracked as a follow-up
-    /// in ISSUES.md if it ever shows up in a profile.
+    /// by tests, neither of which is hot. Revisit if it ever shows
+    /// up in a profile.
     pub fn tuple_elements_vec(&self, id: TypeId) -> Vec<TypeId> {
         let item = self.items[id.0 as usize];
         debug_assert!(matches!(item.tag, Tag::Tuple));

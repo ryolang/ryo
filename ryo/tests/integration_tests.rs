@@ -964,7 +964,7 @@ fn ir_emit_tir_prints_partial_tir_with_unreachable_on_sema_error() {
 
 #[test]
 fn test_ryo_ir_surfaces_warnings_on_success() {
-    // I-044 regression: `ryo ir` used to call sema + ownership
+    // Regression: `ryo ir` used to call sema + ownership
     // against a sink and only render on the error path, so any
     // warnings (W0001 DeadStore, W0002 RedundantMove) emitted on
     // a successful run were silently dropped. After the
@@ -2052,6 +2052,35 @@ fn test_slice_print_roundtrip() {
     assert_ryo_runs!(
         "slice_print.ryo",
         "fn main():\n\ts: str = \"hello world\"\n\tprint(s[0:5])\n\tprint(s[6:])\n\tprint(s[:5])\n"
+    );
+}
+
+#[test]
+fn test_bare_int_to_str_statement() {
+    // A formatter builtin called as a bare statement (result
+    // discarded) must not trip the scalar-Free guard in codegen.
+    assert_ryo_runs!("bare_int_to_str.ryo", "fn main():\n\tint_to_str(5)\n");
+}
+
+#[test]
+fn test_bare_float_to_str_statement() {
+    // Same, for the float formatter.
+    assert_ryo_runs!("bare_float_to_str.ryo", "fn main():\n\tfloat_to_str(2.5)\n");
+}
+
+#[test]
+fn test_bare_bool_to_str_statement() {
+    // Same, for the bool formatter.
+    assert_ryo_runs!("bare_bool_to_str.ryo", "fn main():\n\tbool_to_str(true)\n");
+}
+
+#[test]
+fn test_bare_slice_statement() {
+    // A bare view-typed expression statement (result discarded) must
+    // evaluate through the view entry point, not the scalar path.
+    assert_ryo_runs!(
+        "bare_slice.ryo",
+        "fn main():\n\ts: str = \"hello\"\n\ts[0:2]\n"
     );
 }
 
@@ -3797,7 +3826,7 @@ fn test_str_materialize_rejects_owned_str() {
 
 #[test]
 fn test_examples_parse() {
-    // I-101 sweep: every top-level examples/*.ryo must parse. Local
+    // Sweep: every top-level examples/*.ryo must parse. Local
     // complement to the upstream Examples CI workflow — no CI
     // dependency, and it guards examples/string_slices.ryo (Task 11).
     // `read_dir` is non-recursive, so examples/future/ (not yet

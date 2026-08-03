@@ -42,6 +42,18 @@ const VIEW_SLOT_SIZE: u32 = 16;
 const OFF_PTR: i32 = 0;
 const OFF_LEN: i32 = 8;
 
+/// How a statement or body ended the current block, if it did.
+/// Replaces the `bool` that conflated Break/Continue with Return:
+/// callers distinguish "block ended" (`!= None`) from "the function
+/// definitely returns" (`== Return`) explicitly.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Terminator {
+    None,
+    Return,
+    Break,
+    Continue,
+}
+
 /// Returns `true` if `ty` resolves to `Str` in the pool.
 ///
 /// Callers use this to gate multi-value (fat-pointer) paths before
@@ -630,9 +642,9 @@ impl<M: Module> Codegen<M> {
                 }
             }
 
-            let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
+            let body_term = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
 
-            if !has_return {
+            if body_term == Terminator::None {
                 if is_main {
                     let zero = builder.ins().iconst(int_type, 0);
                     Self::emit_return(&mut builder, &mut ctx, &[zero])?;
@@ -644,7 +656,7 @@ impl<M: Module> Codegen<M> {
                 }
             }
 
-            // I-070: no scheduled Free may be dropped without a
+            // No scheduled Free may be dropped without a
             // same-target substitute having fired. The ownership pass
             // deliberately anchors some temp frees twice — once at the
             // consuming sub-expression and once at the enclosing Return
@@ -687,19 +699,21 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         stmts: &[TirRef],
-    ) -> Result<bool, String> {
-        let mut block_terminated = false;
+    ) -> Result<Terminator, String> {
+        let mut terminator = Terminator::None;
         for &stmt_ref in stmts {
-            if block_terminated {
+            if terminator != Terminator::None {
                 break;
             }
-            block_terminated = Self::emit_stmt(builder, ctx, stmt_ref)?;
-            // Skip Free emission after terminators (e.g. Return): the
-            // current block is sealed and Cranelift rejects any
-            // instruction after a terminator. Returns also transfer
-            // ownership of the returned value to the caller, so
-            // emitting a Free here would be incorrect anyway.
-            if !block_terminated {
+            terminator = Self::emit_stmt(builder, ctx, stmt_ref)?;
+            // Skip Free emission after terminators (Return / Break /
+            // Continue): the current block is sealed and Cranelift
+            // rejects any instruction after a terminator. Returns also
+            // transfer ownership of the returned value to the caller, so
+            // emitting a Free here would be incorrect anyway. Break and
+            // Continue fire their own Frees before the jump (see
+            // emit_stmt), so skipping here drops nothing.
+            if terminator == Terminator::None {
                 // Anchor-on-stmt Frees first (e.g. dead-store survivors
                 // anchored after a VarDecl), then a sweep that catches
                 // sub-expression-anchored entries whose consumers have
@@ -708,22 +722,22 @@ impl<M: Module> Codegen<M> {
                 Self::sweep_due_frees(builder, ctx)?;
             }
         }
-        Ok(block_terminated)
+        Ok(terminator)
     }
 
     fn emit_scoped_body(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         stmts: &[TirRef],
-    ) -> Result<bool, String> {
+    ) -> Result<Terminator, String> {
         let saved_locals = ctx.locals.clone();
         let saved_str_locals = ctx.str_locals.clone();
         let saved_view_locals = ctx.view_locals.clone();
-        let block_terminated = Self::emit_body(builder, ctx, stmts)?;
+        let terminator = Self::emit_body(builder, ctx, stmts)?;
         ctx.locals = saved_locals;
         ctx.str_locals = saved_str_locals;
         ctx.view_locals = saved_view_locals;
-        Ok(block_terminated)
+        Ok(terminator)
     }
 
     /// Store every inout parameter's current `Variable` back through its
@@ -776,14 +790,15 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// Emit a top-level statement instruction. Returns `true` iff
-    /// the statement was a terminator (Return / ReturnVoid) — the
-    /// caller stops the body walk on the first one.
+    /// Emit a top-level statement instruction. Returns the statement's
+    /// [`Terminator`] — anything other than `Terminator::None` ends the
+    /// current block, and the caller stops the body walk on the first
+    /// one.
     fn emit_stmt(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-    ) -> Result<bool, String> {
+    ) -> Result<Terminator, String> {
         let inst = ctx.tir.inst(r);
         match inst.tag {
             TirTag::VarDecl => {
@@ -809,7 +824,7 @@ impl<M: Module> Codegen<M> {
                         }
                         _ => unreachable!("str-typed initializer should produce ValueRepr::Str"),
                     }
-                    return Ok(false);
+                    return Ok(Terminator::None);
                 }
                 if ctx.pool.is_view(inst.ty) {
                     let repr = Self::eval_inst_view(builder, ctx, view.initializer)?;
@@ -829,7 +844,7 @@ impl<M: Module> Codegen<M> {
                         }
                         _ => unreachable!("view-typed initializer should produce ValueRepr::View"),
                     }
-                    return Ok(false);
+                    return Ok(Terminator::None);
                 }
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
                 // The variable's resolved type lives in the VarDecl
@@ -838,7 +853,7 @@ impl<M: Module> Codegen<M> {
                 let var = builder.declare_var(cl_ty);
                 builder.def_var(var, val);
                 ctx.locals.insert(view.name, var);
-                Ok(false)
+                Ok(Terminator::None)
             }
             TirTag::Return => {
                 let operand = match inst.data {
@@ -862,7 +877,7 @@ impl<M: Module> Codegen<M> {
                     Self::emit_due_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[val])?;
                 }
-                Ok(true)
+                Ok(Terminator::Return)
             }
             TirTag::ReturnVoid => {
                 // Bare `return` in a void function. If this is
@@ -876,15 +891,27 @@ impl<M: Module> Codegen<M> {
                     Self::emit_due_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[])?;
                 }
-                Ok(true)
+                Ok(Terminator::Return)
             }
             TirTag::ExprStmt => {
                 let operand = match inst.data {
                     TirData::UnOp(o) => o,
                     _ => unreachable!("ExprStmt must carry TirData::UnOp"),
                 };
-                let _ = Self::eval_inst(builder, ctx, operand)?;
-                Ok(false)
+                // Str-typed operands (bare formatter calls, str(view),
+                // user str-returning calls) go through the str entry
+                // point, which caches the triple for the scheduled temp
+                // Free; view-typed operands (bare slices) go through the
+                // view entry point; the scalar path rejects both.
+                let operand_ty = ctx.tir.inst(operand).ty;
+                if is_str_type(operand_ty, ctx.pool) {
+                    let _ = Self::eval_inst_str(builder, ctx, operand)?;
+                } else if ctx.pool.is_view(operand_ty) {
+                    let _ = Self::eval_inst_view(builder, ctx, operand)?;
+                } else {
+                    let _ = Self::eval_inst(builder, ctx, operand)?;
+                }
+                Ok(Terminator::None)
             }
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
             TirTag::Assign => {
@@ -925,7 +952,7 @@ impl<M: Module> Codegen<M> {
                     builder.def_var(locals.ptr, ptr);
                     builder.def_var(locals.len, len);
                     builder.def_var(locals.cap, cap);
-                    return Ok(false);
+                    return Ok(Terminator::None);
                 }
                 if ctx.pool.is_view(inst.ty) {
                     let repr = Self::eval_inst_view(builder, ctx, view.value)?;
@@ -942,7 +969,7 @@ impl<M: Module> Codegen<M> {
                     // reseat the pair.
                     builder.def_var(locals.ptr, ptr);
                     builder.def_var(locals.len, len);
-                    return Ok(false);
+                    return Ok(Terminator::None);
                 }
                 let val = Self::eval_inst(builder, ctx, view.value)?;
                 let var = ctx.locals.get(&view.name).ok_or_else(|| {
@@ -952,7 +979,7 @@ impl<M: Module> Codegen<M> {
                     )
                 })?;
                 builder.def_var(*var, val);
-                Ok(false)
+                Ok(Terminator::None)
             }
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
@@ -980,7 +1007,7 @@ impl<M: Module> Codegen<M> {
                 };
 
                 builder.def_var(*var, result);
-                Ok(false)
+                Ok(Terminator::None)
             }
             TirTag::WhileLoop => Self::generate_while_loop(builder, ctx, r),
             TirTag::ForRange => Self::generate_for_range(builder, ctx, r),
@@ -1001,7 +1028,7 @@ impl<M: Module> Codegen<M> {
                     return Err("codegen reached break outside loop".to_string());
                 };
                 builder.ins().jump(loop_ctx.exit_block, &[]);
-                Ok(true)
+                Ok(Terminator::Break)
             }
             TirTag::Continue => {
                 debug_assert!(
@@ -1015,7 +1042,7 @@ impl<M: Module> Codegen<M> {
                     return Err("codegen reached continue outside loop".to_string());
                 };
                 builder.ins().jump(loop_ctx.continue_target, &[]);
-                Ok(true)
+                Ok(Terminator::Continue)
             }
             other => Err(format!(
                 "emit_stmt: instruction at %{} is not a statement (tag={:?})",
@@ -1029,7 +1056,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-    ) -> Result<bool, String> {
+    ) -> Result<Terminator, String> {
         let view = ctx.tir.if_stmt_view(r);
         let merge_block = builder.create_block();
 
@@ -1080,14 +1107,19 @@ impl<M: Module> Codegen<M> {
         // both Ok and Err paths by binding the result first.
         ctx.branch_stack.push(branch_ids.then_branch);
         Self::emit_conditional_dead_drops(builder, ctx, r, branch_ids.then_branch)?;
-        let then_returns_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
+        let then_term_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
         ctx.branch_stack.pop();
-        let then_returns = then_returns_result?;
-        if !then_returns {
+        let then_term = then_term_result?;
+        if then_term == Terminator::None {
             builder.ins().jump(merge_block, &[]);
         }
 
-        let mut all_branches_return = then_returns;
+        // Two separate questions the old bool conflated —
+        // `all_terminated` (every arm ends the block, so the merge
+        // block is unreachable) and `all_return` (every arm actually
+        // returns, which is what the if reports to its caller).
+        let mut all_terminated = then_term != Terminator::None;
+        let mut all_return = then_term == Terminator::Return;
         for (i, elif) in view.elif_branches.iter().enumerate() {
             let elif_cond_block = next_blocks[i];
             builder.seal_block(elif_cond_block);
@@ -1111,13 +1143,14 @@ impl<M: Module> Codegen<M> {
             let elif_branch_id = branch_ids.elif_branches.get(i).copied().unwrap_or_default();
             ctx.branch_stack.push(elif_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, elif_branch_id)?;
-            let elif_returns_result = Self::emit_scoped_body(builder, ctx, &elif.body);
+            let elif_term_result = Self::emit_scoped_body(builder, ctx, &elif.body);
             ctx.branch_stack.pop();
-            let elif_returns = elif_returns_result?;
-            if !elif_returns {
+            let elif_term = elif_term_result?;
+            if elif_term == Terminator::None {
                 builder.ins().jump(merge_block, &[]);
             }
-            all_branches_return = all_branches_return && elif_returns;
+            all_terminated = all_terminated && elif_term != Terminator::None;
+            all_return = all_return && elif_term == Terminator::Return;
         }
 
         if let Some(else_stmts) = &view.else_stmts {
@@ -1126,13 +1159,14 @@ impl<M: Module> Codegen<M> {
             let else_branch_id = branch_ids.else_branch.unwrap_or_default();
             ctx.branch_stack.push(else_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, else_branch_id)?;
-            let else_returns_result = Self::emit_scoped_body(builder, ctx, else_stmts);
+            let else_term_result = Self::emit_scoped_body(builder, ctx, else_stmts);
             ctx.branch_stack.pop();
-            let else_returns = else_returns_result?;
-            if !else_returns {
+            let else_term = else_term_result?;
+            if else_term == Terminator::None {
                 builder.ins().jump(merge_block, &[]);
             }
-            all_branches_return = all_branches_return && else_returns;
+            all_terminated = all_terminated && else_term != Terminator::None;
+            all_return = all_return && else_term == Terminator::Return;
         } else if needs_fallthrough_block {
             // The synthetic fall-through — emit the arm-gated
             // DeadDrops for the paths where no arm reseated the binding.
@@ -1143,24 +1177,38 @@ impl<M: Module> Codegen<M> {
             Self::emit_conditional_dead_drops(builder, ctx, r, fallthrough_id)?;
             ctx.branch_stack.pop();
             builder.ins().jump(merge_block, &[]);
-            all_branches_return = false;
+            all_terminated = false;
+            all_return = false;
         } else {
-            all_branches_return = false;
+            all_terminated = false;
+            all_return = false;
         }
 
         builder.seal_block(merge_block);
-        if !all_branches_return {
+        if !all_terminated {
             builder.switch_to_block(merge_block);
         }
 
-        Ok(all_branches_return)
+        // The if terminates the block only when every arm does; it
+        // counts as a Return for the caller only when every arm
+        // actually returns. For mixed all-terminating shapes (e.g.
+        // break in one arm, return in another) the Break variant is a
+        // stand-in: callers only distinguish None / Return /
+        // "terminated some other way".
+        Ok(if all_return {
+            Terminator::Return
+        } else if all_terminated {
+            Terminator::Break
+        } else {
+            Terminator::None
+        })
     }
 
     fn generate_while_loop(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-    ) -> Result<bool, String> {
+    ) -> Result<Terminator, String> {
         let view = ctx.tir.while_loop_view(r);
 
         let header_block = builder.create_block();
@@ -1182,10 +1230,10 @@ impl<M: Module> Codegen<M> {
             exit_block,
             continue_target: header_block,
         });
-        let body_terminated = Self::emit_scoped_body(builder, ctx, &view.body)?;
+        let body_term = Self::emit_scoped_body(builder, ctx, &view.body)?;
         ctx.loop_stack.pop();
 
-        if !body_terminated {
+        if body_term == Terminator::None {
             builder.ins().jump(header_block, &[]);
         }
 
@@ -1195,14 +1243,14 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(exit_block);
         builder.switch_to_block(exit_block);
 
-        Ok(false)
+        Ok(Terminator::None)
     }
 
     fn generate_for_range(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-    ) -> Result<bool, String> {
+    ) -> Result<Terminator, String> {
         let view = ctx.tir.for_range_view(r);
 
         // 1. Create all blocks up front
@@ -1241,7 +1289,7 @@ impl<M: Module> Codegen<M> {
         // insertion.
         let shadowed_var = ctx.locals.insert(view.var_name, counter);
 
-        let body_terminated = Self::emit_body(builder, ctx, &view.body)?;
+        let body_term = Self::emit_body(builder, ctx, &view.body)?;
 
         // Restore locals (loop variable goes out of scope)
         if let Some(old_var) = shadowed_var {
@@ -1250,7 +1298,7 @@ impl<M: Module> Codegen<M> {
             ctx.locals.remove(&view.var_name);
         }
 
-        if !body_terminated {
+        if body_term == Terminator::None {
             builder.ins().jump(increment_block, &[]);
         }
 
@@ -1272,7 +1320,7 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(exit_block);
         builder.switch_to_block(exit_block);
 
-        Ok(false)
+        Ok(Terminator::None)
     }
 
     /// Materialize an instruction's value, recursively materializing
@@ -1284,22 +1332,31 @@ impl<M: Module> Codegen<M> {
         r: TirRef,
     ) -> Result<Value, String> {
         if let Some(repr) = ctx.inst_values.get(&r) {
-            return Ok(match repr {
-                ValueRepr::Scalar(v) => *v,
-                // str-returning calls cache ValueRepr::Str; return the ptr
-                // component as the scalar stand-in (callers that need the
-                // full triple use eval_inst_str).
-                ValueRepr::Str { ptr, .. } => *ptr,
-                // I-083: views have no scalar stand-in. A view-typed value
-                // reaching eval_inst means a consumer forgot to gate on
-                // pool.is_view() and route through eval_inst_view.
-                ValueRepr::View { .. } => panic!(
-                    "eval_inst: strview %{} is two-word; use a view-aware consumer (I-083)",
+            return match repr {
+                ValueRepr::Scalar(v) => Ok(*v),
+                // Str/view-typed values have no scalar stand-in.
+                // A multi-word repr reaching the scalar entry point
+                // means a consumer forgot to gate through eval_inst_str
+                // / eval_inst_view — reject loudly instead of silently
+                // handing out the data pointer.
+                ValueRepr::Str { .. } | ValueRepr::View { .. } => Err(format!(
+                    "eval_inst: str/view-typed inst %{} reached the scalar entry point; use eval_inst_str / eval_inst_view",
                     r.index()
-                ),
-            });
+                )),
+            };
         }
         let inst = ctx.tir.inst(r);
+        // Str- and view-typed insts are multi-word and have no
+        // business on the scalar path. Calls are checked separately in
+        // the Call arm below (bare-statement str calls route through
+        // emit_call / eval_inst_str instead).
+        if inst.tag != TirTag::Call && (is_str_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty))
+        {
+            return Err(format!(
+                "eval_inst: str/view-typed inst %{} reached the scalar entry point; use eval_inst_str / eval_inst_view",
+                r.index()
+            ));
+        }
         let value = match inst.tag {
             TirTag::IntConst => match inst.data {
                 TirData::Int(v) => builder.ins().iconst(ctx.int_type, v),
@@ -1313,19 +1370,15 @@ impl<M: Module> Codegen<M> {
                 TirData::Float(v) => builder.ins().f64const(v),
                 _ => unreachable!("FloatConst must carry TirData::Float"),
             },
-            TirTag::StrConst => match inst.data {
-                TirData::Str(id) => {
-                    // Returns the raw .rodata pointer — used by __ryo_panic
-                    // which takes (ptr, len) scalars. For fat-pointer str
-                    // materialisation, callers use eval_inst_str instead.
-                    let content = ctx.pool.str(id);
-                    let data_id =
-                        store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
-                    let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-                    builder.ins().global_value(ctx.int_type, data_ref)
-                }
-                _ => unreachable!("StrConst must carry TirData::Str"),
-            },
+            TirTag::StrConst => {
+                // Unreachable — the entry guard above rejects str-typed
+                // insts. __ryo_panic's message pointer goes through
+                // emit_strconst_rodata_ptr instead.
+                Err(format!(
+                    "eval_inst: StrConst %{} reached the scalar entry point",
+                    r.index()
+                ))?
+            }
             TirTag::Var => match inst.data {
                 TirData::Var(name) => {
                     let var = ctx
@@ -1467,7 +1520,18 @@ impl<M: Module> Codegen<M> {
                 builder.switch_to_block(merge_block);
                 builder.block_params(merge_block)[0]
             }
-            TirTag::Call => Self::emit_call(builder, ctx, r)?,
+            TirTag::Call => {
+                // Str/view-returning calls are multi-word — they
+                // must come through eval_inst_str / eval_inst_view,
+                // never the scalar path.
+                if is_str_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty) {
+                    return Err(format!(
+                        "eval_inst: str/view-returning call %{} reached the scalar entry point; use eval_inst_str",
+                        r.index()
+                    ));
+                }
+                Self::emit_call(builder, ctx, r)?
+            }
             TirTag::IfStmt => {
                 Self::generate_if_stmt(builder, ctx, r)?;
                 builder.ins().iconst(ctx.int_type, 0)
@@ -1523,9 +1587,26 @@ impl<M: Module> Codegen<M> {
                 ));
             }
         };
-        // Don't overwrite if emit_call already cached a Str repr (sret convention).
-        ctx.inst_values.entry(r).or_insert(ValueRepr::Scalar(value));
+        // Scalar-only entry point: str/view-typed insts are
+        // rejected above, so no path here can have cached a non-scalar
+        // repr for `r` mid-evaluation.
+        ctx.inst_values.insert(r, ValueRepr::Scalar(value));
         Ok(value)
+    }
+
+    /// Emit a string literal's raw `.rodata` pointer (no fat-pointer
+    /// triple). Used by `__ryo_panic`'s scalar (ptr, len) ABI — the one
+    /// deliberate exception to the rule that str-typed insts never
+    /// flow through the scalar entry point.
+    fn emit_strconst_rodata_ptr(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        id: StringId,
+    ) -> Result<Value, String> {
+        let content = ctx.pool.str(id);
+        let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
+        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+        Ok(builder.ins().global_value(ctx.int_type, data_ref))
     }
 
     /// Declare an external runtime function by name and return a
@@ -1577,9 +1658,8 @@ impl<M: Module> Codegen<M> {
     /// Scheduled Frees only target `Str`-cached owners. A
     /// `Scalar`-cached target is an ownership-pass bug — the
     /// borrowed-scalar ABI never owns its argument and the ownership
-    /// pass excludes such args from `temp_owners` (see I-057). If a
-    /// `Scalar` target is observed here, this function returns `Err`
-    /// with a diagnostic pointing at I-057.
+    /// pass excludes such args from `temp_owners`. If a
+    /// `Scalar` target is observed here, this function returns `Err`.
     ///
     /// `freed_at` (a set of `free_schedule` indices) guards against
     /// double-emission across the eval-end hooks and the end-of-stmt
@@ -1648,7 +1728,7 @@ impl<M: Module> Codegen<M> {
     /// each index as fired in `ctx.freed_at`. A `Scalar`-cached target
     /// (borrowed-scalar ABI, never heap-owned) returns an error and aborts
     /// code generation — the ABI registry is supposed to keep such args out
-    /// of `temp_owners`. See I-057/I-059.
+    /// of `temp_owners`.
     ///
     /// When the target is a named binding's initializer/value (or a str
     /// param's virtual ref), the Free is emitted from the binding's
@@ -1704,7 +1784,7 @@ impl<M: Module> Codegen<M> {
                 }
                 ValueRepr::Scalar(_) => {
                     return Err(format!(
-                        "ownership pass scheduled Free for borrowed-scalar value %{}; the ABI registry should have excluded it. See I-057/I-059.",
+                        "ownership pass scheduled Free for borrowed-scalar value %{}; the ABI registry should have excluded it.",
                         target.index()
                     ));
                 }
@@ -1809,6 +1889,47 @@ impl<M: Module> Codegen<M> {
     /// Materialize a str-typed TIR instruction, returning a
     /// `ValueRepr::Str` triple. Falls back to scalar `eval_inst`
     /// for non-str instructions.
+    /// Shared sret pattern for runtime calls that produce a `str`
+    /// through a caller-allocated stack slot: pass `args` plus the
+    /// slot address, then reload the (ptr, len, cap) triple. Used by
+    /// both the value path (`eval_inst_str`) and the bare-statement
+    /// path (`emit_call`) so the two cannot drift.
+    /// Does NOT touch `ctx.inst_values` — caching is the caller's job.
+    fn emit_sret_str_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &str,
+        args: &[(Type, Value)],
+    ) -> Result<ValueRepr, String> {
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+        let param_tys: Vec<Type> = args
+            .iter()
+            .map(|(ty, _)| *ty)
+            .chain([ctx.int_type])
+            .collect();
+        let func_ref = Self::declare_runtime_fn(ctx.module, builder, fn_name, &param_tys, &[])?;
+        let mut call_args: Vec<Value> = args.iter().map(|(_, val)| *val).collect();
+        call_args.push(out_ptr);
+        builder.ins().call(func_ref, &call_args);
+
+        let ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+        let cap = builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+        Ok(ValueRepr::Str { ptr, len, cap })
+    }
+
     fn eval_inst_str(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1847,8 +1968,7 @@ impl<M: Module> Codegen<M> {
                 let view = ctx.tir.call_view(r);
                 let name_str = ctx.pool.str(view.name);
                 if name_str == "__ryo_str_from_view" {
-                    // M8.4.1.2 `str(view)` materialization: the same sret
-                    // stack-slot pattern as `int_to_str`, but the argument
+                    // M8.4.1.2 `str(view)` materialization: the argument
                     // is a view pair evaluated via `eval_inst_view`.
                     let ValueRepr::View {
                         ptr: v_ptr,
@@ -1857,78 +1977,30 @@ impl<M: Module> Codegen<M> {
                     else {
                         unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
                     };
-
-                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        StackSlotKind::ExplicitSlot,
-                        STR_SLOT_SIZE,
-                        3,
-                    ));
-                    let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
-                    let func_ref = Self::declare_runtime_fn(
-                        ctx.module,
+                    Self::emit_sret_str_call(
                         builder,
+                        ctx,
                         "ryo_str_from_view",
-                        &[ctx.int_type, types::I64, ctx.int_type],
-                        &[],
-                    )?;
-                    builder.ins().call(func_ref, &[v_ptr, v_len, out_ptr]);
-
-                    let ptr = builder
-                        .ins()
-                        .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
-                    let len = builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), out_ptr, 8);
-                    let cap = builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), out_ptr, 16);
-
-                    ValueRepr::Str { ptr, len, cap }
+                        &[(ctx.int_type, v_ptr), (types::I64, v_len)],
+                    )?
                 } else if name_str == "int_to_str"
                     || name_str == "float_to_str"
                     || name_str == "bool_to_str"
                 {
                     let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
-
-                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        StackSlotKind::ExplicitSlot,
-                        STR_SLOT_SIZE,
-                        3,
-                    ));
-                    let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
                     let (fn_name, param_ty) = match name_str {
                         "int_to_str" => ("ryo_int_to_str", ctx.int_type),
                         "float_to_str" => ("ryo_float_to_str", types::F64),
                         "bool_to_str" => ("ryo_bool_to_str", types::I8),
                         _ => unreachable!(),
                     };
-
-                    let func_ref = Self::declare_runtime_fn(
-                        ctx.module,
-                        builder,
-                        fn_name,
-                        &[param_ty, ctx.int_type],
-                        &[],
-                    )?;
-                    builder.ins().call(func_ref, &[arg_val, out_ptr]);
-
-                    let ptr = builder
-                        .ins()
-                        .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
-                    let len = builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), out_ptr, 8);
-                    let cap = builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), out_ptr, 16);
-
-                    ValueRepr::Str { ptr, len, cap }
+                    Self::emit_sret_str_call(builder, ctx, fn_name, &[(param_ty, arg_val)])?
                 } else {
-                    // User call — eval_inst triggers emit_call which handles
-                    // sret for str-returning calls and caches ValueRepr::Str.
-                    Self::eval_inst(builder, ctx, r)?;
+                    // User call — emit_call handles sret for str-returning
+                    // calls and caches ValueRepr::Str. Called directly
+                    // (not via eval_inst): the scalar path rejects
+                    // str-returning calls.
+                    Self::emit_call(builder, ctx, r)?;
                     if let Some(repr) = ctx.inst_values.get(&r) {
                         return Ok(*repr);
                     }
@@ -2015,7 +2087,7 @@ impl<M: Module> Codegen<M> {
     /// pair (M8.4). Views are 16-byte non-owning `{ptr, len}` values —
     /// they never materialize into the 24-byte str triple and never
     /// enter the free schedule. Views do NOT go through `eval_inst`'s
-    /// dummy-scalar pattern (I-083): only view-aware consumers
+    /// dummy-scalar pattern: only view-aware consumers
     /// (`print`, `StrLen`, `StrCmpEq/Ne`, call args, view bindings)
     /// reach them, via `eval_str_or_view_parts` or directly.
     fn eval_inst_view(
@@ -2223,7 +2295,15 @@ impl<M: Module> Codegen<M> {
             // never-returns contract.
             let mut arg_values = Vec::with_capacity(view.args.len());
             for arg in &view.args {
-                arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
+                // The message is a StrConst whose .rodata pointer the
+                // scalar (ptr, len) ABI consumes directly — the one
+                // deliberate exception to the scalar-path rule.
+                match ctx.tir.inst(*arg).data {
+                    TirData::Str(id) => {
+                        arg_values.push(Self::emit_strconst_rodata_ptr(builder, ctx, id)?)
+                    }
+                    _ => arg_values.push(Self::eval_inst(builder, ctx, *arg)?),
+                }
             }
             let panic_ref = Self::declare_runtime_fn(
                 ctx.module,
@@ -2265,82 +2345,6 @@ impl<M: Module> Codegen<M> {
                 &[],
             )?;
             builder.ins().call(print_ref, &[ptr, len]);
-            return Ok(builder.ins().iconst(ctx.int_type, 0));
-        }
-
-        // M8.4.1.2: `str(view)` materialization as a bare statement —
-        // emit the copy, cache the triple so a scheduled temp Free can
-        // read it, and discard the value. The primary path (result
-        // bound or consumed) is `eval_inst_str`.
-        if name_str == "__ryo_str_from_view" {
-            let ValueRepr::View {
-                ptr: v_ptr,
-                len: v_len,
-            } = Self::eval_inst_view(builder, ctx, view.args[0])?
-            else {
-                unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
-            };
-
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                STR_SLOT_SIZE,
-                3,
-            ));
-            let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
-            let func_ref = Self::declare_runtime_fn(
-                ctx.module,
-                builder,
-                "ryo_str_from_view",
-                &[ctx.int_type, types::I64, ctx.int_type],
-                &[],
-            )?;
-            builder.ins().call(func_ref, &[v_ptr, v_len, out_ptr]);
-
-            let ptr = builder
-                .ins()
-                .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
-            let len = builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), out_ptr, 8);
-            let cap = builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), out_ptr, 16);
-            ctx.inst_values.insert(r, ValueRepr::Str { ptr, len, cap });
-
-            return Ok(builder.ins().iconst(ctx.int_type, 0));
-        }
-
-        // Formatter builtins — when called as a bare statement (result
-        // discarded), we still emit the call but throw away the output.
-        // The primary path is eval_inst_str (used when result is assigned
-        // to a str variable or passed to print).
-        if name_str == "int_to_str" || name_str == "float_to_str" || name_str == "bool_to_str" {
-            let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
-
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                STR_SLOT_SIZE,
-                3,
-            ));
-            let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
-            let (fn_name, param_ty) = match name_str {
-                "int_to_str" => ("ryo_int_to_str", ctx.int_type),
-                "float_to_str" => ("ryo_float_to_str", types::F64),
-                "bool_to_str" => ("ryo_bool_to_str", types::I8),
-                _ => unreachable!(),
-            };
-
-            let func_ref = Self::declare_runtime_fn(
-                ctx.module,
-                builder,
-                fn_name,
-                &[param_ty, ctx.int_type],
-                &[],
-            )?;
-            builder.ins().call(func_ref, &[arg_val, out_ptr]);
-
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 

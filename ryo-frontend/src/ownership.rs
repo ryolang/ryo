@@ -125,8 +125,8 @@ pub(crate) struct Ownership {
     /// results. Used by the anonymous-temporary-free pass to identify
     /// candidates for scheduling. A temp_owner that ends up bound to
     /// a `VarDecl`/`Assign` is a "named init" and is skipped by the
-    /// anon-temp pass (classified statically via `collect_named_inits`,
-    /// I-060) — it is freed via the last-use / dead-store /
+    /// anon-temp pass (classified statically via `collect_named_inits`)
+    /// — it is freed via the last-use / dead-store /
     /// `free_on_reassign` / loop-exit pass instead.
     pub temp_owners: HashSet<Owner>,
 
@@ -777,7 +777,7 @@ fn owner_binding_name(tir: &Tir, owner: TirRef) -> Option<StringId> {
 
 // ---------- M8.4: slice projections (final spec §3.2/§3.3) ----------
 
-/// Deterministic iteration order for owners (I-068): the post passes
+/// Deterministic iteration order for owners: the post passes
 /// push `FreePoint`s while iterating owner-keyed `HashMap`s, whose
 /// iteration order varies per run — sort by a stable key first.
 fn owner_sort_key(owner: &Owner) -> (u8, u32) {
@@ -969,7 +969,7 @@ fn check_source_projected(
         return;
     }
     // Registration order is walk order, so projections[0] is a
-    // deterministic choice for the note's span (I-068).
+    // deterministic choice for the note's span.
     let (note_span, note_msg) = match projections[0].inst_tirref() {
         Some(vi) => match own.view_last_use.get(&vi) {
             Some(&lu) => (tir.span(lu), "last slice use here"),
@@ -1358,7 +1358,7 @@ pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipS
 /// in `stmts`, recursing into nested control flow. These are the
 /// "named" producers whose Free is owned by the last-use / dead-store /
 /// `free_on_reassign` / loop-exit pass; the anon-temp pass skips them to
-/// avoid a double-free. Stateless replacement (I-060) for the old
+/// avoid a double-free. Stateless replacement for the old
 /// sticky side-set that formerly lived on `Ownership` and accumulated
 /// named-init TirRefs during the forward walk. Unlike a
 /// `current_owner.values()` derivation this is merge-immune: a temp
@@ -1616,7 +1616,7 @@ fn analyze_function(
         collect_last_uses(tir, pool, &own, stmt, &mut last_use);
     }
     // P5 (final spec §3.2): root owner → every view that ever
-    // projected it (sorted for deterministic iteration, I-068).
+    // projected it (sorted for deterministic iteration).
     let order = program_order(tir);
     let mut projections_of: HashMap<Owner, Vec<TirRef>> = HashMap::new();
     for (view, root) in &own.root_owner {
@@ -1656,7 +1656,7 @@ fn analyze_function(
         .iter()
         .filter_map(|n| own.current_owner.get(n).copied())
         .collect();
-    // I-068: iterate owners in a sorted order so `free_schedule` push
+    // Iterate owners in a sorted order so `free_schedule` push
     // order does not depend on HashMap iteration order.
     let mut sorted_states: Vec<(Owner, OwnerState)> =
         own.states.iter().map(|(o, s)| (*o, s.clone())).collect();
@@ -1738,7 +1738,7 @@ fn analyze_function(
     //
     // This "was a named init" predicate is a TIR-shape fact, not a
     // lattice-state fact, so it is derived statically via
-    // `collect_named_inits` (I-060). The old implementation carried a
+    // `collect_named_inits`. The old implementation carried a
     // walk; the static set is merge-immune where a
     // `current_owner.values()` derivation would not be (it drops a
     // loop-rebound temp at the loop merge but the temp is still freed
@@ -1881,7 +1881,7 @@ fn analyze_function(
             }
         }
     }
-    // I-068: sorted iteration for deterministic sidecar emission order.
+    // Sorted iteration for deterministic sidecar emission order.
     let mut honored: Vec<usize> = honored.into_iter().collect();
     honored.sort_unstable();
     for idx in honored {
@@ -1895,7 +1895,7 @@ fn analyze_function(
 
     // Loop-exit Frees run LAST so they can inspect the now-complete
     // `free_schedule` and only add jump-anchored Frees for inside-loop
-    // owners that no earlier pass already covered. See I-058.
+    // owners that no earlier pass already covered.
     schedule_loop_exit_frees_in(tir, &own, sidecar, &body_stmts, None);
 
     // Return epilogue: destroy locals still live at an early return.
@@ -1970,12 +1970,11 @@ fn analyze_stmt(
             // here so a future sema relaxation that reaches the ownership
             // pass without ownership-aware handling trips a debug build
             // instead of silently falling through to no analysis.
-            // See ISSUES.md I-046.
             let view = tir.compound_assign_view(stmt);
             debug_assert!(
                 !needs_tracking(tir.inst(view.value).ty, pool),
                 "compound-assign on Move-typed value reached ownership pass; \
-                 sema should have rejected — see ISSUES.md I-046",
+                 sema should have rejected",
             );
         }
         TirTag::ExprStmt => {
@@ -2150,7 +2149,7 @@ fn record_return_epilogue(own: &mut Ownership, return_stmt: TirRef) {
         .filter(|(o, s)| matches!(s, OwnerState::Valid) && !inout_escape_owner(own, **o))
         .map(|(o, _)| *o)
         .collect();
-    // I-068: sorted for deterministic sidecar emission order.
+    // Sorted for deterministic sidecar emission order.
     live.sort_by_key(owner_sort_key);
     if !live.is_empty() {
         own.return_epilogue.push((return_stmt, live));
@@ -2235,7 +2234,8 @@ fn rebind_to_init(own: &mut Ownership, name: StringId, init: TirRef) {
 /// allocation; `decl_inst` is the `VarDecl`/`Assign` instruction's own
 /// TirRef and serves as the Free anchor if the binding turns out to be
 /// a dead store. Single source of truth for `analyze_var_decl` and
-/// `analyze_assign` — closes ISSUES.md I-055.
+/// `analyze_assign` — kept in one place so the two registration paths
+/// cannot drift apart.
 fn register_pending_dead_store(
     own: &mut Ownership,
     owner: TirRef,
@@ -2289,7 +2289,7 @@ fn inout_escape_owner(own: &Ownership, owner: Owner) -> bool {
         .any(|n| own.current_owner.get(n) == Some(&owner))
 }
 
-/// Use-site use-after-move authority (I-050; spec §5.3 Rule 1 — a move
+/// Use-site use-after-move authority (spec §5.3 Rule 1 — a move
 /// invalidates the original binding). Resolve the operand's
 /// underlying owner and emit E0020 if it is `Moved`. Called from every
 /// use site: consume sites, borrow-arg paths, and operand-read sites.
@@ -2362,7 +2362,8 @@ fn consume_for_assignment(
 /// * `Valid` → stamp `Moved { moved_at: span }`, clear any pending
 ///   dead-store entry, and log a W0003 move-hazard at `site`,
 /// * `Borrowed` → emit E0021 or E0022 per `on_borrowed`,
-/// * `Moved` → now a use-after-move check authority (I-050).
+/// * `Moved` → emit E0020 (this site is the use-after-move check
+///   authority).
 /// * `NotTracked` → no-op.
 #[allow(clippy::too_many_arguments)]
 fn consume_underlying(
@@ -2748,7 +2749,7 @@ fn analyze_if_stmt(
         .iter()
         .flat_map(|a| a.state.states.keys().copied())
         .collect();
-    // I-068: sorted iteration for deterministic free_schedule order.
+    // Sorted iteration for deterministic free_schedule order.
     let mut all_keys: Vec<Owner> = all_keys.into_iter().collect();
     all_keys.sort_by_key(owner_sort_key);
     for owner in all_keys {
@@ -2870,11 +2871,11 @@ fn analyze_if_stmt(
     prune_branch_dead_projections(tir, own, r);
 }
 
-/// Shared loop-body fixed-point (I-051). Caller has already visited the
+/// Shared loop-body fixed-point. Caller has already visited the
 /// prelude (cond / start+end). Walks the body once into a scratch sink,
-/// compares entry vs post-body state (I-087: the full tuple — owner
-/// states plus live-projection emptiness), and either replays
-/// (converged) or re-walks from the merged state against the real sink.
+/// compares entry vs post-body state (the full tuple — owner states
+/// plus live-projection emptiness), and either replays (converged) or
+/// re-walks from the merged state against the real sink.
 fn analyze_loop_body(
     tir: &Tir,
     pool: &InternPool,
@@ -2883,7 +2884,7 @@ fn analyze_loop_body(
     sidecar: &mut FunctionSidecar,
     body: &[TirRef],
 ) {
-    // I-061: snapshot ONLY the non-monotone fields (see Step 2).
+    // Snapshot ONLY the non-monotone fields (see Step 2).
     // `live_projections` joined that set in M8.4 (projections die at
     // their last use); `root_owner` is insert-only and stays live.
     let snap_states = own.states.clone();
@@ -2956,7 +2957,7 @@ fn analyze_loop_body(
 /// 2-pass approximation of a fixed-point ownership analysis for
 /// `while`. Walks the body once from the entry state into a scratch
 /// sink; if the full state tuple (owner states + live-projection
-/// emptiness, I-087) is unchanged across the back-edge, the body is
+/// emptiness) is unchanged across the back-edge, the body is
 /// loop-invariant for ownership purposes and the scratch diagnostics
 /// are flushed. Otherwise we re-walk from the merged
 /// (entry ⊔ post-body) state and emit diagnostics on the second pass
@@ -3018,7 +3019,7 @@ fn analyze_for_range(
     remove_loop_deferred_views(own, r);
 }
 
-/// Loop fixed-point convergence comparison (I-087). Compares the full
+/// Loop fixed-point convergence comparison. Compares the full
 /// state tuple — every tracked owner's full `OwnerState` (not just its
 /// Moved-ness) plus the emptiness of each owner's live-projection set
 /// — between the entry and post-body snapshots. A `Valid` ↔ `Borrowed`
@@ -3513,7 +3514,7 @@ fn collect_jump_path(
 /// which would then read freed memory. The defensive emit covers
 /// future producers that bypass last-use AND dead-store passes.
 ///
-/// Catches the I-058 leak in two shapes:
+/// Catches the jump-path leak in two shapes:
 ///   - linear: `for: s = alloc(); break; print(s)` — natural Free is
 ///     anchored AFTER the break in source order; not on jump path.
 ///   - cross-branch: `for: s = alloc(); if cond: print(s) else: break`
@@ -3567,7 +3568,7 @@ fn schedule_break_continue_frees(
 
     let is_break = matches!(tir.inst(jump_inst).tag, TirTag::Break);
 
-    // I-068: sorted iteration for deterministic free_schedule order.
+    // Sorted iteration for deterministic free_schedule order.
     let mut sorted_states: Vec<(Owner, OwnerState)> =
         own.states.iter().map(|(o, s)| (*o, s.clone())).collect();
     sorted_states.sort_by_key(|(o, _)| owner_sort_key(o));
@@ -3616,7 +3617,7 @@ fn schedule_break_continue_frees(
         // Defensive emit only when no Free is scheduled anywhere — AND only on
         // break. On `continue` the next iteration would re-read the freed buffer
         // (UAF); the principled fix is path-relative liveness, but until then we
-        // accept a potential leak over a UAF. See I-067.
+        // accept a potential leak over a UAF.
         if is_break && has_any.contains(&r) {
             continue;
         }
@@ -3703,7 +3704,7 @@ fn visit_expr(
                     // StrConst arm. `states`, `origin`, and `owner_at_read`
                     // entries are harmless to leave populated — only
                     // `temp_owners` is consulted by the anonymous-temp Free
-                    // pass. See I-057.
+                    // pass.
                     own.temp_owners.remove(&Owner::Inst(*arg));
                 }
                 let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
@@ -3870,10 +3871,22 @@ fn visit_expr(
                 let mut borrow_span = None;
                 let mut move_span = None;
                 for (i, arg) in view.args.iter().enumerate() {
-                    if needs_tracking(tir.inst(*arg).ty, pool)
-                        && underlying_owner(own, *arg) == *owner
-                    {
-                        let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+                    if !needs_tracking(tir.inst(*arg).ty, pool) {
+                        continue;
+                    }
+                    let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+                    // P6' (mirrors the Rule-7 partition above): a
+                    // view re-borrowed into a `str` arg via ViewAsStr
+                    // borrows the view's ROOT owner — look through the
+                    // conversion or the "borrowed here" note is lost.
+                    let arg_owner =
+                        if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::ViewAsStr {
+                            projection_root(own, tir, pool, *arg)
+                                .unwrap_or_else(|| underlying_owner(own, *arg))
+                        } else {
+                            underlying_owner(own, *arg)
+                        };
+                    if arg_owner == *owner {
                         match mode {
                             ParamMode::Borrow => borrow_span = Some(tir.span(*arg)),
                             ParamMode::Move => move_span = Some(tir.span(*arg)),
@@ -4195,9 +4208,10 @@ mod tests {
 
     #[test]
     fn ryo_panic_str_arg_excluded_via_abi_registry() {
-        // Regression test for I-057/I-059. The StrConst arg of `__ryo_panic`
-        // uses the borrowed-scalar ABI in codegen — codegen passes the
-        // raw .rodata pointer with cap=0 and never owns the buffer. The
+        // Regression test for the borrowed-scalar exclusion. The
+        // StrConst arg of `__ryo_panic` uses the borrowed-scalar ABI in
+        // codegen — codegen passes the raw .rodata pointer with cap=0
+        // and never owns the buffer. The
         // ownership pass excludes it from `temp_owners` by consulting the
         // `builtins` ABI registry (`is_borrowed_scalar_param`) rather than
         // a `pool.str(name) == "__ryo_panic"` name-match, so the
@@ -4242,7 +4256,7 @@ mod tests {
             sidecar.free_schedule
         );
 
-        // I-059: the exclusion is driven by the ABI registry. `__ryo_panic`
+        // The exclusion is driven by the ABI registry: `__ryo_panic`
         // passes param 0 (the message) via the borrowed-scalar ABI, but not
         // param 1 (the length) or any out-of-range index.
         assert!(
@@ -4523,9 +4537,10 @@ mod tests {
 
     #[test]
     fn break_before_last_use_schedules_jump_free() {
-        // Regression for I-058. A `break` taken before the `print(s)`
-        // last-use must trigger a Free anchored on the break instr —
-        // otherwise the inside-loop allocation leaks on the break path.
+        // Regression for the break-path leak. A `break` taken before the
+        // `print(s)` last-use must trigger a Free anchored on the break
+        // instr — otherwise the inside-loop allocation leaks on the break
+        // path.
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::TirBuilder;
 
@@ -4647,8 +4662,9 @@ mod tests {
 
     #[test]
     fn break_in_else_arm_sibling_print_schedules_jump_free() {
-        // Cross-branch I-058 regression. The natural last-use Free for
-        // `alloc` anchors on `print(s)` inside the THEN arm; the break
+        // Cross-branch regression for the break-path leak. The natural
+        // last-use Free for `alloc` anchors on `print(s)` inside the
+        // THEN arm; the break
         // sits in the ELSE arm. Lexical raw() ordering would put the
         // print's anchor before the break, but on the break path the
         // print never ran — so the buffer leaks unless we schedule a
@@ -4718,7 +4734,7 @@ mod tests {
 
     #[test]
     fn continue_before_last_use_schedules_jump_free() {
-        // Symmetric I-058 regression for `continue` instead of `break`.
+        // Symmetric regression for `continue` instead of `break`.
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::TirBuilder;
 
@@ -5347,7 +5363,7 @@ mod tests {
         // `free_schedule` — that would be a double-free. The anon-temp pass
         // skips it because it is a named init (the VarDecl initializer);
         // if that filter were missing the anon-temp pass would schedule a
-        // second Free here. See I-060 and the sibling invariant in
+        // second Free here. See the sibling invariant in
         // `reassignment_records_free_on_old_owner`.
         let a_frees = sc
             .free_schedule
@@ -5418,8 +5434,8 @@ mod tests {
         // s = "a"; while c: s = "a"   (rebind each iteration)
         //
         // The loop-body temp `body_lit` is a named init (the Assign's
-        // value), so the anon-temp pass must SKIP it (I-060 static
-        // classifier) and let the dead-store pass own its single Free.
+        // value), so the anon-temp pass must SKIP it (static classifier)
+        // and let the dead-store pass own its single Free.
         // The rejected dynamic `current_owner.values()` classifier would
         // NOT skip it: at the loop merge the entry-state owner (lit) wins
         // via first-write-wins, so body_lit drops out of
@@ -5478,8 +5494,8 @@ mod tests {
     #[test]
     fn double_consume_reports_uam_once_via_consume_authority() {
         // x = "v"; take(x); take(x)  -- the second take consumes an
-        // already-moved binding. Pre-I-050 the Var arm emitted E0020;
-        // post-I-050 the consume site (consume_underlying) is the authority
+        // already-moved binding. The Var arm used to emit E0020 for it;
+        // now the consume site (consume_underlying) is the authority
         // and must emit exactly once.
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::{ParamMode, TirBuilder};
@@ -5728,6 +5744,64 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall)),
             "two borrows of one owner is fine (Rule 7 many readers); got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn move_and_viewasstr_borrow_of_one_owner_reports_borrow_note() {
+        // `two(move s, s[0:1])` against a `(move, str)` signature — the
+        // P6'-converted ViewAsStr arg borrows the view's ROOT owner, so
+        // E0031 must carry the "borrowed here" note (look through the
+        // conversion, like the Rule-7 partition does).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let s = pool.intern_str("s");
+        let two = pool.intern_str("two");
+        let span = SimpleSpan::new((), 0..0);
+        // Distinct spans for the move arg and the reborrow chain, so
+        // the note can be pinned to the reborrow specifically.
+        let move_span = SimpleSpan::new((), 10..11);
+        let reborrow_span = SimpleSpan::new((), 20..26);
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
+        let decl = tb.var_decl(s, false, str_ty, lit, span);
+        let sv1 = tb.var(s, str_ty, move_span);
+        let sv2 = tb.var(s, str_ty, reborrow_span);
+        let zero = tb.int_const(0, int_ty, reborrow_span);
+        let one = tb.int_const(1, int_ty, reborrow_span);
+        let sl = tb.slice(sv2, Some(zero), Some(one), view_ty, reborrow_span);
+        let reborrow = tb.view_as_str(sl, str_ty, reborrow_span);
+        let modes = vec![ParamMode::Move, ParamMode::Borrow];
+        let call = tb.call(two, &[sv1, reborrow], &modes, void, span);
+        let tir = tb.finish(&[decl, call]);
+        let mut sink = DiagSink::new();
+        let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let diags = sink.into_diags();
+        let e0031: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall))
+            .collect();
+        assert_eq!(e0031.len(), 1, "expected exactly one E0031; got {diags:?}");
+        let note = e0031[0]
+            .notes
+            .iter()
+            .find(|n| n.message == "borrowed here")
+            .unwrap_or_else(|| {
+                panic!(
+                    "E0031 must carry the 'borrowed here' note through ViewAsStr; got {:?}",
+                    e0031[0].notes
+                )
+            });
+        assert_eq!(
+            note.span,
+            Some(tir.span(reborrow)),
+            "the note must attach to the reborrow, not the move arg ({move_span:?})"
         );
     }
 
@@ -8236,7 +8310,7 @@ mod tests {
     #[test]
     fn view_in_loop_body_converges() {
         // s: str = "hello"; while true: v = s[0:2]; print(v)
-        // → converges (I-087 full-tuple comparison); no spurious
+        // → converges (full-tuple comparison); no spurious
         //   SourceProjected on the second iteration; s freed after the
         //   loop.
         use chumsky::span::{SimpleSpan, Span as _};
@@ -8374,7 +8448,7 @@ mod tests {
     #[test]
     fn free_schedule_is_deterministic() {
         // Build a TIR with several owners + views; run `check` twice;
-        // assert identical free_schedule (I-068).
+        // assert identical free_schedule.
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::TirBuilder;
 
@@ -8443,7 +8517,7 @@ mod tests {
         assert!(!first.is_empty(), "expected a non-empty free schedule");
         assert_eq!(
             first, second,
-            "free_schedule must be deterministic across runs (I-068)"
+            "free_schedule must be deterministic across runs"
         );
     }
 
@@ -8832,9 +8906,10 @@ mod tests {
 
     #[test]
     fn loop_view_live_at_back_edge_flags_earlier_mutation_on_rewalk() {
-        // Pins the I-087 re-walk DISCOVERY path (the sibling acceptance
-        // test above pins the converge side): a body-created view that
-        // is STILL LIVE at the back-edge forces pass 2, and only pass 2
+        // Pins the full-tuple convergence check's re-walk DISCOVERY
+        // path (the sibling acceptance test above pins the converge
+        // side): a body-created view that is STILL LIVE at the
+        // back-edge forces pass 2, and only pass 2
         // sees the projection at the earlier owner-consume.
         //   s: str = "hello"
         //   suffix: str = "!"
