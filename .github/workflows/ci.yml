@@ -81,6 +81,12 @@ jobs:
         if: steps.zig-cache.outputs.cache-hit != 'true'
         run: cargo run -- toolchain install
       - run: cargo test --workspace
+      # The param-sentinel guards in Tir::inst/span are hard assert!s so a
+      # contract violation fails clearly in release too — run their
+      # should_panic tests under the release profile to keep it that way.
+      - name: Release-profile sentinel tests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --release -p ryo-core --lib tir::tests
 
   windows:
     name: Test (windows-latest)

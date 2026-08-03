@@ -37,6 +37,16 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 
 ---
 
+## 🔴 Blocking
+
+### I-125 — Parser has zero error recovery; one syntax error discards the whole AST
+
+**Files:** `ryo-frontend/src/parser.rs` (`program_parser` :39-65), `ryo-driver/src/pipeline.rs` (`parse_source` :127-143), `ryo-core/src/ast.rs`
+**Summary:** R10 requires the parser to emit a diagnostic, synchronize at the next statement/declaration boundary, and produce a partial AST with `Error` nodes. None of that exists: no `recover_with`/`skip_until` combinator anywhere in the parser, no `Error` node kind in the AST, and `parse_source` calls `.into_result()` and returns early on `Err` — so a single syntax error suppresses *all* semantic diagnostics in the file (one bad function stops analysis of the rest, violating R9's accumulation rule at the parse stage). This blocks the IDE/REPL use cases R10 exists for, and it caps diagnostic quality for every later milestone.
+**Resolution:** Add an `ExprKind::Error` / `StmtKind::Error` (or a dedicated `Error` literal node) to the AST, thread it through astgen/sema as error-typed no-ops (sema already has error-typed `Unreachable` slots to model from), and add chumsky `recover_with(skip_until(...))` synchronization at statement and declaration boundaries. Golden-test multi-error files. Natural sequencing: after I-014's lexer `DiagSink` migration so lex and parse errors co-surface through one sink (cf. I-030's `MapExtra::emit` note).
+
+---
+
 ## 🟡 Correctness / Hygiene
 
 ### I-014 — Lexer errors bypass `DiagSink`
@@ -181,8 +191,8 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 ### I-034 — Builtin name comparison uses string compare instead of interned ID
 
 **Files:** `ryo-frontend/src/sema.rs` (`check_call`, `check_builtin_call`)
-**Summary:** `sema.pool.str(name_id) == "assert"` (and similar for `"panic"`, `"print"`) does a string dereference and byte comparison on every `check_call` invocation. Since the intern pool already deduplicates strings, comparing `name_id == assert_id` (where `assert_id` is cached once during builtin registration or sema init) would be a direct integer compare. Negligible today with three builtins and small programs, but the cost scales linearly with both the number of call sites and the number of builtins.
-**Resolution:** Cache `StringId`s for each builtin name (e.g., in `Sema` or alongside `builtins::BUILTINS`) and match on the id instead of the string. Same applies to the codegen-side `name_str == "print"` comparisons.
+**Summary:** `sema.pool.str(name_id) == "assert"` (and similar for `"panic"`, `"print"`) does a string dereference and byte comparison on every `check_call` invocation. Since the intern pool already deduplicates strings, comparing `name_id == assert_id` (where `assert_id` is cached once during builtin registration or sema init) would be a direct integer compare. Negligible today with three builtins and small programs, but the cost scales linearly with both the number of call sites and the number of builtins. Additional sites found in the M8.4.2 audit: `sema.rs:1489` and `:1945` compare `pool.str(name_id) == "str"` for the `str(view)` materialize intercept (explicitly *not* a `BUILTINS`-table entry, so a table-driven fix misses them), codegen detects `main` by `pool.str(tir.name) == "main"` at `codegen.rs:430, :480, :861`, and `sema.rs:281` does `name.starts_with("__ryo_")` per decl.
+**Resolution:** Cache `StringId`s for each builtin name (e.g., in `Sema` or alongside `builtins::BUILTINS`) and match on the id instead of the string. Same applies to the codegen-side `name_str == "print"` comparisons. Also intern `"str"`, `"main"`, and the `"__ryo_"` prefix check — the materialize intercept and `main` detection are not covered by a BUILTINS-table-driven fix.
 
 ### I-037 — Panic/Assert mechanism lacks `#file` / `#line` intrinsic expansion
 
@@ -311,6 +321,19 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Summary:** `\r` matches no token pattern, so any CRLF source fails with `found '<error>'` at the end of the first line — a confusing diagnostic for the most common Windows editor default. Surfaced by the windows CI leg: git's `core.autocrlf=true` checked `examples/` and `benchmarks/` out as CRLF and every repo-file parse failed (worked around for CI by `.gitattributes` forcing `eol=lf` on `*.ryo`, but user-written CRLF files still fail).
 **Resolution:** Accept `\r\n` as a newline in the lexer (treat `\r` as whitespace adjacent to `\n`, keeping span accounting byte-accurate), and add a CRLF fixture test.
 
+### I-126 — AST is a `Box<Expression>` pointer tree, contradicting R1
+
+**Files:** `ryo-core/src/ast.rs` (`ExprKind` :412-428 — `BinaryOp`, `UnaryOp`, `MethodCall.receiver`, `Borrow`, `Slice` all box children), consumed by `ryo-frontend/src/astgen.rs` (`gen_expr` :370)
+**Summary:** R1 is absolute: *never* `Box<Node>` trees in compiler IR — flat `Vec`s with `u32` newtype indices, hot tags split from cold payloads. The AST is the one pipeline IR that still violates it: a recursive pointer tree with per-node heap allocation (R3's "count every allocation" applies too). Everything downstream (UIR/TIR) already follows the flat-arena discipline, so the AST is the outlier, and every new expression form deepens the tree shape that will eventually have to be rewritten. Works today; bites later — the rewrite only gets bigger.
+**Resolution:** Migrate `ast.rs` to a flat `Ast { tags: Vec<ExprTag>, payloads, spans }` struct-of-arrays with `ExprId(u32)` indices, mirroring the UIR/TIR encoding already in tree. Parser builds into the arena; astgen walks indices instead of `&Box`. Sizeable but mechanical; do it before the AST gains many more node kinds, and sequence it with I-012 (extract `pretty_print`) and I-029 (`FloatBits`) since all three touch the same file.
+
+### I-127 — In-tree `unsafe` sites don't meet the R5 bar
+
+**Files:** `ryo-backend/src/codegen.rs` (:311, :314 — JIT `execute`), `ryo-core/src/types.rs` (:568 — `InternPool::str`)
+**Summary:** R5 permits forced `unsafe` in tree code only with a `// SAFETY:` comment proving the invariant, a linked issue, and human sign-off. The only two compiler-side sites fall short: (a) `Codegen<JITModule>::execute` transmutes a finalized code pointer to `fn() -> isize` and calls `module.free_memory()` with no SAFETY comment and no linked issue at all; (b) `InternPool::str` uses `str::from_utf8_unchecked` with a SAFETY comment (append-only arena, only valid UTF-8 pushed) but no linked issue. Both unsafe blocks themselves are justified (cranelift-jit API / airtight interner invariant) — the gap is process, and R5 exists precisely so the set of in-tree unsafe stays audited.
+**Resolution:** Add the `// SAFETY:` comment at the JIT site (function was finalized by cranelift-jit for this module; signature matches the compiled entry point; memory freed after execution), link this issue from both sites, and record the sign-off here. No code-semantics change.
+**Status (2026-08-03):** SAFETY comments + linked issue are in place at both sites, and `unsafe_code = "deny"` now guards the rest of the tree via `[workspace.lints]` (compiler crates opt in; `runtime/` is the curated boundary). Remaining: human sign-off in review.
+
 ---
 
 ## 🟢 Cleanup
@@ -360,8 +383,8 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 ### I-097 — Embedded runtime archive is ~17 MB
 
 **Files:** `ryo-backend/src/runtime_lib.rs` (:5), `runtime/` (build profile)
-**Summary:** `include_bytes!` bakes the full staticlib into the compiler binary; the archive bundles Rust std (also the root cause of the `_Unwind_*` link wart, I-043). Measured locally: 17.9 MB debug / 17.7 MB release.
-**Resolution:** Build the embedded archive with a slim profile (`opt-level="z"`, strip, LTO — the build scripts control that invocation) and/or land I-043's `no_std` migration, which removes most of std from the archive.
+**Summary:** `include_bytes!` bakes the full staticlib into the compiler binary. The archive is `no_std` since I-043 (std, and the `_Unwind_*` link wart with it, is gone), but it still bundles all of core's precompiled objects, which is what keeps it large. Measured locally: 17.9 MB debug / 17.7 MB release.
+**Resolution:** Build the embedded archive with a slim profile (`opt-level="z"`, strip, LTO — the build scripts control that invocation). The `no_std` half of the original resolution (I-043) already landed and did not shrink the archive on its own.
 
 ### I-098 — Integration tests spawn `cargo run` per test
 
@@ -423,17 +446,17 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Summary:** The zip path stages the download as `zig-download.zip` inside the temp dir and never deletes it after `extract_zip` succeeds. If a future zig zip ever lacks the `zig-{target}-{version}/` top-level directory, `source` falls back to `temp_path` and the rename carries the ~100 MB staged archive into the installed toolchain dir. Inert (zig still runs), but sloppy, and the staged file is never cleaned up on the happy path either.
 **Resolution:** `fs::remove_file(&zip_path).ok()` immediately after `extract_zip` succeeds.
 
-### I-122 — `extract_zip` silently skips non-enclosed entries
+### I-128 — Pass entry points far exceed the R7 size discipline
 
-**Files:** `ryo-backend/src/toolchain.rs` (`extract_zip`, the `enclosed_name()` skip)
-**Summary:** Entries that fail the zip-slip guard are skipped with `continue` and no diagnostic. For the pinned, trusted upstream archive this is the right posture, but if zig ever ships an unexpected layout the install silently drops files and fails later with a confusing "Zig binary not found after download".
-**Resolution:** `eprintln!` a one-line warning naming the skipped entry before the `continue`.
+**Files:** measured by brace-depth scan, tests excluded — worst offenders: `ryo-frontend/src/ownership.rs` `visit_expr` :3633 (~411 lines), `analyze_function` :1560 (~383), `analyze_if_stmt` :2588 (~283); `ryo-frontend/src/sema.rs` `analyze_stmt` :483 (~370), `check_binary_op` :1210 (~264), `analyze_expr` :932 (~259), `emit_builtin_call` :1715 (~218), `check_call` :1475 (~215); `ryo-backend/src/codegen.rs` `emit_call` :2198 (~310), `eval_inst` :1272 (~249), `emit_stmt` :773 (~245), `compile_function` :448 (~228), `eval_inst_str` :1803 (~201); `ryo-frontend/src/parser.rs` `expression_parser` :400 (~228); `ryo-core/src/uir.rs` `write_inst` :1106 (~152) and the same pattern in `ryo-core/src/tir.rs:1155` (~108)
+**Summary:** R7 targets functions under 50 lines so a human reviewer can hold each one in their head. Sixteen functions sit between ~150 and ~410 lines, almost all of them giant per-tag dispatch `match`es in the hottest passes. These are the files every milestone touches; review cost and merge-conflict surface scale with their length. (Distinct from I-090/I-094/I-111, which track *content* problems inside three of these functions, not size.)
+**Resolution:** Split the entry points into one helper per tag/arm family (`lower_match_expr`-style naming per R7), keeping the dispatch match as a thin table. Do it opportunistically when a function is next touched for a feature — starting with `visit_expr` and `analyze_stmt`, the two worst — rather than as one big-bang refactor. `clippy::too_many_lines` is denied workspace-wide with `too-many-lines-threshold = 500` as a ratchet; lower the threshold towards 50 as functions split.
 
-### I-123 — `test_extract_zip_roundtrip` leaks its temp dir on assertion failure
+### I-129 — Dense-index state kept in `HashMap`s where R18 wants `Vec` side tables
 
-**Files:** `ryo-backend/src/toolchain.rs` (`tests::test_extract_zip_roundtrip`)
-**Summary:** The `fs::remove_dir_all(&dir)` cleanup only runs on the happy path; a failing assert leaves the `ryo-zip-test-{pid}` dir behind in the system temp. Harmless (CI reaps temp dirs), but it accumulates junk on dev machines when the test is iterated.
-**Resolution:** Use `tempfile::TempDir` (add as a `ryo-backend` dev-dependency) or a drop guard so cleanup is panic-safe.
+**Files:** `ryo-frontend/src/ownership.rs` (`origin` :113, `owner_at_read` :140, `view_last_use` :201, `view_defer_loop` :214, `consumer_of` :1749, `program_order` :1298-1315 built per function at :1504 and :1620), `ryo-frontend/src/sema.rs` (`call_arg_refs: HashSet<InstRef>` :198, :204-215, queried at :1169)
+**Summary:** R18's rule: side tables keyed by a dense arena index belong in a `Vec` indexed by that index; hash maps are for sparse/string-keyed/unbounded data only. The ownership pass keeps five per-inst `HashMap<TirRef, _>` tables on the hot per-expression path, builds a whole-body `HashMap<TirRef, u32>` program-order map twice per function, and sema keeps a whole-program `HashSet<InstRef>` queried per `Borrow` inst — all keyed by dense `u32` arena indices. Distinct from I-064/I-065/I-107/I-119, which cover recomputation and linear lookups in other helpers.
+**Resolution:** Convert to `Vec<Option<…>>`/`Vec<bool>` side tables sized from the arena length (`TirRef::index()`/`InstRef::index()`), built once per function (per program for `call_arg_refs`). Same refactor shape as I-107's param-index map; do them together.
 
 ---
 

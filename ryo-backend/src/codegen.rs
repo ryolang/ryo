@@ -320,9 +320,18 @@ impl Codegen<JITModule> {
             .map_err(|e| format!("Failed to finalize JIT definitions: {}", e))?;
 
         let code_ptr = self.module.get_finalized_function(main_id);
-        let main_fn: fn() -> isize = unsafe { std::mem::transmute(code_ptr) };
+        // SAFETY (R5 exception, I-127): `code_ptr` was finalized by
+        // cranelift-jit for this module above, and the compiled entry point
+        // has the `extern "C" fn() -> isize` signature we emit for `main`
+        // (Cranelift's default CallConv is the platform C ABI; Rust's own
+        // ABI is unspecified, so the cast must name extern "C").
+        #[allow(unsafe_code)]
+        let main_fn: extern "C" fn() -> isize = unsafe { std::mem::transmute(code_ptr) };
         let result = main_fn();
 
+        // SAFETY (R5 exception, I-127): execution finished above; freeing the
+        // module's memory cannot invalidate any live code.
+        #[allow(unsafe_code)]
         unsafe {
             self.module.free_memory();
         }
@@ -892,9 +901,13 @@ impl<M: Module> Codegen<M> {
                 // Str-typed operands (bare formatter calls, str(view),
                 // user str-returning calls) go through the str entry
                 // point, which caches the triple for the scheduled temp
-                // Free; the scalar path rejects them.
-                if is_str_type(ctx.tir.inst(operand).ty, ctx.pool) {
+                // Free; view-typed operands (bare slices) go through the
+                // view entry point; the scalar path rejects both.
+                let operand_ty = ctx.tir.inst(operand).ty;
+                if is_str_type(operand_ty, ctx.pool) {
                     let _ = Self::eval_inst_str(builder, ctx, operand)?;
+                } else if ctx.pool.is_view(operand_ty) {
+                    let _ = Self::eval_inst_view(builder, ctx, operand)?;
                 } else {
                     let _ = Self::eval_inst(builder, ctx, operand)?;
                 }
@@ -1509,8 +1522,8 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::Call => {
                 // Str/view-returning calls are multi-word — they
-                // must come through eval_inst_str / eval_inst_view (or
-                // emit_call for bare statements), never the scalar path.
+                // must come through eval_inst_str / eval_inst_view,
+                // never the scalar path.
                 if is_str_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty) {
                     return Err(format!(
                         "eval_inst: str/view-returning call %{} reached the scalar entry point; use eval_inst_str",
@@ -1895,7 +1908,11 @@ impl<M: Module> Codegen<M> {
         ));
         let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
 
-        let param_tys: Vec<Type> = args.iter().map(|(ty, _)| *ty).chain([ctx.int_type]).collect();
+        let param_tys: Vec<Type> = args
+            .iter()
+            .map(|(ty, _)| *ty)
+            .chain([ctx.int_type])
+            .collect();
         let func_ref = Self::declare_runtime_fn(ctx.module, builder, fn_name, &param_tys, &[])?;
         let mut call_args: Vec<Value> = args.iter().map(|(_, val)| *val).collect();
         call_args.push(out_ptr);
@@ -2328,49 +2345,6 @@ impl<M: Module> Codegen<M> {
                 &[],
             )?;
             builder.ins().call(print_ref, &[ptr, len]);
-            return Ok(builder.ins().iconst(ctx.int_type, 0));
-        }
-
-        // M8.4.1.2: `str(view)` materialization as a bare statement —
-        // emit the copy, cache the triple so a scheduled temp Free can
-        // read it, and discard the value. The primary path (result
-        // bound or consumed) is `eval_inst_str`.
-        if name_str == "__ryo_str_from_view" {
-            let ValueRepr::View {
-                ptr: v_ptr,
-                len: v_len,
-            } = Self::eval_inst_view(builder, ctx, view.args[0])?
-            else {
-                unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
-            };
-            let repr = Self::emit_sret_str_call(
-                builder,
-                ctx,
-                "ryo_str_from_view",
-                &[(ctx.int_type, v_ptr), (types::I64, v_len)],
-            )?;
-            ctx.inst_values.insert(r, repr);
-
-            return Ok(builder.ins().iconst(ctx.int_type, 0));
-        }
-
-        // Formatter builtins — when called as a bare statement (result
-        // discarded), we still emit the call and cache the triple so the
-        // anon-temp Free the ownership pass scheduled for the result can
-        // resolve the buffer. The primary path is eval_inst_str
-        // (used when result is assigned to a str variable or passed to
-        // print).
-        if name_str == "int_to_str" || name_str == "float_to_str" || name_str == "bool_to_str" {
-            let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
-            let (fn_name, param_ty) = match name_str {
-                "int_to_str" => ("ryo_int_to_str", ctx.int_type),
-                "float_to_str" => ("ryo_float_to_str", types::F64),
-                "bool_to_str" => ("ryo_bool_to_str", types::I8),
-                _ => unreachable!(),
-            };
-            let repr = Self::emit_sret_str_call(builder, ctx, fn_name, &[(param_ty, arg_val)])?;
-            ctx.inst_values.insert(r, repr);
-
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 

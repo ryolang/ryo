@@ -381,7 +381,10 @@ impl Tir {
     /// callers must resolve them to their owning instruction first.
     /// This is a hard `assert!` (not debug-only) so a contract
     /// violation fails with a clear message in release builds too,
-    /// instead of a cryptic index-out-of-bounds.
+    /// instead of a cryptic index-out-of-bounds. A raw-0 ref needs no
+    /// guard here: `TirRef` is a `NonZeroU32` newtype, so slot 0 (the
+    /// reserved arena sentinel) is unconstructible — `from_raw(0)`
+    /// and `from_index(0)` already panic at construction.
     pub fn inst(&self, r: TirRef) -> &TypedInst {
         assert!(
             !r.is_param(),
@@ -1382,12 +1385,20 @@ impl Tir {
                         // arm's statements are on-path. Earlier elif
                         // conds executed (their bodies skipped) so
                         // collect just the conds up to the chosen arm.
-                        if view.then_stmts.iter().any(|&s| self.contains_reachable(s, target)) {
+                        if view
+                            .then_stmts
+                            .iter()
+                            .any(|&s| self.contains_reachable(s, target))
+                        {
                             return self.collect_jump_path(&view.then_stmts, target, set);
                         }
                         for elif in &view.elif_branches {
                             self.collect_reachable(elif.cond, set);
-                            if elif.body.iter().any(|&s| self.contains_reachable(s, target)) {
+                            if elif
+                                .body
+                                .iter()
+                                .any(|&s| self.contains_reachable(s, target))
+                            {
                                 return self.collect_jump_path(&elif.body, target, set);
                             }
                         }
@@ -1669,6 +1680,15 @@ mod tests {
         let lit = b.int_const(1, int_ty, sp());
         let tir = b.finish(&[lit]);
         let _ = tir.span(TirRef::param(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "TirRef raw must be non-zero")]
+    fn from_raw_zero_rejected_at_construction() {
+        // Slot 0 is the reserved arena sentinel; the NonZeroU32
+        // newtype makes a raw-0 ref unconstructible, so `Tir::inst` /
+        // `Tir::span` need no nonzero guard of their own.
+        let _ = TirRef::from_raw(0);
     }
 
     #[test]

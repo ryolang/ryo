@@ -2232,7 +2232,9 @@ fn analyze_assign(
                 // `tirref` (not `inst_tirref`): an inout param's old owner
                 // is a `Param`, resolved here to its virtual ref — codegen
                 // caches that ref's repr at the prologue.
-                sidecar.free_on_reassign.insert(r, old_owner.tirref(&own.param_index));
+                sidecar
+                    .free_on_reassign
+                    .insert(r, old_owner.tirref(&own.param_index));
                 // W0003 case-B support: reassignment mutates the binding's
                 // owner — a defensive-copy hazard on it.
                 own.owner_hazards.push((old_owner, r));
@@ -2431,7 +2433,8 @@ fn inout_escape_owner(own: &Ownership, owner: Owner) -> bool {
         .any(|n| own.current_owner.get(n) == Some(&owner))
 }
 
-/// Use-site use-after-move authority. Resolve the operand's
+/// Use-site use-after-move authority (spec §5.3 Rule 1 — a move
+/// invalidates the original binding). Resolve the operand's
 /// underlying owner and emit E0020 if it is `Moved`. Called from every
 /// use site: consume sites, borrow-arg paths, and operand-read sites.
 fn check_use_moved(
@@ -3383,8 +3386,7 @@ impl LoopExitCtx {
         let body = tir.loop_body(loop_inst)?;
         let mut inside_loop: HashSet<TirRef> = HashSet::new();
         tir.collect_loop_body_refs(loop_inst, &mut inside_loop);
-        let has_any: HashSet<TirRef> =
-            sidecar.free_schedule.iter().map(|fp| fp.target).collect();
+        let has_any: HashSet<TirRef> = sidecar.free_schedule.iter().map(|fp| fp.target).collect();
         let mut top_level: HashMap<TirRef, TirRef> = HashMap::new();
         for &stmt in &body {
             let mut reachable: HashSet<TirRef> = HashSet::new();
@@ -5954,15 +5956,19 @@ mod tests {
         let s = pool.intern_str("s");
         let two = pool.intern_str("two");
         let span = SimpleSpan::new((), 0..0);
+        // Distinct spans for the move arg and the reborrow chain, so
+        // the note can be pinned to the reborrow specifically.
+        let move_span = SimpleSpan::new((), 10..11);
+        let reborrow_span = SimpleSpan::new((), 20..26);
         let mut tb = TirBuilder::new(main, vec![], void, span);
         let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
         let decl = tb.var_decl(s, false, str_ty, lit, span);
-        let sv1 = tb.var(s, str_ty, span);
-        let sv2 = tb.var(s, str_ty, span);
-        let zero = tb.int_const(0, int_ty, span);
-        let one = tb.int_const(1, int_ty, span);
-        let sl = tb.slice(sv2, Some(zero), Some(one), view_ty, span);
-        let reborrow = tb.view_as_str(sl, str_ty, span);
+        let sv1 = tb.var(s, str_ty, move_span);
+        let sv2 = tb.var(s, str_ty, reborrow_span);
+        let zero = tb.int_const(0, int_ty, reborrow_span);
+        let one = tb.int_const(1, int_ty, reborrow_span);
+        let sl = tb.slice(sv2, Some(zero), Some(one), view_ty, reborrow_span);
+        let reborrow = tb.view_as_str(sl, str_ty, reborrow_span);
         let modes = vec![ParamMode::Move, ParamMode::Borrow];
         let call = tb.call(two, &[sv1, reborrow], &modes, void, span);
         let tir = tb.finish(&[decl, call]);
@@ -5974,13 +5980,20 @@ mod tests {
             .filter(|d| matches!(d.code, DiagCode::MoveWhileBorrowedInCall))
             .collect();
         assert_eq!(e0031.len(), 1, "expected exactly one E0031; got {diags:?}");
-        assert!(
-            e0031[0]
-                .notes
-                .iter()
-                .any(|n| n.message == "borrowed here"),
-            "E0031 must carry the 'borrowed here' note through ViewAsStr; got {:?}",
-            e0031[0].notes
+        let note = e0031[0]
+            .notes
+            .iter()
+            .find(|n| n.message == "borrowed here")
+            .unwrap_or_else(|| {
+                panic!(
+                    "E0031 must carry the 'borrowed here' note through ViewAsStr; got {:?}",
+                    e0031[0].notes
+                )
+            });
+        assert_eq!(
+            note.span,
+            Some(tir.span(reborrow)),
+            "the note must attach to the reborrow, not the move arg ({move_span:?})"
         );
     }
 
@@ -9235,7 +9248,10 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = sc.functions.remove(&main).expect("per-function sidecar entry");
+        let sc = sc
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
 
         // Precondition: the loop actually diverged — the re-walk sees
         // `consume(m)` with m already Moved and reports UAM once. If

@@ -5,6 +5,8 @@ edition = "2024"
 rust-version.workspace = true
 
 [dependencies]
-ariadne = { workspace = true }
 chumsky = { workspace = true }
 hashbrown = { workspace = true }
+
+[lints]
+workspace = true
