@@ -509,21 +509,15 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             let view = sema.uir.var_decl_view(r);
             let init_tir = analyze_expr(sema, fcx, scope, view.initializer);
             let inferred = fcx.builder.ty_of(init_tir);
-            // Reject void RHS and recover with error sentinel so
-            // downstream uses don't cascade.
-            let inferred = if inferred == sema.pool.void() {
-                sema.sink.emit(Diag::error(
-                    sema.uir.span(view.initializer),
-                    DiagCode::VoidValueInExpression,
-                    format!(
-                        "cannot bind '{}' to a 'void' value: the right-hand side has no value",
-                        sema.pool.str(view.name),
-                    ),
-                ));
-                sema.pool.error_type()
-            } else {
-                inferred
-            };
+            // Reject void/never RHS and recover with the error
+            // sentinel so downstream uses don't cascade.
+            let inferred =
+                if check_bindable_value(sema, view.name, inferred, sema.uir.span(view.initializer))
+                {
+                    sema.pool.error_type()
+                } else {
+                    inferred
+                };
             let resolved = resolve_var_decl_type(&view, inferred, sema);
 
             if scope.contains_in_current(view.name) {
@@ -639,6 +633,9 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
 
             match scope.lookup_full(view.name) {
                 Some((existing_ty, true)) => {
+                    if check_bindable_value(sema, view.name, value_ty, sema.uir.span(view.value)) {
+                        return fcx.builder.unreachable(sema.pool.error_type(), span);
+                    }
                     if !sema.pool.is_error(value_ty)
                         && !sema.pool.is_error(existing_ty)
                         && !sema.pool.compatible(existing_ty, value_ty)
@@ -668,15 +665,12 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
                 None => {
-                    let resolved_ty = if value_ty == sema.pool.void() {
-                        sema.sink.emit(Diag::error(
-                            sema.uir.span(view.value),
-                            DiagCode::VoidValueInExpression,
-                            format!(
-                                "cannot bind '{}' to a 'void' value: the right-hand side has no value",
-                                sema.pool.str(view.name),
-                            ),
-                        ));
+                    let resolved_ty = if check_bindable_value(
+                        sema,
+                        view.name,
+                        value_ty,
+                        sema.uir.span(view.value),
+                    ) {
                         sema.pool.error_type()
                     } else {
                         value_ty
@@ -736,6 +730,10 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             let op = view.op;
             let is_int = existing_ty == sema.pool.int();
             let is_float = existing_ty == sema.pool.float();
+
+            if check_bindable_value(sema, view.name, value_ty, sema.uir.span(view.value)) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
 
             if op == CompoundOp::Mod && is_float {
                 sema.sink.emit(Diag::error(
@@ -2227,6 +2225,31 @@ fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// Reject a valueless (`void` or `never`) right-hand side in a
+/// binding position: a `void` call produced no value; a `never`
+/// expression (e.g. `panic`) diverges before producing one — neither
+/// can be bound or assigned. Emits the diagnostic and returns true so
+/// the caller can recover; false when `ty` is bindable.
+fn check_bindable_value(sema: &mut Sema<'_>, name: StringId, ty: TypeId, span: Span) -> bool {
+    let kind = if ty == sema.pool.void() {
+        "void"
+    } else if sema.pool.is_never(ty) {
+        "never"
+    } else {
+        return false;
+    };
+    sema.sink.emit(Diag::error(
+        span,
+        DiagCode::VoidValueInExpression,
+        format!(
+            "cannot bind '{}' to a '{}' value: the right-hand side has no value",
+            sema.pool.str(name),
+            kind,
+        ),
+    ));
+    true
+}
+
 fn bin_op_symbol(tag: InstTag) -> &'static str {
     match tag {
         InstTag::Add => "+",
@@ -2842,22 +2865,46 @@ mod tests {
     }
 
     #[test]
-    fn never_var_decl_tail_counts_as_diverging() {
-        // The initializer is `never`-typed: the binding never
-        // completes, so the body cannot fall through.
-        let code = "fn f() -> int:\n\tx = panic(\"boom\")\n";
-        let (_tirs, _pool) = run(code).unwrap();
+    fn never_var_decl_rejected() {
+        // Binding a `never` value is an error — `panic` diverges and
+        // produces no value to bind. No MissingReturn cascade: the
+        // user's intent was to diverge.
+        let diags = run("fn f() -> int:\n\tx = panic(\"boom\")\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::VoidValueInExpression));
+        assert!(
+            !any_code(&diags, DiagCode::MissingReturn),
+            "no cascading MissingReturn; got {:?}",
+            diags
+        );
     }
 
     #[test]
-    fn never_assign_tail_counts_as_diverging() {
-        let code = "fn f() -> int:\n\tmut x = 1\n\tx = panic(\"boom\")\n";
-        let (_tirs, _pool) = run(code).unwrap();
+    fn never_assign_rejected() {
+        let diags = run("fn f() -> int:\n\tmut x = 1\n\tx = panic(\"boom\")\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::VoidValueInExpression));
+        assert!(
+            !any_code(&diags, DiagCode::MissingReturn),
+            "no cascading MissingReturn; got {:?}",
+            diags
+        );
     }
 
     #[test]
-    fn never_compound_assign_tail_counts_as_diverging() {
-        let code = "fn f() -> int:\n\tmut x = 1\n\tx += panic(\"boom\")\n";
+    fn never_compound_assign_rejected() {
+        let diags = run("fn f() -> int:\n\tmut x = 1\n\tx += panic(\"boom\")\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::VoidValueInExpression));
+        assert!(
+            !any_code(&diags, DiagCode::MissingReturn),
+            "no cascading MissingReturn; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn return_panic_accepted() {
+        // `return <never>` is the idiomatic diverging form — the
+        // never value coerces to any return type.
+        let code = "fn f() -> int:\n\treturn panic(\"boom\")\n";
         let (_tirs, _pool) = run(code).unwrap();
     }
 

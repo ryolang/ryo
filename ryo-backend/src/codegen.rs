@@ -97,18 +97,6 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
     }
 }
 
-/// Zero constant of `ty`, used as a dead-block placeholder: after a
-/// `never`-typed value (e.g. `panic`) traps, emission continues in a
-/// sealed dead block, but locals bound there still need verifier-
-/// legal values of the variable's declared type.
-fn zero_const(builder: &mut FunctionBuilder, ty: types::Type) -> Value {
-    if ty == types::F64 {
-        builder.ins().f64const(0.0)
-    } else {
-        builder.ins().iconst(ty, 0)
-    }
-}
-
 pub struct Codegen<M: Module> {
     builder_context: FunctionBuilderContext,
     ctx: codegen::Context,
@@ -815,85 +803,53 @@ impl<M: Module> Codegen<M> {
         match inst.tag {
             TirTag::VarDecl => {
                 let view = ctx.tir.var_decl_view(r);
-                let init_never = ctx.pool.is_never(ctx.tir.inst(view.initializer).ty);
                 if is_str_type(inst.ty, ctx.pool) {
-                    // A `never` initializer (e.g. `panic`) traps during
-                    // eval_inst; bind zeros so later dead-block uses of
-                    // the variable stay verifier-legal.
-                    let (ptr, len, cap) = if init_never {
-                        let _ = Self::eval_inst(builder, ctx, view.initializer)?;
-                        (
-                            builder.ins().iconst(ctx.int_type, 0),
-                            builder.ins().iconst(types::I64, 0),
-                            builder.ins().iconst(types::I64, 0),
-                        )
-                    } else {
-                        match Self::eval_inst_str(builder, ctx, view.initializer)? {
-                            ValueRepr::Str { ptr, len, cap } => (ptr, len, cap),
-                            _ => {
-                                unreachable!("str-typed initializer should produce ValueRepr::Str")
-                            }
+                    let repr = Self::eval_inst_str(builder, ctx, view.initializer)?;
+                    match repr {
+                        ValueRepr::Str { ptr, len, cap } => {
+                            let var_ptr = builder.declare_var(ctx.int_type);
+                            let var_len = builder.declare_var(types::I64);
+                            let var_cap = builder.declare_var(types::I64);
+                            builder.def_var(var_ptr, ptr);
+                            builder.def_var(var_len, len);
+                            builder.def_var(var_cap, cap);
+                            ctx.str_locals.insert(
+                                view.name,
+                                StrLocals {
+                                    ptr: var_ptr,
+                                    len: var_len,
+                                    cap: var_cap,
+                                },
+                            );
                         }
-                    };
-                    let var_ptr = builder.declare_var(ctx.int_type);
-                    let var_len = builder.declare_var(types::I64);
-                    let var_cap = builder.declare_var(types::I64);
-                    builder.def_var(var_ptr, ptr);
-                    builder.def_var(var_len, len);
-                    builder.def_var(var_cap, cap);
-                    ctx.str_locals.insert(
-                        view.name,
-                        StrLocals {
-                            ptr: var_ptr,
-                            len: var_len,
-                            cap: var_cap,
-                        },
-                    );
+                        _ => unreachable!("str-typed initializer should produce ValueRepr::Str"),
+                    }
                     return Ok(Terminator::None);
                 }
                 if ctx.pool.is_view(inst.ty) {
-                    // See the str path above for the `never` guard.
-                    let (ptr, len) = if init_never {
-                        let _ = Self::eval_inst(builder, ctx, view.initializer)?;
-                        (
-                            builder.ins().iconst(ctx.int_type, 0),
-                            builder.ins().iconst(types::I64, 0),
-                        )
-                    } else {
-                        match Self::eval_inst_view(builder, ctx, view.initializer)? {
-                            ValueRepr::View { ptr, len } => (ptr, len),
-                            _ => {
-                                unreachable!(
-                                    "view-typed initializer should produce ValueRepr::View"
-                                )
-                            }
+                    let repr = Self::eval_inst_view(builder, ctx, view.initializer)?;
+                    match repr {
+                        ValueRepr::View { ptr, len } => {
+                            let var_ptr = builder.declare_var(ctx.int_type);
+                            let var_len = builder.declare_var(types::I64);
+                            builder.def_var(var_ptr, ptr);
+                            builder.def_var(var_len, len);
+                            ctx.view_locals.insert(
+                                view.name,
+                                ViewLocals {
+                                    ptr: var_ptr,
+                                    len: var_len,
+                                },
+                            );
                         }
-                    };
-                    let var_ptr = builder.declare_var(ctx.int_type);
-                    let var_len = builder.declare_var(types::I64);
-                    builder.def_var(var_ptr, ptr);
-                    builder.def_var(var_len, len);
-                    ctx.view_locals.insert(
-                        view.name,
-                        ViewLocals {
-                            ptr: var_ptr,
-                            len: var_len,
-                        },
-                    );
+                        _ => unreachable!("view-typed initializer should produce ValueRepr::View"),
+                    }
                     return Ok(Terminator::None);
                 }
+                let val = Self::eval_inst(builder, ctx, view.initializer)?;
                 // The variable's resolved type lives in the VarDecl
                 // inst's `ty` slot directly — no side-table lookup.
                 let cl_ty = cranelift_type_for(inst.ty, ctx.pool, ctx.int_type);
-                let val = if init_never {
-                    // Traps during eval_inst; the zero placeholder keeps
-                    // the dead block verifier-legal (the eval's own I8
-                    // dummy would mismatch an annotated type).
-                    let _ = Self::eval_inst(builder, ctx, view.initializer)?;
-                    zero_const(builder, cl_ty)
-                } else {
-                    Self::eval_inst(builder, ctx, view.initializer)?
-                };
                 let var = builder.declare_var(cl_ty);
                 builder.def_var(var, val);
                 ctx.locals.insert(view.name, var);
@@ -960,16 +916,7 @@ impl<M: Module> Codegen<M> {
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
             TirTag::Assign => {
                 let view = ctx.tir.assign_view(r);
-                // A `never` value (e.g. `panic`) traps during eval_inst
-                // and emission continues in a sealed dead block — skip
-                // the store: it never executes, and the eval's I8 dummy
-                // would mismatch the variable's declared type.
-                let value_never = ctx.pool.is_never(ctx.tir.inst(view.value).ty);
                 if is_str_type(inst.ty, ctx.pool) {
-                    if value_never {
-                        let _ = Self::eval_inst(builder, ctx, view.value)?;
-                        return Ok(Terminator::None);
-                    }
                     let repr = Self::eval_inst_str(builder, ctx, view.value)?;
                     let ValueRepr::Str { ptr, len, cap } = repr else {
                         unreachable!("str-typed assign should produce ValueRepr::Str");
@@ -1008,10 +955,6 @@ impl<M: Module> Codegen<M> {
                     return Ok(Terminator::None);
                 }
                 if ctx.pool.is_view(inst.ty) {
-                    if value_never {
-                        let _ = Self::eval_inst(builder, ctx, view.value)?;
-                        return Ok(Terminator::None);
-                    }
                     let repr = Self::eval_inst_view(builder, ctx, view.value)?;
                     let ValueRepr::View { ptr, len } = repr else {
                         unreachable!("view-typed assign should produce ValueRepr::View");
@@ -1029,9 +972,6 @@ impl<M: Module> Codegen<M> {
                     return Ok(Terminator::None);
                 }
                 let val = Self::eval_inst(builder, ctx, view.value)?;
-                if value_never {
-                    return Ok(Terminator::None);
-                }
                 let var = ctx.locals.get(&view.name).ok_or_else(|| {
                     format!(
                         "Undefined variable in assign: '{}'",
@@ -1044,12 +984,6 @@ impl<M: Module> Codegen<M> {
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
                 let rhs = Self::eval_inst(builder, ctx, view.value)?;
-                // A `never` RHS (e.g. `panic`) trapped during the eval —
-                // skip the dead op+store (its I8 dummy would mismatch
-                // the variable's declared type).
-                if ctx.pool.is_never(ctx.tir.inst(view.value).ty) {
-                    return Ok(Terminator::None);
-                }
                 let var = ctx.locals.get(&view.name).ok_or_else(|| {
                     format!(
                         "Undefined variable in compound assign: '{}'",

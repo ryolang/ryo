@@ -70,10 +70,12 @@ pub enum DiagCode {
     ArityMismatch,
     BuiltinArgKind,
     UnsupportedOperator,
-    /// A `void` value (e.g. the result of a void-returning call
-    /// like `print(...)`) appeared in an expression position that
-    /// requires a real value (var decl initializer, return
-    /// expression, operand of an arithmetic/equality/etc op).
+    /// A valueless result — `void` (e.g. the result of a
+    /// void-returning call like `print(...)`) or `never` (a
+    /// diverging expression like `panic(...)`, which yields no
+    /// value at all) — appeared in a binding position that requires
+    /// a real value (var decl initializer, assignment right-hand
+    /// side).
     VoidValueInExpression,
     /// An `if` or `elif` condition expression evaluated to a non-bool
     /// type. Ryo requires conditions to be `bool` (no truthy coercion).

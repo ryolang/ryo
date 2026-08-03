@@ -1280,12 +1280,10 @@ fn panic_inside_if_branch_not_taken() {
     );
 }
 
-/// A `never`-valued binding statement (`x = panic(...)`, etc.) must
-/// compile — the call traps and the rest of the block is dead — and
-/// panic at runtime, not crash codegen with a verifier error. Assert
-/// on the user message: "panicked" alone also matches a Rust panic
-/// from a crashing compiler.
-fn assert_never_binding_panics(file_name: &str, code: &str) {
+/// A `never`-valued binding statement (`x = panic(...)`, etc.) is a
+/// compile error — `panic` diverges and produces no value to bind.
+/// Assert on the user-facing message, not the exit code alone.
+fn assert_never_binding_rejected(file_name: &str, code: &str) {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), file_name, code);
 
@@ -1294,60 +1292,60 @@ fn assert_never_binding_panics(file_name: &str, code: &str) {
 
     assert!(
         !output.status.success(),
-        "panic should exit nonzero. stdout: {}",
+        "never-binding should be rejected. stdout: {}",
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("boom"),
-        "stderr should contain the runtime panic message, got: {}",
+        stderr.contains("'never' value"),
+        "stderr should name the never-binding error, got: {}",
         stderr
     );
 }
 
 #[test]
-fn never_var_decl_scalar_compiles_and_panics() {
-    assert_never_binding_panics(
+fn never_var_decl_scalar_rejected() {
+    assert_never_binding_rejected(
         "never_vardecl_scalar.ryo",
         "fn f() -> int:\n\tx: int = panic(\"boom\")\n\nfn main():\n\ty = f()\n",
     );
 }
 
 #[test]
-fn never_var_decl_str_compiles_and_panics() {
-    assert_never_binding_panics(
+fn never_var_decl_str_rejected() {
+    assert_never_binding_rejected(
         "never_vardecl_str.ryo",
         "fn f() -> int:\n\tx: str = panic(\"boom\")\n\nfn main():\n\ty = f()\n",
     );
 }
 
 #[test]
-fn never_assign_scalar_compiles_and_panics() {
-    assert_never_binding_panics(
+fn never_assign_scalar_rejected() {
+    assert_never_binding_rejected(
         "never_assign_scalar.ryo",
         "fn f() -> int:\n\tmut x = 1\n\tx = panic(\"boom\")\n\nfn main():\n\ty = f()\n",
     );
 }
 
 #[test]
-fn never_assign_str_compiles_and_panics() {
-    assert_never_binding_panics(
+fn never_assign_str_rejected() {
+    assert_never_binding_rejected(
         "never_assign_str.ryo",
         "fn f() -> int:\n\tmut x = \"a\"\n\tx = panic(\"boom\")\n\nfn main():\n\ty = f()\n",
     );
 }
 
 #[test]
-fn never_compound_assign_compiles_and_panics() {
-    assert_never_binding_panics(
+fn never_compound_assign_rejected() {
+    assert_never_binding_rejected(
         "never_compound.ryo",
         "fn f() -> int:\n\tmut x = 1\n\tx += panic(\"boom\")\n\nfn main():\n\ty = f()\n",
     );
 }
 
 #[test]
-fn never_assign_view_compiles_and_panics() {
-    assert_never_binding_panics(
+fn never_assign_view_rejected() {
+    assert_never_binding_rejected(
         "never_assign_view.ryo",
         "fn f() -> int:\n\ts = \"hello\"\n\tmut v = s[0:2]\n\tv = panic(\"boom\")\n\nfn main():\n\ty = f()\n",
     );

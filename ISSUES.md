@@ -445,6 +445,12 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Summary:** R18's rule: side tables keyed by a dense arena index belong in a `Vec` indexed by that index; hash maps are for sparse/string-keyed/unbounded data only. The ownership pass keeps five per-inst `HashMap<TirRef, _>` tables on the hot per-expression path, builds a whole-body `HashMap<TirRef, u32>` program-order map twice per function, and sema keeps a whole-program `HashSet<InstRef>` queried per `Borrow` inst — all keyed by dense `u32` arena indices. Distinct from I-064/I-065/I-107/I-119, which cover recomputation and linear lookups in other helpers.
 **Resolution:** Convert to `Vec<Option<…>>`/`Vec<bool>` side tables sized from the arena length (`TirRef::index()`/`InstRef::index()`), built once per function (per program for `call_arg_refs`). Same refactor shape as I-107's param-index map; do them together.
 
+### I-130 — `never` in operand positions reaches codegen, which rejects it with an internal error
+
+**Files:** `ryo-frontend/src/sema.rs` (`check_binary_op`, call-arg conversion), `ryo-backend/src/codegen.rs`, `ryo-frontend/src/ownership.rs`
+**Summary:** Binding a `never` value is rejected by sema (`check_bindable_value`), but `never` in other operand positions — arithmetic operands (`return 1 + panic("x")`), call arguments (`f(panic("x"))`) — passes sema: `InternPool::compatible` accepts `never` against everything. Codegen then fails with an internal error (e.g. "ownership pass scheduled Free but no ValueRepr cached", or a Cranelift verifier type mismatch from the I8 dead-block dummy) instead of a user diagnostic. Found while fixing the return-flow review feedback.
+**Resolution:** Decide per position: reject with a diagnostic (extend the valueless-RHS rule beyond binding positions), or define `never`-operand semantics (operand short-circuits the whole expression — divergence propagates) and teach codegen to emit the trap path. The former is simpler and matches the binding rule; the latter matches Rust's `!` coercion.
+
 ---
 
 ## Cross-References
