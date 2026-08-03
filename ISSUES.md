@@ -346,6 +346,12 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** Both accessors debug-assert `!r.is_param()`, but `TirRef::index()` is a bare `as usize` cast, so in a release build a param sentinel ref (≥ 2³¹) still flows into `self.spans[r.index()]` / `self.instructions[r.index()]` and panics index-out-of-bounds instead of being handled. The debug_assert only surfaces the contract violation in dev/test.
 **Resolution:** Promote to a real guard (return `Option` / fallback span, or `expect` with a clear message), or document the by-construction invariant that param sentinels never reach these accessors and keep the debug_assert as the contract.
 
+### I-124 — Lexer rejects CRLF line endings
+
+**Files:** `ryo-frontend/src/lexer.rs`
+**Summary:** `\r` matches no token pattern, so any CRLF source fails with `found '<error>'` at the end of the first line — a confusing diagnostic for the most common Windows editor default. Surfaced by the windows CI leg: git's `core.autocrlf=true` checked `examples/` and `benchmarks/` out as CRLF and every repo-file parse failed (worked around for CI by `.gitattributes` forcing `eol=lf` on `*.ryo`, but user-written CRLF files still fail).
+**Resolution:** Accept `\r\n` as a newline in the lexer (treat `\r` as whitespace adjacent to `\n`, keeping span accounting byte-accurate), and add a CRLF fixture test.
+
 ---
 
 ## 🟢 Cleanup
