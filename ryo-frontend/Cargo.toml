@@ -15,3 +15,6 @@ divan = { version = "5.0.1", package = "codspeed-divan-compat" }
 [[bench]]
 name = "frontend"
 harness = false
+
+[lints]
+workspace = true

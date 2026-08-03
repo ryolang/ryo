@@ -2289,7 +2289,8 @@ fn inout_escape_owner(own: &Ownership, owner: Owner) -> bool {
         .any(|n| own.current_owner.get(n) == Some(&owner))
 }
 
-/// Use-site use-after-move authority (I-050). Resolve the operand's
+/// Use-site use-after-move authority (I-050; spec §5.3 Rule 1 — a move
+/// invalidates the original binding). Resolve the operand's
 /// underlying owner and emit E0020 if it is `Moved`. Called from every
 /// use site: consume sites, borrow-arg paths, and operand-read sites.
 fn check_use_moved(

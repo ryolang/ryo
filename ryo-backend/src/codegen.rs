@@ -308,9 +308,18 @@ impl Codegen<JITModule> {
             .map_err(|e| format!("Failed to finalize JIT definitions: {}", e))?;
 
         let code_ptr = self.module.get_finalized_function(main_id);
-        let main_fn: fn() -> isize = unsafe { std::mem::transmute(code_ptr) };
+        // SAFETY (R5 exception, I-127): `code_ptr` was finalized by
+        // cranelift-jit for this module above, and the compiled entry point
+        // has the `extern "C" fn() -> isize` signature we emit for `main`
+        // (Cranelift's default CallConv is the platform C ABI; Rust's own
+        // ABI is unspecified, so the cast must name extern "C").
+        #[allow(unsafe_code)]
+        let main_fn: extern "C" fn() -> isize = unsafe { std::mem::transmute(code_ptr) };
         let result = main_fn();
 
+        // SAFETY (R5 exception, I-127): execution finished above; freeing the
+        // module's memory cannot invalidate any live code.
+        #[allow(unsafe_code)]
         unsafe {
             self.module.free_memory();
         }

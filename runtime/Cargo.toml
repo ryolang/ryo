@@ -17,3 +17,15 @@ ryu = "1"
 # std JIT host (ryo-backend) must NOT define one — it would collide with
 # std's panic_impl lang item.
 staticlib = []
+
+# This crate is the curated unsafe/FFI boundary, so it does NOT opt into the
+# workspace lint table (`unsafe_code = "deny"` would reject it wholesale).
+# Instead these lints guard the no_std discipline: the staticlib archive
+# builds with `#![no_std]` (feature = "staticlib"), and any `std::` path
+# fails that build — but only at archive-build time. Denying the
+# std/alloc-instead-of-core lints surfaces the same mistake in the editor
+# and in the rlib/test configurations where std happens to link fine.
+[lints.clippy]
+std_instead_of_core = "deny"
+alloc_instead_of_core = "deny"
+std_instead_of_alloc = "deny"
