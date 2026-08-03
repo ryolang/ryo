@@ -6,6 +6,29 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 ---
 
+## Fix Order for m8.4.2
+
+Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
+
+1. **I-031 + I-071** — return-flow analysis: non-void fn falling off the end gets no diagnostic.
+2. **I-020** — `inst_values` memoizer is cross-block: stale values across control flow.
+3. **I-082** — `never`-returning call path skips inout write-back.
+4. **I-075** — duplicate function definitions silently accepted.
+5. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
+6. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
+7. **I-106** — decode paths panic instead of reporting an internal error.
+8. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
+9. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
+10. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
+11. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
+12. **I-017** — `i64::MIN` integer literal is unrepresentable.
+13. **I-088** — ownership sidecar keyed by function name.
+14. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+
+Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
+
+---
+
 ## Severity Legend
 
 - 🔴 **Blocking** — prevents implementing roadmap features as currently designed.
