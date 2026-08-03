@@ -1364,6 +1364,9 @@ impl Tir {
     ///   spurious `MissingReturn`.
     /// - `ExprStmt` whose operand is `never`-typed (e.g. a `panic`
     ///   call): diverges, nothing past it executes.
+    /// - `VarDecl` / `Assign` / `CompoundAssign` whose evaluated
+    ///   initializer/value is `never`-typed: same divergence, the
+    ///   binding never completes.
     /// - `IfStmt`: the then-block, every elif body, and the else
     ///   block must all definitely return; without an else the
     ///   not-taken path falls through.
@@ -1378,6 +1381,11 @@ impl Tir {
                     unreachable!("ExprStmt must carry TirData::UnOp");
                 };
                 pool.is_never(self.inst(operand).ty)
+            }
+            TirTag::VarDecl => pool.is_never(self.inst(self.var_decl_view(r).initializer).ty),
+            TirTag::Assign => pool.is_never(self.inst(self.assign_view(r).value).ty),
+            TirTag::CompoundAssign => {
+                pool.is_never(self.inst(self.compound_assign_view(r).value).ty)
             }
             TirTag::IfStmt => {
                 let view = self.if_stmt_view(r);

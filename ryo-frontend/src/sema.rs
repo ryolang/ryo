@@ -2842,6 +2842,26 @@ mod tests {
     }
 
     #[test]
+    fn never_var_decl_tail_counts_as_diverging() {
+        // The initializer is `never`-typed: the binding never
+        // completes, so the body cannot fall through.
+        let code = "fn f() -> int:\n\tx = panic(\"boom\")\n";
+        let (_tirs, _pool) = run(code).unwrap();
+    }
+
+    #[test]
+    fn never_assign_tail_counts_as_diverging() {
+        let code = "fn f() -> int:\n\tmut x = 1\n\tx = panic(\"boom\")\n";
+        let (_tirs, _pool) = run(code).unwrap();
+    }
+
+    #[test]
+    fn never_compound_assign_tail_counts_as_diverging() {
+        let code = "fn f() -> int:\n\tmut x = 1\n\tx += panic(\"boom\")\n";
+        let (_tirs, _pool) = run(code).unwrap();
+    }
+
+    #[test]
     fn genuine_missing_return_reported_alongside_other_errors() {
         // An unrelated error doesn't mask return-flow: this function
         // genuinely lacks a return, so both diags fire.
