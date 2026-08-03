@@ -26,6 +26,14 @@ unsafe extern "C" {
     fn _write(fd: c_int, buf: *const c_void, count: u32) -> c_int;
 }
 
+// MSVC's CRT defines `_fltused`; float code in core/ryu references it.
+// Rustc-linked binaries get it from the CRT, but the no_std archive is
+// linked by `zig cc`, which provides no definition — supply it here.
+#[cfg(all(windows, feature = "staticlib"))]
+#[no_mangle]
+#[used]
+pub static _fltused: c_int = 0;
+
 unsafe extern "C" {
     fn exit(code: c_int) -> !;
     fn abort() -> !;
