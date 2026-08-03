@@ -365,7 +365,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 *   `bytes`: Owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` (final spec §4, D2). Move semantics, mutability by binding. Literal: `b"\x00\x01"`. Slicing yields a `bytesview` projection (§4.4 rules; no UTF-8 hazard, so scalar indexing `b[i]` **is** allowed, yielding `u8`). Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated), `text.to_bytes() -> bytes` (owned copy). *(Rationale: `list[u8]` was the only — awkward — option for protocol/binary data; `bytes` fills it with the same ownership story as `str`.)*
 *   `char`: Unicode Scalar Value. Literal: `'a'`.
 *   `void`: Unit type. Represents a value with no data. Used for functions that return no meaningful value. *(Rationale: Provides explicit way to represent "no return value" concept, common in many programming languages for side-effecting functions)*.
-*   `never`: Bottom type. Represents a computation that never completes (e.g., `panic`, infinite loop, `exit`). *(Rationale: Useful for control flow analysis and type theory completeness).*
+*   `never`: Bottom type. Represents a computation that never completes (e.g., `panic`, infinite loop, `exit`). A `never` value may only appear as a **bare expression statement** — it cannot be bound to a variable, returned, passed as an argument, or used as an operand (error **E0017**, `VoidValueInExpression`); see §6.1.3 and §7.6. *(Rationale: Useful for control flow analysis and type theory completeness).*
 *   Explicit Sizes: `i8`-`i64`, `u8`-`u64`, `usize`, `float32`. *(Rationale: Necessary for control over representation, performance, and FFI).**
 
 ### 4.3 Anonymous Structs & Tuple Sugar
@@ -1660,6 +1660,38 @@ println(f"x = {x}, y = {y}")           # f-string handles formatting
 # println(42)                          # compile error: expected str, got int
 ```
 
+### 6.1.3 Return Checking (Return-Flow Analysis)
+
+A function with a non-`void` return type must return a value on **every** path through its body. If control can reach the end of the body without returning, the compiler rejects the function (error **E0036**, `MissingReturn`).
+
+```ryo
+fn f() -> int:
+	x = 1                          # compile error E0036: missing return
+
+fn abs(x: int) -> int:
+	if x >= 0:
+		return x
+	else:
+		return 0 - x               # ok — every arm returns
+
+fn sign(x: int) -> int:
+	if x > 0:
+		return 1
+	return 0                       # ok — a trailing return covers the fall-through
+
+fn die(msg: str) -> int:
+	panic(msg)                   # ok — `panic` diverges (type `never`)
+```
+
+**Rules:**
+
+*   An `if`/`elif`/`else` chain satisfies the check only when it has an `else` and **every** arm returns.
+*   Loops never satisfy the check — a loop body can execute zero times, so a `return` inside `while`/`for` does not count.
+*   A bare `panic(...)` statement **diverges** (§4.2, §7.6): control cannot continue past it, so it satisfies the check like a `return`.
+*   `void` functions (including `main`) need no return.
+
+*(Rationale: falling off the end of a non-`void` function is always a bug — the caller would receive a garbage value. Branch-aware analysis keeps the check precise: exhaustive `if`/`else` chains pass without a redundant trailing `return`.)*
+
 ### 6.2 Closures & Lambda Expressions
 
 *   **Concept:** Closures are anonymous functions that can capture variables from their enclosing scope. They provide first-class function values, enabling higher-order functions, callbacks, and functional programming patterns.
@@ -2142,6 +2174,7 @@ fn critical_operation():
 
 *   **Aborts the process immediately** with exit code `101`
 *   **Does not unwind** - no cleanup code runs (simplifies implementation and predictability)
+*   **Statement-only** — `panic(...)` evaluates to the bottom type `never` (§4.2). A `never` value cannot be bound to a variable, returned, passed as an argument, or used as an operand (error **E0017**); the bare statement shown above is the only legal form. As a consequence, a bare `panic(...)` satisfies return-flow analysis like a `return` (§6.1.3).
 *   **Captures and prints full stack trace** - shows complete call chain leading to panic
 *   **Includes location information** - file, line, column, and function name of panic call
 
