@@ -316,12 +316,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
 **Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
 
-### I-115 — `Tir::span`/`Tir::inst` still panic on param sentinel refs in release
-
-**Files:** `ryo-core/src/tir.rs` (`Tir::span` :371-374, `Tir::inst` :366-368, `TirRef::index` :75-77)
-**Summary:** Both accessors debug-assert `!r.is_param()`, but `TirRef::index()` is a bare `as usize` cast, so in a release build a param sentinel ref (≥ 2³¹) still flows into `self.spans[r.index()]` / `self.instructions[r.index()]` and panics index-out-of-bounds instead of being handled. The debug_assert only surfaces the contract violation in dev/test.
-**Resolution:** Promote to a real guard (return `Option` / fallback span, or `expect` with a clear message), or document the by-construction invariant that param sentinels never reach these accessors and keep the debug_assert as the contract.
-
 ### I-124 — Lexer rejects CRLF line endings
 
 **Files:** `ryo-frontend/src/lexer.rs`

@@ -363,13 +363,36 @@ pub struct Tir {
 }
 
 impl Tir {
+    /// Look up the instruction for `r`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `r` is a param sentinel ([`TirRef::param`]). Sentinels
+    /// are map keys for param-origin values in ownership/codegen and
+    /// are by construction never valid indices into `instructions`;
+    /// callers must resolve them to their owning instruction first.
+    /// This is a hard `assert!` (not debug-only) so a contract
+    /// violation fails with a clear message in release builds too,
+    /// instead of a cryptic index-out-of-bounds.
     pub fn inst(&self, r: TirRef) -> &TypedInst {
-        debug_assert!(!r.is_param(), "Tir::inst called with a param sentinel ref");
+        assert!(
+            !r.is_param(),
+            "Tir::inst called with a param sentinel ref (raw={}); \
+             param sentinels are not instruction indices",
+            r.raw()
+        );
         &self.instructions[r.index()]
     }
 
+    /// Look up the source span for `r`. Same param-sentinel contract
+    /// as [`Tir::inst`].
     pub fn span(&self, r: TirRef) -> Span {
-        debug_assert!(!r.is_param(), "Tir::span called with a param sentinel ref");
+        assert!(
+            !r.is_param(),
+            "Tir::span called with a param sentinel ref (raw={}); \
+             param sentinels are not instruction indices",
+            r.raw()
+        );
         self.spans[r.index()]
     }
 
@@ -1330,6 +1353,30 @@ mod tests {
         let real = TirRef::from_raw(7);
         assert!(!real.is_param());
         assert_eq!(real.as_param_index(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Tir::inst called with a param sentinel ref")]
+    fn inst_rejects_param_sentinel_with_clear_message() {
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let main = pool.intern_str("main");
+        let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+        let lit = b.int_const(1, int_ty, sp());
+        let tir = b.finish(&[lit]);
+        let _ = tir.inst(TirRef::param(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "Tir::span called with a param sentinel ref")]
+    fn span_rejects_param_sentinel_with_clear_message() {
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let main = pool.intern_str("main");
+        let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+        let lit = b.int_const(1, int_ty, sp());
+        let tir = b.finish(&[lit]);
+        let _ = tir.span(TirRef::param(0));
     }
 
     #[test]
