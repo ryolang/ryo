@@ -1217,6 +1217,7 @@ dependencies = [
  "sha2",
  "tar",
  "target-lexicon",
+ "tempfile",
  "ureq",
  "xz2",
  "zip",
@@ -1226,7 +1227,6 @@ dependencies = [
 name = "ryo-core"
 version = "0.1.0"
 dependencies = [
- "ariadne",
  "chumsky",
  "hashbrown 0.17.1",
 ]

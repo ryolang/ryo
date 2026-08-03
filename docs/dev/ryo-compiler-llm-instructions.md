@@ -126,4 +126,18 @@ Ask. Present the trade-off with spec references and let the human decide — the
 
 ---
 
+## 9. Tooling Enforcement
+
+A subset of these rules is machine-enforced; check before arguing with CI:
+
+- **R5** — `unsafe_code = "deny"` in `[workspace.lints]` (root `Cargo.toml`). All compiler crates opt in; `runtime/` is the curated unsafe boundary. The grandfathered sites carry `#[allow(unsafe_code)]` + SAFETY comment + linked issue (I-127) — copy that pattern exactly if a benchmark ever forces a new one.
+- **R1** — `clippy::disallowed_types` denies `Rc`, `Weak`, `RefCell` workspace-wide (`clippy.toml`).
+- **R7** — `clippy::too_many_lines` denied with `too-many-lines-threshold = 500` (ratchet above today's worst, I-128; lower it as functions split).
+- **R8/R13** — `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented` warn workspace-wide (tests exempt via `clippy.toml`). Promote to deny once the tracked panic sites (I-103, I-106, I-107, I-115) are converted.
+- **Runtime `no_std`** — the `runtime/` crate is the curated unsafe/FFI boundary and opts out of the workspace lints; instead it denies `std_instead_of_core`, `alloc_instead_of_core`, `std_instead_of_alloc` in its own `[lints.clippy]`. The hard gate is structural: the archive build always passes `--features staticlib`, which activates `#![no_std]`, so any `std` dependency fails the compile.
+
+What lints cannot express stays on you: interning discipline (R2), allocation counting (R3), laziness (R4), spec citations (R12), milestone gating (R13's substance), and the diagnostics rules (R9–R11).
+
+---
+
 *End of Instructions*

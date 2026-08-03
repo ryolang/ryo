@@ -15,3 +15,6 @@ build-support = { path = "../build-support" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

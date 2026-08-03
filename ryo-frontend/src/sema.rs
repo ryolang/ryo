@@ -824,6 +824,7 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                 .for_range(var_name, start_tir, end_tir, &body_tirs, void_ty, span)
         }
         InstTag::Break => {
+            // break outside a loop is a compile error (spec §3, Control Flow)
             if fcx.loop_depth == 0 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -834,6 +835,7 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             fcx.builder.break_stmt(sema.pool.void(), span)
         }
         InstTag::Continue => {
+            // continue outside a loop is a compile error (spec §3, Control Flow)
             if fcx.loop_depth == 0 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -891,6 +893,7 @@ fn analyze_block_seeded(
 }
 
 fn check_condition_bool(sema: &mut Sema<'_>, fcx: &FuncCtx, cond_tir: TirRef, cond_uir: InstRef) {
+    // conditions must be bool (spec §3, Control Flow)
     let cond_ty = fcx.builder.ty_of(cond_tir);
     if !sema.pool.is_error(cond_ty) && cond_ty != sema.pool.bool_() {
         sema.sink.emit(Diag::error(
@@ -961,6 +964,8 @@ fn analyze_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, r: InstRe
             match scope.lookup(name) {
                 Some(t) => fcx.builder.var(name, t, span),
                 None => {
+                    // block-scoped name resolution; unknown names are a
+                    // compile error (spec §3, Variables)
                     sema.sink.emit(Diag::error(
                         span,
                         DiagCode::UndefinedVariable,
@@ -1560,6 +1565,7 @@ fn check_call(
     let mut converted: Vec<TirRef> = arg_tirs.to_vec();
 
     if view.args.len() != expected.len() {
+        // arity must match the signature — no variadic parameters (spec §6.1.2)
         sema.sink.emit(Diag::error(
             span,
             DiagCode::ArityMismatch,
@@ -2033,6 +2039,7 @@ fn emit_str_materialize(
 
 fn emit_panic(sema: &mut Sema<'_>, fcx: &mut FuncCtx, view: &CallView, span: Span) -> TirRef {
     if view.args.len() != 1 {
+        // panic takes exactly one message argument (spec §7.6)
         sema.sink.emit(Diag::error(
             span,
             DiagCode::ArityMismatch,
