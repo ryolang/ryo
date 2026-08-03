@@ -1,0 +1,3 @@
+# Windows runners and contributors default to core.autocrlf=true, which
+# checks sources out as CRLF; the lexer is LF-only (I-124).
+*.ryo text eol=lf
