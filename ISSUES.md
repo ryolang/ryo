@@ -6,6 +6,29 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 ---
 
+## Fix Order for m8.4.2
+
+Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
+
+1. **I-031 + I-071** — return-flow analysis: non-void fn falling off the end gets no diagnostic.
+2. **I-020** — `inst_values` memoizer is cross-block: stale values across control flow.
+3. **I-082** — `never`-returning call path skips inout write-back.
+4. **I-075** — duplicate function definitions silently accepted.
+5. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
+6. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
+7. **I-106** — decode paths panic instead of reporting an internal error.
+8. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
+9. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
+10. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
+11. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
+12. **I-017** — `i64::MIN` integer literal is unrepresentable.
+13. **I-088** — ownership sidecar keyed by function name.
+14. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+
+Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
+
+---
+
 ## Severity Legend
 
 - 🔴 **Blocking** — prevents implementing roadmap features as currently designed.
@@ -208,12 +231,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** Currently, `for-range` loops have bespoke code generation that manually emits basic blocks, jump instructions, and raw counter increments. When general iterators are added, loops should be desugared during the AST-to-UIR phase into standard `while` loops that call `.next()`.
 **Resolution:** Once iterators land, remove the `generate_for_range` codegen entirely and rely on standard `while` codegen to emit loops.
 
-### I-045 — Loop fixed-point uses a scratch sink and re-walks the body to suppress duplicates
-
-**Files:** `ryo-frontend/src/ownership.rs` (`analyze_while_loop`, `analyze_for_range`)
-**Summary:** Both loop helpers walk the body once into a throwaway `DiagSink`, compare entry vs. post-body Moved-ness via `states_differ`, and then either replay the scratch diagnostics (converged) or re-walk the body from the merged state against the real sink (didn't converge). Diagnostic output is implicitly a function of *which iteration emitted it*, not of the converged lattice. Today this happens to work because the M8.1 patterns converge in ≤2 iterations, but the body-twice-with-discard shape couples diagnostic emission to control-flow analysis instead of running checks against a fixed-point.
-**Resolution:** Refactor to a propagate-only first pass (state mutations only, no diagnostics), iterate to fixed-point, then a single check pass at the converged lattice that emits diagnostics. Removes the scratch sink entirely and makes the loop helpers symmetric with `analyze_if_stmt`.
-
 ### I-047 — UIR `is_move` field is a pass-through
 
 **Files:** `ryo-core/src/uir.rs` (`UirParam`), `ryo-frontend/src/astgen.rs`, `ryo-frontend/src/sema.rs`
@@ -225,34 +242,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Files:** `ryo-driver/src/pipeline.rs` (`parse_source`, `display_tokens`)
 **Summary:** `finalize_diags` consolidates the drain + render + `Err(CompilerError::Diagnostics(_))` shape for the sink-using stages (`lower_and_analyze`, `ir_command`). The lex error paths and `parse_source`'s parse-error branch still hand-roll the same pattern over a `Vec<Diag>` they build directly (no `DiagSink`). Drift risk is real: parse/lex paths skip the `Severity::Error` filter (they assume every diag they emit is an error, which holds today but isn't enforced), and any future change to the rendering convention has to be applied in three places.
 **Resolution:** Generalize `finalize_diags` to take `Vec<Diag>` (or `impl IntoIterator<Item = Diag>`); have `DiagSink::into_diags()` feed the new entry point. Then the three lex/parse error paths become `finalize_diags(vec![diag], input, &name)` and the render+wrap pattern lives in exactly one place. Folds naturally with I-014's lexer-DiagSink migration.
-
-### I-064 — `inside_loop` / `has_any` reachability sets recomputed per jump
-
-**Files:** `ryo-frontend/src/ownership.rs` (`schedule_break_continue_frees`, `schedule_loop_exit_frees_in`)
-**Summary:** `schedule_break_continue_frees` rebuilds the `inside_loop` HashSet via `collect_loop_body_refs` on every break/continue jump. `has_any` (which depends only on `sidecar.free_schedule`) is also rebuilt per jump. For a loop with K jumps that's K full traversals of the same loop body and K full scans of `free_schedule`. The same data is invariant across jumps in the same loop. Today's fixtures hit ≤1 jump per loop so the cost is invisible, but `match` and labelled break expand the jump count and the asymmetry will become visible.
-**Resolution:** Lift `inside_loop` and `has_any` to per-loop scope inside `schedule_loop_exit_frees_in`'s `WhileLoop`/`ForRange` arm; pass them down by reference into the per-jump call. `covers_this_jump` and `on_path` stay per-jump (they depend on `jump_inst`).
-
-### I-065 — `collect_jump_path` builds throwaway HashSets per arm for containment
-
-**Files:** `ryo-frontend/src/ownership.rs` (`collect_jump_path`)
-**Summary:** For each arm of an `IfStmt` containing the target, the helper builds a fresh `HashSet<TirRef>` via full `collect_refs_recursive` walk just to test `sub.contains(&target)`. The matched arm is then walked AGAIN by the recursive `collect_jump_path` call to populate `set` for real. The non-matching arm's full subtree gets walked into a throwaway set to confirm the jump isn't there. For an N-arm if where the jump is in arm K, the prefix is walked twice; for an N-stmt body where the jump is in stmt N, the prefix gets walked into per-stmt throwaway sets. Worst-case O(N²) in body size.
-**Resolution:** Two options that compose:
-
-- (a) Replace the per-arm containment probe with a short-circuiting `contains_recursive(tir, root, target) -> bool` that DFS-returns at first hit (no allocation).
-- (b) Precompute, alongside `inside_loop` (see I-064), a `HashMap<TirRef, TirRef>` from each ref to its enclosing top-level loop-body stmt. `collect_jump_path` then does a single lookup to find the chosen arm's containing stmt — no per-stmt walks.
-Option (b) composes naturally with I-064's per-loop precomputation.
-
-### I-066 — TIR reachability helpers belong next to `walk_operands` in `ryo-core/src/tir.rs`
-
-**Files:** `ryo-frontend/src/ownership.rs` (`collect_loop_body_refs`, `collect_refs_recursive`, `collect_jump_path`); `ryo-core/src/tir.rs` (`walk_operands`)
-**Summary:** `walk_operands` is documented as the single source of truth for TIR-shape coverage. The three new helpers introduced for I-058 (`collect_loop_body_refs`, `collect_refs_recursive`, `collect_jump_path`) are pure structural reachability over TIR shape — they consult no ownership state, just walk the IR. Today they live as private helpers in `ryo-frontend/src/ownership.rs` and re-encode the same dispatch on `WhileLoop`/`ForRange`/`IfStmt` that `walk_operands` performs internally. Adding any new control-flow shape (e.g. `match` arms) means editing `walk_operands` plus three call sites in `ownership.rs`. The same pattern keeps reappearing — `find_consumers` and `collect_last_uses` already drive recursion via `walk_operands` closures.
-**Resolution:** Promote a small TIR-reachability surface to `ryo-core/src/tir.rs`. Suggested API: `Tir::collect_reachable(r) -> HashSet<TirRef>` (transitive closure of `walk_operands`) and `Tir::collect_jump_path(body, target) -> Option<HashSet<TirRef>>` (path-set reachability). Ownership-pass scheduling becomes a thin policy layer; future passes (early-return ownership, exception-arm Frees, `match`-arm Frees) reuse the same reachability primitives. Folds with I-051 (loop helper extraction) on the same TIR module.
-
-### I-069 — Loop fixed-point re-walk leaves speculative sidecar entries behind
-
-**Files:** `ryo-frontend/src/ownership.rs` (`analyze_loop_body`, `analyze_if_stmt`)
-**Summary:** `analyze_loop_body` passes the live sidecar to both the scratch walk (:1097) and the real re-walk (:1117). A diverged `if` inside a loop body runs `analyze_if_stmt` twice: it pushes branch-gated `FreePoint`s (:1058-1063) and `if_branches` entries (:928) both times, while `next_branch_id` is monotone and never restored. Pass-1 `FreePoint`s end up gated on `BranchId`s codegen never activates. Benign today only because ids are function-unique; the "speculative writes are not rolled back" invariant is undocumented.
-**Resolution:** Either have the scratch walk write to a staging sidecar merged only on convergence (folds with I-045's propagate-only refactor), or document the invariant and assert in codegen that unknown `BranchId`s are inert.
 
 ### I-071 — Non-void function can fall off the end with no diagnostic
 
@@ -355,12 +344,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** Decoding an unknown mode word yields `Borrow` — the least restrictive convention — instead of an error. Harmless today; a footgun if the enum grows or a payload is corrupted.
 **Resolution:** Return `Option<ParamMode>` and internal-error on unknown values at the single decode site (`call_view`).
 
-### I-090 — Two near-verbatim branch-merge implementations in the ownership pass
-
-**Files:** `ryo-frontend/src/ownership.rs` (`merge_branches` :163-294, `merge_non_monotone` :1238-1310)
-**Summary:** The N-way and 2-way merges re-implement the same any-Moved-wins + binding-aware-override + dead-store intersect/union logic; the override blocks (:226-260 vs :1261-1290) are near-verbatim copies. Changing merge semantics requires editing both.
-**Resolution:** Express `merge_non_monotone` in terms of the shared merge core, or extract the override/intersect helpers used by both.
-
 ### I-091 — UIR/TIR view decoders allocate a `Vec` per decode
 
 **Files:** `ryo-core/src/uir.rs` (`call_view` :843-847, `if_stmt_view` :980-1001, `body_stmts` :320-326, `while_loop_view` :915, `for_range_view` :931-935, `method_call_view` :955-959), `ryo-core/src/tir.rs` (`call_view`), `ryo-backend/src/codegen.rs` (call view args/modes)
@@ -445,41 +428,17 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** View decoders `debug_assert` the tag then `unreachable!` on mismatch; sema hard-trusts astgen with `panic!`/`unreachable!` on tag mismatches; codegen mixes `Result<_, String>` with panics. Malformed IR crashes the compiler with no internal-error diagnostic. Fine with exactly one producer per IR; brittle for any future producer (caches, plugins, alternative front ends).
 **Resolution:** Low priority by design. If a second UIR/TIR producer ever lands, convert the decode paths to an internal-error `Diag`; until then, document the "trusted producer" invariant at each IR boundary.
 
-### I-107 — Ownership pass does linear, panicking param lookups in hot paths
-
-**Files:** `ryo-frontend/src/ownership.rs` (`Owner::tirref` :81-93, :450-454, :1026-1031, :1049-1055)
-**Summary:** Four sites do `tir.params.iter().position(...).expect("param exists")` — O(P) per call inside per-owner loops, and a panic (not a diagnostic) on malformed TIR.
-**Resolution:** Build a name→param-index map once per function (or key `Owner` by param index directly); keep the `expect` as a `debug_assert` once the invariant is verified at entry.
-
-### I-108 — Owned params are freed after the last body statement, not their last use
-
-**Files:** `ryo-frontend/src/ownership.rs` (:448-462)
-**Summary:** A still-`Valid` `Owner::Param` at function exit is freed after the last body statement; only `Inst` owners get true last-use anchoring. Owned params thus live longer than necessary — coarser than the local-variable policy.
-**Resolution:** Extend last-use tracking to params (they have stable `Owner`s already); verify against the valgrind suite.
-
 ### I-109 — No instruction→function reverse mapping in UIR
 
 **Files:** `ryo-core/src/uir.rs` (`func_bodies` :272, :279-284)
 **Summary:** `func_bodies` lists only top-level statement refs; given an arbitrary `InstRef` you cannot tell which function owns it without walking every body. Any pass wanting per-function slices of the shared arena (diagnostics, per-function codegen, future incremental sema) re-derives this by traversal.
 **Resolution:** Add a computed inst→body index map (built lazily or at `finish()`), or move to per-function UIR arenas mirroring TIR when Phase 5 lands.
 
-### I-110 — Tree-shaped-TIR assumption is undocumented
-
-**Files:** `ryo-frontend/src/ownership.rs` (`find_consumers` :1351-1369)
-**Summary:** `find_consumers` uses first-parent-wins `or_insert` because "TIR is tree-shaped per function"; the anon-temp free anchor silently breaks if TIR ever becomes a DAG (shared subexpressions, CSE). The invariant lives in one comment.
-**Resolution:** Document the tree-shape invariant on `Tir` itself (`ryo-core/src/tir.rs`) and add a debug assertion or validation pass that each inst has at most one parent.
-
 ### I-111 — Lexer token boilerplate is four touch points per variant
 
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken` :176-300, `Token` :30-103, `intern_token` :392-495, `Display` :105-170)
 **Summary:** Adding a token means editing `RawToken`, `Token`, the giant manual `intern_token` match, and `Display` (plus the parser downstream) — ~45 non-payload variants of pure boilerplate.
 **Resolution:** Generate the quadruple from a single macro table (variant name, logos pattern, payload kind).
-
-### I-119 — `loop_nesting_of` recomputes nesting stacks per query
-
-**Files:** `ryo-frontend/src/ownership.rs` (`loop_nesting_of` :1000-1047; call sites :1089-1090, :1541-1545, :2557)
-**Summary:** Each call walks the whole function body to rebuild the target's loop-nesting stack, and it is queried per view/read pair in `collect_view_liveness`, per candidate in `refine_view_liveness_for_arm`, and per materialize site in `warn_redundant_materialize` — O(sites × body) recomputation with no memo.
-**Resolution:** Build a `TirRef`→nesting-stack map in a single pre-pass over the body and reuse it at the three call sites, preserving the cond/bounds-counts-as-inside and nested-loop semantics.
 
 ### I-121 — Staged zig zip is carried into the toolchain dir on fallback rename
 

@@ -31,7 +31,7 @@ use ryo_core::diag::{Diag, DiagCode, DiagSink};
 pub use ryo_core::ownership::{
     BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
 };
-use ryo_core::tir::{ParamMode, Span, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{ChildKind, ParamMode, Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
 
@@ -83,17 +83,10 @@ impl Owner {
         }
     }
 
-    pub(crate) fn tirref(self, tir: &Tir) -> TirRef {
+    pub(crate) fn tirref(self, param_index: &HashMap<StringId, usize>) -> TirRef {
         match self {
             Owner::Inst(r) => r,
-            Owner::Param(name) => {
-                let idx = tir
-                    .params
-                    .iter()
-                    .position(|p| p.name == name)
-                    .expect("param exists");
-                TirRef::param(idx)
-            }
+            Owner::Param(name) => TirRef::param(*param_index.get(&name).expect("param exists")),
         }
     }
 }
@@ -111,6 +104,14 @@ pub(crate) struct Ownership {
     pub states: HashMap<Owner, OwnerState>,
     pub current_owner: HashMap<StringId, Owner>,
     pub origin: HashMap<TirRef, Option<Owner>>,
+    /// Param name → index into `tir.params`, built once per function
+    /// in `analyze_function`. Resolving a `Param` owner to its virtual
+    /// `TirRef`, type, or span happens inside per-owner loops, so a
+    /// linear scan of `tir.params` per lookup would be O(P) each time.
+    /// Every `Owner::Param` name originates from `tir.params` by
+    /// construction, so a missing key is an internal invariant
+    /// violation (`expect` at the lookup sites), not a diagnostic.
+    pub param_index: HashMap<StringId, usize>,
     /// VarDecls of Move-typed values, keyed by the underlying owner
     /// `TirRef`. Cleared when the binding is read (`Var`) or consumed
     /// (move/return). Whatever remains at function end is a dead
@@ -213,6 +214,15 @@ pub(crate) struct Ownership {
     /// later iterations, so it stays live through the whole loop.
     pub view_defer_loop: HashMap<TirRef, TirRef>,
 
+    /// Walk-constant pre-pass structure: instruction → the
+    /// `WhileLoop`/`ForRange` instructions whose body, condition, or
+    /// bounds contain it, outermost first. Computed in one traversal
+    /// before the walk so the liveness passes and the
+    /// redundant-materialize pass look nesting up instead of
+    /// re-walking the body per query. Constant per function, so
+    /// branch merges need no per-field rule for it.
+    pub loop_nesting: HashMap<TirRef, Vec<TirRef>>,
+
     /// Views whose projection ends at the current statement's end
     /// (P4). Drained by `analyze_stmt` after every statement, so a
     /// read and a consume within the same statement both see the view
@@ -275,58 +285,44 @@ impl Ownership {
     ///   contribute their state to the merged binding.
     fn merge_branches(&mut self, branches: &[&Ownership]) {
         // BranchId monotonicity: never let a merge roll the allocator
-        // backward. analyze_while_loop and analyze_for_range build
-        // their post-loop state via merge_two(&entry, &after_body),
-        // which clones `entry` — that would discard any BranchIds
-        // minted inside the loop body and let post-loop ifs reuse
-        // them, colliding in codegen's branch_blocks map.
+        // backward. The loop fixed-point (analyze_loop_body) merges
+        // only the four non-monotone fields via merge_non_monotone,
+        // so next_branch_id minted inside a loop body survives into
+        // post-loop ifs through `self`; this max rule is what keeps
+        // if-arm merges from ever rolling it backward and colliding
+        // in codegen's branch_blocks map.
         self.next_branch_id = std::cmp::max(
             self.next_branch_id,
             branches.iter().map(|b| b.next_branch_id).max().unwrap_or(0),
         );
 
-        // Snapshot pre-branch (name, owner) pairs before we start
+        // Snapshot pre-branch (name → owner) bindings before we start
         // touching `self.states`. After the per-TirRef merge below
-        // we revisit each pre-branch binding and recompute its state
-        // through whichever owner each branch ended on, so a branch
-        // that reseats `current_owner[name]` to a fresh TirRef still
-        // contributes its end-of-branch state to the merged binding.
-        // Without this, post-`if` reads of `name` resolve through the
-        // pre-branch owner whose state reflects only what happened to
-        // *that* TirRef, missing reseats inside branches.
-        let pre_branch_owners: Vec<(StringId, Owner)> =
-            self.current_owner.iter().map(|(n, t)| (*n, *t)).collect();
+        // the binding-aware override (merge_binding_states) revisits
+        // each pre-branch binding and recomputes its state through
+        // whichever owner each branch ended on. Must be taken before
+        // the `current_owner` union below, or branch-local bindings
+        // would be mistaken for pre-branch ones.
+        let pre_branch_owners = self.current_owner.clone();
 
         // Rule: any branch Moved → Moved; otherwise first observed
         // (across branches) wins. Walk each branch once and merge
         // directly into `self.states` — no intermediate set of keys.
         for b in branches {
-            for (r, s) in &b.states {
-                self.states
-                    .entry(*r)
-                    .and_modify(|cur| {
-                        if !matches!(cur, OwnerState::Moved { .. })
-                            && matches!(s, OwnerState::Moved { .. })
-                        {
-                            *cur = s.clone();
-                        }
-                    })
-                    .or_insert_with(|| s.clone());
-            }
+            merge_states_any_moved_wins(&mut self.states, &b.states);
         }
         // Union the remaining branch-local fields. `current_owner` /
         // `origin` use first-wins via `or_insert`. `temp_owners` is
         // unioned so entries introduced inside a branch (or loop body)
         // survive the merge — without this a `StrConst`/`StrConcat`/Call
         // inside a `while` body is silently dropped from `temp_owners`
-        // when `merge_two` clones the pre-loop entry. `owner_at_read`
+        // when the merged state starts from the pre-loop entry.
+        // `owner_at_read`
         // keys are unique per TirRef (instructions aren't shared across
         // blocks), so each key appears in at most one branch and
         // `or_insert` is correct.
         for b in branches {
-            for (name, owner) in &b.current_owner {
-                self.current_owner.entry(*name).or_insert(*owner);
-            }
+            merge_current_owner_first_wins(&mut self.current_owner, &b.current_owner);
             for (k, v) in &b.origin {
                 self.origin.entry(*k).or_insert(*v);
             }
@@ -338,87 +334,168 @@ impl Ownership {
             for (k, v) in &b.root_owner {
                 self.root_owner.entry(*k).or_insert(*v);
             }
-            // P2 freeze ranges: union per root — a view live on any
-            // branch is live at the join (final spec §3.2). The caller
-            // prunes views whose last use is inside the branch.
-            for (root, views) in &b.live_projections {
-                let entry = self.live_projections.entry(*root).or_default();
-                for v in views {
-                    if !entry.contains(v) {
-                        entry.push(*v);
-                    }
-                }
-            }
+            // P2 freeze ranges: union per root (the caller prunes
+            // views whose last use is inside the branch).
+            union_live_projections(&mut self.live_projections, &b.live_projections);
             // W0003 hazard log: union (monotone; duplicates harmless).
             self.owner_hazards.extend(b.owner_hazards.iter().copied());
         }
 
-        // Binding-aware override: for each name that existed before
-        // the branches walked, look up where each branch left that
-        // binding (b.current_owner[name]), read that owner's state in
-        // the branch, and merge across branches with the same any-
-        // Moved-wins rule. Write the merged state back onto the
-        // pre-branch owner in `self.states` so post-merge reads of
-        // `name` (which still resolve via `self.current_owner[name]`
-        // = owner_pre) see the union of what each branch did to its
-        // respective end-of-branch owner.
-        for (name, owner_pre) in &pre_branch_owners {
-            let mut merged: Option<OwnerState> = None;
-            for b in branches {
-                let owner_b = b.current_owner.get(name).copied().unwrap_or(*owner_pre);
-                let state_b = b
-                    .states
-                    .get(&owner_b)
-                    .cloned()
-                    .unwrap_or(OwnerState::NotTracked);
-                // any-Moved-wins, otherwise first observed wins. When
-                // `merged` is already Moved, keep it — preserves the
-                // first-observed Moved span for diagnostics.
-                let take = match (&merged, &state_b) {
-                    (None, _) => true,
-                    (Some(OwnerState::Moved { .. }), _) => false,
-                    (_, OwnerState::Moved { .. }) => true,
-                    _ => false,
-                };
-                if take {
-                    merged = Some(state_b);
+        // Binding-aware override: recompute each pre-branch binding's
+        // state through whichever owner each branch ended on (shared
+        // with the loop fixed-point merge — see merge_binding_states).
+        let sides: Vec<_> = branches
+            .iter()
+            .map(|b| (&b.current_owner, &b.states))
+            .collect();
+        merge_binding_states(&mut self.states, &pre_branch_owners, &sides);
+
+        // Pending dead-store entries: pre-branch keys intersect,
+        // branch-local keys union (see merge_pending_dead_store).
+        let branch_stores: Vec<_> = branches.iter().map(|b| &b.pending_dead_store).collect();
+        merge_pending_dead_store(&mut self.pending_dead_store, &branch_stores);
+    }
+}
+
+/// Any-Moved-wins owner-state merge: a `Moved` entry in `src`
+/// overwrites a non-`Moved` entry in `dst`, a key missing from `dst`
+/// is inserted, and anything else keeps `dst`'s first-observed state.
+/// Shared by `Ownership::merge_branches` (per branch, into
+/// `self.states`) and `merge_non_monotone` (entry ⊔ post-body).
+fn merge_states_any_moved_wins(
+    dst: &mut HashMap<Owner, OwnerState>,
+    src: &HashMap<Owner, OwnerState>,
+) {
+    for (r, s) in src {
+        dst.entry(*r)
+            .and_modify(|cur| {
+                if !matches!(cur, OwnerState::Moved { .. }) && matches!(s, OwnerState::Moved { .. })
+                {
+                    *cur = s.clone();
                 }
-            }
-            if let Some(state) = merged {
-                self.states.insert(*owner_pre, state);
+            })
+            .or_insert_with(|| s.clone());
+    }
+}
+
+/// First-write-wins merge of binding → owner entries: `dst` keeps
+/// its existing entries, entries present only in `src` are copied
+/// over. Shared by `Ownership::merge_branches` and
+/// `merge_non_monotone`.
+fn merge_current_owner_first_wins(
+    dst: &mut HashMap<StringId, Owner>,
+    src: &HashMap<StringId, Owner>,
+) {
+    for (&name, &owner) in src {
+        dst.entry(name).or_insert(owner);
+    }
+}
+
+/// One side of a binding-aware merge: the side's binding → owner map
+/// paired with its owner-state map.
+type MergeSide<'a> = (&'a HashMap<StringId, Owner>, &'a HashMap<Owner, OwnerState>);
+
+/// Binding-aware override, shared by `Ownership::merge_branches`
+/// (sides = the branch lattices) and `merge_non_monotone` (sides =
+/// the loop-entry and post-body snapshots). For each name that
+/// existed before the branches / loop body walked (`pre_owners`),
+/// look up where each side left that binding (`current_owner[name]`,
+/// falling back to the pre-branch owner when the side never touched
+/// it), read that owner's state on that side, and merge across sides
+/// with the same any-Moved-wins rule (first-observed otherwise; an
+/// already-`Moved` merge is kept so the first-observed Moved span
+/// survives for diagnostics). Write the merged state back onto the
+/// pre-branch owner in `dst_states` so post-merge reads of `name`
+/// (which still resolve via the pre-branch `current_owner[name]` =
+/// owner_pre) see the union of what each side did to its respective
+/// end-of-branch owner. Without this, post-merge reads of `name`
+/// resolve through the pre-branch owner whose state reflects only
+/// what happened to *that* TirRef, missing reseats inside a side.
+///
+/// NOT monotone: when a loop body reseats a binding (consume-then-
+/// rebind), this merges the pre-reseat owner's entry state with the
+/// post-reseat owner's post-body state, which can flip `Moved` back
+/// to `Valid` on every merge. `analyze_loop_body`'s propagate phase
+/// is capped at MAX_PROPAGATE_PASSES walks precisely because of this
+/// (see the cap comment there and the maintainer note on
+/// `analyze_while_loop`). `Ownership::merge_branches` merges a fixed
+/// branch list, so monotonicity does not arise on that path.
+fn merge_binding_states(
+    dst_states: &mut HashMap<Owner, OwnerState>,
+    pre_owners: &HashMap<StringId, Owner>,
+    sides: &[MergeSide<'_>],
+) {
+    for (&name, &owner_pre) in pre_owners {
+        let mut merged: Option<OwnerState> = None;
+        for &(current_owner, states) in sides {
+            let owner_side = current_owner.get(&name).copied().unwrap_or(owner_pre);
+            let state_side = states
+                .get(&owner_side)
+                .cloned()
+                .unwrap_or(OwnerState::NotTracked);
+            // any-Moved-wins, otherwise first observed wins. When
+            // `merged` is already Moved, keep it — preserves the
+            // first-observed Moved span for diagnostics.
+            let take = match (&merged, &state_side) {
+                (None, _) => true,
+                (Some(OwnerState::Moved { .. }), _) => false,
+                (_, OwnerState::Moved { .. }) => true,
+                _ => false,
+            };
+            if take {
+                merged = Some(state_side);
             }
         }
+        if let Some(state) = merged {
+            dst_states.insert(owner_pre, state);
+        }
+    }
+}
 
-        // Pending dead-store entries: a key falls into one of two
-        // buckets relative to the pre-branch snapshot in `self`.
-        //
-        // (1) Pre-branch entries (already in `self.pending_dead_store`
-        //     before the branches walked): every branch started with
-        //     the entry. If any branch cleared it, the value was
-        //     used somewhere — drop it. Rule: intersect across
-        //     branches.
-        //
-        // (2) Branch-local entries (introduced inside a branch by a
-        //     VarDecl): only the introducing branch has the key. If
-        //     that branch ended with the entry still pending, W0001
-        //     should still fire after the join. Rule: union across
-        //     branches (skipping keys that were pre-branch — those
-        //     are governed by rule (1)).
-        //
-        // Snapshot the pre-branch key set so the union step can
-        // distinguish branch-local keys from pre-branch keys that
-        // (1) may have just dropped.
-        let pre_branch_keys: HashSet<Owner> = self.pending_dead_store.keys().copied().collect();
-        self.pending_dead_store.retain(|k, _| {
-            branches
-                .iter()
-                .all(|b| b.pending_dead_store.contains_key(k))
-        });
-        for b in branches {
-            for (k, v) in &b.pending_dead_store {
-                if !pre_branch_keys.contains(k) {
-                    self.pending_dead_store.insert(*k, *v);
-                }
+/// Pending dead-store merge. A key falls into one of two buckets
+/// relative to the pre-merge snapshot in `dst`:
+///
+/// (1) Pre-existing entries (already in `dst` before the branches /
+///     loop body walked): every side started with the entry. If any
+///     side cleared it, the value was used somewhere — drop it.
+///     Rule: intersect across sides.
+///
+/// (2) Local entries (introduced inside a side by a VarDecl): only
+///     the introducing side has the key. If that side ended with the
+///     entry still pending, W0001 should still fire after the join.
+///     Rule: union across sides (skipping pre-existing keys — those
+///     are governed by rule (1)).
+///
+/// Snapshots the pre-merge key set so the union step can distinguish
+/// local keys from pre-existing keys that (1) may have just dropped.
+/// Shared by `Ownership::merge_branches` (N sides) and
+/// `merge_non_monotone` (one side: the post-body snapshot).
+fn merge_pending_dead_store(
+    dst: &mut HashMap<Owner, (StringId, Span, TirRef)>,
+    branches: &[&HashMap<Owner, (StringId, Span, TirRef)>],
+) {
+    let pre_branch_keys: HashSet<Owner> = dst.keys().copied().collect();
+    dst.retain(|k, _| branches.iter().all(|b| b.contains_key(k)));
+    for b in branches {
+        for (k, v) in *b {
+            if !pre_branch_keys.contains(k) {
+                dst.insert(*k, *v);
+            }
+        }
+    }
+}
+
+/// P2 freeze ranges: union per root — a view live on any side is
+/// live at the join (final spec §3.2). Monotone over membership, so
+/// the loop fixed point's two walks still suffice. Callers prune
+/// views whose last use is inside the branch / loop afterwards.
+/// Shared by `Ownership::merge_branches` and `merge_non_monotone`.
+fn union_live_projections(dst: &mut HashMap<Owner, Vec<Owner>>, src: &HashMap<Owner, Vec<Owner>>) {
+    for (root, views) in src {
+        let entry = dst.entry(*root).or_default();
+        for v in views {
+            if !entry.contains(v) {
+                entry.push(*v);
             }
         }
     }
@@ -566,7 +643,7 @@ fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
-                if let Some(body) = loop_body(tir, r)
+                if let Some(body) = tir.loop_body(r)
                     && body_may_return(tir, &body)
                 {
                     return true;
@@ -595,7 +672,7 @@ fn branch_may_not_return(tir: &Tir, branch_stmt: TirRef) -> bool {
                     .as_ref()
                     .is_some_and(|es| body_may_return(tir, es))
         }
-        TirTag::WhileLoop | TirTag::ForRange => match loop_body(tir, branch_stmt) {
+        TirTag::WhileLoop | TirTag::ForRange => match tir.loop_body(branch_stmt) {
             Some(body) => !body_may_return(tir, &body),
             None => false,
         },
@@ -619,7 +696,7 @@ fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                 return stack.first().copied();
             }
             let mut sub: HashSet<TirRef> = HashSet::new();
-            collect_refs_recursive(tir, r, &mut sub);
+            tir.collect_reachable(r, &mut sub);
             if !sub.contains(&target) {
                 continue;
             }
@@ -648,7 +725,7 @@ fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
                     stack.push(r);
-                    let found = match loop_body(tir, r) {
+                    let found = match tir.loop_body(r) {
                         Some(body) => walk(tir, &body, target, stack),
                         None => None,
                     };
@@ -682,7 +759,7 @@ fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
                 return Some(stack.clone());
             }
             let mut sub: HashSet<TirRef> = HashSet::new();
-            collect_refs_recursive(tir, r, &mut sub);
+            tir.collect_reachable(r, &mut sub);
             if !sub.contains(&target) {
                 continue;
             }
@@ -708,7 +785,7 @@ fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
                     stack.push(r);
-                    let found = match loop_body(tir, r) {
+                    let found = match tir.loop_body(r) {
                         Some(body) => walk(tir, &body, target, stack),
                         None => None,
                     };
@@ -761,7 +838,7 @@ fn owner_binding_name(tir: &Tir, owner: TirRef) -> Option<StringId> {
                     }
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
-                    if let Some(body) = loop_body(tir, r)
+                    if let Some(body) = tir.loop_body(r)
                         && let Some(found) = walk(tir, &body, owner)
                     {
                         return Some(found);
@@ -914,7 +991,7 @@ fn remove_loop_deferred_views(own: &mut Ownership, loop_ref: TirRef) {
 /// sound direction.
 fn prune_branch_dead_projections(tir: &Tir, own: &mut Ownership, if_ref: TirRef) {
     let mut subtree: HashSet<TirRef> = HashSet::new();
-    collect_refs_recursive(tir, if_ref, &mut subtree);
+    tir.collect_reachable(if_ref, &mut subtree);
     let dead: Vec<Owner> = own
         .root_owner
         .keys()
@@ -993,60 +1070,79 @@ fn check_source_projected(
     );
 }
 
-/// The `WhileLoop`/`ForRange` instructions whose bodies (or conditions,
-/// which re-evaluate per iteration) contain `target`, outermost first.
-/// Used to decide whether a view's last read re-executes on a later
-/// iteration than its creation (P4, final spec §3.2).
-fn loop_nesting_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
-    fn walk(tir: &Tir, stmts: &[TirRef], target: TirRef, stack: &mut Vec<TirRef>) -> bool {
+/// Compute every instruction's loop-nesting stack — the
+/// `WhileLoop`/`ForRange` instructions whose bodies (or conditions,
+/// which re-evaluate per iteration) contain it, outermost first — in
+/// a single traversal. Replaces per-query body walks: the stack is
+/// walk-constant, so the liveness passes and the
+/// redundant-materialize pass look it up instead (P4, final spec
+/// §3.2).
+///
+/// A loop's whole subtree (condition, bounds, body) counts as inside
+/// the loop; an if's subtree keeps the if's own nesting. Recording a
+/// loop's full subtree before recursing into its body lets nested
+/// loops overwrite their own subtrees with deeper stacks — the TIR is
+/// tree-shaped, so each instruction's final entry is the one written
+/// by its unique outermost-in path.
+fn collect_loop_nesting(tir: &Tir) -> HashMap<TirRef, Vec<TirRef>> {
+    fn walk(
+        tir: &Tir,
+        stmts: &[TirRef],
+        stack: &[TirRef],
+        nesting: &mut HashMap<TirRef, Vec<TirRef>>,
+    ) {
         for &r in stmts {
-            if r == target {
-                return true;
-            }
             let mut sub: HashSet<TirRef> = HashSet::new();
-            collect_refs_recursive(tir, r, &mut sub);
-            if !sub.contains(&target) {
-                continue;
-            }
+            tir.collect_reachable(r, &mut sub);
             match tir.inst(r).tag {
                 TirTag::WhileLoop | TirTag::ForRange => {
-                    stack.push(r);
-                    if let Some(body) = loop_body(tir, r)
-                        && walk(tir, &body, target, stack)
-                    {
-                        return true;
+                    // Everything the loop evaluates re-executes per
+                    // iteration, so it all counts as inside the loop.
+                    let mut inner = stack.to_vec();
+                    inner.push(r);
+                    sub.remove(&r);
+                    for x in sub {
+                        nesting.insert(x, inner.clone());
                     }
-                    // The target is in this loop's cond/bounds — those
-                    // re-evaluate per iteration, so it counts as
-                    // inside the loop.
-                    return true;
+                    // The loop instruction itself sits at the
+                    // enclosing nesting.
+                    nesting.insert(r, stack.to_vec());
+                    if let Some(body) = tir.loop_body(r) {
+                        walk(tir, &body, &inner, nesting);
+                    }
                 }
-                TirTag::IfStmt => {
-                    let view = tir.if_stmt_view(r);
-                    if walk(tir, &view.then_stmts, target, stack) {
-                        return true;
+                _ => {
+                    // Plain statements and ifs (condition included)
+                    // keep the enclosing nesting.
+                    for x in sub {
+                        nesting.insert(x, stack.to_vec());
                     }
-                    for elif in &view.elif_branches {
-                        if walk(tir, &elif.body, target, stack) {
-                            return true;
+                    if tir.inst(r).tag == TirTag::IfStmt {
+                        let view = tir.if_stmt_view(r);
+                        walk(tir, &view.then_stmts, stack, nesting);
+                        for elif in &view.elif_branches {
+                            walk(tir, &elif.body, stack, nesting);
+                        }
+                        if let Some(else_stmts) = &view.else_stmts {
+                            walk(tir, else_stmts, stack, nesting);
                         }
                     }
-                    if let Some(else_stmts) = &view.else_stmts
-                        && walk(tir, else_stmts, target, stack)
-                    {
-                        return true;
-                    }
-                    // In the if's condition — same nesting as the if.
-                    return true;
                 }
-                _ => return true,
             }
         }
-        false
     }
-    let mut stack = Vec::new();
-    walk(tir, &tir.body_stmts(), target, &mut stack);
-    stack
+    let mut nesting = HashMap::new();
+    walk(tir, &tir.body_stmts(), &[], &mut nesting);
+    nesting
+}
+
+/// `target`'s pre-computed nesting stack. The map covers every
+/// instruction reachable from the body — all callers query body
+/// instructions (views, reads, materialize calls, hazard sites) — and
+/// a ref outside the body nests in no loop anyway, so a missing entry
+/// means the empty stack, exactly what a fresh body walk would find.
+fn nesting_of(nesting: &HashMap<TirRef, Vec<TirRef>>, target: TirRef) -> &[TirRef] {
+    nesting.get(&target).map_or(&[], Vec::as_slice)
 }
 
 /// Pre-walk liveness for bound views (P4, final spec §3.2). See
@@ -1071,7 +1167,11 @@ struct ViewLiveness {
 /// passes a projection's last use. A read inside a loop that does not
 /// contain the view's creation re-executes on later iterations, so
 /// the projection's death is deferred to that loop's exit.
-fn collect_view_liveness(tir: &Tir, pool: &InternPool) -> ViewLiveness {
+fn collect_view_liveness(
+    tir: &Tir,
+    pool: &InternPool,
+    nesting: &HashMap<TirRef, Vec<TirRef>>,
+) -> ViewLiveness {
     let mut bindings: HashMap<StringId, TirRef> = HashMap::new();
     let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
     let mut arm_last_reads: HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>> = HashMap::new();
@@ -1086,8 +1186,8 @@ fn collect_view_liveness(tir: &Tir, pool: &InternPool) -> ViewLiveness {
     );
     let mut defer_to_loop = HashMap::new();
     for (view, read) in &last_use {
-        let created_in = loop_nesting_of(tir, *view);
-        let read_in = loop_nesting_of(tir, *read);
+        let created_in = nesting_of(nesting, *view);
+        let read_in = nesting_of(nesting, *read);
         // Scope rules guarantee `created_in` is a prefix of `read_in`
         // (a view's reads cannot escape its binding's scope). A
         // strictly deeper read re-executes on later iterations of the
@@ -1269,7 +1369,7 @@ fn record_view_reads(
     {
         last_use.insert(view_inst, r);
     }
-    walk_operands(tir, r, &mut |_parent, child, _kind| {
+    tir.walk_operands(r, &mut |_parent, child, _kind| {
         record_view_reads(tir, pool, child, bindings, last_use);
     });
 }
@@ -1302,7 +1402,7 @@ fn program_order(tir: &Tir) -> HashMap<TirRef, u32> {
         }
         order.insert(r, *next);
         *next += 1;
-        walk_operands(tir, r, &mut |_parent, child, _kind| {
+        tir.walk_operands(r, &mut |_parent, child, _kind| {
             assign(tir, child, order, next);
         });
     }
@@ -1538,11 +1638,11 @@ fn warn_redundant_materialize(tir: &Tir, pool: &InternPool, own: &Ownership, sin
         // re-executes between iterations regardless of source order,
         // so it suppresses too (conservative).
         let mat_rank = rank(call);
-        let mat_loops = loop_nesting_of(tir, call);
+        let mat_loops = nesting_of(&own.loop_nesting, call);
         let defensive = own.owner_hazards.iter().any(|&(o, site)| {
             o == root
                 && (rank(site) > mat_rank
-                    || loop_nesting_of(tir, site)
+                    || nesting_of(&own.loop_nesting, site)
                         .iter()
                         .any(|l| mat_loops.contains(l)))
         });
@@ -1563,12 +1663,27 @@ fn analyze_function(
     sink: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
 ) {
-    let mut own = Ownership::default();
+    let mut own = Ownership {
+        // Name → param-index map, built once so the per-owner lookups
+        // below (Param owner → TirRef / type / span) are O(1) instead
+        // of a linear scan of `tir.params` per call.
+        param_index: tir
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.name, i))
+            .collect(),
+        ..Ownership::default()
+    };
 
     // M8.4: view-liveness pre-pass (P4, final spec §3.2). The walk
     // consults these walk-constant tables to know when it passes a
-    // projection's last use (and which loop exit defers it).
-    let liveness = collect_view_liveness(tir, pool);
+    // projection's last use (and which loop exit defers it). The
+    // nesting map the deferral table is derived from is computed
+    // first, so the walk's per-arm refinement and the
+    // redundant-materialize pass reuse the same table.
+    own.loop_nesting = collect_loop_nesting(tir);
+    let liveness = collect_view_liveness(tir, pool, &own.loop_nesting);
     own.view_last_use = liveness.last_use;
     own.view_defer_loop = liveness.defer_to_loop;
     own.if_arm_last_reads = liveness.arm_last_reads;
@@ -1712,19 +1827,46 @@ fn analyze_function(
                 if own.inout_str_params.contains(name) {
                     continue;
                 }
-                if let Some(&after) = body_stmts.last() {
-                    let idx = tir
-                        .params
-                        .iter()
-                        .position(|p| p.name == *name)
-                        .expect("param exists");
-                    sidecar.free_schedule.push(FreePoint {
-                        after,
-                        target: owner.tirref(tir),
-                        span: tir.params[idx].span,
-                        branch: None,
-                    });
-                }
+                let idx = *own.param_index.get(name).expect("param exists");
+                // Anchor the Free after the param's last read — the
+                // same policy locals get — so later statements that
+                // never touch the param don't keep its buffer alive.
+                // A never-read param keeps the old anchor (after the
+                // last body statement): it must still be freed exactly
+                // once.
+                let Some(after) = (match last_use.get(&TirRef::param(idx)) {
+                    Some(&after) => {
+                        // P5 (final spec §3.2): defer the destruction to
+                        // the last use of any projection of this param
+                        // (a slice of it keeps the buffer alive).
+                        let after = defer_anchor(after, owner, &projections_of, &last_use, &order);
+                        // Conditional last use: same re-anchor as `Inst`
+                        // owners — a last read inside a branch frees at
+                        // the branch's exit. Anchoring after the read
+                        // itself fires per-iteration in loops (UAF on
+                        // later reads) and never fires on not-taken
+                        // arms (leak). Skip when the branch may
+                        // `return` (the exit anchor is unreachable on
+                        // the return path). The declared-before check
+                        // locals need is trivially true here: params
+                        // precede the body.
+                        match outermost_branch_of(tir, after) {
+                            Some(branch_stmt) if branch_may_not_return(tir, branch_stmt) => {
+                                Some(branch_stmt)
+                            }
+                            _ => Some(after),
+                        }
+                    }
+                    None => body_stmts.last().copied(),
+                }) else {
+                    continue;
+                };
+                sidecar.free_schedule.push(FreePoint {
+                    after,
+                    target: TirRef::param(idx),
+                    span: tir.params[idx].span,
+                    branch: None,
+                });
             }
         }
     }
@@ -1888,7 +2030,7 @@ fn analyze_function(
         let drop = &own.reseat_drops[idx];
         sidecar.conditional_dead_drops.push(ConditionalDeadDrop {
             if_stmt: drop.if_stmt,
-            target: drop.pre_owner.tirref(tir),
+            target: drop.pre_owner.tirref(&own.param_index),
             arms: drop.untouched_arms.clone(),
         });
     }
@@ -1908,7 +2050,7 @@ fn analyze_function(
     let mut epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
     for (return_stmt, owners) in &own.return_epilogue {
         let mut on_path: HashSet<TirRef> = HashSet::new();
-        let _ = collect_jump_path(tir, &body_stmts, *return_stmt, &mut on_path);
+        let _ = tir.collect_jump_path(&body_stmts, *return_stmt, &mut on_path);
         // A Free anchored after a branch CONTAINING the return never
         // fires on the return's path — the branch statement does not
         // complete before the return exits. Exclude ancestors from the
@@ -1921,7 +2063,7 @@ fn analyze_function(
             if own.pending_dead_store.contains_key(owner) {
                 continue;
             }
-            let r = owner.tirref(tir);
+            let r = owner.tirref(&own.param_index);
             if !epilogue_emitted.insert((*return_stmt, r)) {
                 continue;
             }
@@ -2090,7 +2232,9 @@ fn analyze_assign(
                 // `tirref` (not `inst_tirref`): an inout param's old owner
                 // is a `Param`, resolved here to its virtual ref — codegen
                 // caches that ref's repr at the prologue.
-                sidecar.free_on_reassign.insert(r, old_owner.tirref(tir));
+                sidecar
+                    .free_on_reassign
+                    .insert(r, old_owner.tirref(&own.param_index));
                 // W0003 case-B support: reassignment mutates the binding's
                 // owner — a defensive-copy hazard on it.
                 own.owner_hazards.push((old_owner, r));
@@ -2482,7 +2626,7 @@ fn rule7_owner_name(
 fn stmts_subtree(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
     let mut set = HashSet::new();
     for &s in stmts {
-        collect_refs_recursive(tir, s, &mut set);
+        tir.collect_reachable(s, &mut set);
     }
     set
 }
@@ -2521,7 +2665,6 @@ fn stmts_subtree(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
 /// subtree — a post-join read lies on every path and keeps the view
 /// live in every arm.
 fn refine_view_liveness_for_arm(
-    tir: &Tir,
     own: &mut Ownership,
     if_ref: TirRef,
     arm_index: usize,
@@ -2556,7 +2699,8 @@ fn refine_view_liveness_for_arm(
                 // only the global max read, so re-apply the pre-pass's
                 // `created_in < read_in` test to the arm-local read the
                 // override would install.
-                if loop_nesting_of(tir, vi).len() < loop_nesting_of(tir, lu).len() {
+                if nesting_of(&own.loop_nesting, vi).len() < nesting_of(&own.loop_nesting, lu).len()
+                {
                     continue;
                 }
                 saved.push((vi, global_lu));
@@ -2607,7 +2751,7 @@ fn analyze_if_stmt(
     // per arm, the arm's body statements (conditions belong to the
     // shared flow, not to a specific arm).
     let mut if_subtree: HashSet<TirRef> = HashSet::new();
-    collect_refs_recursive(tir, r, &mut if_subtree);
+    tir.collect_reachable(r, &mut if_subtree);
 
     // Allocate fresh BranchIds for this if's arms. Codegen consults
     // `sidecar.if_branches` when lowering the if so each arm pushes
@@ -2646,7 +2790,7 @@ fn analyze_if_stmt(
     let snap_live_projections = own.live_projections.clone();
 
     let then_subtree = stmts_subtree(tir, &view.then_stmts);
-    let saved = refine_view_liveness_for_arm(tir, own, r, 0, &if_subtree, &then_subtree);
+    let saved = refine_view_liveness_for_arm(own, r, 0, &if_subtree, &then_subtree);
     for stmt in &view.then_stmts {
         analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
     }
@@ -2666,7 +2810,7 @@ fn analyze_if_stmt(
         drain_dying_views(own);
         let elif_subtree = stmts_subtree(tir, &elif.body);
         let saved =
-            refine_view_liveness_for_arm(tir, own, r, 1 + elif_index, &if_subtree, &elif_subtree);
+            refine_view_liveness_for_arm(own, r, 1 + elif_index, &if_subtree, &elif_subtree);
         for stmt in &elif.body {
             analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
         }
@@ -2682,7 +2826,6 @@ fn analyze_if_stmt(
 
         let else_subtree = stmts_subtree(tir, else_stmts);
         let saved = refine_view_liveness_for_arm(
-            tir,
             own,
             r,
             1 + view.elif_branches.len(),
@@ -2756,11 +2899,7 @@ fn analyze_if_stmt(
         let is_tracked = match owner {
             Owner::Inst(_) => true,
             Owner::Param(name) => {
-                let idx = tir
-                    .params
-                    .iter()
-                    .position(|p| p.name == name)
-                    .expect("param exists");
+                let idx = *own.param_index.get(&name).expect("param exists");
                 needs_tracking(tir.params[idx].ty, pool)
             }
         };
@@ -2780,17 +2919,13 @@ fn analyze_if_stmt(
                 let span = match owner {
                     Owner::Inst(r) => tir.span(r),
                     Owner::Param(name) => {
-                        let idx = tir
-                            .params
-                            .iter()
-                            .position(|p| p.name == name)
-                            .expect("param exists");
+                        let idx = *own.param_index.get(&name).expect("param exists");
                         tir.params[idx].span
                     }
                 };
                 sidecar.free_schedule.push(FreePoint {
                     after,
-                    target: owner.tirref(tir),
+                    target: owner.tirref(&own.param_index),
                     span,
                     branch: Some(arm.branch_id),
                 });
@@ -2871,11 +3006,37 @@ fn analyze_if_stmt(
     prune_branch_dead_projections(tir, own, r);
 }
 
-/// Shared loop-body fixed-point. Caller has already visited the
-/// prelude (cond / start+end). Walks the body once into a scratch sink,
-/// compares entry vs post-body state (the full tuple — owner states
-/// plus live-projection emptiness), and either replays (converged) or
-/// re-walks from the merged state against the real sink.
+/// Shared loop-body fixed-point, in two phases. Caller has already
+/// visited the prelude (cond / start+end).
+///
+/// Phase 1 — propagate-only propagation, bounded to two walks (the
+/// bound is load-bearing — see the comment in the body). Walks the
+/// body with a throwaway `DiagSink` AND a staging sidecar (a clone of
+/// the real one), so speculative diagnostics and sidecar writes are
+/// discarded at the end of each iteration. After each walk, compares
+/// entry vs post-body via `states_differ_snapshot` (the full tuple —
+/// owner states plus live-projection emptiness) and always merges
+/// (entry ⊔ post-body) into `own` via `merge_non_monotone`. Converged
+/// → break early; otherwise the merged state becomes the new entry
+/// and the loop iterates up to the cap.
+///
+/// Phase 2 — single check pass. From the propagated entry
+/// state, walks the body exactly once against the REAL sink and
+/// sidecar, then does the final merge with the loop-entry snapshot
+/// (the loop may execute zero times), so post-loop state =
+/// entry ⊔ post-check-pass. Diagnostics are therefore always derived
+/// from the propagated lattice, never from whichever speculative
+/// iteration happened to emit them.
+///
+/// Monotone `Ownership` fields (`temp_owners`, `owner_at_read`,
+/// `root_owner`, `reseat_drops`, `return_epilogue`, `owner_hazards`,
+/// `origin`) keep accumulating across propagate passes and are deduped
+/// at scheduling time (documented on those fields) — they are
+/// deliberately not rolled back. `next_branch_id` likewise stays
+/// monotone (never snapshotted/restored): propagate passes may leave
+/// gaps in BranchId numbering, which is harmless because ids only
+/// need function-uniqueness (see `merge_branches`' BranchId
+/// monotonicity note and `merge_branches_takes_max_next_branch_id`).
 fn analyze_loop_body(
     tir: &Tir,
     pool: &InternPool,
@@ -2887,99 +3048,119 @@ fn analyze_loop_body(
     // Snapshot ONLY the non-monotone fields (see Step 2).
     // `live_projections` joined that set in M8.4 (projections die at
     // their last use); `root_owner` is insert-only and stays live.
+    // The loop-entry snapshot is kept for the final merge in Phase 2.
     let snap_states = own.states.clone();
     let snap_current_owner = own.current_owner.clone();
     let snap_pending_dead_store = own.pending_dead_store.clone();
     let snap_live_projections = own.live_projections.clone();
 
-    let mut scratch = DiagSink::new();
-    for stmt in body {
-        analyze_stmt(tir, pool, own, &mut scratch, sidecar, *stmt);
-    }
-    let after = (
-        own.states.clone(),
-        own.current_owner.clone(),
-        own.pending_dead_store.clone(),
-        own.live_projections.clone(),
-    );
-
-    if states_differ_snapshot(&snap_states, &after.0, &snap_live_projections, &after.3) {
-        // merge the non-monotone fields and re-walk against the real sink
-        merge_non_monotone(
-            own,
-            &snap_states,
-            &after.0,
-            &snap_current_owner,
-            &after.1,
-            &snap_pending_dead_store,
-            &after.2,
-            &snap_live_projections,
-            &after.3,
-        );
+    // Phase 1 — propagate-only fixed-point, bounded to
+    // MAX_PROPAGATE_PASSES walks. The bound is load-bearing, not just
+    // pragmatic: the binding-aware override (`merge_binding_states`,
+    // called by `merge_non_monotone`) is NOT monotone — when the body
+    // reseats a binding (consume-then-rebind), the override merges the
+    // pre-reseat owner's entry state with the post-reseat owner's
+    // post-body state, which can flip `Moved` back to `Valid` on every
+    // merge. An unbounded loop then oscillates forever (`while:
+    // consume(name); name = "Bob"` never converges).
+    // Two walks reproduce the historical 2-pass precision: genuinely
+    // divergent bodies (move-without-rebind) converge by the second
+    // walk's comparison and break early; oscillating bodies stop at
+    // the cap with the same merged state the old re-walk started from.
+    const MAX_PROPAGATE_PASSES: usize = 2;
+    let mut entry_states = snap_states.clone();
+    let mut entry_current_owner = snap_current_owner.clone();
+    let mut entry_pending_dead_store = snap_pending_dead_store.clone();
+    let mut entry_live_projections = snap_live_projections.clone();
+    for _ in 0..MAX_PROPAGATE_PASSES {
+        let mut scratch = DiagSink::new();
+        let mut staging = sidecar.clone();
         for stmt in body {
-            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
+            analyze_stmt(tir, pool, own, &mut scratch, &mut staging, *stmt);
         }
-        // final merge with entry
-        let own_states_clone = own.states.clone();
-        let own_current_owner_clone = own.current_owner.clone();
-        let own_pending_dead_store_clone = own.pending_dead_store.clone();
-        let own_live_projections_clone = own.live_projections.clone();
-        merge_non_monotone(
-            own,
-            &snap_states,
-            &own_states_clone,
-            &snap_current_owner,
-            &own_current_owner_clone,
-            &snap_pending_dead_store,
-            &own_pending_dead_store_clone,
-            &snap_live_projections,
-            &own_live_projections_clone,
+        let after = (
+            own.states.clone(),
+            own.current_owner.clone(),
+            own.pending_dead_store.clone(),
+            own.live_projections.clone(),
         );
-    } else {
-        for d in scratch.into_diags() {
-            sink.emit(d);
-        }
-        // restore union-only fields are already live; reset non-monotone to entry-merged
+        let differ =
+            states_differ_snapshot(&entry_states, &after.0, &entry_live_projections, &after.3);
+        // Always merge (entry ⊔ post-body) into `own`; on convergence
+        // post-body == entry so the merge is a no-op and `own` already
+        // holds the converged entry state Phase 2 starts from.
         merge_non_monotone(
             own,
-            &snap_states,
+            &entry_states,
             &after.0,
-            &snap_current_owner,
+            &entry_current_owner,
             &after.1,
-            &snap_pending_dead_store,
+            &entry_pending_dead_store,
             &after.2,
-            &snap_live_projections,
+            &entry_live_projections,
             &after.3,
         );
+        if !differ {
+            break;
+        }
+        entry_states = own.states.clone();
+        entry_current_owner = own.current_owner.clone();
+        entry_pending_dead_store = own.pending_dead_store.clone();
+        entry_live_projections = own.live_projections.clone();
     }
+
+    // Phase 2 — single check pass against the real sink and sidecar.
+    for stmt in body {
+        analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
+    }
+    // Final merge with the loop-entry snapshot: the loop may execute
+    // zero times, so post-loop state = entry ⊔ post-check-pass.
+    let own_states_clone = own.states.clone();
+    let own_current_owner_clone = own.current_owner.clone();
+    let own_pending_dead_store_clone = own.pending_dead_store.clone();
+    let own_live_projections_clone = own.live_projections.clone();
+    merge_non_monotone(
+        own,
+        &snap_states,
+        &own_states_clone,
+        &snap_current_owner,
+        &own_current_owner_clone,
+        &snap_pending_dead_store,
+        &own_pending_dead_store_clone,
+        &snap_live_projections,
+        &own_live_projections_clone,
+    );
 }
 
-/// 2-pass approximation of a fixed-point ownership analysis for
-/// `while`. Walks the body once from the entry state into a scratch
-/// sink; if the full state tuple (owner states + live-projection
-/// emptiness) is unchanged across the back-edge, the body is
-/// loop-invariant for ownership purposes and the scratch diagnostics
-/// are flushed. Otherwise we re-walk from the merged
-/// (entry ⊔ post-body) state and emit diagnostics on the second pass
-/// — a binding moved inside the body without rebinding before the
-/// back-edge surfaces as E0020 on iteration two.
+/// Fixed-point ownership analysis for `while`, in the
+/// propagate-then-check shape of `analyze_loop_body`: Phase 1 walks
+/// the body against a throwaway sink and a staging sidecar, merging
+/// (entry ⊔ post-body) until the full state tuple (owner states +
+/// live-projection emptiness) is unchanged across the back-edge;
+/// Phase 2 then walks the body exactly once from the converged entry
+/// state against the real sink and sidecar — a binding moved inside
+/// the body without rebinding before the back-edge surfaces as E0020
+/// on that check pass, because the converged entry already records
+/// the move.
 ///
-/// Why two passes suffice for the M8.1 pattern set (instead of a
-/// general fixed-point loop): the merge is monotonic over the
-/// Moved-ness sub-lattice (`Valid → Moved` is the only transition,
-/// and merge takes "any branch Moved → Moved"), the projection merge
-/// is a plain union (also monotone), and there are no
-/// iteration-count-dependent conditionals — so a TirRef that flips
-/// from `Valid` to `Moved` in pass one stays `Moved` after the
-/// (entry ⊔ post-body) merge and a third walk would observe nothing
-/// new. Original phrasing for traceability:
-/// "Converges in at most 2 iterations for the M8.1 pattern set".
+/// Why two propagate walks suffice for the M8.1 pattern set: the
+/// state merge is monotonic over the Moved-ness sub-lattice
+/// (`Valid → Moved` is the only transition, and merge takes "any
+/// branch Moved → Moved") and the projection merge is a plain union
+/// (also monotone) — so a TirRef that flips from `Valid` to `Moved`
+/// in one pass stays `Moved` after the (entry ⊔ post-body) merge and
+/// a further propagate pass observes nothing new. Original phrasing
+/// for traceability: "Converges in at most 2 iterations for the M8.1
+/// pattern set".
 ///
-/// **Maintainer note.** If a future change introduces non-monotonic
-/// merges (e.g., `Moved → Valid` re-entry as a real lattice transition
-/// rather than via rebinding) or iteration-count-dependent control
-/// flow inside the body, revert this to a true fixed-point loop
-/// (iterate until `states_differ_snapshot` returns false).
+/// **Maintainer note.** The merge is NOT fully monotone: the
+/// binding-aware override in `merge_binding_states` (used by
+/// `merge_non_monotone`) can flip `Moved` back to `Valid` when a body
+/// reseats its binding (consume-then-rebind), so an UNBOUNDED
+/// propagate loop oscillates forever on that pattern. The two-walk
+/// cap is what keeps Phase 1 total; do not replace it with an
+/// unbounded `loop` unless the override's monotonicity is addressed
+/// first.
 fn analyze_while_loop(
     tir: &Tir,
     pool: &InternPool,
@@ -2998,7 +3179,7 @@ fn analyze_while_loop(
 
 /// `for i in range(start, end)` loop var is `int` (Copy), so the
 /// induction variable never enters the lattice. The body runs the
-/// same fixed-point as `while`.
+/// same propagate-then-check fixed-point as `while`.
 fn analyze_for_range(
     tir: &Tir,
     pool: &InternPool,
@@ -3062,6 +3243,7 @@ fn states_differ_snapshot(
 
 /// Merge only the non-monotone fields of two states (represented by their snapshots)
 /// into `own`'s corresponding fields, leaving the monotone fields intact.
+/// Shares its per-field merge rules with `Ownership::merge_branches`.
 #[allow(clippy::too_many_arguments)]
 fn merge_non_monotone(
     own: &mut Ownership,
@@ -3074,78 +3256,34 @@ fn merge_non_monotone(
     snap_live_projections: &HashMap<Owner, Vec<Owner>>,
     after_live_projections: &HashMap<Owner, Vec<Owner>>,
 ) {
-    // 1. Merge states: any branch Moved -> Moved; otherwise first observed (snap_states) wins.
+    // 1. Merge states: any side Moved -> Moved; otherwise first observed (snap_states) wins.
     let mut merged_states = snap_states.clone();
-    for (r, s) in after_states {
-        merged_states
-            .entry(*r)
-            .and_modify(|cur| {
-                if !matches!(cur, OwnerState::Moved { .. }) && matches!(s, OwnerState::Moved { .. })
-                {
-                    *cur = s.clone();
-                }
-            })
-            .or_insert_with(|| s.clone());
-    }
+    merge_states_any_moved_wins(&mut merged_states, after_states);
 
-    // Binding-aware override
-    for (&name, &owner_pre) in snap_current_owner {
-        let owner_snap = owner_pre;
-        let owner_after = after_current_owner.get(&name).copied().unwrap_or(owner_pre);
+    // Binding-aware override — NOT monotone (see merge_binding_states);
+    // analyze_loop_body's propagate-phase cap depends on that.
+    merge_binding_states(
+        &mut merged_states,
+        snap_current_owner,
+        &[
+            (snap_current_owner, snap_states),
+            (after_current_owner, after_states),
+        ],
+    );
 
-        let state_snap = snap_states
-            .get(&owner_snap)
-            .cloned()
-            .unwrap_or(OwnerState::NotTracked);
-        let state_after = after_states
-            .get(&owner_after)
-            .cloned()
-            .unwrap_or(OwnerState::NotTracked);
-
-        let mut merged: Option<OwnerState> = None;
-        for state_b in &[state_snap, state_after] {
-            let take = match (&merged, state_b) {
-                (None, _) => true,
-                (Some(OwnerState::Moved { .. }), _) => false,
-                (_, OwnerState::Moved { .. }) => true,
-                _ => false,
-            };
-            if take {
-                merged = Some(state_b.clone());
-            }
-        }
-        if let Some(state) = merged {
-            merged_states.insert(owner_pre, state);
-        }
-    }
-
-    // 2. Merge current_owner: first-wins via or_insert.
+    // 2. Merge current_owner: first-wins.
     let mut merged_current_owner = snap_current_owner.clone();
-    for (&name, &owner) in after_current_owner {
-        merged_current_owner.entry(name).or_insert(owner);
-    }
+    merge_current_owner_first_wins(&mut merged_current_owner, after_current_owner);
 
-    // 3. Merge pending_dead_store: pre-branch keys intersect; branch-local keys union.
+    // 3. Merge pending_dead_store: pre-existing keys intersect; local keys union.
     let mut merged_pending_dead_store = snap_pending_dead_store.clone();
-    merged_pending_dead_store.retain(|k, _| after_pending_dead_store.contains_key(k));
-    for (k, v) in after_pending_dead_store {
-        if !snap_pending_dead_store.contains_key(k) {
-            merged_pending_dead_store.insert(*k, *v);
-        }
-    }
+    merge_pending_dead_store(&mut merged_pending_dead_store, &[after_pending_dead_store]);
 
     // 4. Merge live_projections: union per root (P2 freeze ranges,
     // final spec §3.2) — a view live on either side of the back-edge
     // stays live. Monotone, so the 2-pass fixed point still suffices.
     let mut merged_live_projections = snap_live_projections.clone();
-    for (root, views) in after_live_projections {
-        let entry = merged_live_projections.entry(*root).or_default();
-        for v in views {
-            if !entry.contains(v) {
-                entry.push(*v);
-            }
-        }
-    }
+    union_live_projections(&mut merged_live_projections, after_live_projections);
 
     own.states = merged_states;
     own.current_owner = merged_current_owner;
@@ -3158,7 +3296,7 @@ fn merge_non_monotone(
 /// populated by overwriting (not `or_insert`), so the latest read
 /// wins — semantically equivalent to the previous reverse-walk +
 /// `or_insert` approach for a tree-shaped IR. Recurses through
-/// `walk_operands` so reads buried inside calls, loops, and if-arms
+/// `Tir::walk_operands` so reads buried inside calls, loops, and if-arms
 /// are still seen. M8.4 (P4/P5, final spec §3.2): `strview`-typed reads
 /// are recorded too — keyed by the view's slice instruction — so the
 /// P5 deferral can compare an owner's last use against its
@@ -3185,19 +3323,22 @@ fn collect_last_uses(
         && let Some(&owner) = own.owner_at_read.get(&r)
     {
         // Overwriting insert: latest forward-order read wins =
-        // last source-order read.
-        if let Some(r_owner) = owner.inst_tirref() {
-            last_use.insert(r_owner, r);
-        }
+        // last source-order read. `Owner::tirref` keys a `Param`
+        // owner under its sentinel ref, so reads of a param-owned
+        // binding register a last use for the param too — the
+        // last-use pass can then anchor its Free after the param's
+        // true last read instead of the last body statement.
+        last_use.insert(owner.tirref(&own.param_index), r);
     }
-    walk_operands(tir, r, &mut |_parent, operand, _kind| {
+    tir.walk_operands(r, &mut |_parent, operand, _kind| {
         collect_last_uses(tir, pool, own, operand, last_use);
     });
 }
 
 /// Build a `child_TirRef → parent_TirRef` map. Each temporary owner
-/// has at most one direct parent in the TIR (TIR is tree-shaped per
-/// function), so `or_insert` correctly preserves the first parent
+/// has at most one direct parent in the TIR (the tree-shape invariant
+/// documented on `Tir`, checked by `validate_tree_shape` in debug
+/// builds), so `or_insert` correctly preserves the first parent
 /// observed. Used by the anonymous-temporary-free pass to anchor
 /// each temp's Free after its single consumer.
 ///
@@ -3208,7 +3349,7 @@ fn collect_last_uses(
 /// descends through `BodyStmt` edges to reach operands buried
 /// inside those nested statements.
 fn find_consumers(tir: &Tir, r: TirRef, consumer_of: &mut HashMap<TirRef, TirRef>) {
-    walk_operands(tir, r, &mut |parent, operand, kind| {
+    tir.walk_operands(r, &mut |parent, operand, kind| {
         if matches!(kind, ChildKind::Operand) {
             consumer_of.entry(operand).or_insert(parent);
         }
@@ -3216,114 +3357,50 @@ fn find_consumers(tir: &Tir, r: TirRef, consumer_of: &mut HashMap<TirRef, TirRef
     });
 }
 
-/// Distinguishes the two kinds of (parent, child) edges announced
-/// by [`walk_operands`]:
+/// Per-loop invariants for jump-exit Free scheduling, computed once
+/// when the traversal enters a `WhileLoop`/`ForRange` and shared by
+/// every `break`/`continue` jump inside the loop:
 ///
-/// * [`ChildKind::Operand`] — a direct data dependency (e.g. a
-///   binary-op LHS, a call arg, a `VarDecl`'s initializer, an
-///   `if`/`while`/`for` condition or range bound). Consumer of
-///   the parent.
-/// * [`ChildKind::BodyStmt`] — a statement nested inside an
-///   `if`/`while`/`for` body. Reachable from the parent for
-///   traversal, but not a consumer of the parent.
-#[derive(Clone, Copy)]
-enum ChildKind {
-    Operand,
-    BodyStmt,
+/// * `body` — the loop's top-level body statements.
+/// * `inside_loop` — every TirRef reachable from the loop body.
+///   Classifies owners as inside-loop vs pre-loop; raw-index
+///   comparisons are unsound (producer refs sit numerically below
+///   their parent body stmt).
+/// * `has_any` — targets of Frees scheduled anywhere at loop entry.
+///   Jump-exit scheduling only appends Frees anchored inside the loop,
+///   which the per-jump `free_inside_loop` check already accounts for,
+///   so this snapshot stays exact for every jump in the loop.
+/// * `top_level` — each ref inside the loop body mapped to the
+///   top-level body statement that contains it (the first container in
+///   source order wins). Turns "which body stmt reaches the jump" into
+///   one lookup instead of a per-stmt containment walk of the body.
+struct LoopExitCtx {
+    body: Vec<TirRef>,
+    inside_loop: HashSet<TirRef>,
+    has_any: HashSet<TirRef>,
+    top_level: HashMap<TirRef, TirRef>,
 }
 
-/// Visit every direct operand and body-statement edge of TIR
-/// instruction `r`, invoking `f(parent, child, kind)` for each
-/// `(parent, child)` edge in forward source order. **Shallow** —
-/// does not recurse on its own; callers' closures drive recursion
-/// (see [`collect_last_uses`] / [`find_consumers`]). Avoids the
-/// O(2^N) re-walking that an internally-recursive walker would
-/// produce when callers also recurse via their closures.
-///
-/// Single source of truth for TIR-shape coverage across the
-/// ownership pass's post-walk analyses (last-use, consumer-of, …).
-/// Adding a new TIR shape requires updating exactly this function.
-fn walk_operands(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef, TirRef, ChildKind)) {
-    let inst = *tir.inst(r);
-    match inst.data {
-        TirData::UnOp(o) => {
-            f(r, o, ChildKind::Operand);
-        }
-        TirData::BinOp { lhs, rhs } => {
-            f(r, lhs, ChildKind::Operand);
-            f(r, rhs, ChildKind::Operand);
-        }
-        TirData::Slice { base, start, end } => {
-            // M8.4: a slice reads its base and bounds; the base read
-            // is what keeps the owner live (final spec §3.2 P5).
-            f(r, base, ChildKind::Operand);
-            if let Some(s) = start {
-                f(r, s, ChildKind::Operand);
-            }
-            if let Some(e) = end {
-                f(r, e, ChildKind::Operand);
+impl LoopExitCtx {
+    fn new(tir: &Tir, sidecar: &FunctionSidecar, loop_inst: TirRef) -> Option<Self> {
+        let body = tir.loop_body(loop_inst)?;
+        let mut inside_loop: HashSet<TirRef> = HashSet::new();
+        tir.collect_loop_body_refs(loop_inst, &mut inside_loop);
+        let has_any: HashSet<TirRef> = sidecar.free_schedule.iter().map(|fp| fp.target).collect();
+        let mut top_level: HashMap<TirRef, TirRef> = HashMap::new();
+        for &stmt in &body {
+            let mut reachable: HashSet<TirRef> = HashSet::new();
+            tir.collect_reachable(stmt, &mut reachable);
+            for r in reachable {
+                top_level.entry(r).or_insert(stmt);
             }
         }
-        TirData::Extra(_) => match inst.tag {
-            TirTag::Call => {
-                let view = tir.call_view(r);
-                for &arg in &view.args {
-                    f(r, arg, ChildKind::Operand);
-                }
-            }
-            TirTag::VarDecl => {
-                let v = tir.var_decl_view(r);
-                f(r, v.initializer, ChildKind::Operand);
-            }
-            TirTag::Assign => {
-                let v = tir.assign_view(r);
-                f(r, v.value, ChildKind::Operand);
-            }
-            TirTag::CompoundAssign => {
-                let v = tir.compound_assign_view(r);
-                f(r, v.value, ChildKind::Operand);
-            }
-            TirTag::IfStmt => {
-                let v = tir.if_stmt_view(r);
-                f(r, v.cond, ChildKind::Operand);
-                for &s in &v.then_stmts {
-                    f(r, s, ChildKind::BodyStmt);
-                }
-                for elif in &v.elif_branches {
-                    f(r, elif.cond, ChildKind::Operand);
-                    for &s in &elif.body {
-                        f(r, s, ChildKind::BodyStmt);
-                    }
-                }
-                if let Some(else_stmts) = &v.else_stmts {
-                    for &s in else_stmts {
-                        f(r, s, ChildKind::BodyStmt);
-                    }
-                }
-            }
-            TirTag::WhileLoop => {
-                let v = tir.while_loop_view(r);
-                f(r, v.cond, ChildKind::Operand);
-                for &s in &v.body {
-                    f(r, s, ChildKind::BodyStmt);
-                }
-            }
-            TirTag::ForRange => {
-                let v = tir.for_range_view(r);
-                f(r, v.start, ChildKind::Operand);
-                f(r, v.end, ChildKind::Operand);
-                for &s in &v.body {
-                    f(r, s, ChildKind::BodyStmt);
-                }
-            }
-            _ => {}
-        },
-        TirData::None
-        | TirData::Int(_)
-        | TirData::Float(_)
-        | TirData::Str(_)
-        | TirData::Bool(_)
-        | TirData::Var(_) => {}
+        Some(Self {
+            body,
+            inside_loop,
+            has_any,
+            top_level,
+        })
     }
 }
 
@@ -3331,174 +3408,49 @@ fn walk_operands(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef, TirRef, ChildK
 /// the last-use, anonymous-temp, and dead-store passes have populated
 /// `sidecar.free_schedule`, so per-jump scheduling can read existing
 /// entries to decide whether an inside-loop owner is already covered
-/// (see `schedule_break_continue_frees`). `enclosing_loop` is the
-/// nearest enclosing `WhileLoop`/`ForRange` instruction reference, or
-/// `None` at top-level (where `Break`/`Continue` would already have
-/// been rejected by sema).
+/// (see `schedule_break_continue_frees`). `enclosing` is the per-loop
+/// context of the nearest enclosing `WhileLoop`/`ForRange`, or `None`
+/// at top-level (where `Break`/`Continue` would already have been
+/// rejected by sema).
 fn schedule_loop_exit_frees_in(
     tir: &Tir,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
     stmts: &[TirRef],
-    enclosing_loop: Option<TirRef>,
+    enclosing: Option<&LoopExitCtx>,
 ) {
     for &r in stmts {
         let inst = *tir.inst(r);
         match inst.tag {
             TirTag::Break | TirTag::Continue => {
-                if let Some(loop_ref) = enclosing_loop {
-                    schedule_break_continue_frees(tir, own, sidecar, r, loop_ref);
+                if let Some(ctx) = enclosing {
+                    schedule_break_continue_frees(tir, own, sidecar, r, ctx);
                 }
                 // Else: outside any loop — sema rejects this with a
                 // dedicated diagnostic, so well-formed TIR never
                 // reaches here.
             }
-            TirTag::WhileLoop => {
-                let view = tir.while_loop_view(r);
-                schedule_loop_exit_frees_in(tir, own, sidecar, &view.body, Some(r));
-            }
-            TirTag::ForRange => {
-                let view = tir.for_range_view(r);
-                schedule_loop_exit_frees_in(tir, own, sidecar, &view.body, Some(r));
+            TirTag::WhileLoop | TirTag::ForRange => {
+                // The loop-body reachability and scheduled-Free index
+                // are invariant across jumps in the same loop — compute
+                // them once here, not per break/continue.
+                if let Some(ctx) = LoopExitCtx::new(tir, sidecar, r) {
+                    schedule_loop_exit_frees_in(tir, own, sidecar, &ctx.body, Some(&ctx));
+                }
             }
             TirTag::IfStmt => {
                 let view = tir.if_stmt_view(r);
-                schedule_loop_exit_frees_in(tir, own, sidecar, &view.then_stmts, enclosing_loop);
+                schedule_loop_exit_frees_in(tir, own, sidecar, &view.then_stmts, enclosing);
                 for elif in &view.elif_branches {
-                    schedule_loop_exit_frees_in(tir, own, sidecar, &elif.body, enclosing_loop);
+                    schedule_loop_exit_frees_in(tir, own, sidecar, &elif.body, enclosing);
                 }
                 if let Some(else_stmts) = &view.else_stmts {
-                    schedule_loop_exit_frees_in(tir, own, sidecar, else_stmts, enclosing_loop);
+                    schedule_loop_exit_frees_in(tir, own, sidecar, else_stmts, enclosing);
                 }
             }
             _ => {}
         }
     }
-}
-
-/// Slice of body statements for a `WhileLoop`/`ForRange` instruction,
-/// materialized into an owned `Vec<TirRef>` so the caller can re-borrow
-/// `tir` for recursive walks. Returns `None` for non-loop refs.
-fn loop_body(tir: &Tir, loop_inst: TirRef) -> Option<Vec<TirRef>> {
-    match tir.inst(loop_inst).tag {
-        TirTag::WhileLoop => Some(tir.while_loop_view(loop_inst).body.to_vec()),
-        TirTag::ForRange => Some(tir.for_range_view(loop_inst).body.to_vec()),
-        _ => None,
-    }
-}
-
-/// Collect every `TirRef` reachable from `loop_inst`'s body —
-/// transitive operands AND nested body statements — into `set`.
-/// Used to classify owners as inside-loop vs pre-loop without
-/// relying on the broken `raw()` proxy (producer refs are pushed
-/// before their parent body stmt, so a producer's `raw()` can be
-/// below the parent body-stmt's `raw()` even though it's
-/// semantically inside).
-///
-/// `walk_operands` is shallow; this helper drives the recursion.
-fn collect_loop_body_refs(tir: &Tir, loop_inst: TirRef, set: &mut HashSet<TirRef>) {
-    let Some(body) = loop_body(tir, loop_inst) else {
-        return;
-    };
-    for stmt in body {
-        collect_refs_recursive(tir, stmt, set);
-    }
-}
-
-fn collect_refs_recursive(tir: &Tir, r: TirRef, set: &mut HashSet<TirRef>) {
-    if !set.insert(r) {
-        return;
-    }
-    walk_operands(tir, r, &mut |_parent, child, _kind| {
-        collect_refs_recursive(tir, child, set);
-    });
-}
-
-/// Collect the set of TirRefs evaluated on the path that reaches
-/// `target` (a `break`/`continue` instruction) within `body`. Returns
-/// `true` if `target` was located.
-///
-/// Walk-down rule: a body-stmt that does NOT contain `target` runs
-/// to completion before the jump's stmt is reached, so all of its
-/// operand-reachable refs are on-path. The body-stmt that DOES
-/// contain `target` recurses: into the right `IfStmt` arm, or into
-/// a nested loop's body. For an `IfStmt` we collect the cond
-/// unconditionally (it always runs); we then locate the single arm
-/// (then / a specific elif / else) that contains `target` and only
-/// recurse into that arm — sibling arms are off-path. For elif
-/// arms we also collect each preceding elif's cond (those conds
-/// executed; their bodies were skipped).
-///
-/// Used by `schedule_break_continue_frees` to decide whether an
-/// existing `FreePoint` actually fires on the jump's path. A Free
-/// anchored in a sibling arm has its `after` ref outside this set,
-/// so it's correctly classified as not-covering.
-fn collect_jump_path(
-    tir: &Tir,
-    body: &[TirRef],
-    target: TirRef,
-    set: &mut HashSet<TirRef>,
-) -> bool {
-    for &stmt in body {
-        if stmt == target {
-            set.insert(target);
-            return true;
-        }
-        let mut sub: HashSet<TirRef> = HashSet::new();
-        collect_refs_recursive(tir, stmt, &mut sub);
-        if sub.contains(&target) {
-            // `stmt` contains the jump. Descend along the right arm.
-            match tir.inst(stmt).tag {
-                TirTag::IfStmt => {
-                    let view = tir.if_stmt_view(stmt);
-                    set.insert(stmt);
-                    collect_refs_recursive(tir, view.cond, set);
-                    // Locate the arm containing `target`; only that arm's
-                    // statements are on-path. Earlier elif conds executed
-                    // (their bodies skipped) so collect just the conds up
-                    // to the chosen arm.
-                    let mut then_sub: HashSet<TirRef> = HashSet::new();
-                    for &s in &view.then_stmts {
-                        collect_refs_recursive(tir, s, &mut then_sub);
-                    }
-                    if then_sub.contains(&target) {
-                        return collect_jump_path(tir, &view.then_stmts, target, set);
-                    }
-                    for elif in &view.elif_branches {
-                        collect_refs_recursive(tir, elif.cond, set);
-                        let mut elif_sub: HashSet<TirRef> = HashSet::new();
-                        for &s in &elif.body {
-                            collect_refs_recursive(tir, s, &mut elif_sub);
-                        }
-                        if elif_sub.contains(&target) {
-                            return collect_jump_path(tir, &elif.body, target, set);
-                        }
-                    }
-                    if let Some(else_stmts) = &view.else_stmts {
-                        return collect_jump_path(tir, else_stmts, target, set);
-                    }
-                    return true;
-                }
-                TirTag::WhileLoop | TirTag::ForRange => {
-                    // Inner loop containing the jump. Should not
-                    // happen when called from the innermost-enclosing-
-                    // loop's break-pass — the inner loop runs its own
-                    // schedule_break_continue_frees pass for that jump.
-                    return true;
-                }
-                _ => {
-                    // Other shapes (ExprStmt, etc.). The stmt's
-                    // operands are evaluated as part of reaching
-                    // `target`.
-                    collect_refs_recursive(tir, stmt, set);
-                    return true;
-                }
-            }
-        }
-        // `stmt` does not contain target — fully evaluated before target.
-        collect_refs_recursive(tir, stmt, set);
-    }
-    false
 }
 
 /// Schedule one Free per `Valid` owner not already covered by a Free
@@ -3521,43 +3473,55 @@ fn collect_jump_path(
 ///     — natural Free is anchored INSIDE the then-arm; the else-arm's
 ///     break is not on the same path, so the Free doesn't cover it.
 ///
-/// `inside_loop` and `on_path` are computed by transitive reachability
-/// from the loop's body — `raw()` comparisons are unsound (producer
-/// refs sit numerically below their parent body stmt, and sibling
-/// if-arms compare lexically but are not on the same control-flow
-/// path).
+/// `inside_loop` comes precomputed from the per-loop context; only
+/// `on_path` is per-jump (it depends on `jump_inst`). Both are derived
+/// by transitive reachability from the loop's body — `raw()`
+/// comparisons are unsound (producer refs sit numerically below their
+/// parent body stmt, and sibling if-arms compare lexically but are not
+/// on the same control-flow path).
 fn schedule_break_continue_frees(
     tir: &Tir,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
     jump_inst: TirRef,
-    loop_inst: TirRef,
+    ctx: &LoopExitCtx,
 ) {
-    // Classify owners by transitive reachability from the loop body.
-    // raw() comparisons are unsound here — producer refs sit
-    // numerically below their parent body stmt.
-    let mut inside_loop: HashSet<TirRef> = HashSet::new();
-    collect_loop_body_refs(tir, loop_inst, &mut inside_loop);
+    let inside_loop = &ctx.inside_loop;
 
     // Compute the set of TirRefs evaluated on the path that takes
     // the jump. A Free covers this jump iff its `after` anchor is
     // in this set — purely lexical raw() ordering misclassifies
-    // anchors in sibling if-arms.
+    // anchors in sibling if-arms. The jump's enclosing top-level body
+    // stmt is one map lookup; stmts before it run to completion, so
+    // they are collected directly and the path walk descends only
+    // from the enclosing stmt — no per-stmt containment probes along
+    // the body.
     let mut on_path: HashSet<TirRef> = HashSet::new();
-    let Some(body) = loop_body(tir, loop_inst) else {
-        return;
-    };
-    let _ = collect_jump_path(tir, &body, jump_inst, &mut on_path);
+    match ctx.top_level.get(&jump_inst) {
+        Some(&enclosing_stmt) => {
+            for &stmt in ctx.body.iter().take_while(|&&s| s != enclosing_stmt) {
+                tir.collect_reachable(stmt, &mut on_path);
+            }
+            let _ = tir.collect_jump_path(
+                std::slice::from_ref(&enclosing_stmt),
+                jump_inst,
+                &mut on_path,
+            );
+        }
+        // Defensive: every jump visited from this loop's body is in
+        // the map, so this only guards against malformed input.
+        None => {
+            let _ = tir.collect_jump_path(&ctx.body, jump_inst, &mut on_path);
+        }
+    }
 
     // Index sidecar.free_schedule by target.
-    //   has_any           — Free scheduled anywhere
     //   covers_this_jump  — Free anchored on a TirRef in `on_path`
     //                       (i.e. fires on the path that takes the jump)
-    let mut has_any: HashSet<TirRef> = HashSet::new();
+    //   free_inside_loop  — Free anchored anywhere inside the loop
     let mut covers_this_jump: HashSet<TirRef> = HashSet::new();
     let mut free_inside_loop: HashSet<TirRef> = HashSet::new();
     for fp in &sidecar.free_schedule {
-        has_any.insert(fp.target);
         if on_path.contains(&fp.after) {
             covers_this_jump.insert(fp.target);
         }
@@ -3618,7 +3582,7 @@ fn schedule_break_continue_frees(
         // break. On `continue` the next iteration would re-read the freed buffer
         // (UAF); the principled fix is path-relative liveness, but until then we
         // accept a potential leak over a UAF.
-        if is_break && has_any.contains(&r) {
+        if is_break && ctx.has_any.contains(&r) {
             continue;
         }
         if is_break {
@@ -5153,10 +5117,10 @@ mod tests {
 
     #[test]
     fn merge_branches_takes_max_next_branch_id() {
-        // Direct regression for Bug 4 in M8.1c. merge_two clones the
-        // pre-loop entry; merge_branches must monotonically advance
-        // next_branch_id so that BranchIds minted inside a loop body
-        // are not reused by post-loop ifs.
+        // Direct regression for Bug 4 in M8.1c. The loop merge starts
+        // from the pre-loop entry; merge_branches must monotonically
+        // advance next_branch_id so that BranchIds minted inside a
+        // loop body are not reused by post-loop ifs.
         let mut entry = Ownership {
             next_branch_id: 0,
             ..Ownership::default()
@@ -5267,6 +5231,234 @@ mod tests {
             .find(|fp| fp.target == virtual_ref)
             .expect("free scheduled");
         assert_eq!(fp.after, ret);
+    }
+
+    #[test]
+    fn read_move_param_frees_after_last_read_not_last_stmt() {
+        // fn f(move s: str): print(s); print(42) — the param's Free
+        // anchors after its last read (the `Var` inside print(s)),
+        // not after the later statement that never touches it.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s_name = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s_name,
+                ty: str_ty,
+                mode: ParamMode::Move,
+                span,
+            }],
+            void,
+            span,
+        );
+        let s_read = tb.var(s_name, str_ty, span);
+        let call1 = tb.call(print, &[s_read], &all_borrow(&[s_read]), void, span);
+        let n = tb.int_const(42, int_ty, span);
+        let call2 = tb.call(print, &[n], &all_borrow(&[n]), void, span);
+        let tir = tb.finish(&[call1, call2]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+
+        let frees: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == TirRef::param(0))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the owned param; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert_eq!(
+            frees[0].after, s_read,
+            "the Free must anchor after the param's last read; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn param_last_read_inside_loop_frees_after_loop() {
+        // fn f(move s: str, cond: bool): while cond: print(s) — the
+        // last read sits inside the loop; anchoring after it would fire
+        // the Free per iteration (UAF on the next iteration's read), so
+        // the Free moves to after the loop statement.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s_name = pool.intern_str("s");
+        let cond_name = pool.intern_str("cond");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![
+                TirParam {
+                    name: s_name,
+                    ty: str_ty,
+                    mode: ParamMode::Move,
+                    span,
+                },
+                TirParam {
+                    name: cond_name,
+                    ty: bool_ty,
+                    mode: ParamMode::Borrow,
+                    span,
+                },
+            ],
+            void,
+            span,
+        );
+        let cond = tb.var(cond_name, bool_ty, span);
+        let s_read = tb.var(s_name, str_ty, span);
+        let call = tb.call(print, &[s_read], &all_borrow(&[s_read]), void, span);
+        let while_stmt = tb.while_loop(cond, &[call], void, span);
+        let tir = tb.finish(&[while_stmt]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+
+        let frees: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == TirRef::param(0))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the owned param; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert_eq!(
+            frees[0].after, while_stmt,
+            "a param last read inside a loop must be freed after the loop, not inside it; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn param_slice_read_defers_free_to_projection_last_use() {
+        // fn f(move s: str): v = s[0:2]; print(v); print(42) — the
+        // slice projects the param, so its Free defers to the
+        // projection's last use (the read inside print(v)), past the
+        // param's own last direct read.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let view_ty = pool.str_view();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s_name = pool.intern_str("s");
+        let v_name = pool.intern_str("v");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s_name,
+                ty: str_ty,
+                mode: ParamMode::Move,
+                span,
+            }],
+            void,
+            span,
+        );
+        let base = tb.var(s_name, str_ty, span);
+        let i0 = tb.int_const(0, int_ty, span);
+        let i2 = tb.int_const(2, int_ty, span);
+        let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
+        let vdecl = tb.var_decl(v_name, false, view_ty, sl, span);
+        let vread = tb.var(v_name, view_ty, span);
+        let call1 = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+        let n = tb.int_const(42, int_ty, span);
+        let call2 = tb.call(print, &[n], &all_borrow(&[n]), void, span);
+        let tir = tb.finish(&[vdecl, call1, call2]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+
+        let frees: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == TirRef::param(0))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the owned param; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert_eq!(
+            frees[0].after, vread,
+            "a slice of the param defers its Free to the projection's last use; schedule = {:?}",
+            sc.free_schedule
+        );
+    }
+
+    #[test]
+    fn never_read_move_param_still_freed_once_after_last_stmt() {
+        // fn f(move s: str): print(42) — a never-read owned param must
+        // still be freed exactly once, anchored after the last body
+        // statement (there is no last read to anchor on).
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let void = pool.void();
+        let f = pool.intern_str("f");
+        let s_name = pool.intern_str("s");
+        let print = pool.intern_str("print");
+        let span = SimpleSpan::new((), 0..0);
+        let mut tb = TirBuilder::new(
+            f,
+            vec![TirParam {
+                name: s_name,
+                ty: str_ty,
+                mode: ParamMode::Move,
+                span,
+            }],
+            void,
+            span,
+        );
+        let n = tb.int_const(42, int_ty, span);
+        let call = tb.call(print, &[n], &all_borrow(&[n]), void, span);
+        let tir = tb.finish(&[call]);
+        let mut sink = DiagSink::new();
+        let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sidecar.functions.remove(&f).expect("sidecar");
+
+        let frees: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.target == TirRef::param(0))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            1,
+            "exactly one Free for the owned param; schedule = {:?}",
+            sc.free_schedule
+        );
+        assert_eq!(
+            frees[0].after, call,
+            "a never-read param keeps the last-body-statement anchor; schedule = {:?}",
+            sc.free_schedule
+        );
     }
 
     #[test]
@@ -6937,8 +7129,8 @@ mod tests {
     fn return_epilogue_covers_move_param() {
         // `fn f(move s: str): if d: return` — the owned param is still
         // Valid at the early return; the callee must destroy it there
-        // (the exit-time param Free anchors after the last body stmt,
-        // which the early-return path never reaches).
+        // (the never-read param's Free anchors after the last body
+        // stmt, which the early-return path never reaches).
         use chumsky::span::{SimpleSpan, Span as _};
         use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
         let mut pool = InternPool::new();
@@ -8994,6 +9186,112 @@ mod tests {
             diags[0].message.contains("`s`"),
             "expected the diagnostic to name `s`; got: {}",
             diags[0].message
+        );
+    }
+
+    #[test]
+    fn diverged_loop_writes_branch_gated_free_exactly_once() {
+        // Regression: speculative sidecar writes from the loop
+        // fixed-point's first walk must not leak into the real sidecar.
+        //   m: str = "m"
+        //   while true:
+        //       x: str = "x"     # fresh owner every iteration
+        //       if true:
+        //           consume(x)   # then arm moves x
+        //       else:
+        //           print(x)     # else arm keeps x Valid
+        //       consume(m)       # moved without rebinding → divergence
+        //
+        // m flips Valid → Moved across the back-edge, so the state
+        // tuple differs and the diverged path runs. The if schedules a
+        // branch-gated Free for x on the else arm. Before the fix the
+        // scratch walk wrote that FreePoint into the REAL sidecar and
+        // the re-walk wrote it again under freshly minted BranchIds —
+        // two entries for one arm, the first gated on a BranchId that
+        // `if_branches` no longer records and codegen never activates.
+        use chumsky::span::{SimpleSpan, Span as _};
+        use ryo_core::tir::TirBuilder;
+
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let m = pool.intern_str("m");
+        let x = pool.intern_str("x");
+        let consume = pool.intern_str("consume");
+        let print = pool.intern_str("print");
+        let m_lit = pool.intern_str("m");
+        let x_lit = pool.intern_str("x");
+        let span = SimpleSpan::new((), 0..0);
+
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let lit_m = tb.str_const(m_lit, str_ty, span);
+        let decl_m = tb.var_decl(m, false, str_ty, lit_m, span);
+
+        let cond_w = tb.bool_const(true, bool_ty, span);
+        let lit_x = tb.str_const(x_lit, str_ty, span);
+        let decl_x = tb.var_decl(x, false, str_ty, lit_x, span);
+        let cond_i = tb.bool_const(true, bool_ty, span);
+        let x_then = tb.var(x, str_ty, span);
+        let consume_then = tb.call(consume, &[x_then], &[ParamMode::Move], void, span);
+        let then_stmt = tb.unary(TirTag::ExprStmt, void, consume_then, span);
+        let x_else = tb.var(x, str_ty, span);
+        let print_else = tb.call(print, &[x_else], &all_borrow(&[x_else]), void, span);
+        let else_stmt = tb.unary(TirTag::ExprStmt, void, print_else, span);
+        let if_inst = tb.if_stmt(cond_i, &[then_stmt], &[], Some(&[else_stmt]), void, span);
+        let m_read = tb.var(m, str_ty, span);
+        let consume_m = tb.call(consume, &[m_read], &[ParamMode::Move], void, span);
+        let consume_m_stmt = tb.unary(TirTag::ExprStmt, void, consume_m, span);
+        let wl = tb.while_loop(cond_w, &[decl_x, if_inst, consume_m_stmt], void, span);
+        let tir = tb.finish(&[decl_m, wl]);
+
+        let mut sink = DiagSink::new();
+        let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+        let sc = sc
+            .functions
+            .remove(&main)
+            .expect("per-function sidecar entry");
+
+        // Precondition: the loop actually diverged — the re-walk sees
+        // `consume(m)` with m already Moved and reports UAM once. If
+        // this ever fails, the fixed-point no longer takes the diverged
+        // path and the assertions below pass vacuously.
+        let uam = sink
+            .into_diags()
+            .iter()
+            .filter(|d| matches!(d.code, DiagCode::UseAfterMove))
+            .count();
+        assert_eq!(
+            uam, 1,
+            "expected exactly one UAM from the diverged re-walk; got {uam}"
+        );
+
+        // Exactly ONE branch-gated Free for the if's else arm,
+        // gated on the BranchId `if_branches` actually records.
+        assert_eq!(
+            sc.if_branches.len(),
+            1,
+            "one if → one entry set; got {:?}",
+            sc.if_branches
+        );
+        let ids = sc
+            .if_branches
+            .get(&if_inst)
+            .expect("if_branches entry for the loop-body if");
+        let gated: Vec<_> = sc
+            .free_schedule
+            .iter()
+            .filter(|fp| fp.branch.is_some())
+            .collect();
+        assert_eq!(
+            gated.len(),
+            1,
+            "diverged loop must schedule the else-arm Free exactly once; got {gated:?}"
+        );
+        assert_eq!(
+            gated[0].branch, ids.else_branch,
+            "the gated Free must reference the live else BranchId; if_branches = {ids:?}"
         );
     }
 

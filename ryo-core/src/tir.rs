@@ -46,6 +46,7 @@
 use crate::ast::CompoundOp;
 use crate::types::{InternPool, StringId, TypeId};
 use chumsky::span::{SimpleSpan, Span as _};
+use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU32;
 
@@ -348,6 +349,13 @@ pub struct TirParam {
 /// arenas; refs are scoped to the body. This is the shape that lets
 /// monomorphization (Phase 5) clone-and-substitute one body without
 /// renumbering everything else.
+///
+/// The body is tree-shaped: every instruction has at most one parent
+/// (one incoming operand or body-statement edge), so the body roots
+/// plus [`Tir::walk_operands`] edges form a forest, not a DAG.
+/// Analyses that record one parent per instruction — e.g. the
+/// ownership pass's first-parent-wins consumer map — rely on this;
+/// [`TirBuilder::finish`] debug-asserts it on every built body.
 #[derive(Debug, Clone)]
 pub struct Tir {
     pub name: StringId,
@@ -903,7 +911,7 @@ impl TirBuilder {
             self.extra.push(r.raw());
         }
         let len = Self::len_u32(stmts.len());
-        Tir {
+        let tir = Tir {
             name: self.name,
             params: self.params,
             return_type: self.return_type,
@@ -912,7 +920,10 @@ impl TirBuilder {
             spans: self.spans,
             body: ExtraRange { offset, len },
             span: self.span,
-        }
+        };
+        #[cfg(debug_assertions)]
+        tir.validate_tree_shape();
+        tir
     }
 }
 
@@ -1128,6 +1139,295 @@ fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<TirRef> {
         .collect();
     *pos += count;
     refs
+}
+
+// ---------- Structural reachability ----------
+
+/// Distinguishes the two kinds of (parent, child) edges announced
+/// by [`Tir::walk_operands`]:
+///
+/// * [`ChildKind::Operand`] — a direct data dependency (e.g. a
+///   binary-op LHS, a call arg, a `VarDecl`'s initializer, an
+///   `if`/`while`/`for` condition or range bound). Consumer of
+///   the parent.
+/// * [`ChildKind::BodyStmt`] — a statement nested inside an
+///   `if`/`while`/`for` body. Reachable from the parent for
+///   traversal, but not a consumer of the parent.
+#[derive(Clone, Copy)]
+pub enum ChildKind {
+    Operand,
+    BodyStmt,
+}
+
+impl Tir {
+    /// Visit every direct operand and body-statement edge of TIR
+    /// instruction `r`, invoking `f(parent, child, kind)` for each
+    /// `(parent, child)` edge in forward source order. **Shallow** —
+    /// does not recurse on its own; callers' closures drive recursion
+    /// (see [`Tir::collect_reachable`]). Avoids the O(2^N) re-walking
+    /// that an internally-recursive walker would produce when callers
+    /// also recurse via their closures.
+    ///
+    /// Single source of truth for TIR-shape coverage across the
+    /// compiler's post-sema analyses (the ownership pass's last-use
+    /// and consumer-of walks drive their recursion from here). Adding
+    /// a new TIR shape requires updating exactly this function.
+    pub fn walk_operands(&self, r: TirRef, f: &mut impl FnMut(TirRef, TirRef, ChildKind)) {
+        let inst = *self.inst(r);
+        match inst.data {
+            TirData::UnOp(o) => {
+                f(r, o, ChildKind::Operand);
+            }
+            TirData::BinOp { lhs, rhs } => {
+                f(r, lhs, ChildKind::Operand);
+                f(r, rhs, ChildKind::Operand);
+            }
+            TirData::Slice { base, start, end } => {
+                // M8.4: a slice reads its base and bounds; the base read
+                // is what keeps the owner live (final spec §3.2 P5).
+                f(r, base, ChildKind::Operand);
+                if let Some(s) = start {
+                    f(r, s, ChildKind::Operand);
+                }
+                if let Some(e) = end {
+                    f(r, e, ChildKind::Operand);
+                }
+            }
+            TirData::Extra(_) => match inst.tag {
+                TirTag::Call => {
+                    let view = self.call_view(r);
+                    for &arg in &view.args {
+                        f(r, arg, ChildKind::Operand);
+                    }
+                }
+                TirTag::VarDecl => {
+                    let v = self.var_decl_view(r);
+                    f(r, v.initializer, ChildKind::Operand);
+                }
+                TirTag::Assign => {
+                    let v = self.assign_view(r);
+                    f(r, v.value, ChildKind::Operand);
+                }
+                TirTag::CompoundAssign => {
+                    let v = self.compound_assign_view(r);
+                    f(r, v.value, ChildKind::Operand);
+                }
+                TirTag::IfStmt => {
+                    let v = self.if_stmt_view(r);
+                    f(r, v.cond, ChildKind::Operand);
+                    for &s in &v.then_stmts {
+                        f(r, s, ChildKind::BodyStmt);
+                    }
+                    for elif in &v.elif_branches {
+                        f(r, elif.cond, ChildKind::Operand);
+                        for &s in &elif.body {
+                            f(r, s, ChildKind::BodyStmt);
+                        }
+                    }
+                    if let Some(else_stmts) = &v.else_stmts {
+                        for &s in else_stmts {
+                            f(r, s, ChildKind::BodyStmt);
+                        }
+                    }
+                }
+                TirTag::WhileLoop => {
+                    let v = self.while_loop_view(r);
+                    f(r, v.cond, ChildKind::Operand);
+                    for &s in &v.body {
+                        f(r, s, ChildKind::BodyStmt);
+                    }
+                }
+                TirTag::ForRange => {
+                    let v = self.for_range_view(r);
+                    f(r, v.start, ChildKind::Operand);
+                    f(r, v.end, ChildKind::Operand);
+                    for &s in &v.body {
+                        f(r, s, ChildKind::BodyStmt);
+                    }
+                }
+                _ => {}
+            },
+            TirData::None
+            | TirData::Int(_)
+            | TirData::Float(_)
+            | TirData::Str(_)
+            | TirData::Bool(_)
+            | TirData::Var(_) => {}
+        }
+    }
+
+    /// Debug-only check of the tree-shape invariant documented on
+    /// [`Tir`]: walking every operand / body-statement edge from the
+    /// body roots, no instruction may be reached twice — each inst has
+    /// at most one parent. Called from [`TirBuilder::finish`]; costs
+    /// one O(N) walk per built body in debug builds only.
+    #[cfg(debug_assertions)]
+    fn validate_tree_shape(&self) {
+        fn walk(tir: &Tir, r: TirRef, seen: &mut HashSet<TirRef>) {
+            tir.walk_operands(r, &mut |_parent, child, _kind| {
+                debug_assert!(
+                    seen.insert(child),
+                    "TIR body is not tree-shaped: instruction raw={} has more than one parent",
+                    child.raw()
+                );
+                walk(tir, child, seen);
+            });
+        }
+        let mut seen: HashSet<TirRef> = HashSet::new();
+        for stmt in self.body_stmts() {
+            debug_assert!(
+                seen.insert(stmt),
+                "TIR body is not tree-shaped: statement raw={} is listed twice in the body roots",
+                stmt.raw()
+            );
+            walk(self, stmt, &mut seen);
+        }
+    }
+
+    /// Slice of body statements for a `WhileLoop`/`ForRange`
+    /// instruction, materialized into an owned `Vec<TirRef>` so the
+    /// caller can re-borrow `self` for recursive walks. Returns `None`
+    /// for non-loop refs.
+    pub fn loop_body(&self, loop_inst: TirRef) -> Option<Vec<TirRef>> {
+        match self.inst(loop_inst).tag {
+            TirTag::WhileLoop => Some(self.while_loop_view(loop_inst).body),
+            TirTag::ForRange => Some(self.for_range_view(loop_inst).body),
+            _ => None,
+        }
+    }
+
+    /// Collect every `TirRef` reachable from `loop_inst`'s body —
+    /// transitive operands AND nested body statements — into `set`.
+    /// Used to classify instructions as inside-loop vs pre-loop
+    /// without relying on raw-index comparisons (producer refs are
+    /// emitted before their parent body stmt, so a producer's index
+    /// can sit below the parent body-stmt's even though it's
+    /// semantically inside).
+    pub fn collect_loop_body_refs(&self, loop_inst: TirRef, set: &mut HashSet<TirRef>) {
+        let Some(body) = self.loop_body(loop_inst) else {
+            return;
+        };
+        for stmt in body {
+            self.collect_reachable(stmt, set);
+        }
+    }
+
+    /// Collect every `TirRef` reachable from `r` — transitive operands
+    /// and nested body statements — into `set`.
+    /// [`Tir::walk_operands`] is shallow; this helper drives the
+    /// recursion.
+    pub fn collect_reachable(&self, r: TirRef, set: &mut HashSet<TirRef>) {
+        if !set.insert(r) {
+            return;
+        }
+        self.walk_operands(r, &mut |_parent, child, _kind| {
+            self.collect_reachable(child, set);
+        });
+    }
+
+    /// Return `true` iff `target` is reachable from `root` — `target`
+    /// is `root` itself or a transitive operand / nested body
+    /// statement. Allocation-free short-circuiting DFS: returns at the
+    /// first hit instead of materializing the reachable set the way
+    /// [`Tir::collect_reachable`] does. Used for containment probes
+    /// (e.g. `collect_jump_path`'s arm selection) where the set itself
+    /// is never needed.
+    pub fn contains_reachable(&self, root: TirRef, target: TirRef) -> bool {
+        if root == target {
+            return true;
+        }
+        let mut found = false;
+        self.walk_operands(root, &mut |_parent, child, _kind| {
+            if !found && self.contains_reachable(child, target) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    /// Collect the set of TirRefs evaluated on the path that reaches
+    /// `target` within `body`. Returns `true` if `target` was located.
+    ///
+    /// Walk-down rule: a body-stmt that does NOT contain `target` runs
+    /// to completion before the target's stmt is reached, so all of
+    /// its operand-reachable refs are on-path. The body-stmt that DOES
+    /// contain `target` recurses: into the right `IfStmt` arm, or into
+    /// a nested loop's body. For an `IfStmt` we collect the cond
+    /// unconditionally (it always runs); we then locate the single arm
+    /// (then / a specific elif / else) that contains `target` and only
+    /// recurse into that arm — sibling arms are off-path. For elif
+    /// arms we also collect each preceding elif's cond (those conds
+    /// executed; their bodies were skipped).
+    ///
+    /// Used by the ownership pass's jump/return-exit Free scheduling
+    /// to decide whether an existing Free actually fires on the exit's
+    /// path. A Free anchored in a sibling arm has its `after` ref
+    /// outside this set, so it's correctly classified as not-covering.
+    pub fn collect_jump_path(
+        &self,
+        body: &[TirRef],
+        target: TirRef,
+        set: &mut HashSet<TirRef>,
+    ) -> bool {
+        for &stmt in body {
+            if stmt == target {
+                set.insert(target);
+                return true;
+            }
+            if self.contains_reachable(stmt, target) {
+                // `stmt` contains the target. Descend along the right arm.
+                match self.inst(stmt).tag {
+                    TirTag::IfStmt => {
+                        let view = self.if_stmt_view(stmt);
+                        set.insert(stmt);
+                        self.collect_reachable(view.cond, set);
+                        // Locate the arm containing `target`; only that
+                        // arm's statements are on-path. Earlier elif
+                        // conds executed (their bodies skipped) so
+                        // collect just the conds up to the chosen arm.
+                        if view
+                            .then_stmts
+                            .iter()
+                            .any(|&s| self.contains_reachable(s, target))
+                        {
+                            return self.collect_jump_path(&view.then_stmts, target, set);
+                        }
+                        for elif in &view.elif_branches {
+                            self.collect_reachable(elif.cond, set);
+                            if elif
+                                .body
+                                .iter()
+                                .any(|&s| self.contains_reachable(s, target))
+                            {
+                                return self.collect_jump_path(&elif.body, target, set);
+                            }
+                        }
+                        if let Some(else_stmts) = &view.else_stmts {
+                            return self.collect_jump_path(else_stmts, target, set);
+                        }
+                        return true;
+                    }
+                    TirTag::WhileLoop | TirTag::ForRange => {
+                        // Inner loop containing the target. The inner
+                        // loop runs its own exit-path pass for a jump
+                        // targeting it, so there is nothing on-path to
+                        // collect here.
+                        return true;
+                    }
+                    _ => {
+                        // Other shapes (ExprStmt, etc.). The stmt's
+                        // operands are evaluated as part of reaching
+                        // `target`.
+                        self.collect_reachable(stmt, set);
+                        return true;
+                    }
+                }
+            }
+            // `stmt` does not contain target — fully evaluated before target.
+            self.collect_reachable(stmt, set);
+        }
+        false
+    }
 }
 
 // ---------- Pretty-printer ----------
@@ -1577,8 +1877,11 @@ mod tests {
         let lo = b.int_const(0, pool.int(), sp());
         // `s[0:]` — end omitted, exercising the `None` bound.
         let slice = b.slice(base, Some(lo), None, view_ty, sp());
-        // `str → strview` conversion of the same base.
-        let view = b.view_of_str(base, view_ty, sp());
+        // `str → strview` conversion of the same variable — a fresh
+        // read: each use of a binding emits its own `Var` instruction,
+        // so the body stays tree-shaped.
+        let base2 = b.var(s, str_ty, sp());
+        let view = b.view_of_str(base2, view_ty, sp());
         let tir = b.finish(&[slice, view]);
 
         assert_eq!(tir.inst(slice).ty, view_ty);
@@ -1599,6 +1902,6 @@ mod tests {
 
         let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));
         assert!(out.contains("= slice %1, %2.._"), "got:\n{}", out);
-        assert!(out.contains("= view_of_str %1"), "got:\n{}", out);
+        assert!(out.contains("= view_of_str %4"), "got:\n{}", out);
     }
 }
