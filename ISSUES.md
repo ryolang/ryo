@@ -292,12 +292,6 @@ Option (b) composes naturally with I-064's per-loop precomputation.
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
 
-### I-081 — `break`/`continue` conflated with `return` in codegen terminator tracking
-
-**Files:** `ryo-backend/src/codegen.rs` (`emit_stmt` :758, :882, :896; `generate_if_stmt` :987-1003; `emit_body` :620-622)
-**Summary:** `emit_stmt` returns `true` for `Return`, `Break`, and `Continue` alike, so `all_branches_return` treats an arm ending in `break` as "returns" and `emit_body` drops all subsequent statements including their scheduled frees. Works today only because break/continue fire their own frees first; the boolean is doing double duty.
-**Resolution:** Return a small enum (`Terminator::{None, Return, Break, Continue}`) from `emit_stmt` and treat only `Return` in `all_branches_return`.
-
 ### I-082 — `never`-returning call path skips inout write-back
 
 **Files:** `ryo-backend/src/codegen.rs` (:1944-1952)

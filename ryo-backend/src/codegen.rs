@@ -42,6 +42,18 @@ const VIEW_SLOT_SIZE: u32 = 16;
 const OFF_PTR: i32 = 0;
 const OFF_LEN: i32 = 8;
 
+/// How a statement or body ended the current block, if it did (I-081).
+/// Replaces the `bool` that conflated Break/Continue with Return:
+/// callers distinguish "block ended" (`!= None`) from "the function
+/// definitely returns" (`== Return`) explicitly.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Terminator {
+    None,
+    Return,
+    Break,
+    Continue,
+}
+
 /// Returns `true` if `ty` resolves to `Str` in the pool.
 ///
 /// Callers use this to gate multi-value (fat-pointer) paths before
@@ -621,9 +633,9 @@ impl<M: Module> Codegen<M> {
                 }
             }
 
-            let has_return = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
+            let body_term = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
 
-            if !has_return {
+            if body_term == Terminator::None {
                 if is_main {
                     let zero = builder.ins().iconst(int_type, 0);
                     Self::emit_return(&mut builder, &mut ctx, &[zero])?;
@@ -678,19 +690,21 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         stmts: &[TirRef],
-    ) -> Result<bool, String> {
-        let mut block_terminated = false;
+    ) -> Result<Terminator, String> {
+        let mut terminator = Terminator::None;
         for &stmt_ref in stmts {
-            if block_terminated {
+            if terminator != Terminator::None {
                 break;
             }
-            block_terminated = Self::emit_stmt(builder, ctx, stmt_ref)?;
-            // Skip Free emission after terminators (e.g. Return): the
-            // current block is sealed and Cranelift rejects any
-            // instruction after a terminator. Returns also transfer
-            // ownership of the returned value to the caller, so
-            // emitting a Free here would be incorrect anyway.
-            if !block_terminated {
+            terminator = Self::emit_stmt(builder, ctx, stmt_ref)?;
+            // Skip Free emission after terminators (Return / Break /
+            // Continue): the current block is sealed and Cranelift
+            // rejects any instruction after a terminator. Returns also
+            // transfer ownership of the returned value to the caller, so
+            // emitting a Free here would be incorrect anyway. Break and
+            // Continue fire their own Frees before the jump (see
+            // emit_stmt), so skipping here drops nothing.
+            if terminator == Terminator::None {
                 // Anchor-on-stmt Frees first (e.g. dead-store survivors
                 // anchored after a VarDecl), then a sweep that catches
                 // sub-expression-anchored entries whose consumers have
@@ -699,22 +713,22 @@ impl<M: Module> Codegen<M> {
                 Self::sweep_due_frees(builder, ctx)?;
             }
         }
-        Ok(block_terminated)
+        Ok(terminator)
     }
 
     fn emit_scoped_body(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         stmts: &[TirRef],
-    ) -> Result<bool, String> {
+    ) -> Result<Terminator, String> {
         let saved_locals = ctx.locals.clone();
         let saved_str_locals = ctx.str_locals.clone();
         let saved_view_locals = ctx.view_locals.clone();
-        let block_terminated = Self::emit_body(builder, ctx, stmts)?;
+        let terminator = Self::emit_body(builder, ctx, stmts)?;
         ctx.locals = saved_locals;
         ctx.str_locals = saved_str_locals;
         ctx.view_locals = saved_view_locals;
-        Ok(block_terminated)
+        Ok(terminator)
     }
 
     /// Store every inout parameter's current `Variable` back through its
@@ -767,14 +781,15 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// Emit a top-level statement instruction. Returns `true` iff
-    /// the statement was a terminator (Return / ReturnVoid) — the
-    /// caller stops the body walk on the first one.
+    /// Emit a top-level statement instruction. Returns the statement's
+    /// [`Terminator`] — anything other than `Terminator::None` ends the
+    /// current block, and the caller stops the body walk on the first
+    /// one (I-081).
     fn emit_stmt(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-    ) -> Result<bool, String> {
+    ) -> Result<Terminator, String> {
         let inst = ctx.tir.inst(r);
         match inst.tag {
             TirTag::VarDecl => {
@@ -800,7 +815,7 @@ impl<M: Module> Codegen<M> {
                         }
                         _ => unreachable!("str-typed initializer should produce ValueRepr::Str"),
                     }
-                    return Ok(false);
+                    return Ok(Terminator::None);
                 }
                 if ctx.pool.is_view(inst.ty) {
                     let repr = Self::eval_inst_view(builder, ctx, view.initializer)?;
@@ -820,7 +835,7 @@ impl<M: Module> Codegen<M> {
                         }
                         _ => unreachable!("view-typed initializer should produce ValueRepr::View"),
                     }
-                    return Ok(false);
+                    return Ok(Terminator::None);
                 }
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
                 // The variable's resolved type lives in the VarDecl
@@ -829,7 +844,7 @@ impl<M: Module> Codegen<M> {
                 let var = builder.declare_var(cl_ty);
                 builder.def_var(var, val);
                 ctx.locals.insert(view.name, var);
-                Ok(false)
+                Ok(Terminator::None)
             }
             TirTag::Return => {
                 let operand = match inst.data {
@@ -853,7 +868,7 @@ impl<M: Module> Codegen<M> {
                     Self::emit_due_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[val])?;
                 }
-                Ok(true)
+                Ok(Terminator::Return)
             }
             TirTag::ReturnVoid => {
                 // Bare `return` in a void function. If this is
@@ -867,7 +882,7 @@ impl<M: Module> Codegen<M> {
                     Self::emit_due_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[])?;
                 }
-                Ok(true)
+                Ok(Terminator::Return)
             }
             TirTag::ExprStmt => {
                 let operand = match inst.data {
@@ -875,7 +890,7 @@ impl<M: Module> Codegen<M> {
                     _ => unreachable!("ExprStmt must carry TirData::UnOp"),
                 };
                 let _ = Self::eval_inst(builder, ctx, operand)?;
-                Ok(false)
+                Ok(Terminator::None)
             }
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
             TirTag::Assign => {
@@ -916,7 +931,7 @@ impl<M: Module> Codegen<M> {
                     builder.def_var(locals.ptr, ptr);
                     builder.def_var(locals.len, len);
                     builder.def_var(locals.cap, cap);
-                    return Ok(false);
+                    return Ok(Terminator::None);
                 }
                 if ctx.pool.is_view(inst.ty) {
                     let repr = Self::eval_inst_view(builder, ctx, view.value)?;
@@ -933,7 +948,7 @@ impl<M: Module> Codegen<M> {
                     // reseat the pair.
                     builder.def_var(locals.ptr, ptr);
                     builder.def_var(locals.len, len);
-                    return Ok(false);
+                    return Ok(Terminator::None);
                 }
                 let val = Self::eval_inst(builder, ctx, view.value)?;
                 let var = ctx.locals.get(&view.name).ok_or_else(|| {
@@ -943,7 +958,7 @@ impl<M: Module> Codegen<M> {
                     )
                 })?;
                 builder.def_var(*var, val);
-                Ok(false)
+                Ok(Terminator::None)
             }
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
@@ -971,7 +986,7 @@ impl<M: Module> Codegen<M> {
                 };
 
                 builder.def_var(*var, result);
-                Ok(false)
+                Ok(Terminator::None)
             }
             TirTag::WhileLoop => Self::generate_while_loop(builder, ctx, r),
             TirTag::ForRange => Self::generate_for_range(builder, ctx, r),
@@ -992,7 +1007,7 @@ impl<M: Module> Codegen<M> {
                     return Err("codegen reached break outside loop".to_string());
                 };
                 builder.ins().jump(loop_ctx.exit_block, &[]);
-                Ok(true)
+                Ok(Terminator::Break)
             }
             TirTag::Continue => {
                 debug_assert!(
@@ -1006,7 +1021,7 @@ impl<M: Module> Codegen<M> {
                     return Err("codegen reached continue outside loop".to_string());
                 };
                 builder.ins().jump(loop_ctx.continue_target, &[]);
-                Ok(true)
+                Ok(Terminator::Continue)
             }
             other => Err(format!(
                 "emit_stmt: instruction at %{} is not a statement (tag={:?})",
@@ -1020,7 +1035,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-    ) -> Result<bool, String> {
+    ) -> Result<Terminator, String> {
         let view = ctx.tir.if_stmt_view(r);
         let merge_block = builder.create_block();
 
@@ -1071,14 +1086,19 @@ impl<M: Module> Codegen<M> {
         // both Ok and Err paths by binding the result first.
         ctx.branch_stack.push(branch_ids.then_branch);
         Self::emit_conditional_dead_drops(builder, ctx, r, branch_ids.then_branch)?;
-        let then_returns_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
+        let then_term_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
         ctx.branch_stack.pop();
-        let then_returns = then_returns_result?;
-        if !then_returns {
+        let then_term = then_term_result?;
+        if then_term == Terminator::None {
             builder.ins().jump(merge_block, &[]);
         }
 
-        let mut all_branches_return = then_returns;
+        // I-081: two separate questions the old bool conflated —
+        // `all_terminated` (every arm ends the block, so the merge
+        // block is unreachable) and `all_return` (every arm actually
+        // returns, which is what the if reports to its caller).
+        let mut all_terminated = then_term != Terminator::None;
+        let mut all_return = then_term == Terminator::Return;
         for (i, elif) in view.elif_branches.iter().enumerate() {
             let elif_cond_block = next_blocks[i];
             builder.seal_block(elif_cond_block);
@@ -1102,13 +1122,14 @@ impl<M: Module> Codegen<M> {
             let elif_branch_id = branch_ids.elif_branches.get(i).copied().unwrap_or_default();
             ctx.branch_stack.push(elif_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, elif_branch_id)?;
-            let elif_returns_result = Self::emit_scoped_body(builder, ctx, &elif.body);
+            let elif_term_result = Self::emit_scoped_body(builder, ctx, &elif.body);
             ctx.branch_stack.pop();
-            let elif_returns = elif_returns_result?;
-            if !elif_returns {
+            let elif_term = elif_term_result?;
+            if elif_term == Terminator::None {
                 builder.ins().jump(merge_block, &[]);
             }
-            all_branches_return = all_branches_return && elif_returns;
+            all_terminated = all_terminated && elif_term != Terminator::None;
+            all_return = all_return && elif_term == Terminator::Return;
         }
 
         if let Some(else_stmts) = &view.else_stmts {
@@ -1117,13 +1138,14 @@ impl<M: Module> Codegen<M> {
             let else_branch_id = branch_ids.else_branch.unwrap_or_default();
             ctx.branch_stack.push(else_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, else_branch_id)?;
-            let else_returns_result = Self::emit_scoped_body(builder, ctx, else_stmts);
+            let else_term_result = Self::emit_scoped_body(builder, ctx, else_stmts);
             ctx.branch_stack.pop();
-            let else_returns = else_returns_result?;
-            if !else_returns {
+            let else_term = else_term_result?;
+            if else_term == Terminator::None {
                 builder.ins().jump(merge_block, &[]);
             }
-            all_branches_return = all_branches_return && else_returns;
+            all_terminated = all_terminated && else_term != Terminator::None;
+            all_return = all_return && else_term == Terminator::Return;
         } else if needs_fallthrough_block {
             // The synthetic fall-through — emit the arm-gated
             // DeadDrops for the paths where no arm reseated the binding.
@@ -1134,24 +1156,38 @@ impl<M: Module> Codegen<M> {
             Self::emit_conditional_dead_drops(builder, ctx, r, fallthrough_id)?;
             ctx.branch_stack.pop();
             builder.ins().jump(merge_block, &[]);
-            all_branches_return = false;
+            all_terminated = false;
+            all_return = false;
         } else {
-            all_branches_return = false;
+            all_terminated = false;
+            all_return = false;
         }
 
         builder.seal_block(merge_block);
-        if !all_branches_return {
+        if !all_terminated {
             builder.switch_to_block(merge_block);
         }
 
-        Ok(all_branches_return)
+        // The if terminates the block only when every arm does; it
+        // counts as a Return for the caller only when every arm
+        // actually returns. For mixed all-terminating shapes (e.g.
+        // break in one arm, return in another) the Break variant is a
+        // stand-in: callers only distinguish None / Return /
+        // "terminated some other way".
+        Ok(if all_return {
+            Terminator::Return
+        } else if all_terminated {
+            Terminator::Break
+        } else {
+            Terminator::None
+        })
     }
 
     fn generate_while_loop(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-    ) -> Result<bool, String> {
+    ) -> Result<Terminator, String> {
         let view = ctx.tir.while_loop_view(r);
 
         let header_block = builder.create_block();
@@ -1173,10 +1209,10 @@ impl<M: Module> Codegen<M> {
             exit_block,
             continue_target: header_block,
         });
-        let body_terminated = Self::emit_scoped_body(builder, ctx, &view.body)?;
+        let body_term = Self::emit_scoped_body(builder, ctx, &view.body)?;
         ctx.loop_stack.pop();
 
-        if !body_terminated {
+        if body_term == Terminator::None {
             builder.ins().jump(header_block, &[]);
         }
 
@@ -1186,14 +1222,14 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(exit_block);
         builder.switch_to_block(exit_block);
 
-        Ok(false)
+        Ok(Terminator::None)
     }
 
     fn generate_for_range(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-    ) -> Result<bool, String> {
+    ) -> Result<Terminator, String> {
         let view = ctx.tir.for_range_view(r);
 
         // 1. Create all blocks up front
@@ -1232,7 +1268,7 @@ impl<M: Module> Codegen<M> {
         // insertion.
         let shadowed_var = ctx.locals.insert(view.var_name, counter);
 
-        let body_terminated = Self::emit_body(builder, ctx, &view.body)?;
+        let body_term = Self::emit_body(builder, ctx, &view.body)?;
 
         // Restore locals (loop variable goes out of scope)
         if let Some(old_var) = shadowed_var {
@@ -1241,7 +1277,7 @@ impl<M: Module> Codegen<M> {
             ctx.locals.remove(&view.var_name);
         }
 
-        if !body_terminated {
+        if body_term == Terminator::None {
             builder.ins().jump(increment_block, &[]);
         }
 
@@ -1263,7 +1299,7 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(exit_block);
         builder.switch_to_block(exit_block);
 
-        Ok(false)
+        Ok(Terminator::None)
     }
 
     /// Materialize an instruction's value, recursively materializing
