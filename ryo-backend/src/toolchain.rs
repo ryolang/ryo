@@ -163,7 +163,10 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), CompilerError> {
             // never trip the zip-slip guard, so a skip means an unexpected
             // layout that would otherwise fail later with a confusing
             // "Zig binary not found after download".
-            eprintln!("warning: skipping non-enclosed zip entry '{}'", entry.name());
+            eprintln!(
+                "warning: skipping non-enclosed zip entry '{}'",
+                entry.name()
+            );
             continue;
         };
         let outpath = dest.join(enclosed);
