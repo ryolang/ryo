@@ -2644,7 +2644,7 @@ fn test_fetch():
 - `task.scope` - Primary concurrency pattern (not `task.spawn`)
 - Prevents resource leaks and zombie tasks
 - All tasks in scope must complete before scope exits
-- **Fire-and-forget is opt-in:** `task.spawn_detached()` for rare cases
+- **Fire-and-forget is opt-in:** `task.spawn_detached()` for rare cases — returns a `handle[T]` (identity-only: sendable, comparable, no dereference, drop ≠ cancel; spec §9.2.1, Pony's `tag`)
 - **Scoped task borrows (final spec §7, D5):** children inside `task.scope` may capture by immutable borrow (compiler-verified against the scope join; projections capturable too) — enables fork-join data parallelism; stdlib `par_*` APIs build on it. `task.run`/`spawn_detached` keep implicit move capture.
 
 ```ryo
@@ -2692,6 +2692,8 @@ select:
 **4. Parallelism Spec Updates (Breaking Changes from Single-Threaded)**
 
 Adding M:N threading has **specification impacts** that require changes to earlier milestones:
+
+**2026-08 amendments folded in:** sharing-freezes rule — access through `shared[T]` is read-only, mutation only via `shared[mutex[T]]`/`shared[rwlock[T]]` (spec §5.6); `handle[T]` for detached-task identity (§9.2.1); send constraint restated as an explicit 3-member predicate — owned move, `shared[T]` handle, `handle[T]` (§14.5.6 #6).
 
 **A. `Shared[T]` Must Be Atomic Reference Counted (ARC)**
 
@@ -2781,7 +2783,7 @@ fn main():
 
 **Implementation Phases:**
 
-1. **Milestone 32:** Green threads runtime, ambient context, basic task spawning
+1. **Milestone 32:** Green threads runtime, ambient context, basic task spawning, `handle[T]` for `task.spawn_detached` (spec §9.2.1)
 2. **Milestone 33:** Cancellation model (`Canceled`/`Timeout` errors, cooperative cancellation, RAII cleanup on cancel)
 3. **Milestone 34:** Parallelism, sync primitives (Mutex/RwLock), spec updates, work-stealing
 4. **Milestone 35:** Data parallelism (par_iter, fork-join)

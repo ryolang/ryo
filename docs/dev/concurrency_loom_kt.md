@@ -70,7 +70,7 @@ Anyone reading the current `concurrency.md` and knowing about this proposal shou
 - `#[blocking]` routes to a dedicated 10K-thread pool. ~10 µs dispatch overhead. Overkill for compute FFI that doesn't actually block.
 
 **This proposal:**
-- Each OS worker thread maintains a **system coroutine** at startup — a long-lived `corosensei::Coroutine` with a 2 MB stack, sized for any reasonable C library.
+- Each OS worker thread maintains a **system coroutine** at startup — a long-lived `corosensei.Coroutine` with a 2 MB stack, sized for any reasonable C library.
 - Plain FFI calls are routed through the system coroutine:
   1. Task coroutine yields to scheduler with `FfiCallRequest`.
   2. Scheduler resumes the system coroutine on the same OS worker, passing the FFI closure.
@@ -96,25 +96,25 @@ This is **Go's cgo model** implemented via corosensei. Mature engineering, no ne
 **This proposal (Kotlin-borrowed):**
 - First-class `Pool` type (Kotlin's `CoroutineDispatcher`).
 - Built-in pools:
-  - `pool::default` — the carrier pool (`RYOMAXPROCS` workers).
-  - `pool::blocking` — overflow pool for blocking work (`#[blocking]` routes here).
-  - `pool::compute` — CPU-bound pool, sized to CPU cores; optional.
-- User-defined pools: `pool::custom(workers = 8, name = "db-pool")` — useful for app-level resource isolation (e.g., a fixed-size pool to bound DB concurrency).
+  - `pool.default` — the carrier pool (`RYOMAXPROCS` workers).
+  - `pool.blocking` — overflow pool for blocking work (`#[blocking]` routes here).
+  - `pool.compute` — CPU-bound pool, sized to CPU cores; optional.
+- User-defined pools: `pool.custom(workers = 8, name = "db-pool")` — useful for app-level resource isolation (e.g., a fixed-size pool to bound DB concurrency).
 - Explicit pool switch via `with_pool`:
 
   ```ryo
   fn handle_request(req: Request, db_pool: Pool) -> Response:
   	bytes = with_pool(db_pool):
-  		sqlite::query(req.sql)            # runs on db_pool
+  		sqlite.query(req.sql)            # runs on db_pool
   	return Response(parse(bytes))         # back on default pool
   ```
 
 - `with_pool` is **not a coloring marker.** Calling functions don't need to know which pool the callee uses. The pool is a runtime concept, not a type-system one.
 
 **Impact on the plan:**
-- §3.4 gains a generalization. `#[blocking]` is now sugar for "auto-route this FFI to `pool::blocking`"; `with_pool` lets users pick a different pool explicitly.
+- §3.4 gains a generalization. `#[blocking]` is now sugar for "auto-route this FFI to `pool.blocking`"; `with_pool` lets users pick a different pool explicitly.
 - Phase 4 gains a §4.X (`Pool` and `with_pool`) — small additional API surface.
-- Phase 6 may add a linter: "long-running CPU work on `pool::blocking` is wasteful; consider `pool::compute`."
+- Phase 6 may add a linter: "long-running CPU work on `pool.blocking` is wasteful; consider `pool.compute`."
 
 ### Change 3 — `task.supervise` scope variant (Kotlin's `supervisorScope`)
 
@@ -150,7 +150,7 @@ This is **Go's cgo model** implemented via corosensei. Mature engineering, no ne
 
 ### New 1 — Per-OS-thread system coroutine + FFI router
 
-A long-lived `corosensei::Coroutine` per OS worker thread, owned by the scheduler. Setup at worker start; reused across many FFI calls. Each system coroutine has:
+A long-lived `corosensei.Coroutine` per OS worker thread, owned by the scheduler. Setup at worker start; reused across many FFI calls. Each system coroutine has:
 
 - A 2 MB stack (configurable via env var `RYO_FFI_STACK_SIZE`).
 - A read-loop that accepts FFI closures from the scheduler and runs them.
@@ -159,7 +159,7 @@ The FFI router code lives in the scheduler. A plain `extern "C"` call site lower
 
 ```rust
 // pseudocode in codegen
-let result = scheduler::call_ffi(|| unsafe {
+let result = scheduler.call_ffi(|| unsafe {
     extern_function(args)
 });
 ```
@@ -204,7 +204,7 @@ Borrows from Kotlin's `withContext` but uses Ryo's `with`-block style (consisten
 | Component | concurrency.md (current) | This proposal |
 |---|---|---|
 | Task stack | Per-task growable (32 KB → 128 KB), `corosensei` | **Same** — kept as-is |
-| Stack-switching primitive | `corosensei::Coroutine` | **Same** |
+| Stack-switching primitive | `corosensei.Coroutine` | **Same** |
 | Worker / carrier OS threads | `RYOMAXPROCS` (= `NumCPU`) | Same |
 | Per-OS-thread system coroutine | None | **New** — 2 MB stack, long-lived, hosts FFI |
 | Work-stealing queues | `crossbeam-deque` | Same |
@@ -234,12 +234,12 @@ Compared to the earlier "Loom-proper with hand-rolled continuation capture" fram
 
 | Scenario | Current plan | Proposal |
 |---|---|---|
-| `libjpeg::decode(bytes)` (compute, no I/O) | Risky if libjpeg uses >128 KB stack | Safe — runs on 2 MB system coroutine. ~200 ns overhead. |
-| `simdjson::parse(bytes)` (compute, no I/O) | OK on 128 KB | Same — also safe via system coroutine. |
-| `sqlite3::query(db, sql)` (blocking I/O) | `#[blocking]`; ~10 µs dispatch | `#[blocking]`; ~10 µs dispatch. Same. |
-| `openssl::aes_encrypt(key, data)` (compute) | OK on 128 KB | Safe on 2 MB. ~200 ns overhead. |
-| `libpng::write(file, data)` (compute + libc write) | `#[blocking]` recommended; libc write may block | `#[blocking]` required. Same. |
-| `libfoo::compute()` recursing 4 MB deep | Stack overflow at 128 KB → task fails | Stack overflow at 2 MB → task fails. Configurable via env var. |
+| `libjpeg.decode(bytes)` (compute, no I/O) | Risky if libjpeg uses >128 KB stack | Safe — runs on 2 MB system coroutine. ~200 ns overhead. |
+| `simdjson.parse(bytes)` (compute, no I/O) | OK on 128 KB | Same — also safe via system coroutine. |
+| `sqlite3.query(db, sql)` (blocking I/O) | `#[blocking]`; ~10 µs dispatch | `#[blocking]`; ~10 µs dispatch. Same. |
+| `openssl.aes_encrypt(key, data)` (compute) | OK on 128 KB | Safe on 2 MB. ~200 ns overhead. |
+| `libpng.write(file, data)` (compute + libc write) | `#[blocking]` recommended; libc write may block | `#[blocking]` required. Same. |
+| `libfoo.compute()` recursing 4 MB deep | Stack overflow at 128 KB → task fails | Stack overflow at 2 MB → task fails. Configurable via env var. |
 | Callback from C into Ryo | Callback runs on green-thread stack (risky) | Callback runs on system-coroutine stack — safe to do work, can `task.spawn` cleanly |
 
 ### Memory profile at scale
@@ -269,13 +269,13 @@ Same workload — HTTP server with config, SQLite (blocking C), libjpeg (compute
 ```ryo
 fn handle_request(req: Request, db: shared[SqliteDb]) -> Response:
 	user = db.query(req.sql)              # #[blocking] inside SqliteDb.query
-	avatar = libjpeg::decode(user.bytes)  # runs on 32-128 KB green-thread stack
+	avatar = libjpeg.decode(user.bytes)  # runs on 32-128 KB green-thread stack
 	                                      # may overflow if libjpeg recurses
 	return Response(user.name, avatar)
 
 fn main():
-	db = shared[SqliteDb](SqliteDb::open(cfg.db_path))
-	http::serve(cfg.port, fn(req): handle_request(req, db))
+	db = shared(SqliteDb.open(cfg.db_path))
+	http.serve(cfg.port, fn(req): handle_request(req, db))
 ```
 
 ### Proposal
@@ -283,27 +283,27 @@ fn main():
 ```ryo
 fn handle_request(req: Request, db: shared[SqliteDb]) -> Response:
 	user = db.query(req.sql)              # #[blocking] — same ~10 µs dispatch
-	avatar = libjpeg::decode(user.bytes)  # runs on 2 MB system coroutine — safe
+	avatar = libjpeg.decode(user.bytes)  # runs on 2 MB system coroutine — safe
 	                                      # ~200 ns overhead vs current
 	return Response(user.name, avatar)
 
 fn main():
-	db = shared[SqliteDb](SqliteDb::open(cfg.db_path))
-	http::serve(cfg.port, fn(req): handle_request(req, db))
+	db = shared(SqliteDb.open(cfg.db_path))
+	http.serve(cfg.port, fn(req): handle_request(req, db))
 ```
 
 User-visible code is **identical**. The difference is entirely under the runtime:
 
-- `libjpeg::decode` is safe regardless of internal stack usage.
+- `libjpeg.decode` is safe regardless of internal stack usage.
 - `db.query` cost is unchanged.
 
 Adding an explicit DB pool (for connection limiting at the app level):
 
 ```ryo
 fn main():
-	db_pool = pool::custom(workers = 16, name = "db")
-	db = shared[SqliteDb](SqliteDb::open(cfg.db_path))
-	http::serve(cfg.port, fn(req):
+	db_pool = pool.custom(workers = 16, name = "db")
+	db = shared(SqliteDb.open(cfg.db_path))
+	http.serve(cfg.port, fn(req):
 		with_pool(db_pool):
 			handle_request(req, db)         # SQLite queries bounded to 16 concurrent
 	)
@@ -333,6 +333,61 @@ This is a meaningful detail. The proposal is **not a rewrite of the concurrency 
 
 ---
 
+## Data plane: Pony cross-reference (added 2026-08)
+
+This proposal is runtime mechanics — it schedules closures and says nothing
+about what data may flow across them. That data plane is now settled at the
+spec level (2026-08 amendments, informed by the Pony comparison in
+[`experimental/ryo-vs-pony.md`](../experimental/ryo-vs-pony.md)):
+
+- **Sharing freezes (spec §5.6).** Access through `shared[T]` is read-only;
+  shared mutation requires `shared[mutex[T]]` / `shared[rwlock[T]]`. The
+  `shared[SqliteDb]` examples in this doc assume `SqliteDb` is internally
+  synchronized; a plain mutable `SqliteDb` would need the `mutex` wrapper.
+- **`handle[T]` (spec §9.2.1).** `task.spawn_detached` returns an
+  identity-only, sendable, comparable handle with no dereference — Pony's
+  `tag`. This is what `task.supervise` needs to become supervision rather than
+  just failure isolation: the supervisor can hold, registry-store, and compare
+  child handles, and signal them through channels. Addition to this proposal:
+  `task.supervise` children yield `handle[T]` to the supervisor scope.
+- **Send predicate (spec §14.5.6 #6).** A value crosses a task boundary in
+  exactly three ways: owned move (Pony's `iso`), `shared[T]` handle (`val`),
+  `handle[T]` (`tag`). Views cross only inside a `task.scope` (D5). Every
+  primitive added by this proposal must be checkable against that predicate.
+
+New sendability edges this proposal introduces — to be folded into the pending
+Ownership-Lite formalization (Q10 / Polonius fragment):
+
+1. **Conflated-channel overwrite.** `channel.conflated` destroys an unreceived
+   owned value on the *sender's* context while a receiver may concurrently
+   observe the slot. Happens-before edges must be specified per channel mode:
+   rendezvous is a synchronization point and gets a clean HB edge for free;
+   conflated needs an explicit overwrite-vs-receive rule (the Go-aligned HB
+   model has no conflated precedent).
+2. **FFI-originated tasks.** A C callback running on the system coroutine can
+   `task.spawn` (see the FFI scenarios table). The send predicate must state
+   what a callback-spawned closure may capture — FFI pointers are
+   `handle[T]`-shaped, but Ryo values captured across the C boundary need a
+   rule.
+3. **Pool migration.** `with_pool` changes a task's home pool mid-execution;
+   captures travel with the task (fine), but pool-local and task-local state
+   must not leak across the switch.
+
+Two Pony imports adopted as runtime design principles:
+
+- **Per-carrier reclamation locality (ORCA instinct, no GC needed).** Memory
+  allocated by a task is reclaimed in its home context; mimalloc's thread-local
+  heaps (spec §14.5.6) provide this by default. Stating it matters because
+  conflated-channel drops and pool migrations would otherwise silently shift
+  reclamation across threads.
+- **Capability-gated pool creation (AmbientAuth instinct).** `pool.custom`
+  from arbitrary code can starve the runtime. Recommendation: pool creation is
+  restricted to startup/main scope — by convention now, and by the planned
+  runtime-context capability injection later — matching Pony's
+  authority-enters-at-one-point principle.
+
+---
+
 ## Open questions before committing
 
 1. **System-coroutine stack size: 2 MB default, configurable?**
@@ -346,13 +401,13 @@ This is a meaningful detail. The proposal is **not a rewrite of the concurrency 
    - **Recommendation:** one per worker. The memory cost (~16 MB for 8 workers) is negligible compared to per-task stack memory.
 
 3. **`#[blocking]` annotation: keep or remove?**
-   - Keep: explicit hint that this FFI is blocking-by-design; routes to `pool::blocking` automatically.
+   - Keep: explicit hint that this FFI is blocking-by-design; routes to `pool.blocking` automatically.
    - Remove: rely on runtime detection.
    - **Recommendation:** keep for v0.4 — better signal-to-noise from explicit annotation.
 
 4. **`with_pool` syntax: block form vs function form?**
    - Block: `with_pool(p):\n\t...` — matches Ryo's `with` semantics for resource lifetime.
-   - Function: `pool::run(p, fn(): ...)`.
+   - Function: `pool.run(p, fn(): ...)`.
    - **Recommendation:** block form.
 
 5. **Channel mode default.**
