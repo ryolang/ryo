@@ -2492,6 +2492,10 @@ impl<M: Module> Codegen<M> {
         // a terminator. Emit a trap + dead block for subsequent IR.
         if ctx.pool.is_never(ret_ty) {
             builder.ins().call(callee_ref, &arg_values);
+            // Reload inout slots before the trap: Cranelift models the
+            // callee as an ordinary (returning) call, so the mutations
+            // must be visible on the path where control resumes.
+            Self::reload_inout_args(builder, ctx, &inout_reloads)?;
             builder.ins().trap(TrapCode::user(1).unwrap());
             let dead = builder.create_block();
             builder.seal_block(dead);

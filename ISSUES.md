@@ -10,18 +10,17 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-082** — `never`-returning call path skips inout write-back.
-3. **I-075** — duplicate function definitions silently accepted.
-3. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
-4. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
-5. **I-106** — decode paths panic instead of reporting an internal error.
-6. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
-7. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
-8. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
-9. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
-10. **I-017** — `i64::MIN` integer literal is unrepresentable.
-11. **I-088** — ownership sidecar keyed by function name.
-12. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+1. **I-075** — duplicate function definitions silently accepted.
+2. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
+3. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
+4. **I-106** — decode paths panic instead of reporting an internal error.
+5. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
+6. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
+7. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
+8. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
+9. **I-017** — `i64::MIN` integer literal is unrepresentable.
+10. **I-088** — ownership sidecar keyed by function name.
+11. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -270,12 +269,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-core/src/uir.rs` (`var_decl_extra` etc.), `ryo-core/src/tir.rs` (`call_extra` :337-342, `var_decl_extra` :355-362, `assign_extra`/… :370-418)
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
-
-### I-082 — `never`-returning call path skips inout write-back
-
-**Files:** `ryo-backend/src/codegen.rs` (:1944-1952)
-**Summary:** A callee typed `never` (today only `__ryo_panic`) is emitted as call + trap + dead block and skips `reload_inout_args` — any inout argument's mutated value is dropped. Latent: `__ryo_panic` takes no inout params today, but the path exists for any future `never`-typed function.
-**Resolution:** Call `reload_inout_args` before the trap, or assert at sema that `never`-typed callees cannot take inout params.
 
 ### I-084 — `ryo build` writes artifacts to the CWD; same-stem sources collide
 
