@@ -10,19 +10,18 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-020** — `inst_values` memoizer is cross-block: stale values across control flow.
-2. **I-082** — `never`-returning call path skips inout write-back.
+1. **I-082** — `never`-returning call path skips inout write-back.
 3. **I-075** — duplicate function definitions silently accepted.
-4. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
-5. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
-6. **I-106** — decode paths panic instead of reporting an internal error.
-7. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
-8. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
-9. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
-10. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
-11. **I-017** — `i64::MIN` integer literal is unrepresentable.
-12. **I-088** — ownership sidecar keyed by function name.
-13. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+3. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
+4. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
+5. **I-106** — decode paths panic instead of reporting an internal error.
+6. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
+7. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
+8. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
+9. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
+10. **I-017** — `i64::MIN` integer literal is unrepresentable.
+11. **I-088** — ownership sidecar keyed by function name.
+12. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -71,12 +70,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken::Int` arm)
 **Summary:** Integer literals are parsed as `i64` at lex time, then sign is applied later via the unary `-` operator. That makes `-9_223_372_036_854_775_808` (i.e. `i64::MIN`) unspellable: the positive form `9_223_372_036_854_775_808` overflows `i64`. Hits the negation-overflow corner Rust itself fixed via `IntLit` / `IntLitMin` token-level distinction.
 **Resolution:** Either parse as `u64` and resolve negation+overflow at sema time, or add an `IntLitMin` token variant that the parser recognises only as the operand of unary `-`. Coordinate with the broader numeric-tower design before picking either.
-
-### I-020 — `inst_values` memoizer is cross-block
-
-**Files:** `ryo-backend/src/codegen.rs` (`inst_values: HashMap<TirRef, Value>`)
-**Summary:** Codegen lazily memoizes Cranelift `Value`s keyed by `TirRef` in a single flat HashMap shared across all basic blocks within a function. This is sound today because: (a) TIR instructions are unique per use (no shared sub-expressions), (b) BoolAnd/BoolOr use block params (phi nodes) so the memoized result is the merge-block param which dominates downstream uses, and (c) IfStmt is statement-level so no values flow out of branches. However, if future features introduce expression-level if (ternary) or shared sub-expressions across blocks, the memoizer will produce Cranelift dominator errors.
-**Resolution:** Scope the memoizer to per-block when expression-level control flow lands. For now the cross-block cache is correct given the TIR invariants.
 
 ### I-032 — IfStmt is statement-only, no expression-level conditional
 

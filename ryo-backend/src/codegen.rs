@@ -176,6 +176,23 @@ struct FunctionContext<'a, M: Module> {
     /// `TirRef → ValueRepr` memo. Materializing the same instruction
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
+    ///
+    /// INVARIANT: this map is deliberately cross-block (one flat map
+    /// per function, not scoped per basic block). That is sound only
+    /// because the current TIR producers guarantee:
+    ///   (a) TIR instructions are unique per use — no shared
+    ///       sub-expressions, so a `TirRef` is materialized in exactly
+    ///       one block and read only where that block dominates;
+    ///   (b) `BoolAnd`/`BoolOr` merge values via block params (phi
+    ///       nodes), so the memoized `Value` is the merge-block param,
+    ///       which dominates every downstream use;
+    ///   (c) `IfStmt` is statement-level — no values flow out of
+    ///       branches, so no branch-local value is ever read after the
+    ///       merge.
+    /// If a future TIR producer introduces expression-level control
+    /// flow (ternary if) or shared sub-expressions across blocks, this
+    /// memo MUST be re-scoped per-block or reads will hit Cranelift
+    /// dominator errors.
     inst_values: HashMap<TirRef, ValueRepr>,
     /// Indices into `sidecar.free_schedule` whose Frees have already
     /// been emitted in codegen. A given anchor TirRef can be reached
