@@ -30,7 +30,12 @@ pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, 
         let (tok, span) = &tokens[i];
 
         if let RawToken::Newline(s) = tok {
-            let whitespace = &s[1..]; // skip the '\n' character
+            // Skip the newline itself: `\n`, or `\r\n` for CRLF
+            // sources (the lexer's Newline regex matches `\r?\n`).
+            let whitespace = match s.strip_prefix('\r') {
+                Some(rest) => &rest[1..],
+                None => &s[1..],
+            };
 
             // Validate indentation for non-empty lines.
             if i + 1 < tokens.len() && !matches!(&tokens[i + 1].0, RawToken::Newline(_)) {
@@ -217,5 +222,21 @@ mod tests {
         let raw = lex_raw(input);
         let processed = process(raw).unwrap();
         assert!(has_token(&processed, |t| matches!(t, RawToken::Newline(_))));
+    }
+
+    #[test]
+    fn crlf_indentation() {
+        // CRLF sources: the `\r` must not disturb indent measurement.
+        let input = "fn foo():\r\n\tx = 1\r\n\t\ty = 2\r\n\tz = 3\r\n";
+        let raw = lex_raw(input);
+        let processed = process(raw).unwrap();
+        assert_eq!(
+            count_token(&processed, |t| matches!(t, RawToken::Indent)),
+            2
+        );
+        assert_eq!(
+            count_token(&processed, |t| matches!(t, RawToken::Dedent)),
+            2
+        );
     }
 }

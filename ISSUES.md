@@ -10,16 +10,15 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
-2. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
-3. **I-106** — decode paths panic instead of reporting an internal error.
-4. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
-5. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
-6. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
-7. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
-8. **I-017** — `i64::MIN` integer literal is unrepresentable.
-9. **I-088** — ownership sidecar keyed by function name.
-10. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+1. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
+2. **I-106** — decode paths panic instead of reporting an internal error.
+3. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
+4. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
+5. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
+6. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
+7. **I-017** — `i64::MIN` integer literal is unrepresentable.
+8. **I-088** — ownership sidecar keyed by function name.
+9. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -280,12 +279,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-core/src/ownership.rs` (`OwnershipSidecar` :50-52), `ryo-frontend/src/ownership.rs` (:301-309)
 **Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
 **Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
-
-### I-124 — Lexer rejects CRLF line endings
-
-**Files:** `ryo-frontend/src/lexer.rs`
-**Summary:** `\r` matches no token pattern, so any CRLF source fails with `found '<error>'` at the end of the first line — a confusing diagnostic for the most common Windows editor default. Surfaced by the windows CI leg: git's `core.autocrlf=true` checked `examples/` and `benchmarks/` out as CRLF and every repo-file parse failed (worked around for CI by `.gitattributes` forcing `eol=lf` on `*.ryo`, but user-written CRLF files still fail).
-**Resolution:** Accept `\r\n` as a newline in the lexer (treat `\r` as whitespace adjacent to `\n`, keeping span accounting byte-accurate), and add a CRLF fixture test.
 
 ### I-126 — AST is a `Box<Expression>` pointer tree, contradicting R1
 

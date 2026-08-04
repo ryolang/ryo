@@ -294,7 +294,11 @@ pub(crate) enum RawToken<'a> {
     #[token(".")]
     Dot,
 
-    #[regex(r"\n[ \t]*")]
+    // CRLF line endings (the Windows-editor default) lex as the same
+    // Newline token; the leading `\r` is part of the token's span so
+    // byte offsets stay accurate, and `indent::process` skips it when
+    // measuring indentation.
+    #[regex(r"\r?\n[ \t]*")]
     Newline(&'a str),
 
     Indent,
@@ -653,6 +657,55 @@ mod tests {
         let mut pool = InternPool::new();
         let res = lex("99999999999999999999", &mut pool);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn lex_crlf_line_endings() {
+        // CRLF is the Windows-editor default; a full program written
+        // with `\r\n` must lex identically to its LF form.
+        let mut pool = InternPool::new();
+        let crlf = lex("fn main():\r\n\tx = 1\r\n\ty = 2\r\n", &mut pool)
+            .expect("CRLF source should lex");
+        assert!(
+            crlf.iter()
+                .all(|(t, _)| !matches!(t, Token::Error)),
+            "no error tokens in CRLF stream: {:?}",
+            crlf
+        );
+        let kinds: Vec<Token> = crlf.iter().map(|(t, _)| *t).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                Token::Fn,
+                Token::Ident(pool.intern_str("main")),
+                Token::LParen,
+                Token::RParen,
+                Token::Colon,
+                Token::Indent,
+                Token::Newline,
+                Token::Ident(pool.intern_str("x")),
+                Token::Assign,
+                Token::IntLit(1),
+                Token::Newline,
+                Token::Ident(pool.intern_str("y")),
+                Token::Assign,
+                Token::IntLit(2),
+                Token::Newline,
+                Token::Dedent,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_crlf_blank_lines_and_comments() {
+        let mut pool = InternPool::new();
+        let toks = lex("x = 1\r\n\r\n# comment\r\ny = 2\r\n", &mut pool)
+            .expect("CRLF with blank lines and comments should lex");
+        assert!(
+            toks.iter().all(|(t, _)| !matches!(t, Token::Error)),
+            "no error tokens: {:?}",
+            toks
+        );
     }
 
     #[test]
