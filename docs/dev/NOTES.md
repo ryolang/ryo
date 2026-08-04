@@ -1,12 +1,12 @@
 # TODO
 
+- FFI tests: sqlite(included), raylib(external)
 - [ ] [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)
 - [ ] [Go by Example](https://www.mintlify.com/mmcgrana/gobyexample/introduction)
 - [ ] Iterators
 - [ ] Define Testing
 - [ ] https://ziglang.org/documentation/0.1.1/#case-study-printf
 - [ ] Debug Breakpoints https://ziglang.org/documentation/0.1.1/#builtin-breakpoint
-- [ ] my_str: str = "hello" when pass as reference fn world(hello: str) ->, should not include the derref world(&str), python and new developers do not understand &, we should use a short english word as we do for && -> and
 - [ ] Zen of ryo. https://dave.cheney.net/2020/02/23/the-zen-of-go
 - [ ] Add https://scorecard.dev/
 - [ ] review for more https://github.com/astral-sh/ruff/tree/main/.github/workflows
@@ -26,7 +26,6 @@
 - [Type Inference Course](https://course.ccs.neu.edu/cs4410sp19/lec_type-inference_notes.html)
 - [Rustc Dev Guide - Type Inference](https://rustc-dev-guide.rust-lang.org/type-inference.html)
 - [Pony Tutorial - Actors](https://tutorial.ponylang.io/types/actors) - Concurrency via actors
-- [Lattner's Concurrency Gist](https://gist.github.com/lattner/31ed37682ef1576b16bca1432ea9f782)
 - [Hylo Programming Language](https://www.hylo-lang.org)
 
 **Implementation Guides**:
@@ -46,10 +45,6 @@
 - [Pollster - Minimal executor](https://github.com/zesterer/pollster)
 - [Zig's I/O discussion](https://kristoff.it/blog/zig-new-async-io/) - Function colorblindness
 - [Go concurrency patterns](https://go.dev/tour/concurrency/) - Goroutines and channels
-
-**Performance & Benchmarking**:
-- [Mojo Benchmark Guide](https://mojodojo.dev/guides/std/Benchmark.html)
-- [Fibonacci: Python vs Mojo vs Rust](https://www.statpan.com/2023/10/python-vs-mojo-vs-rust-fibonacci-speed.html)
 
 **Similar Projects**:
 - [Tao Language](https://github.com/zesterer/tao)
