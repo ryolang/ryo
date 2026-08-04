@@ -10,13 +10,12 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
-2. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
-3. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
-4. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
-5. **I-017** — `i64::MIN` integer literal is unrepresentable.
-6. **I-088** — ownership sidecar keyed by function name.
-7. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+1. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
+2. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
+3. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
+4. **I-017** — `i64::MIN` integer literal is unrepresentable.
+5. **I-088** — ownership sidecar keyed by function name.
+6. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -360,12 +359,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo/tests/asan_smoke.rs`, `ryo/tests/valgrind_smoke.rs`, `ryo/tests/common/mod.rs`, `.github/workflows/ci.yml` (:83)
 **Summary:** Both suites iterate the same 11 fixtures (`common/mod.rs:81-210`), compiling+linking each twice per full run; each `build_and_link` also shells out to `ryo toolchain status --path` to find zig (:10-22). `cargo test --workspace` in the test lane already includes `asan_smoke`, so it runs twice on ubuntu (test lane + dedicated asan lane); valgrind "runs" (silently skips, I-085) in lanes without valgrind.
 **Resolution:** Share fixture compilation across suites, cache the zig path, and exclude the smoke suites from the default test lane (or from the dedicated lanes).
-
-### I-103 — Diagnostics print twice on failure; `emit_one` can panic mid-report
-
-**Files:** `ryo-driver/src/pipeline.rs` (`emit_one` :174-205), `ryo/src/main.rs` (:71)
-**Summary:** The report header and the label both use `d.message`, so every diagnostic prints its text twice; `.expect("diag render")` (:204) can panic mid-report. After the ariadne report, `main`'s `Box<dyn Error>` return makes the std `Termination` handler print a second, differently-formatted summary line.
-**Resolution:** Use a short label message (or set the message only once); handle the `eprint` result gracefully; consider `ExitCode`-based `main` to control the final line.
 
 ### I-104 — `ryo-core` depends on chumsky solely for `SimpleSpan`
 

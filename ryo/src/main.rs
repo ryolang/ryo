@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use ryo_backend::toolchain;
+use ryo_core::errors::CompilerError;
 use ryo_driver::pipeline::{self, EmitKind};
 
 #[derive(Parser)]
@@ -68,7 +69,7 @@ enum ToolchainAction {
     },
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn main() -> std::process::ExitCode {
     // Windows reserves 1 MiB for the main-thread stack (8 MiB on
     // macOS/Linux); the recursive front-end and JIT-executed programs
     // overflow that in debug builds. Run the CLI on a thread with an
@@ -76,14 +77,31 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // nothing until used.
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
-        .spawn(cli_main)?
+        .spawn(cli_main)
+        .expect("failed to spawn the CLI thread")
         .join()
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
 }
 
-fn cli_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn cli_main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    match run_command(cli) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            // Diagnostics were already rendered to stderr by the
+            // pipeline; printing the error again would duplicate the
+            // report. (Returning `Err` from `main` would also make the
+            // std Termination handler add its own differently-formatted
+            // summary line.)
+            if !matches!(e, CompilerError::Diagnostics(_)) {
+                eprintln!("error: {e}");
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
 
+fn run_command(cli: Cli) -> Result<(), CompilerError> {
     match cli.command {
         Commands::Lex { file } => pipeline::lex_command(&file)?,
         Commands::Parse { file } => pipeline::parse_command(&file)?,

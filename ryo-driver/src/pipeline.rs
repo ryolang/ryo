@@ -189,13 +189,13 @@ fn emit_one(d: &Diag, source_name: &str, source: &Source<&str>) {
     };
     let label_color = color_for_severity(d.severity);
     let code = diag_code_str(d.code);
+    // The full message goes in the report header only; the label
+    // carries no text so the message isn't printed twice.
     let mut report = Report::build(kind, (source_name, d.span.start..d.span.end))
         .with_code(code)
         .with_message(&d.message)
         .with_label(
-            Label::new((source_name, d.span.start..d.span.end))
-                .with_message(&d.message)
-                .with_color(label_color),
+            Label::new((source_name, d.span.start..d.span.end)).with_color(label_color),
         );
     for note in &d.notes {
         if let Some(span) = note.span {
@@ -208,10 +208,12 @@ fn emit_one(d: &Diag, source_name: &str, source: &Source<&str>) {
             report = report.with_note(&note.message);
         }
     }
-    report
-        .finish()
-        .eprint((source_name, source))
-        .expect("diag render");
+    if report.finish().eprint((source_name, source)).is_err() {
+        // Ariadne can fail on out-of-range spans or stderr write
+        // errors; fall back to a plain line rather than panicking
+        // mid-report and suppressing the remaining diagnostics.
+        eprintln!("{}: {}", code, d.message);
+    }
 }
 
 /// Map severity to a label color so the squiggle hue matches the
