@@ -33,9 +33,35 @@ fn valgrind_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Decide whether the smoke test may run. A missing valgrind is a
+/// hard failure outside CI: a green local run that silently exercised
+/// nothing is worse than a red one (I-085). Opt out explicitly with
+/// `RYO_SKIP_VALGRIND=1`. In CI the dedicated `valgrind` lane installs
+/// valgrind and runs this suite, so other lanes may skip.
+fn require_valgrind(name: &str) -> bool {
+    if valgrind_available() {
+        return true;
+    }
+    if std::env::var_os("CI").is_some() {
+        eprintln!(
+            "skipping {name}: valgrind not installed \
+             (covered by the dedicated CI valgrind lane)"
+        );
+        return false;
+    }
+    assert!(
+        std::env::var_os("RYO_SKIP_VALGRIND").is_some(),
+        "valgrind is not installed; these smoke tests exist because LSan \
+         misses leaks from Cranelift-emitted code, so skipping them \
+         silently would make a green run meaningless. Install valgrind, \
+         or set RYO_SKIP_VALGRIND=1 to skip explicitly."
+    );
+    eprintln!("skipping {name}: valgrind not installed (RYO_SKIP_VALGRIND is set)");
+    false
+}
+
 fn run_valgrind_smoke(source: &str, name: &str) {
-    if !valgrind_available() {
-        eprintln!("skipping {name}: valgrind not installed");
+    if !require_valgrind(name) {
         return;
     }
 

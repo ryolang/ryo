@@ -10,11 +10,10 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
-2. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
-3. **I-017** — `i64::MIN` integer literal is unrepresentable.
-4. **I-088** — ownership sidecar keyed by function name.
-5. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+1. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
+2. **I-017** — `i64::MIN` integer literal is unrepresentable.
+3. **I-088** — ownership sidecar keyed by function name.
+4. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -251,12 +250,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-core/src/uir.rs` (`var_decl_extra` etc.), `ryo-core/src/tir.rs` (`call_extra` :337-342, `var_decl_extra` :355-362, `assign_extra`/… :370-418)
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
-
-### I-085 — Valgrind smoke tests silently pass when valgrind is absent
-
-**Files:** `ryo/tests/valgrind_smoke.rs` (:36-40)
-**Summary:** `run_valgrind_smoke` prints "skipping" and returns success when valgrind is not installed, so local green runs may have exercised nothing. Only the CI lane that `apt-get install`s valgrind guarantees coverage; the suite exists because LSan misses leaks from Cranelift-emitted code (not ASan-instrumented).
-**Resolution:** Fail loudly (or require an opt-in env var to skip) outside CI; at minimum print a prominent end-of-suite summary of skipped tests.
 
 ### I-088 — Ownership sidecar is keyed by function name
 
