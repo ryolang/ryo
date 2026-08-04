@@ -30,17 +30,27 @@ use std::fs;
 use std::path::Path;
 use target_lexicon::Triple;
 
-// Helper function to generate output filenames
+// Helper function to generate output filenames. Artifacts land next
+// to the source file, not in the CWD, so two same-stem sources in
+// different directories built from one CWD don't clobber each other.
 fn get_output_filenames(input_file: &Path) -> (String, String) {
     let stem = input_file
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
+    let dir = input_file.parent().unwrap_or_else(|| Path::new(""));
 
-    let obj_filename = format!("{}.{}", stem, if cfg!(windows) { "obj" } else { "o" });
-    let exe_filename = format!("{}{}", stem, std::env::consts::EXE_SUFFIX);
+    let obj_filename = dir.join(format!(
+        "{}.{}",
+        stem,
+        if cfg!(windows) { "obj" } else { "o" }
+    ));
+    let exe_filename = dir.join(format!("{}{}", stem, std::env::consts::EXE_SUFFIX));
 
-    (obj_filename, exe_filename)
+    (
+        obj_filename.to_string_lossy().into_owned(),
+        exe_filename.to_string_lossy().into_owned(),
+    )
 }
 
 pub fn lex_command(file: &Path) -> Result<(), CompilerError> {
@@ -509,16 +519,19 @@ pub fn build_file(file: &Path) -> Result<(), CompilerError> {
     let runtime_path = runtime_lib::extract_runtime_to_temp()
         .map_err(|e| CompilerError::LinkError(format!("Failed to extract runtime: {e}")))?;
 
-    linker::link_executable(&obj_filename, &exe_filename, &runtime_path)?;
+    let link_result = linker::link_executable(&obj_filename, &exe_filename, &runtime_path);
 
     runtime_lib::cleanup_runtime_temp(&runtime_path);
     // Default: clean up the intermediate object file. Set
     // `RYO_KEEP_OBJ=1` to retain it — used by tooling that needs to
     // relink the same object with extra flags (e.g. the ASan smoke
     // tests in `tests/asan_smoke.rs` re-link with `-fsanitize=address`).
+    // Runs on the link-failure path too, which previously leaked the
+    // `.o` via the early `?`.
     if std::env::var_os("RYO_KEEP_OBJ").is_none() {
         let _ = fs::remove_file(&obj_filename);
     }
+    link_result?;
 
     println!("Built: {}", exe_filename);
     Ok(())
@@ -532,6 +545,28 @@ fn display_result(result: i32) {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn output_filenames_land_next_to_source() {
+        let obj_ext = if cfg!(windows) { "obj" } else { "o" };
+        let exe_suffix = std::env::consts::EXE_SUFFIX;
+
+        let (obj, exe) = get_output_filenames(Path::new("some/dir/hello.ryo"));
+        assert_eq!(
+            Path::new(&obj),
+            Path::new("some/dir").join(format!("hello.{obj_ext}"))
+        );
+        assert_eq!(
+            Path::new(&exe),
+            Path::new("some/dir").join(format!("hello{exe_suffix}"))
+        );
+
+        // No directory component: output stays relative to the CWD,
+        // exactly as before.
+        let (obj, exe) = get_output_filenames(Path::new("hello.ryo"));
+        assert_eq!(obj, format!("hello.{obj_ext}"));
+        assert_eq!(exe, format!("hello{exe_suffix}"));
+    }
 
     #[test]
     fn diag_code_strings_are_stable_and_unique() {
