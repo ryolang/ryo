@@ -60,17 +60,19 @@ pub fn lex_command(file: &Path) -> Result<(), CompilerError> {
 
 fn display_tokens(input: &str, file: &Path) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
-    let tokens = lexer::lex(input, &mut pool).map_err(|e| {
-        // Route lex failures through the same Diag pipeline as
-        // parse / sema errors so `ryo lex` matches the rest of the
-        // CLI's exit-code and rendering behaviour. Previously this
-        // path silently `eprintln!`d and returned `Ok(())`, which
-        // hid lex errors from CI.
-        let diag = Diag::error(e.span, DiagCode::ParseError, e.message);
-        let name = source_name(file);
-        render_diags(std::slice::from_ref(&diag), input, &name);
-        CompilerError::Diagnostics(vec![diag])
-    })?;
+    let name = source_name(file);
+    let tokens = match lexer::lex(input, &mut pool) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            // Route lex failures through the same Diag pipeline as
+            // parse / sema errors so `ryo lex` matches the rest of the
+            // CLI's exit-code and rendering behaviour. Previously this
+            // path silently `eprintln!`d and returned `Ok(())`, which
+            // hid lex errors from CI.
+            let diag = Diag::error(e.span, DiagCode::ParseError, e.message);
+            return finalize_diags(vec![diag], input, &name);
+        }
+    };
 
     println!("Token stream for '{}':", file.display());
     println!();
@@ -123,11 +125,13 @@ fn parse_source(
     // at the offending byte range. Phase 1 wraps that as a single
     // structured `Diag` so the same Ariadne renderer handles lex,
     // parse, and middle-end diagnostics.
-    let tokens = lexer::lex(input, pool).map_err(|e| {
-        let diag = Diag::error(e.span, DiagCode::ParseError, e.message);
-        render_diags(std::slice::from_ref(&diag), input, source_name);
-        CompilerError::Diagnostics(vec![diag])
-    })?;
+    let tokens = match lexer::lex(input, pool) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            let diag = Diag::error(e.span, DiagCode::ParseError, e.message);
+            return Err(fail_with_diags(vec![diag], input, source_name));
+        }
+    };
 
     // chumsky 0.12 added `Input::split_token_span`, which collapses the previous
     // `Stream::from_iter(...).map(eoi, |(t, s)| (t, s))` boilerplate that we used to
@@ -147,10 +151,18 @@ fn parse_source(
                     )
                 })
                 .collect();
-            render_diags(&diags, input, source_name);
-            Err(CompilerError::Diagnostics(diags))
+            Err(fail_with_diags(diags, input, source_name))
         }
     }
+}
+
+/// Render + wrap for paths whose diagnostics are always error
+/// severity (lex / parse failures), where `finalize_diags` therefore
+/// always returns `Err`. Keeps the render-and-wrap shape in one
+/// place while letting callers keep their own error type.
+fn fail_with_diags(diags: Vec<Diag>, input: &str, source_name: &str) -> CompilerError {
+    finalize_diags(diags, input, source_name)
+        .expect_err("fail_with_diags requires an error-severity diagnostic")
 }
 
 /// Render a slice of diagnostics to stderr through Ariadne.
@@ -320,7 +332,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     if !(want.tir || want.clif) {
         // UIR-only run. Surface astgen diagnostics now, with a
         // non-zero exit if anything fired.
-        return finalize_diags(sink, &input, &name);
+        return finalize_diags(sink.into_diags(), &input, &name);
     }
 
     // For TIR / CLIF we also run sema. Per the §4.5 design, sema
@@ -340,7 +352,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
         // failed, surface the diagnostics and abort — we cannot
         // produce a meaningful CLIF dump from a broken TIR.
         if sink.has_errors() {
-            return finalize_diags(sink, &input, &name);
+            return finalize_diags(sink.into_diags(), &input, &name);
         }
         generate_and_display_ir(&tirs, &pool, &sidecar)?;
     }
@@ -348,7 +360,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // Tail block: drains the sink whether sema/ownership were
     // clean or only emitted warnings. Without this `ryo ir` would
     // silently swallow W0001/W0002 on success.
-    finalize_diags(sink, &input, &name)
+    finalize_diags(sink.into_diags(), &input, &name)
 }
 
 /// Resolve `--emit` flag values into a normalized set. Membership
@@ -387,24 +399,26 @@ impl EmitSet {
     }
 }
 
-/// Drain `sink`, render whatever is queued, and translate into a
-/// terminal pipeline result.
+/// Render a batch of diagnostics and translate into a terminal
+/// pipeline result.
 ///
 /// Single tail-block used by every front-end driver (`ryo run`,
-/// `ryo build`, `ryo ir`) so that:
+/// `ryo build`, `ryo ir`) and by the lex/parse error paths so that:
 ///
 /// * warnings (`W0001` DeadStore, `W0002` RedundantMove, …) reach
 ///   the user on otherwise-successful runs, and
 /// * the success and error paths render the *same* diagnostics
 ///   exactly once — never via two separate `render_diags` calls
-///   that could drift out of sync.
+///   that could drift out of sync, and
+/// * the `Severity::Error` check lives in exactly one place (the
+///   lex/parse paths previously assumed every diag they built was
+///   error severity without enforcing it).
 ///
-/// Returns `Err(CompilerError::Diagnostics(_))` iff at least one
-/// diagnostic has `Severity::Error`; warnings/notes alone do not
-/// fail the build.
-fn finalize_diags(sink: DiagSink, input: &str, source_name: &str) -> Result<(), CompilerError> {
-    let has_errors = sink.has_errors();
-    let diags = sink.into_diags();
+/// Sink-using stages feed this via `sink.into_diags()`. Returns
+/// `Err(CompilerError::Diagnostics(_))` iff at least one diagnostic
+/// has `Severity::Error`; warnings/notes alone do not fail the build.
+fn finalize_diags(diags: Vec<Diag>, input: &str, source_name: &str) -> Result<(), CompilerError> {
+    let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
     if !diags.is_empty() {
         render_diags(&diags, input, source_name);
     }
@@ -448,7 +462,7 @@ fn lower_and_analyze(
     // `W0002` RedundantMove, …) surface on the success path
     // without a separate render block that could drift from the
     // error path.
-    finalize_diags(sink, input, source_name)?;
+    finalize_diags(sink.into_diags(), input, source_name)?;
     Ok((tirs, sidecar))
 }
 
