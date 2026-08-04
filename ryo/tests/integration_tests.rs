@@ -1280,6 +1280,102 @@ fn panic_inside_if_branch_not_taken() {
     );
 }
 
+/// A `never` value anywhere but a bare statement is a compile error
+/// — `panic` diverges and produces no value to bind, return, pass,
+/// or operate on. Assert on the user-facing message, not the exit
+/// code alone.
+fn assert_never_rejected(file_name: &str, code: &str) {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), file_name, code);
+
+    let output =
+        run_ryo_command(&["run", file_name], &test_file).expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "never-binding should be rejected. stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("'never' value"),
+        "stderr should name the never-binding error, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn never_var_decl_scalar_rejected() {
+    assert_never_rejected(
+        "never_vardecl_scalar.ryo",
+        "fn f() -> int:\n\tx: int = panic(\"boom\")\n\nfn main():\n\ty = f()\n",
+    );
+}
+
+#[test]
+fn never_var_decl_str_rejected() {
+    assert_never_rejected(
+        "never_vardecl_str.ryo",
+        "fn f() -> int:\n\tx: str = panic(\"boom\")\n\nfn main():\n\ty = f()\n",
+    );
+}
+
+#[test]
+fn never_assign_scalar_rejected() {
+    assert_never_rejected(
+        "never_assign_scalar.ryo",
+        "fn f() -> int:\n\tmut x = 1\n\tx = panic(\"boom\")\n\nfn main():\n\ty = f()\n",
+    );
+}
+
+#[test]
+fn never_assign_str_rejected() {
+    assert_never_rejected(
+        "never_assign_str.ryo",
+        "fn f() -> int:\n\tmut x = \"a\"\n\tx = panic(\"boom\")\n\nfn main():\n\ty = f()\n",
+    );
+}
+
+#[test]
+fn never_compound_assign_rejected() {
+    assert_never_rejected(
+        "never_compound.ryo",
+        "fn f() -> int:\n\tmut x = 1\n\tx += panic(\"boom\")\n\nfn main():\n\ty = f()\n",
+    );
+}
+
+#[test]
+fn never_assign_view_rejected() {
+    assert_never_rejected(
+        "never_assign_view.ryo",
+        "fn f() -> int:\n\ts = \"hello\"\n\tmut v = s[0:2]\n\tv = panic(\"boom\")\n\nfn main():\n\ty = f()\n",
+    );
+}
+
+#[test]
+fn never_return_rejected() {
+    assert_never_rejected(
+        "never_return.ryo",
+        "fn f() -> int:\n\treturn panic(\"boom\")\n\nfn main():\n\ty = f()\n",
+    );
+}
+
+#[test]
+fn never_binop_operand_rejected() {
+    assert_never_rejected(
+        "never_binop.ryo",
+        "fn f() -> int:\n\treturn 1 + panic(\"boom\")\n\nfn main():\n\ty = f()\n",
+    );
+}
+
+#[test]
+fn never_call_arg_rejected() {
+    assert_never_rejected(
+        "never_call_arg.ryo",
+        "fn g(x: int):\n\tprint(\"{x}\")\n\nfn main():\n\tg(panic(\"boom\"))\n",
+    );
+}
+
 #[test]
 fn assert_non_bool_condition_rejected() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");

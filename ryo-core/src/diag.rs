@@ -70,10 +70,15 @@ pub enum DiagCode {
     ArityMismatch,
     BuiltinArgKind,
     UnsupportedOperator,
-    /// A `void` value (e.g. the result of a void-returning call
-    /// like `print(...)`) appeared in an expression position that
-    /// requires a real value (var decl initializer, return
-    /// expression, operand of an arithmetic/equality/etc op).
+    /// A valueless result — `void` (e.g. the result of a
+    /// void-returning call like `print(...)`) or `never` (a
+    /// diverging expression like `panic(...)`, which yields no
+    /// value at all) — appeared in a position that requires a real
+    /// value: a binding (var decl initializer, assignment
+    /// right-hand side), a `return` operand, an operator operand,
+    /// a call argument, or a condition / slice / range bound. A
+    /// `never` value's only legal form is a bare expression
+    /// statement (e.g. `panic("...")` on its own line).
     VoidValueInExpression,
     /// An `if` or `elif` condition expression evaluated to a non-bool
     /// type. Ryo requires conditions to be `bool` (no truthy coercion).
@@ -115,6 +120,10 @@ pub enum DiagCode {
     /// worklist driver in Phase 5 catches the case so future
     /// comptime / inferred-return-type work doesn't stack-overflow.
     CycleInResolution,
+    /// A non-void function can reach the end of its body without
+    /// returning a value. Return-flow analysis: every path through
+    /// the body must end in `return` (or diverge via `never`).
+    MissingReturn,
 
     // --- ownership (M8.1b) ---
     /// Use of a value after it has been moved.

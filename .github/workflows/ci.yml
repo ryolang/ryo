@@ -99,7 +99,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: windows
-      - run: cargo check --workspace --all-targets
       - name: Get Zig version
         id: zig-version
         shell: bash

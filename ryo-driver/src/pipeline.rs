@@ -251,6 +251,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::ViewEscape => "E0034",
         DiagCode::SourceProjected => "E0035",
         DiagCode::CycleInResolution => "E0016",
+        DiagCode::MissingReturn => "E0036",
         DiagCode::ParseError => "E0100",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::ConstEvalFailure => "E0200",
@@ -565,6 +566,7 @@ mod tests {
             (DiagCode::BorrowMismatch, "E0033"),
             (DiagCode::ViewEscape, "E0034"),
             (DiagCode::SourceProjected, "E0035"),
+            (DiagCode::MissingReturn, "E0036"),
             (DiagCode::ParseError, "E0100"),
             (DiagCode::TooManyDiagnostics, "E0101"),
             (DiagCode::ConstEvalFailure, "E0200"),
@@ -620,6 +622,7 @@ mod tests {
                 | DiagCode::DeadStore
                 | DiagCode::ViewEscape
                 | DiagCode::SourceProjected
+                | DiagCode::MissingReturn
                 | DiagCode::CycleInResolution
                 | DiagCode::ParseError
                 | DiagCode::TooManyDiagnostics

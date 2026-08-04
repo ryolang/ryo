@@ -1345,6 +1345,64 @@ impl Tir {
         found
     }
 
+    /// Return `true` iff every execution path through `stmts` returns
+    /// or diverges — i.e. control can never reach past the end of the
+    /// block. Backs sema's return-flow analysis: a non-void function
+    /// whose body block does not definitely return is rejected with
+    /// `DiagCode::MissingReturn`.
+    ///
+    /// A block definitely returns when ANY of its statements does —
+    /// everything after that point is unreachable.
+    pub fn block_definitely_returns(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
+        stmts.iter().any(|&s| self.stmt_definitely_returns(s, pool))
+    }
+
+    /// Statement rules for [`Tir::block_definitely_returns`]:
+    /// - `Return` / `ReturnVoid`: returns by construction.
+    /// - `Unreachable`: error-recovery sentinel — treated as
+    ///   returning so a body that already errored doesn't cascade a
+    ///   spurious `MissingReturn`.
+    /// - `ExprStmt` whose operand is `never`-typed (e.g. a `panic`
+    ///   call): diverges, nothing past it executes.
+    /// - `VarDecl` / `Assign` / `CompoundAssign` whose evaluated
+    ///   initializer/value is `never`-typed: same divergence, the
+    ///   binding never completes.
+    /// - `IfStmt`: the then-block, every elif body, and the else
+    ///   block must all definitely return; without an else the
+    ///   not-taken path falls through.
+    /// - Everything else — including loops, whose bodies can run
+    ///   zero times — falls through.
+    fn stmt_definitely_returns(&self, r: TirRef, pool: &InternPool) -> bool {
+        let inst = self.inst(r);
+        match inst.tag {
+            TirTag::Return | TirTag::ReturnVoid | TirTag::Unreachable => true,
+            TirTag::ExprStmt => {
+                let TirData::UnOp(operand) = inst.data else {
+                    unreachable!("ExprStmt must carry TirData::UnOp");
+                };
+                pool.is_never(self.inst(operand).ty)
+            }
+            TirTag::VarDecl => pool.is_never(self.inst(self.var_decl_view(r).initializer).ty),
+            TirTag::Assign => pool.is_never(self.inst(self.assign_view(r).value).ty),
+            TirTag::CompoundAssign => {
+                pool.is_never(self.inst(self.compound_assign_view(r).value).ty)
+            }
+            TirTag::IfStmt => {
+                let view = self.if_stmt_view(r);
+                let Some(else_stmts) = view.else_stmts else {
+                    return false;
+                };
+                self.block_definitely_returns(&view.then_stmts, pool)
+                    && view
+                        .elif_branches
+                        .iter()
+                        .all(|elif| self.block_definitely_returns(&elif.body, pool))
+                    && self.block_definitely_returns(&else_stmts, pool)
+            }
+            _ => false,
+        }
+    }
+
     /// Collect the set of TirRefs evaluated on the path that reaches
     /// `target` within `body`. Returns `true` if `target` was located.
     ///
