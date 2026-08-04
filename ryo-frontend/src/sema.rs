@@ -245,17 +245,20 @@ impl<'a> Sema<'a> {
             // first declaration and the duplicate still gets analyzed
             // (so its own errors surface), but the redefinition itself
             // is a hard error.
-            if name_to_decl.contains_key(&body.name) {
-                sink.emit(Diag::error(
-                    body.span,
-                    DiagCode::DuplicateDeclaration,
-                    format!(
-                        "function '{}' is defined more than once",
-                        pool.str(body.name)
-                    ),
-                ));
-            } else {
-                name_to_decl.insert(body.name, DeclId::from_index(i));
+            match name_to_decl.entry(body.name) {
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    sink.emit(Diag::error(
+                        body.span,
+                        DiagCode::DuplicateDeclaration,
+                        format!(
+                            "function '{}' is defined more than once",
+                            pool.str(body.name)
+                        ),
+                    ));
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(DeclId::from_index(i));
+                }
             }
         }
         let mut results = Vec::with_capacity(n);
@@ -2349,7 +2352,9 @@ mod tests {
     /// those stages.
     fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
         let mut pool = InternPool::new();
-        let tokens = lex(input, &mut pool).expect("lex ok");
+        let mut lex_sink = DiagSink::new();
+        let tokens = lex(input, &mut pool, &mut lex_sink);
+        assert!(!lex_sink.has_errors(), "lex errors: {:?}", lex_sink.into_diags());
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
         let program = program_parser()
             .parse(token_stream)
@@ -2372,7 +2377,9 @@ mod tests {
     /// used to assert the "Unreachable + diag" invariant from §4.5.
     fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
         let mut pool = InternPool::new();
-        let tokens = lex(input, &mut pool).expect("lex ok");
+        let mut lex_sink = DiagSink::new();
+        let tokens = lex(input, &mut pool, &mut lex_sink);
+        assert!(!lex_sink.has_errors(), "lex errors: {:?}", lex_sink.into_diags());
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
         let program = program_parser()
             .parse(token_stream)

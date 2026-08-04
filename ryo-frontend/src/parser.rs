@@ -637,7 +637,15 @@ mod tests {
 
     fn lex_and_parse(input: &str) -> Result<(Program, InternPool), Vec<Rich<'static, Token>>> {
         let mut pool = InternPool::new();
-        let tokens = lex(input, &mut pool).map_err(|e| vec![Rich::custom(e.span, e.message)])?;
+        let mut sink = ryo_core::diag::DiagSink::new();
+        let tokens = lex(input, &mut pool, &mut sink);
+        if sink.has_errors() {
+            return Err(sink
+                .into_diags()
+                .into_iter()
+                .map(|d| Rich::custom(d.span, d.message))
+                .collect());
+        }
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
 
         let program = program_parser()

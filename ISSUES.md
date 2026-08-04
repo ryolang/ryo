@@ -10,10 +10,9 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
-2. **I-017** — `i64::MIN` integer literal is unrepresentable.
-3. **I-088** — ownership sidecar keyed by function name.
-4. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+1. **I-017** — `i64::MIN` integer literal is unrepresentable.
+2. **I-088** — ownership sidecar keyed by function name.
+3. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -38,24 +37,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 ---
 
 ## 🟡 Correctness / Hygiene
-
-### I-014 — Lexer errors bypass `DiagSink`
-
-**Files:** `ryo-frontend/src/lexer.rs` (`LexError`), `ryo-driver/src/pipeline.rs` (`parse_source`, `display_tokens`)
-**Summary:** Phase 1 of `docs/dev/pipeline_alignment.md` routes parse / ast_lower / sema errors through a `DiagSink` so analysis can continue past the first failure. The lexer was on a parallel branch at the time and still uses a single-shot `Result<_, LexError>`. The driver wraps a `LexError` into a one-element `Vec<Diag>` at the boundary, but problems like "invalid integer literal" or "unknown escape sequence" can't co-surface with a sema error in the same run.
-**Resolution:** Thread `&mut DiagSink` into `lexer::lex` and `intern_token`. Replace the early return on the first lex error with `sink.emit(...)` followed by a recovery token (e.g. `Token::Error` for the bad span) so the parser still sees a well-formed stream. Eliminate `LexError` once the migration is complete.
-
-### I-015 — Unknown escape sequences silently preserved
-
-**Files:** `ryo-frontend/src/lexer.rs` (`unescape`)
-**Summary:** When `unescape` encounters `\q` (or any other character not in the small known table) it preserves the backslash and the character verbatim instead of reporting a diagnostic. The user gets no feedback that the escape sequence is unrecognised, and the runtime string contains the literal `\q` bytes. Tracked as a TODO at the function definition.
-**Resolution:** Folded in with I-014: once `lexer::lex` has a `&mut DiagSink`, the `Some(c)` arm of `unescape` emits a structured `Diag::error(span, DiagCode::UnknownEscape, …)` and proceeds with the raw character (or skips both bytes — TBD by spec discussion).
-
-### I-016 — Indent processor errors carry no span
-
-**Files:** `ryo-frontend/src/indent.rs` (`process`), `ryo-frontend/src/lexer.rs` (`lex` fallback)
-**Summary:** `indent::process` returns `Result<_, String>` with a free-form message and no source location. The driver currently fakes a span by reusing the last raw token's span. That's "near" the offending newline but not on it; for "spaces are not allowed" / "dedent doesn't match an outer level" the user wants the squiggle on the indentation itself.
-**Resolution:** Have `indent::process` return a richer error type carrying the offending span (the `Newline(s)` token whose whitespace failed validation, or the `Dedent` insertion point) and propagate it into `LexError.span`. The TODO at the lexer fallback covers this from the consumer side.
 
 ### I-017 — `i64::MIN` integer literal is unrepresentable
 
@@ -226,18 +207,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-backend/src/codegen.rs` (all str stack slots), `runtime/src/lib.rs` (`RyoStrFat`)
 **Summary:** Every str stack slot hardcodes 24 bytes / align 3 / offsets 0,8,16 (:1607, :1667, :1727, :1800, :1833, :1894, :1956, :746-748), and `len`/`cap` are hardcoded `types::I64` (:404-405) while `ptr` is pointer-sized. On a 32-bit target, caller and callee layouts silently mismatch.
 **Resolution:** Centralize the fat-pointer layout in one place (offsets and size computed from `module.target_config().pointer_type()`) and mirror it in the runtime. Prerequisite for any 32-bit target; interacts with I-021 (bool FFI width) when FFI lands.
-
-### I-077 — Invalid characters surface as parse errors, not lex errors
-
-**Files:** `ryo-frontend/src/lexer.rs` (:327-330, :394), `ryo-frontend/src/parser.rs`
-**Summary:** Logos failures map to `RawToken::Error` → `Token::Error` and are pushed into the token stream with no diagnostic; the parser later fails with a generic "unexpected token" error. A bad byte surfaces as a parse error divorced from its cause.
-**Resolution:** Emit a structured lex diagnostic at the `Token::Error` site (folds with I-014's `DiagSink` migration), then let the parser see the recovery token.
-
-### I-078 — Parse diagnostics leak interned-handle placeholders (`<id#N>`)
-
-**Files:** `ryo-frontend/src/lexer.rs` (`Token` `Display` :105-170), `ryo-driver/src/pipeline.rs` (`parse_source` :130-142, `emit_one`)
-**Summary:** `Token`'s `Display` renders `Ident` as `<id#N>` and `StrLit` as `<str#N>`; chumsky `Rich` errors are rendered via `e.reason().to_string()` with no pool available, so user-facing parse errors can contain opaque handle ids instead of source text. The lexer comment (:106-110) claiming the driver re-renders with the pool is stale — it does not.
-**Resolution:** Make parse-error rendering pool-aware (re-render expected/found tokens through the pool in `parse_source`), or carry structured expected/found data in `Diag` instead of a pre-formatted `String`.
 
 ### I-079 — Unary minus on `float` is rejected
 
