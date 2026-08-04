@@ -241,13 +241,22 @@ impl<'a> Sema<'a> {
         let n = uir.func_bodies.len();
         let mut name_to_decl = HashMap::with_capacity(n);
         for (i, body) in uir.func_bodies.iter().enumerate() {
-            // First definition wins on duplicates; the second-and-
-            // beyond will type-check against the first, which keeps
-            // the pipeline robust until a dedicated redefinition
-            // pass lands.
-            name_to_decl
-                .entry(body.name)
-                .or_insert(DeclId::from_index(i));
+            // First definition wins on duplicates: calls bind to the
+            // first declaration and the duplicate still gets analyzed
+            // (so its own errors surface), but the redefinition itself
+            // is a hard error.
+            if name_to_decl.contains_key(&body.name) {
+                sink.emit(Diag::error(
+                    body.span,
+                    DiagCode::DuplicateDeclaration,
+                    format!(
+                        "function '{}' is defined more than once",
+                        pool.str(body.name)
+                    ),
+                ));
+            } else {
+                name_to_decl.insert(body.name, DeclId::from_index(i));
+            }
         }
         let mut results = Vec::with_capacity(n);
         for _ in 0..n {
@@ -3445,6 +3454,18 @@ mod tests {
     fn duplicate_mut_decl_same_scope_rejected() {
         let diags = run("fn main():\n\tmut x = 1\n\tmut x = 2\n").unwrap_err();
         assert!(any_code(&diags, DiagCode::DuplicateDeclaration));
+    }
+
+    #[test]
+    fn duplicate_function_definition_rejected() {
+        let diags =
+            run("fn foo():\n\tx = 1\nfn foo():\n\ty = 2\nfn main():\n\tz = 3\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DuplicateDeclaration));
+    }
+
+    #[test]
+    fn distinct_function_definitions_ok() {
+        run("fn foo():\n\tx = 1\nfn bar():\n\ty = 2\nfn main():\n\tz = 3\n").unwrap();
     }
 
     #[test]

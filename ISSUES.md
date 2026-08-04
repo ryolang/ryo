@@ -10,17 +10,16 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-075** — duplicate function definitions silently accepted.
-2. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
-3. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
-4. **I-106** — decode paths panic instead of reporting an internal error.
-5. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
-6. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
-7. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
-8. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
-9. **I-017** — `i64::MIN` integer literal is unrepresentable.
-10. **I-088** — ownership sidecar keyed by function name.
-11. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+1. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
+2. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
+3. **I-106** — decode paths panic instead of reporting an internal error.
+4. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
+5. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
+6. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
+7. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
+8. **I-017** — `i64::MIN` integer literal is unrepresentable.
+9. **I-088** — ownership sidecar keyed by function name.
+10. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -233,12 +232,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-backend/src/toolchain.rs` (`download_zig` :54-112)
 **Summary:** The tarball is streamed HTTPS → XZ → tar with no sha256/signature check even though ziglang.org publishes shasums and `.minisig` files — a supply-chain gap. The fixed temp dir `.zig-{v}-downloading` (:62) lets two concurrent first-runs delete each other's in-flight download (`remove_dir_all` at :67), and `remove_dir_all(&desired_path)` (:101) can delete a working toolchain out from under another running compile.
 **Resolution:** Hardcode the three pinned sha256s (one per supported target) and verify before extraction; use a pid-suffixed temp dir (matching `runtime_lib.rs`'s discipline) and atomic rename; never delete `desired_path` until the replacement is staged.
-
-### I-075 — Duplicate function definitions silently accepted
-
-**Files:** `ryo-frontend/src/sema.rs` (`Sema::new` :219-227)
-**Summary:** `name_to_decl` is first-wins on duplicates: both bodies are analyzed and get TIR, but calls bind to the first definition and no redefinition diagnostic is emitted. The inline comment defers to "a dedicated redefinition pass".
-**Resolution:** Emit `DiagCode::DuplicateDeclaration` (E0029) for duplicate function names at seed time; keep first-wins binding for error recovery.
 
 ### I-076 — `str` ABI is hardcoded to 64-bit layout
 
