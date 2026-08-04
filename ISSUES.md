@@ -10,14 +10,13 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-106** — decode paths panic instead of reporting an internal error.
-2. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
-3. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
-4. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
-5. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
-6. **I-017** — `i64::MIN` integer literal is unrepresentable.
-7. **I-088** — ownership sidecar keyed by function name.
-8. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+1. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
+2. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
+3. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
+4. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
+5. **I-017** — `i64::MIN` integer literal is unrepresentable.
+6. **I-088** — ownership sidecar keyed by function name.
+7. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -373,12 +372,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-core/src/diag.rs` (:18-20), `ryo-core/Cargo.toml`
 **Summary:** The "core" IR/types crate pulls in a parser crate for one span type, coupling every consumer of `ryo-core` to chumsky's release cycle.
 **Resolution:** Define a small `Span` newtype in `ryo-core` and convert at the parser boundary (`pipeline.rs` already adapts spans).
-
-### I-106 — Decode paths panic instead of reporting an internal error
-
-**Files:** `ryo-core/src/uir.rs` (view decoders, `InstRef::from_raw` :99-101), `ryo-frontend/src/sema.rs` (:469, :514, :782-786, :878-890, :1071-1075), `ryo-backend/src/codegen.rs` (~20 `unreachable!` arms, `cranelift_type_for` :56-67, `unimplemented!` Tuple :71)
-**Summary:** View decoders `debug_assert` the tag then `unreachable!` on mismatch; sema hard-trusts astgen with `panic!`/`unreachable!` on tag mismatches; codegen mixes `Result<_, String>` with panics. Malformed IR crashes the compiler with no internal-error diagnostic. Fine with exactly one producer per IR; brittle for any future producer (caches, plugins, alternative front ends).
-**Resolution:** Low priority by design. If a second UIR/TIR producer ever lands, convert the decode paths to an internal-error `Diag`; until then, document the "trusted producer" invariant at each IR boundary.
 
 ### I-109 — No instruction→function reverse mapping in UIR
 

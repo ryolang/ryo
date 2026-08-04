@@ -42,6 +42,17 @@
 //! via niche-filling. Slot 0 of `instructions` is reserved as a
 //! never-emitted sentinel so all valid refs are non-zero. Same
 //! invariant as [`crate::uir::InstRef`].
+//!
+//! ## Trusted producer
+//!
+//! TIR has exactly one producer (`sema`) and one consumer (`codegen`),
+//! and the producer is trusted: view decoders and codegen's per-tag
+//! dispatch `unreachable!` on malformed IR instead of returning an
+//! error, because malformed TIR is a compiler bug, not user input. If
+//! a second producer ever lands (cached IR, plugins, an alternative
+//! front end), the decode paths must first be converted to report an
+//! internal-error `Diag` — see the `unreachable!` sites in this file
+//! and the audit in ISSUES.md history (I-106).
 
 use crate::ast::CompoundOp;
 use crate::types::{InternPool, StringId, TypeId};
