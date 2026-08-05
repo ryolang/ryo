@@ -500,11 +500,20 @@ impl<M: Module> Codegen<M> {
         // per-function (each `Tir` arena restarts at `TirRef(1)`), so
         // threading the program-wide sidecar would let frees scheduled
         // for one function fire at numerically-matching TirRefs in
-        // another. The sidecar is positional with the `tirs` slice;
-        // the `unwrap_or` arm covers compiler-emitted helpers
-        // (e.g. `__ryo_panic`) that the ownership pass never sees.
-        let empty_sidecar = ryo_core::ownership::FunctionSidecar::default();
-        let func_sidecar = sidecar.functions.get(sidecar_index).unwrap_or(&empty_sidecar);
+        // another. The sidecar is positional with the `tirs` slice —
+        // `ownership::check` pushes exactly one entry per body — so a
+        // missing entry is a pipeline contract violation, not a case
+        // to paper over with an empty sidecar (compiler-emitted
+        // helpers like `__ryo_panic` are imported runtime calls and
+        // never appear in `tirs`).
+        let func_sidecar = sidecar.functions.get(sidecar_index).ok_or_else(|| {
+            format!(
+                "ownership sidecar has no entry for '{}' (index {} of {})",
+                pool.str(tir.name),
+                sidecar_index,
+                sidecar.functions.len()
+            )
+        })?;
 
         self.ctx.func.signature = self.build_signature(tir, pool);
 

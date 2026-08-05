@@ -426,6 +426,9 @@ fn unescape(inner: &str, token_span: Span, sink: &mut DiagSink) -> String {
     // chars at once.
     let mut i = 0;
     while i < inner.len() {
+        // `i` only ever advances by a full char (`len_utf8`) or a
+        // two-byte ASCII escape, so it is always a char boundary.
+        debug_assert!(inner.is_char_boundary(i));
         let ch = inner[i..].chars().next().unwrap();
         if ch == '\\' {
             match inner[i + 1..].chars().next() {
@@ -456,9 +459,14 @@ fn unescape(inner: &str, token_span: Span, sink: &mut DiagSink) -> String {
                 Some(c) => {
                     // Unknown escape: report it, then preserve the
                     // backslash and the following character verbatim.
-                    let start = token_span.start + 1 + i;
+                    // Saturating adds: the span is derived from
+                    // `token_span` and in-bounds offsets, so it cannot
+                    // overflow in practice, but a diagnostic span must
+                    // never panic the reporter.
+                    let start = token_span.start.saturating_add(1).saturating_add(i);
+                    let end = start.saturating_add(1).saturating_add(c.len_utf8());
                     sink.emit(Diag::error(
-                        SimpleSpan::new((), start..start + 1 + c.len_utf8()),
+                        SimpleSpan::new((), start..end),
                         DiagCode::UnknownEscape,
                         format!("unknown escape sequence '\\{}'", c),
                     ));

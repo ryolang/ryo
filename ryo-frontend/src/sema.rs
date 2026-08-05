@@ -306,13 +306,14 @@ impl<'a> Sema<'a> {
                 body.span,
                 "is a reserved builtin and cannot be used as a function name",
             );
-            self.signatures.insert(
-                body.name,
-                FunctionSig {
-                    params: body.params.iter().map(|p| p.ty).collect(),
-                    return_type: body.return_type,
-                },
-            );
+            // First definition wins, matching `name_to_decl` in
+            // `Sema::new`: the duplicate body is still analyzed (and
+            // its DuplicateDeclaration error already emitted), but it
+            // must not overwrite the signature calls bind against.
+            self.signatures.entry(body.name).or_insert(FunctionSig {
+                params: body.params.iter().map(|p| p.ty).collect(),
+                return_type: body.return_type,
+            });
         }
     }
 

@@ -28,30 +28,22 @@ use ryo_frontend::lexer::{self, Token};
 use ryo_frontend::parser::program_parser;
 use ryo_frontend::sema;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use target_lexicon::Triple;
 
 // Helper function to generate output filenames. Artifacts land next
 // to the source file, not in the CWD, so two same-stem sources in
 // different directories built from one CWD don't clobber each other.
-fn get_output_filenames(input_file: &Path) -> (String, String) {
-    let stem = input_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    let dir = input_file.parent().unwrap_or_else(|| Path::new(""));
+// Paths are built by extension replacement (never through `str`), so
+// non-UTF-8 source paths survive through object writing and linking.
+fn get_output_filenames(input_file: &Path) -> (PathBuf, PathBuf) {
+    let obj_filename = input_file.with_extension(if cfg!(windows) { "obj" } else { "o" });
+    // EXE_SUFFIX is ".exe" on Windows and "" elsewhere; with_extension
+    // takes the bare extension ("" clears it, leaving the stem).
+    let exe_filename =
+        input_file.with_extension(std::env::consts::EXE_SUFFIX.trim_start_matches('.'));
 
-    let obj_filename = dir.join(format!(
-        "{}.{}",
-        stem,
-        if cfg!(windows) { "obj" } else { "o" }
-    ));
-    let exe_filename = dir.join(format!("{}{}", stem, std::env::consts::EXE_SUFFIX));
-
-    (
-        obj_filename.to_string_lossy().into_owned(),
-        exe_filename.to_string_lossy().into_owned(),
-    )
+    (obj_filename, exe_filename)
 }
 
 pub fn lex_command(file: &Path) -> Result<(), CompilerError> {
@@ -588,7 +580,7 @@ pub fn build_file(file: &Path) -> Result<(), CompilerError> {
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
     fs::write(&obj_filename, obj_bytes).map_err(CompilerError::from)?;
-    println!("Generated object file: {}", obj_filename);
+    println!("Generated object file: {}", obj_filename.display());
 
     // Extract embedded runtime archive and link
     let runtime_path = runtime_lib::extract_runtime_to_temp()
@@ -608,7 +600,7 @@ pub fn build_file(file: &Path) -> Result<(), CompilerError> {
     }
     link_result?;
 
-    println!("Built: {}", exe_filename);
+    println!("Built: {}", exe_filename.display());
     Ok(())
 }
 
@@ -627,20 +619,14 @@ mod tests {
         let exe_suffix = std::env::consts::EXE_SUFFIX;
 
         let (obj, exe) = get_output_filenames(Path::new("some/dir/hello.ryo"));
-        assert_eq!(
-            Path::new(&obj),
-            Path::new("some/dir").join(format!("hello.{obj_ext}"))
-        );
-        assert_eq!(
-            Path::new(&exe),
-            Path::new("some/dir").join(format!("hello{exe_suffix}"))
-        );
+        assert_eq!(obj, PathBuf::from(format!("some/dir/hello.{obj_ext}")));
+        assert_eq!(exe, PathBuf::from(format!("some/dir/hello{exe_suffix}")));
 
         // No directory component: output stays relative to the CWD,
         // exactly as before.
         let (obj, exe) = get_output_filenames(Path::new("hello.ryo"));
-        assert_eq!(obj, format!("hello.{obj_ext}"));
-        assert_eq!(exe, format!("hello{exe_suffix}"));
+        assert_eq!(obj, PathBuf::from(format!("hello.{obj_ext}")));
+        assert_eq!(exe, PathBuf::from(format!("hello{exe_suffix}")));
     }
 
     #[test]

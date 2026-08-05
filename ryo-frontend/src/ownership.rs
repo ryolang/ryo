@@ -4092,16 +4092,11 @@ mod tests {
 
     /// Positional replacement for the old name-keyed sidecar lookup:
     /// find `name`'s index in `tirs` and take that entry.
-    fn take_function_sidecar(
-        sidecar: &mut OwnershipSidecar,
-        tirs: &[Tir],
-        name: StringId,
-    ) -> FunctionSidecar {
-        let idx = tirs
-            .iter()
-            .position(|t| t.name == name)
-            .expect("tir present for sidecar lookup");
-        std::mem::take(&mut sidecar.functions[idx])
+    /// Take the sidecar entry at `index`, positional with the `tirs`
+    /// slice handed to `check` — the same contract codegen relies on.
+    /// (Every test below checks a single function, so `index` is 0.)
+    fn take_function_sidecar(sidecar: &mut OwnershipSidecar, index: usize) -> FunctionSidecar {
+        std::mem::take(&mut sidecar.functions[index])
     }
 
     #[test]
@@ -4149,7 +4144,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         // W0001 fires.
         let diags = sink.into_diags();
@@ -4219,7 +4214,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar_map = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar_map, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar_map, 0);
 
         // No scheduled Free should target __ryo_panic's StrConst arg —
         // codegen's borrowed-scalar ABI never frees it.
@@ -4268,7 +4263,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         assert!(
             sidecar.free_schedule.iter().any(|fp| fp.target == lit),
@@ -4329,7 +4324,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         let frees: Vec<_> = sidecar
             .free_schedule
@@ -4391,7 +4386,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         // The only Free for `alloc` must be anchored on `print_call`,
         // and we must NOT have any Free anchored on `cont`.
@@ -4450,7 +4445,7 @@ mod tests {
         let tir = tb.finish(&[decl, lp]);
         let mut sink = DiagSink::new();
         let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sc, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sc, 0);
         // No Free for `lit` anchored on the continue jump:
         assert!(
             !sc.free_schedule
@@ -4487,7 +4482,7 @@ mod tests {
         let tir = tb.finish(&[decl, lp]);
         let mut sink = DiagSink::new();
         let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sc, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sc, 0);
         // Under the buggy compiler, `lit1` is defensively freed on `cont`:
         let freed_on_cont = sc
             .free_schedule
@@ -4541,7 +4536,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         assert!(
             sidecar
@@ -4596,7 +4591,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         // Exactly one Free for `alloc`, anchored on `print_call` (the
         // last-use), not on `brk`.
@@ -4664,7 +4659,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         // Two Frees expected: one anchored on s_var (the Var read in
         // the then-arm — collect_last_uses anchors on Var reads, not
@@ -4726,7 +4721,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         assert!(
             sidecar
@@ -4768,7 +4763,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         let diags = sink.into_diags();
         assert!(
@@ -4822,7 +4817,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
         assert!(sink.is_empty(), "expected no diagnostics");
         assert_eq!(sidecar.free_schedule.len(), 1);
         assert_eq!(sidecar.free_schedule[0].target, lit);
@@ -4861,7 +4856,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
         assert!(sink.is_empty(), "expected no diagnostics");
 
         // Reassign frees l1 (old owner) keyed on the Assign inst.
@@ -4915,7 +4910,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
         assert!(sink.is_empty());
 
         // Three Frees: la, lb, cat. Anchored after consumers (la/lb on
@@ -4962,7 +4957,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
         assert!(sink.is_empty(), "expected no diagnostics");
 
         // The Free for "Alice" must come from free_on_reassign[assign],
@@ -5065,7 +5060,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         let max = sidecar
             .free_schedule
@@ -5192,7 +5187,7 @@ mod tests {
         let tir = tb.finish(&[ret]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), consume);
+        let sc = take_function_sidecar(&mut sidecar, 0);
 
         let virtual_ref = TirRef::param(0);
         let fp = sc
@@ -5236,7 +5231,7 @@ mod tests {
         let tir = tb.finish(&[call1, call2]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), f);
+        let sc = take_function_sidecar(&mut sidecar, 0);
 
         let frees: Vec<_> = sc
             .free_schedule
@@ -5299,7 +5294,7 @@ mod tests {
         let tir = tb.finish(&[while_stmt]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), f);
+        let sc = take_function_sidecar(&mut sidecar, 0);
 
         let frees: Vec<_> = sc
             .free_schedule
@@ -5360,7 +5355,7 @@ mod tests {
         let tir = tb.finish(&[vdecl, call1, call2]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), f);
+        let sc = take_function_sidecar(&mut sidecar, 0);
 
         let frees: Vec<_> = sc
             .free_schedule
@@ -5411,7 +5406,7 @@ mod tests {
         let tir = tb.finish(&[call]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), f);
+        let sc = take_function_sidecar(&mut sidecar, 0);
 
         let frees: Vec<_> = sc
             .free_schedule
@@ -5477,7 +5472,7 @@ mod tests {
         let tir = tb.finish(&[if_stmt]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), consume_cond);
+        let sc = take_function_sidecar(&mut sidecar, 0);
 
         let virtual_ref = TirRef::param(0);
         // We expect a branch-gated free for the parameter in the else branch!
@@ -5518,7 +5513,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
 
         // temp_a (lit_a) is released via `free_on_reassign` (codegen lowers
         // its destructor at the Assign), so it must NOT also appear in
@@ -5579,7 +5574,7 @@ mod tests {
         let tir = tb.finish(&[decl, call]);
         let mut sink = DiagSink::new();
         let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sc, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sc, 0);
         let lit_frees = sc
             .free_schedule
             .iter()
@@ -5625,7 +5620,7 @@ mod tests {
         let tir = tb.finish(&[decl, lp]);
         let mut sink = DiagSink::new();
         let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sc, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sc, 0);
         // body_lit must be scheduled exactly once (dead-store pass owns
         // it; anon-temp skips it as a named init). The dynamic
         // current_owner.values() classifier would schedule it twice
@@ -5774,7 +5769,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
 
         // (a) Assert no next_branch_id collision in sidecar.if_branches
         let mut ids = HashSet::new();
@@ -6368,7 +6363,7 @@ mod tests {
             !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
             "inout param reassignment must not warn dead-store — the value escapes via write-back; got {diags:?}"
         );
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), set);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert_eq!(
             sc.free_on_reassign.get(&asg),
             Some(&TirRef::param(0)),
@@ -6422,7 +6417,7 @@ mod tests {
             !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
             "inout param reassignment escapes — no dead-store warning, even branch-divergent; got {diags:?}"
         );
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), g);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sc.free_on_reassign.contains_key(&asg),
             "the taken arm must drop the incoming buffer; free_on_reassign = {:?}",
@@ -6558,7 +6553,7 @@ mod tests {
             diags.is_empty(),
             "inout call on a str local must produce no diagnostics; got {diags:?}"
         );
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         let frees: Vec<_> = sc
             .free_schedule
             .iter()
@@ -6639,7 +6634,7 @@ mod tests {
             !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
             "s is read after the loop — no dead-store warning may survive the loop merge; got {diags:?}"
         );
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert_eq!(
             sc.free_schedule
                 .iter()
@@ -6685,7 +6680,7 @@ mod tests {
             !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
             "s is read after the if — no dead-store warning; got {diags:?}"
         );
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sc.free_on_reassign.contains_key(&asg),
             "the taken arm must drop the pre-reassign buffer; free_on_reassign = {:?}",
@@ -6732,7 +6727,7 @@ mod tests {
         let tir = tb.finish(&[decl, if_s]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         let drops: Vec<_> = sc
             .conditional_dead_drops
             .iter()
@@ -6777,7 +6772,7 @@ mod tests {
         let tir = tb.finish(&[decl, if_s]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sc.conditional_dead_drops.is_empty(),
             "all arms reseated — no untouched path, no ConditionalDeadDrop; got {:?}",
@@ -6812,7 +6807,7 @@ mod tests {
         let tir = tb.finish(&[decl, wl]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sc.free_schedule
                 .iter()
@@ -6854,7 +6849,7 @@ mod tests {
         let tir = tb.finish(&[decl, wl]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sc.free_schedule
                 .iter()
@@ -6894,7 +6889,7 @@ mod tests {
         let tir = tb.finish(&[wl]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sc.free_schedule
                 .iter()
@@ -6939,7 +6934,7 @@ mod tests {
         let tir = tb.finish(&[decl, fr]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sc.free_schedule
                 .iter()
@@ -6981,7 +6976,7 @@ mod tests {
         let tir = tb.finish(&[decl, if_s]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sc.free_schedule
                 .iter()
@@ -7019,7 +7014,7 @@ mod tests {
         let tir = tb.finish(&[decl, if_s]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sc.free_schedule
                 .iter()
@@ -7049,7 +7044,7 @@ mod tests {
         let tir = tb.finish(&[decl, ret]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), f);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             !sc.free_schedule
                 .iter()
@@ -7082,7 +7077,7 @@ mod tests {
         let tir = tb.finish(&[decl, if_s]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             !sc.free_schedule
                 .iter()
@@ -7124,7 +7119,7 @@ mod tests {
         let tir = tb.finish(&[if_s]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), f);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sc.free_schedule
                 .iter()
@@ -7161,7 +7156,7 @@ mod tests {
         let tir = tb.finish(&[fr]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             !sc.free_schedule.iter().any(|fp| fp.after == fr),
             "a loop-local temp must keep its per-iteration Free, not move to the loop anchor; schedule = {:?}",
@@ -7202,7 +7197,7 @@ mod tests {
         let tir = tb.finish(&[decl, if_s]);
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         let else_id = sc
             .if_branches
             .get(&if_s)
@@ -7264,7 +7259,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
         assert!(sink.is_empty(), "expected no diagnostics");
 
         // The FreePoint targeting s's owner fires after the print(v)
@@ -8502,7 +8497,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sidecar = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sidecar = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sink.is_empty(),
             "expected no diagnostics (no spurious SourceProjected)"
@@ -8656,7 +8651,7 @@ mod tests {
         let run = |tir: &Tir| {
             let mut sink = DiagSink::new();
             let mut sidecar = check(std::slice::from_ref(tir), &pool, &mut sink);
-            let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(tir), main);
+            let sc = take_function_sidecar(&mut sidecar, 0);
             sc.free_schedule
                 .iter()
                 .map(|fp| (fp.after.raw(), fp.target.raw(), fp.branch.map(|b| b.0)))
@@ -9206,7 +9201,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sc, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sc, 0);
 
         // Precondition: the loop actually diverged — the re-walk sees
         // `consume(m)` with m already Moved and reports UAM once. If
@@ -9361,7 +9356,7 @@ mod tests {
 
         let mut sink = DiagSink::new();
         let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
-        let sc = take_function_sidecar(&mut sidecar, std::slice::from_ref(&tir), main);
+        let sc = take_function_sidecar(&mut sidecar, 0);
         assert!(
             sink.is_empty(),
             "expected no diagnostics; got: {:?}",

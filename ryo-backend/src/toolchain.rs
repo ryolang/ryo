@@ -117,7 +117,13 @@ fn download_zig() -> Result<(), CompilerError> {
         extract_zip(&zip_path, &temp_path).inspect_err(|_| {
             fs::remove_dir_all(&temp_path).ok();
         })?;
-        fs::remove_file(&zip_path).ok();
+        // Deletion must succeed before the fallback rename below can
+        // run: a leftover staged zip would be carried into the
+        // toolchain dir, so a removal failure aborts the install.
+        fs::remove_file(&zip_path).map_err(|e| {
+            fs::remove_dir_all(&temp_path).ok();
+            CompilerError::ToolchainError(format!("Failed to remove staged zip: {e}"))
+        })?;
     } else {
         let decompressor = XzDecoder::new(response.into_body().into_reader());
         let mut archive = tar::Archive::new(decompressor);

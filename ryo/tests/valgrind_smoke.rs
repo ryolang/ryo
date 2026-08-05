@@ -49,14 +49,16 @@ fn require_valgrind(name: &str) -> bool {
         );
         return false;
     }
+    // Only the exact value "1" opts out: an empty, "0", or "false"
+    // value must not silently skip the suite.
     assert!(
-        std::env::var_os("RYO_SKIP_VALGRIND").is_some(),
+        std::env::var("RYO_SKIP_VALGRIND").as_deref() == Ok("1"),
         "valgrind is not installed; these smoke tests exist because LSan \
          misses leaks from Cranelift-emitted code, so skipping them \
          silently would make a green run meaningless. Install valgrind, \
          or set RYO_SKIP_VALGRIND=1 to skip explicitly."
     );
-    eprintln!("skipping {name}: valgrind not installed (RYO_SKIP_VALGRIND is set)");
+    eprintln!("skipping {name}: valgrind not installed (RYO_SKIP_VALGRIND=1)");
     false
 }
 
