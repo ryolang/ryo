@@ -74,6 +74,10 @@ pub fn generate(program: &ast::Program, pool: &mut InternPool, sink: &mut DiagSi
     for stmt in &program.statements {
         match &stmt.kind {
             ast::StmtKind::FunctionDef(f) => func_defs.push(f),
+            // Parser-recovery placeholder: already diagnosed at the
+            // parse stage, and not a "top-level statement" for the
+            // explicit-main check.
+            ast::StmtKind::Error => {}
             _ => top_level.push(stmt),
         }
     }
@@ -364,6 +368,10 @@ fn gen_stmt(
             let r = b.continue_stmt(stmt.span);
             out.push(r);
         }
+        // Unparseable statement recovered by the parser. The parse
+        // diagnostic was already emitted; lower it to nothing so the
+        // rest of the program still reaches sema.
+        ast::StmtKind::Error => {}
     }
 }
 

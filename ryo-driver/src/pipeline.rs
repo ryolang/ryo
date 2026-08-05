@@ -89,7 +89,8 @@ pub fn parse_command(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
-    let program = parse_source(&input, &mut pool, &name)?;
+    let (program, diags) = parse_source(&input, &mut pool, &name)?;
+    finalize_diags(diags, &input, &name)?;
     display_ast(&program, &pool);
     Ok(())
 }
@@ -109,7 +110,7 @@ fn parse_source(
     input: &str,
     pool: &mut InternPool,
     source_name: &str,
-) -> Result<ast::Program, CompilerError> {
+) -> Result<(ast::Program, Vec<Diag>), CompilerError> {
     // `lexer::lex` runs logos + indent processing + string and
     // integer interning in a single pass and never fails hard: it
     // emits structured `Diag`s into the sink and recovers so the
@@ -132,28 +133,24 @@ fn parse_source(
     // pull `(Token, Span)` slices into a parser-friendly shape.
     let token_stream = tokens[..].split_token_span((0..input.len()).into());
 
-    match program_parser().parse(token_stream).into_result() {
-        Ok(program) => {
-            // Parse succeeded, but the lexer may still have reported
-            // errors (invalid character, bad literal, unknown escape)
-            // that recovery let us parse past. Only a clean sink
-            // yields `Ok`.
-            if sink.has_errors() {
-                Err(fail_with_diags(sink.into_diags(), input, source_name))
-            } else {
-                Ok(program)
-            }
-        }
-        Err(errs) => {
-            for e in &errs {
-                sink.emit(Diag::error(
-                    chumsky::span::SimpleSpan::new((), e.span().start..e.span().end),
-                    DiagCode::ParseError,
-                    rich_error_message(e, pool),
-                ));
-            }
-            Err(fail_with_diags(sink.into_diags(), input, source_name))
-        }
+    // R10: the parser recovers at statement boundaries, so a syntax
+    // error yields a diagnostic AND a partial program (with `Error`
+    // placeholder nodes). Callers thread the diagnostics into the
+    // middle-end sink and keep analyzing, so one bad statement never
+    // suppresses semantic diagnostics elsewhere in the file (R9).
+    let (program, errs) = program_parser().parse(token_stream).into_output_errors();
+    for e in &errs {
+        sink.emit(Diag::error(
+            chumsky::span::SimpleSpan::new((), e.span().start..e.span().end),
+            DiagCode::ParseError,
+            rich_error_message(e, pool),
+        ));
+    }
+    match program {
+        Some(program) => Ok((program, sink.into_diags())),
+        // Unrecoverable parse (no output even after recovery — e.g.
+        // trailing garbage that swallows the end-of-input marker).
+        None => Err(fail_with_diags(sink.into_diags(), input, source_name)),
     }
 }
 
@@ -355,11 +352,18 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
 
     let want = EmitSet::from_args(emit);
-    let program = parse_source(&input, &mut pool, &name)?;
+    let (program, parse_diags) = parse_source(&input, &mut pool, &name)?;
 
     if want.ast {
         display_ast(&program, &pool);
         println!();
+    }
+
+    // Lex/parse diagnostics accumulate with the middle-end's so a
+    // recovered syntax error never hides UIR/TIR-stage problems.
+    let mut sink = DiagSink::new();
+    for d in parse_diags {
+        sink.emit(d);
     }
 
     // UIR / TIR / CLIF gating. We always *run* astgen if any of
@@ -367,10 +371,9 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // if CLIF. Each stage's print is independent.
     let need_uir = want.uir || want.tir || want.clif;
     if !need_uir {
-        return Ok(());
+        return finalize_diags(sink.into_diags(), &input, &name);
     }
 
-    let mut sink = DiagSink::new();
     let uir = astgen::generate(&program, &mut pool, &mut sink);
 
     if want.uir {
@@ -498,8 +501,14 @@ fn lower_and_analyze(
     input: &str,
     source_name: &str,
     file_path: &Path,
+    parse_diags: Vec<Diag>,
 ) -> Result<(Vec<Tir>, ryo_core::ownership::OwnershipSidecar), CompilerError> {
     let mut sink = DiagSink::new();
+    // Lex/parse diagnostics come first so the final render preserves
+    // pipeline order.
+    for d in parse_diags {
+        sink.emit(d);
+    }
     let uir = astgen::generate(program, pool, &mut sink);
     // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
@@ -536,7 +545,7 @@ pub fn run_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
-    let program = parse_source(&input, &mut pool, &name)?;
+    let (program, parse_diags) = parse_source(&input, &mut pool, &name)?;
 
     println!("[Input Source]");
     println!("{}", input);
@@ -544,7 +553,7 @@ pub fn run_file(file: &Path) -> Result<(), CompilerError> {
     display_ast(&program, &pool);
     println!();
 
-    let (tirs, sidecar) = lower_and_analyze(&program, &mut pool, &input, &name, file)?;
+    let (tirs, sidecar) = lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
 
     println!("[Codegen]");
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
@@ -564,8 +573,8 @@ pub fn build_file(file: &Path) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
-    let program = parse_source(&input, &mut pool, &name)?;
-    let (tirs, sidecar) = lower_and_analyze(&program, &mut pool, &input, &name, file)?;
+    let (program, parse_diags) = parse_source(&input, &mut pool, &name)?;
+    let (tirs, sidecar) = lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 
@@ -738,10 +747,8 @@ mod tests {
         // must re-render them through the pool so the user sees the
         // actual identifier text.
         let mut pool = InternPool::new();
-        let err = parse_source("x foo = 1", &mut pool, "<test>").expect_err("parse should fail");
-        let CompilerError::Diagnostics(diags) = err else {
-            panic!("expected Diagnostics error");
-        };
+        let (_program, diags) = parse_source("x foo = 1", &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
         assert!(!diags.is_empty());
         let msg = &diags[0].message;
         assert!(
@@ -751,6 +758,66 @@ mod tests {
         assert!(
             !msg.contains("<id#"),
             "message must not leak opaque handle ids: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_source_recovers_and_returns_partial_program() {
+        // R10: one syntax error must not discard the rest of the
+        // file. The parser synchronizes at the next statement
+        // boundary, reports the error, and yields a partial AST
+        // with an `Error` placeholder node.
+        let mut pool = InternPool::new();
+        let (program, diags) = parse_source("x = 1\ny = = 2\nz = 3\n", &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        assert_eq!(
+            diags
+                .iter()
+                .filter(|d| d.code == DiagCode::ParseError)
+                .count(),
+            1,
+            "expected exactly one parse diagnostic: {diags:?}"
+        );
+        assert_eq!(program.statements.len(), 3);
+        assert!(matches!(
+            program.statements[0].kind,
+            ast::StmtKind::VarDecl(_)
+        ));
+        assert!(matches!(program.statements[1].kind, ast::StmtKind::Error));
+        assert!(matches!(
+            program.statements[2].kind,
+            ast::StmtKind::VarDecl(_)
+        ));
+    }
+
+    #[test]
+    fn parse_and_sema_diagnostics_co_surface() {
+        // R9 + R10: a syntax error in one statement must not suppress
+        // semantic diagnostics elsewhere in the file — both surface
+        // in a single run.
+        let mut pool = InternPool::new();
+        let input = "fn main():\n\tx = = 1\n\ty: int = \"hi\"\n";
+        let (program, parse_diags) =
+            parse_source(input, &mut pool, "<test>").expect("recovery should succeed");
+        let err = lower_and_analyze(
+            &program,
+            &mut pool,
+            input,
+            "<test>",
+            Path::new("<test>"),
+            parse_diags,
+        )
+        .expect_err("both a parse error and a type error must fail the compile");
+        let CompilerError::Diagnostics(diags) = err else {
+            panic!("expected Diagnostics error");
+        };
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::ParseError),
+            "parse diagnostic must survive: {diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::TypeMismatch),
+            "sema diagnostic must co-surface: {diags:?}"
         );
     }
 }

@@ -14,16 +14,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 ---
 
-## 🔴 Blocking
-
-### I-125 — Parser has zero error recovery; one syntax error discards the whole AST
-
-**Files:** `ryo-frontend/src/parser.rs` (`program_parser` :39-65), `ryo-driver/src/pipeline.rs` (`parse_source` :127-143), `ryo-core/src/ast.rs`
-**Summary:** R10 requires the parser to emit a diagnostic, synchronize at the next statement/declaration boundary, and produce a partial AST with `Error` nodes. None of that exists: no `recover_with`/`skip_until` combinator anywhere in the parser, no `Error` node kind in the AST, and `parse_source` calls `.into_result()` and returns early on `Err` — so a single syntax error suppresses *all* semantic diagnostics in the file (one bad function stops analysis of the rest, violating R9's accumulation rule at the parse stage). This blocks the IDE/REPL use cases R10 exists for, and it caps diagnostic quality for every later milestone.
-**Resolution:** Add an `ExprKind::Error` / `StmtKind::Error` (or a dedicated `Error` literal node) to the AST, thread it through astgen/sema as error-typed no-ops (sema already has error-typed `Unreachable` slots to model from), and add chumsky `recover_with(skip_until(...))` synchronization at statement and declaration boundaries. Golden-test multi-error files. Natural sequencing: after I-014's lexer `DiagSink` migration so lex and parse errors co-surface through one sink (cf. I-030's `MapExtra::emit` note).
-
----
-
 ## 🟡 Correctness / Hygiene
 
 ### I-032 — IfStmt is statement-only, no expression-level conditional
