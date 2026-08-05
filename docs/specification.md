@@ -1412,7 +1412,7 @@ fn setup_server():
 *   `shared[T]` is **explicit opt-in** — the developer chooses shared ownership at the type level, and the type signature tells a reviewer "this data is shared."
 *   `shared[T]` is a **normal owned type** — it can be stored in struct fields, returned from functions, and moved between scopes. The inner `T` is accessed through the container.
 *   Assignment retains, drop releases; the user never writes `.clone()`. Most retain/release pairs are elided by the compiler before codegen.
-*   **Sharing freezes.** Access through `shared[T]` is **read-only**: constructing `shared(x)` consumes the (possibly `mut`-built) owned value and ends all mutation of it — the moment Pony spells `trn → val`. Shared mutation is possible only through interior-mutability wrappers: `shared[mutex[T]]` or `shared[rwlock[T]]` (§9.2.4). This makes a plain `shared[T]` deeply immutable and therefore trivially safe to send across tasks: no receiver can mutate it, views of it are immutable by the P-rules (§4.4), and there is no hidden interior mutability. As a consequence, graphs of plain `shared[T]` values are **acyclic by construction** — a shared-immutable value can only reference *older* shared values, with no mutation to close a loop — so the cycle-leak caveat above applies only to graphs built with the mutable wrappers.
+*   **Sharing freezes.** Access through `shared[T]` is **read-only**: constructing `shared(x)` consumes the (possibly `mut`-built) owned value and ends all mutation of it — the moment Pony spells `trn → val`. Shared mutation is possible only through interior-mutability wrappers: `shared[mutex[T]]` or `shared[rwlock[T]]` (§9.2.4). This makes a plain `shared[T]` deeply immutable and therefore — provided `T` is composed of safe Ryo types (the `unsafe` and FFI exceptions of §14.5.6 aside) — trivially safe to send across tasks: no receiver can mutate it, views of it are immutable by the P-rules (§4.4), and there is no hidden interior mutability. As a consequence, graphs of plain `shared[T]` values are **acyclic by construction** — a shared-immutable value can only reference *older* shared values, with no mutation to close a loop — so the cycle-leak caveat above applies only to graphs built with the mutable wrappers.
 
 *(Rationale: In Ryo's target domains, `shared[T]` is common in server code — shared DB pools, shared configuration, shared caches. It is not an "escape hatch" to be avoided; it is the idiomatic tool for shared state. Swift's model is the closest published precedent for "refcounting that's actually fast in application code," and it pairs naturally with Ryo's no-explicit-lifetimes design.)*
 
@@ -2748,13 +2748,13 @@ Tasks are Ryo's lightweight, non-OS-thread concurrency unit (like Go's goroutine
 | :--- | :--- | :--- | :--- |
 | **Run** | `task.run: ...` | `fn(f: fn() -> T) -> future[T]` | Executes `f` on a green thread. Returns a **`future[T]`** to retrieve the result. **Dropping the future cancels the task.** |
 | **Scope** | `task.scope: ...` | `fn` | **Structured Concurrency**. Creates a scope where all child tasks must complete before the scope exits. **Recommended default.** |
-| **Spawn Detached** | `task.spawn_detached: ...` | `fn(f: fn() -> void) -> handle[T]` | **Fire-and-forget (explicit opt-out)**. Returns a `handle[T]` — an identity token, not a future (see below). Errors are logged to stderr. Cancelled on process exit. |
+| **Spawn Detached** | `task.spawn_detached: ...` | `fn(f: fn() -> T) -> handle[T]` | **Fire-and-forget (explicit opt-out)**. Returns a `handle[T]` — an identity token, not a future (see below). The task's result is discarded; errors are logged to stderr. Cancelled on process exit. |
 | **Await** | `fut.await` | **`future[T]`** | **Suspends the current green thread** until the value is ready. Does NOT block the OS thread. |
 
 **Ownership Safety:** Task closures implicitly capture by **move** — the compiler enforces this because tasks may outlive the spawning scope (see §6.2.2). To share data across tasks, use `shared[T]` — assignment retains the handle (§5.6); there is no explicit `.clone()`. **Exception (scoped task borrows, final spec §7, D5):** inside a `task.scope` body — structured concurrency, where the scope joins all children before exiting — child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as P2, §4.4) and that no capture escapes the scope. Projections (`strview`, `slice[T]`, `bytesview`) may be captured too: the scope join is lexically inside the defining function, so the view still cannot escape it — the owner's freeze extends to the end of the `task.scope` block. `task.run` and `task.spawn_detached` are unchanged: implicit move capture, enforced.
-**FFI Warning:** Calling blocking C functions (like `sleep`) will block the underlying OS thread. Use `#[blocking]` attribute on FFI imports to hint the runtime to spawn a dedicated thread.
+**FFI Warning:** Calling blocking C functions (like `sleep`) will block the underlying OS thread. Use the `#[blocking]` attribute on FFI imports so the runtime routes the call through its blocking pool; a blocking C function still occupies blocking execution capacity for the duration of the call.
 
-**Task Handles (`handle[T]`):** Detached tasks outlive any scope, so a `future[T]` cannot represent them — dropping a future cancels the task, and identity must not imply ownership. `handle[T]` is an **identity-only token**: sendable across tasks, comparable for equality, with **no dereference** — all interaction with the task happens through channels. Dropping a `Handle` does **not** cancel the task; a `Handle` keeps no task alive either (detached tasks are cancelled on process exit regardless). Handles are how supervisors, registries, watchdogs, and cancellation tokens refer to long-lived tasks. FFI pointers (`FILE*`, window handles, connection handles) follow the same shape. *(Rationale: Pony's `tag` capability is the proven precedent — identity without access is sufficient for supervision and never entangles lifetimes.)*
+**Task Handles (`handle[T]`):** Detached tasks outlive any scope, so a `future[T]` cannot represent them — dropping a future cancels the task, and identity must not imply ownership. `handle[T]` is an **identity-only token**: sendable across tasks, comparable for equality, with **no dereference** — all interaction with the task happens through channels. Dropping a `handle[T]` does **not** cancel the task; a `handle[T]` keeps no task alive either (detached tasks are cancelled on process exit regardless). Handles are how supervisors, registries, watchdogs, and cancellation tokens refer to long-lived tasks. FFI pointers (`FILE*`, window handles, connection handles) follow the same shape. *(Rationale: Pony's `tag` capability is the proven precedent — identity without access is sufficient for supervision and never entangles lifetimes.)*
 
 #### 9.2.2 Channels (Communication and Synchronization)
 
@@ -2971,7 +2971,7 @@ fn main():
 		io.println("Background logging task")
 	
 	io.println("Main continues immediately")
-	# Note: detached tasks are cancelled when main() returns
+	# Note: detached tasks are cancelled on process exit — main() returning ends the process
 ```
 
 #### Non-Deterministic Waiting with `select`
@@ -3765,14 +3765,14 @@ Adding parallelism (M:N green threads across multiple OS threads) has **specific
 
 *Problem:* C function calls can block OS threads, starving the green thread scheduler.
 
-*Solution:* `#[blocking]` attribute signals runtime to spawn new OS thread:
+*Solution:* `#[blocking]` attribute routes the call through the runtime's blocking pool, off the green-thread scheduler threads:
 
 ```ryo
 #[blocking]
 extern "C" fn sqlite_exec(db: *void, sql: *c_char) -> int
 
 fn query_db(sql: str):
-	# Runtime detects #[blocking], runs on detached OS thread
+	# Runtime detects #[blocking], runs on a blocking-pool thread
 	result = sqlite_exec(db_handle, sql.as_ptr())
 ```
 
@@ -3806,7 +3806,7 @@ result = worker.await catch as e:
 
 **6. Send Constraint (Explicit Predicate)**
 
-*Policy:* A value may cross a task boundary in exactly three ways:
+*Policy:* In safe code outside a `task.scope` body, a value may cross a task boundary in exactly three ways:
 
 1. **Owned move** — an owned `T` moves into the task closure or channel; the sender loses access, so uniqueness is preserved (Pony's `iso`).
 2. **`shared[T]` handle** — read-only by the sharing-freezes rule (§5.6), or internally synchronized (`shared[mutex[T]]`, `shared[rwlock[T]]`); the ARC refcount is atomic (Pony's `val`).

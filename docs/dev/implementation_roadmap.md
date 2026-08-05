@@ -2693,7 +2693,7 @@ select:
 
 Adding M:N threading has **specification impacts** that require changes to earlier milestones:
 
-**2026-08 amendments folded in:** sharing-freezes rule — access through `shared[T]` is read-only, mutation only via `shared[mutex[T]]`/`shared[rwlock[T]]` (spec §5.6); `handle[T]` for detached-task identity (§9.2.1); send constraint restated as an explicit 3-member predicate — owned move, `shared[T]` handle, `handle[T]` (§14.5.6 #6).
+**2026-08 amendments folded in:** sharing-freezes rule — access through `shared[T]` is read-only, mutation only via `shared[mutex[T]]`/`shared[rwlock[T]]` (spec §5.6); `handle[T]` for detached-task identity (§9.2.1); send constraint restated as an explicit 3-member predicate for safe code outside `task.scope` — owned move, `shared[T]` handle, `handle[T]` — with scoped views permitted only inside `task.scope` and `unsafe`/FFI crossings as explicit exceptions (§14.5.6 #6).
 
 **A. `Shared[T]` Must Be Atomic Reference Counted (ARC)**
 
