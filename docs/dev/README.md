@@ -44,8 +44,7 @@ This directory contains implementation notes, architectural decisions, and desig
 
 | File | Content | Next Action |
 |---|---|---|
-| [concurrency.md](concurrency.md) | v0.4 concurrency implementation plan (corosensei green threads, structured concurrency) | **Implement** at the concurrency milestone (v0.4) — then move model to spec |
-| [concurrency_loom_kt.md](concurrency_loom_kt.md) | Alternative concurrency proposal: Loom-inspired FFI + Kotlin-borrowed patterns | **Decide** against `concurrency.md`, then delete the loser |
+| [concurrency.md](concurrency.md) | v0.4 concurrency implementation plan (corosensei green threads, structured concurrency, system-coroutine FFI router, dispatchers — the Loom/Kotlin proposal is adopted and merged in) | **Implement** at the concurrency milestone (v0.4) — then move model to spec |
 
 ### Ecosystem & Tooling
 

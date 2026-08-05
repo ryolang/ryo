@@ -6,28 +6,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 ---
 
-## Fix Order for m8.4.2
-
-Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
-
-1. **I-020** — `inst_values` memoizer is cross-block: stale values across control flow.
-2. **I-082** — `never`-returning call path skips inout write-back.
-3. **I-075** — duplicate function definitions silently accepted.
-4. **I-124** — lexer rejects CRLF line endings (default on Windows editors).
-5. **I-084** — `ryo build` writes artifacts to the CWD; same-stem sources collide.
-6. **I-106** — decode paths panic instead of reporting an internal error.
-7. **I-103** — diagnostics print twice on failure; `emit_one` can panic mid-report.
-8. **I-054** — `parse_source` / lex error paths bypass `finalize_diags`.
-9. **I-085** — valgrind smoke tests silently pass when valgrind is absent.
-10. **I-014 + I-015 + I-016 + I-077 + I-078** — lexer diagnostic hygiene (fold together).
-11. **I-017** — `i64::MIN` integer literal is unrepresentable.
-12. **I-088** — ownership sidecar keyed by function name.
-13. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
-
-Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
-
----
-
 ## Severity Legend
 
 - 🔴 **Blocking** — prevents implementing roadmap features as currently designed.
@@ -47,36 +25,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 ---
 
 ## 🟡 Correctness / Hygiene
-
-### I-014 — Lexer errors bypass `DiagSink`
-
-**Files:** `ryo-frontend/src/lexer.rs` (`LexError`), `ryo-driver/src/pipeline.rs` (`parse_source`, `display_tokens`)
-**Summary:** Phase 1 of `docs/dev/pipeline_alignment.md` routes parse / ast_lower / sema errors through a `DiagSink` so analysis can continue past the first failure. The lexer was on a parallel branch at the time and still uses a single-shot `Result<_, LexError>`. The driver wraps a `LexError` into a one-element `Vec<Diag>` at the boundary, but problems like "invalid integer literal" or "unknown escape sequence" can't co-surface with a sema error in the same run.
-**Resolution:** Thread `&mut DiagSink` into `lexer::lex` and `intern_token`. Replace the early return on the first lex error with `sink.emit(...)` followed by a recovery token (e.g. `Token::Error` for the bad span) so the parser still sees a well-formed stream. Eliminate `LexError` once the migration is complete.
-
-### I-015 — Unknown escape sequences silently preserved
-
-**Files:** `ryo-frontend/src/lexer.rs` (`unescape`)
-**Summary:** When `unescape` encounters `\q` (or any other character not in the small known table) it preserves the backslash and the character verbatim instead of reporting a diagnostic. The user gets no feedback that the escape sequence is unrecognised, and the runtime string contains the literal `\q` bytes. Tracked as a TODO at the function definition.
-**Resolution:** Folded in with I-014: once `lexer::lex` has a `&mut DiagSink`, the `Some(c)` arm of `unescape` emits a structured `Diag::error(span, DiagCode::UnknownEscape, …)` and proceeds with the raw character (or skips both bytes — TBD by spec discussion).
-
-### I-016 — Indent processor errors carry no span
-
-**Files:** `ryo-frontend/src/indent.rs` (`process`), `ryo-frontend/src/lexer.rs` (`lex` fallback)
-**Summary:** `indent::process` returns `Result<_, String>` with a free-form message and no source location. The driver currently fakes a span by reusing the last raw token's span. That's "near" the offending newline but not on it; for "spaces are not allowed" / "dedent doesn't match an outer level" the user wants the squiggle on the indentation itself.
-**Resolution:** Have `indent::process` return a richer error type carrying the offending span (the `Newline(s)` token whose whitespace failed validation, or the `Dedent` insertion point) and propagate it into `LexError.span`. The TODO at the lexer fallback covers this from the consumer side.
-
-### I-017 — `i64::MIN` integer literal is unrepresentable
-
-**Files:** `ryo-frontend/src/lexer.rs` (`RawToken::Int` arm)
-**Summary:** Integer literals are parsed as `i64` at lex time, then sign is applied later via the unary `-` operator. That makes `-9_223_372_036_854_775_808` (i.e. `i64::MIN`) unspellable: the positive form `9_223_372_036_854_775_808` overflows `i64`. Hits the negation-overflow corner Rust itself fixed via `IntLit` / `IntLitMin` token-level distinction.
-**Resolution:** Either parse as `u64` and resolve negation+overflow at sema time, or add an `IntLitMin` token variant that the parser recognises only as the operand of unary `-`. Coordinate with the broader numeric-tower design before picking either.
-
-### I-020 — `inst_values` memoizer is cross-block
-
-**Files:** `ryo-backend/src/codegen.rs` (`inst_values: HashMap<TirRef, Value>`)
-**Summary:** Codegen lazily memoizes Cranelift `Value`s keyed by `TirRef` in a single flat HashMap shared across all basic blocks within a function. This is sound today because: (a) TIR instructions are unique per use (no shared sub-expressions), (b) BoolAnd/BoolOr use block params (phi nodes) so the memoized result is the merge-block param which dominates downstream uses, and (c) IfStmt is statement-level so no values flow out of branches. However, if future features introduce expression-level if (ternary) or shared sub-expressions across blocks, the memoizer will produce Cranelift dominator errors.
-**Resolution:** Scope the memoizer to per-block when expression-level control flow lands. For now the cross-block cache is correct given the TIR invariants.
 
 ### I-032 — IfStmt is statement-only, no expression-level conditional
 
@@ -106,7 +54,7 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 
 **Files:** `ryo/src/main.rs`, `ryo-driver/src/pipeline.rs`
 **Summary:** `lex`, `parse`, `ir` are separate subcommands. Each stage already exists and is wired up; users would benefit from a single `ryo build --emit=tokens|ast|hir|clif|obj` surface (mirroring `zig build-exe -femit-…`).
-**Resolution:** Unify under one subcommand with an `--emit` flag. Keep current subcommands as deprecated aliases for one release.
+**Resolution:** Unify under one subcommand with an `--emit` flag.
 
 ### I-018 — `TypeId` is a newtype, not a typed enum
 
@@ -142,7 +90,7 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 
 **Files:** `ryo-frontend/src/sema.rs` (`check_binary_op` mixed-type branch)
 **Summary:** `1 + 2.0` is a hard `TypeMismatch` error; users must spell every conversion explicitly, but there are no conversion intrinsics yet either — `int(x)` and `float(x)` don't exist. The result is that mixed numeric arithmetic is currently *unspellable*. Acceptable today (no programs need it), but blocks any real numeric workload.
-**Resolution:** Land conversion intrinsics first (`int(float) -> int`, `float(int) -> float`, with Cranelift `fcvt_to_sint_sat` / `fcvt_from_sint`). Decide at that point whether to keep mixed arithmetic as an error (Zig stance) or introduce limited widening (e.g. `int + float -> float` only when the int is a literal, Swift stance). Both are coherent; pick one and document.
+**Resolution:** Land conversion intrinsics first (`int(float) -> int`, `float(int) -> float`, with Cranelift `fcvt_to_sint_sat` / `fcvt_from_sint`). At that point introduce limited widening (e.g. `int + float -> float` only when the int is a literal, Swift stance). Document.
 
 ### I-026 — Float modulo (`%` on `float`) rejected
 
@@ -230,41 +178,17 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Summary:** `is_move` is threaded lexer → parser → AST → UIR → TIR. The UIR copy is never read: astgen propagates the AST flag in, sema reads it back out into `TirParam`, and no UIR pass inspects it. UIR is structural lowering with no semantic meaning, so `UirParam::is_move` is dead weight that exists only to bridge two layers it shouldn't.
 **Resolution:** Drop `UirParam::is_move`. Sema can read the flag straight from the AST `FuncBody` (or via a side-channel keyed by FuncBody) when it constructs `TirParam`. Wait until any other UIR-level pass needs the flag before re-introducing it.
 
-### I-054 — `parse_source` and lex error paths bypass `finalize_diags`
-
-**Files:** `ryo-driver/src/pipeline.rs` (`parse_source`, `display_tokens`)
-**Summary:** `finalize_diags` consolidates the drain + render + `Err(CompilerError::Diagnostics(_))` shape for the sink-using stages (`lower_and_analyze`, `ir_command`). The lex error paths and `parse_source`'s parse-error branch still hand-roll the same pattern over a `Vec<Diag>` they build directly (no `DiagSink`). Drift risk is real: parse/lex paths skip the `Severity::Error` filter (they assume every diag they emit is an error, which holds today but isn't enforced), and any future change to the rendering convention has to be applied in three places.
-**Resolution:** Generalize `finalize_diags` to take `Vec<Diag>` (or `impl IntoIterator<Item = Diag>`); have `DiagSink::into_diags()` feed the new entry point. Then the three lex/parse error paths become `finalize_diags(vec![diag], input, &name)` and the render+wrap pattern lives in exactly one place. Folds naturally with I-014's lexer-DiagSink migration.
-
 ### I-073 — Zig download has no integrity verification and races concurrent installs
 
 **Files:** `ryo-backend/src/toolchain.rs` (`download_zig` :54-112)
 **Summary:** The tarball is streamed HTTPS → XZ → tar with no sha256/signature check even though ziglang.org publishes shasums and `.minisig` files — a supply-chain gap. The fixed temp dir `.zig-{v}-downloading` (:62) lets two concurrent first-runs delete each other's in-flight download (`remove_dir_all` at :67), and `remove_dir_all(&desired_path)` (:101) can delete a working toolchain out from under another running compile.
 **Resolution:** Hardcode the three pinned sha256s (one per supported target) and verify before extraction; use a pid-suffixed temp dir (matching `runtime_lib.rs`'s discipline) and atomic rename; never delete `desired_path` until the replacement is staged.
 
-### I-075 — Duplicate function definitions silently accepted
-
-**Files:** `ryo-frontend/src/sema.rs` (`Sema::new` :219-227)
-**Summary:** `name_to_decl` is first-wins on duplicates: both bodies are analyzed and get TIR, but calls bind to the first definition and no redefinition diagnostic is emitted. The inline comment defers to "a dedicated redefinition pass".
-**Resolution:** Emit `DiagCode::DuplicateDeclaration` (E0029) for duplicate function names at seed time; keep first-wins binding for error recovery.
-
 ### I-076 — `str` ABI is hardcoded to 64-bit layout
 
 **Files:** `ryo-backend/src/codegen.rs` (all str stack slots), `runtime/src/lib.rs` (`RyoStrFat`)
 **Summary:** Every str stack slot hardcodes 24 bytes / align 3 / offsets 0,8,16 (:1607, :1667, :1727, :1800, :1833, :1894, :1956, :746-748), and `len`/`cap` are hardcoded `types::I64` (:404-405) while `ptr` is pointer-sized. On a 32-bit target, caller and callee layouts silently mismatch.
 **Resolution:** Centralize the fat-pointer layout in one place (offsets and size computed from `module.target_config().pointer_type()`) and mirror it in the runtime. Prerequisite for any 32-bit target; interacts with I-021 (bool FFI width) when FFI lands.
-
-### I-077 — Invalid characters surface as parse errors, not lex errors
-
-**Files:** `ryo-frontend/src/lexer.rs` (:327-330, :394), `ryo-frontend/src/parser.rs`
-**Summary:** Logos failures map to `RawToken::Error` → `Token::Error` and are pushed into the token stream with no diagnostic; the parser later fails with a generic "unexpected token" error. A bad byte surfaces as a parse error divorced from its cause.
-**Resolution:** Emit a structured lex diagnostic at the `Token::Error` site (folds with I-014's `DiagSink` migration), then let the parser see the recovery token.
-
-### I-078 — Parse diagnostics leak interned-handle placeholders (`<id#N>`)
-
-**Files:** `ryo-frontend/src/lexer.rs` (`Token` `Display` :105-170), `ryo-driver/src/pipeline.rs` (`parse_source` :130-142, `emit_one`)
-**Summary:** `Token`'s `Display` renders `Ident` as `<id#N>` and `StrLit` as `<str#N>`; chumsky `Rich` errors are rendered via `e.reason().to_string()` with no pool available, so user-facing parse errors can contain opaque handle ids instead of source text. The lexer comment (:106-110) claiming the driver re-renders with the pool is stale — it does not.
-**Resolution:** Make parse-error rendering pool-aware (re-render expected/found tokens through the pool in `parse_source`), or carry structured expected/found data in `Diag` instead of a pre-formatted `String`.
 
 ### I-079 — Unary minus on `float` is rejected
 
@@ -277,36 +201,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-core/src/uir.rs` (`var_decl_extra` etc.), `ryo-core/src/tir.rs` (`call_extra` :337-342, `var_decl_extra` :355-362, `assign_extra`/… :370-418)
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
-
-### I-082 — `never`-returning call path skips inout write-back
-
-**Files:** `ryo-backend/src/codegen.rs` (:1944-1952)
-**Summary:** A callee typed `never` (today only `__ryo_panic`) is emitted as call + trap + dead block and skips `reload_inout_args` — any inout argument's mutated value is dropped. Latent: `__ryo_panic` takes no inout params today, but the path exists for any future `never`-typed function.
-**Resolution:** Call `reload_inout_args` before the trap, or assert at sema that `never`-typed callees cannot take inout params.
-
-### I-084 — `ryo build` writes artifacts to the CWD; same-stem sources collide
-
-**Files:** `ryo-driver/src/pipeline.rs` (`get_output_filenames` :34-44, `build_file` :485-522)
-**Summary:** Output names are derived from `file_stem` only, so `{stem}.o`/`{stem}` land in the current working directory — two same-stem sources built from the same CWD clobber each other, and on link failure the `.o` is left behind (the early `?` at :509 skips cleanup).
-**Resolution:** Place outputs next to the source (or under a `target/` dir), include a disambiguator when needed, and clean up the `.o` on the link-failure path.
-
-### I-085 — Valgrind smoke tests silently pass when valgrind is absent
-
-**Files:** `ryo/tests/valgrind_smoke.rs` (:36-40)
-**Summary:** `run_valgrind_smoke` prints "skipping" and returns success when valgrind is not installed, so local green runs may have exercised nothing. Only the CI lane that `apt-get install`s valgrind guarantees coverage; the suite exists because LSan misses leaks from Cranelift-emitted code (not ASan-instrumented).
-**Resolution:** Fail loudly (or require an opt-in env var to skip) outside CI; at minimum print a prominent end-of-suite summary of skipped tests.
-
-### I-088 — Ownership sidecar is keyed by function name
-
-**Files:** `ryo-core/src/ownership.rs` (`OwnershipSidecar` :50-52), `ryo-frontend/src/ownership.rs` (:301-309)
-**Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
-**Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
-
-### I-124 — Lexer rejects CRLF line endings
-
-**Files:** `ryo-frontend/src/lexer.rs`
-**Summary:** `\r` matches no token pattern, so any CRLF source fails with `found '<error>'` at the end of the first line — a confusing diagnostic for the most common Windows editor default. Surfaced by the windows CI leg: git's `core.autocrlf=true` checked `examples/` and `benchmarks/` out as CRLF and every repo-file parse failed (worked around for CI by `.gitattributes` forcing `eol=lf` on `*.ryo`, but user-written CRLF files still fail).
-**Resolution:** Accept `\r\n` as a newline in the lexer (treat `\r` as whitespace adjacent to `\n`, keeping span accounting byte-accurate), and add a CRLF fixture test.
 
 ### I-126 — AST is a `Box<Expression>` pointer tree, contradicting R1
 
@@ -397,23 +291,11 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Summary:** Both suites iterate the same 11 fixtures (`common/mod.rs:81-210`), compiling+linking each twice per full run; each `build_and_link` also shells out to `ryo toolchain status --path` to find zig (:10-22). `cargo test --workspace` in the test lane already includes `asan_smoke`, so it runs twice on ubuntu (test lane + dedicated asan lane); valgrind "runs" (silently skips, I-085) in lanes without valgrind.
 **Resolution:** Share fixture compilation across suites, cache the zig path, and exclude the smoke suites from the default test lane (or from the dedicated lanes).
 
-### I-103 — Diagnostics print twice on failure; `emit_one` can panic mid-report
-
-**Files:** `ryo-driver/src/pipeline.rs` (`emit_one` :174-205), `ryo/src/main.rs` (:71)
-**Summary:** The report header and the label both use `d.message`, so every diagnostic prints its text twice; `.expect("diag render")` (:204) can panic mid-report. After the ariadne report, `main`'s `Box<dyn Error>` return makes the std `Termination` handler print a second, differently-formatted summary line.
-**Resolution:** Use a short label message (or set the message only once); handle the `eprint` result gracefully; consider `ExitCode`-based `main` to control the final line.
-
 ### I-104 — `ryo-core` depends on chumsky solely for `SimpleSpan`
 
 **Files:** `ryo-core/src/diag.rs` (:18-20), `ryo-core/Cargo.toml`
 **Summary:** The "core" IR/types crate pulls in a parser crate for one span type, coupling every consumer of `ryo-core` to chumsky's release cycle.
 **Resolution:** Define a small `Span` newtype in `ryo-core` and convert at the parser boundary (`pipeline.rs` already adapts spans).
-
-### I-106 — Decode paths panic instead of reporting an internal error
-
-**Files:** `ryo-core/src/uir.rs` (view decoders, `InstRef::from_raw` :99-101), `ryo-frontend/src/sema.rs` (:469, :514, :782-786, :878-890, :1071-1075), `ryo-backend/src/codegen.rs` (~20 `unreachable!` arms, `cranelift_type_for` :56-67, `unimplemented!` Tuple :71)
-**Summary:** View decoders `debug_assert` the tag then `unreachable!` on mismatch; sema hard-trusts astgen with `panic!`/`unreachable!` on tag mismatches; codegen mixes `Result<_, String>` with panics. Malformed IR crashes the compiler with no internal-error diagnostic. Fine with exactly one producer per IR; brittle for any future producer (caches, plugins, alternative front ends).
-**Resolution:** Low priority by design. If a second UIR/TIR producer ever lands, convert the decode paths to an internal-error `Diag`; until then, document the "trusted producer" invariant at each IR boundary.
 
 ### I-109 — No instruction→function reverse mapping in UIR
 
@@ -426,12 +308,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken` :176-300, `Token` :30-103, `intern_token` :392-495, `Display` :105-170)
 **Summary:** Adding a token means editing `RawToken`, `Token`, the giant manual `intern_token` match, and `Display` (plus the parser downstream) — ~45 non-payload variants of pure boilerplate.
 **Resolution:** Generate the quadruple from a single macro table (variant name, logos pattern, payload kind).
-
-### I-121 — Staged zig zip is carried into the toolchain dir on fallback rename
-
-**Files:** `ryo-backend/src/toolchain.rs` (`download_zig` fallback rename; staged `zig-download.zip`)
-**Summary:** The zip path stages the download as `zig-download.zip` inside the temp dir and never deletes it after `extract_zip` succeeds. If a future zig zip ever lacks the `zig-{target}-{version}/` top-level directory, `source` falls back to `temp_path` and the rename carries the ~100 MB staged archive into the installed toolchain dir. Inert (zig still runs), but sloppy, and the staged file is never cleaned up on the happy path either.
-**Resolution:** `fs::remove_file(&zip_path).ok()` immediately after `extract_zip` succeeds.
 
 ### I-128 — Pass entry points far exceed the R7 size discipline
 

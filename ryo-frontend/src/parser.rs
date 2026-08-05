@@ -497,7 +497,15 @@ where
             just(Token::Not).to(UnaryOperator::Not),
         ));
 
-        let unary = unary_op
+        // `- IntLitMin` is folded to the `i64::MIN` literal at parse
+        // time: the positive form `9223372036854775808` overflows
+        // `i64`, so the lexer marks it with a dedicated token that is
+        // only grammatical directly after unary `-`.
+        let neg_min = just(Token::Sub)
+            .then(just(Token::IntLitMin))
+            .map_with(|_, e| Expression::new(ExprKind::Literal(Literal::Int(i64::MIN)), e.span()));
+
+        let unary = neg_min.or(unary_op
             .repeated()
             .collect::<Vec<_>>()
             .then(postfix)
@@ -507,7 +515,7 @@ where
                     result = Expression::new(ExprKind::UnaryOp(op, Box::new(result)), e.span());
                 }
                 result
-            });
+            }));
 
         let term = unary.clone().foldl(
             choice((
@@ -637,7 +645,15 @@ mod tests {
 
     fn lex_and_parse(input: &str) -> Result<(Program, InternPool), Vec<Rich<'static, Token>>> {
         let mut pool = InternPool::new();
-        let tokens = lex(input, &mut pool).map_err(|e| vec![Rich::custom(e.span, e.message)])?;
+        let mut sink = ryo_core::diag::DiagSink::new();
+        let tokens = lex(input, &mut pool, &mut sink);
+        if sink.has_errors() {
+            return Err(sink
+                .into_diags()
+                .into_iter()
+                .map(|d| Rich::custom(d.span, d.message))
+                .collect());
+        }
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
 
         let program = program_parser()
@@ -758,6 +774,36 @@ mod tests {
         } else {
             panic!("Expected VarDecl");
         }
+    }
+
+    #[test]
+    fn parse_i64_min_literal() {
+        // `-9223372036854775808` (i64::MIN): the lexer emits IntLitMin
+        // for the overflowing positive form and the parser folds
+        // `- IntLitMin` directly to the literal — no UnaryOp.
+        let (program, _) = lex_and_parse("x = -9223372036854775808").unwrap();
+        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
+            assert!(
+                matches!(
+                    decl.initializer.kind,
+                    ExprKind::Literal(Literal::Int(i64::MIN))
+                ),
+                "expected folded i64::MIN literal, got {:?}",
+                decl.initializer.kind
+            );
+        } else {
+            panic!("Expected VarDecl");
+        }
+    }
+
+    #[test]
+    fn bare_i64_min_magnitude_literal_rejected() {
+        // Without the unary `-`, the positive form overflows `i64`
+        // and must not parse as an expression.
+        assert!(lex_and_parse("x = 9223372036854775808").is_err());
+        // …including after a binary minus, where the literal is a
+        // fresh operand, not the operand of a unary negation.
+        assert!(lex_and_parse("y = 1\nx = y - 9223372036854775808").is_err());
     }
 
     #[test]

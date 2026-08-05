@@ -1197,6 +1197,7 @@ dependencies = [
  "build-support",
  "clap",
  "ryo-backend",
+ "ryo-core",
  "ryo-driver",
  "sha2",
  "tempfile",

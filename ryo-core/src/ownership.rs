@@ -55,20 +55,29 @@ pub struct ConditionalDeadDrop {
 /// also be per-function — otherwise codegen processing function B
 /// could pick up entries scheduled for function A whose TirRefs
 /// happen to match B's at the same numeric index, emitting wrong/
-/// extra `ryo_str_free` calls. Keyed by function name's `StringId`;
-/// codegen looks up the entry for the current function before
-/// consulting any of the per-function maps.
+/// extra `ryo_str_free` calls. One entry per `Tir`, positional with
+/// the `tirs` slice handed to `ownership::check` and on to codegen;
+/// keying by body index (not function name) is what keeps future
+/// same-name functions in different scopes from silently colliding.
 #[derive(Default, Debug, Clone)]
 pub struct OwnershipSidecar {
-    pub functions: HashMap<StringId, FunctionSidecar>,
+    pub functions: Vec<FunctionSidecar>,
 }
 
 /// Per-function ownership metadata. Owns the three TirRef-keyed maps
-/// that codegen consults during lowering. Created fresh inside
-/// `analyze_function` and inserted into the parent
-/// [`OwnershipSidecar`] under the function's name.
-#[derive(Default, Debug, Clone)]
+/// that codegen consults during lowering. Created fresh by the
+/// ownership pass (`ryo-frontend`'s `check`, one per body, in order)
+/// and pushed onto the parent [`OwnershipSidecar`].
+#[derive(Debug, Clone)]
 pub struct FunctionSidecar {
+    /// Name of the `Tir` this entry belongs to, recorded at push
+    /// time. Positional indexing alone cannot detect a `tirs` slice
+    /// that was reordered or filtered between `ownership::check` and
+    /// codegen (same length, wrong alignment): codegen
+    /// `debug_assert!`s this against `tir.name` so a misaligned entry
+    /// fails loudly in debug builds instead of silently applying one
+    /// function's frees to another.
+    pub name: StringId,
     /// Frees anchored after specific instructions.
     pub free_schedule: Vec<FreePoint>,
     /// Reassignment Frees. Key: the `Assign` instruction's `TirRef`.
@@ -84,4 +93,20 @@ pub struct FunctionSidecar {
     /// the arms it names (including a synthetic fall-through block for
     /// else-less ifs).
     pub conditional_dead_drops: Vec<ConditionalDeadDrop>,
+}
+
+impl FunctionSidecar {
+    /// Empty sidecar for the function named `name`. `Default` is
+    /// deliberately not derived: a sidecar without a recorded name
+    /// would defeat the codegen alignment assert documented on
+    /// [`Self::name`].
+    pub fn new(name: StringId) -> Self {
+        FunctionSidecar {
+            name,
+            free_schedule: Vec::new(),
+            free_on_reassign: HashMap::new(),
+            if_branches: HashMap::new(),
+            conditional_dead_drops: Vec::new(),
+        }
+    }
 }

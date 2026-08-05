@@ -41,6 +41,17 @@
 //! via niche-filling. The 0 slot in `instructions` is reserved as a
 //! never-emitted sentinel so all valid refs are non-zero. This
 //! mirrors Zig's `Zir.Inst.Index` / `Zir.Inst.OptionalIndex` pair.
+//!
+//! ## Trusted producer
+//!
+//! UIR has exactly one producer (`astgen`) and one consumer (`sema`),
+//! and the producer is trusted: view decoders (`call_view`,
+//! `if_stmt_view`, …) `debug_assert` the tag and `unreachable!` on
+//! mismatch instead of returning an error, because malformed UIR is a
+//! compiler bug, not user input. If a second producer ever lands
+//! (cached IR, plugins, an alternative front end), the decode paths
+//! must first be converted to report an internal-error `Diag` — see
+//! the `unreachable!` sites in this file.
 
 use crate::ast::CompoundOp;
 use crate::tir::ParamMode;

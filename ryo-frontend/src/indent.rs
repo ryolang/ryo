@@ -13,7 +13,19 @@ use crate::lexer::RawToken;
 
 type Spanned<'a> = (RawToken<'a>, SimpleSpan);
 
-pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, String> {
+/// Failure of the indentation pre-processor.
+///
+/// Carries the span of the offending `Newline` token — that token's
+/// text is the `\n` plus the following indentation whitespace, so the
+/// diagnostic squiggle lands on the indentation itself rather than on
+/// some unrelated earlier token.
+#[derive(Debug, Clone)]
+pub(crate) struct IndentError {
+    pub span: SimpleSpan,
+    pub message: String,
+}
+
+pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, IndentError> {
     // The output preserves every input token and only *adds*
     // Indent/Dedent markers, so `tokens.len()` is a tight lower bound.
     // Growing from zero here meant repeatedly reallocating and copying
@@ -30,11 +42,21 @@ pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, 
         let (tok, span) = &tokens[i];
 
         if let RawToken::Newline(s) = tok {
-            let whitespace = &s[1..]; // skip the '\n' character
+            // Skip the newline itself: `\n`, or `\r\n` for CRLF
+            // sources (the lexer's Newline regex matches `\r?\n`).
+            let whitespace = match s.strip_prefix('\r') {
+                Some(rest) => &rest[1..],
+                None => &s[1..],
+            };
 
             // Validate indentation for non-empty lines.
             if i + 1 < tokens.len() && !matches!(&tokens[i + 1].0, RawToken::Newline(_)) {
-                validate_indentation(whitespace)?;
+                if let Err(message) = validate_indentation(whitespace) {
+                    return Err(IndentError {
+                        span: *span,
+                        message,
+                    });
+                }
                 let new_level = whitespace.chars().filter(|c| *c == '\t').count();
                 let current_level = *indent_stack.last().unwrap();
 
@@ -47,10 +69,13 @@ pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, 
                         result.push((RawToken::Dedent, *span));
                     }
                     if *indent_stack.last().unwrap() != new_level {
-                        return Err(format!(
-                            "Indentation error: dedent to level {} does not match any outer indentation level",
-                            new_level
-                        ));
+                        return Err(IndentError {
+                            span: *span,
+                            message: format!(
+                                "Indentation error: dedent to level {} does not match any outer indentation level",
+                                new_level
+                            ),
+                        });
                     }
                 }
             }
@@ -182,7 +207,22 @@ mod tests {
         let raw = lex_raw("fn foo():\n    return 1");
         let result = process(raw);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("spaces"));
+        assert!(result.unwrap_err().message.contains("spaces"));
+    }
+
+    #[test]
+    fn error_span_points_at_offending_newline() {
+        // The Newline token's text is `\n` plus the following
+        // indentation whitespace, so its span is exactly where the
+        // diagnostic should point.
+        let raw = lex_raw("fn foo():\n    return 1");
+        let newline_span = raw
+            .iter()
+            .find(|(t, _)| matches!(t, RawToken::Newline(_)))
+            .map(|(_, s)| *s)
+            .expect("input has a newline token");
+        let err = process(raw).unwrap_err();
+        assert_eq!(err.span, newline_span);
     }
 
     #[test]
@@ -217,5 +257,21 @@ mod tests {
         let raw = lex_raw(input);
         let processed = process(raw).unwrap();
         assert!(has_token(&processed, |t| matches!(t, RawToken::Newline(_))));
+    }
+
+    #[test]
+    fn crlf_indentation() {
+        // CRLF sources: the `\r` must not disturb indent measurement.
+        let input = "fn foo():\r\n\tx = 1\r\n\t\ty = 2\r\n\tz = 3\r\n";
+        let raw = lex_raw(input);
+        let processed = process(raw).unwrap();
+        assert_eq!(
+            count_token(&processed, |t| matches!(t, RawToken::Indent)),
+            2
+        );
+        assert_eq!(
+            count_token(&processed, |t| matches!(t, RawToken::Dedent)),
+            2
+        );
     }
 }

@@ -65,13 +65,18 @@ fn large_source(functions: usize) -> String {
 /// Lex a source string, returning the interned token stream.
 fn lex(src: &str) -> Vec<(Token, Span)> {
     let mut pool = InternPool::new();
-    lexer::lex(src, &mut pool).expect("lex should succeed")
+    let mut sink = ryo_core::diag::DiagSink::new();
+    let tokens = lexer::lex(src, &mut pool, &mut sink);
+    assert!(!sink.has_errors(), "lex should succeed");
+    tokens
 }
 
 /// Full lex + parse of a source string.
 fn parse(src: &str) {
     let mut pool = InternPool::new();
-    let tokens = lexer::lex(src, &mut pool).expect("lex should succeed");
+    let mut sink = ryo_core::diag::DiagSink::new();
+    let tokens = lexer::lex(src, &mut pool, &mut sink);
+    assert!(!sink.has_errors(), "lex should succeed");
     let token_stream = tokens[..].split_token_span((0..src.len()).into());
     let program = program_parser()
         .parse(token_stream)
@@ -119,7 +124,9 @@ fn parse_large(bencher: divan::Bencher, functions: usize) {
 /// Full parse of a source string, returning the AST Program and populated InternPool.
 fn parse_program(src: &str) -> (ryo_core::ast::Program, InternPool) {
     let mut pool = InternPool::new();
-    let tokens = lexer::lex(src, &mut pool).expect("lex should succeed");
+    let mut sink = ryo_core::diag::DiagSink::new();
+    let tokens = lexer::lex(src, &mut pool, &mut sink);
+    assert!(!sink.has_errors(), "lex should succeed");
     let token_stream = tokens[..].split_token_span((0..src.len()).into());
     let program = program_parser()
         .parse(token_stream)

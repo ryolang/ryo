@@ -96,6 +96,8 @@ Non-immediate issues that affect architecture, correctness, or long-term code he
 
 Do **not** create issues for things you're fixing right now — just fix them. Do **not** use GitHub Issues for these; `ISSUES.md` is the single source of truth.
 
+Do **not** cite issue IDs (`I-XXX`) in code or doc comments. Resolved entries are deleted from `ISSUES.md`, so the comment becomes a dangling pointer to context that no longer exists — comments must stand on their own. Put the ID in the commit message instead, where it survives in git history.
+
 ---
 
 ## Design Change Escalation

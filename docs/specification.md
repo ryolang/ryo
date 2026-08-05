@@ -18,6 +18,7 @@
 > ### What's Documented
 >
 > ✅ **Complete Design**:
+>
 > - Core syntax and semantics
 > - Type system (primitives, collections, enums, errors, optionals)
 > - Memory management ("Ownership Lite" model)
@@ -28,6 +29,7 @@
 > - Tooling approach (Cranelift backend, Zig linker)
 >
 > ⏳ **Acknowledged Gaps** (see Section 19):
+>
 > - Formal grammar (EBNF/BNF)
 > - Detailed standard library API signatures
 > - Precise borrow checker algorithm specification
@@ -36,6 +38,7 @@
 > ### Target Audience
 >
 > This specification is written for:
+>
 > - **Language designers** evaluating design decisions
 > - **Potential contributors** understanding the vision
 > - **Developers** familiar with Rust/Go/Python/Zig assessing whether Ryo fits their needs
@@ -45,6 +48,7 @@
 > ### How to Provide Feedback
 >
 > We welcome feedback on:
+>
 > 1. **Design Philosophy**: Does the DX-first approach (trading some performance for debugging) make sense?
 > 2. **Ownership Model**: Is "Ownership Lite" (simplified borrowing without lifetimes) clear and practical?
 > 3. **Error Handling**: Are error unions (Zig-inspired) and exhaustive matching intuitive?
@@ -60,16 +64,16 @@
 
 ## 1. Introduction & Vision
 
-*   **Vision:** Ryo is a statically-typed, compiled programming language designed to prioritize developer experience while maintaining memory safety and native performance. It aims to combine the compile-time memory safety guarantees inspired by Rust (simplified, without a garbage collector), the approachable syntax and developer experience reminiscent of Python, and familiar Task/Future/Channel concurrency patterns. Where trade-offs exist, Ryo explicitly chooses developer productivity and debugging capability over raw performance optimization.
+- **Vision:** Ryo is a statically-typed, compiled programming language designed to prioritize developer experience while maintaining memory safety and native performance. It aims to combine the compile-time memory safety guarantees inspired by Rust (simplified, without a garbage collector), the approachable syntax and developer experience reminiscent of Python, and familiar Task/Future/Channel concurrency patterns. Where trade-offs exist, Ryo explicitly chooses developer productivity and debugging capability over raw performance optimization.
 
-*   **Target Domains:** Web Backend Development (API Servers, Microservices), CLI Tools, Network Services & Proxies, WebAssembly (Wasm) Applications & Libraries, Game Development (Tooling, Scripting, Core Logic), Data Processing & ETL Pipelines, and Higher-Level Embedded Systems.
-*   **Core Goals:**
-    *   **Python-like Ergonomics:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
-    *   **Rust-like Safety (Simplified):** Memory safe by default via ownership and borrowing, without GC. Compile-time checks prevent dangling pointers, data races, use-after-free. Simplified borrowing model compared to Rust (no manual lifetimes).
-    *   **Go-Inspired Simplicity:** Minimal keyword set, straightforward core concepts, avoid unnecessary feature creep. Focus on providing essential, orthogonal features. Simpler than Rust, more expressive than Go — the right trade-off for Ryo's target audience.
-    *   **Native Performance:** Compiled to native code (or Wasm) via **Cranelift**. No GC pauses. Deterministic resource management. Performance comparable to Go — faster than Python, Node.js, or Ruby. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
-    *   **Effective Concurrency:** Simple and safe concurrency using Task/Future/Channel patterns with a concurrent runtime (planned).
-    *   **Compile-Time Power:** Integrated compile-time function execution (`comptime`) for metaprogramming, configuration, and optimization (planned for future implementation).
+- **Target Domains:** Web Backend Development (API Servers, Microservices), CLI Tools, Network Services & Proxies, WebAssembly (Wasm) Applications & Libraries, Game Development (Tooling, Scripting, Core Logic), Data Processing & ETL Pipelines, and Higher-Level Embedded Systems.
+- **Core Goals:**
+  - **Python-like Ergonomics:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
+  - **Rust-like Safety (Simplified):** Memory safe by default via ownership and borrowing, without GC. Compile-time checks prevent dangling pointers, data races, use-after-free. Simplified borrowing model compared to Rust (no manual lifetimes).
+  - **Go-Inspired Simplicity:** Minimal keyword set, straightforward core concepts, avoid unnecessary feature creep. Focus on providing essential, orthogonal features. Simpler than Rust, more expressive than Go — the right trade-off for Ryo's target audience.
+  - **Native Performance:** Compiled to native code (or Wasm) via **Cranelift**. No GC pauses. Deterministic resource management. Performance comparable to Go — faster than Python, Node.js, or Ruby. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
+  - **Effective Concurrency:** Simple and safe concurrency using Task/Future/Channel patterns with a concurrent runtime (planned).
+  - **Compile-Time Power:** Integrated compile-time function execution (`comptime`) for metaprogramming, configuration, and optimization (planned for future implementation).
     *.  **Excellent Tooling:** Provide a seamless experience out-of-the-box, including a fast compiler, integrated package manager, REPL, and testing framework.
 
 ### Feature Availability
@@ -77,7 +81,7 @@
 This specification describes the full target design. Not all features are available in v0.1. The table below summarizes the rollout plan:
 
 | Feature | v0.1 | v0.2 | v0.3 | v0.4+ |
-|---------|------|------|------|-------|
+| --------- | ------ | ------ | ------ | ------- |
 | Core types, variables, functions | Yes | | | |
 | Ownership & borrowing (Ownership Lite) | Yes | | | |
 | Error handling (`try`/`catch`, error unions) | Yes | | | |
@@ -99,17 +103,17 @@ This specification describes the full target design. Not all features are availa
 
 Sections describing planned features are marked with a status banner.
 
-*   **Target Audience:** Developers familiar with languages like Python, Go, TypeScript, or C# seeking better performance and stronger safety guarantees without the steep learning curve of Rust or the runtime overhead of GC languages, especially for backend services, CLI tools, and scripting.
+- **Target Audience:** Developers familiar with languages like Python, Go, TypeScript, or C# seeking better performance and stronger safety guarantees without the steep learning curve of Rust or the runtime overhead of GC languages, especially for backend services, CLI tools, and scripting.
 
 ### Language Inspirations
 
 Ryo synthesizes ideas from several modern programming languages:
 
-*   **Python** - Clean syntax with colons and indentation, f-strings, type inference, developer-friendly design
-*   **Rust** - Ownership model for memory safety, algebraic data types (enums with data), pattern matching, trait system, Result/Option types
-*   **Mojo** - Simplified ownership without manual lifetimes, value semantics, progressive complexity model
-*   **Go** - Simplicity as a core design principle, fast compilation, built-in concurrency primitives, minimal feature set
-*   **Zig** - Explicit error handling with error unions, no operator overloading, readable-by-default design, minimal runtime, comptime execution (Ryo plans similar compile-time features for future versions)
+- **Python** - Clean syntax with colons and indentation, f-strings, type inference, developer-friendly design
+- **Rust** - Ownership model for memory safety, algebraic data types (enums with data), pattern matching, trait system, Result/Option types
+- **Mojo** - Simplified ownership without manual lifetimes, value semantics, progressive complexity model
+- **Go** - Simplicity as a core design principle, fast compilation, built-in concurrency primitives, minimal feature set
+- **Zig** - Explicit error handling with error unions, no operator overloading, readable-by-default design, minimal runtime, comptime execution (Ryo plans similar compile-time features for future versions)
 
 **Key Differentiators**: Ryo aims to be easier than Rust (no lifetimes), safer than Python (compile-time memory safety), more expressive than Go (generics, algebraic types), and more familiar than Zig (Python-like syntax).
 
@@ -120,7 +124,7 @@ Ryo explicitly prioritizes **developer experience and debugging capability over 
 **Where Ryo Trades Performance for DX:**
 
 | Feature | Runtime Overhead | Binary Size Impact | DX Benefit | Rationale |
-|---------|------------------|-------------------|------------|-----------|
+| --------- | ------------------ | ------------------- | ------------ | ----------- |
 | **Automatic error stack traces** | ~5-10% (at error creation) | - | Complete error origin tracking with file/line/function | Eliminates hours of debugging; worth the cost for most applications |
 | **Stack frame capture at `try`** | ~5-10% cumulative (at each propagation) | - | Full error propagation chain | Shows exactly how errors bubble through call stack |
 | **Panic stack traces** | ~5-10% always-on | - | Post-mortem analysis without debugger | Critical for production debugging |
@@ -131,6 +135,7 @@ Ryo explicitly prioritizes **developer experience and debugging capability over 
 **When Ryo Is/Isn't Appropriate:**
 
 ✅ **Good fit:**
+
 - Web backends, APIs, microservices (I/O-bound)
 - CLI tools, build systems, developer tooling
 - Applications where debugging time > runtime performance
@@ -138,6 +143,7 @@ Ryo explicitly prioritizes **developer experience and debugging capability over 
 - Teams prioritizing maintainability
 
 ❌ **Not ideal for:**
+
 - Ultra-low-latency systems (HFT, real-time audio/video)
 - Bare-metal embedded systems with tight resource constraints
 - Applications where every microsecond matters
@@ -157,6 +163,7 @@ Ryo explicitly prioritizes **developer experience and debugging capability over 
 True DX means **smart defaults + user choice**, not mandatory overhead. Ryo provides configuration options for performance-critical applications:
 
 **Build-time control (compiler flags):**
+
 ```bash
 ryo build                        # Default: full traces (~5-10% overhead)
 ryo build --error-traces=minimal # Location only (~2-3% overhead)
@@ -164,6 +171,7 @@ ryo build --error-traces=off     # No capture (0% overhead)
 ```
 
 **Profile-based defaults:**
+
 ```toml
 # ryo.toml
 [profile.dev]
@@ -197,26 +205,29 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 
 ## 2. Lexical Structure
 
-*   **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
-*   **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
-    *   *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for user-defined types (structs, enums, traits) and enum variants. Built-in fundamental types (primitives and collections) use lowercase (e.g., `int`, `str`, `list`, `map`). *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
-*   **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `while`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `package`, `true`, `false`, `none`, `void`, `move`, `error`, `try`, `catch`, `as`, `orelse`, `select`, `case`, `default`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `let` is not a keyword; `as` is a binding keyword used in `with`, `catch`, and `task.scope` to name a captured value (type conversions use `TargetType(value)`, not `as`, keeping its meaning unambiguous). `package` is an access modifier keyword added for package-internal visibility. `select`, `case`, and `default` are used for non-deterministic concurrent operations).
-*   **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error union prefix (`!`), optional chaining (`?.`), range bounds (`..`, used in constrained types `int(1..65535)` — not used for iteration or slicing), slice (`:` inside `[]`, e.g., `s[1:4]`, `s[:4]`, `s[2:]` — Python/Go convention).
-    *   **Important Note:** The `!` operator is used exclusively for error union type prefixes (`!T` = error or T, `ErrorType!T` = ErrorType or T). The `!` is NOT used for logical negation—use `not` instead (following Python convention). Similarly, `?` operator in type context (`?T`) denotes optional types, while `?.` is the optional chaining operator.
-    *   `_` (Underscore): The underscore `_` is treated as a special identifier. When used in patterns (`match`, destructuring assignment), it signifies a wildcard or an intentionally ignored value; it does not bind to a variable.
-*   **Literals:** Integers (decimal `123`, hex `0xFF`, octal `0o77`, binary `0b11`; underscores `1_000`), Floats (`123.45`, `1.23e-10`; underscores `1_000.0`), Strings (`"..."` basic escapes like `\n`, `\t`, `\\`, `\"`, `\xHH`, `\u{HHHH}`). `f"..."` (f-strings with `{expression}` interpolation). `t"..."` (t-strings for template literal parsing/interpolation). Booleans (`true`, `false`), Optional null value (`none`), List (`[...]`), Map (`{key: value, ...}`), Tuple (`(v1, v2, ...)`), Char (`'a'`, `'\u{1F600}'`).
+- **Encoding:** Source files are UTF-8 encoded, allowing for Unicode characters in strings and potentially identifiers (if identifier rules are expanded later).
+- **Identifiers:** `[a-zA-Z_][a-zA-Z0-9_]*`. Case-sensitive.
+  - *Convention:* Follow `snake_case` for variables, functions, and modules. Use `PascalCase` for user-defined types (structs, enums, traits) and enum variants. Built-in fundamental types (primitives and collections) use lowercase (e.g., `int`, `str`, `list`, `map`). *(Rationale: Adopting common conventions enhances readability and aligns with practices in Python and Rust).*
+- **Keywords:** `fn`, `struct`, `enum`, `trait`, `impl`, `mut`, `if`, `elif`, `else`, `for`, `while`, `in`, `return`, `break`, `continue`, `import`, `match`, `pub`, `package`, `true`, `false`, `none`, `void`, `move`, `error`, `try`, `catch`, `as`, `orelse`, `select`, `case`, `default`. (Note: `comptime`, `unsafe` are planned for future implementation. `void` is reserved for the unit type. `let` is not a keyword; `as` is a binding keyword used in `with`, `catch`, and `task.scope` to name a captured value (type conversions use `TargetType(value)`, not `as`, keeping its meaning unambiguous). `package` is an access modifier keyword added for package-internal visibility. `select`, `case`, and `default` are used for non-deterministic concurrent operations).
+- **Operators:** Standard set including arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`and`, `or`, `not`), assignment (`=`), type annotation (`:`), scope/literal delimiters (`{`, `}`, `[`, `]`, `(` `)`), access (`.`), error union prefix (`!`), optional chaining (`?.`), range bounds (`..`, used in constrained types `int(1..65535)` — not used for iteration or slicing), slice (`:` inside `[]`, e.g., `s[1:4]`, `s[:4]`, `s[2:]` — Python/Go convention).
+  - **Important Note:** The `!` operator is used exclusively for error union type prefixes (`!T` = error or T, `ErrorType!T` = ErrorType or T). The `!` is NOT used for logical negation—use `not` instead (following Python convention). Similarly, `?` operator in type context (`?T`) denotes optional types, while `?.` is the optional chaining operator.
+  - `_` (Underscore): The underscore `_` is treated as a special identifier. When used in patterns (`match`, destructuring assignment), it signifies a wildcard or an intentionally ignored value; it does not bind to a variable.
+- **Literals:** Integers (decimal `123`, hex `0xFF`, octal `0o77`, binary `0b11`; underscores `1_000`), Floats (`123.45`, `1.23e-10`; underscores `1_000.0`), Strings (`"..."` basic escapes like `\n`, `\t`, `\\`, `\"`, `\xHH`, `\u{HHHH}`). `f"..."` (f-strings with `{expression}` interpolation). `t"..."` (t-strings for template literal parsing/interpolation). Booleans (`true`, `false`), Optional null value (`none`), List (`[...]`), Map (`{key: value, ...}`), Tuple (`(v1, v2, ...)`), Char (`'a'`, `'\u{1F600}'`).
 
     **Note on Strings (`f"..."` vs `t"..."`):**
-    *   **F-strings (`f"..."`):** Produce a standard `str`. The compiler immediately evaluates the interpolations and concatenates the resulting string.
-    *   **T-strings (`t"..."`):** Inspired by Python 3.14's `t-strings`, these do not produce a raw `str`. Instead, they produce a `Template` object (which contains the static string parts and the dynamic values as separate components). This is the foundation for secure web templating and database queries in Ryo. By passing a `Template` to a parser (like an HTML or SQL builder), the builder can securely escape the dynamic values before rendering, entirely preventing Injection and XSS attacks.
-*   **Comments:**
-    *   **Regular Comment:** Starts with `#` followed by a space or directly by the comment text. Continues to the end of the line. Ignored by the compiler.
+  - **F-strings (`f"..."`):** Produce a standard `str`. The compiler immediately evaluates the interpolations and concatenates the resulting string.
+  - **T-strings (`t"..."`):** Inspired by Python 3.14's `t-strings`, these do not produce a raw `str`. Instead, they produce a `Template` object (which contains the static string parts and the dynamic values as separate components). This is the foundation for secure web templating and database queries in Ryo. By passing a `Template` to a parser (like an HTML or SQL builder), the builder can securely escape the dynamic values before rendering, entirely preventing Injection and XSS attacks.
+- **Comments:**
+  - **Regular Comment:** Starts with `#` followed by a space or directly by the comment text. Continues to the end of the line. Ignored by the compiler.
+
         ```ryo
 		# This is a comment
 		#Another comment
 		x = 1 # Comment after code
 		```
-    *   **Documentation Comment:** Starts with the specific sequence `#:` (hash symbol immediately followed by a colon). Continues to the end of the line. Processed by documentation tooling (supports Markdown). Ignored otherwise by the compiler. Applies to the item immediately following it. Consecutive `#:` lines form a single documentation block.
+
+  - **Documentation Comment:** Starts with the specific sequence `#:` (hash symbol immediately followed by a colon). Continues to the end of the line. Processed by documentation tooling (supports Markdown). Ignored otherwise by the compiler. Applies to the item immediately following it. Consecutive `#:` lines form a single documentation block.
+
         ```ryo
 		#: Represents a point in 2D space.
 		#: Supports basic arithmetic.
@@ -228,24 +239,26 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 		fn distance(p: &Point) -> float:
 			...
 		```
-    *   *(Rationale: Uses `#` as the base. The `#:` marker provides an unambiguous distinction for documentation tooling, avoiding whitespace sensitivity and block comment syntax. Attributes `#[...]` remain separate).*
-*   **Attributes:** Metadata annotations use the `#[...]` syntax, placed before the documented item. *(Rationale: Distinct syntax using brackets clearly separates attributes from code and comments).* v0.1 recognizes `#[derive(Eq)]` and `#[repr(C)]` on struct definitions (Section 4.5) as one-off compiler-known attributes; the general attribute system arrives later (see Section 6.1.1 and the testing framework's `#[test]`).
-*   **Indentation:** **Tabs** strictly denote code blocks. One tab per indentation level. Mixing tabs and spaces for indentation is a compile-time error. *(Rationale: Enforces a single, consistent style like Go, avoids common Python indentation issues).*
-    - **Note:** Code examples in this documentation may display spaces for markdown rendering compatibility, but actual `.ryo` source files **MUST** use tabs. The compiler will enforce this requirement and reject files with mixed tabs and spaces.
-*   **Statements:** Generally one per line; semicolons are not required or used.
+
+  - *(Rationale: Uses `#` as the base. The `#:` marker provides an unambiguous distinction for documentation tooling, avoiding whitespace sensitivity and block comment syntax. Attributes `#[...]` remain separate).*
+- **Attributes:** Metadata annotations use the `#[...]` syntax, placed before the documented item. *(Rationale: Distinct syntax using brackets clearly separates attributes from code and comments).* v0.1 recognizes `#[derive(Eq)]` and `#[repr(C)]` on struct definitions (Section 4.5) as one-off compiler-known attributes; the general attribute system arrives later (see Section 6.1.1 and the testing framework's `#[test]`).
+- **Indentation:** **Tabs** strictly denote code blocks. One tab per indentation level. Mixing tabs and spaces for indentation is a compile-time error. *(Rationale: Enforces a single, consistent style like Go, avoids common Python indentation issues).*
+  - **Note:** Code examples in this documentation may display spaces for markdown rendering compatibility, but actual `.ryo` source files **MUST** use tabs. The compiler will enforce this requirement and reject files with mixed tabs and spaces.
+- **Statements:** Generally one per line; semicolons are not required or used.
 
 ## 3. Syntax & Grammar
 
-*   *(Note: A formal grammar (EBNF) is required for full implementation but omitted here).*
-*   **The Binding Rule:** `=` binds a name to a value. `:` never binds — it *relates* (name↔type, header↔block, key↔value, position↔position). Everywhere a name gets a value, the mark is `=`; everywhere the mark is `:`, no name gets a value. **Corollary (the field/key rule):** struct fields are **names** (accessed as identifiers, compiler-known) → `=`; map keys are **data** (accessed as runtime values) → `:`. Scope: the law governs bindings, types, scopes, and pairings; bracket/string micro-syntax (slice ranges, format specs) satisfies "never binds" without being governed by it.
-*   **The Brace Law:** parens group positionally; braces group by name. Construction is visibly distinct from calls: `Point{x=1, y=2}` cannot be mistaken for `fetch(x=1, y=2)` — construction allocates, establishes invariants, and creates ownership.
-*   **Function Definition:** `fn name(param: Type, ...) -> RetType: ...`
-*   **Variable Declaration:** Variables are **immutable by default** and do not require a keyword. Use `mut` for mutable variables.
-    *   Immutable: `name = value` (type inferred)
-    *   Immutable with explicit type: `name: Type = value`
-    *   Mutable: `mut name = value` (type inferred)
-    *   Mutable with explicit type: `mut name: Type = value`
-    *   Examples:
+- *(Note: A formal grammar (EBNF) is required for full implementation but omitted here).*
+- **The Binding Rule:** `=` binds a name to a value. `:` never binds — it *relates* (name↔type, header↔block, key↔value, position↔position). Everywhere a name gets a value, the mark is `=`; everywhere the mark is `:`, no name gets a value. **Corollary (the field/key rule):** struct fields are **names** (accessed as identifiers, compiler-known) → `=`; map keys are **data** (accessed as runtime values) → `:`. Scope: the law governs bindings, types, scopes, and pairings; bracket/string micro-syntax (slice ranges, format specs) satisfies "never binds" without being governed by it.
+- **The Brace Law:** parens group positionally; braces group by name. Construction is visibly distinct from calls: `Point{x=1, y=2}` cannot be mistaken for `fetch(x=1, y=2)` — construction allocates, establishes invariants, and creates ownership.
+- **Function Definition:** `fn name(param: Type, ...) -> RetType: ...`
+- **Variable Declaration:** Variables are **immutable by default** and do not require a keyword. Use `mut` for mutable variables.
+  - Immutable: `name = value` (type inferred)
+  - Immutable with explicit type: `name: Type = value`
+  - Mutable: `mut name = value` (type inferred)
+  - Mutable with explicit type: `mut name: Type = value`
+  - Examples:
+
         ```ryo
 		pi = 3.14                    # Immutable float (type inferred)
 		name = "Alice"               # Immutable string (type inferred)
@@ -253,7 +266,9 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 		mut counter = 0              # Mutable integer (type inferred)
 		mut temperature: float = 98.6 # Mutable float (explicit type)
 		```
-    *   **Variable Shadowing:** Same-scope shadowing is **not allowed**. Re-using a name in the same scope is a compile-time error — use a new name or `mut` if you need to update a value. Inner-scope shadowing (e.g., inside an `if` or loop body) **is** allowed via an explicit declaration (`mut x = ...` or `x: Type = ...`).
+
+  - **Variable Shadowing:** Same-scope shadowing is **not allowed**. Re-using a name in the same scope is a compile-time error — use a new name or `mut` if you need to update a value. Inner-scope shadowing (e.g., inside an `if` or loop body) **is** allowed via an explicit declaration (`mut x = ...` or `x: Type = ...`).
+
         ```ryo
 		x = "123"
 		x = int(x)       # ERROR: cannot assign to immutable variable 'x'
@@ -267,14 +282,16 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 		if condition:
 			mut count = 0  # OK: shadows outer 'count' in this block
 		```
-    *   *(Rationale: Immutable-by-default promotes safer code. No `let` keyword provides Pythonic simplicity. Type inference reduces boilerplate while explicit types remain available for clarity. The `mut` keyword makes mutability explicit and visible. Banning same-scope shadowing avoids accidental rebinding — if `x = ...` appears twice, it's almost always a mistake, not a deliberate type transformation).*
-    *   **Type Inference:** Ryo uses **bidirectional type checking** (like Rust, TypeScript, and modern statically-typed languages) which provides:
-        *   **Function signatures require type annotations** - Good for documentation and API clarity
-        *   **Local variables inferred from initialization** - Ergonomic for local code
-        *   **Better, localized error messages** - More understandable than full Hindley-Milner
-        *   **Simpler implementation** - More practical than complete HM type inference
-        *   **Comptime with enhanced inference** - More aggressive type inference in compile-time contexts
-        *   Examples:
+
+  - *(Rationale: Immutable-by-default promotes safer code. No `let` keyword provides Pythonic simplicity. Type inference reduces boilerplate while explicit types remain available for clarity. The `mut` keyword makes mutability explicit and visible. Banning same-scope shadowing avoids accidental rebinding — if `x = ...` appears twice, it's almost always a mistake, not a deliberate type transformation).*
+  - **Type Inference:** Ryo uses **bidirectional type checking** (like Rust, TypeScript, and modern statically-typed languages) which provides:
+    - **Function signatures require type annotations** - Good for documentation and API clarity
+    - **Local variables inferred from initialization** - Ergonomic for local code
+    - **Better, localized error messages** - More understandable than full Hindley-Milner
+    - **Simpler implementation** - More practical than complete HM type inference
+    - **Comptime with enhanced inference** - More aggressive type inference in compile-time contexts
+    - Examples:
+
             ```ryo
 			fn add(a: int, b: int) -> int:  # Parameters need types
 				result = a + b              # Local variable type inferred: int
@@ -285,11 +302,13 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 			y = 3.14           # Inferred: float
 			z = x + y          # Error: cannot add int and float (clear, localized)
 			```
-        *   *(Rationale: Bidirectional type checking provides the right balance - function signatures serve as documentation and API contracts while local code remains concise. This matches developer expectations from Rust/TypeScript and provides better error messages than fully implicit systems like Hindley-Milner).*
-*   **Struct Definition:** `struct Name: field: Type ...`
-*   **Enum Definition:** `enum Name: Variant1, Variant2(Type), Variant3(field: Type) ...`
-*   **Trait Definition:** `trait Name: fn method(...) -> RetType ... (with optional default implementation)`
-*   **Implementation:** `impl Trait for Type: fn method(...) -> RetType: ...`
+
+    - *(Rationale: Bidirectional type checking provides the right balance - function signatures serve as documentation and API contracts while local code remains concise. This matches developer expectations from Rust/TypeScript and provides better error messages than fully implicit systems like Hindley-Milner).*
+- **Struct Definition:** `struct Name: field: Type ...`
+- **Enum Definition:** `enum Name: Variant1, Variant2(Type), Variant3(field: Type) ...`
+- **Trait Definition:** `trait Name: fn method(...) -> RetType ... (with optional default implementation)`
+- **Implementation:** `impl Trait for Type: fn method(...) -> RetType: ...`
+
     ```ryo
 	struct Counter:
 		count: int
@@ -298,20 +317,23 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 	impl Resettable for Counter:
 		fn reset(inout self): self.count = 0
 	```
-*   **Method Call:** `instance.method(args...)`. Field Access: `instance.field`.
-*   **Control Flow:** `if/elif/else`, two `for` loop forms and `while`:
-    *   **Iteration:** `for item in iterable:` — iterate over collections
-    *   **Counted:** `for i in range(start, end):` — counted iteration (exclusive end)
-    *   **Condition:** `while condition:` — repeat while condition is true
-    *   **Infinite:** `while true:` — infinite loop (use `break` to exit)
-*   **Loop Semantics:**
-    *   **Loop Variable Scope:** Loop variables are **block-scoped** — they exist only inside the loop body and are not accessible after the loop ends.
+- **Method Call:** `instance.method(args...)`. Field Access: `instance.field`.
+- **Control Flow:** `if/elif/else`, two `for` loop forms and `while`:
+  - **Iteration:** `for item in iterable:` — iterate over collections
+  - **Counted:** `for i in range(start, end):` — counted iteration (exclusive end)
+  - **Condition:** `while condition:` — repeat while condition is true
+  - **Infinite:** `while true:` — infinite loop (use `break` to exit)
+- **Loop Semantics:**
+  - **Loop Variable Scope:** Loop variables are **block-scoped** — they exist only inside the loop body and are not accessible after the loop ends.
+
         ```ryo
 		for i in range(5):
 		    print(i)      # ok
 		# print(i)        # compile error: `i` not in scope
 		```
-    *   **Loop Variable Mutability:** Loop variables are **immutable** (consistent with Ryo's default). In iteration loops, the variable is re-bound each iteration. For `while` loops, use a separately declared `mut` variable.
+
+  - **Loop Variable Mutability:** Loop variables are **immutable** (consistent with Ryo's default). In iteration loops, the variable is re-bound each iteration. For `while` loops, use a separately declared `mut` variable.
+
         ```ryo
 		for item in items:
 		    # item is immutable — cannot assign to item
@@ -322,10 +344,12 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 		    print(counter)
 		    counter += 1    # counter is mut, declared outside the loop
 		```
-    *   **`range()` Built-in Function:** The only way to create counted iteration sequences. Exclusive end (matches Python convention).
-        *   `range(end)` — 0 to end, exclusive
-        *   `range(start, end)` — start to end, exclusive
-        *   `range(start, end, step)` — with step
+
+  - **`range()` Built-in Function:** The only way to create counted iteration sequences. Exclusive end (matches Python convention).
+    - `range(end)` — 0 to end, exclusive
+    - `range(start, end)` — start to end, exclusive
+    - `range(start, end, step)` — with step
+
         ```ryo
 		for i in range(5):           # 0, 1, 2, 3, 4
 		    print(i)
@@ -334,39 +358,40 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 		for i in range(0, 10, 2):    # 0, 2, 4, 6, 8
 		    print(i)
 		```
+
         **Note:** The `..` operator is reserved for type bounds (`int(1..65535)`). Slicing uses `:` inside `[]` (`s[1:4]`). Iteration uses `range()`. Each operator has exactly one meaning.
-    *   **`break`/`continue`:** Affect the **innermost** enclosing loop. Using `break` or `continue` outside a loop is a compile error. Labeled breaks are not supported in v0.1. Loops are statements, not expressions — `break` does not carry a value.
-    *   *(Rationale: Block-scoped loop variables prevent accidental use of stale state. Immutable loop variables are consistent with Ryo's default and eliminate a class of bugs. `range()` is the single mechanism for counted iteration — no operator alternative, no ambiguity. It follows Python conventions because that's the target audience. Each operator has exactly one purpose: `range()` for iteration, `:` for slicing, `..` for type bounds. `for` handles iteration and counting; `while` handles conditions. Each keyword has one clear purpose. `while true:` replaces a dedicated `loop` keyword — one keyword per concept, no more.)*
+  - **`break`/`continue`:** Affect the **innermost** enclosing loop. Using `break` or `continue` outside a loop is a compile error. Labeled breaks are not supported in v0.1. Loops are statements, not expressions — `break` does not carry a value.
+  - *(Rationale: Block-scoped loop variables prevent accidental use of stale state. Immutable loop variables are consistent with Ryo's default and eliminate a class of bugs. `range()` is the single mechanism for counted iteration — no operator alternative, no ambiguity. It follows Python conventions because that's the target audience. Each operator has exactly one purpose: `range()` for iteration, `:` for slicing, `..` for type bounds. `for` handles iteration and counting; `while` handles conditions. Each keyword has one clear purpose. `while true:` replaces a dedicated `loop` keyword — one keyword per concept, no more.)*
 
-*   **Pattern Matching:** `match expr: Pattern1: ... Pattern2(bind): ... Pattern3 { x, y }: ... _ : ...` (`_` for wildcard/default).
+- **Pattern Matching:** `match expr: Pattern1: ... Pattern2(bind): ... Pattern3 { x, y }: ... _ : ...` (`_` for wildcard/default).
 
-*   **Closures:** Anonymous functions with capture semantics.
-    *   Single-line: `fn(args): expression`
-    *   Multi-line: `fn(args):` followed by indented block (tab-based)
-    *   Move capture: `move fn(args): ...`
-    *   See Section 6.2 for complete closure specification including capture semantics and examples.
-*   **Tuple Destructuring:** `(a, b) = my_tuple`.
-*   **Type Conversion Syntax:** Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
-*   **Equality Operators:** `==` (equal), `!=` (not equal). Both operands must have the same type. Equality operators return `bool`. Equality does **not** chain: `a == b == c` is a syntax error. *(Rationale: Explicit equality with no implicit coercion prevents subtle bugs; non-chaining equality avoids ambiguous expressions).*
+- **Closures:** Anonymous functions with capture semantics.
+  - Single-line: `fn(args): expression`
+  - Multi-line: `fn(args):` followed by indented block (tab-based)
+  - Move capture: `move fn(args): ...`
+  - See Section 6.2 for complete closure specification including capture semantics and examples.
+- **Tuple Destructuring:** `(a, b) = my_tuple`.
+- **Type Conversion Syntax:** Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
+- **Equality Operators:** `==` (equal), `!=` (not equal). Both operands must have the same type. Equality operators return `bool`. Equality does **not** chain: `a == b == c` is a syntax error. *(Rationale: Explicit equality with no implicit coercion prevents subtle bugs; non-chaining equality avoids ambiguous expressions).*
 
 ## 4. Types
 
 ### 4.1 Static Typing & Inference
 
-*   **Static Typing:** Checked at compile time. Enhances safety and enables performance optimizations.
-*   **Type Inference:** Limited to variable declarations (`var = val`). Explicit type annotations are required for function signatures, struct fields, enum variant data, and potentially complex literals to maintain clarity. *(Rationale: Balances Pythonic convenience for local variables with the clarity and safety benefits of explicit types in definitions and interfaces).*
+- **Static Typing:** Checked at compile time. Enhances safety and enables performance optimizations.
+- **Type Inference:** Limited to variable declarations (`var = val`). Explicit type annotations are required for function signatures, struct fields, enum variant data, and potentially complex literals to maintain clarity. *(Rationale: Balances Pythonic convenience for local variables with the clarity and safety benefits of explicit types in definitions and interfaces).*
 
 ### 4.2 Primitive Types
 
-*   `int`: Defaults to `i64` (64-bit signed integer). *(Rationale: Consistent behavior across platforms, unlike C's `long` or Rust's `isize` default).*
-*   `float`: Defaults to `float64` (64-bit IEEE 754 float).
-*   `bool`: Boolean type with two values: `true` and `false`. Produced by equality operators (`==`, `!=`). No implicit conversion to or from `int`. *(Rationale: Explicit boolean semantics prevent common bugs from implicit truthy/falsy conversions, following Zig's design philosophy).*
-*   `str`: Owned, heap-allocated, UTF-8 string. Can grow and shrink dynamically when bound to a `mut` variable. *(Rationale: Provides a primary, easy-to-use string type. Mutability controlled by binding aligns with general variable mutability).*
-*   `bytes`: Owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` (final spec §4, D2). Move semantics, mutability by binding. Literal: `b"\x00\x01"`. Slicing yields a `bytesview` projection (§4.4 rules; no UTF-8 hazard, so scalar indexing `b[i]` **is** allowed, yielding `u8`). Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated), `text.to_bytes() -> bytes` (owned copy). *(Rationale: `list[u8]` was the only — awkward — option for protocol/binary data; `bytes` fills it with the same ownership story as `str`.)*
-*   `char`: Unicode Scalar Value. Literal: `'a'`.
-*   `void`: Unit type. Represents a value with no data. Used for functions that return no meaningful value. *(Rationale: Provides explicit way to represent "no return value" concept, common in many programming languages for side-effecting functions)*.
-*   `never`: Bottom type. Represents a computation that never completes (e.g., `panic`, infinite loop, `exit`). A `never` value may only appear as a **bare expression statement** — it cannot be bound to a variable, returned, passed as an argument, or used as an operand (error **E0017**, `VoidValueInExpression`); see §6.1.3 and §7.6. *(Rationale: Useful for control flow analysis and type theory completeness).*
-*   Explicit Sizes: `i8`-`i64`, `u8`-`u64`, `usize`, `float32`. *(Rationale: Necessary for control over representation, performance, and FFI).**
+- `int`: Defaults to `i64` (64-bit signed integer). *(Rationale: Consistent behavior across platforms, unlike C's `long` or Rust's `isize` default).*
+- `float`: Defaults to `float64` (64-bit IEEE 754 float).
+- `bool`: Boolean type with two values: `true` and `false`. Produced by equality operators (`==`, `!=`). No implicit conversion to or from `int`. *(Rationale: Explicit boolean semantics prevent common bugs from implicit truthy/falsy conversions, following Zig's design philosophy).*
+- `str`: Owned, heap-allocated, UTF-8 string. Can grow and shrink dynamically when bound to a `mut` variable. *(Rationale: Provides a primary, easy-to-use string type. Mutability controlled by binding aligns with general variable mutability).*
+- `bytes`: Owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` (final spec §4, D2). Move semantics, mutability by binding. Literal: `b"\x00\x01"`. Slicing yields a `bytesview` projection (§4.4 rules; no UTF-8 hazard, so scalar indexing `b[i]` **is** allowed, yielding `u8`). Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated), `text.to_bytes() -> bytes` (owned copy). *(Rationale: `list[u8]` was the only — awkward — option for protocol/binary data; `bytes` fills it with the same ownership story as `str`.)*
+- `char`: Unicode Scalar Value. Literal: `'a'`.
+- `void`: Unit type. Represents a value with no data. Used for functions that return no meaningful value. *(Rationale: Provides explicit way to represent "no return value" concept, common in many programming languages for side-effecting functions)*.
+- `never`: Bottom type. Represents a computation that never completes (e.g., `panic`, infinite loop, `exit`). A `never` value may only appear as a **bare expression statement** — it cannot be bound to a variable, returned, passed as an argument, or used as an operand (error **E0017**, `VoidValueInExpression`); see §6.1.3 and §7.6. *(Rationale: Useful for control flow analysis and type theory completeness).*
+- Explicit Sizes: `i8`-`i64`, `u8`-`u64`, `usize`, `float32`. *(Rationale: Necessary for control over representation, performance, and FFI).**
 
 ### 4.3 Anonymous Structs & Tuple Sugar
 
@@ -395,23 +420,24 @@ match point:
 	(0, _):     "tuple form"
 ```
 
-*   **Identity is structural:** same field names, same types, same order. **Exact match only** — no subtyping, no width rules. Structural typing applies *only* to anonymous structs; named structs remain nominal forever.
-*   **No implicit coercion** between anonymous and named structs. Graduating a value from anonymous to named is an explicit, greppable act (§4.5's `Name{...}` construction).
-*   **Usage rule:** crossing a boundary (public API, package, long-term storage) or carrying domain meaning → named; local/transient (multi-return, unpacking, throwaway shapes) → anonymous. A lint flags anonymous structs returned from public functions of other packages.
-*   **`{}` is reserved** for the future empty map literal (Python intuition). There is no empty anonymous struct — use `none`.
-*   Single-element tuple keeps Python's trailing comma: `(x,)`. Trailing commas allowed in all literals.
-*   *(Rationale: one product-type mechanism instead of two — no second ABI/ownership path, no positional swap-bug class (`(int, str)` vs `(str, int)`); the Python-familiar `(a, b)` literal/unpack syntax survives as sugar; named groupings gain self-documenting returns (`result.q` over `result.0`).)*
+- **Identity is structural:** same field names, same types, same order. **Exact match only** — no subtyping, no width rules. Structural typing applies *only* to anonymous structs; named structs remain nominal forever.
+- **No implicit coercion** between anonymous and named structs. Graduating a value from anonymous to named is an explicit, greppable act (§4.5's `Name{...}` construction).
+- **Usage rule:** crossing a boundary (public API, package, long-term storage) or carrying domain meaning → named; local/transient (multi-return, unpacking, throwaway shapes) → anonymous. A lint flags anonymous structs returned from public functions of other packages.
+- **`{}` is reserved** for the future empty map literal (Python intuition). There is no empty anonymous struct — use `none`.
+- Single-element tuple keeps Python's trailing comma: `(x,)`. Trailing commas allowed in all literals.
+- *(Rationale: one product-type mechanism instead of two — no second ABI/ownership path, no positional swap-bug class (`(int, str)` vs `(str, int)`); the Python-familiar `(a, b)` literal/unpack syntax survives as sugar; named groupings gain self-documenting returns (`result.q` over `result.0`).)*
 
 ### 4.4 Slice Types (Scope-Locked Views)
 
 Slices are lightweight borrowed views into owned data. They are **scope-locked**: a slice may be bound to a local variable whose uses remain within the current function; a slice cannot be stored in a variable, field, or container that outlives that function (see §5.7 and Rule 5).
 
-*   `strview` (`str` slice): Immutable UTF-8 view (pointer + byte length). Created via `my_str[start:end]` or string slicing operations. Supports shorthand: `s[:end]` (from start), `s[start:]` (to end).
-*   `slice[T]` (`list[T]` slice): Immutable view of `T` elements (pointer + element length). Created via `my_list[start:end]`. Supports shorthand: `items[:3]`, `items[2:]`.
-*   `inout list[T]` parameter: Mutable list access passed via explicit `inout` parameter and call-site `&` (see Section 5.3, Rule 3).
-*   **View liveness (P4, final spec §3.2):** A view's lifetime ends at its last use, lifting the owner's no-move/no-mutate restriction at that point. Two conservative cases: a view that is never read freezes its owner from creation to scope end, and a view whose last read on a branch path sits inside a loop it was created outside of stays live to the join.
+- `strview` (`str` slice): Immutable UTF-8 view (pointer + byte length). Created via `my_str[start:end]` or string slicing operations. Supports shorthand: `s[:end]` (from start), `s[start:]` (to end).
+- `slice[T]` (`list[T]` slice): Immutable view of `T` elements (pointer + element length). Created via `my_list[start:end]`. Supports shorthand: `items[:3]`, `items[2:]`.
+- `inout list[T]` parameter: Mutable list access passed via explicit `inout` parameter and call-site `&` (see Section 5.3, Rule 3).
+- **View liveness (P4, final spec §3.2):** A view's lifetime ends at its last use, lifting the owner's no-move/no-mutate restriction at that point. Two conservative cases: a view that is never read freezes its owner from creation to scope end, and a view whose last read on a branch path sits inside a loop it was created outside of stays live to the join.
 
 **Read-only string parameters prefer `strview`** — passing an owned `str` converts implicitly; owned-type parameters remain supported and are still borrowed implicitly (Rule 2), and views also pass to them via a call-scoped `cap=0` re-borrow — no copy, exactly like a string literal (final spec §3.2, P6'):
+
 ```ryo
 fn process_string(s: strview):           # Preferred: read-only view — zero-copy
 	# ... read s ...
@@ -428,35 +454,38 @@ fn mutate_list(inout items: list[int]): # Explicit mutable borrow
 
 *(Rationale: Mutable borrows remain a parameter-passing convention, not a type (M8.3). Immutable views (`strview`, `slice[T]`, `bytesview`) are a narrow exception: they are first-class types that may be bound and passed, but they are non-escaping — they cannot be returned, moved, or stored in aggregates — so they cannot play the role of general-purpose reference types. This eliminates the need for lifetime annotations while preserving zero-copy performance within expression chains.)*
 
-*   **Materialization:** `str(view)` produces an owned `str` copy of a `strview` (allocates + copies) — the escape hatch for returning, storing, or moving viewed data past its owner. The argument must be a `strview`; anything else, including an owned `str`, is a type error. Materialization is never implicit: `x: str = view` stays a type error, while `x: str = str(view)` is the explicit, legal form. Warning **W0003** (`RedundantMaterialize`) flags materializations at argument positions the call-scoped re-borrow or a view-accepting builtin already serves, and copies that never escape while their source is never mutated — heuristically, and never as an error.
+- **Materialization:** `str(view)` produces an owned `str` copy of a `strview` (allocates + copies) — the escape hatch for returning, storing, or moving viewed data past its owner. The argument must be a `strview`; anything else, including an owned `str`, is a type error. Materialization is never implicit: `x: str = view` stays a type error, while `x: str = str(view)` is the explicit, legal form. Warning **W0003** (`RedundantMaterialize`) flags materializations at argument positions the call-scoped re-borrow or a view-accepting builtin already serves, and copies that never escape while their source is never mutated — heuristically, and never as an error.
 
 ### 4.5 Struct Type (Product Type)
 
-*   User-defined data aggregation: `struct Name: field: Type ...`.
-*   Instances created via brace construction with named fields: `Name{field=value, ...}` (the Brace Law: braces group by name — visibly distinct from a call).
-*   Access via dot notation: `instance.field`. Mutable if instance bound `mut`.
-*   **Debug Representation:** Every struct has a compiler-synthesized debug string mirroring the literal syntax (`Point{x=1.0, y=2.0}`), fields in declaration order, nested structs rendered recursively. `print()` accepts any struct value via this path. Always-on — no opt-in required. *(Rationale: a field rendering cannot be semantically wrong, so there is nothing to opt into — the same reason Swift prints any struct.)*
-*   **Equality:** `#[derive(Eq)]` on the struct definition opts into memberwise `==` / `!=`. Every field must be Eq-capable (primitives, `str`, other derived structs — recursive); float fields use IEEE `==`, so a struct containing NaN never equals itself. *(Rationale: equality is a semantic claim the type must declare — meaningless comparisons on future Move-only types must not compile, unlike the always-on Debug representation.)*
-*   **Memory Layout:** Unspecified by default; the compiler may reorder fields to minimize padding (source-invisible, since access is by name). `#[repr(C)]` forces declaration order with standard C padding, for FFI (Section 4.11).
-*   `Eq` and `Debug` are **compiler-known interfaces** in v0.1 (like the `Copy` marker and `Drop`); they promote to real traits with identical surface syntax when the trait system lands (v0.2/v0.3).
+- User-defined data aggregation: `struct Name: field: Type ...`.
+- Instances created via brace construction with named fields: `Name{field=value, ...}` (the Brace Law: braces group by name — visibly distinct from a call).
+- Access via dot notation: `instance.field`. Mutable if instance bound `mut`.
+- **Debug Representation:** Every struct has a compiler-synthesized debug string mirroring the literal syntax (`Point{x=1.0, y=2.0}`), fields in declaration order, nested structs rendered recursively. `print()` accepts any struct value via this path. Always-on — no opt-in required. *(Rationale: a field rendering cannot be semantically wrong, so there is nothing to opt into — the same reason Swift prints any struct.)*
+- **Equality:** `#[derive(Eq)]` on the struct definition opts into memberwise `==` / `!=`. Every field must be Eq-capable (primitives, `str`, other derived structs — recursive); float fields use IEEE `==`, so a struct containing NaN never equals itself. *(Rationale: equality is a semantic claim the type must declare — meaningless comparisons on future Move-only types must not compile, unlike the always-on Debug representation.)*
+- **Memory Layout:** Unspecified by default; the compiler may reorder fields to minimize padding (source-invisible, since access is by name). `#[repr(C)]` forces declaration order with standard C padding, for FFI (Section 4.11).
+- `Eq` and `Debug` are **compiler-known interfaces** in v0.1 (like the `Copy` marker and `Drop`); they promote to real traits with identical surface syntax when the trait system lands (v0.2/v0.3).
 
 ### 4.6 Enum Type (Sum Type / Algebraic Data Type - ADT)
 
-*   **Concept:** Defines a type that can be exactly *one* of several named **variants**. Each variant can optionally hold associated data. Enums are fundamental for representing alternatives, states, and structured data safely.
-*   **Syntax:**
+- **Concept:** Defines a type that can be exactly *one* of several named **variants**. Each variant can optionally hold associated data. Enums are fundamental for representing alternatives, states, and structured data safely.
+- **Syntax:**
+
     ```ryo
 	enum EnumName[T]: # Optional type parameters for generics
 		UnitVariant             # Variant with no data
 		TupleVariant(Type1, Type2) # Variant holding ordered data
 		StructVariant(name1: TypeA, name2: TypeB) # Variant holding named fields
 	```
-*   **Instantiation:** Use `EnumName.VariantName`. Named payloads use brace construction (`Variant{field=value}` — the Brace Law); positional payloads keep parens.
+- **Instantiation:** Use `EnumName.VariantName`. Named payloads use brace construction (`Variant{field=value}` — the Brace Law); positional payloads keep parens.
+
     ```ryo
 	msg1 = Message.Quit
 	msg2 = Message.Write("hello")
 	msg3 = Message.Coords{x=10, y=-5}
 	```
-*   **Pattern Matching (`match`):** The primary way to use enum values. `match` destructures variants and allows executing code based on the current variant.
+- **Pattern Matching (`match`):** The primary way to use enum values. `match` destructures variants and allows executing code based on the current variant.
+
     ```ryo
 	match my_enum_value:
 		MyEnum.Variant1:
@@ -468,9 +497,10 @@ fn mutate_list(inout items: list[int]): # Explicit mutable borrow
 		_ : # Wildcard for unlisted variants (required if not exhaustive)
 			# Default code
 	```
-*   **Exhaustiveness:** The compiler **enforces** that `match` expressions handle *all* possible variants of an enum, preventing runtime errors from unhandled cases. A wildcard `_` can be used to satisfy exhaustiveness if not all variants are explicitly matched. *(Rationale: Core safety feature, eliminates bugs from missed cases).*
-*   **Ownership:** Enum values follow standard ownership rules. An enum value owns any data contained within its current variant. Moving the enum moves the contained data. Destructuring in `match` can move or borrow contained data based on the pattern.
-*   **Methods:** Methods can be defined on enums using `impl EnumName: ...`, often using `match self:` internally.
+- **Exhaustiveness:** The compiler **enforces** that `match` expressions handle *all* possible variants of an enum, preventing runtime errors from unhandled cases. A wildcard `_` can be used to satisfy exhaustiveness if not all variants are explicitly matched. *(Rationale: Core safety feature, eliminates bugs from missed cases).*
+- **Ownership:** Enum values follow standard ownership rules. An enum value owns any data contained within its current variant. Moving the enum moves the contained data. Destructuring in `match` can move or borrow contained data based on the pattern.
+- **Methods:** Methods can be defined on enums using `impl EnumName: ...`, often using `match self:` internally.
+
     ```ryo
 	impl MyEnum:
 		fn process(self):
@@ -478,45 +508,49 @@ fn mutate_list(inout items: list[int]): # Explicit mutable borrow
 				MyEnum.Variant1: io.println("Processing V1")
 				# ... other variants ...
 	```
-*   *(Rationale: Enums provide type-safe ways to represent alternatives (like `Result`/`Optional`), states, and structured messages, crucial for robust software and eliminating `null` errors. Exhaustive matching is a key safety feature derived from functional programming and Rust).*
+- *(Rationale: Enums provide type-safe ways to represent alternatives (like `Result`/`Optional`), states, and structured messages, crucial for robust software and eliminating `null` errors. Exhaustive matching is a key safety feature derived from functional programming and Rust).*
 
 ### 4.7 Built-in Collections
 
-*   `list[T]`: Dynamic array. Homogeneous. *(Built-in fundamental type)*
-*   `map[K, V]`: Hash map. Homogeneous keys/values. `K` must be hashable/comparable. *(Built-in fundamental type)*
+- `list[T]`: Dynamic array. Homogeneous. *(Built-in fundamental type)*
+- `map[K, V]`: Hash map. Homogeneous keys/values. `K` must be hashable/comparable. *(Built-in fundamental type)*
 
 #### **Performance Note: Strict Bounds Checking (No Negative Indexing)**
-For maximum execution speed and optimal CPU branch prediction, Ryo enforces **strict, zero-based bounds checking**. 
-*   Negative indexing (e.g., `my_list[-1]`) is **not supported** in Ryo, as allowing it would require a hidden `if index < 0` branch on every single memory access, defeating auto-vectorization.
-*   **DX-First Error:** Because Ryo targets Python developers who expect negative indexing, writing `my_list[-1]` yields a special compiler error: *"Error: Ryo does not support negative indexing for performance reasons. Use `my_list.last()` instead."*
+
+For maximum execution speed and optimal CPU branch prediction, Ryo enforces **strict, zero-based bounds checking**.
+- Negative indexing (e.g., `my_list[-1]`) is **not supported** in Ryo, as allowing it would require a hidden `if index < 0` branch on every single memory access, defeating auto-vectorization.
+- **DX-First Error:** Because Ryo targets Python developers who expect negative indexing, writing `my_list[-1]` yields a special compiler error: *"Error: Ryo does not support negative indexing for performance reasons. Use `my_list.last()` instead."*
 
 #### **Safety Note: Versioned Iterators**
+
 To prevent "Iterator Invalidation" bugs (modifying a collection while iterating), Ryo uses **Versioned Iterators**.
-*   Each collection has a modification counter.
-*   Iterators capture this counter on creation.
-*   If the collection is modified during iteration, the next iterator step panics.
-*   *(Rationale: Prevents memory safety issues and logical bugs common in mutable iteration).*
+- Each collection has a modification counter.
+- Iterators capture this counter on creation.
+- If the collection is modified during iteration, the next iterator step panics.
+- *(Rationale: Prevents memory safety issues and logical bugs common in mutable iteration).*
 
 #### **String Indexing**
-*   Direct indexing `s[i]` is **forbidden** for strings.
-*   `.len()` returns the **byte length**, not a character count. Character-level access comes from explicit decoding APIs that advertise their cost: `.chars()` (an iterator of `char` — Unicode scalar values, §4.2) and `.char_count()` (explicit O(n)); `s.chars().collect() -> list[char]` is the "decode once, then index freely" escape hatch, as an explicit allocation.
-*   *(Rationale: Strings are UTF-8. Byte indexing is dangerous (can split characters), and O(N) character indexing is a performance trap. Use `.bytes()` or `.chars()` explicitly).*
+- Direct indexing `s[i]` is **forbidden** for strings.
+- `.len()` returns the **byte length**, not a character count. Character-level access comes from explicit decoding APIs that advertise their cost: `.chars()` (an iterator of `char` — Unicode scalar values, §4.2) and `.char_count()` (explicit O(n)); `s.chars().collect() -> list[char]` is the "decode once, then index freely" escape hatch, as an explicit allocation.
+- *(Rationale: Strings are UTF-8. Byte indexing is dangerous (can split characters), and O(N) character indexing is a performance trap. Use `.bytes()` or `.chars()` explicitly).*
 
 *Note: User-defined generics are planned for future implementation. For v0.1 polymorphism, use **Enum Wrappers** (Enum Dispatch) instead of `dyn Trait`. Advanced generics with trait bounds are detailed in Section 19 (Future Work).*
 
 ### 4.8 Optional Types (`?T`)
 
-*   **Syntax:** `?T` represents a value of type `T` that may be absent (represented by `none`). Eliminates null pointer errors through explicit, type-safe handling.
-*   **Null literal:** `none` (lowercase keyword, consistent with `true` and `false`). *(Rationale: Python-familiar, semantically clear—"none" means "no value")*
-*   **Zero-Cost Optionals (Niche Optimization):** For any pointer-backed type (`str`, `list`, `map`, `shared[T]`, and references like `&Point`), the compiler guarantees that `?T` has the exact same memory layout as `T`. The `none` value is simply represented by a null pointer at the machine level. There is no boxing or metadata overhead.
-*   **Declaration and Assignment:**
+- **Syntax:** `?T` represents a value of type `T` that may be absent (represented by `none`). Eliminates null pointer errors through explicit, type-safe handling.
+- **Null literal:** `none` (lowercase keyword, consistent with `true` and `false`). *(Rationale: Python-familiar, semantically clear—"none" means "no value")*
+- **Zero-Cost Optionals (Niche Optimization):** For any pointer-backed type (`str`, `list`, `map`, `shared[T]`, and references like `&Point`), the compiler guarantees that `?T` has the exact same memory layout as `T`. The `none` value is simply represented by a null pointer at the machine level. There is no boxing or metadata overhead.
+- **Declaration and Assignment:**
+
     ```ryo
 	user: ?User = none
 	user: ?User = User(name="Alice")
 
 	config: ?Config = load_config()  # If load_config returns ?Config
 	```
-*   **Optional Chaining (`?.`):** Access nested optional fields without explicit unwrapping. Returns an optional type if any step is `none`:
+- **Optional Chaining (`?.`):** Access nested optional fields without explicit unwrapping. Returns an optional type if any step is `none`:
+
     ```ryo
 	city = user?.profile?.address?.city  # Returns ?str
 
@@ -526,7 +560,8 @@ To prevent "Iterator Invalidation" bugs (modifying a collection while iterating)
 	else:
 		none
 	```
-*   **Default Values with `orelse`:** Provide defaults or early return:
+- **Default Values with `orelse`:** Provide defaults or early return:
+
     ```ryo
 	name = user?.name orelse "Unknown"
 	port = config?.port orelse 8080
@@ -535,7 +570,8 @@ To prevent "Iterator Invalidation" bugs (modifying a collection while iterating)
 	user = optional_user orelse return error.NoUser
 	# 'user' is now User (not ?User)
 	```
-*   **Smart Casting after Null Checks:** After a null check, the type is automatically narrowed:
+- **Smart Casting after Null Checks:** After a null check, the type is automatically narrowed:
+
     ```ryo
 	if user != none:
 		print(user.name)  # user is User here, not ?User (smart cast)
@@ -543,20 +579,23 @@ To prevent "Iterator Invalidation" bugs (modifying a collection while iterating)
 	if let user = optional_user:  # Future: if-let syntax
 		print(user.name)
 	```
-*   *(Rationale: Zig-inspired `?T` syntax is concise and compositional. The `none` keyword aligns with Python's `None`. Optional chaining (`?.`) and `orelse` provide ergonomic handling. Smart casting reduces boilerplate after validation)*
+- *(Rationale: Zig-inspired `?T` syntax is concise and compositional. The `none` keyword aligns with Python's `None`. Optional chaining (`?.`) and `orelse` provide ergonomic handling. Smart casting reduces boilerplate after validation)*
 
 ### 4.9 Error Types (`ErrorType!SuccessType`)
 
-*   **Purpose:** Error types are algebraic data types specifically designed for error handling. Use the `error` keyword to define error types with associated data.
+- **Purpose:** Error types are algebraic data types specifically designed for error handling. Use the `error` keyword to define error types with associated data.
 
 #### **Single-Variant Errors** (Simple Case)
 
-*   **Unit Error (No Data):** A simple error marker:
+- **Unit Error (No Data):** A simple error marker:
+
     ```ryo
 	error Timeout
 	error Unauthorized
 	```
+
     **Usage:**
+
     ```ryo
 	fn operation() -> Timeout!Data:
 		if elapsed > limit:
@@ -564,26 +603,33 @@ To prevent "Iterator Invalidation" bugs (modifying a collection while iterating)
 		return data
 	```
 
-*   **Message-Only Error (Most Common):** Single unnamed string field becomes the message:
+- **Message-Only Error (Most Common):** Single unnamed string field becomes the message:
+
     ```ryo
 	error NotFound(str)
 	error ValidationFailed(str)
 	```
+
     **Usage:**
+
     ```ryo
 	fn find_user(id: int) -> NotFound!User:
 		if not exists(id):
 			return NotFound("User not found")
 		return user
 	```
+
     **Automatic message:** The string is accessible via `.message()` method on error trait.
 
-*   **Structured Single-Variant Error:** Multiple named fields:
+- **Structured Single-Variant Error:** Multiple named fields:
+
     ```ryo
 	error HttpError(status: int, message: str)
 	error ValidationError(field: str, constraint: str)
 	```
+
     **Usage:**
+
     ```ryo
 	fn fetch(url: str) -> HttpError!Data:
 		response = await http.get(url)
@@ -611,6 +657,7 @@ error UnexpectedEof
 ```
 
 Usage:
+
 ```ryo
 # File: main.ryo
 import io
@@ -629,7 +676,8 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 #### **Error Union Types** (Composition)
 
-*   **Explicit Error Unions** - Compose multiple error types:
+- **Explicit Error Unions** - Compose multiple error types:
+
     ```ryo
 	# Can return either FileError or ParseError
 	fn process(path: str) -> (FileError | ParseError)!Data:
@@ -638,7 +686,8 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 		return data
 	```
 
-*   **Inferred Error Unions** - Compiler infers error set from `try` expressions:
+- **Inferred Error Unions** - Compiler infers error set from `try` expressions:
+
     ```ryo
 	# Just use ! and compiler infers: (FileError | ParseError)!Data
 	fn process(path: str) -> !Data:
@@ -649,9 +698,11 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 	# Use --show-inferred-errors flag to see inferred type:
 	# process() -> (FileError | ParseError)!Data
 	```
+
     **Benefits:** No wrapper types needed, composition is automatic, refactoring-friendly.
 
-*   **Explicit Single Error Type** (`ErrorType!T`):
+- **Explicit Single Error Type** (`ErrorType!T`):
+
     ```ryo
 	fn read_file(path: str) -> io.FileNotFound!str:
 		if not exists(path):
@@ -659,14 +710,16 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 		return os.read(path)
 	```
 
-*   **Generic Error Type** (`!T`): Accept any error:
+- **Generic Error Type** (`!T`): Accept any error:
+
     ```ryo
 	fn flexible_operation() -> !Data:
 		# Can return any error type
 		...
 	```
 
-*   **Combined Error and Optional** (`!?T`):
+- **Combined Error and Optional** (`!?T`):
+
     ```ryo
 	fn find_user(db: Database, id: int) -> DatabaseError!?User:
 		# Can return: DatabaseError, none (not found), or User
@@ -678,7 +731,8 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 #### **Pattern Matching on Errors**
 
-*   **Single Error Type** (Exhaustive matching required):
+- **Single Error Type** (Exhaustive matching required):
+
     ```ryo
 	result = read_file(path) catch as e:
 		match e:
@@ -691,7 +745,8 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 			# MUST handle all variants - compiler error if missing
 	```
 
-*   **Error Union** (Exhaustive matching required):
+- **Error Union** (Exhaustive matching required):
+
     ```ryo
 	result = process(path) catch as e:
 		match e:
@@ -712,6 +767,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 	```
 
     **Using catch-all when needed:**
+
     ```ryo
 	result = process(path) catch as e:
 		match e:
@@ -722,17 +778,16 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 				return default_config()
 	```
 
-*   *(Rationale: Single-variant errors provide simplicity (one syntax). Error unions enable automatic composition without wrapper types (Zig-inspired). Exhaustive matching by default ensures all error cases are explicitly handled. The `_` catch-all provides an escape hatch for truly generic handling.)*
+- *(Rationale: Single-variant errors provide simplicity (one syntax). Error unions enable automatic composition without wrapper types (Zig-inspired). Exhaustive matching by default ensures all error cases are explicitly handled. The `_` catch-all provides an escape hatch for truly generic handling.)*
 
 ### 4.10 Error Trait and Message Handling
 
+- **Error Creation:** When an error value is created (`return MyError(...)`), the compiler automatically captures the full call stack at that moment, storing it as the initial stack trace. **Performance Note:** Stack capture incurs ~5-10% overhead at error creation, but only when errors actually occur (error-free code paths have no overhead). See Section 1.1 for DX vs. performance trade-off rationale.
+- **Error Propagation (`try`):** When an error is propagated via try, the compiler appends a new frame to the error's stack trace. This new frame contains the location (file, line, function) of the try expression itself. **Performance Note:** Each propagation adds ~5-10% overhead at that specific `try` site when an error is being propagated (no overhead on success path).
+- **Result:** The final `.stack_trace()` provides a complete, easy-to-read "story" of the failure, starting with the original error and showing every function that propagated it. This rich debugging information is a core part of Ryo's DX-first philosophy.
 
-* **Error Creation:** When an error value is created (`return MyError(...)`), the compiler automatically captures the full call stack at that moment, storing it as the initial stack trace. **Performance Note:** Stack capture incurs ~5-10% overhead at error creation, but only when errors actually occur (error-free code paths have no overhead). See Section 1.1 for DX vs. performance trade-off rationale.
-* **Error Propagation (`try`):** When an error is propagated via try, the compiler appends a new frame to the error's stack trace. This new frame contains the location (file, line, function) of the try expression itself. **Performance Note:** Each propagation adds ~5-10% overhead at that specific `try` site when an error is being propagated (no overhead on success path).
-* **Result:** The final `.stack_trace()` provides a complete, easy-to-read "story" of the failure, starting with the original error and showing every function that propagated it. This rich debugging information is a core part of Ryo's DX-first philosophy.
+- **Error Trait:** All error types automatically implement the `Error` trait:
 
-
-*   **Error Trait:** All error types automatically implement the `Error` trait:
     ```ryo
 	trait Error:
 		fn message(self) -> str           # Human-readable message
@@ -755,13 +810,14 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 		column: int        # Column number
 	```
 
-*   **Automatic Location Tracking:** All error values automatically capture the location where they are created:
-    *   **`.location()`** returns `Location` with file, line, column, and function name
-    *   **`.stack_trace()`** returns the full call stack (list of frames) at error creation
-    *   Useful for debugging: find exactly where an error originated
-    *   Works across error propagation with `try` - stack grows as error bubbles up
+- **Automatic Location Tracking:** All error values automatically capture the location where they are created:
+  - **`.location()`** returns `Location` with file, line, column, and function name
+  - **`.stack_trace()`** returns the full call stack (list of frames) at error creation
+  - Useful for debugging: find exactly where an error originated
+  - Works across error propagation with `try` - stack grows as error bubbles up
 
     Example:
+
     ```ryo
 	# File: file/errors.ryo
 	error NotFound(path: str)
@@ -785,29 +841,37 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 				print(f"  {frame.function} at {frame.file}:{frame.line}")
 	```
 
-*   **Automatic Message Generation:**
-    *   **Single string field:** The string is used as the message.
+- **Automatic Message Generation:**
+  - **Single string field:** The string is used as the message.
+
         ```ryo
 		error NotFound(str)
 		# .message() returns the string directly
 		```
-    *   **Named message field:** The `message` field is used.
+
+  - **Named message field:** The `message` field is used.
+
         ```ryo
 		error HttpError(status: int, message: str)
 		# .message() returns the message field
 		```
-    *   **Unit variant:** Variant name is used.
+
+  - **Unit variant:** Variant name is used.
+
         ```ryo
 		error Timeout
 		# .message() returns "Timeout"
 		```
-    *   **Multiple fields (no message field):** Generated from Debug representation.
+
+  - **Multiple fields (no message field):** Generated from Debug representation.
+
         ```ryo
 		error FileNotFound(path: str, permission_level: int)
 		# .message() returns "FileNotFound(path=/var/log, permission_level=0700)"
 		```
 
-*   **Custom Message Implementation:** Override automatic message generation:
+- **Custom Message Implementation:** Override automatic message generation:
+
     ```ryo
 	# Single-variant errors with custom messages
 	error TooShort(field: str, min_length: int)
@@ -822,7 +886,8 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 			return f"{self.field} cannot exceed {self.max_length} characters"
 	```
 
-*   **Accessing Error Messages and Location:**
+- **Accessing Error Messages and Location:**
+
     ```ryo
 	result = operation() catch as e:
 		# Access message directly
@@ -844,7 +909,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 						print(f"  {frame.function} at {frame.file}:{frame.line}")
 	```
 
-*   *(Rationale: Error messages are essential for debugging and user feedback. Automatic generation from data reduces boilerplate. Custom implementations enable domain-specific messages. Location tracking and stack traces enable efficient debugging without requiring external tools or logging.)*
+- *(Rationale: Error messages are essential for debugging and user feedback. Automatic generation from data reduces boilerplate. Custom implementations enable domain-specific messages. Location tracking and stack traces enable efficient debugging without requiring external tools or logging.)*
 
 ### 4.11 FFI & C Interoperability
 
@@ -866,7 +931,8 @@ The workflow involves declaring your external library in `ryo.toml` under the `[
 
 This is the most direct case. You have the C source and header files.
 
-1.  **Project Structure**:
+1. **Project Structure**:
+
     ```
     my_ryo_project/
     ├── ryo.toml
@@ -874,21 +940,25 @@ This is the most direct case. You have the C source and header files.
         ├── my_c_lib.h
         └── my_c_lib.c
     ```
-2.  **`ryo.toml` Configuration**:
+
+2. **`ryo.toml` Configuration**:
+
     ```toml
     [c_dependencies]
     my_lib = { header = "c_libs/my_c_lib.h", source = "c_libs/my_c_lib.c" }
     ```
-3.  **Build Process**: When you run `ryo build`:
-    *   `ryo-bindgen` reads `my_c_lib.h` to generate Ryo bindings.
-    *   `zig cc` compiles `my_c_lib.c` into an object file.
-    *   The Ryo compiler links everything together.
+
+3. **Build Process**: When you run `ryo build`:
+    - `ryo-bindgen` reads `my_c_lib.h` to generate Ryo bindings.
+    - `zig cc` compiles `my_c_lib.c` into an object file.
+    - The Ryo compiler links everything together.
 
 **Case 2: Integrating a Rust Library**
 
 To be used by Ryo, a Rust library must first be compiled to expose a C ABI. This typically involves using a tool like `cbindgen` to generate a C header file from the Rust source.
 
-1.  **Project Structure**: You would have the Rust library's generated header (`.h`) and its pre-compiled static library (`.a`).
+1. **Project Structure**: You would have the Rust library's generated header (`.h`) and its pre-compiled static library (`.a`).
+
     ```
     my_ryo_project/
     ├── ryo.toml
@@ -896,15 +966,18 @@ To be used by Ryo, a Rust library must first be compiled to expose a C ABI. This
         ├── my_rust_lib.h           # Generated by cbindgen
         └── libmy_rust_lib.a        # Compiled with 'cargo build'
     ```
-2.  **`ryo.toml` Configuration**: The configuration is almost identical. You just point `source` to the `.a` file instead of a `.c` file.
+
+2. **`ryo.toml` Configuration**: The configuration is almost identical. You just point `source` to the `.a` file instead of a `.c` file.
+
     ```toml
     [c_dependencies]
     my_rust_lib = { header = "rust_libs/my_rust_lib.h", source = "rust_libs/libmy_rust_lib.a" }
     ```
-3.  **Build Process**: When you run `ryo build`:
-    *   `ryo-bindgen` reads `my_rust_lib.h` to generate the Ryo bindings. (It doesn't care the source was Rust).
-    *   The build system sees the `.a` file and skips compilation.
-    *   The Ryo compiler links your Ryo code directly with `libmy_rust_lib.a`.
+
+3. **Build Process**: When you run `ryo build`:
+    - `ryo-bindgen` reads `my_rust_lib.h` to generate the Ryo bindings. (It doesn't care the source was Rust).
+    - The build system sees the `.a` file and skips compilation.
+    - The Ryo compiler links your Ryo code directly with `libmy_rust_lib.a`.
 
 #### Usage in Ryo
 
@@ -924,7 +997,7 @@ fn main():
 This unified approach makes `ryo-bindgen` a cornerstone of Ryo's ecosystem, providing a consistent and simple path for integrating with the vast number of libraries that can expose a C ABI.
 
 ### 4.12 Type Conversion Syntax
-*   Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
+- Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
 
 ### 4.13 Constrained Types (Range Types)
 
@@ -932,7 +1005,7 @@ This unified approach makes `ryo-bindgen` a cornerstone of Ryo's ecosystem, prov
 
 Constrained types attach compile-time and runtime bounds to numeric types, eliminating an entire class of validation bugs. Inspired by Ada's range types, adapted to Ryo's syntax and philosophy.
 
-*   **Syntax:** `type Name = BaseType(min..max)`
+- **Syntax:** `type Name = BaseType(min..max)`
 
     ```ryo
     type Port = int(1..65535)
@@ -941,14 +1014,14 @@ Constrained types attach compile-time and runtime bounds to numeric types, elimi
     type Latitude = float(-90.0..90.0)
     ```
 
-*   **Compile-Time Validation:** When a constrained type is constructed from a literal, the compiler checks bounds statically:
+- **Compile-Time Validation:** When a constrained type is constructed from a literal, the compiler checks bounds statically:
 
     ```ryo
     p = Port(8080)      # ok — checked at compile time
     p = Port(70000)     # compile error: 70000 outside range 1..65535
     ```
 
-*   **Runtime Validation:** When constructed from a dynamic value, bounds are checked at runtime:
+- **Runtime Validation:** When constructed from a dynamic value, bounds are checked at runtime:
 
     ```ryo
     fn serve(port: Port):
@@ -959,20 +1032,20 @@ Constrained types attach compile-time and runtime bounds to numeric types, elimi
         p = Port(user_input)         # runtime check, panics if out of range
     ```
 
-*   **Safe Runtime Validation:** Use `.checked()` to return an error instead of panicking:
+- **Safe Runtime Validation:** Use `.checked()` to return an error instead of panicking:
 
     ```ryo
     p = try Port.checked(user_input)  # returns RangeError!Port
     ```
 
-*   **Introspection:** Access type bounds at compile time:
+- **Introspection:** Access type bounds at compile time:
 
     ```ryo
     Port.min   # 1
     Port.max   # 65535
     ```
 
-*   **Arithmetic Safety:** Operations on constrained types produce the base type. Re-constraining requires explicit construction:
+- **Arithmetic Safety:** Operations on constrained types produce the base type. Re-constraining requires explicit construction:
 
     ```ryo
     a = Port(80)
@@ -980,7 +1053,7 @@ Constrained types attach compile-time and runtime bounds to numeric types, elimi
     c = Port(a + 1)    # runtime check: still in range?
     ```
 
-*   *(Rationale: Python developers write `if port < 1 or port > 65535: raise ValueError(...)` constantly. Constrained types eliminate this pattern — define the constraint once in the type, enforce it everywhere automatically. Consistent with existing `TargetType(value)` conversion syntax. For the AI-writes, human-reviews workflow: the AI writes the constraint once, the compiler enforces it forever, and the human reviewer sees `port: Port` and knows it's valid without tracing validation logic.)*
+- *(Rationale: Python developers write `if port < 1 or port > 65535: raise ValueError(...)` constantly. Constrained types eliminate this pattern — define the constraint once in the type, enforce it everywhere automatically. Consistent with existing `TargetType(value)` conversion syntax. For the AI-writes, human-reviews workflow: the AI writes the constraint once, the compiler enforces it forever, and the human reviewer sees `port: Port` and knows it's valid without tracing validation logic.)*
 
 ### 4.14 Distinct Types (Strong Typedefs)
 
@@ -988,7 +1061,7 @@ Constrained types attach compile-time and runtime bounds to numeric types, elimi
 
 Distinct types create new nominal types that share a representation with their base type but cannot be used interchangeably. This prevents unit-mismatch bugs at zero runtime cost.
 
-*   **Syntax:** `type Name = distinct BaseType`
+- **Syntax:** `type Name = distinct BaseType`
 
     ```ryo
     type Meters = distinct float
@@ -996,7 +1069,7 @@ Distinct types create new nominal types that share a representation with their b
     type Velocity = distinct float
     ```
 
-*   **Type Safety:** Distinct types cannot be mixed in operations:
+- **Type Safety:** Distinct types cannot be mixed in operations:
 
     ```ryo
     fn speed(distance: Meters, time: Seconds) -> Velocity:
@@ -1008,14 +1081,14 @@ Distinct types create new nominal types that share a representation with their b
     v = speed(t, d)        # compile error: expected Meters, got Seconds
     ```
 
-*   **Conversion:** Convert between distinct type and base type using function-call syntax:
+- **Conversion:** Convert between distinct type and base type using function-call syntax:
 
     ```ryo
     m = Meters(42.0)       # float → Meters
     raw = float(m)         # Meters → float (explicit unwrap)
     ```
 
-*   **Composition with Constrained Types:** Distinct and constrained types can be combined:
+- **Composition with Constrained Types:** Distinct and constrained types can be combined:
 
     ```ryo
     type Port = distinct int(1..65535)
@@ -1023,8 +1096,7 @@ Distinct types create new nominal types that share a representation with their b
     type Temperature = distinct float(-273.15..1000.0)
     ```
 
-*   *(Rationale: The Mars Climate Orbiter was lost because of a unit-mismatch bug — meters vs. feet. Distinct types catch this class of error at compile time with zero runtime cost. The type has the same representation as its base, so there is no performance penalty. Combined with constrained types, this provides Ada-level type safety with Python-like syntax.)*
-
+- *(Rationale: The Mars Climate Orbiter was lost because of a unit-mismatch bug — meters vs. feet. Distinct types catch this class of error at compile time with zero runtime cost. The type has the same representation as its base, so there is no performance penalty. Combined with constrained types, this provides Ada-level type safety with Python-like syntax.)*
 
 ## 5. Memory Management: "Ownership Lite"
 
@@ -1032,14 +1104,14 @@ Ryo's memory model is designed for one goal: **Rust-level safety without lifetim
 
 **Core principle:** Borrow-by-Default for Functions, Move-by-Default for Assignment.
 
-*   **No Garbage Collector.** Deterministic performance and resource management.
-*   **No Lifetime Annotations.** Borrows are scoped to function calls — the compiler always knows when they end.
-*   **Clone Only When Necessary.** Returning owned values uses NRVO — the compiler writes directly into the caller's slot. Moving owned values transfers a fat pointer, not the underlying data. Actual copies are rare, reserved for cases where the compiler cannot prove safety or the caller demands an independent value. See Section 5.9 for idiomatic copy-avoidance techniques.
+- **No Garbage Collector.** Deterministic performance and resource management.
+- **No Lifetime Annotations.** Borrows are scoped to function calls — the compiler always knows when they end.
+- **Clone Only When Necessary.** Returning owned values uses NRVO — the compiler writes directly into the caller's slot. Moving owned values transfers a fat pointer, not the underlying data. Actual copies are rare, reserved for cases where the compiler cannot prove safety or the caller demands an independent value. See Section 5.9 for idiomatic copy-avoidance techniques.
 
 ### 5.1 Value Semantics (Copy) vs. Ownership Semantics (Move)
 
-*   **Value Types (Copy):** Primitive types (`int`, `float`, `bool`, `char`) and small, user-defined structs (that contain only Copy types) are **copied** on assignment, function call, and return. Ownership is trivial.
-*   **Ownership Types (Move):** Types that manage external resources (e.g., `str`, `list[T]`, `map[K, V]`, and most user-defined structs/enums) are **moved** on assignment and return. Function parameters are a separate case — they default to immutable borrow (see Rule 2); `move` is the explicit opt-in when the function needs to take ownership.
+- **Value Types (Copy):** Primitive types (`int`, `float`, `bool`, `char`) and small, user-defined structs (that contain only Copy types) are **copied** on assignment, function call, and return. Ownership is trivial.
+- **Ownership Types (Move):** Types that manage external resources (e.g., `str`, `list[T]`, `map[K, V]`, and most user-defined structs/enums) are **moved** on assignment and return. Function parameters are a separate case — they default to immutable borrow (see Rule 2); `move` is the explicit opt-in when the function needs to take ownership.
 
 ### 5.2 The Three Modes of Data Access
 
@@ -1060,27 +1132,28 @@ The decision rule is not "do I want to mutate?" — both `inout` and
 need to leave the caller?**
 
 | Need | Use |
-|------|-----|
+| ------ | ----- |
 | Read contents (strings, buffers) | `strview` / `bytesview` view parameter — the preferred read-only string/buffer convention (§4.4); owned values convert implicitly |
 | Read-only access (keep or extend the value) | Default borrow (no annotation) |
 | Modify in place, caller keeps the value | `inout` |
 | Take ownership permanently | `move` |
 | Take ownership temporarily and return it | `move T -> T` |
 
-##### Use `inout` when:
+##### Use `inout` when
 
 - The function modifies data and the caller keeps the binding
 - Most mutation APIs (`buf.push_str`, `list.sort`, `map.insert`)
 - The value stays in the same storage for the caller's entire scope
 
 Example:
+
 ```ryo
 fn add_header(inout buf: str, header: str):
 	buf.push_str(header)
 	buf.push('\n')
 ```
 
-##### Use `move` when ownership must leave the caller:
+##### Use `move` when ownership must leave the caller
 
 1. **Storage in another scope.** Inserting into a collection, storing
    in a struct field, sending across a channel, spawning into a task.
@@ -1271,8 +1344,8 @@ struct Order:
 
 #### Rule 7: Borrowing Rules (Compile-Time Enforced)
 
-*   **One Writer OR Many Readers:** At any point, a value can have *either* one or more immutable borrows *OR* exactly one mutable borrow (`inout`). Never both.
-*   **Borrows Are Scoped to Calls:** A borrow begins when a function is called and ends when it returns. Because borrows can't be stored or returned (Rules 5 and 6), the compiler always knows the exact scope.
+- **One Writer OR Many Readers:** At any point, a value can have *either* one or more immutable borrows *OR* exactly one mutable borrow (`inout`). Never both.
+- **Borrows Are Scoped to Calls:** A borrow begins when a function is called and ends when it returns. Because borrows can't be stored or returned (Rules 5 and 6), the compiler always knows the exact scope.
 
 ```ryo
 fn main():
@@ -1295,14 +1368,16 @@ fn main():
 Ryo employs a **Hybrid Eager Destruction** model to optimize memory usage without compromising predictable resource management. This approach cleanly separates "Pure Memory" from "Observable Resources".
 
 #### 1. Pure Memory is Destroyed Eagerly (Dataflow-based)
-If a type does **not** implement a custom `Drop` trait (e.g., `str`, `list[T]`, primitive arrays, or plain structs containing them), the compiler destroys it immediately after its **last syntactic use**, rather than waiting for the end of the lexical scope. 
 
-*   *Why?* The developer cannot observe exactly *when* pure memory is freed, only that it is. Eager destruction dramatically reduces peak memory overhead in long-running functions (similar to Mojo's eager destruction) without requiring developers to manually scope variables or call `del`.
+If a type does **not** implement a custom `Drop` trait (e.g., `str`, `list[T]`, primitive arrays, or plain structs containing them), the compiler destroys it immediately after its **last syntactic use**, rather than waiting for the end of the lexical scope.
+
+- *Why?* The developer cannot observe exactly *when* pure memory is freed, only that it is. Eager destruction dramatically reduces peak memory overhead in long-running functions (similar to Mojo's eager destruction) without requiring developers to manually scope variables or call `del`.
 
 #### 2. Resources are Destroyed Lexically (RAII/Scope-based)
+
 If a type **does** implement a custom `Drop` trait (e.g., `File`, `MutexGuard`, `Connection`), it represents an observable resource. These are destroyed **strictly at the end of their lexical scope** (or `with` block). Eager destruction is disabled for these types.
 
-*   *Why?* When a developer acquires a lock or opens a transaction, they rely on scope boundaries for correctness. Eagerly dropping a lock because the variable isn't referenced later in the function could cause subtle data races. Lexical destruction guarantees predictable, Python-like semantics.
+- *Why?* When a developer acquires a lock or opens a transaction, they rely on scope boundaries for correctness. Eagerly dropping a lock because the variable isn't referenced later in the function could cause subtle data races. Lexical destruction guarantees predictable, Python-like semantics.
 
 ```ryo
 impl Drop for Connection:
@@ -1321,8 +1396,8 @@ fn process_data():
 	# <--- `guard` is lexically destroyed RIGHT HERE (lock predictably released)
 ```
 
-*   **Drop order (for resources):** Reverse declaration order within a scope.
-*   **Relation to Ownership:** The Move/Borrow model dictates *who* owns the value. The Hybrid Eager model dictates *when* ownership ends (after last use for memory, at scope exit for resources). The `Drop` trait dictates *what happens* when ownership ends.
+- **Drop order (for resources):** Reverse declaration order within a scope.
+- **Relation to Ownership:** The Move/Borrow model dictates *who* owns the value. The Hybrid Eager model dictates *when* ownership ends (after last use for memory, at scope exit for resources). The `Drop` trait dictates *what happens* when ownership ends.
 
 *(Rationale: `drop` takes `self` by move rather than `inout self` because the value is being destroyed — there is no reason to borrow something that ceases to exist. This hybrid model gives Ryo 90% of Mojo's performance benefits with 0% of the cognitive overhead or race-condition risks associated with pure eager destruction.)*
 
@@ -1379,16 +1454,16 @@ fn update_count(inout counter: mutex[int]):
 
 The Move/Borrow model handles tree-shaped data well, but some patterns need shared access:
 
-1.  **Graph/Cyclic Data:** Nodes referencing each other.
-2.  **Shared State:** A configuration object accessed by multiple concurrent tasks.
-3.  **Long-Lived Resources:** State shared across route handlers in a web server.
+1. **Graph/Cyclic Data:** Nodes referencing each other.
+2. **Shared State:** A configuration object accessed by multiple concurrent tasks.
+3. **Long-Lived Resources:** State shared across route handlers in a web server.
 
 `shared[T]` allows multiple owners via atomic reference counting. The data is dropped when the last reference is released. The semantic model follows **Swift's class reference semantics**, not Rust's manual `Arc<T>`: refcount operations are implicit on assignment, the compiler aggressively elides redundant retain/release pairs, and stdlib container types (`list`, `map`, `str`) implement copy-on-write so users see value semantics even when storage is shared. The practical effect is that `shared[T]` is cheap in common patterns and expensive only when reference counts actually cross thread boundaries or escape into closures.
 
 `weak[T]` and `unowned[T]` break reference cycles:
 
-*   `weak[T]` — nilable on drop; the holder must check before use. Suitable for parent-pointers in trees, observer subscribers, and any reference that may legitimately outlive its referent.
-*   `unowned[T]` — traps on use-after-drop. Suitable for "I know this lives at least as long as I do" relationships where a check would be noise.
+- `weak[T]` — nilable on drop; the holder must check before use. Suitable for parent-pointers in trees, observer subscribers, and any reference that may legitimately outlive its referent.
+- `unowned[T]` — traps on use-after-drop. Suitable for "I know this lives at least as long as I do" relationships where a check would be noise.
 
 Cycles between `shared[T]` values that do not include at least one `weak[T]` or `unowned[T]` link will leak memory — the runtime does not perform cycle collection.
 
@@ -1409,10 +1484,10 @@ fn setup_server():
 	)
 ```
 
-*   `shared[T]` is **explicit opt-in** — the developer chooses shared ownership at the type level, and the type signature tells a reviewer "this data is shared."
-*   `shared[T]` is a **normal owned type** — it can be stored in struct fields, returned from functions, and moved between scopes. The inner `T` is accessed through the container.
-*   Assignment retains, drop releases; the user never writes `.clone()`. Most retain/release pairs are elided by the compiler before codegen.
-*   **Sharing freezes.** Access through `shared[T]` is **read-only**: constructing `shared(x)` consumes the (possibly `mut`-built) owned value and ends all mutation of it — the moment Pony spells `trn → val`. Shared mutation is possible only through interior-mutability wrappers: `shared[mutex[T]]` or `shared[rwlock[T]]` (§9.2.4). This makes a plain `shared[T]` deeply immutable and therefore trivially safe to send across tasks: no receiver can mutate it, views of it are immutable by the P-rules (§4.4), and there is no hidden interior mutability. As a consequence, graphs of plain `shared[T]` values are **acyclic by construction** — a shared-immutable value can only reference *older* shared values, with no mutation to close a loop — so the cycle-leak caveat above applies only to graphs built with the mutable wrappers.
+- `shared[T]` is **explicit opt-in** — the developer chooses shared ownership at the type level, and the type signature tells a reviewer "this data is shared."
+- `shared[T]` is a **normal owned type** — it can be stored in struct fields, returned from functions, and moved between scopes. The inner `T` is accessed through the container.
+- Assignment retains, drop releases; the user never writes `.clone()`. Most retain/release pairs are elided by the compiler before codegen.
+- **Sharing freezes.** Access through `shared[T]` is **read-only**: constructing `shared(x)` consumes the (possibly `mut`-built) owned value and ends all mutation of it — the moment Pony spells `trn → val`. Shared mutation is possible only through interior-mutability wrappers: `shared[mutex[T]]` or `shared[rwlock[T]]` (§9.2.4). This makes a plain `shared[T]` deeply immutable and therefore — provided `T` is composed of safe Ryo types (the `unsafe` and FFI exceptions of §14.5.6 aside) — trivially safe to send across tasks: no receiver can mutate it, views of it are immutable by the P-rules (§4.4), and there is no hidden interior mutability.
 
 *(Rationale: In Ryo's target domains, `shared[T]` is common in server code — shared DB pools, shared configuration, shared caches. It is not an "escape hatch" to be avoided; it is the idiomatic tool for shared state. Swift's model is the closest published precedent for "refcounting that's actually fast in application code," and it pairs naturally with Ryo's no-explicit-lifetimes design.)*
 
@@ -1436,10 +1511,10 @@ fn process(items: list[int]):
 
 **Rules for scope-locked views:**
 
-*   Views **cannot be stored** in variables that outlive the current block (iterator views); string slices are slightly wider — usable anywhere within the current function (§4.4).
-*   Views **cannot be returned** from functions (follows Rule 5).
-*   Views **cannot be passed to other functions** that would store them.
-*   The compiler enforces that the source collection is not mutated while a view exists (follows Rule 7).
+- Views **cannot be stored** in variables that outlive the current block (iterator views); string slices are slightly wider — usable anywhere within the current function (§4.4).
+- Views **cannot be returned** from functions (follows Rule 5).
+- Views **cannot be passed to other functions** that would store them.
+- The compiler enforces that the source collection is not mutated while a view exists (follows Rule 7).
 
 String slices (`strview`, M8.4) follow these escape restrictions at function scope; see §4.4.
 
@@ -1492,12 +1567,12 @@ are the tools in order of preference.
 
 2. **Move semantics cost a pointer move, not a data copy.** Owned
    types like `str` and `list[T]` are fat pointers (pointer + length
-   + capacity). Moving them between scopes is a register-to-register
+   - capacity). Moving them between scopes is a register-to-register
    transfer.
 
 #### Idiomatic techniques
 
-3. **Use `inout` for in-place mutation.** When a function modifies
+1. **Use `inout` for in-place mutation.** When a function modifies
    data rather than producing a new value, take `inout` instead of
    consuming and returning. See Section 5.2.1 for the full decision
    rule between `inout` and `move`.
@@ -1508,7 +1583,7 @@ are the tools in order of preference.
    	buf.push('\n')
    ```
 
-4. **Use move-in / move-out for incremental building.** When the
+2. **Use move-in / move-out for incremental building.** When the
    caller wants to hand off a buffer for the callee to fill (the
    "sink parameter" pattern, documented in Section 5.2.1):
 
@@ -1521,12 +1596,12 @@ are the tools in order of preference.
 
    The `buf` travels through the callee without being copied.
 
-5. **Use `shared[T]` for read-heavy fanout.** When many holders need
+3. **Use `shared[T]` for read-heavy fanout.** When many holders need
    read-only access to the same value — configuration, parsed ASTs,
    loaded assets — `shared[T]` hands out cheap refcounted handles
    instead of clones. See Section 5.6.
 
-6. **Use scope-locked views for transformation chains.** Chained
+4. **Use scope-locked views for transformation chains.** Chained
    transformations (`filter → map → collect`) allocate only at the
    terminal `collect()`. See Section 5.7.
 
@@ -1535,11 +1610,11 @@ are the tools in order of preference.
 These are implementation details of the standard library, not
 language features, but they affect real-world copy behavior:
 
-7. **Small-string optimization.** `str` values below a threshold are
+1. **Small-string optimization.** `str` values below a threshold are
    stored inline in the fat pointer, eliminating heap allocation
    entirely for short strings. *(See `dev/stdlib_optimizations.md`.)*
 
-8. **Copy-on-write for immutable strings.** When a copy is required
+2. **Copy-on-write for immutable strings.** When a copy is required
    for an immutable `str`, the backing buffer is shared via refcount
    rather than duplicated, deferring allocation until mutation.
    *(See `dev/stdlib_optimizations.md`.)*
@@ -1572,7 +1647,7 @@ lifetimes.)*
 
 ### 6.1 Functions & Methods
 
-*   **Functions/Methods:** Standard definition/call. Return single value (can be tuple). Methods use `self` (implicit immutable borrow, consistent with Rule 2), `inout self` (explicit mutable borrow), or `move self` (take ownership).
+- **Functions/Methods:** Standard definition/call. Return single value (can be tuple). Methods use `self` (implicit immutable borrow, consistent with Rule 2), `inout self` (explicit mutable borrow), or `move self` (take ownership).
 
 ### 6.1.1 Named Parameters & Default Values
 
@@ -1605,11 +1680,11 @@ print("hello", "")          # compile error — end is keyword-only
 
 **Rules:**
 
-*   **Named by default**: All parameters require `name=value` at the call site unless marked with `_`.
-*   **`_` opts into positional**: `_ param: Type` allows callers to pass by position. Named calling still works.
-*   **Positional before named**: At the call site, positional arguments must come before any named arguments.
-*   **Default values**: Parameters with defaults must be trailing. Defaults are evaluated at each call site (not at definition time), and must be compile-time evaluable expressions (literals, constants, `comptime` calls).
-*   **No function overloading**: Each function name has one definition, so defaults never create ambiguity.
+- **Named by default**: All parameters require `name=value` at the call site unless marked with `_`.
+- **`_` opts into positional**: `_ param: Type` allows callers to pass by position. Named calling still works.
+- **Positional before named**: At the call site, positional arguments must come before any named arguments.
+- **Default values**: Parameters with defaults must be trailing. Defaults are evaluated at each call site (not at definition time), and must be compile-time evaluable expressions (literals, constants, `comptime` calls).
+- **No function overloading**: Each function name has one definition, so defaults never create ambiguity.
 
 *(Rationale: Inspired by Swift's proven calling convention. For the AI-writes, human-reviews workflow, named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature. Prevents the common bug of swapping arguments with the same type, e.g., `create_user("Alice", "admin", 30)` vs `create_user("Alice", 30, "admin")`. The `_` escape hatch keeps simple functions like `add(1, 2)` and `sqrt(16.0)` clean.)*
 
@@ -1631,12 +1706,12 @@ print(f"user={id} action={action}")    # f-strings replace print(a, b, c)
 
 **Rationale:**
 
-*   **Conflicts with "Strict over convenient."** Variadics are pure call-site sugar. They save a pair of brackets (`[`, `]`) at the cost of a non-orthogonal parameter mode that interacts awkwardly with generics, traits, and the borrow checker.
-*   **No good answer in a statically-typed, no-GC language.** Homogeneous variadics (`*args: &T`) are equivalent to `args: &list[T]` with sugar. Heterogeneous variadics require either dynamic dispatch (`&dyn Display`, deferred — see `docs/dev/dyn_trait.md`), variadic generics (massive type-system complexity), or compile-time macros (Ryo has no macro system; `comptime` is not a macro). Each option violates "Simplicity First."
-*   **Hidden allocations conflict with Ownership Lite.** Any backing storage for `*args` either silently allocates a slice on every call (against "no hidden costs") or silently moves arguments (against Rule 2: parameters default to immutable borrow).
-*   **F-strings already cover the main use case.** `print(f"{a} {b} {c}")` is strictly more powerful than `print(a, b, c)`: it gives the caller control over spacing and formatting, is fully type-checked, and produces a single `str` that downstream consumers (loggers, sinks) can handle uniformly.
-*   **List literals cover the rest.** `min([1, 2, 3, 4])`, `sum([1, 2, 3])`, `log(["a", "b"])` — one extra pair of brackets, zero new language features.
-*   **AI-era reviewability.** At a call site, `log(a, b, c, d)` hides the role of each argument; `log([a, b, c, d])` or `log(f"...")` makes the shape obvious to the human reviewer.
+- **Conflicts with "Strict over convenient."** Variadics are pure call-site sugar. They save a pair of brackets (`[`, `]`) at the cost of a non-orthogonal parameter mode that interacts awkwardly with generics, traits, and the borrow checker.
+- **No good answer in a statically-typed, no-GC language.** Homogeneous variadics (`*args: &T`) are equivalent to `args: &list[T]` with sugar. Heterogeneous variadics require either dynamic dispatch (`&dyn Display`, deferred — see `docs/dev/dyn_trait.md`), variadic generics (massive type-system complexity), or compile-time macros (Ryo has no macro system; `comptime` is not a macro). Each option violates "Simplicity First."
+- **Hidden allocations conflict with Ownership Lite.** Any backing storage for `*args` either silently allocates a slice on every call (against "no hidden costs") or silently moves arguments (against Rule 2: parameters default to immutable borrow).
+- **F-strings already cover the main use case.** `print(f"{a} {b} {c}")` is strictly more powerful than `print(a, b, c)`: it gives the caller control over spacing and formatting, is fully type-checked, and produces a single `str` that downstream consumers (loggers, sinks) can handle uniformly.
+- **List literals cover the rest.** `min([1, 2, 3, 4])`, `sum([1, 2, 3])`, `log(["a", "b"])` — one extra pair of brackets, zero new language features.
+- **AI-era reviewability.** At a call site, `log(a, b, c, d)` hides the role of each argument; `log([a, b, c, d])` or `log(f"...")` makes the shape obvious to the human reviewer.
 
 **One narrow exception — C FFI.** Real C functions like `printf` are variadic at the ABI level. Ryo will permit `...` **only** in `extern "C"` declarations inside `unsafe` blocks (see Section 17). This is a calling-convention concession, not a Ryo language feature: regular `fn` definitions cannot use `...`.
 
@@ -1686,25 +1761,27 @@ fn die(msg: str) -> int:
 
 **Rules:**
 
-*   An `if`/`elif`/`else` chain satisfies the check only when it has an `else` and **every** arm returns.
-*   Loops never satisfy the check — a loop body can execute zero times, so a `return` inside `while`/`for` does not count.
-*   A bare `panic(...)` statement **diverges** (§4.2, §7.6): control cannot continue past it, so it satisfies the check like a `return`.
-*   `void` functions (including `main`) need no return.
+- An `if`/`elif`/`else` chain satisfies the check only when it has an `else` and **every** arm returns.
+- Loops never satisfy the check — a loop body can execute zero times, so a `return` inside `while`/`for` does not count.
+- A bare `panic(...)` statement **diverges** (§4.2, §7.6): control cannot continue past it, so it satisfies the check like a `return`.
+- `void` functions (including `main`) need no return.
 
 *(Rationale: falling off the end of a non-`void` function is always a bug — the caller would receive a garbage value. Branch-aware analysis keeps the check precise: exhaustive `if`/`else` chains pass without a redundant trailing `return`.)*
 
 ### 6.2 Closures & Lambda Expressions
 
-*   **Concept:** Closures are anonymous functions that can capture variables from their enclosing scope. They provide first-class function values, enabling higher-order functions, callbacks, and functional programming patterns.
+- **Concept:** Closures are anonymous functions that can capture variables from their enclosing scope. They provide first-class function values, enabling higher-order functions, callbacks, and functional programming patterns.
 
 #### 6.2.1 Syntax
 
 **Single-line closures:**
+
 ```ryo
 fn(args): expression
 ```
 
 **Multi-line closures (with colon-indentation):**
+
 ```ryo
 fn(args):
 	# Indented block (tab-based)
@@ -1714,6 +1791,7 @@ fn(args):
 ```
 
 **Examples:**
+
 ```ryo
 # Single-line closure
 square = fn(x: int): x * x
@@ -1775,17 +1853,17 @@ print(total)    # 15
 
 **Ownership Rules:**
 
-*   **Move capture** invalidates the original variable (use-after-move is a compile error)
-*   **Only one mutable borrow** at a time (prevents data races)
-*   **No simultaneous mutable and immutable borrows** (enforced by borrow checker)
-*   Compiler enforces these rules at closure creation time (no runtime overhead)
+- **Move capture** invalidates the original variable (use-after-move is a compile error)
+- **Only one mutable borrow** at a time (prevents data races)
+- **No simultaneous mutable and immutable borrows** (enforced by borrow checker)
+- Compiler enforces these rules at closure creation time (no runtime overhead)
 
 #### 6.2.3 Conceptual Types
 
 Closures are categorized by their capture behavior for type checking purposes:
 
 | Type | Capture Mode | Can Call Multiple Times? | Use Case |
-|------|--------------|--------------------------|----------|
+| ------ | -------------- | -------------------------- | ---------- |
 | **`Fn`** | Immutable borrow | Yes | Read-only operations, pure functions |
 | **`FnMut`** | Mutable borrow | Yes (requires mut) | Stateful operations, accumulators |
 | **`FnMove`** | Move ownership | No (consumes closure) | Transfer ownership, one-time use |
@@ -1936,7 +2014,7 @@ error PermissionDenied(path: str)
 error ReadFailed(reason: str)
 ```
 
-*   *(Rationale: `error` keyword signals error-handling intent. Single-variant errors with module organization provide clear composition without wrapper types. Associated data enables rich error information.)*
+- *(Rationale: `error` keyword signals error-handling intent. Single-variant errors with module organization provide clear composition without wrapper types. Associated data enables rich error information.)*
 
 ### 7.2 Error Union Types
 
@@ -1945,12 +2023,13 @@ Function return types specify both the error type and success type. Ryo provides
 #### **Choosing Your Error Union Syntax**
 
 | Syntax | Use Case | Example |
-|--------|----------|---------|
+| -------- | ---------- | --------- |
 | `ErrorType!T` | Single, specific error type | `fn read(path) -> FileNotFound!str` |
 | `(E1\|E2\|E3)!T` | Multiple known error types | `fn load() -> (FileNotFound\|ParseError)!Data` |
 | `!T` | Any/inferred error types | `fn process() -> !Result` (compiler infers all errors from `try`) |
 
 **Decision Guide:**
+
 - **Use `ErrorType!T`** when your function can only fail in one specific way
 - **Use `(E1|E2)!T`** when you know exactly which errors can occur and want to document them
 - **Use `!T`** when composing multiple functions with different errors - the compiler automatically infers the error union from `try` expressions
@@ -1996,13 +2075,13 @@ fn flexible_operation() -> !Data:
 	...
 ```
 
-*   **Error Union Semantics:**
-    *   Error types are composed with `|` operator (unordered, not a sequence)
-    *   Inferred unions automatically track all possible errors from `try` expressions
-    *   Use `--show-inferred-errors` compiler flag to see inferred error set
-    *   Single error type is a special case of error union with one member
+- **Error Union Semantics:**
+  - Error types are composed with `|` operator (unordered, not a sequence)
+  - Inferred unions automatically track all possible errors from `try` expressions
+  - Use `--show-inferred-errors` compiler flag to see inferred error set
+  - Single error type is a special case of error union with one member
 
-*   *(Rationale: Zig-style `E!T` syntax is concise. Error unions eliminate wrapper types through automatic composition. Explicit unions document API contracts. Inferred unions reduce boilerplate.)*
+- *(Rationale: Zig-style `E!T` syntax is concise. Error unions eliminate wrapper types through automatic composition. Explicit unions document API contracts. Inferred unions reduce boilerplate.)*
 
 ### 7.3 Error Propagation (`try`)
 
@@ -2018,17 +2097,18 @@ fn load_and_parse(path: str) -> !Config:
 	return config
 ```
 
-*   **Semantic:** `try expr` evaluates `expr`:
-    *   If success: returns the value
-    *   If error: propagates error to caller
+- **Semantic:** `try expr` evaluates `expr`:
+  - If success: returns the value
+  - If error: propagates error to caller
 
-*   **Error Composition with `try`:**
-    *   **Inferred unions (`!T`):** `try` automatically collects all error types from `try` expressions into the inferred union. No manual bookkeeping needed.
-    *   **Explicit unions (`(E1 | E2)!T`):** The error type of each `try` expression must be a member of the declared union. If not, the compiler emits an error: `"error type ParseError is not in the error union (FileError | NetworkError)"`. No automatic `From` conversion — composition is explicit.
-    *   **Single error type (`E!T`):** The error type must match exactly.
-    *   *(Rationale: Inferred unions are convenient for internal functions. Explicit unions document API contracts and require the developer to acknowledge every error type. No implicit conversions — consistent with Ryo's "explicit where the reviewer needs to see intent" principle.)*
+- **Error Composition with `try`:**
+  - **Inferred unions (`!T`):** `try` automatically collects all error types from `try` expressions into the inferred union. No manual bookkeeping needed.
+  - **Explicit unions (`(E1 | E2)!T`):** The error type of each `try` expression must be a member of the declared union. If not, the compiler emits an error: `"error type ParseError is not in the error union (FileError | NetworkError)"`. No automatic `From` conversion — composition is explicit.
+  - **Single error type (`E!T`):** The error type must match exactly.
+  - *(Rationale: Inferred unions are convenient for internal functions. Explicit unions document API contracts and require the developer to acknowledge every error type. No implicit conversions — consistent with Ryo's "explicit where the reviewer needs to see intent" principle.)*
 
-*   **Example - Inferred Union:**
+- **Example - Inferred Union:**
+
     ```ryo
 	fn process() -> !Data:
 		a = try func_a()  # FileError
@@ -2037,7 +2117,8 @@ fn load_and_parse(path: str) -> !Config:
 	# Inferred as: (FileError | ParseError | NetworkError)!Data
 	```
 
-*   **Example - Explicit Union with Conversion:**
+- **Example - Explicit Union with Conversion:**
+
     ```ryo
 	# Example using separate error types with error unions
 	fn process() -> (FileError | ParseError)!Data:
@@ -2046,9 +2127,10 @@ fn load_and_parse(path: str) -> !Config:
 		return b
 	```
 
-*   **Error Context Preservation:** When `try` propagates an error, the original error's location and stack trace are preserved intact. No context is lost as the error bubbles up through the call stack. Each level can inspect `.location()` and `.stack_trace()` to see where the error originated.
+- **Error Context Preservation:** When `try` propagates an error, the original error's location and stack trace are preserved intact. No context is lost as the error bubbles up through the call stack. Each level can inspect `.location()` and `.stack_trace()` to see where the error originated.
 
     Example:
+
     ```ryo
 	fn level3() -> db.QueryFailed!Result:
 		# Error created here with location information
@@ -2069,7 +2151,7 @@ fn load_and_parse(path: str) -> !Config:
 			print(f"Original error at {loc.file}:{loc.line}")
 	```
 
-*   *(Rationale: `try` clearly signals error propagation. Familiar to concurrent programming users. Automatic composition via inferred unions eliminates wrapper types (Zig-inspired). Error context preservation ensures debugging information is never lost during propagation.)*
+- *(Rationale: `try` clearly signals error propagation. Familiar to concurrent programming users. Automatic composition via inferred unions eliminates wrapper types (Zig-inspired). Error context preservation ensures debugging information is never lost during propagation.)*
 
 ### 7.4 Error Handling (`catch`)
 
@@ -2089,12 +2171,13 @@ config = load_and_parse("app.toml") catch as e:
 			exit(1)
 ```
 
-*   **Syntax:** `expr catch as e: handle_error(e)` binds the error to `e`; use `expr catch:` (no `as` clause) to handle without binding. `as` is Ryo's binding keyword — the same gesture as `with EXPR as NAME:` — and is *not* used for type conversion (which uses `TargetType(value)`).
-*   **Pattern Matching:** Full ADT pattern matching enables type-safe error handling.
-*   **Note (future improvement, not yet in the language):** The dominant idiom is `catch as err:` immediately followed by `match err:` — the value is bound only to be matched on the next line, so the explicit `match err:` is superfluous boilerplate. A later language improvement may let `catch:` introduce match arms directly (e.g. `expr catch: Pattern: body`), eliding the redundant `match`. Until then, the explicit `match` is required.
+- **Syntax:** `expr catch as e: handle_error(e)` binds the error to `e`; use `expr catch:` (no `as` clause) to handle without binding. `as` is Ryo's binding keyword — the same gesture as `with EXPR as NAME:` — and is *not* used for type conversion (which uses `TargetType(value)`).
+- **Pattern Matching:** Full ADT pattern matching enables type-safe error handling.
+- **Note (future improvement, not yet in the language):** The dominant idiom is `catch as err:` immediately followed by `match err:` — the value is bound only to be matched on the next line, so the explicit `match err:` is superfluous boilerplate. A later language improvement may let `catch:` introduce match arms directly (e.g. `expr catch: Pattern: body`), eliding the redundant `match`. Until then, the explicit `match` is required.
 
-*   **Pattern Matching Differences:**
-    *   **Single Error Type** (exhaustive): Must handle all variants
+- **Pattern Matching Differences:**
+  - **Single Error Type** (exhaustive): Must handle all variants
+
         ```ryo
 		result = read_file(path) catch as e:
 			match e:
@@ -2106,7 +2189,9 @@ config = load_and_parse("app.toml") catch as e:
 					# ...
 				# MUST handle all variants
 		```
-    *   **Error Union** (Exhaustive matching required): Must handle all error types in union:
+
+  - **Error Union** (Exhaustive matching required): Must handle all error types in union:
+
         ```ryo
 		result = process(path) catch as e:
 			match e:
@@ -2119,7 +2204,9 @@ config = load_and_parse("app.toml") catch as e:
 					return retry_later()
 				# MUST handle all variants in union
 		```
-    *   **With Catch-All**: When you want generic handling for some errors:
+
+  - **With Catch-All**: When you want generic handling for some errors:
+
         ```ryo
 		result = process(path) catch as e:
 			match e:
@@ -2130,7 +2217,7 @@ config = load_and_parse("app.toml") catch as e:
 					return default_config()
 		```
 
-*   *(Rationale: `catch` follows familiar error-handling conventions. Exhaustive matching for all error types (single or union) ensures all error cases are explicitly handled, improving code reliability and preventing silent failures.)*
+- *(Rationale: `catch` follows familiar error-handling conventions. Exhaustive matching for all error types (single or union) ensures all error cases are explicitly handled, improving code reliability and preventing silent failures.)*
 
 ### 7.5 Combined Error + Optional (`!?T`)
 
@@ -2157,9 +2244,9 @@ fn authenticate(db: Database, token: ?str) -> !User:
 	return user
 ```
 
-*   **Sequential Unwrapping:** `try` handles errors, `orelse` handles optionals.
-*   **Smart Casting:** Values are automatically narrowed after unwrapping.
-*   *(Rationale: Handles real-world patterns where operations can both error and return optional data.)*
+- **Sequential Unwrapping:** `try` handles errors, `orelse` handles optionals.
+- **Smart Casting:** Values are automatically narrowed after unwrapping.
+- *(Rationale: Handles real-world patterns where operations can both error and return optional data.)*
 
 ### 7.6 Unrecoverable Errors (`panic`)
 
@@ -2173,11 +2260,11 @@ fn critical_operation():
 
 #### **Panic Behavior**
 
-*   **Aborts the process immediately** with exit code `101`
-*   **Does not unwind** - no cleanup code runs (simplifies implementation and predictability)
-*   **Statement-only** — `panic(...)` evaluates to the bottom type `never` (§4.2). A `never` value cannot be bound to a variable, returned, passed as an argument, or used as an operand (error **E0017**); the bare statement shown above is the only legal form. As a consequence, a bare `panic(...)` satisfies return-flow analysis like a `return` (§6.1.3).
-*   **Captures and prints full stack trace** - shows complete call chain leading to panic
-*   **Includes location information** - file, line, column, and function name of panic call
+- **Aborts the process immediately** with exit code `101`
+- **Does not unwind** - no cleanup code runs (simplifies implementation and predictability)
+- **Statement-only** — `panic(...)` evaluates to the bottom type `never` (§4.2). A `never` value cannot be bound to a variable, returned, passed as an argument, or used as an operand (error **E0017**); the bare statement shown above is the only legal form. As a consequence, a bare `panic(...)` satisfies return-flow analysis like a `return` (§6.1.3).
+- **Captures and prints full stack trace** - shows complete call chain leading to panic
+- **Includes location information** - file, line, column, and function name of panic call
 
 #### **Panic Output Format**
 
@@ -2196,6 +2283,7 @@ note: Set RYOLANG_BACKTRACE=full for more verbose output
 ```
 
 **Stack trace details:**
+
 - Each frame shows: frame number, function path, file:line:column location
 - Frame 0 is the panic call (most recent)
 - Frame N is the entry point (oldest)
@@ -2204,6 +2292,7 @@ note: Set RYOLANG_BACKTRACE=full for more verbose output
 #### **Debug Symbols and Stack Traces**
 
 **Default behavior (DX-optimized):**
+
 - Stack traces automatically captured for all panics
 - Debug symbols included (DWARF format via Cranelift)
 - Binary size impact: +20-30%
@@ -2211,6 +2300,7 @@ note: Set RYOLANG_BACKTRACE=full for more verbose output
 **Configuration options:**
 
 *Build-time (compiler flags):*
+
 ```bash
 ryo build                        # Default: full traces
 ryo build --error-traces=minimal # Location only (~2-3% overhead)
@@ -2219,6 +2309,7 @@ ryo build --strip                # Remove debug symbols (production)
 ```
 
 *Runtime (environment variables):*
+
 ```bash
 RYOLANG_ERROR_TRACES=full    # Show all frames
 RYOLANG_ERROR_TRACES=short   # Show 3-5 frames (default)
@@ -2226,6 +2317,7 @@ RYOLANG_ERROR_TRACES=off     # Only error message
 ```
 
 **Recommended approach:**
+
 - Development: Use defaults (`--error-traces=full`)
 - Production: Use `--error-traces=minimal` or profile-based config
 - HFT/embedded: Use `--error-traces=off` for zero overhead
@@ -2234,16 +2326,18 @@ RYOLANG_ERROR_TRACES=off     # Only error message
 
 Panic stack traces incur runtime overhead even when no panic occurs (in `full` mode):
 
-*   **Runtime overhead** - ~5-10% estimated (varies by workload) for stack frame maintenance
-*   **Memory overhead** - Maintaining stack frame information uses additional memory
-*   **Configurable** - Use `--error-traces=minimal` or `=off` to reduce/eliminate overhead (see Section 7.10)
+- **Runtime overhead** - ~5-10% estimated (varies by workload) for stack frame maintenance
+- **Memory overhead** - Maintaining stack frame information uses additional memory
+- **Configurable** - Use `--error-traces=minimal` or `=off` to reduce/eliminate overhead (see Section 7.10)
 
 **When to configure:**
+
 - Ultra-low-latency systems → Use `--error-traces=off`
 - Performance-sensitive services → Use `--error-traces=minimal`
 - Most applications → Use defaults (debugging capability > 5-10% overhead)
 
 **Mitigation strategies:**
+
 - Use build profiles (dev: full, release: minimal)
 - Structure code to avoid panic in hot paths
 - Use error types (`!T`) for recoverable errors instead of panics
@@ -2252,11 +2346,13 @@ Panic stack traces incur runtime overhead even when no panic occurs (in `full` m
 #### **When to Use `panic`**
 
 Use `panic()` **only** for:
+
 - Truly unrecoverable conditions that indicate a bug in your program
 - Invalid program state that cannot be recovered
 - Internal consistency violations
 
 Do **not** use `panic()` for:
+
 - User input errors (use error types instead)
 - Expected failure modes (use error types instead)
 - Control flow (use error types instead)
@@ -2285,7 +2381,7 @@ fn main():
 	# 3. where to fix the bug
 ```
 
-*   *(Rationale: Immediate abort without unwinding simplifies runtime and guarantees clean termination. Comprehensive stack traces provide essential debugging information for post-mortem analysis.)*
+- *(Rationale: Immediate abort without unwinding simplifies runtime and guarantees clean termination. Comprehensive stack traces provide essential debugging information for post-mortem analysis.)*
 
 ### 7.7 Error Handling Best Practices
 
@@ -2329,7 +2425,7 @@ if maybe_user != none:
 	name = maybe_user.name  # Type narrowed to User
 ```
 
-*   **Rationale:** Direct unwrap removes type safety. By requiring explicit `try`/`catch`/`orelse`, Ryo ensures all error and null cases are handled, preventing silent failures and unexpected panics. This design choice makes error handling visible and intentional.
+- **Rationale:** Direct unwrap removes type safety. By requiring explicit `try`/`catch`/`orelse`, Ryo ensures all error and null cases are handled, preventing silent failures and unexpected panics. This design choice makes error handling visible and intentional.
 
 ### 7.9 Stack Traces and Debugging
 
@@ -2338,6 +2434,7 @@ Ryo provides comprehensive stack trace and debugging information to help diagnos
 #### **Automatic Stack Trace Capture**
 
 **Default behavior (DX-first):**
+
 - Stack traces automatically captured for all panics and errors
 - ~5-10% runtime overhead in default mode
 - Can be configured at build-time or runtime
@@ -2355,6 +2452,7 @@ See Section 7.10 for complete configuration options and trade-offs.
 #### **Using Stack Traces for Debugging**
 
 **From Panics:**
+
 ```ryo
 fn dangerous_operation() -> int:
 	panic("Something went very wrong!")
@@ -2371,6 +2469,7 @@ fn main():
 ```
 
 **From Errors:**
+
 ```ryo
 # File: db/errors.ryo
 error QueryFailed(sql: str)
@@ -2397,20 +2496,21 @@ fn main():
 
 #### **Debug Symbols and Build Information**
 
-*   **Debug symbols always included by default** - DWARF format generated via Cranelift
-*   **Binary size impact** - Approximately 20-30% larger due to debug information
-*   **`--strip` compiler flag** - Remove debug symbols from production binaries if size is critical
-*   **Trade-off confirmed** - Size cost justified by debugging capability
+- **Debug symbols always included by default** - DWARF format generated via Cranelift
+- **Binary size impact** - Approximately 20-30% larger due to debug information
+- **`--strip` compiler flag** - Remove debug symbols from production binaries if size is critical
+- **Trade-off confirmed** - Size cost justified by debugging capability
 
 #### **Environment Variables**
 
 Control stack trace verbosity:
 
-*   **`RYOLANG_BACKTRACE=1`** (default) - Standard stack trace with file, line, column, function name
-*   **`RYOLANG_BACKTRACE=full`** (future) - Verbose output with additional context and local values
-*   **`RYOLANG_BACKTRACE=0`** (not recommended) - Minimal output, disables stack trace display
+- **`RYOLANG_BACKTRACE=1`** (default) - Standard stack trace with file, line, column, function name
+- **`RYOLANG_BACKTRACE=full`** (future) - Verbose output with additional context and local values
+- **`RYOLANG_BACKTRACE=0`** (not recommended) - Minimal output, disables stack trace display
 
 Example:
+
 ```bash
 # Show standard stack trace (default)
 ./my_program
@@ -2427,7 +2527,7 @@ RYOLANG_BACKTRACE=0 ./my_program
 Understanding how Ryo's debugging approach compares to alternatives:
 
 | Language | Stack Trace Approach | Overhead | DX Rating | When to Choose |
-|----------|---------------------|----------|-----------|----------------|
+| ---------- | --------------------- | ---------- | ----------- | ---------------- |
 | **Ryo** | Always-on, automatic, rich context | ~TBD% always | ⭐⭐⭐⭐⭐ Excellent | When debugging ease > raw performance |
 | **Rust** | Optional (`RUST_BACKTRACE=1`), opt-in | ~0% default, ~3-5% when enabled | ⭐⭐⭐ Good (requires env var) | When performance > debugging ease |
 | **Go** | Always-on, simpler traces | ~1-3% | ⭐⭐⭐⭐ Very good (less detail) | Balanced, but less detail than Ryo |
@@ -2442,6 +2542,7 @@ For complete performance implications and mitigation strategies, see Section 7.6
 #### **Best Practices for Debugging**
 
 1. **Use error location for quick diagnosis:**
+
    ```ryo
    result = risky_operation() catch as e:
 	   loc = e.location()
@@ -2449,6 +2550,7 @@ For complete performance implications and mitigation strategies, see Section 7.6
    ```
 
 2. **Print full stack trace for complex error chains:**
+
    ```ryo
    result = risky_operation() catch as e:
 	   print(f"Error: {e.message()}")
@@ -2459,6 +2561,7 @@ For complete performance implications and mitigation strategies, see Section 7.6
    ```
 
 3. **Use messages with context:**
+
    ```ryo
    error DatabaseError(sql: str, reason: str)
    # When error occurs, message includes both query and reason
@@ -2480,12 +2583,13 @@ Ryo provides flexible configuration for error stack traces, balancing DX with pe
 Compiler flag: `--error-traces=LEVEL`
 
 | Level | Creation Overhead | Propagation Overhead | Total | Use Case |
-|-------|-------------------|----------------------|-------|----------|
+| ------- | ------------------- | ---------------------- | ------- | ---------- |
 | `full` (default) | ~5-10% | ~5-10% cumulative | ~5-10% | Development, most production |
 | `minimal` | ~2-3% | 0% | ~2-3% | Performance-sensitive services |
 | `off` | 0% | 0% | 0% | HFT, real-time, embedded |
 
 **Examples:**
+
 ```bash
 # Default build with full traces
 ryo build
@@ -2527,6 +2631,7 @@ RYOLANG_ERROR_TRACES=off     # Only error message
 #### **Recommended Configurations by Use Case**
 
 **Web Backend / API Server:**
+
 ```toml
 [profile.dev]
 error-traces = "full"
@@ -2536,6 +2641,7 @@ error-traces = "full"  # Still useful for debugging production issues
 ```
 
 **High-Performance Service:**
+
 ```toml
 [profile.dev]
 error-traces = "full"
@@ -2545,12 +2651,14 @@ error-traces = "minimal"  # Location only, minimal overhead
 ```
 
 **Real-Time / Embedded Systems:**
+
 ```toml
 [profile.release]
 error-traces = "off"  # Zero overhead, manual logging required
 ```
 
 **CLI Tools / Developer Tooling:**
+
 ```toml
 # Use defaults - full traces everywhere
 ```
@@ -2558,12 +2666,14 @@ error-traces = "off"  # Zero overhead, manual logging required
 #### **How Configuration Works**
 
 **Build-time (`--error-traces`):**
+
 - Compiler generates different IR based on flag
 - `full`: Captures stack at error creation + every `try`
 - `minimal`: Only captures location at error creation
 - `off`: No automatic capture, errors only have `.message()`
 
 **Runtime (`RYOLANG_ERROR_TRACES`):**
+
 - Controls output format when panic/error occurs
 - Does NOT affect capture (that's build-time decision)
 - Useful for CI/CD where you want concise logs
@@ -2647,12 +2757,14 @@ Contracts are controlled by the `--contracts` compiler flag and build profiles:
 | `off` | Strip all contract checks (zero overhead) | Performance-critical production |
 
 **Build-time control:**
+
 ```bash
 ryo build                     # Default: enforce contracts
 ryo build --contracts=off     # Strip contracts for max performance
 ```
 
 **Profile-based configuration:**
+
 ```toml
 # ryo.toml
 [profile.dev]
@@ -2692,22 +2804,22 @@ No new runtime, no new IR, no new type system concepts — contracts reuse `if`,
 
 #### **Design Principles**
 
-*   Contracts are **runtime-checked assertions**, not formal verification proofs.
-*   Contracts use the same attribute system as `#[test]` and `#[blocking]` — no new syntax needed.
-*   **Smart defaults + escape hatches**: Enforce by default, strip when needed.
-*   Postconditions handle multiple return points — each `return` is rewritten to check the contract before returning.
-*   For the AI-writes, human-reviews workflow: the AI writes contracts as executable documentation, the compiler enforces them, and the human reviewer reads them as a formal specification of intent.
+- Contracts are **runtime-checked assertions**, not formal verification proofs.
+- Contracts use the same attribute system as `#[test]` and `#[blocking]` — no new syntax needed.
+- **Smart defaults + escape hatches**: Enforce by default, strip when needed.
+- Postconditions handle multiple return points — each `return` is rewritten to check the contract before returning.
+- For the AI-writes, human-reviews workflow: the AI writes contracts as executable documentation, the compiler enforces them, and the human reviewer reads them as a formal specification of intent.
 
 *(Rationale: Ada 2012 proved that contracts dramatically improve code correctness with minimal implementation cost. In Ryo, contracts are syntactic sugar over `if not: panic()`, making them one of the cheapest features to implement once the attribute system exists. They serve as enforced documentation — more reliable than comments, less ceremonial than test cases for basic invariants.)*
 
 ## 8. Traits (Behavior)
 
-*   **Definition:** `trait Name: fn method(...) ...` (with optional default implementations). Default methods allowed. *(Rationale: Default methods reduce boilerplate).*
-*   **Implementation:** `impl Trait for Type: fn method(...) ...`. Can override defaults.
-*   **Dispatch:** **Static Dispatch** via monomorphization only (initially). *(Rationale: Prioritizes runtime performance and implementation simplicity).* No dynamic dispatch (`dyn Trait`).
-    *   This means polymorphism is primarily achieved through generics (compile-time polymorphism). For runtime polymorphism in v0.1, use **Enum Dispatch** (wrapping variants in an enum) instead of `dyn Trait`. This is simpler, more performant, and covers 90% of use cases.
-    *   **Future Extension:** Dynamic dispatch via trait objects (e.g., `&dyn Trait`) is planned for future versions to enable more flexible polymorphism patterns familiar to Python developers. See Section 19 (Future Work) for details.
-*   **Associated Types:** Not supported initially. *(Rationale: Significant type system complexity).*
+- **Definition:** `trait Name: fn method(...) ...` (with optional default implementations). Default methods allowed. *(Rationale: Default methods reduce boilerplate).*
+- **Implementation:** `impl Trait for Type: fn method(...) ...`. Can override defaults.
+- **Dispatch:** **Static Dispatch** via monomorphization only (initially). *(Rationale: Prioritizes runtime performance and implementation simplicity).* No dynamic dispatch (`dyn Trait`).
+  - This means polymorphism is primarily achieved through generics (compile-time polymorphism). For runtime polymorphism in v0.1, use **Enum Dispatch** (wrapping variants in an enum) instead of `dyn Trait`. This is simpler, more performant, and covers 90% of use cases.
+  - **Future Extension:** Dynamic dispatch via trait objects (e.g., `&dyn Trait`) is planned for future versions to enable more flexible polymorphism patterns familiar to Python developers. See Section 19 (Future Work) for details.
+- **Associated Types:** Not supported initially. *(Rationale: Significant type system complexity).*
 
 ## 9. Concurrency Model: Task/Future/Channel
 
@@ -2716,15 +2828,15 @@ No new runtime, no new IR, no new type system concepts — contracts reuse `if`,
 ### 9.1 Rationale: Green Threads & Ambient Runtime
 
 Ryo uses a **Green Thread (M:N) Concurrency Model**, similar to Go.
-*   **Green Threads:** Tasks are lightweight, userspace threads managed by the Ryo runtime, not OS threads.
-*   **Stack Swapping:** The runtime swaps stacks to switch tasks, avoiding the "colored function" problem of `async`/`await`.
-*   **Ambient Runtime:** The runtime context is stored in Thread-Local Storage (TLS), allowing functions to spawn tasks without passing a runtime handle.
-*   **Work Stealing:** A multi-threaded scheduler distributes tasks across CPU cores.
+- **Green Threads:** Tasks are lightweight, userspace threads managed by the Ryo runtime, not OS threads.
+- **Stack Swapping:** The runtime swaps stacks to switch tasks, avoiding the "colored function" problem of `async`/`await`.
+- **Ambient Runtime:** The runtime context is stored in Thread-Local Storage (TLS), allowing functions to spawn tasks without passing a runtime handle.
+- **Work Stealing:** A multi-threaded scheduler distributes tasks across CPU cores.
 
 **Runtime Profiles (final spec §8, D9):** the ambient runtime is a *deployment assumption*, not a language property. Ryo ships two profiles:
 
 | Capability | `core` | `hosted` (default) |
-|------------|:------:|:------------------:|
+| ------------ | :------: | :------------------: |
 | Ownership, borrowing, Drop, eager destruction, bounds checks | ✅ | ✅ |
 | `panic` | abort / trap (handler overridable) | full stack trace |
 | Error unions, `try`/`catch` | ✅ types; `.location()`/`.stack_trace()` return `none` | ✅ full capture |
@@ -2748,13 +2860,13 @@ Tasks are Ryo's lightweight, non-OS-thread concurrency unit (like Go's goroutine
 | :--- | :--- | :--- | :--- |
 | **Run** | `task.run: ...` | `fn(f: fn() -> T) -> future[T]` | Executes `f` on a green thread. Returns a **`future[T]`** to retrieve the result. **Dropping the future cancels the task.** |
 | **Scope** | `task.scope: ...` | `fn` | **Structured Concurrency**. Creates a scope where all child tasks must complete before the scope exits. **Recommended default.** |
-| **Spawn Detached** | `task.spawn_detached: ...` | `fn(f: fn() -> void) -> handle[T]` | **Fire-and-forget (explicit opt-out)**. Returns a `handle[T]` — an identity token, not a future (see below). Errors are logged to stderr. Cancelled on process exit. |
+| **Spawn Detached** | `task.spawn_detached: ...` | `fn(f: fn() -> T) -> handle[T]` | **Fire-and-forget (explicit opt-out)**. Returns a `handle[T]` — an identity token, not a future (see below). The task's result is discarded; errors are logged to stderr. Cancelled on process exit. |
 | **Await** | `fut.await` | **`future[T]`** | **Suspends the current green thread** until the value is ready. Does NOT block the OS thread. |
 
 **Ownership Safety:** Task closures implicitly capture by **move** — the compiler enforces this because tasks may outlive the spawning scope (see §6.2.2). To share data across tasks, use `shared[T]` — assignment retains the handle (§5.6); there is no explicit `.clone()`. **Exception (scoped task borrows, final spec §7, D5):** inside a `task.scope` body — structured concurrency, where the scope joins all children before exiting — child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as P2, §4.4) and that no capture escapes the scope. Projections (`strview`, `slice[T]`, `bytesview`) may be captured too: the scope join is lexically inside the defining function, so the view still cannot escape it — the owner's freeze extends to the end of the `task.scope` block. `task.run` and `task.spawn_detached` are unchanged: implicit move capture, enforced.
-**FFI Warning:** Calling blocking C functions (like `sleep`) will block the underlying OS thread. Use `#[blocking]` attribute on FFI imports to hint the runtime to spawn a dedicated thread.
+**FFI Warning:** Calling blocking C functions (like `sleep`) from a task will block that task's execution. Mark such FFI imports with the `#[blocking]` attribute.
 
-**Task Handles (`handle[T]`):** Detached tasks outlive any scope, so a `future[T]` cannot represent them — dropping a future cancels the task, and identity must not imply ownership. `handle[T]` is an **identity-only token**: sendable across tasks, comparable for equality, with **no dereference** — all interaction with the task happens through channels. Dropping a `Handle` does **not** cancel the task; a `Handle` keeps no task alive either (detached tasks are cancelled on process exit regardless). Handles are how supervisors, registries, watchdogs, and cancellation tokens refer to long-lived tasks. FFI pointers (`FILE*`, window handles, connection handles) follow the same shape. *(Rationale: Pony's `tag` capability is the proven precedent — identity without access is sufficient for supervision and never entangles lifetimes.)*
+**Task Handles (`handle[T]`):** Detached tasks outlive any scope, so a `future[T]` cannot represent them — dropping a future cancels the task, and identity must not imply ownership. `handle[T]` is an **identity-only token**: sendable across tasks, comparable for equality, with **no dereference** — all interaction with the task happens through channels. Dropping a `handle[T]` does **not** cancel the task; a `handle[T]` keeps no task alive either (detached tasks are cancelled on process exit regardless). Handles are how supervisors, registries, watchdogs, and cancellation tokens refer to long-lived tasks. FFI pointers (`FILE*`, window handles, connection handles) follow the same shape. *(Rationale: Pony's `tag` capability is the proven precedent — identity without access is sufficient for supervision and never entangles lifetimes.)*
 
 #### 9.2.2 Channels (Communication and Synchronization)
 
@@ -2767,10 +2879,12 @@ Channels are the idiomatic, memory-safe way to communicate and synchronize betwe
 | **Receive** | `rx.recv()` | **Suspends task** until message available. Returns received value. |
 
 #### 9.2.4 Shared State
+
 For shared mutable state, Ryo uses the `shared[mutex[T]]` pattern:
-*   `shared[T]`: Reference counting (ARC).
-*   `mutex[T]`: Interior mutability with locking.
-*   **Deadlock Safety:** Ryo's mutex is designed to detect deadlocks in debug mode where possible.
+- `shared[T]`: Reference counting (ARC).
+- `mutex[T]`: Interior mutability with locking.
+- **Deadlock Safety:** Ryo's mutex is designed to detect deadlocks in debug mode where possible.
+
 ```ryo
 state = shared(mutex(0))
 worker = task.run:
@@ -2783,8 +2897,9 @@ result = worker.await
 
 The `future` type integrates seamlessly with Ryo's error system, using the correct lowercase and bracket syntax:
 
-*   **Type:** A future that can fail is represented as **`future[!T]`** (using the error-union prefix `!`).
-*   **Unwrap:** The `.await` operation is designed to work with the `try` operator:
+- **Type:** A future that can fail is represented as **`future[!T]`** (using the error-union prefix `!`).
+- **Unwrap:** The `.await` operation is designed to work with the `try` operator:
+
     ```ryo
 	# task.run returns future[!str]
 	fetch_future = task.run:
@@ -2905,10 +3020,10 @@ select:
 
 **`default` branch semantics:**
 
-*   `default` makes the `select` **non-blocking**: if no `case` is immediately ready, the `default` branch executes instead of suspending the current task.
-*   Without `default`, `select` **suspends** the current task until at least one `case` fires.
-*   `default` is **optional** — most `select` blocks should omit it; blocking until a case fires is the common and expected pattern.
-*   `default` is only valid inside `select` blocks; it is not a general-purpose keyword.
+- `default` makes the `select` **non-blocking**: if no `case` is immediately ready, the `default` branch executes instead of suspending the current task.
+- Without `default`, `select` **suspends** the current task until at least one `case` fires.
+- `default` is **optional** — most `select` blocks should omit it; blocking until a case fires is the common and expected pattern.
+- `default` is only valid inside `select` blocks; it is not a general-purpose keyword.
 
 #### 9.3.2 Task Grouping and Management
 
@@ -2971,7 +3086,7 @@ fn main():
 		io.println("Background logging task")
 	
 	io.println("Main continues immediately")
-	# Note: detached tasks are cancelled when main() returns
+	# Note: detached tasks are cancelled on process exit — main() returning ends the process
 ```
 
 #### Non-Deterministic Waiting with `select`
@@ -2996,13 +3111,13 @@ fn main():
 			io.println("Nothing ready (non-blocking)")
 ```
 
-*   *(Rationale: Task/Future/Channel eliminates function coloring while providing safe, ergonomic concurrency. Dropping a future cancels the task, making structured concurrency the natural default. `task.spawn_detached` exists for the rare fire-and-forget case. No async/await keywords simplifies the language and removes the sync/async divide).*
+- *(Rationale: Task/Future/Channel eliminates function coloring while providing safe, ergonomic concurrency. Dropping a future cancels the task, making structured concurrency the natural default. `task.spawn_detached` exists for the rare fire-and-forget case. No async/await keywords simplifies the language and removes the sync/async divide).*
 
 ## 10. Compile-Time Execution (`comptime`)
 
 > **Status: Planned (timeline TBD)** — This feature is reserved but not yet designed in detail. See Section 19 (Future Work).
 
-*   **Note:** Compile-time execution is planned for future implementation. See Section 19 (Future Work) for details.
+- **Note:** Compile-time execution is planned for future implementation. See Section 19 (Future Work) for details.
 
 ## 11. Modules & Packages
 
@@ -3010,17 +3125,18 @@ fn main():
 
 **Package** = The entire project defined by `ryo.toml`. This is the unit of compilation, versioning, and distribution.
 
-*   **Properties:**
-    *   One `ryo.toml` file defines one package
-    *   Contains one or more modules
-    *   Compiled as a single unit
-    *   Published to package registry as one unit
-    *   Has a unique name (e.g., "mywebapp")
-    *   Defines the boundary for `package` visibility
+- **Properties:**
+  - One `ryo.toml` file defines one package
+  - Contains one or more modules
+  - Compiled as a single unit
+  - Published to package registry as one unit
+  - Has a unique name (e.g., "mywebapp")
+  - Defines the boundary for `package` visibility
 
-*   **Equivalent to:** Rust's crate, Go's module (go.mod), Swift's package (Package.swift), Python's distribution package
+- **Equivalent to:** Rust's crate, Go's module (go.mod), Swift's package (Package.swift), Python's distribution package
 
 **Example Structure:**
+
 ```
 mywebapp/              # Package "mywebapp"
 ├── ryo.toml           # Package manifest
@@ -3031,6 +3147,7 @@ mywebapp/              # Package "mywebapp"
 ```
 
 **ryo.toml:**
+
 ```toml
 [package]
 name = "mywebapp"
@@ -3047,18 +3164,19 @@ json = "0.5"
 
 **Module** = A directory containing `.ryo` files. All `.ryo` files in the same directory are part of one module and share a namespace.
 
-*   **Properties:**
-    *   One directory = one module
-    *   All `.ryo` files in directory share the same namespace
-    *   Can contain both `.ryo` files AND subdirectories (submodules)
-    *   Hierarchical: parent modules can contain child modules
-    *   Module-private items are shared among all files in the directory
-    *   Imported by full path (e.g., `import utils.math`)
-    *   Implicit discovery - no `mod` keyword needed
+- **Properties:**
+  - One directory = one module
+  - All `.ryo` files in directory share the same namespace
+  - Can contain both `.ryo` files AND subdirectories (submodules)
+  - Hierarchical: parent modules can contain child modules
+  - Module-private items are shared among all files in the directory
+  - Imported by full path (e.g., `import utils.math`)
+  - Implicit discovery - no `mod` keyword needed
 
-*   **Equivalent to:** Go's package (directory concept), Rust's module (organizational concept), Python's package (directory)
+- **Equivalent to:** Go's package (directory concept), Rust's module (organizational concept), Python's package (directory)
 
 **Example:**
+
 ```
 src/
   utils/               # Module "utils"
@@ -3073,6 +3191,7 @@ All functions and types in `core.ryo` and `helpers.ryo` are part of the `utils` 
 Modules can contain submodules, creating a hierarchical organization.
 
 **Example:**
+
 ```
 src/
   utils/               # Module "utils" (parent)
@@ -3085,20 +3204,20 @@ src/
 ```
 
 **Module Hierarchy:**
-*   `utils` module contains:
-    *   Files: `core.ryo`, `helpers.ryo`
-    *   Submodule: `utils.math`
-*   `utils.math` module contains:
-    *   Files: `basic.ryo`
-    *   Submodule: `utils.math.geometry`
-*   `utils.math.geometry` module contains:
-    *   Files: `shapes.ryo`
+- `utils` module contains:
+  - Files: `core.ryo`, `helpers.ryo`
+  - Submodule: `utils.math`
+- `utils.math` module contains:
+  - Files: `basic.ryo`
+  - Submodule: `utils.math.geometry`
+- `utils.math.geometry` module contains:
+  - Files: `shapes.ryo`
 
 **Key Properties:**
-*   Parent directories can have BOTH `.ryo` files AND subdirectories (submodules)
-*   Each directory level is a separate module with its own namespace
-*   Child modules do NOT automatically see parent module's private items
-*   Must import parent explicitly to use its items
+- Parent directories can have BOTH `.ryo` files AND subdirectories (submodules)
+- Each directory level is a separate module with its own namespace
+- Child modules do NOT automatically see parent module's private items
+- Must import parent explicitly to use its items
 
 ### 11.4 Access Control Levels
 
@@ -3115,9 +3234,9 @@ pub fn start():        # Public API - anyone can use
 ```
 
 **Use when:**
-*   It's your library's public API
-*   External projects will import it
-*   You promise stability (semver applies)
+- It's your library's public API
+- External projects will import it
+- You promise stability (semver applies)
 
 #### **2. `package` - Package-Internal**
 
@@ -3136,9 +3255,9 @@ fn start():
 ```
 
 **Use when:**
-*   Multiple modules in your project need it
-*   It's an implementation detail, not public API
-*   You want to share code without exposing it externally
+- Multiple modules in your project need it
+- It's an implementation detail, not public API
+- You want to share code without exposing it externally
 
 #### **3. No Keyword - Module-Private**
 
@@ -3159,14 +3278,14 @@ fn connect():
 ```
 
 **Use when:**
-*   Only one module needs it
-*   It's an implementation detail within that module
-*   You want to hide complexity from other modules
+- Only one module needs it
+- It's an implementation detail within that module
+- You want to hide complexity from other modules
 
 #### **Comparison to Other Languages**
 
 | Language | Public | Package/Crate | Module/Internal | File |
-|----------|--------|---------------|-----------------|------|
+| ---------- | -------- | --------------- | ----------------- | ------ |
 | **Ryo** | `pub` | `package` | *(no keyword)* | - |
 | **Rust** | `pub` | `pub(crate)` | `pub(super)` / *(no keyword)* | - |
 | **Go** | Capitalized | `internal/` | *(lowercase)* | - |
@@ -3191,13 +3310,15 @@ import pkg:external_dep              # External dependency from ryo.toml
 
 #### **Import Rules**
 
-1.  **Full Path Required:** Must specify complete module path
+1. **Full Path Required:** Must specify complete module path
+
     ```ryo
 	import utils.math.geometry  # ✓ Full path
 	import geometry             # ✗ Missing parent path
 	```
 
-2.  **No Implicit Parent Access:** Child modules must import parent explicitly
+2. **No Implicit Parent Access:** Child modules must import parent explicitly
+
     ```ryo
 	# utils/math/basic.ryo
 	import utils  # Must import parent to use it
@@ -3206,13 +3327,15 @@ import pkg:external_dep              # External dependency from ryo.toml
 		utils.helper()  # ✓ After importing
 	```
 
-3.  **Paths Relative to `src/`:** Import paths resolve from `src/` directory
+3. **Paths Relative to `src/`:** Import paths resolve from `src/` directory
+
     ```ryo
 	import server      # → src/server/
 	import utils.math  # → src/utils/math/
 	```
 
-4.  **External Dependencies:** Use `pkg:` prefix for dependencies in `ryo.toml`
+4. **External Dependencies:** Use `pkg:` prefix for dependencies in `ryo.toml`
+
     ```ryo
 	import pkg:http    # From [dependencies]
 	import pkg:json    # From [dependencies]
@@ -3300,6 +3423,7 @@ import server    # ✗ ERROR - Circular dependency!
 ```
 
 **Error Message:**
+
 ```
 Error: Circular dependency detected
   server → database → server
@@ -3326,6 +3450,7 @@ fn register():
 **Problem:** User ↔ Post circular dependency
 
 **Solution 1: Extract Common Types**
+
 ```ryo
 # types/core.ryo
 pub struct UserID(int)
@@ -3347,6 +3472,7 @@ pub struct Post:
 ```
 
 **Solution 2: Merge Modules**
+
 ```ryo
 # domain/models.ryo - Combined module
 pub struct User: ...
@@ -3368,12 +3494,14 @@ myapp/
 ```
 
 **src/utils/math.ryo:**
+
 ```ryo
 pub fn add(a: int, b: int) -> int:
 	return a + b
 ```
 
 **src/main.ryo:**
+
 ```ryo
 import utils.math
 
@@ -3393,6 +3521,7 @@ myapp/
 ```
 
 **src/server/http.ryo:**
+
 ```ryo
 pub fn start():              # Public
 	_bind_port()             # Module-private
@@ -3402,6 +3531,7 @@ fn _bind_port():             # Module-private
 ```
 
 **src/server/routes.ryo:**
+
 ```ryo
 pub fn register():
 	http._bind_port()        # ✓ Same module
@@ -3419,6 +3549,7 @@ myapp/
 ```
 
 **src/utils/core.ryo:**
+
 ```ryo
 pub fn helper():
 	pass
@@ -3428,6 +3559,7 @@ package fn internal():
 ```
 
 **src/utils/math/basic.ryo:**
+
 ```ryo
 import utils  # Import parent
 
@@ -3437,6 +3569,7 @@ pub fn calculate():
 ```
 
 **src/main.ryo:**
+
 ```ryo
 import utils
 import utils.math
@@ -3462,6 +3595,7 @@ fn _module_helper():             # Implementation detail
 ```
 
 **Usage from same package:**
+
 ```ryo
 # server/main.ryo
 import lib.api
@@ -3473,6 +3607,7 @@ fn main():
 ```
 
 **Usage from external package:**
+
 ```ryo
 # external-project/main.ryo
 import myapp.lib.api
@@ -3485,6 +3620,7 @@ fn main():
 #### **Example 5: Package Boundary**
 
 **Package 1 (mylib):**
+
 ```
 mylib/
 ├── ryo.toml  # name = "mylib"
@@ -3494,6 +3630,7 @@ mylib/
 ```
 
 **mylib/src/utils/helper.ryo:**
+
 ```ryo
 pub fn public_helper():
 	pass
@@ -3503,6 +3640,7 @@ package fn internal_helper():  # Only within mylib package
 ```
 
 **Package 2 (myapp):**
+
 ```
 myapp/
 ├── ryo.toml  # name = "myapp", depends on mylib
@@ -3511,6 +3649,7 @@ myapp/
 ```
 
 **myapp/src/main.ryo:**
+
 ```ryo
 import pkg:mylib.utils.helper
 
@@ -3523,43 +3662,43 @@ fn main():
 
 ## 12. Application Entry Point
 
-*   **Convention:** Default entry point file is `src/main.ryo`.
-*   **`fn main()`:** Required in entry point. Takes no parameters, returns the unit type `void`. Use `try/catch` for error handling within main.
-*   **Compiler Enforcement:** `fn main()` only allowed in the designated entry point file for executable compilation. *(Rationale: Clear convention without needing `package main` keyword).*
+- **Convention:** Default entry point file is `src/main.ryo`.
+- **`fn main()`:** Required in entry point. Takes no parameters, returns the unit type `void`. Use `try/catch` for error handling within main.
+- **Compiler Enforcement:** `fn main()` only allowed in the designated entry point file for executable compilation. *(Rationale: Clear convention without needing `package main` keyword).*
 
 ## 13. Package Manager (`ryopkg`)
 
-*   **Manifest:** `ryo.toml`. Defines metadata, dependencies.
-*   **Registry:** `ryopkgs.io` (hypothetical).
-*   **Versioning:** SemVer enforced.
-*   **Locking:** `ryo.lock` for reproducible builds.
-*   **CLI Tool:** Cargo-inspired commands (`new`, `add`, `install`, `build`, `run`, `test`, `publish`, `update`, `lock`). *(Rationale: Proven, robust model for ecosystem management).*
+- **Manifest:** `ryo.toml`. Defines metadata, dependencies.
+- **Registry:** `ryopkgs.io` (hypothetical).
+- **Versioning:** SemVer enforced.
+- **Locking:** `ryo.lock` for reproducible builds.
+- **CLI Tool:** Cargo-inspired commands (`new`, `add`, `install`, `build`, `run`, `test`, `publish`, `update`, `lock`). *(Rationale: Proven, robust model for ecosystem management).*
 
 ## 14. Standard Library
 
-*   **Philosophy:** Modular packages, practical, ergonomic, safe.
-*   **Hybrid Architecture:** The Standard Library is a **hybrid** of:
-    *   **Rust Runtime (`libryo_runtime`):** Low-level primitives (allocator, scheduler, I/O loop) written in Rust for performance and stability.
-    *   **Ryo Standard Library (`std`):** High-level APIs written in Ryo, wrapping the runtime via internal FFI.
-*   **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
-*   **Core Packages (Initial):**
-    *   `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`, `assert`, `range`), error and optional type support. **`print` and `println` accept exactly one `str` argument** — there are no variadic forms (see Section 6.1.2). For non-string values, use an f-string: `println(f"x = {x}")`.
-    *   `template`: Native support for parsing and evaluating `t"..."` strings. Includes builder traits and HTML/SQL sanitization utilities (similar to Dave Peck's `tdom` concept for Python) to safely construct DOM trees or queries from Template types.
-        *   Includes `template.include("path")`: A compiler-backed function that reads an external file (like `.html` or `.sql`) at compile-time and treats it as an inline `t-string`. This allows designers to edit plain HTML files without logic, while the Ryo compiler statically checks and interpolates variables into the Template object at compile-time with zero runtime parsing cost. Control flow (loops/conditionals) must be handled in Ryo via component composition (joining multiple Templates) to maintain strict MVC separation.
-    *   `io`: Console (`readln`), Files (`File`), Buffering (functions return `IoError!T`), implements `Drop`.
-    *   `string`: `str`/`strview` manipulation, parsing (functions return `ParseError!T`).
-    *   `collections`: `list[T]`, `map[K, V]` types and methods.
-    *   `math`: Functions, constants, explicit overflow methods.
-    *   `time`: `Instant`, `SystemTime`, `Duration`.
-    *   `encoding.json`: `encode -> JsonError!str`, `decode -> JsonError!JsonValue`, `decode_into[T] -> JsonError!T`.
-    *   `net.http`: Client/Server primitives (`Request`, `Response`, handlers, functions return `HttpError!T`).
-    *   `task`: Task execution primitives (`task.run`, `task.scope`, `task.spawn_detached`, `task.join`, `task.gather`, `task.any`, `task.delay`, `task.timeout`), `future[T]` type. *(Planned)*
-    *   `channel`: Channel communication primitives (`channel.create[T]`, `sender[T]`, `receiver[T]`), ownership-based message passing. *(Planned)*
-    *   `os`: Env, args, basic filesystem ops (functions return `OsError!T`).
-    *   `testing`: `#[test]` attribute, `assert()`, `assert_eq()`. *(Planned)*
-    *   `sync`: `shared[T]`/`weak[T]` types for optional shared ownership, `mutex[T]` and `rwlock[T]` for thread-safe interior mutability. *(Planned)*
-    *   `mem`: Basic memory utilities, `Drop` trait definition.
-    *   `utf8`: Utilities for `str`/`strview` validation, char iteration.
+- **Philosophy:** Modular packages, practical, ergonomic, safe.
+- **Hybrid Architecture:** The Standard Library is a **hybrid** of:
+  - **Rust Runtime (`libryo_runtime`):** Low-level primitives (allocator, scheduler, I/O loop) written in Rust for performance and stability.
+  - **Ryo Standard Library (`std`):** High-level APIs written in Ryo, wrapping the runtime via internal FFI.
+- **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
+- **Core Packages (Initial):**
+  - `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `println`, `panic`, `assert`, `range`), error and optional type support. **`print` and `println` accept exactly one `str` argument** — there are no variadic forms (see Section 6.1.2). For non-string values, use an f-string: `println(f"x = {x}")`.
+  - `template`: Native support for parsing and evaluating `t"..."` strings. Includes builder traits and HTML/SQL sanitization utilities (similar to Dave Peck's `tdom` concept for Python) to safely construct DOM trees or queries from Template types.
+    - Includes `template.include("path")`: A compiler-backed function that reads an external file (like `.html` or `.sql`) at compile-time and treats it as an inline `t-string`. This allows designers to edit plain HTML files without logic, while the Ryo compiler statically checks and interpolates variables into the Template object at compile-time with zero runtime parsing cost. Control flow (loops/conditionals) must be handled in Ryo via component composition (joining multiple Templates) to maintain strict MVC separation.
+  - `io`: Console (`readln`), Files (`File`), Buffering (functions return `IoError!T`), implements `Drop`.
+  - `string`: `str`/`strview` manipulation, parsing (functions return `ParseError!T`).
+  - `collections`: `list[T]`, `map[K, V]` types and methods.
+  - `math`: Functions, constants, explicit overflow methods.
+  - `time`: `Instant`, `SystemTime`, `Duration`.
+  - `encoding.json`: `encode -> JsonError!str`, `decode -> JsonError!JsonValue`, `decode_into[T] -> JsonError!T`.
+  - `net.http`: Client/Server primitives (`Request`, `Response`, handlers, functions return `HttpError!T`).
+  - `task`: Task execution primitives (`task.run`, `task.scope`, `task.spawn_detached`, `task.join`, `task.gather`, `task.any`, `task.delay`, `task.timeout`), `future[T]` type. *(Planned)*
+  - `channel`: Channel communication primitives (`channel.create[T]`, `sender[T]`, `receiver[T]`), ownership-based message passing. *(Planned)*
+  - `os`: Env, args, basic filesystem ops (functions return `OsError!T`).
+  - `testing`: `#[test]` attribute, `assert()`, `assert_eq()`. *(Planned)*
+  - `sync`: `shared[T]`/`weak[T]` types for optional shared ownership, `mutex[T]` and `rwlock[T]` for thread-safe interior mutability. *(Planned)*
+  - `mem`: Basic memory utilities, `Drop` trait definition.
+  - `utf8`: Utilities for `str`/`strview` validation, char iteration.
 
 ### 14.5 Concurrency Model
 
@@ -3570,12 +3709,14 @@ Ryo's concurrency model is designed to provide **"colorless" functions** (no `as
 **Design Decision:** Ryo uses **Green Threads (Stack Swapping)** instead of async/await state machines.
 
 *Rationale:*
+
 - Avoids the "function coloring" problem where async functions cannot call sync functions and vice versa
 - Provides simpler developer experience compared to Rust's async ecosystem
 - Enables pythonic code style without runtime overhead of a garbage collector
 - Proven approach: Go has used green threads successfully for 15+ years
 
 **How It Works:**
+
 1. **M:N Threading Model:** M green threads (user-space tasks) run on N OS threads (typically = CPU cores)
 2. **Stack Swapping:** When a task blocks (I/O, sleep), the runtime saves its stack pointer and switches to another task
 3. **Work-Stealing Scheduler:** OS threads steal tasks from each other to balance load
@@ -3584,7 +3725,7 @@ Ryo's concurrency model is designed to provide **"colorless" functions** (no `as
 **Comparison to Alternatives:**
 
 | Approach | Function Coloring | Implementation Complexity | DX | Example Language |
-|----------|-------------------|---------------------------|-----|------------------|
+| ---------- | ------------------- | --------------------------- | ----- | ------------------ |
 | **Green Threads** | No | Medium (runtime stack management) | Excellent | Go, Ryo (planned) |
 | **async/await** | Yes | High (compiler state machines) | Good | Rust, JavaScript |
 | **Callbacks** | No | Low | Poor | Node.js (old style) |
@@ -3594,6 +3735,7 @@ Ryo's concurrency model is designed to provide **"colorless" functions** (no `as
 Ryo uses **Thread-Local Storage (TLS)** to provide a runtime context without polluting function signatures.
 
 **Python-like Usage:**
+
 ```ryo
 import std.task
 import std.net
@@ -3606,12 +3748,14 @@ fn fetch_data(url: str) -> !Data:
 ```
 
 **Under the Hood:**
+
 - When `task.sleep()` is called, it accesses a **Thread-Local Variable** pointing to the current scheduler
 - If running in async runtime: Swaps stack to another task
 - If running in blocking runtime: Blocks OS thread
 - If running in test: Uses mock runtime
 
 **Testing Pattern:**
+
 ```ryo
 #[test]
 fn test_fetch_fast():
@@ -3625,8 +3769,10 @@ fn test_fetch_fast():
 ```
 
 **Runtime Initialization:**
+
 1. **Default:** First call to `task` or `net` initializes a simple single-threaded blocking runtime
 2. **Explicit:** User can create a multi-threaded runtime:
+
     ```ryo
 	fn main():
 		rt = MultiThreadedRuntime.new(threads=4)
@@ -3640,6 +3786,7 @@ fn test_fetch_fast():
 Ryo makes **structured concurrency** the primary pattern to prevent resource leaks and zombie tasks.
 
 **Primary Pattern: `task.scope`**
+
 ```ryo
 import std.task
 
@@ -3651,6 +3798,7 @@ fn process_all(urls: list[str]) -> !list[Data]:
 ```
 
 **Properties:**
+
 - All spawned tasks **must** complete before scope exits
 - If any task panics, all tasks in scope are cancelled
 - Prevents "fire-and-forget" bugs common in unstructured concurrency
@@ -3659,6 +3807,7 @@ fn process_all(urls: list[str]) -> !list[Data]:
 
 **Detached Tasks (Rare):**
 For the rare case where you truly need fire-and-forget:
+
 ```ryo
 task.spawn_detached(background_worker)  # No join point
 ```
@@ -3670,6 +3819,7 @@ task.spawn_detached(background_worker)  # No join point
 While channels are preferred for communication ("share memory by communicating"), Ryo provides traditional sync primitives for shared state.
 
 **Mutex (Exclusive Lock):**
+
 ```ryo
 import std.sync
 
@@ -3682,6 +3832,7 @@ fn worker(cache: shared[mutex[map[str, int]]]):
 ```
 
 **RwLock (Reader-Writer Lock):**
+
 ```ryo
 data = shared(rwlock(config))
 
@@ -3695,6 +3846,7 @@ fn writer(data: shared[rwlock[Config]]):
 ```
 
 *Available Primitives:*
+
 - `mutex[T]` - Mutual exclusion lock
 - `rwlock[T]` - Reader-writer lock (multiple readers or single writer)
 - `atomic[T]` - Lock-free atomic operations (integers, booleans)
@@ -3719,6 +3871,7 @@ select:
 ```
 
 **Cancel Safety:** If a case is not selected, ownership transfer does not happen:
+
 - `my_value` in the `tx.send()` case remains valid in outer scope if timeout hits
 - Operations are atomic regarding ownership
 - Unselected operations are cancelled without side effects
@@ -3750,9 +3903,11 @@ Adding parallelism (M:N green threads across multiple OS threads) has **specific
 *Problem:* Two threads accessing `mut counter = 0` without locks causes undefined behavior.
 
 *Solution:*
+
 - **Global `mut` variables:** Forbidden (compile error) OR require `unsafe`
 - **Global constants:** Allowed (read-only is safe)
 - **Recommended pattern:**
+
   ```ryo
   # ❌ Forbidden
   mut global_cache = map[str, int]()
@@ -3763,26 +3918,26 @@ Adding parallelism (M:N green threads across multiple OS threads) has **specific
 
 **3. FFI Blocking Annotation**
 
-*Problem:* C function calls can block OS threads, starving the green thread scheduler.
+*Problem:* C function calls can block for arbitrarily long, stalling the calling task.
 
-*Solution:* `#[blocking]` attribute signals runtime to spawn new OS thread:
+*Solution:* mark blocking FFI imports with the `#[blocking]` attribute so the runtime can keep them off task execution:
 
 ```ryo
 #[blocking]
 extern "C" fn sqlite_exec(db: *void, sql: *c_char) -> int
 
 fn query_db(sql: str):
-	# Runtime detects #[blocking], runs on detached OS thread
 	result = sqlite_exec(db_handle, sql.as_ptr())
 ```
 
-**Impact:** Prevents green thread scheduler from getting blocked by slow C calls.
+**Impact:** Slow C calls no longer stall unrelated tasks.
 
 **4. Panic Isolation (Task-Level Boundaries)**
 
 *Problem:* Should one panicking task crash the entire process?
 
 *Solution:*
+
 - Panics inside `task.run` or `task.spawn_detached` **kill only that task**, not the process
 - Error is logged to stderr or captured in the `future[T]` result (if using `task.run`)
 - OS thread survives to handle other tasks
@@ -3806,7 +3961,7 @@ result = worker.await catch as e:
 
 **6. Send Constraint (Explicit Predicate)**
 
-*Policy:* A value may cross a task boundary in exactly three ways:
+*Policy:* In safe code outside a `task.scope` body, a value may cross a task boundary in exactly three ways:
 
 1. **Owned move** — an owned `T` moves into the task closure or channel; the sender loses access, so uniqueness is preserved (Pony's `iso`).
 2. **`shared[T]` handle** — read-only by the sharing-freezes rule (§5.6), or internally synchronized (`shared[mutex[T]]`, `shared[rwlock[T]]`); the ARC refcount is atomic (Pony's `val`).
@@ -3820,16 +3975,19 @@ Views (`strview`, `slice[T]`, `bytesview`) may cross only inside a `task.scope` 
 
 **Reserved Keywords (Future-Proofing):**
 Even though Ryo does not use `async`/`await` syntax, these keywords are **reserved** in the lexer to prevent breaking changes if the design evolves:
+
 - `async` (reserved, unused)
 - `await` (reserved — used as postfix operator `.await` on `future[T]`, not as a standalone keyword)
 
 **Active Keywords:**
+
 - `select` - Non-deterministic operation selection
 - `case` - Branch in `select` statement
 - `default` - Non-blocking fallback in `select` statement
 - `move` - Move capture for closures (redundant but accepted in task closures, which implicitly move)
 
 **Standard Library Modules:**
+
 - `std.task` - Task spawning, scheduling, scopes
 - `std.channel` - Channel creation and communication
 - `std.sync` - Mutex, RwLock, Atomic primitives
@@ -3838,6 +3996,7 @@ Even though Ryo does not use `async`/`await` syntax, these keywords are **reserv
 #### 14.5.8 Implementation Timeline
 
 Concurrency is implemented in **Phase 5** (post-v0.1.0):
+
 - **Milestone 32:** Green threads runtime and ambient context
 - **Milestone 33:** Cancellation model (`Canceled`/`Timeout` errors, cooperative cancellation)
 - **Milestone 34:** Parallelism, sync primitives, and spec updates
@@ -3849,8 +4008,9 @@ Concurrency is implemented in **Phase 5** (post-v0.1.0):
 
 Ryo includes a first-class testing framework.
 
-*   **Test Functions:** Marked with `#[test]`.
-*   **Test Timeouts:** Tests can specify a maximum execution duration to prevent hanging CI. A timed-out test panics with a clear message.
+- **Test Functions:** Marked with `#[test]`.
+- **Test Timeouts:** Tests can specify a maximum execution duration to prevent hanging CI. A timed-out test panics with a clear message.
+
     ```ryo
 	#[test]
 	fn test_fast():
@@ -3861,14 +4021,18 @@ Ryo includes a first-class testing framework.
 	    data = fetch_slow_service()
 	    assert(data.is_valid())
 	```
+
     A global default timeout can be configured in `ryo.toml`:
+
     ```toml
 	[testing]
 	default-timeout = "30s"    # Applied to all tests without explicit timeout
 	```
+
     Tests with an explicit `timeout` parameter override the global default. Tests without any timeout (and no global default) run without a time limit.
-*   **Benchmarks:** Marked with `#[bench]`.
-*   **Fixtures:** Use **RAII (Drop)** for setup/teardown.
+- **Benchmarks:** Marked with `#[bench]`.
+- **Fixtures:** Use **RAII (Drop)** for setup/teardown.
+
     ```ryo
 	struct DbFixture:
 		fn new() -> DbFixture: ...
@@ -3880,14 +4044,14 @@ Ryo includes a first-class testing framework.
 		# ... test ...
 		# Teardown (drop) happens automatically
 	```
-*   **Integration Tests:** Placed in `tests/` directory. Treated as external packages (black-box testing).
+- **Integration Tests:** Placed in `tests/` directory. Treated as external packages (black-box testing).
 
 ## 16. Tooling
 
-*   **Linker/Driver:** **Zig (`zig cc`)** is the mandatory linker and driver.
-    *   *Rationale:* Enables easy cross-compilation (e.g., `ryo build --target x86_64-linux-musl`) and seamless C interop.
-*   **Compiler Backend:** **Cranelift**. Supports AOT and JIT. *(Rationale: Good balance of performance and compile speed; provides both AOT and JIT from a single backend.)* A WebAssembly target is a future possibility but is not provided by Cranelift; it would require a parallel backend — see [§19](#19-missing-elements--future-work).
-*   **Tools:** `ryo` package manager integrated, `ryo-bindgen` for automatic C FFI binding generation, `ryo` REPL (using JIT), Integrated Testing (`ryo test`). LSP future goal.
+- **Linker/Driver:** **Zig (`zig cc`)** is the mandatory linker and driver.
+  - *Rationale:* Enables easy cross-compilation (e.g., `ryo build --target x86_64-linux-musl`) and seamless C interop.
+- **Compiler Backend:** **Cranelift**. Supports AOT and JIT. *(Rationale: Good balance of performance and compile speed; provides both AOT and JIT from a single backend.)* A WebAssembly target is a future possibility but is not provided by Cranelift; it would require a parallel backend — see [§19](#19-missing-elements--future-work).
+- **Tools:** `ryo` package manager integrated, `ryo-bindgen` for automatic C FFI binding generation, `ryo` REPL (using JIT), Integrated Testing (`ryo test`). LSP future goal.
 
 ## 17. FFI & `unsafe`
 
@@ -3897,72 +4061,72 @@ Ryo provides a powerful, high-level workflow for C interoperability, as detailed
 
 However, the underlying mechanisms involve `unsafe` code and `extern "C"` blocks, which are strictly controlled.
 
-*   **Gatekeeping:** `unsafe` is a **manifest-declared capability** available to any package (final spec §6, D4). Packages without the flag cannot contain `unsafe` blocks.
+- **Gatekeeping:** `unsafe` is a **manifest-declared capability** available to any package (final spec §6, D4). Packages without the flag cannot contain `unsafe` blocks.
+
     ```toml
 	# ryo.toml
 	[package]
 	name = "fastcodec"
 	allow_unsafe = true        # required, or unsafe blocks are compile errors
     ```
-*   **Visibility:** the capability is stated in the manifest, printed by `ryo audit` (dependency-tree report), and surfaced by tooling. Consumers can build with `--deny-unsafe=deps` to reject any dependency that uses it.
-*   **Mandatory safety documentation:** every `unsafe` block must be preceded by a `#: SAFETY:` doc comment explaining why its invariants hold; a missing or empty `SAFETY:` comment is a compile error.
-*   **Safe-API norm (lint):** `pub` functions whose bodies contain `unsafe` trigger a pedantic lint unless documented as safe abstractions. Raw pointers (`*T`) remain confined to `unsafe` blocks; they never appear in safe signatures.
-*   *Rationale:* memory safety stays the default, but the boundary becomes **auditable** rather than **prohibitive** — the ecosystem can build safe abstractions (containers, FFI wrappers, concurrency primitives) that the language team didn't anticipate. The primary way to interact with C code remains the automated `ryo-bindgen` workflow.
+- **Visibility:** the capability is stated in the manifest, printed by `ryo audit` (dependency-tree report), and surfaced by tooling. Consumers can build with `--deny-unsafe=deps` to reject any dependency that uses it.
+- **Mandatory safety documentation:** every `unsafe` block must be preceded by a `#: SAFETY:` doc comment explaining why its invariants hold; a missing or empty `SAFETY:` comment is a compile error.
+- **Safe-API norm (lint):** `pub` functions whose bodies contain `unsafe` trigger a pedantic lint unless documented as safe abstractions. Raw pointers (`*T`) remain confined to `unsafe` blocks; they never appear in safe signatures.
+- *Rationale:* memory safety stays the default, but the boundary becomes **auditable** rather than **prohibitive** — the ecosystem can build safe abstractions (containers, FFI wrappers, concurrency primitives) that the language team didn't anticipate. The primary way to interact with C code remains the automated `ryo-bindgen` workflow.
 
 ## 18. Integer Overflow Behavior
 
-*   **Default:** Integer arithmetic **traps (panics) on overflow in all build modes**, debug and release alike. No behavior drift between development and production. *(Rationale (GAP-2): Swift-proven; consistent with DX-first. Code that intends wrapping, saturation, or testability spells it — the reviewer always knows which regime applies by reading the operation. Cost: one predictable, branch-predictable check per integer op.)*
-*   **Explicit Methods:** `wrapping_*` / `saturating_*` / `checked_*` (the latter returning `?T`) as stdlib operations or D10-overloadable explicit operators.
-*   **Division by Zero:** Always panics.
-*   **Numeric Conversions (`TargetType(value)`):** Safe, explicitly defined behavior (widening ok, float->int truncates towards zero, narrowing int wraps/truncates). Does *not* require `unsafe`. This defined behavior ensures portability and avoids undefined behavior common in some other languages for certain conversions.
+- **Default:** Integer arithmetic **traps (panics) on overflow in all build modes**, debug and release alike. No behavior drift between development and production. *(Rationale (GAP-2): Swift-proven; consistent with DX-first. Code that intends wrapping, saturation, or testability spells it — the reviewer always knows which regime applies by reading the operation. Cost: one predictable, branch-predictable check per integer op.)*
+- **Explicit Methods:** `wrapping_*` / `saturating_*` / `checked_*` (the latter returning `?T`) as stdlib operations or D10-overloadable explicit operators.
+- **Division by Zero:** Always panics.
+- **Numeric Conversions (`TargetType(value)`):** Safe, explicitly defined behavior (widening ok, float->int truncates towards zero, narrowing int wraps/truncates). Does *not* require `unsafe`. This defined behavior ensures portability and avoids undefined behavior common in some other languages for certain conversions.
 
 ## 19. Missing Elements / Future Work
 
 Future features and extensions are listed in this section below.
 
 **Current Specification Gaps:**
-*   **Formal Grammar (EBNF/BNF).**
-*   **Detailed Standard Library API Specification** (All function signatures, struct fields, detailed semantics).
-*   **~~Precise Borrow Checker Algorithm Specification~~** — Draft sketch exists. Formal specification deferred to implementation phase.
-*   **~~Precise Closure Representation/ABI~~** — Draft exists. Full ABI specification deferred to v0.2+ FFI milestone.
-*   **Error Handling Details** (Standard `Error` trait? `From` trait for `?` conversions?).
-*   **Module System Edge Cases** (Detailed resolution rules, visibility across modules/packages).
-*   **Attributes:** Formal system for attributes like `#[test]`, `#[no_mangle]`, `#[repr(C)]`.
-*   **Memory Layout Guarantees** (Beyond `#[repr(C)]`).
-*   **WebAssembly Target Details** (ABI, JS interop bindings, WASI support).
+- **Formal Grammar (EBNF/BNF).**
+- **Detailed Standard Library API Specification** (All function signatures, struct fields, detailed semantics).
+- **~~Precise Borrow Checker Algorithm Specification~~** — Draft sketch exists. Formal specification deferred to implementation phase.
+- **~~Precise Closure Representation/ABI~~** — Draft exists. Full ABI specification deferred to v0.2+ FFI milestone.
+- **Error Handling Details** (Standard `Error` trait? `From` trait for `?` conversions?).
+- **Module System Edge Cases** (Detailed resolution rules, visibility across modules/packages).
+- **Attributes:** Formal system for attributes like `#[test]`, `#[no_mangle]`, `#[repr(C)]`.
+- **Memory Layout Guarantees** (Beyond `#[repr(C)]`).
+- **WebAssembly Target Details** (ABI, JS interop bindings, WASI support).
 
 **Planned Future Extensions:**
-*   **`sbytes`** — shared-backed byte buffer (opt-in ARC + COW with compiler warnings) for views that must escape (final spec §5, D3; v0.2–v0.3)
-*   **Runtime Profiles** — `core` (freestanding) / `hosted` (default) split (final spec §8, D9; v0.2; see Section 9.1)
-*   **Bounded Operator Overloading** — trait-based, fixed operator set, same-type operands, static dispatch (final spec §9, D10; v0.2–v0.3)
-*   **Scoped Task Borrows** — borrow captures inside `task.scope` + stdlib `par_*` (final spec §7, D5; v0.4; see Section 9.2.1)
-*   **Context Propagation & Cancellation Deadlines** — ambient request-scoped context over the task tree (GAP-1; v0.4, with the concurrency runtime)
-*   **Volatile Memory Access (MMIO)** — `volatile_read`/`volatile_write` unsafe intrinsics (GAP-3; v0.2)
-*   **`#[repr(packed)]`** — packed struct layout for wire protocols and register maps (GAP-4; v0.2)
-*   **`bytes` / `bytesview`** — contiguous binary data + projections (D2; v0.1, Milestone 8.4.2 — see Section 4.2)
-*   **Constrained Types** (Range types with compile-time/runtime bounds checking — see Section 4.13)
-*   **Distinct Types** (Strong typedefs for unit safety — see Section 4.14)
-*   **Contracts** (`#[pre]`/`#[post]` function contracts — see Section 7.11)
-*   ~~**Named Parameters & Default Values**~~ — Implemented in v0.1 (see Section 6.1.1)
-*   **Cancellation Model** (Cooperative cancellation with `Canceled`/`Timeout` errors — see Section 9.2.5)
-*   **Test Timeouts** (`#[test(timeout=5s)]` for preventing hanging tests — see Section 15)
-*   **Compile-Time Execution** (`comptime` blocks and functions)
-*   **Foreign Function Interface & Unsafe Operations** (C FFI, raw pointers, unsafe blocks)
-*   **CSP Concurrency Extensions** (channels, select, spawn - optional)
-*   **Advanced Generics** (User-defined generics with trait bounds)
-*   **Iterator System** (Standard iterator traits and lazy evaluation)
-*   **Standard Error Trait** (Unified error handling with conversions)
-*   **Attribute System** (Formal `#[attribute]` syntax)
-*   **Advanced String Formatting** (Display/Debug traits)
-*   **Dynamic Dispatch** (Trait objects for runtime polymorphism)
-*   **Advanced Pattern Matching** (Guards, OR patterns, advanced destructuring)
-*   **Advanced Compile-Time Reflection** (Type introspection and code generation)
-*   **SIMD Support** (Vector operations)
-*   **Module System Extensions** (Conditional compilation)
+- **`sbytes`** — shared-backed byte buffer (opt-in ARC + COW with compiler warnings) for views that must escape (final spec §5, D3; v0.2–v0.3)
+- **Runtime Profiles** — `core` (freestanding) / `hosted` (default) split (final spec §8, D9; v0.2; see Section 9.1)
+- **Bounded Operator Overloading** — trait-based, fixed operator set, same-type operands, static dispatch (final spec §9, D10; v0.2–v0.3)
+- **Scoped Task Borrows** — borrow captures inside `task.scope` + stdlib `par_*` (final spec §7, D5; v0.4; see Section 9.2.1)
+- **Context Propagation & Cancellation Deadlines** — ambient request-scoped context over the task tree (GAP-1; v0.4, with the concurrency runtime)
+- **Volatile Memory Access (MMIO)** — `volatile_read`/`volatile_write` unsafe intrinsics (GAP-3; v0.2)
+- **`#[repr(packed)]`** — packed struct layout for wire protocols and register maps (GAP-4; v0.2)
+- **`bytes` / `bytesview`** — contiguous binary data + projections (D2; v0.1, Milestone 8.4.2 — see Section 4.2)
+- **Constrained Types** (Range types with compile-time/runtime bounds checking — see Section 4.13)
+- **Distinct Types** (Strong typedefs for unit safety — see Section 4.14)
+- **Contracts** (`#[pre]`/`#[post]` function contracts — see Section 7.11)
+- ~~**Named Parameters & Default Values**~~ — Implemented in v0.1 (see Section 6.1.1)
+- **Cancellation Model** (Cooperative cancellation with `Canceled`/`Timeout` errors — see Section 9.2.5)
+- **Test Timeouts** (`#[test(timeout=5s)]` for preventing hanging tests — see Section 15)
+- **Compile-Time Execution** (`comptime` blocks and functions)
+- **Foreign Function Interface & Unsafe Operations** (C FFI, raw pointers, unsafe blocks)
+- **CSP Concurrency Extensions** (channels, select, spawn - optional)
+- **Advanced Generics** (User-defined generics with trait bounds)
+- **Iterator System** (Standard iterator traits and lazy evaluation)
+- **Standard Error Trait** (Unified error handling with conversions)
+- **Attribute System** (Formal `#[attribute]` syntax)
+- **Advanced String Formatting** (Display/Debug traits)
+- **Dynamic Dispatch** (Trait objects for runtime polymorphism)
+- **Advanced Pattern Matching** (Guards, OR patterns, advanced destructuring)
+- **Advanced Compile-Time Reflection** (Type introspection and code generation)
+- **SIMD Support** (Vector operations)
+- **Module System Extensions** (Conditional compilation)
 
 **Considered and Rejected:**
-*   **Variadic Parameters** (`*args`, `...T`) — Rejected. F-strings and list literals cover all use cases without adding a non-orthogonal parameter mode. C-ABI variadics are permitted only inside `unsafe extern "C"`. See Section 6.1.2 for full rationale.
-
+- **Variadic Parameters** (`*args`, `...T`) — Rejected. F-strings and list literals cover all use cases without adding a non-orthogonal parameter mode. C-ABI variadics are permitted only inside `unsafe extern "C"`. See Section 6.1.2 for full rationale.
 
 ## See Also
 

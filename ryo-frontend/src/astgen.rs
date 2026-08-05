@@ -443,11 +443,17 @@ mod tests {
 
     fn parse_and_lower(input: &str) -> Result<(Uir, InternPool), Vec<Diag>> {
         // Phase-2 lex pipeline: logos + indent + intern in one
-        // pass; identifiers come back as `StringId`. Phase-1
-        // diagnostics are still threaded through `DiagSink` so
-        // astgen can keep going past errors.
+        // pass; identifiers come back as `StringId`. Lex diagnostics
+        // go through `DiagSink` like every other stage, so assert
+        // the sink stayed clean instead of unwrapping a `Result`.
         let mut pool = InternPool::new();
-        let tokens = lex(input, &mut pool).expect("lex ok");
+        let mut lex_sink = DiagSink::new();
+        let tokens = lex(input, &mut pool, &mut lex_sink);
+        assert!(
+            !lex_sink.has_errors(),
+            "lex errors: {:?}",
+            lex_sink.into_diags()
+        );
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
         let program = program_parser()
             .parse(token_stream)

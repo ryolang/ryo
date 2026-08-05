@@ -241,13 +241,25 @@ impl<'a> Sema<'a> {
         let n = uir.func_bodies.len();
         let mut name_to_decl = HashMap::with_capacity(n);
         for (i, body) in uir.func_bodies.iter().enumerate() {
-            // First definition wins on duplicates; the second-and-
-            // beyond will type-check against the first, which keeps
-            // the pipeline robust until a dedicated redefinition
-            // pass lands.
-            name_to_decl
-                .entry(body.name)
-                .or_insert(DeclId::from_index(i));
+            // First definition wins on duplicates: calls bind to the
+            // first declaration and the duplicate still gets analyzed
+            // (so its own errors surface), but the redefinition itself
+            // is a hard error.
+            match name_to_decl.entry(body.name) {
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    sink.emit(Diag::error(
+                        body.span,
+                        DiagCode::DuplicateDeclaration,
+                        format!(
+                            "function '{}' is defined more than once",
+                            pool.str(body.name)
+                        ),
+                    ));
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(DeclId::from_index(i));
+                }
+            }
         }
         let mut results = Vec::with_capacity(n);
         for _ in 0..n {
@@ -294,13 +306,14 @@ impl<'a> Sema<'a> {
                 body.span,
                 "is a reserved builtin and cannot be used as a function name",
             );
-            self.signatures.insert(
-                body.name,
-                FunctionSig {
-                    params: body.params.iter().map(|p| p.ty).collect(),
-                    return_type: body.return_type,
-                },
-            );
+            // First definition wins, matching `name_to_decl` in
+            // `Sema::new`: the duplicate body is still analyzed (and
+            // its DuplicateDeclaration error already emitted), but it
+            // must not overwrite the signature calls bind against.
+            self.signatures.entry(body.name).or_insert(FunctionSig {
+                params: body.params.iter().map(|p| p.ty).collect(),
+                return_type: body.return_type,
+            });
         }
     }
 
@@ -2340,7 +2353,13 @@ mod tests {
     /// those stages.
     fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
         let mut pool = InternPool::new();
-        let tokens = lex(input, &mut pool).expect("lex ok");
+        let mut lex_sink = DiagSink::new();
+        let tokens = lex(input, &mut pool, &mut lex_sink);
+        assert!(
+            !lex_sink.has_errors(),
+            "lex errors: {:?}",
+            lex_sink.into_diags()
+        );
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
         let program = program_parser()
             .parse(token_stream)
@@ -2363,7 +2382,13 @@ mod tests {
     /// used to assert the "Unreachable + diag" invariant from §4.5.
     fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
         let mut pool = InternPool::new();
-        let tokens = lex(input, &mut pool).expect("lex ok");
+        let mut lex_sink = DiagSink::new();
+        let tokens = lex(input, &mut pool, &mut lex_sink);
+        assert!(
+            !lex_sink.has_errors(),
+            "lex errors: {:?}",
+            lex_sink.into_diags()
+        );
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
         let program = program_parser()
             .parse(token_stream)
@@ -3445,6 +3470,18 @@ mod tests {
     fn duplicate_mut_decl_same_scope_rejected() {
         let diags = run("fn main():\n\tmut x = 1\n\tmut x = 2\n").unwrap_err();
         assert!(any_code(&diags, DiagCode::DuplicateDeclaration));
+    }
+
+    #[test]
+    fn duplicate_function_definition_rejected() {
+        let diags =
+            run("fn foo():\n\tx = 1\nfn foo():\n\ty = 2\nfn main():\n\tz = 3\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DuplicateDeclaration));
+    }
+
+    #[test]
+    fn distinct_function_definitions_ok() {
+        run("fn foo():\n\tx = 1\nfn bar():\n\ty = 2\nfn main():\n\tz = 3\n").unwrap();
     }
 
     #[test]
