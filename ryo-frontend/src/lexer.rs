@@ -886,7 +886,11 @@ mod tests {
         let mut pool = InternPool::new();
         let mut sink = DiagSink::new();
         let toks = lex(src, &mut pool, &mut sink);
-        assert!(!sink.has_errors(), "should lex cleanly: {:?}", sink.into_diags());
+        assert!(
+            !sink.has_errors(),
+            "should lex cleanly: {:?}",
+            sink.into_diags()
+        );
         let newlines: Vec<_> = toks
             .iter()
             .filter(|(t, _)| matches!(t, Token::Newline))

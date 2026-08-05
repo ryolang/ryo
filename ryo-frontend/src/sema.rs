@@ -2355,7 +2355,11 @@ mod tests {
         let mut pool = InternPool::new();
         let mut lex_sink = DiagSink::new();
         let tokens = lex(input, &mut pool, &mut lex_sink);
-        assert!(!lex_sink.has_errors(), "lex errors: {:?}", lex_sink.into_diags());
+        assert!(
+            !lex_sink.has_errors(),
+            "lex errors: {:?}",
+            lex_sink.into_diags()
+        );
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
         let program = program_parser()
             .parse(token_stream)
@@ -2380,7 +2384,11 @@ mod tests {
         let mut pool = InternPool::new();
         let mut lex_sink = DiagSink::new();
         let tokens = lex(input, &mut pool, &mut lex_sink);
-        assert!(!lex_sink.has_errors(), "lex errors: {:?}", lex_sink.into_diags());
+        assert!(
+            !lex_sink.has_errors(),
+            "lex errors: {:?}",
+            lex_sink.into_diags()
+        );
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
         let program = program_parser()
             .parse(token_stream)

@@ -255,9 +255,7 @@ fn emit_one(d: &Diag, source_name: &str, source: &Source<&str>) {
     let mut report = Report::build(kind, (source_name, d.span.start..d.span.end))
         .with_code(code)
         .with_message(&d.message)
-        .with_label(
-            Label::new((source_name, d.span.start..d.span.end)).with_color(label_color),
-        );
+        .with_label(Label::new((source_name, d.span.start..d.span.end)).with_color(label_color));
     for note in &d.notes {
         if let Some(span) = note.span {
             report = report.with_label(
@@ -740,8 +738,7 @@ mod tests {
         // must re-render them through the pool so the user sees the
         // actual identifier text.
         let mut pool = InternPool::new();
-        let err = parse_source("x foo = 1", &mut pool, "<test>")
-            .expect_err("parse should fail");
+        let err = parse_source("x foo = 1", &mut pool, "<test>").expect_err("parse should fail");
         let CompilerError::Diagnostics(diags) = err else {
             panic!("expected Diagnostics error");
         };
