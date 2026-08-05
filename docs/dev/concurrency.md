@@ -1,7 +1,7 @@
 **Status:** Design (v0.4)
 
 # Ryo v0.4 Concurrency Implementation Plan
-> Task / Future / Channel — Green Thread M:N Runtime
+> Task / Future / Channel / Dispatcher — Green Thread M:N Runtime with System-Coroutine FFI
 
 ---
 
@@ -11,6 +11,31 @@ This document describes the phased implementation plan for Ryo's concurrency
 model. The goal is a working, cross-platform (Linux, macOS, Windows) M:N green
 thread runtime backing `task.run`, `future[T]`, and channels by the v0.4
 release.
+
+**Lineage.** This plan supersedes the earlier draft of this document and
+absorbs the adopted Loom/Kotlin alternative proposal
+(`concurrency_loom_kt.md`). Two ideas from that proposal are now part of the
+core design:
+
+- **Loom-inspired FFI ergonomics.** Every compute FFI call runs on a
+  per-OS-thread *system coroutine* with a megabyte-sized stack — Go's g0/cgo
+  pattern implemented via `corosensei` — never on the green-thread stack
+  (§3.5). True Loom-style stack capture (freeze frames to heap, thaw on
+  another carrier) was investigated and rejected for v0.4: no Rust crate
+  implements it in production-quality form, and hand-rolling it means
+  per-ISA assembly plus DWARF integration. It remains a deferred future
+  optimization (see *Memory profile at scale*); the WebAssembly
+  stack-switching proposal is the closest production-bound realization (see
+  the WasmFX section).
+- **Kotlin-borrowed user-facing primitives.** Explicit dispatchers
+  (`Dispatcher` + `with_dispatcher`, from `CoroutineDispatcher` /
+  `withContext`), a supervisor scope (`task.supervise`, from
+  `supervisorScope`), and a four-mode channel taxonomy.
+
+`Dispatcher`, `with_dispatcher`, and `task.supervise` are **proposal-only** —
+not stable user-facing APIs — unless/until their definitions are added to the
+normative specification. Ryo remains colorless: no `async`/`await`, no
+`suspend` keyword.
 
 **Core stack:**
 - `corosensei` — cross-platform stack switching
@@ -30,10 +55,16 @@ release.
 | Setting | Default | Notes |
 |---|---|---|
 | `RYOMAXPROCS` | `NumCPU` (logical cores) | Number of OS worker threads in the M:N scheduler. Same shape as Go's `GOMAXPROCS`. |
-| Blocking thread pool cap | `10000` | Mirrors Go's default M cap. Hard ceiling on concurrent `#[blocking]` calls. |
+| Blocking thread pool cap | `1000` | Hard ceiling on concurrent `#[blocking]` calls. Smaller than Go's 10 000 M cap: only blocking-by-design FFI routes here (§3.4); compute FFI runs on the system coroutine (§3.5). Possibly tuned later. |
 | Initial task stack | `32 KB` | Grows on demand. See §1.1. |
 | Maximum task stack | `128 KB` (v0.4) | Hard cap; overflow delivers `StackOverflow` to the task. |
+| `RYO_FFI_STACK_SIZE` | `2 MB` | System-coroutine stack size (§3.5). Matches Linux's typical `pthread_create` default; covers virtually all real C libraries. |
+| `RYO_FFI_OVERFLOW_DEPTH` | `8` | Max nested FFI re-entry coroutines per worker (§3.5). |
+| `RYO_MAX_DISPATCHERS` | `64` | Process-wide cap on live custom dispatchers (§4.5). |
+| Dispatcher worker budget | `4 × RYOMAXPROCS` | Total `workers` across all custom dispatchers (§4.5). |
 | Timer wheel resolution | `1 ms` | Sufficient for scripting workloads. |
+
+> **Sibling reference docs:** [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`proposals/wasm_target.md`](proposals/wasm_target.md).
 
 ---
 
@@ -70,15 +101,19 @@ RyoStack {
 > auditing every assumption that depended on a fixed slot size. Doing it now
 > costs little and keeps the door open.
 
+The 128 KB cap is safe for Ryo-only code because compute FFI runs on the
+system coroutine (§3.5), not on the green-thread stack. It remains a safety
+net for runaway Ryo recursion.
+
 ### 1.2 Task and Future Primitives
 
 - Define `Task<T>` as an owned handle to a green thread
-- Define `Future<T>` as the user-facing return value of `task.run`
-- Implement `Drop` on `Future<T>` to request cancellation
+- Define `future[T]` as the user-facing return value of `task.run`
+- Implement `Drop` on `future[T]` to request cancellation
 - States: `Pending | Running | Completed(T) | Cancelled | Panicked(Reason)`
 
 ```
-Future<T>:
+future[T]:
     Drop  → sends CancelRequest to task
     .await → suspends caller until task completes, returns T
 ```
@@ -101,7 +136,7 @@ Future<T>:
 > *not* task-local. In Phase 3 a task can migrate between worker OS threads
 > across yield points, and any value read from native TLS will change
 > identity. Library authors must not store task-state in OS TLS.
-> Phase 3.5 introduces a `task_local!` macro that survives migration.
+> §3.6 introduces a `task_local!` macro that survives migration.
 
 ### 1.5 Cancellation Delivery (Basic)
 
@@ -119,8 +154,10 @@ A task that panics does not take down the runtime. Concretely:
 - `.await` on a panicked task's future propagates the panic to the awaiter
 - A detached panicked task's panic is logged to stderr in v0.4 (a hook for
   user-defined panic handlers is a v0.5 concern)
-- Inside `task.scope` (Phase 4.2), a panicking child cancels its siblings and
+- Inside `task.scope` (§4.2), a panicking child cancels its siblings and
   propagates the panic out of the scope
+- Inside `task.supervise` (§4.2.1), a panicking child does **not** cancel its
+  siblings; the failure surfaces in the child's `future[T]`
 
 ### 1.7 Test Strategy
 
@@ -149,6 +186,8 @@ cancellation tests pass. Stack growth works.
 - Scheduler loop becomes: run all ready tasks → poll I/O events → wake waiting
   tasks → repeat
 - `mio` handles epoll (Linux), kqueue (macOS), IOCP (Windows) transparently
+- io_uring may be added later as a Linux opt-in feature; `mio` remains the
+  cross-platform baseline
 
 ```
 Scheduler loop:
@@ -166,7 +205,7 @@ Scheduler loop:
   resume when ready
 - File I/O on Linux via thread pool (files are not pollable on most OSes)
 - **Define the `#[blocking]` FFI attribute now**, but dispatch is via a
-  minimal single-thread fallback pool until Phase 3.4 builds the real one.
+  minimal single-thread fallback pool until §3.4 builds the real one.
   This avoids the previous draft's chicken-and-egg between 2.2 and 3.4.
 
 ### 2.3 Real `task.delay`
@@ -200,7 +239,7 @@ races.
 ## Phase 3 — Multi-Threading and Work Stealing
 
 **Goal:** Spread tasks across multiple OS threads (M:N scheduling). Full
-work-stealing.
+work-stealing. Route FFI safely.
 
 ### 3.1 Multi-Threaded Scheduler
 
@@ -233,19 +272,82 @@ Worker loop:
 - Reserve `task.pin()` API for tasks holding OS-thread-local resources (some
   C FFI libraries require this)
 - Do not implement for v0.4 — design the hook, implement later
+- Design constraint for the hook: a pinned task is non-migrating, so
+  `with_dispatcher` (§4.5) inside a pinned region is a compile error (§6.2.6)
 
 ### 3.4 `#[blocking]` Thread Pool
 
-- Separate thread pool for blocking FFI calls
+- Separate thread pool for C that blocks on its own I/O (sqlite, libpq sync
+  mode, blocking sockets opened outside Ryo)
 - When a `#[blocking]` function is called from a green thread:
   1. Move the blocking call to the thread pool
   2. Suspend the green thread
   3. Resume when the thread pool call completes
-- **Pool cap: 10 000 threads (matches Go's default M cap).** Starts small,
-  grows on demand, shrinks idle threads after a timeout
-- This replaces the minimal fallback pool from Phase 2.2
+- **Pool cap: 1 000 threads by default.** Starts small, grows on demand,
+  shrinks idle threads after a timeout. The cap is smaller than Go's 10 000 M
+  cap because the pool is narrowed to blocking-by-design FFI — compute FFI
+  runs on the system coroutine (§3.5) instead.
+- `#[blocking]` is sugar for "auto-route this FFI to `dispatcher.blocking`"
+  (§4.5); an enclosing `with_dispatcher` block overrides that routing for the
+  duration of the block (precedence rule, §4.5).
+- This replaces the minimal fallback pool from §2.2
 
-### 3.5 Task-Local Storage
+### 3.5 Per-OS-Thread System Coroutine and FFI Router
+
+**Rationale.** Plain FFI on the green-thread stack is unsafe: a C library
+that uses more than the 128 KB task-stack cap — image codecs, ML inference,
+some crypto, anything that recurses — would hit `StackOverflow` on a Ryo
+task. Routing every FFI call through the `#[blocking]` pool works but pays
+~10 µs of thread-pool dispatch per call, unacceptable for compute-heavy FFI.
+The fix borrows Loom's FFI ergonomics goal via Go's g0/cgo pattern: run FFI
+on a dedicated big-stack coroutine.
+
+**Mechanism.** Each OS worker thread maintains a **system coroutine** at
+startup — a long-lived `corosensei.Coroutine`, owned by the scheduler, with
+a 2 MB stack (configurable via `RYO_FFI_STACK_SIZE`; covers virtually all
+real C libraries). One per worker, not a shared pool: no cross-worker
+synchronization on the FFI hot path, and the memory cost (~16 MB for 8
+workers) is negligible next to per-task stacks. The system coroutine runs a
+read loop that accepts FFI closures from the scheduler and executes them.
+
+A plain `extern "C"` call site lowers to:
+
+```ryo
+# pseudocode for the lowering of an extern call site
+result = scheduler.call_ffi(fn(): extern_function(args))
+```
+
+`call_ffi` performs the yield-to-system-coroutine handoff (~150–250 LOC):
+
+1. Task coroutine yields to scheduler with `FfiCallRequest`.
+2. Scheduler resumes the system coroutine on the same OS worker, passing the
+   FFI closure.
+3. System coroutine runs the C call on its 2 MB stack.
+4. System coroutine yields back with the result.
+5. Scheduler resumes the original task coroutine.
+
+Cost: two extra stack switches per FFI call (~200 ns total on x86_64),
+versus ~10 µs for `#[blocking]` dispatch — roughly 50× cheaper. With compute
+FFI on the system coroutine, the 128 KB green-stack cap is no longer a
+stack-safety risk for FFI users; it remains a safety net for runaway Ryo
+recursion.
+
+**Nested FFI re-entry from C callbacks.** A C library may call back into Ryo
+code (qsort comparators, libjpeg error handlers, visitor APIs), and that
+callback may itself make an FFI call while the worker's primary system
+coroutine is still occupied by the outer call. Policy: the inner FFI call is
+routed to an **overflow system coroutine** — an extra large-stack coroutine
+created on demand on the same worker, cached for reuse, and bounded per
+worker by `RYO_FFI_OVERFLOW_DEPTH` (default 8). When the bound is reached,
+the inner FFI call **fails immediately** with an explicit re-entry-limit
+error (`FfiReentryLimit`) — it must not queue and suspend the current task,
+because the suspended task may be exactly what the occupied system coroutines
+are waiting on, so queueing risks deadlock. (A non-blocking
+`try_call_ffi`-style fallback that reports busy instead of failing is a
+possible later addition.) Below the limit, overflow coroutines are reused
+across nested calls.
+
+### 3.6 Task-Local Storage
 
 The OS-TLS caveat from §1.4 becomes load-bearing once tasks migrate. Provide:
 
@@ -255,10 +357,10 @@ task_local! { static REQUEST_ID: Cell<u64> = Cell::new(0); }
 
 Implementation: each task owns a small map of task-local slots. Reads and
 writes go through the current task's map, not OS TLS. Survives migration.
-Inherited by child tasks spawned within the same `task.scope` (Phase 4.2)
+Inherited by child tasks spawned within the same `task.scope` (§4.2)
 unless explicitly overridden.
 
-### 3.6 Memory Model
+### 3.7 Memory Model
 
 Once tasks share state across worker OS threads, users need visibility
 guarantees. Ryo adopts a **happens-before model close to Go's**:
@@ -278,7 +380,7 @@ A dedicated concurrency memory-model document will spell this out
 precisely when the concurrency milestone is designed. This phase only
 commits to the high-level shape.
 
-### 3.7 Test Strategy
+### 3.8 Test Strategy
 
 - CPU-bound benchmark: 10 000 tasks doing pure computation, scaling near
   linearly with `RYOMAXPROCS`
@@ -288,28 +390,50 @@ commits to the high-level shape.
   task-locals survived
 - `#[blocking]` saturation: 1 000 simultaneous blocking calls do not stall
   the scheduler
+- FFI router correctness: a C library recursing past 128 KB (but under
+  `RYO_FFI_STACK_SIZE`) completes via plain FFI; one recursing past 2 MB
+  delivers `StackOverflow` to the task
+- FFI re-entry: a C callback that itself calls FFI works up to
+  `RYO_FFI_OVERFLOW_DEPTH` nested calls; one level deeper fails immediately
+  with `FfiReentryLimit` and no task is left suspended
+- FFI overhead benchmark: plain FFI round-trip ≈200 ns on x86_64
 
 **Exit criteria:** Linear scaling for embarrassingly parallel workloads.
 `task_local!` works across migration. Blocking pool does not stall green
-threads.
+threads. Compute FFI is stack-safe via the system coroutine, and re-entry
+overflow fails fast without deadlock.
 
 ---
 
 ## Phase 4 — Channels and High-Level Primitives
 
-**Goal:** Implement all concurrency primitives described in the spec.
+**Goal:** Implement all concurrency primitives described in the spec, plus
+the proposal-only additions (dispatchers, `task.supervise`).
 
 ### 4.1 Channels
 
+Four modes on the same infrastructure:
+
 ```
-std.channel.create[T]() -> (sender[T], receiver[T])
+std.channel.create[T]() -> (sender[T], receiver[T])      # unbounded (default)
 std.channel.bounded[T](capacity) -> (sender[T], receiver[T])
+std.channel.rendezvous[T]() -> (sender[T], receiver[T])
+std.channel.conflated[T]() -> (sender[T], receiver[T])
 ```
 
 - **MPMC by default.** `sender[T]` and `receiver[T]` are reference-counted
   handles; `clone()` produces another handle to the same end. The channel
   closes on that side when the **last** clone is dropped.
-- Bounded and unbounded variants
+- `channel.unbounded[T]()` (= `create[T]()`) — sender never blocks; memory
+  unbounded. This is the default mode.
+- `channel.bounded[T](capacity)` — sender blocks at capacity.
+- `channel.rendezvous[T]()` — capacity 0. Sender blocks until the receiver
+  picks up. Synchronous handoff. (Equivalent to `bounded[T](0)` but named
+  for clarity.)
+- `channel.conflated[T]()` — buffer of 1; new sends overwrite the unreceived
+  value. Useful for "latest state" patterns (UI updates, sensor readings).
+  Opt-in. The overwrite-vs-receive happens-before rule is **draft** — see
+  the data-plane section.
 - `tx.send(value)` — moves value into channel, suspends if buffer full
 - `tx.try_send(value)` — non-yielding; returns `Full` error if buffer full
   (lock-safe; see Phase 6)
@@ -321,7 +445,8 @@ std.channel.bounded[T](capacity) -> (sender[T], receiver[T])
   subsequent senders immediately
 
 Internal implementation:
-- `VecDeque<T>` as the ring buffer
+- `VecDeque<T>` as the ring buffer (the two new modes are ~20 LOC each on
+  the same code)
 - Intrusive wait lists for suspended senders and receivers
 - No `Mutex` held during task resumption — only during queue manipulation
 
@@ -332,6 +457,29 @@ Internal implementation:
   and await their unwind (the scope blocks until all children are settled)
 - Scope holds a `JoinHandle` list; on exit, awaits all of them
 - **This is the recommended default over `task.spawn_detached`**
+
+### 4.2.1 `task.supervise` (Supervisor Scope)
+
+> **Status:** proposal-only API (Kotlin's `supervisorScope`) — not yet in the
+> normative specification.
+
+- Sibling primitive to `task.scope`. Inside a supervisor scope, a child task
+  failing does **not** cancel its siblings. The scope still awaits all
+  children before returning. Failures are surfaced as part of each child's
+  `future[T]` result.
+- Children yield **both** handles to the supervisor scope: the identity-only
+  `handle[T]` (spec §9.2.1 — sendable, comparable, no dereference; Pony's
+  `tag`) for supervision — the supervisor can hold, registry-store, and
+  compare child handles, and signal them through channels — and an awaitable
+  `future[T]` join/result handle so the supervisor can await each child and
+  observe its result or failure. The two are not interchangeable: `handle[T]`
+  has no dereference and cannot be joined; `future[T]` joins but is not a
+  stable identity for registry use.
+- Use case: a long-running parent task that spawns many independent workers,
+  where one worker's failure shouldn't kill the others. Common in HTTP server
+  request handlers, batch processors, monitoring agents.
+- Implementation: same `JoinHandle` list as `task.scope`, different
+  failure-propagation policy (~150 LOC).
 
 ### 4.3 `select`
 
@@ -361,7 +509,79 @@ select:
 - `task.any([futures])` — returns first to complete, cancels the rest
 - All three implemented on top of `select` internally
 
-### 4.5 Cancellation Sources
+### 4.5 `Dispatcher` and `with_dispatcher`
+
+> **Status:** proposal-only API (Kotlin's `CoroutineDispatcher` /
+> `withContext`) — not yet in the normative specification.
+
+Kotlin's explicit dispatcher abstraction generalizes the two implicit pools
+(carrier workers and `#[blocking]`) into user-declarable scheduler execution
+contexts. Useful for app-level isolation — bound DB queries to 16 concurrent,
+run image processing on a separate compute dispatcher — without changing the
+colorless model.
+
+- First-class `Dispatcher` type (Kotlin's `CoroutineDispatcher`). The name is
+  deliberate: a `Dispatcher` is a scheduler execution context, and is
+  unrelated to the `std.pool` resource-pool namespace (connection pools,
+  object pools). The two never interact; examples keep them terminologically
+  separate.
+- Built-in dispatchers:
+  - `dispatcher.default` — the carrier pool (`RYOMAXPROCS` workers).
+  - `dispatcher.blocking` — overflow pool for blocking work (`#[blocking]`
+    routes here).
+  - `dispatcher.compute` — CPU-bound pool, sized to CPU cores; optional.
+- User-defined dispatchers: `dispatcher.custom(workers = 8, name = "db")` —
+  app-level resource isolation (e.g., a fixed-size dispatcher to bound DB
+  concurrency).
+- Explicit dispatcher switch via `with_dispatcher` — block form only,
+  matching Ryo's `with` semantics for resource lifetime. Implemented as a
+  scheduler operation: the task's *home dispatcher* changes for the duration
+  of the block, then is restored:
+
+  ```ryo
+  fn handle_request(req: Request, db_dispatcher: Dispatcher) -> Response:
+  	bytes = with_dispatcher(db_dispatcher):
+  		sqlite.query(req.sql)            # runs on db_dispatcher
+  	return Response(parse(bytes))         # back on default dispatcher
+  ```
+
+- `with_dispatcher` is **not a coloring marker.** Calling functions don't
+  need to know which dispatcher the callee uses. The dispatcher is a runtime
+  concept, not a type-system one.
+- `with_dispatcher` is a **yielding operation.** Entering and leaving the
+  block are suspension points, and the task may migrate across OS worker
+  threads (to a worker of the target dispatcher, and back on exit). Two
+  consequences:
+  - A task holding a lock guard (`shared[mutex[T]]` / `shared[rwlock[T]]`)
+    must not cross a `with_dispatcher` boundary — the compiler diagnoses it
+    under the yield-while-locked enforcement (§6.2).
+  - `task.pin()` (§3.3) marks a non-migrating critical section: the compiler
+    diagnoses `with_dispatcher` used inside a `task.pin()` region, since a
+    dispatcher switch may migrate the task. Code that must stay on one
+    carrier switches dispatchers outside the pinned region.
+- **Precedence rule:** an enclosing `with_dispatcher` block wins — for the
+  duration of the block, calls inside it run on that dispatcher, overriding
+  `#[blocking]` auto-routing to `dispatcher.blocking`. (If `#[blocking]` won
+  instead, the bounded-concurrency example in the appendix would be void.)
+- **Capability-gated creation (hard contract, not convention).**
+  `dispatcher.custom` from arbitrary code can starve the runtime. The runtime
+  enforces a process-wide limit of live custom dispatchers
+  (`RYO_MAX_DISPATCHERS`, default 64), and their `workers` threads count
+  against a total extra-worker budget of 4 × `RYOMAXPROCS`. Creation that
+  would exceed either limit fails immediately with a `ResourceExhausted`
+  error at the `dispatcher.custom` call — it does not queue and does not
+  silently degrade. Authority: creation requires the runtime-context
+  capability, which is granted at startup/main scope and is not obtainable by
+  library code — matching Pony's authority-enters-at-one-point principle.
+  Until the planned capability injection lands, the numeric limits are
+  enforced globally at every call site — but they are only
+  resource-exhaustion protection, not authority: they do not distinguish
+  callers, so `dispatcher.custom` must not be exposed to untrusted library
+  code before the capability check lands.
+
+See the appendix for a full workload example (bounded DB concurrency).
+
+### 4.6 Cancellation Sources
 
 | Source | Mechanism | Sync or async? |
 |---|---|---|
@@ -371,7 +591,7 @@ select:
 | `task.timeout` expiry | Delivers `Timeout` at next suspension | Async |
 | `fut.cancel()` | Explicit cancel call | **Async** — returns a future that resolves when the cancelled task has fully unwound. `fut.cancel_now()` is the fire-and-forget variant for cases where the caller does not need to await unwind. |
 
-### 4.6 Async Drop / Destructor-Yield Semantics
+### 4.7 Async Drop / Destructor-Yield Semantics
 
 This is the design call most likely to bite later if left ambiguous. Ryo's
 position for v0.4:
@@ -392,7 +612,7 @@ the lesser evil compared to wedging a `task.scope` indefinitely.
 This is the same shape as Trio's "shielded cleanup" and Kotlin's
 `NonCancellable` context. We borrow the semantics, not the names.
 
-### 4.7 Test Strategy
+### 4.8 Test Strategy
 
 - All §9.4 spec examples pass
 - `task.scope` leak test: child task that holds a file handle, parent panics,
@@ -400,12 +620,24 @@ This is the same shape as Trio's "shielded cleanup" and Kotlin's
 - `select` race test: 1 000 iterations of contended select, no zombie wakers
 - Channel ownership test: clone senders, drop them in arbitrary order, verify
   close happens exactly when last clone drops
+- Channel modes: rendezvous handoff synchronizes sender and receiver;
+  conflated overwrite keeps exactly the latest value and never blocks the
+  sender
+- `task.supervise`: failing child leaves siblings running; scope still awaits
+  all children; each child's `future[T]` surfaces its own failure; the
+  supervisor receives both `handle[T]` and `future[T]` per child
+- Dispatcher switch: work inside `with_dispatcher(d)` runs on `d`'s workers;
+  a 16-worker custom dispatcher bounds concurrent DB queries to 16; creation
+  beyond `RYO_MAX_DISPATCHERS` or the worker budget fails with
+  `ResourceExhausted`
 - Async drop test: destructor that yields completes before scope exit;
   destructor that exceeds `unwind_deadline` logs and force-terminates
 
 **Exit criteria:** All spec examples in §9.4 run correctly. `task.scope`
-prevents resource leaks under cancellation. `select` with `default` is
-non-blocking. Channel ownership is correct under reference counting.
+prevents resource leaks under cancellation. `task.supervise` isolates child
+failures without losing results. `select` with `default` is non-blocking.
+Channel ownership is correct under reference counting. Dispatchers bound
+concurrency as declared, and creation limits are enforced.
 
 ---
 
@@ -424,6 +656,11 @@ The adaptive stacks from §1.1 are working but not yet tuned:
   cache by class)
 - Validate that stack growth on guard-page hit is cheap enough to not be a
   performance cliff in real workloads
+- Tune `RYO_FFI_STACK_SIZE` if real C libraries approach the 2 MB default
+  (deep recursion, very large stack arrays)
+
+This tuning is less load-bearing than it would be without §3.5: compute FFI
+no longer pressures the 128 KB task-stack cap.
 
 ### 5.2 Deadlock Detection
 
@@ -455,6 +692,10 @@ The adaptive stacks from §1.1 are working but not yet tuned:
 - `task.current_id()` for user-facing introspection
 - Runtime stats in debug mode: active tasks, queue depth, steal count,
   blocking-pool size, stack-class distribution
+- `pool_drained(pool_name, queue_depth)` event — published when a pool has
+  more pending tasks than active workers for more than a threshold (default
+  100 ms). Cheap: small atomic counters checked at scheduler boundaries.
+  Helps users tune custom dispatcher sizes.
 - Foundation for a future `ryo profile` tool
 
 ### 5.6 Test Strategy
@@ -463,6 +704,9 @@ The adaptive stacks from §1.1 are working but not yet tuned:
   cancellation) — catches scheduler-order-dependent races
 - 24-hour soak test on each platform: random workload, no leaks, no panics,
   no deadlocks
+- FFI router stress: system coroutines saturated with nested C callbacks —
+  verify fail-fast at `RYO_FFI_OVERFLOW_DEPTH`, no deadlock, no coroutine
+  leak
 - Adversarial cancellation: deeply nested `task.scope`s with random
   cancellation injection
 - Deadlock detector: synthetic deadlock test, verify the report names the
@@ -509,7 +753,8 @@ the user writes. Think of it as Ryo's analog of Rust's `Send`/`Sync` auto
 traits.
 
 1. **Leaf primitives are tagged by the compiler:** `recv`, `await`, `delay`,
-   timer ops, bounded-channel `send` when buffer is full.
+   timer ops, bounded-channel `send` when buffer is full, `with_dispatcher`
+   entry/exit (§4.5).
 2. **Propagation is inferred upward** through the call graph during
    whole-program AOT compilation. A function is `[yields]` iff its body
    transitively calls a `[yields]` operation. Recursion is handled by
@@ -583,10 +828,24 @@ unbounded_tx.send(x)  # statically non-yielding (if the type is unbounded)
 ```
 
 Unbounded `sender[T]` carries enough type information for `send` to be
-statically non-yielding. Bounded `sender[T].send` is `[yields]`. The user
-chooses the right tool for the location.
+statically non-yielding. Bounded `sender[T].send` is `[yields]`. Rendezvous
+`send` always yields (blocks until pickup); conflated `send` never yields
+(overwrites the unreceived slot). The user chooses the right tool for the
+location.
 
-#### 6.2.6 Error message requirements
+#### 6.2.6 `with_dispatcher` and pinned regions
+
+`with_dispatcher` (§4.5) is a yielding operation that may migrate the task
+across OS worker threads. Two diagnoses follow:
+
+- Holding a lock guard across a `with_dispatcher` boundary is
+  yield-while-locked and is rejected by this analysis like any other yield.
+- Once the `task.pin()` hook (§3.3) is implemented, `with_dispatcher` inside
+  a pinned region is a compile error: a dispatcher switch may migrate the
+  task, violating the pin. Code that must stay on one carrier switches
+  dispatchers outside the pinned region.
+
+#### 6.2.7 Error message requirements
 
 This is the make-or-break implementation detail. The error must show:
 
@@ -627,6 +886,8 @@ accept Phase 6.2 or fight it.
     channel (those clones are intentional, not redundant)
 - **Outcome:** Catches accidental refcount churn without false-positiving
   on the legitimate "clone-then-move-into-task" pattern.
+- A further candidate lint once dispatchers (§4.5) land: "long-running CPU
+  work on `dispatcher.blocking` is wasteful; consider `dispatcher.compute`."
 
 ### 6.4 Test Strategy
 
@@ -637,7 +898,8 @@ accept Phase 6.2 or fight it.
 - Compile-time benchmark: measure the cost of effect propagation on a
   representative large program; track over time
 - Negative tests: every documented "this should be rejected" case has a
-  test that confirms rejection with the right error
+  test that confirms rejection with the right error — including
+  `with_dispatcher` inside a `with lock()` critical section
 
 **Exit criteria:** All §9.x spec examples involving locks pass. Compile-time
 overhead from the analysis is under 10% on the benchmark corpus. Error
@@ -645,14 +907,85 @@ messages include the impl trace.
 
 ---
 
+## Data plane: Pony cross-reference (added 2026-08)
+
+The runtime mechanics above schedule closures and say nothing about what
+data may flow across them. The base data-plane rules are settled at the spec
+level (2026-08 amendments, informed by the Pony comparison in
+[`experimental/ryo-vs-pony.md`](../experimental/ryo-vs-pony.md)). The
+plan-specific rules further below — conflated-channel ordering, FFI callback
+captures, dispatcher-local state — are **draft/open**, pending formalization,
+and nothing in this section should be read as committing them:
+
+- **Sharing freezes (spec §5.6).** Access through `shared[T]` is read-only;
+  shared mutation requires `shared[mutex[T]]` / `shared[rwlock[T]]`. The
+  `shared[SqliteDb]` examples in this doc assume `SqliteDb` is internally
+  synchronized; a plain mutable `SqliteDb` would need the `mutex` wrapper.
+- **`handle[T]` (spec §9.2.1).** `task.spawn_detached` returns an
+  identity-only, sendable, comparable handle with no dereference — Pony's
+  `tag`. This is what `task.supervise` needs to become supervision rather
+  than just failure isolation: the supervisor can hold, registry-store, and
+  compare child handles, and signal them through channels. Hence §4.2.1:
+  `task.supervise` children yield **both** handles to the supervisor scope —
+  the identity-only `handle[T]` for supervision, and an awaitable `future[T]`
+  join/result handle so the supervisor can await each child and observe its
+  result or failure. The two are not interchangeable: `handle[T]` has no
+  dereference and cannot be joined; `future[T]` joins but is not a stable
+  identity for registry use.
+- **Send predicate (spec §14.5.6 #6).** A value crosses a task boundary in
+  exactly three ways: owned move (Pony's `iso`), `shared[T]` handle (`val`),
+  `handle[T]` (`tag`). Views cross only inside a `task.scope` (D5). Every
+  primitive in this plan must be checkable against that predicate.
+
+New sendability edges this plan introduces — to be folded into the pending
+Ownership-Lite formalization (Q10 / Polonius fragment):
+
+1. **Conflated-channel overwrite.** `channel.conflated` destroys an
+   unreceived owned value on the *sender's* context while a receiver may
+   concurrently observe the slot. Happens-before edges must be specified per
+   channel mode: rendezvous is a synchronization point and gets a clean HB
+   edge for free; conflated needs an explicit overwrite-vs-receive rule (the
+   Go-aligned HB model has no conflated precedent).
+2. **FFI-originated tasks.** A C callback running on the system coroutine
+   can `task.spawn` (see the FFI scenarios table). The send predicate must
+   state what a callback-spawned closure may capture — FFI pointers are
+   `handle[T]`-shaped, but Ryo values captured across the C boundary need a
+   rule.
+3. **Dispatcher migration.** `with_dispatcher` changes a task's home
+   dispatcher mid-execution; captures travel with the task (fine), but
+   dispatcher-local and task-local state must not leak across the switch.
+
+Two Pony imports adopted as runtime design principles:
+
+- **Per-carrier reclamation locality (ORCA instinct, no GC needed).** This is
+  a **goal, not a guarantee**: channel ownership transfers and
+  `with_dispatcher` migration can free memory on a different thread than the
+  one that allocated it. Those cross-thread frees go through mimalloc's
+  remote-free path (deferred to the owning heap's thread), so correctness
+  holds even when locality does not. Stating it matters because
+  conflated-channel drops and dispatcher migrations would otherwise silently
+  shift reclamation across threads.
+- **Capability-gated dispatcher creation (AmbientAuth instinct).** The hard
+  contract lives in §4.5: `RYO_MAX_DISPATCHERS`, the extra-worker budget,
+  `ResourceExhausted` on overflow, and capability-based authority at
+  startup/main scope. The global limits are resource-exhaustion protection,
+  not authority — Pony's authority-enters-at-one-point principle is only
+  fully realized once the planned runtime-context capability injection lands.
+
+---
+
 ## Dependency Summary
 
 | Crate | Purpose | Alternatives considered |
 |---|---|---|
-| `corosensei` | Stack switching, all platforms | `context`, raw `ucontext` |
+| `corosensei` | Stack switching, all platforms; also the system-coroutine primitive | `context`, raw `ucontext` |
 | `mio` | I/O polling abstraction | `tokio` (rejected — wrong model) |
 | `crossbeam-deque` | Work-stealing queues | Manual Chase-Lev |
 | `crossbeam-channel` | Internal runtime messaging | `std::sync::mpsc` |
+
+No dependencies beyond these four: the system coroutine, FFI router,
+dispatchers, supervisor scope, and new channel modes are all built on the
+existing stack.
 
 ---
 
@@ -664,9 +997,100 @@ messages include the impl trace.
 | WASM target | Stack swapping not available in standard WASM — see WasmFX section |
 | Stackless coroutines | Reintroduces function coloring, wrong for Ryo |
 | Tokio as scheduler | Stackless-first, conflicts with stack-swapping model |
-| `io_uring` direct | Linux only, use `mio` for cross-platform |
+| `io_uring` direct | Linux only, use `mio` for cross-platform (may become a Linux opt-in feature later) |
 | Preemptive scheduling | Cooperative is sufficient for scripting; adds significant complexity |
 | User-defined panic handlers | v0.5 concern — log-to-stderr is the v0.4 default |
+| True Loom-style stack capture | No production-quality Rust crate; per-ISA assembly + DWARF integration to hand-roll. Deferred — see *Memory profile at scale* |
+
+---
+
+## FFI scenarios
+
+How common C-library workloads behave under this plan:
+
+| Scenario | Behavior |
+|---|---|
+| `libjpeg.decode(bytes)` (compute, no I/O) | Safe for any internal stack usage up to the configured `RYO_FFI_STACK_SIZE` (2 MB by default) — runs on the system coroutine, ~200 ns overhead. This removes the previous 128 KB stack limit for typical libraries. |
+| `simdjson.parse(bytes)` (compute, no I/O) | Same system-coroutine path. |
+| `sqlite3.query(db, sql)` (blocking I/O) | `#[blocking]`; ~10 µs dispatch. |
+| `openssl.aes_encrypt(key, data)` (compute) | System coroutine; ~200 ns overhead. |
+| `libpng.write(file, data)` (compute + libc write) | `#[blocking]` required — the libc write may block. |
+| `libfoo.compute()` recursing 4 MB deep | `StackOverflow` at 2 MB → task fails. Configurable via `RYO_FFI_STACK_SIZE`. |
+| Callback from C into Ryo | Runs on system-coroutine stack — safe to do work, can `task.spawn` cleanly; nested FFI from the callback routes to an overflow system coroutine, and past `RYO_FFI_OVERFLOW_DEPTH` the inner call fails immediately with an explicit re-entry-limit error (`FfiReentryLimit`, no queueing — see §3.5). |
+
+---
+
+## Memory profile at scale
+
+| Concurrent task count | Stack memory (32 KB+ per task) |
+|---|---|
+| 10 K tasks | ~320 MB |
+| 100 K tasks | ~3.2 GB |
+| 1 M tasks | ~32 GB |
+
+The per-task memory floor is corosensei's, not Loom's: true Loom-style heap
+capture would bring 1 M concurrent tasks to ~8 GB instead of ~32 GB. For
+Ryo's target audience (10K–100K concurrent tasks per process, FFI-heavy
+workloads) this is rounding error, so the plan **explicitly defers** true
+Loom-style heap-capture as a future optimization. Revisit if:
+
+- 1M+ concurrent tasks become a real Ryo use case.
+- A `loom-rs` Rust crate matures, or corosensei gains `freeze`/`thaw` modes.
+- On the WASM target: when the WebAssembly stack-switching proposal
+  stabilizes, the WASM build can get true Loom semantics natively (the Wasm
+  engine handles the capture). Native and WASM may diverge in the runtime;
+  that's fine. See the WasmFX section.
+
+---
+
+## Appendix: code example — a realistic workload
+
+HTTP server with config, SQLite (blocking C), libjpeg (compute C):
+
+```ryo
+fn handle_request(req: Request, db: shared[SqliteDb]) -> Response:
+	user = db.query(req.sql)              # #[blocking] — ~10 µs dispatch
+	avatar = libjpeg.decode(user.bytes)  # runs on 2 MB system coroutine — safe
+	                                      # ~200 ns overhead
+	return Response(user.name, avatar)
+
+fn main():
+	db = shared(SqliteDb.open(cfg.db_path))
+	http.serve(cfg.port, fn(req): handle_request(req, db))
+```
+
+What the runtime buys invisibly (user code stays colorless):
+
+- `libjpeg.decode` is safe for any internal stack usage up to the configured
+  `RYO_FFI_STACK_SIZE` (2 MB by default) — this removes the previous 128 KB
+  limit for typical libraries.
+- `db.query` cost is unchanged.
+
+Adding an explicit DB dispatcher (for connection limiting at the app level).
+Only the database operation switches dispatchers; `libjpeg.decode` and the
+other CPU work stay on the default dispatcher (and thus on the system
+coroutine for FFI):
+
+```ryo
+fn handle_request(req: Request, db: shared[SqliteDb], db_dispatcher: Dispatcher) -> Response:
+	user = with_dispatcher(db_dispatcher):
+		db.query(req.sql)                # only the DB op runs on db_dispatcher —
+		                                  # bounded to 16 concurrent queries
+	avatar = libjpeg.decode(user.bytes)  # back on the default dispatcher;
+	                                      # CPU work never touches db_dispatcher
+	return Response(user.name, avatar)
+
+fn main():
+	db_dispatcher = dispatcher.custom(workers = 16, name = "db")
+	db = shared(SqliteDb.open(cfg.db_path))
+	http.serve(cfg.port, fn(req): handle_request(req, db, db_dispatcher))
+```
+
+The bound depends on the §4.5 precedence rule: the enclosing
+`with_dispatcher(db_dispatcher)` block overrides the `#[blocking]`
+auto-routing inside `SqliteDb.query` for the duration of the block — if
+`#[blocking]` won instead, the query would escape to the blocking pool and
+the 16-concurrent bound would not hold.
 
 ---
 
@@ -766,7 +1190,11 @@ browser target is a stated product priority.
 | Phase 6.2 effect propagation balloons compile time | Medium | Medium | Measure on real corpus from Phase 6 start; budget under 10% overhead |
 | Phase 6.2 dyn-trace error messages turn out unhelpful | Medium | High | Dedicate engineering effort; this is the make-or-break detail for user acceptance |
 | Async drop deadline kills useful destructors | Low | Medium | Configurable deadline; default of 5s is generous; logs name the offender |
-| Task migration breaks user code that read OS TLS | Medium | Medium | `task_local!` from Phase 3.5 + clear documentation |
+| Task migration breaks user code that read OS TLS | Medium | Medium | `task_local!` from §3.6 + clear documentation |
+| System coroutine stack memory (~2 MB × `RYOMAXPROCS`) | Low | Low | Bounded by worker count; configurable via `RYO_FFI_STACK_SIZE` |
+| Nested FFI re-entry from C callbacks deadlocks a worker | Medium | High | Bounded overflow coroutines; exhaustion fails immediately with `FfiReentryLimit` — never queues (§3.5) |
+| `dispatcher.custom` from arbitrary code starves the runtime | Medium | Medium | `RYO_MAX_DISPATCHERS` + extra-worker budget with `ResourceExhausted`; capability-gated creation (§4.5) |
+| Conflated-channel HB semantics underspecified | Medium | Medium | Rules are draft (data-plane section); formalize in the Ownership-Lite work before Phase 6 sign-off |
 
 ---
 
@@ -776,12 +1204,26 @@ browser target is a stated product priority.
 |---|---|---|
 | 1 | Single-threaded green threads, adaptive stacks, panic semantics | Basic `task.run` + `.await` |
 | 2 | `mio` I/O, timer wheel | Non-blocking I/O, `task.delay`, `task.timeout` |
-| 3 | Work stealing, blocking pool, task-local storage, memory model | True M:N parallelism, safe FFI, well-defined visibility |
-| 4 | Channels, `select`, `task.scope`, async-drop semantics | Full spec compliance |
-| 5 | Hardening, observability, Loom + soak testing | Production readiness |
-| 6 | `with` enforcement, inferred-effect lock safety, ARC lint | Static deadlock prevention without coloring |
+| 3 | Work stealing, blocking pool, system-coroutine FFI router, task-local storage, memory model | True M:N parallelism, safe compute + blocking FFI, well-defined visibility |
+| 4 | Channels (four modes), `select`, `task.scope`, `task.supervise`, dispatchers, async-drop semantics | Full spec compliance + proposal-only APIs |
+| 5 | Hardening, observability (incl. `pool_drained`), Loom + soak testing | Production readiness |
+| 6 | `with` enforcement, inferred-effect lock safety (incl. `with_dispatcher`), ARC lint | Static deadlock prevention without coloring |
+
+---
 
 ## References
-- Spec: `docs/specification.md` §9 (Concurrency)
-- Dev: `docs/dev/concurrency_loom_kt.md` (alternative proposal), `docs/dev/go_reference.md` (inspiration)
-- Roadmap: `docs/dev/implementation_roadmap.md` (concurrency, v0.4)
+
+- Spec: [`docs/specification.md`](../specification.md) §9 (Concurrency)
+- Historical note: this document began as two drafts — an initial plan and
+  the `concurrency_loom_kt.md` Loom/Kotlin alternative. The alternative was
+  adopted and merged here.
+- Sibling design docs: [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`go_reference.md`](go_reference.md) (inspiration), [`proposals/wasm_target.md`](proposals/wasm_target.md)
+- Upstream prior art:
+  - [JEP 444: Virtual Threads (Java 21 GA)](https://openjdk.org/jeps/444) — Loom (inspiration for the FFI ergonomics goal).
+  - [Loom OpenJDK wiki](https://wiki.openjdk.org/display/loom/Main).
+  - [Kotlin Coroutines Guide](https://kotlinlang.org/docs/coroutines-guide.html) — source of `with_dispatcher`, `task.supervise`, channel mode patterns.
+  - [`kotlinx.coroutines` source](https://github.com/Kotlin/kotlinx.coroutines).
+  - [`corosensei`](https://github.com/Amanieu/corosensei) — Rust stack-switching primitive; the foundation of this plan.
+  - [`may`](https://github.com/Xudong-Huang/may) — production Rust green-thread runtime (alternative reference).
+  - Go's cgo internals — origin of the system-stack switching pattern this plan mirrors via corosensei.
+  - [WebAssembly stack-switching proposal](https://github.com/WebAssembly/stack-switching) — future path to true Loom semantics on WASM.
