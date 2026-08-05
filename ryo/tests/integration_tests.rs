@@ -156,8 +156,12 @@ fn test_file_not_found_error() {
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The stable needle is our own `IO error` prefix from
+    // CompilerError's Display; the OS message after it differs by
+    // platform ("No such file or directory" vs "The system cannot
+    // find the file specified.").
     assert!(
-        stderr.contains("IoError") || stderr.contains("No such file") || stderr.contains("Error:"),
+        stderr.contains("IO error") || stderr.contains("No such file"),
         "Should contain file not found error, got: {}",
         stderr
     );
