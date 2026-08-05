@@ -10,8 +10,7 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-088** — ownership sidecar keyed by function name.
-2. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+1. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -212,12 +211,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 **Files:** `ryo-core/src/uir.rs` (`var_decl_extra` etc.), `ryo-core/src/tir.rs` (`call_extra` :337-342, `var_decl_extra` :355-362, `assign_extra`/… :370-418)
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
-
-### I-088 — Ownership sidecar is keyed by function name
-
-**Files:** `ryo-core/src/ownership.rs` (`OwnershipSidecar` :50-52), `ryo-frontend/src/ownership.rs` (:301-309)
-**Summary:** `functions` is a `HashMap<StringId, FunctionSidecar>` keyed by interned name. Correct today because `TirRef` arenas restart per function and names are unique (I-075 notwithstanding), but any future overloading or same-name functions in different scopes will silently collide.
-**Resolution:** Key by `DeclId`/body index (positional with `Vec<Tir>`) when the declaration model supports it.
 
 ### I-126 — AST is a `Box<Expression>` pointer tree, contradicting R1
 

@@ -234,10 +234,11 @@ struct FunctionContext<'a, M: Module> {
     /// Ownership sidecar for the function currently being lowered.
     /// `TirRef`s are scoped per-function — each `Tir`'s arena restarts
     /// at `TirRef(1)` — so codegen must consult only the entry that
-    /// belongs to this function. `compile_function` looks up
-    /// `sidecar.functions[&tir.name]` and threads the resulting
-    /// per-function entry here. Both unconditional (`branch: None`) and
-    /// branch-gated (`branch: Some(_)`) entries are filtered through
+    /// belongs to this function. `compile_function` picks
+    /// `sidecar.functions[i]`, positional with the `tirs` slice, and
+    /// threads the resulting per-function entry here. Both
+    /// unconditional (`branch: None`) and branch-gated
+    /// (`branch: Some(_)`) entries are filtered through
     /// `branch_active`.
     sidecar: &'a ryo_core::ownership::FunctionSidecar,
     /// Active arm stack for conditional destruction (Task 9). Each
@@ -378,8 +379,8 @@ impl<M: Module> Codegen<M> {
         );
         let func_ids = self.prepare_compilation(tirs, pool)?;
 
-        for tir in tirs {
-            self.compile_function(tir, &func_ids, pool, sidecar)?;
+        for (i, tir) in tirs.iter().enumerate() {
+            self.compile_function(tir, &func_ids, pool, sidecar, i)?;
         }
 
         // Resolve "main" through the pool. `astgen` always interns
@@ -409,8 +410,8 @@ impl<M: Module> Codegen<M> {
         let func_ids = self.prepare_compilation(tirs, pool)?;
 
         let mut ir_output = String::new();
-        for tir in tirs {
-            ir_output.push_str(&self.compile_function(tir, &func_ids, pool, sidecar)?);
+        for (i, tir) in tirs.iter().enumerate() {
+            ir_output.push_str(&self.compile_function(tir, &func_ids, pool, sidecar, i)?);
             ir_output.push('\n');
         }
 
@@ -489,6 +490,7 @@ impl<M: Module> Codegen<M> {
         func_ids: &HashMap<StringId, FuncId>,
         pool: &InternPool,
         sidecar: &ryo_core::ownership::OwnershipSidecar,
+        sidecar_index: usize,
     ) -> Result<String, String> {
         let func_id = *func_ids
             .get(&tir.name)
@@ -498,10 +500,11 @@ impl<M: Module> Codegen<M> {
         // per-function (each `Tir` arena restarts at `TirRef(1)`), so
         // threading the program-wide sidecar would let frees scheduled
         // for one function fire at numerically-matching TirRefs in
-        // another. The `unwrap_or` arm covers compiler-emitted helpers
+        // another. The sidecar is positional with the `tirs` slice;
+        // the `unwrap_or` arm covers compiler-emitted helpers
         // (e.g. `__ryo_panic`) that the ownership pass never sees.
         let empty_sidecar = ryo_core::ownership::FunctionSidecar::default();
-        let func_sidecar = sidecar.functions.get(&tir.name).unwrap_or(&empty_sidecar);
+        let func_sidecar = sidecar.functions.get(sidecar_index).unwrap_or(&empty_sidecar);
 
         self.ctx.func.signature = self.build_signature(tir, pool);
 

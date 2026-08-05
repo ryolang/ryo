@@ -1,5 +1,4 @@
 use crate::tir::{Span, TirRef};
-use crate::types::StringId;
 use std::collections::HashMap;
 
 /// Identifies a specific arm of an `IfStmt` (and, future, `Match`).
@@ -55,18 +54,19 @@ pub struct ConditionalDeadDrop {
 /// also be per-function — otherwise codegen processing function B
 /// could pick up entries scheduled for function A whose TirRefs
 /// happen to match B's at the same numeric index, emitting wrong/
-/// extra `ryo_str_free` calls. Keyed by function name's `StringId`;
-/// codegen looks up the entry for the current function before
-/// consulting any of the per-function maps.
+/// extra `ryo_str_free` calls. One entry per `Tir`, positional with
+/// the `tirs` slice handed to `ownership::check` and on to codegen;
+/// keying by body index (not function name) is what keeps future
+/// same-name functions in different scopes from silently colliding.
 #[derive(Default, Debug, Clone)]
 pub struct OwnershipSidecar {
-    pub functions: HashMap<StringId, FunctionSidecar>,
+    pub functions: Vec<FunctionSidecar>,
 }
 
 /// Per-function ownership metadata. Owns the three TirRef-keyed maps
 /// that codegen consults during lowering. Created fresh inside
-/// `analyze_function` and inserted into the parent
-/// [`OwnershipSidecar`] under the function's name.
+/// `analyze_function` and pushed onto the parent
+/// [`OwnershipSidecar`] in body order.
 #[derive(Default, Debug, Clone)]
 pub struct FunctionSidecar {
     /// Frees anchored after specific instructions.
