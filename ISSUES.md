@@ -6,14 +6,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 ---
 
-## Fix Order for m8.4.2
-
-Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
-
-Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
-
----
-
 ## Severity Legend
 
 - 🔴 **Blocking** — prevents implementing roadmap features as currently designed.
@@ -62,7 +54,7 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 
 **Files:** `ryo/src/main.rs`, `ryo-driver/src/pipeline.rs`
 **Summary:** `lex`, `parse`, `ir` are separate subcommands. Each stage already exists and is wired up; users would benefit from a single `ryo build --emit=tokens|ast|hir|clif|obj` surface (mirroring `zig build-exe -femit-…`).
-**Resolution:** Unify under one subcommand with an `--emit` flag. Keep current subcommands as deprecated aliases for one release.
+**Resolution:** Unify under one subcommand with an `--emit` flag.
 
 ### I-018 — `TypeId` is a newtype, not a typed enum
 
@@ -98,7 +90,7 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 
 **Files:** `ryo-frontend/src/sema.rs` (`check_binary_op` mixed-type branch)
 **Summary:** `1 + 2.0` is a hard `TypeMismatch` error; users must spell every conversion explicitly, but there are no conversion intrinsics yet either — `int(x)` and `float(x)` don't exist. The result is that mixed numeric arithmetic is currently *unspellable*. Acceptable today (no programs need it), but blocks any real numeric workload.
-**Resolution:** Land conversion intrinsics first (`int(float) -> int`, `float(int) -> float`, with Cranelift `fcvt_to_sint_sat` / `fcvt_from_sint`). Decide at that point whether to keep mixed arithmetic as an error (Zig stance) or introduce limited widening (e.g. `int + float -> float` only when the int is a literal, Swift stance). Both are coherent; pick one and document.
+**Resolution:** Land conversion intrinsics first (`int(float) -> int`, `float(int) -> float`, with Cranelift `fcvt_to_sint_sat` / `fcvt_from_sint`). At that point introduce limited widening (e.g. `int + float -> float` only when the int is a literal, Swift stance). Document.
 
 ### I-026 — Float modulo (`%` on `float`) rejected
 

@@ -81,6 +81,8 @@
 
 > **Recommendation:** promote `concurrency_loom_kt.md` from "structured alternative" to **the plan** before Phase 1 begins (its own trigger condition), with amendments L-1…L-3 plus integration sections C-2/C-3. The base plan's Phase 6 and the loom doc's FFI router are both keepers — they compose without conflict.
 
+> **Status (m8.4.2):** Promotion executed — the merged plan now lives at `concurrency.md`. Resolved en route: L-1 (`Dispatcher`/`with_dispatcher` rename), L-2 (overflow system coroutines, `RYO_FFI_OVERFLOW_DEPTH`, fail-fast `FfiReentryLimit`), L-3 (`with_dispatcher` is `[yields]`; `task.pin()` interaction in §6.2.6), L-6 (APIs marked proposal-only, spec edits still owed). Still open: L-4, L-5, C-2…C-5.
+
 ### 5.1 `concurrency.md` (base plan)
 
 | ID | Sev | Issue | Required fix | Spec relationship |
