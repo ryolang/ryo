@@ -38,6 +38,13 @@ pub enum Token {
 
     // Literals (already parsed / interned).
     IntLit(i64),
+    /// The literal `9223372036854775808` (i.e. `i64::MAX + 1`), whose
+    /// positive form overflows `i64`. Only grammatical as the direct
+    /// operand of unary `-`, where the parser folds it to
+    /// `Literal::Int(i64::MIN)` — anywhere else it is a parse error.
+    /// This is how `-9_223_372_036_854_775_808` stays spellable
+    /// while sign resolution remains a unary operator.
+    IntLitMin,
     /// IEEE-754 `f64` literal stored as its bit pattern so `Token`
     /// can keep `Eq + Hash`. Decoded with `f64::from_bits` by
     /// downstream consumers (parser/astgen).
@@ -121,6 +128,7 @@ impl fmt::Display for Token {
         match self {
             Self::Error => write!(f, "<error>"),
             Self::IntLit(n) => write!(f, "{}", n),
+            Self::IntLitMin => write!(f, "9223372036854775808"),
             Self::FloatLit(bits) => write!(f, "{}", f64::from_bits(*bits)),
             Self::StrLit(id) => write!(f, "<str#{}>", id.raw()),
             Self::Fn => write!(f, "fn"),
@@ -474,17 +482,15 @@ fn unescape(inner: &str, token_span: Span, sink: &mut DiagSink) -> String {
 fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool, sink: &mut DiagSink) -> Token {
     match raw {
         RawToken::Error => Token::Error,
-        // Integer literals are parsed as `i64` here. This is a
-        // documented limitation: the smallest `i64` value
-        // (`-9_223_372_036_854_775_808`) is unrepresentable as a
-        // positive integer literal because we resolve sign at
-        // parse time via the unary `-` operator on top of a
-        // positive token. Phase 3+ should switch to `u64`-with-
-        // late-negation (or add an `IntLitMin` token variant) so
-        // the literal can be spelled. Tracked alongside the
-        // numeric-tower work in the roadmap.
+        // Integer literals are parsed as `i64` here; sign is applied
+        // later via the unary `-` operator. The one value that
+        // overflows on the positive side, `i64::MAX + 1`, gets the
+        // dedicated `IntLitMin` token so `-9_223_372_036_854_775_808`
+        // (i.e. `i64::MIN`) stays spellable — the parser folds
+        // `- IntLitMin` to `Literal::Int(i64::MIN)` and rejects the
+        // token everywhere else.
         //
-        // Parse failures (e.g. overflow) emit a diagnostic and
+        // Other parse failures (e.g. overflow) emit a diagnostic and
         // recover with a zero literal so the parser doesn't choke on
         // a placeholder token and cascade a spurious parse error on
         // top of the real problem.
@@ -501,6 +507,7 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool, sink: &mut
         },
         RawToken::Int(s) => match s.parse::<i64>() {
             Ok(n) => Token::IntLit(n),
+            Err(_) if s.parse::<u64>() == Ok(i64::MAX as u64 + 1) => Token::IntLitMin,
             Err(_) => {
                 sink.emit(Diag::error(
                     span,
@@ -754,6 +761,25 @@ mod tests {
             "tokens after the invalid character still lexed: {:?}",
             toks
         );
+    }
+
+    #[test]
+    fn lex_i64_min_magnitude_gets_intlitmin() {
+        // `9223372036854775808` (i64::MAX + 1) overflows i64 on the
+        // positive side but is negatable, so it lexes to the
+        // dedicated IntLitMin token with no diagnostic; one more and
+        // it is an ordinary invalid-literal error.
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex("9223372036854775808", &mut pool, &mut sink);
+        assert!(!sink.has_errors(), "no diag for IntLitMin");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0].0, Token::IntLitMin));
+
+        let mut sink = DiagSink::new();
+        let toks = lex("9223372036854775809", &mut pool, &mut sink);
+        assert!(sink.has_errors(), "overflow past i64::MAX + 1 errors");
+        assert!(toks.iter().any(|(t, _)| *t == Token::IntLit(0)));
     }
 
     #[test]

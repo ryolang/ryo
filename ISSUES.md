@@ -10,9 +10,8 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 Sorted by priority; do them top-down. Already-fixed entries are removed from this file — see git log.
 
-1. **I-017** — `i64::MIN` integer literal is unrepresentable.
-2. **I-088** — ownership sidecar keyed by function name.
-3. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
+1. **I-088** — ownership sidecar keyed by function name.
+2. **I-121** — staged zig zip carried into the toolchain dir on fallback rename.
 
 Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanup tier) is post-m8.4.2 unless it blocks one of the above.
 
@@ -37,12 +36,6 @@ Everything below this line (remaining 🟡 spec/design items and the 🟢 cleanu
 ---
 
 ## 🟡 Correctness / Hygiene
-
-### I-017 — `i64::MIN` integer literal is unrepresentable
-
-**Files:** `ryo-frontend/src/lexer.rs` (`RawToken::Int` arm)
-**Summary:** Integer literals are parsed as `i64` at lex time, then sign is applied later via the unary `-` operator. That makes `-9_223_372_036_854_775_808` (i.e. `i64::MIN`) unspellable: the positive form `9_223_372_036_854_775_808` overflows `i64`. Hits the negation-overflow corner Rust itself fixed via `IntLit` / `IntLitMin` token-level distinction.
-**Resolution:** Either parse as `u64` and resolve negation+overflow at sema time, or add an `IntLitMin` token variant that the parser recognises only as the operand of unary `-`. Coordinate with the broader numeric-tower design before picking either.
 
 ### I-032 — IfStmt is statement-only, no expression-level conditional
 
