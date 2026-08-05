@@ -159,6 +159,13 @@ pub enum DiagCode {
     /// renderers / tests / future LSP code can identify the
     /// suppression note without scraping the message text.
     TooManyDiagnostics,
+    /// Logos failed to match any token at a position — the source
+    /// contains a character the grammar does not recognize.
+    InvalidCharacter,
+    /// A string literal contains an escape sequence the lexer does
+    /// not recognize (e.g. `\q`). The backslash and character are
+    /// preserved verbatim in the interned string.
+    UnknownEscape,
 
     // --- reserved (not constructed in Phase 1) ---
     ConstEvalFailure,

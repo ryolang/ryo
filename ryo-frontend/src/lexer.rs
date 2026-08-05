@@ -8,10 +8,15 @@
 //!
 //! The `lex` entry point also runs the indentation pre-processor and
 //! parses integer/string literals into their final form, so callers
-//! get a stream the parser can consume directly.
+//! get a stream the parser can consume directly. Problems found along
+//! the way (invalid characters, bad literals, unknown escapes, indent
+//! errors) are emitted as structured `Diag`s through a caller-supplied
+//! `DiagSink`; lexing recovers and continues so several problems can
+//! surface in a single run.
 
 use chumsky::span::{SimpleSpan, Span as _};
 use logos::Logos;
+use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::types::{InternPool, StringId};
 use std::fmt;
 
@@ -33,6 +38,13 @@ pub enum Token {
 
     // Literals (already parsed / interned).
     IntLit(i64),
+    /// The literal `9223372036854775808` (i.e. `i64::MAX + 1`), whose
+    /// positive form overflows `i64`. Only grammatical as the direct
+    /// operand of unary `-`, where the parser folds it to
+    /// `Literal::Int(i64::MIN)` — anywhere else it is a parse error.
+    /// This is how `-9_223_372_036_854_775_808` stays spellable
+    /// while sign resolution remains a unary operator.
+    IntLitMin,
     /// IEEE-754 `f64` literal stored as its bit pattern so `Token`
     /// can keep `Eq + Hash`. Decoded with `f64::from_bits` by
     /// downstream consumers (parser/astgen).
@@ -107,13 +119,16 @@ pub enum Token {
 impl fmt::Display for Token {
     /// Pool-free display fallback used by chumsky's `Rich` error
     /// formatting. Identifier and string-literal payloads render as
-    /// opaque handle ids; the driver re-renders diagnostics with the
-    /// pool available, so users see the actual text in error
-    /// reports.
+    /// opaque handle ids; the driver re-renders parse diagnostics
+    /// through the pool (see `parse_source` in `ryo-driver`), so
+    /// users see the actual text in error reports and this fallback
+    /// only shows up in non-driver contexts (unit tests, Debug
+    /// dumps).
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Error => write!(f, "<error>"),
             Self::IntLit(n) => write!(f, "{}", n),
+            Self::IntLitMin => write!(f, "9223372036854775808"),
             Self::FloatLit(bits) => write!(f, "{}", f64::from_bits(*bits)),
             Self::StrLit(id) => write!(f, "<str#{}>", id.raw()),
             Self::Fn => write!(f, "fn"),
@@ -294,13 +309,20 @@ pub(crate) enum RawToken<'a> {
     #[token(".")]
     Dot,
 
-    #[regex(r"\n[ \t]*")]
+    // CRLF line endings (the Windows-editor default) lex as the same
+    // Newline token; the leading `\r` is part of the token's span so
+    // byte offsets stay accurate, and `indent::process` skips it when
+    // measuring indentation.
+    #[regex(r"\r?\n[ \t]*")]
     Newline(&'a str),
 
     Indent,
     Dedent,
 
-    #[regex(r"#[^\n]*", logos::skip, allow_greedy = true)]
+    // `[^\r\n]` (not `[^\n]`): in a CRLF file the comment must stop
+    // before the `\r` too, so the `\r\n` stays inside the following
+    // Newline token's span — same as every other line ending.
+    #[regex(r"#[^\r\n]*", logos::skip, allow_greedy = true)]
     Comment,
 
     #[regex(r"[ \t\f]+", logos::skip)]
@@ -310,21 +332,6 @@ pub(crate) enum RawToken<'a> {
 // ============================================================================
 // Pipeline entry point
 // ============================================================================
-
-/// Errors from the lex stage (indent processing, integer literal
-/// parsing). One `Result` instead of `DiagSink` because Phase 1's
-/// structured-diagnostics work lands on a parallel branch; this
-/// stage will route through a `DiagSink` once the two phases
-/// converge on `main`.
-#[derive(Debug, Clone)]
-pub struct LexError {
-    /// Source span of the offending byte range. Currently consumed
-    /// only by the parser-test glue, but the field is part of the
-    /// public surface so the full-pipeline driver can route it
-    /// through Ariadne once Phase 1's diag module lands here.
-    pub span: Span,
-    pub message: String,
-}
 
 /// Heuristic estimate of the number of raw tokens in `input`, used to
 /// pre-size the token buffers so the collect/indent passes don't
@@ -342,9 +349,15 @@ fn estimated_token_count(input: &str) -> usize {
 }
 
 /// Run logos, indentation processing, and string/int interning in
-/// one pass. Returns the spanned token stream the parser consumes,
-/// or the first lex-time error encountered.
-pub fn lex(input: &str, pool: &mut InternPool) -> Result<Vec<(Token, Span)>, LexError> {
+/// one pass. Never fails hard: problems are emitted to `sink` and
+/// lexing recovers (a `Token::Error` placeholder for invalid
+/// characters, a zero literal for unparseable ints/floats) so the
+/// parser still sees a well-formed stream and later stages can
+/// co-surface their own diagnostics in the same run. The one
+/// exception is an indentation failure: the stream is unusable
+/// without Indent/Dedent markers, so this returns an empty vector
+/// and the driver skips parsing.
+pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
     // Pre-size the raw-token buffer instead of growing it from zero.
     // logos' `SpannedIter` reports only a trivial `(0, None)` size
     // hint, so `collect` would otherwise repeatedly reallocate and
@@ -360,97 +373,164 @@ pub fn lex(input: &str, pool: &mut InternPool) -> Result<Vec<(Token, Span)>, Lex
             .spanned()
             .map(|(tok, span)| match tok {
                 Ok(t) => (t, span.into()),
-                Err(()) => (RawToken::Error, span.into()),
+                Err(()) => {
+                    // logos matched nothing at this span: the source
+                    // holds a character the grammar doesn't recognize.
+                    // The text is sliced from the input and escaped so
+                    // control bytes (e.g. a lone `\r`) render readably.
+                    let text = input[span.clone()].escape_debug().to_string();
+                    sink.emit(Diag::error(
+                        SimpleSpan::new((), span.clone()),
+                        DiagCode::InvalidCharacter,
+                        format!("invalid character '{}'", text),
+                    ));
+                    (RawToken::Error, span.into())
+                }
             }),
     );
 
-    // TODO: have `indent::process` return a span/offset for the
-    // offending newline so we can point Ariadne at the exact line.
-    // For now, anchor on the last raw token's span (which is at
-    // least *near* where the indent went wrong) and fall back to
-    // 0..0 only for the empty-input case.
-    let fallback_span = raw_tokens
-        .last()
-        .map(|(_, s)| *s)
-        .unwrap_or_else(|| SimpleSpan::new((), 0..0));
-    let processed = crate::indent::process(raw_tokens).map_err(|e| LexError {
-        span: fallback_span,
-        message: e,
-    })?;
+    let processed = match crate::indent::process(raw_tokens) {
+        Ok(processed) => processed,
+        Err(e) => {
+            // `IndentError` carries the offending `Newline` token's
+            // span — its text is the `\n` plus the following
+            // whitespace, so the squiggle lands on the indentation
+            // itself. Without indent markers the token stream is
+            // unusable, so hand back an empty stream; the driver
+            // skips parsing when it sees this together with sink
+            // errors.
+            sink.emit(Diag::error(e.span, DiagCode::ParseError, e.message));
+            return Vec::new();
+        }
+    };
 
     let mut out = Vec::with_capacity(processed.len());
     for (raw, span) in processed {
-        let tok = intern_token(raw, span, pool)?;
+        let tok = intern_token(raw, span, pool, sink);
         out.push((tok, span));
     }
-    Ok(out)
+    out
 }
 
 /// Decode standard escape sequences in a string-literal body.
 ///
-/// TODO(phase-3): unknown escape sequences are silently preserved
-/// (e.g. `\q` becomes the two characters `\` and `q`). Once the
-/// pipeline-alignment Phase 1 work integrates with the lexer, emit
-/// a structured `Diag` through a `DiagSink` here instead so the
-/// user sees `unknown escape sequence '\q'` with a span pointing
-/// at the offending byte. Matches the same gap noted at the
-/// `LexError` definition.
-fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(ch) = chars.next() {
+/// Unknown escape sequences (e.g. `\q`) are preserved verbatim — the
+/// backslash and the following character are kept as-is — and reported
+/// through `sink` as an `UnknownEscape` error pointing at exactly the
+/// two bytes of the escape.
+///
+/// `token_span` is the span of the whole quoted literal; the escape's
+/// byte span is derived from it (the body starts one byte past the
+/// opening quote).
+fn unescape(inner: &str, token_span: Span, sink: &mut DiagSink) -> String {
+    let mut out = String::with_capacity(inner.len());
+    // Byte offset within `inner`; tracked manually (rather than
+    // `char_indices`) because consuming an escape advances past two
+    // chars at once.
+    let mut i = 0;
+    while i < inner.len() {
+        // `i` only ever advances by a full char (`len_utf8`) or a
+        // two-byte ASCII escape, so it is always a char boundary.
+        debug_assert!(inner.is_char_boundary(i));
+        let ch = inner[i..].chars().next().unwrap();
         if ch == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('\\') => out.push('\\'),
-                Some('"') => out.push('"'),
-                Some('0') => out.push('\0'),
+            match inner[i + 1..].chars().next() {
+                Some('n') => {
+                    out.push('\n');
+                    i += 2;
+                }
+                Some('t') => {
+                    out.push('\t');
+                    i += 2;
+                }
+                Some('r') => {
+                    out.push('\r');
+                    i += 2;
+                }
+                Some('\\') => {
+                    out.push('\\');
+                    i += 2;
+                }
+                Some('"') => {
+                    out.push('"');
+                    i += 2;
+                }
+                Some('0') => {
+                    out.push('\0');
+                    i += 2;
+                }
                 Some(c) => {
-                    // Unknown escape: preserve the backslash and
-                    // the following character verbatim. See TODO
-                    // above — this should become a diagnostic.
+                    // Unknown escape: report it, then preserve the
+                    // backslash and the following character verbatim.
+                    // Saturating adds: the span is derived from
+                    // `token_span` and in-bounds offsets, so it cannot
+                    // overflow in practice, but a diagnostic span must
+                    // never panic the reporter.
+                    let start = token_span.start.saturating_add(1).saturating_add(i);
+                    let end = start.saturating_add(1).saturating_add(c.len_utf8());
+                    sink.emit(Diag::error(
+                        SimpleSpan::new((), start..end),
+                        DiagCode::UnknownEscape,
+                        format!("unknown escape sequence '\\{}'", c),
+                    ));
                     out.push('\\');
                     out.push(c);
+                    i += 1 + c.len_utf8();
                 }
-                None => out.push('\\'),
+                None => {
+                    out.push('\\');
+                    i += 1;
+                }
             }
         } else {
             out.push(ch);
+            i += ch.len_utf8();
         }
     }
     out
 }
 
-fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<Token, LexError> {
-    Ok(match raw {
+fn intern_token(
+    raw: RawToken<'_>,
+    span: Span,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> Token {
+    match raw {
         RawToken::Error => Token::Error,
-        // Integer literals are parsed as `i64` here. This is a
-        // documented limitation: the smallest `i64` value
-        // (`-9_223_372_036_854_775_808`) is unrepresentable as a
-        // positive integer literal because we resolve sign at
-        // parse time via the unary `-` operator on top of a
-        // positive token. Phase 3+ should switch to `u64`-with-
-        // late-negation (or add an `IntLitMin` token variant) so
-        // the literal can be spelled. Tracked alongside the
-        // numeric-tower work in the roadmap.
+        // Integer literals are parsed as `i64` here; sign is applied
+        // later via the unary `-` operator. The one value that
+        // overflows on the positive side, `i64::MAX + 1`, gets the
+        // dedicated `IntLitMin` token so `-9_223_372_036_854_775_808`
+        // (i.e. `i64::MIN`) stays spellable — the parser folds
+        // `- IntLitMin` to `Literal::Int(i64::MIN)` and rejects the
+        // token everywhere else.
+        //
+        // Other parse failures (e.g. overflow) emit a diagnostic and
+        // recover with a zero literal so the parser doesn't choke on
+        // a placeholder token and cascade a spurious parse error on
+        // top of the real problem.
         RawToken::Float(s) => match s.parse::<f64>() {
             Ok(n) => Token::FloatLit(n.to_bits()),
             Err(_) => {
-                return Err(LexError {
+                sink.emit(Diag::error(
                     span,
-                    message: format!("invalid float literal: '{}'", s),
-                });
+                    DiagCode::ParseError,
+                    format!("invalid float literal: '{}'", s),
+                ));
+                Token::FloatLit(0f64.to_bits())
             }
         },
         RawToken::Int(s) => match s.parse::<i64>() {
             Ok(n) => Token::IntLit(n),
+            Err(_) if s.parse::<u64>() == Ok(i64::MAX as u64 + 1) => Token::IntLitMin,
             Err(_) => {
-                return Err(LexError {
+                sink.emit(Diag::error(
                     span,
-                    message: format!("invalid integer literal: '{}'", s),
-                });
+                    DiagCode::ParseError,
+                    format!("invalid integer literal: '{}'", s),
+                ));
+                Token::IntLit(0)
             }
         },
         RawToken::Str(s) => {
@@ -459,7 +539,7 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
             // the parser sees a single `StrLit(StringId)` token
             // pointing at the user-visible bytes.
             let inner = &s[1..s.len() - 1];
-            let decoded = unescape(inner);
+            let decoded = unescape(inner, span, sink);
             Token::StrLit(pool.intern_str(&decoded))
         }
         RawToken::Ident(s) => Token::Ident(pool.intern_str(s)),
@@ -527,7 +607,7 @@ fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool) -> Result<
             // notice rather than silently producing `Token::Error`.
             unreachable!("logos::skip variants never reach intern_token")
         }
-    })
+    }
 }
 
 #[cfg(test)]
@@ -536,7 +616,9 @@ mod tests {
 
     fn lex_strings(input: &str) -> (Vec<Token>, InternPool) {
         let mut pool = InternPool::new();
-        let toks = lex(input, &mut pool).expect("lex ok");
+        let mut sink = DiagSink::new();
+        let toks = lex(input, &mut pool, &mut sink);
+        assert!(!sink.has_errors(), "lex errors: {:?}", sink.into_diags());
         let cleaned: Vec<Token> = toks
             .into_iter()
             .map(|(t, _)| t)
@@ -650,9 +732,179 @@ mod tests {
 
     #[test]
     fn lex_int_overflow_emits_error() {
+        // An out-of-range integer literal emits a diagnostic and
+        // recovers with a zero literal so parsing can continue
+        // without a spurious cascade parse error.
         let mut pool = InternPool::new();
-        let res = lex("99999999999999999999", &mut pool);
-        assert!(res.is_err());
+        let mut sink = DiagSink::new();
+        let toks = lex("99999999999999999999", &mut pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagCode::ParseError);
+        assert_eq!(
+            diags[0].message,
+            "invalid integer literal: '99999999999999999999'"
+        );
+        assert!(
+            toks.iter().any(|(t, _)| *t == Token::IntLit(0)),
+            "recovery token IntLit(0) present: {:?}",
+            toks
+        );
+    }
+
+    #[test]
+    fn lex_invalid_character_emits_diag_and_continues() {
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex("x = @\ny = 2", &mut pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagCode::InvalidCharacter);
+        assert_eq!(diags[0].message, "invalid character '@'");
+        // The `@` sits at byte 4 in "x = @\ny = 2".
+        assert_eq!(diags[0].span, SimpleSpan::new((), 4..5));
+        // Recovery: a Token::Error placeholder is pushed and lexing
+        // continues past the bad byte — the rest of the stream is
+        // intact.
+        assert!(toks.iter().any(|(t, _)| matches!(t, Token::Error)));
+        let y = pool.intern_str("y");
+        assert!(
+            toks.iter().any(|(t, _)| *t == Token::Ident(y)),
+            "tokens after the invalid character still lexed: {:?}",
+            toks
+        );
+    }
+
+    #[test]
+    fn lex_i64_min_magnitude_gets_intlitmin() {
+        // `9223372036854775808` (i64::MAX + 1) overflows i64 on the
+        // positive side but is negatable, so it lexes to the
+        // dedicated IntLitMin token with no diagnostic; one more and
+        // it is an ordinary invalid-literal error.
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex("9223372036854775808", &mut pool, &mut sink);
+        assert!(!sink.has_errors(), "no diag for IntLitMin");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0].0, Token::IntLitMin));
+
+        let mut sink = DiagSink::new();
+        let toks = lex("9223372036854775809", &mut pool, &mut sink);
+        assert!(sink.has_errors(), "overflow past i64::MAX + 1 errors");
+        assert!(toks.iter().any(|(t, _)| *t == Token::IntLit(0)));
+    }
+
+    #[test]
+    fn lex_unknown_escape_emits_diag_and_preserves_verbatim() {
+        // `\q` is not a recognized escape: the lexer reports it with
+        // a span covering exactly those two bytes, and keeps the
+        // backslash + char verbatim in the interned string.
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex("s = \"a\\nb\\qc\"", &mut pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagCode::UnknownEscape);
+        assert_eq!(diags[0].message, "unknown escape sequence '\\q'");
+        // Byte layout: 0:s 1:' ' 2:= 3:' ' 4:'"' 5:a 6:\ 7:n 8:b
+        // 9:\ 10:q 11:c 12:'"' — the escape spans 9..11.
+        assert_eq!(diags[0].span, SimpleSpan::new((), 9..11));
+        let str_tok = toks
+            .iter()
+            .find_map(|(t, _)| match t {
+                Token::StrLit(id) => Some(*id),
+                _ => None,
+            })
+            .expect("string token present");
+        assert_eq!(pool.str(str_tok), "a\nb\\qc");
+    }
+
+    #[test]
+    fn lex_crlf_line_endings() {
+        // CRLF is the Windows-editor default; a full program written
+        // with `\r\n` must lex identically to its LF form.
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let crlf = lex("fn main():\r\n\tx = 1\r\n\ty = 2\r\n", &mut pool, &mut sink);
+        assert!(
+            !sink.has_errors(),
+            "CRLF source should lex cleanly: {:?}",
+            sink.into_diags()
+        );
+        assert!(
+            crlf.iter().all(|(t, _)| !matches!(t, Token::Error)),
+            "no error tokens in CRLF stream: {:?}",
+            crlf
+        );
+        let kinds: Vec<Token> = crlf.iter().map(|(t, _)| *t).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                Token::Fn,
+                Token::Ident(pool.intern_str("main")),
+                Token::LParen,
+                Token::RParen,
+                Token::Colon,
+                Token::Indent,
+                Token::Newline,
+                Token::Ident(pool.intern_str("x")),
+                Token::Assign,
+                Token::IntLit(1),
+                Token::Newline,
+                Token::Ident(pool.intern_str("y")),
+                Token::Assign,
+                Token::IntLit(2),
+                Token::Newline,
+                Token::Dedent,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_crlf_blank_lines_and_comments() {
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex("x = 1\r\n\r\n# comment\r\ny = 2\r\n", &mut pool, &mut sink);
+        assert!(
+            !sink.has_errors(),
+            "CRLF with blank lines and comments should lex cleanly: {:?}",
+            sink.into_diags()
+        );
+        assert!(
+            toks.iter().all(|(t, _)| !matches!(t, Token::Error)),
+            "no error tokens: {:?}",
+            toks
+        );
+    }
+
+    #[test]
+    fn lex_crlf_comment_leaves_cr_in_newline_span() {
+        // An indented comment at end of line must stop before the
+        // `\r`: the `\r\n` belongs to the Newline token's span, same
+        // as lines without a comment.
+        let src = "fn main():\r\n\t# c\r\n\tx = 1\r\n";
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex(src, &mut pool, &mut sink);
+        assert!(
+            !sink.has_errors(),
+            "should lex cleanly: {:?}",
+            sink.into_diags()
+        );
+        let newlines: Vec<_> = toks
+            .iter()
+            .filter(|(t, _)| matches!(t, Token::Newline))
+            .collect();
+        assert!(
+            newlines
+                .iter()
+                .any(|(_, span)| &src[span.start..span.end] == "\r\n\t"),
+            "expected a Newline spanning \"\\r\\n\\t\" after the comment, got: {:?}",
+            newlines
+                .iter()
+                .map(|(_, span)| &src[span.start..span.end])
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

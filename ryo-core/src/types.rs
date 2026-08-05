@@ -563,7 +563,7 @@ impl InternPool {
     pub fn str(&self, id: StringId) -> &str {
         let (offset, len) = self.strings[id.0 as usize];
         let bytes = &self.string_bytes[offset as usize..(offset + len) as usize];
-        // SAFETY (R5 exception, I-127): `intern_str` only ever pushes valid
+        // SAFETY (R5 exception): `intern_str` only ever pushes valid
         // UTF-8 from `&str::as_bytes`, and the arena is append-only.
         #[allow(unsafe_code)]
         unsafe {

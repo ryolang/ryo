@@ -156,8 +156,12 @@ fn test_file_not_found_error() {
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The stable needle is our own `IO error` prefix from
+    // CompilerError's Display; the OS message after it differs by
+    // platform ("No such file or directory" vs "The system cannot
+    // find the file specified.").
     assert!(
-        stderr.contains("IoError") || stderr.contains("No such file") || stderr.contains("Error:"),
+        stderr.contains("IO error") || stderr.contains("No such file"),
         "Should contain file not found error, got: {}",
         stderr
     );
@@ -1557,9 +1561,10 @@ fn test_cross_scope_mut_reassign() {
 
 /// Run `ryo build` and return the path to the compiled binary.
 ///
-/// The AOT pipeline writes the binary (named after the source file stem) into
-/// the process's CWD. We point CWD at a dedicated output directory so the
-/// artifact lands somewhere predictable and is cleaned up with the `TempDir`.
+/// The AOT pipeline writes the binary next to the source file. Tests
+/// place (or copy) the source into a dedicated output directory so the
+/// artifact lands somewhere predictable and is cleaned up with the
+/// `TempDir`.
 fn run_ryo_build(source_file: &Path, out_dir: &Path) -> std::process::Output {
     // We need the Cargo project root so `cargo run` can find Cargo.toml.
     // CARGO_MANIFEST_DIR is set by Cargo during `cargo test`.
@@ -3576,6 +3581,22 @@ fn test_benchmark_files_aot_compile_and_run() {
         "eager_destruction.ryo not found at {:?}",
         eager_file
     );
+
+    // Copy the sources into the temp dir: `ryo build` writes the
+    // binary next to the source, and building in-place would
+    // overwrite the committed benchmark binaries in the repo.
+    let fib_file = temp_dir.path().join("fib.ryo");
+    let eager_file = temp_dir.path().join("eager_destruction.ryo");
+    std::fs::copy(
+        workspace_root.join("benchmarks/fibonacci/fib.ryo"),
+        &fib_file,
+    )
+    .expect("copy fib.ryo");
+    std::fs::copy(
+        workspace_root.join("benchmarks/eager_destruction/eager_destruction.ryo"),
+        &eager_file,
+    )
+    .expect("copy eager_destruction.ryo");
 
     // 1. Compile and run fibonacci
     let fib_build = run_ryo_build(&fib_file, temp_dir.path());

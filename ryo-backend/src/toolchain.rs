@@ -93,8 +93,11 @@ fn download_zig() -> Result<(), CompilerError> {
     eprintln!("Extracting...");
 
     // tar.xz streams response → XZ → tar (no large buffers). The zip
-    // path stages the download to a temp file: `ZipArchive` needs
-    // `Seek`, and the file is removed with the temp dir afterwards.
+    // path stages the download to a temp file (`ZipArchive` needs
+    // `Seek`) and deletes it right after extraction: the fallback
+    // below renames the whole temp dir when the archive has no inner
+    // zig-{target}-{version}/, which would otherwise carry the zip
+    // into the toolchain dir.
     fs::create_dir_all(&temp_path).map_err(|e| {
         CompilerError::ToolchainError(format!("Failed to create temp directory: {e}"))
     })?;
@@ -113,6 +116,13 @@ fn download_zig() -> Result<(), CompilerError> {
         drop(file);
         extract_zip(&zip_path, &temp_path).inspect_err(|_| {
             fs::remove_dir_all(&temp_path).ok();
+        })?;
+        // Deletion must succeed before the fallback rename below can
+        // run: a leftover staged zip would be carried into the
+        // toolchain dir, so a removal failure aborts the install.
+        fs::remove_file(&zip_path).map_err(|e| {
+            fs::remove_dir_all(&temp_path).ok();
+            CompilerError::ToolchainError(format!("Failed to remove staged zip: {e}"))
         })?;
     } else {
         let decompressor = XzDecoder::new(response.into_body().into_reader());

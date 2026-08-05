@@ -11,6 +11,7 @@ pub enum EmitKind {
 }
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
+use chumsky::error::{Rich, RichPattern, RichReason};
 use chumsky::span::Span as _;
 use chumsky::{Parser, prelude::*};
 use ryo_backend::codegen;
@@ -27,18 +28,20 @@ use ryo_frontend::lexer::{self, Token};
 use ryo_frontend::parser::program_parser;
 use ryo_frontend::sema;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use target_lexicon::Triple;
 
-// Helper function to generate output filenames
-fn get_output_filenames(input_file: &Path) -> (String, String) {
-    let stem = input_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-
-    let obj_filename = format!("{}.{}", stem, if cfg!(windows) { "obj" } else { "o" });
-    let exe_filename = format!("{}{}", stem, std::env::consts::EXE_SUFFIX);
+// Helper function to generate output filenames. Artifacts land next
+// to the source file, not in the CWD, so two same-stem sources in
+// different directories built from one CWD don't clobber each other.
+// Paths are built by extension replacement (never through `str`), so
+// non-UTF-8 source paths survive through object writing and linking.
+fn get_output_filenames(input_file: &Path) -> (PathBuf, PathBuf) {
+    let obj_filename = input_file.with_extension(if cfg!(windows) { "obj" } else { "o" });
+    // EXE_SUFFIX is ".exe" on Windows and "" elsewhere; with_extension
+    // takes the bare extension ("" clears it, leaving the stem).
+    let exe_filename =
+        input_file.with_extension(std::env::consts::EXE_SUFFIX.trim_start_matches('.'));
 
     (obj_filename, exe_filename)
 }
@@ -50,17 +53,17 @@ pub fn lex_command(file: &Path) -> Result<(), CompilerError> {
 
 fn display_tokens(input: &str, file: &Path) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
-    let tokens = lexer::lex(input, &mut pool).map_err(|e| {
-        // Route lex failures through the same Diag pipeline as
+    let name = source_name(file);
+    let mut sink = DiagSink::new();
+    let tokens = lexer::lex(input, &mut pool, &mut sink);
+    if !sink.is_empty() {
+        // Route lex diagnostics through the same Diag pipeline as
         // parse / sema errors so `ryo lex` matches the rest of the
         // CLI's exit-code and rendering behaviour. Previously this
         // path silently `eprintln!`d and returned `Ok(())`, which
         // hid lex errors from CI.
-        let diag = Diag::error(e.span, DiagCode::ParseError, e.message);
-        let name = source_name(file);
-        render_diags(std::slice::from_ref(&diag), input, &name);
-        CompilerError::Diagnostics(vec![diag])
-    })?;
+        return finalize_diags(sink.into_diags(), input, &name);
+    }
 
     println!("Token stream for '{}':", file.display());
     println!();
@@ -107,17 +110,22 @@ fn parse_source(
     pool: &mut InternPool,
     source_name: &str,
 ) -> Result<ast::Program, CompilerError> {
-    // Phase 2's `lexer::lex` runs logos + indent processing + string
-    // and integer interning in a single pass and returns either the
-    // typed `Token` stream or a `LexError` carrying a span pointing
-    // at the offending byte range. Phase 1 wraps that as a single
-    // structured `Diag` so the same Ariadne renderer handles lex,
-    // parse, and middle-end diagnostics.
-    let tokens = lexer::lex(input, pool).map_err(|e| {
-        let diag = Diag::error(e.span, DiagCode::ParseError, e.message);
-        render_diags(std::slice::from_ref(&diag), input, source_name);
-        CompilerError::Diagnostics(vec![diag])
-    })?;
+    // `lexer::lex` runs logos + indent processing + string and
+    // integer interning in a single pass and never fails hard: it
+    // emits structured `Diag`s into the sink and recovers so the
+    // parser still sees a well-formed stream. Lex and parse
+    // diagnostics accumulate in the same sink so both can surface in
+    // one run, rendered through the same Ariadne pipeline as the
+    // middle-end diagnostics.
+    let mut sink = DiagSink::new();
+    let tokens = lexer::lex(input, pool, &mut sink);
+
+    // Indentation failure: the lexer returned an empty stream because
+    // without Indent/Dedent markers parsing is meaningless. Skip the
+    // parser and report the lex diagnostics as-is.
+    if tokens.is_empty() && sink.has_errors() {
+        return Err(fail_with_diags(sink.into_diags(), input, source_name));
+    }
 
     // chumsky 0.12 added `Input::split_token_span`, which collapses the previous
     // `Stream::from_iter(...).map(eoi, |(t, s)| (t, s))` boilerplate that we used to
@@ -125,22 +133,85 @@ fn parse_source(
     let token_stream = tokens[..].split_token_span((0..input.len()).into());
 
     match program_parser().parse(token_stream).into_result() {
-        Ok(program) => Ok(program),
+        Ok(program) => {
+            // Parse succeeded, but the lexer may still have reported
+            // errors (invalid character, bad literal, unknown escape)
+            // that recovery let us parse past. Only a clean sink
+            // yields `Ok`.
+            if sink.has_errors() {
+                Err(fail_with_diags(sink.into_diags(), input, source_name))
+            } else {
+                Ok(program)
+            }
+        }
         Err(errs) => {
-            let diags: Vec<Diag> = errs
-                .iter()
-                .map(|e| {
-                    Diag::error(
-                        chumsky::span::SimpleSpan::new((), e.span().start..e.span().end),
-                        DiagCode::ParseError,
-                        e.reason().to_string(),
-                    )
-                })
-                .collect();
-            render_diags(&diags, input, source_name);
-            Err(CompilerError::Diagnostics(diags))
+            for e in &errs {
+                sink.emit(Diag::error(
+                    chumsky::span::SimpleSpan::new((), e.span().start..e.span().end),
+                    DiagCode::ParseError,
+                    rich_error_message(e, pool),
+                ));
+            }
+            Err(fail_with_diags(sink.into_diags(), input, source_name))
         }
     }
+}
+
+/// Render a token with the intern pool available: identifiers and
+/// string literals show their actual text, everything else falls back
+/// to the token's pool-free `Display` (which renders those payloads
+/// as opaque `<id#N>` / `<str#N>` handles).
+fn render_token_with_pool(tok: &Token, pool: &InternPool) -> String {
+    match tok {
+        Token::Ident(id) => pool.str(*id).to_string(),
+        Token::StrLit(id) => format!("\"{}\"", pool.str(*id)),
+        other => other.to_string(),
+    }
+}
+
+/// Rebuild chumsky's `Rich` error message with identifier and
+/// string-literal payloads resolved through the pool. Mirrors
+/// chumsky's own phrasing ("found 'X' expected A, B, or C") so the
+/// text stays familiar, but a parse error on `x = foo(` shows `foo`
+/// instead of the opaque `<id#0>` handle.
+fn rich_error_message(e: &Rich<'_, Token>, pool: &InternPool) -> String {
+    match e.reason() {
+        RichReason::Custom(msg) => msg.clone(),
+        RichReason::ExpectedFound { .. } => {
+            let found = match e.found() {
+                Some(tok) => format!("found '{}'", render_token_with_pool(tok, pool)),
+                None => "found end of input".to_string(),
+            };
+            let expected: Vec<String> = e
+                .expected()
+                .map(|p| match p {
+                    RichPattern::Token(tok) => {
+                        format!("'{}'", render_token_with_pool(tok, pool))
+                    }
+                    other => other.to_string(),
+                })
+                .collect();
+            let expected_part = match expected.len() {
+                0 => "something else".to_string(),
+                1 => expected[0].clone(),
+                _ => format!(
+                    "{}, or {}",
+                    expected[..expected.len() - 1].join(", "),
+                    expected.last().unwrap()
+                ),
+            };
+            format!("{} expected {}", found, expected_part)
+        }
+    }
+}
+
+/// Render + wrap for paths whose diagnostics are always error
+/// severity (lex / parse failures), where `finalize_diags` therefore
+/// always returns `Err`. Keeps the render-and-wrap shape in one
+/// place while letting callers keep their own error type.
+fn fail_with_diags(diags: Vec<Diag>, input: &str, source_name: &str) -> CompilerError {
+    finalize_diags(diags, input, source_name)
+        .expect_err("fail_with_diags requires an error-severity diagnostic")
 }
 
 /// Render a slice of diagnostics to stderr through Ariadne.
@@ -179,14 +250,12 @@ fn emit_one(d: &Diag, source_name: &str, source: &Source<&str>) {
     };
     let label_color = color_for_severity(d.severity);
     let code = diag_code_str(d.code);
+    // The full message goes in the report header only; the label
+    // carries no text so the message isn't printed twice.
     let mut report = Report::build(kind, (source_name, d.span.start..d.span.end))
         .with_code(code)
         .with_message(&d.message)
-        .with_label(
-            Label::new((source_name, d.span.start..d.span.end))
-                .with_message(&d.message)
-                .with_color(label_color),
-        );
+        .with_label(Label::new((source_name, d.span.start..d.span.end)).with_color(label_color));
     for note in &d.notes {
         if let Some(span) = note.span {
             report = report.with_label(
@@ -198,10 +267,12 @@ fn emit_one(d: &Diag, source_name: &str, source: &Source<&str>) {
             report = report.with_note(&note.message);
         }
     }
-    report
-        .finish()
-        .eprint((source_name, source))
-        .expect("diag render");
+    if report.finish().eprint((source_name, source)).is_err() {
+        // Ariadne can fail on out-of-range spans or stderr write
+        // errors; fall back to a plain line rather than panicking
+        // mid-report and suppressing the remaining diagnostics.
+        eprintln!("{}: {}", code, d.message);
+    }
 }
 
 /// Map severity to a label color so the squiggle hue matches the
@@ -254,6 +325,8 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::MissingReturn => "E0036",
         DiagCode::ParseError => "E0100",
         DiagCode::TooManyDiagnostics => "E0101",
+        DiagCode::InvalidCharacter => "E0102",
+        DiagCode::UnknownEscape => "E0103",
         DiagCode::ConstEvalFailure => "E0200",
         DiagCode::CycleInComptime => "E0201",
         DiagCode::GenericInstantiation => "E0202",
@@ -308,7 +381,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     if !(want.tir || want.clif) {
         // UIR-only run. Surface astgen diagnostics now, with a
         // non-zero exit if anything fired.
-        return finalize_diags(sink, &input, &name);
+        return finalize_diags(sink.into_diags(), &input, &name);
     }
 
     // For TIR / CLIF we also run sema. Per the §4.5 design, sema
@@ -328,7 +401,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
         // failed, surface the diagnostics and abort — we cannot
         // produce a meaningful CLIF dump from a broken TIR.
         if sink.has_errors() {
-            return finalize_diags(sink, &input, &name);
+            return finalize_diags(sink.into_diags(), &input, &name);
         }
         generate_and_display_ir(&tirs, &pool, &sidecar)?;
     }
@@ -336,7 +409,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // Tail block: drains the sink whether sema/ownership were
     // clean or only emitted warnings. Without this `ryo ir` would
     // silently swallow W0001/W0002 on success.
-    finalize_diags(sink, &input, &name)
+    finalize_diags(sink.into_diags(), &input, &name)
 }
 
 /// Resolve `--emit` flag values into a normalized set. Membership
@@ -375,24 +448,26 @@ impl EmitSet {
     }
 }
 
-/// Drain `sink`, render whatever is queued, and translate into a
-/// terminal pipeline result.
+/// Render a batch of diagnostics and translate into a terminal
+/// pipeline result.
 ///
 /// Single tail-block used by every front-end driver (`ryo run`,
-/// `ryo build`, `ryo ir`) so that:
+/// `ryo build`, `ryo ir`) and by the lex/parse error paths so that:
 ///
 /// * warnings (`W0001` DeadStore, `W0002` RedundantMove, …) reach
 ///   the user on otherwise-successful runs, and
 /// * the success and error paths render the *same* diagnostics
 ///   exactly once — never via two separate `render_diags` calls
-///   that could drift out of sync.
+///   that could drift out of sync, and
+/// * the `Severity::Error` check lives in exactly one place (the
+///   lex/parse paths previously assumed every diag they built was
+///   error severity without enforcing it).
 ///
-/// Returns `Err(CompilerError::Diagnostics(_))` iff at least one
-/// diagnostic has `Severity::Error`; warnings/notes alone do not
-/// fail the build.
-fn finalize_diags(sink: DiagSink, input: &str, source_name: &str) -> Result<(), CompilerError> {
-    let has_errors = sink.has_errors();
-    let diags = sink.into_diags();
+/// Sink-using stages feed this via `sink.into_diags()`. Returns
+/// `Err(CompilerError::Diagnostics(_))` iff at least one diagnostic
+/// has `Severity::Error`; warnings/notes alone do not fail the build.
+fn finalize_diags(diags: Vec<Diag>, input: &str, source_name: &str) -> Result<(), CompilerError> {
+    let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
     if !diags.is_empty() {
         render_diags(&diags, input, source_name);
     }
@@ -436,7 +511,7 @@ fn lower_and_analyze(
     // `W0002` RedundantMove, …) surface on the success path
     // without a separate render block that could drift from the
     // error path.
-    finalize_diags(sink, input, source_name)?;
+    finalize_diags(sink.into_diags(), input, source_name)?;
     Ok((tirs, sidecar))
 }
 
@@ -503,24 +578,27 @@ pub fn build_file(file: &Path) -> Result<(), CompilerError> {
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
     fs::write(&obj_filename, obj_bytes).map_err(CompilerError::from)?;
-    println!("Generated object file: {}", obj_filename);
+    println!("Generated object file: {}", obj_filename.display());
 
     // Extract embedded runtime archive and link
     let runtime_path = runtime_lib::extract_runtime_to_temp()
         .map_err(|e| CompilerError::LinkError(format!("Failed to extract runtime: {e}")))?;
 
-    linker::link_executable(&obj_filename, &exe_filename, &runtime_path)?;
+    let link_result = linker::link_executable(&obj_filename, &exe_filename, &runtime_path);
 
     runtime_lib::cleanup_runtime_temp(&runtime_path);
     // Default: clean up the intermediate object file. Set
     // `RYO_KEEP_OBJ=1` to retain it — used by tooling that needs to
     // relink the same object with extra flags (e.g. the ASan smoke
     // tests in `tests/asan_smoke.rs` re-link with `-fsanitize=address`).
+    // Runs on the link-failure path too, which previously leaked the
+    // `.o` via the early `?`.
     if std::env::var_os("RYO_KEEP_OBJ").is_none() {
         let _ = fs::remove_file(&obj_filename);
     }
+    link_result?;
 
-    println!("Built: {}", exe_filename);
+    println!("Built: {}", exe_filename.display());
     Ok(())
 }
 
@@ -532,6 +610,22 @@ fn display_result(result: i32) {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn output_filenames_land_next_to_source() {
+        let obj_ext = if cfg!(windows) { "obj" } else { "o" };
+        let exe_suffix = std::env::consts::EXE_SUFFIX;
+
+        let (obj, exe) = get_output_filenames(Path::new("some/dir/hello.ryo"));
+        assert_eq!(obj, PathBuf::from(format!("some/dir/hello.{obj_ext}")));
+        assert_eq!(exe, PathBuf::from(format!("some/dir/hello{exe_suffix}")));
+
+        // No directory component: output stays relative to the CWD,
+        // exactly as before.
+        let (obj, exe) = get_output_filenames(Path::new("hello.ryo"));
+        assert_eq!(obj, PathBuf::from(format!("hello.{obj_ext}")));
+        assert_eq!(exe, PathBuf::from(format!("hello{exe_suffix}")));
+    }
 
     #[test]
     fn diag_code_strings_are_stable_and_unique() {
@@ -569,6 +663,8 @@ mod tests {
             (DiagCode::MissingReturn, "E0036"),
             (DiagCode::ParseError, "E0100"),
             (DiagCode::TooManyDiagnostics, "E0101"),
+            (DiagCode::InvalidCharacter, "E0102"),
+            (DiagCode::UnknownEscape, "E0103"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -626,10 +722,35 @@ mod tests {
                 | DiagCode::CycleInResolution
                 | DiagCode::ParseError
                 | DiagCode::TooManyDiagnostics
+                | DiagCode::InvalidCharacter
+                | DiagCode::UnknownEscape
                 | DiagCode::ConstEvalFailure
                 | DiagCode::CycleInComptime
                 | DiagCode::GenericInstantiation => {}
             }
         }
+    }
+
+    #[test]
+    fn parse_error_renders_identifiers_through_pool() {
+        // The token's pool-free `Display` renders identifiers as
+        // opaque `<id#N>` handles; the driver's parse-error path
+        // must re-render them through the pool so the user sees the
+        // actual identifier text.
+        let mut pool = InternPool::new();
+        let err = parse_source("x foo = 1", &mut pool, "<test>").expect_err("parse should fail");
+        let CompilerError::Diagnostics(diags) = err else {
+            panic!("expected Diagnostics error");
+        };
+        assert!(!diags.is_empty());
+        let msg = &diags[0].message;
+        assert!(
+            msg.contains("foo"),
+            "message should name the identifier text: {msg}"
+        );
+        assert!(
+            !msg.contains("<id#"),
+            "message must not leak opaque handle ids: {msg}"
+        );
     }
 }

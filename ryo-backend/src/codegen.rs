@@ -176,6 +176,23 @@ struct FunctionContext<'a, M: Module> {
     /// `TirRef → ValueRepr` memo. Materializing the same instruction
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
+    ///
+    /// INVARIANT: this map is deliberately cross-block (one flat map
+    /// per function, not scoped per basic block). That is sound only
+    /// because the current TIR producers guarantee:
+    ///   (a) TIR instructions are unique per use — no shared
+    ///       sub-expressions, so a `TirRef` is materialized in exactly
+    ///       one block and read only where that block dominates;
+    ///   (b) `BoolAnd`/`BoolOr` merge values via block params (phi
+    ///       nodes), so the memoized `Value` is the merge-block param,
+    ///       which dominates every downstream use;
+    ///   (c) `IfStmt` is statement-level — no values flow out of
+    ///       branches, so no branch-local value is ever read after the
+    ///       merge.
+    /// If a future TIR producer introduces expression-level control
+    /// flow (ternary if) or shared sub-expressions across blocks, this
+    /// memo MUST be re-scoped per-block or reads will hit Cranelift
+    /// dominator errors.
     inst_values: HashMap<TirRef, ValueRepr>,
     /// Indices into `sidecar.free_schedule` whose Frees have already
     /// been emitted in codegen. A given anchor TirRef can be reached
@@ -217,10 +234,11 @@ struct FunctionContext<'a, M: Module> {
     /// Ownership sidecar for the function currently being lowered.
     /// `TirRef`s are scoped per-function — each `Tir`'s arena restarts
     /// at `TirRef(1)` — so codegen must consult only the entry that
-    /// belongs to this function. `compile_function` looks up
-    /// `sidecar.functions[&tir.name]` and threads the resulting
-    /// per-function entry here. Both unconditional (`branch: None`) and
-    /// branch-gated (`branch: Some(_)`) entries are filtered through
+    /// belongs to this function. `compile_function` picks
+    /// `sidecar.functions[i]`, positional with the `tirs` slice, and
+    /// threads the resulting per-function entry here. Both
+    /// unconditional (`branch: None`) and branch-gated
+    /// (`branch: Some(_)`) entries are filtered through
     /// `branch_active`.
     sidecar: &'a ryo_core::ownership::FunctionSidecar,
     /// Active arm stack for conditional destruction (Task 9). Each
@@ -320,7 +338,7 @@ impl Codegen<JITModule> {
             .map_err(|e| format!("Failed to finalize JIT definitions: {}", e))?;
 
         let code_ptr = self.module.get_finalized_function(main_id);
-        // SAFETY (R5 exception, I-127): `code_ptr` was finalized by
+        // SAFETY (R5 exception): `code_ptr` was finalized by
         // cranelift-jit for this module above, and the compiled entry point
         // has the `extern "C" fn() -> isize` signature we emit for `main`
         // (Cranelift's default CallConv is the platform C ABI; Rust's own
@@ -329,7 +347,7 @@ impl Codegen<JITModule> {
         let main_fn: extern "C" fn() -> isize = unsafe { std::mem::transmute(code_ptr) };
         let result = main_fn();
 
-        // SAFETY (R5 exception, I-127): execution finished above; freeing the
+        // SAFETY (R5 exception): execution finished above; freeing the
         // module's memory cannot invalidate any live code.
         #[allow(unsafe_code)]
         unsafe {
@@ -361,8 +379,8 @@ impl<M: Module> Codegen<M> {
         );
         let func_ids = self.prepare_compilation(tirs, pool)?;
 
-        for tir in tirs {
-            self.compile_function(tir, &func_ids, pool, sidecar)?;
+        for (i, tir) in tirs.iter().enumerate() {
+            self.compile_function(tir, &func_ids, pool, sidecar, i)?;
         }
 
         // Resolve "main" through the pool. `astgen` always interns
@@ -392,8 +410,8 @@ impl<M: Module> Codegen<M> {
         let func_ids = self.prepare_compilation(tirs, pool)?;
 
         let mut ir_output = String::new();
-        for tir in tirs {
-            ir_output.push_str(&self.compile_function(tir, &func_ids, pool, sidecar)?);
+        for (i, tir) in tirs.iter().enumerate() {
+            ir_output.push_str(&self.compile_function(tir, &func_ids, pool, sidecar, i)?);
             ir_output.push('\n');
         }
 
@@ -472,6 +490,7 @@ impl<M: Module> Codegen<M> {
         func_ids: &HashMap<StringId, FuncId>,
         pool: &InternPool,
         sidecar: &ryo_core::ownership::OwnershipSidecar,
+        sidecar_index: usize,
     ) -> Result<String, String> {
         let func_id = *func_ids
             .get(&tir.name)
@@ -481,10 +500,30 @@ impl<M: Module> Codegen<M> {
         // per-function (each `Tir` arena restarts at `TirRef(1)`), so
         // threading the program-wide sidecar would let frees scheduled
         // for one function fire at numerically-matching TirRefs in
-        // another. The `unwrap_or` arm covers compiler-emitted helpers
-        // (e.g. `__ryo_panic`) that the ownership pass never sees.
-        let empty_sidecar = ryo_core::ownership::FunctionSidecar::default();
-        let func_sidecar = sidecar.functions.get(&tir.name).unwrap_or(&empty_sidecar);
+        // another. The sidecar is positional with the `tirs` slice —
+        // `ownership::check` pushes exactly one entry per body — so a
+        // missing entry is a pipeline contract violation, not a case
+        // to paper over with an empty sidecar (compiler-emitted
+        // helpers like `__ryo_panic` are imported runtime calls and
+        // never appear in `tirs`).
+        let func_sidecar = sidecar.functions.get(sidecar_index).ok_or_else(|| {
+            format!(
+                "ownership sidecar has no entry for '{}' (index {} of {})",
+                pool.str(tir.name),
+                sidecar_index,
+                sidecar.functions.len()
+            )
+        })?;
+        // The length check above cannot detect a `tirs` slice that was
+        // reordered or filtered between `ownership::check` and codegen
+        // (same length, wrong alignment): every index would resolve to
+        // a wrong-but-plausible sidecar. The name recorded at push
+        // time pins entry `i` to `tirs[i]`.
+        debug_assert_eq!(
+            func_sidecar.name, tir.name,
+            "ownership sidecar misaligned with tirs at index {}",
+            sidecar_index
+        );
 
         self.ctx.func.signature = self.build_signature(tir, pool);
 
@@ -2475,6 +2514,10 @@ impl<M: Module> Codegen<M> {
         // a terminator. Emit a trap + dead block for subsequent IR.
         if ctx.pool.is_never(ret_ty) {
             builder.ins().call(callee_ref, &arg_values);
+            // Reload inout slots before the trap: Cranelift models the
+            // callee as an ordinary (returning) call, so the mutations
+            // must be visible on the path where control resumes.
+            Self::reload_inout_args(builder, ctx, &inout_reloads)?;
             builder.ins().trap(TrapCode::user(1).unwrap());
             let dead = builder.create_block();
             builder.seal_block(dead);
