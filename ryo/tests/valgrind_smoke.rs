@@ -35,7 +35,7 @@ fn valgrind_available() -> bool {
 
 /// Decide whether the smoke test may run. A missing valgrind is a
 /// hard failure outside CI: a green local run that silently exercised
-/// nothing is worse than a red one (I-085). Opt out explicitly with
+/// nothing is worse than a red one. Opt out explicitly with
 /// `RYO_SKIP_VALGRIND=1`. In CI the dedicated `valgrind` lane installs
 /// valgrind and runs this suite, so other lanes may skip.
 fn require_valgrind(name: &str) -> bool {

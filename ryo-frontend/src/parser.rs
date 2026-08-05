@@ -500,7 +500,7 @@ where
         // `- IntLitMin` is folded to the `i64::MIN` literal at parse
         // time: the positive form `9223372036854775808` overflows
         // `i64`, so the lexer marks it with a dedicated token that is
-        // only grammatical directly after unary `-` (I-017).
+        // only grammatical directly after unary `-`.
         let neg_min = just(Token::Sub)
             .then(just(Token::IntLitMin))
             .map_with(|_, e| Expression::new(ExprKind::Literal(Literal::Int(i64::MIN)), e.span()));
