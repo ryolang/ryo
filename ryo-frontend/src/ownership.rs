@@ -1448,7 +1448,7 @@ fn defer_anchor(
 pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipSidecar {
     let mut sidecar = OwnershipSidecar::default();
     for tir in tirs {
-        let mut func_sidecar = FunctionSidecar::default();
+        let mut func_sidecar = FunctionSidecar::new(tir.name);
         analyze_function(tir, pool, sink, &mut func_sidecar);
         sidecar.functions.push(func_sidecar);
     }
@@ -4096,7 +4096,8 @@ mod tests {
     /// slice handed to `check` — the same contract codegen relies on.
     /// (Every test below checks a single function, so `index` is 0.)
     fn take_function_sidecar(sidecar: &mut OwnershipSidecar, index: usize) -> FunctionSidecar {
-        std::mem::take(&mut sidecar.functions[index])
+        let name = sidecar.functions[index].name;
+        std::mem::replace(&mut sidecar.functions[index], FunctionSidecar::new(name))
     }
 
     #[test]

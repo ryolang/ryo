@@ -514,6 +514,16 @@ impl<M: Module> Codegen<M> {
                 sidecar.functions.len()
             )
         })?;
+        // The length check above cannot detect a `tirs` slice that was
+        // reordered or filtered between `ownership::check` and codegen
+        // (same length, wrong alignment): every index would resolve to
+        // a wrong-but-plausible sidecar. The name recorded at push
+        // time pins entry `i` to `tirs[i]`.
+        debug_assert_eq!(
+            func_sidecar.name, tir.name,
+            "ownership sidecar misaligned with tirs at index {}",
+            sidecar_index
+        );
 
         self.ctx.func.signature = self.build_signature(tir, pool);
 
