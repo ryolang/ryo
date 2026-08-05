@@ -2752,7 +2752,7 @@ Tasks are Ryo's lightweight, non-OS-thread concurrency unit (like Go's goroutine
 | **Await** | `fut.await` | **`future[T]`** | **Suspends the current green thread** until the value is ready. Does NOT block the OS thread. |
 
 **Ownership Safety:** Task closures implicitly capture by **move** — the compiler enforces this because tasks may outlive the spawning scope (see §6.2.2). To share data across tasks, use `shared[T]` — assignment retains the handle (§5.6); there is no explicit `.clone()`. **Exception (scoped task borrows, final spec §7, D5):** inside a `task.scope` body — structured concurrency, where the scope joins all children before exiting — child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as P2, §4.4) and that no capture escapes the scope. Projections (`strview`, `slice[T]`, `bytesview`) may be captured too: the scope join is lexically inside the defining function, so the view still cannot escape it — the owner's freeze extends to the end of the `task.scope` block. `task.run` and `task.spawn_detached` are unchanged: implicit move capture, enforced.
-**FFI Warning:** Calling blocking C functions (like `sleep`) will block the underlying OS thread. Use the `#[blocking]` attribute on FFI imports so the runtime routes the call through its blocking pool; a blocking C function still occupies blocking execution capacity for the duration of the call.
+**FFI Warning:** Calling blocking C functions (like `sleep`) from a task will block that task's execution. Mark such FFI imports with the `#[blocking]` attribute.
 
 **Task Handles (`handle[T]`):** Detached tasks outlive any scope, so a `future[T]` cannot represent them — dropping a future cancels the task, and identity must not imply ownership. `handle[T]` is an **identity-only token**: sendable across tasks, comparable for equality, with **no dereference** — all interaction with the task happens through channels. Dropping a `handle[T]` does **not** cancel the task; a `handle[T]` keeps no task alive either (detached tasks are cancelled on process exit regardless). Handles are how supervisors, registries, watchdogs, and cancellation tokens refer to long-lived tasks. FFI pointers (`FILE*`, window handles, connection handles) follow the same shape. *(Rationale: Pony's `tag` capability is the proven precedent — identity without access is sufficient for supervision and never entangles lifetimes.)*
 
@@ -3763,20 +3763,19 @@ Adding parallelism (M:N green threads across multiple OS threads) has **specific
 
 **3. FFI Blocking Annotation**
 
-*Problem:* C function calls can block OS threads, starving the green thread scheduler.
+*Problem:* C function calls can block for arbitrarily long, stalling the calling task.
 
-*Solution:* `#[blocking]` attribute routes the call through the runtime's blocking pool, off the green-thread scheduler threads:
+*Solution:* mark blocking FFI imports with the `#[blocking]` attribute so the runtime can keep them off task execution:
 
 ```ryo
 #[blocking]
 extern "C" fn sqlite_exec(db: *void, sql: *c_char) -> int
 
 fn query_db(sql: str):
-	# Runtime detects #[blocking], runs on a blocking-pool thread
 	result = sqlite_exec(db_handle, sql.as_ptr())
 ```
 
-**Impact:** Prevents green thread scheduler from getting blocked by slow C calls.
+**Impact:** Slow C calls no longer stall unrelated tasks.
 
 **4. Panic Isolation (Task-Level Boundaries)**
 

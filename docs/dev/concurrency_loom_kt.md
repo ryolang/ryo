@@ -11,7 +11,7 @@ The result is the same colorless-concurrency promise as the current plan, with t
 
 This doc is structured as a **delta against [`concurrency.md`](concurrency.md)** — what stays, what changes, what's new, and what it costs.
 
-This proposal does **not** change the user-facing spec. Ryo remains colorless. No `suspend` keyword. One new user-facing primitive (`with_dispatcher`, borrowed from Kotlin's `withContext`).
+This proposal does **not** change the user-facing spec. Ryo remains colorless. No `suspend` keyword. One new user-facing primitive is proposed (`with_dispatcher`, borrowed from Kotlin's `withContext`); it, `Dispatcher`, and `task.supervise` are **proposal-only** — not stable user-facing APIs — unless/until their definitions are added to the normative specification.
 
 > **Sibling reference docs:** [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`proposals/wasm_target.md`](proposals/wasm_target.md).
 
@@ -115,7 +115,7 @@ This is **Go's cgo model** implemented via corosensei. Mature engineering, no ne
   - `task.pin()` marks a non-migrating critical section: the compiler diagnoses `with_dispatcher` used inside a `task.pin()` region, since a dispatcher switch may migrate the task. Code that must stay on one carrier switches dispatchers outside the pinned region.
 
 **Impact on the plan:**
-- §3.4 gains a generalization. `#[blocking]` is now sugar for "auto-route this FFI to `dispatcher.blocking`"; `with_dispatcher` lets users pick a different dispatcher explicitly.
+- §3.4 gains a generalization. `#[blocking]` is now sugar for "auto-route this FFI to `dispatcher.blocking`"; `with_dispatcher` lets users pick a different dispatcher explicitly. Precedence rule: an enclosing `with_dispatcher` block wins — for the duration of the block, calls inside it run on that dispatcher, overriding `#[blocking]` auto-routing.
 - Phase 4 gains a §4.X (`Dispatcher` and `with_dispatcher`) — small additional API surface.
 - Phase 6 may add a linter: "long-running CPU work on `dispatcher.blocking` is wasteful; consider `dispatcher.compute`."
 
@@ -125,7 +125,7 @@ This is **Go's cgo model** implemented via corosensei. Mature engineering, no ne
 - `task.scope: ...` cancels all siblings if any child panics or the scope exits early.
 
 **This proposal (Kotlin-borrowed):**
-- Add `task.supervise: ...` as a sibling primitive. Inside a supervisor scope, a child task failing does **not** cancel its siblings. The scope still awaits all children before returning. Failures are surfaced as part of each child's `Future<T>` result.
+- Add `task.supervise: ...` as a sibling primitive. Inside a supervisor scope, a child task failing does **not** cancel its siblings. The scope still awaits all children before returning. Failures are surfaced as part of each child's `future[T]` result.
 - Use case: a long-running parent task that spawns many independent workers, where one worker's failure shouldn't kill the others. Common in HTTP server request handlers, batch processors, monitoring agents.
 
 **Impact on the plan:**
@@ -167,7 +167,7 @@ result = scheduler.call_ffi(fn(): extern_function(args))
 
 `call_ffi` performs the yield-to-system-coroutine handoff. ~150–250 LOC depending on detail.
 
-**Nested FFI re-entry from C callbacks.** A C library may call back into Ryo code (qsort comparators, libjpeg error handlers, visitor APIs), and that callback may itself make an FFI call while the worker's primary system coroutine is still occupied by the outer call. Policy: the inner FFI call is routed to an **overflow system coroutine** — an extra large-stack coroutine created on demand on the same worker, cached for reuse, and bounded per worker by `RYO_FFI_OVERFLOW_DEPTH` (default 8). When the bound is reached, the inner FFI call is **deferred**: it is queued on the worker and runs once any system coroutine (primary or overflow) frees; the task making the inner call suspends until then. This keeps re-entrant callbacks working without an unbounded coroutine leak.
+**Nested FFI re-entry from C callbacks.** A C library may call back into Ryo code (qsort comparators, libjpeg error handlers, visitor APIs), and that callback may itself make an FFI call while the worker's primary system coroutine is still occupied by the outer call. Policy: the inner FFI call is routed to an **overflow system coroutine** — an extra large-stack coroutine created on demand on the same worker, cached for reuse, and bounded per worker by `RYO_FFI_OVERFLOW_DEPTH` (default 8). When the bound is reached, the inner FFI call **fails immediately** with an explicit re-entry-limit error (`FfiReentryLimit`) — it must not queue and suspend the current task, because the suspended task may be exactly what the occupied system coroutines are waiting on, so queueing risks deadlock. (A non-blocking `try_call_ffi`-style fallback that reports busy instead of failing is a possible later addition.) Below the limit, overflow coroutines are reused across nested calls.
 
 ### New 2 — Optional carrier-pinning telemetry
 
@@ -192,15 +192,15 @@ Borrows from Kotlin's `withContext` but uses Ryo's `with`-block style (consisten
 | Function coloring | None ✓ | None ✓ |
 | `task.run` / `future[T]` API | Same | Same |
 | `task.scope` | Same | Same |
-| `task.supervise` | Not present | **Added** (Kotlin pattern) |
+| `task.supervise` | Not present | **Added** (Kotlin pattern; proposal-only — not yet in the normative spec) |
 | Channels | unbounded, bounded | unbounded, bounded, rendezvous, conflated |
-| Dispatcher selection | Implicit (carrier + blocking) | Explicit via `with_dispatcher(d)` (Kotlin pattern) |
+| Dispatcher selection | Implicit (carrier + blocking) | Explicit via `with_dispatcher(d)` (Kotlin pattern; proposal-only — not yet in the normative spec) |
 | `#[blocking]` annotation | Required for any blocking C | Required only for C that blocks on its own I/O |
 | Plain FFI safety | Risky on 128 KB stack | Safe on 2 MB system coroutine |
-| Cancellation primitive | Drop on `Future<T>` | Same |
+| Cancellation primitive | Drop on `future[T]` | Same |
 | Structured concurrency | `task.scope` | `task.scope` + `task.supervise` |
 | Memory model | Happens-before, Go-aligned | Same |
-| Spec impact | None (matches spec) | None for the language surface (matches spec); the sendability edges of the new primitives are draft, pending the Ownership-Lite formalization (see the data-plane section) |
+| Spec impact | None (matches spec) | None for the language surface (matches spec); `Dispatcher`, `with_dispatcher`, and `task.supervise` are proposal-only until added to the normative specification, and the sendability edges of the new primitives are draft, pending the Ownership-Lite formalization (see the data-plane section) |
 
 ### Runtime architecture
 
@@ -243,7 +243,7 @@ Compared to the earlier "Loom-proper with hand-rolled continuation capture" fram
 | `openssl.aes_encrypt(key, data)` (compute) | OK on 128 KB | Safe on 2 MB. ~200 ns overhead. |
 | `libpng.write(file, data)` (compute + libc write) | `#[blocking]` recommended; libc write may block | `#[blocking]` required. Same. |
 | `libfoo.compute()` recursing 4 MB deep | Stack overflow at 128 KB → task fails | Stack overflow at 2 MB → task fails. Configurable via env var. |
-| Callback from C into Ryo | Callback runs on green-thread stack (risky) | Callback runs on system-coroutine stack — safe to do work, can `task.spawn` cleanly; nested FFI from the callback routes to an overflow system coroutine (bounded, see New 1) |
+| Callback from C into Ryo | Callback runs on green-thread stack (risky) | Callback runs on system-coroutine stack — safe to do work, can `task.spawn` cleanly; nested FFI from the callback routes to an overflow system coroutine, and past `RYO_FFI_OVERFLOW_DEPTH` the inner call fails immediately with an explicit re-entry-limit error (no queueing — see New 1) |
 
 ### Memory profile at scale
 
@@ -317,7 +317,7 @@ fn main():
 	http.serve(cfg.port, fn(req): handle_request(req, db, db_dispatcher))
 ```
 
-This is genuinely new capability — the current plan doesn't have a way to bound DB concurrency from Ryo code; you'd need a separate semaphore.
+This is genuinely new capability — the current plan doesn't have a way to bound DB concurrency from Ryo code; you'd need a separate semaphore. It depends on the precedence rule above: the enclosing `with_dispatcher(db_dispatcher)` block overrides the `#[blocking]` auto-routing inside `SqliteDb.query` for the duration of the block — if `#[blocking]` won instead, the query would escape to the blocking pool and the 16-concurrent bound would not hold.
 
 ---
 
@@ -361,10 +361,10 @@ formalization, and nothing in this section should be read as committing them:
   just failure isolation: the supervisor can hold, registry-store, and compare
   child handles, and signal them through channels. Addition to this proposal:
   `task.supervise` children yield **both** handles to the supervisor scope —
-  the identity-only `handle[T]` for supervision, and an awaitable `Future[T]`
+  the identity-only `handle[T]` for supervision, and an awaitable `future[T]`
   join/result handle (Change 3) so the supervisor can await each child and
   observe its result or failure. The two are not interchangeable: `handle[T]`
-  has no dereference and cannot be joined; `Future[T]` joins but is not a
+  has no dereference and cannot be joined; `future[T]` joins but is not a
   stable identity for registry use.
 - **Send predicate (spec §14.5.6 #6).** A value crosses a task boundary in
   exactly three ways: owned move (Pony's `iso`), `shared[T]` handle (`val`),
@@ -391,11 +391,13 @@ Ownership-Lite formalization (Q10 / Polonius fragment):
 
 Two Pony imports adopted as runtime design principles:
 
-- **Per-carrier reclamation locality (ORCA instinct, no GC needed).** Memory
-  allocated by a task is reclaimed in its home context; mimalloc's thread-local
-  heaps (spec §14.5.6) provide this by default. Stating it matters because
-  conflated-channel drops and dispatcher migrations would otherwise silently shift
-  reclamation across threads.
+- **Per-carrier reclamation locality (ORCA instinct, no GC needed).** This is a
+  **goal, not a guarantee**: channel ownership transfers and `with_dispatcher`
+  migration can free memory on a different thread than the one that allocated
+  it. Those cross-thread frees go through mimalloc's remote-free path (deferred
+  to the owning heap's thread), so correctness holds even when locality does
+  not. Stating it matters because conflated-channel drops and dispatcher
+  migrations would otherwise silently shift reclamation across threads.
 - **Capability-gated dispatcher creation (AmbientAuth instinct).** `dispatcher.custom`
   from arbitrary code can starve the runtime. This is a hard contract, not a
   convention: the runtime enforces a process-wide limit of live custom
@@ -406,8 +408,10 @@ Two Pony imports adopted as runtime design principles:
   degrade. Authority: creation requires the runtime-context capability, which
   is granted at startup/main scope and is not obtainable by library code —
   matching Pony's authority-enters-at-one-point principle. Until the planned
-  capability injection lands, the runtime enforces the numeric limits globally
-  at every call site, so the contract holds even without the capability check.
+  capability injection lands, the numeric limits are enforced globally at every
+  call site — but they are only resource-exhaustion protection, not authority:
+  they do not distinguish callers, so `dispatcher.custom` must not be exposed
+  to untrusted library code before the capability check lands.
 
 ---
 

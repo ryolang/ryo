@@ -319,7 +319,10 @@ pub(crate) enum RawToken<'a> {
     Indent,
     Dedent,
 
-    #[regex(r"#[^\n]*", logos::skip, allow_greedy = true)]
+    // `[^\r\n]` (not `[^\n]`): in a CRLF file the comment must stop
+    // before the `\r` too, so the `\r\n` stays inside the following
+    // Newline token's span — same as every other line ending.
+    #[regex(r"#[^\r\n]*", logos::skip, allow_greedy = true)]
     Comment,
 
     #[regex(r"[ \t\f]+", logos::skip)]
@@ -487,7 +490,12 @@ fn unescape(inner: &str, token_span: Span, sink: &mut DiagSink) -> String {
     out
 }
 
-fn intern_token(raw: RawToken<'_>, span: Span, pool: &mut InternPool, sink: &mut DiagSink) -> Token {
+fn intern_token(
+    raw: RawToken<'_>,
+    span: Span,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> Token {
     match raw {
         RawToken::Error => Token::Error,
         // Integer literals are parsed as `i64` here; sign is applied
@@ -610,11 +618,7 @@ mod tests {
         let mut pool = InternPool::new();
         let mut sink = DiagSink::new();
         let toks = lex(input, &mut pool, &mut sink);
-        assert!(
-            !sink.has_errors(),
-            "lex errors: {:?}",
-            sink.into_diags()
-        );
+        assert!(!sink.has_errors(), "lex errors: {:?}", sink.into_diags());
         let cleaned: Vec<Token> = toks
             .into_iter()
             .map(|(t, _)| t)
@@ -828,8 +832,7 @@ mod tests {
             sink.into_diags()
         );
         assert!(
-            crlf.iter()
-                .all(|(t, _)| !matches!(t, Token::Error)),
+            crlf.iter().all(|(t, _)| !matches!(t, Token::Error)),
             "no error tokens in CRLF stream: {:?}",
             crlf
         );
@@ -871,6 +874,32 @@ mod tests {
             toks.iter().all(|(t, _)| !matches!(t, Token::Error)),
             "no error tokens: {:?}",
             toks
+        );
+    }
+
+    #[test]
+    fn lex_crlf_comment_leaves_cr_in_newline_span() {
+        // An indented comment at end of line must stop before the
+        // `\r`: the `\r\n` belongs to the Newline token's span, same
+        // as lines without a comment.
+        let src = "fn main():\r\n\t# c\r\n\tx = 1\r\n";
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex(src, &mut pool, &mut sink);
+        assert!(!sink.has_errors(), "should lex cleanly: {:?}", sink.into_diags());
+        let newlines: Vec<_> = toks
+            .iter()
+            .filter(|(t, _)| matches!(t, Token::Newline))
+            .collect();
+        assert!(
+            newlines
+                .iter()
+                .any(|(_, span)| &src[span.start..span.end] == "\r\n\t"),
+            "expected a Newline spanning \"\\r\\n\\t\" after the comment, got: {:?}",
+            newlines
+                .iter()
+                .map(|(_, span)| &src[span.start..span.end])
+                .collect::<Vec<_>>()
         );
     }
 
