@@ -90,8 +90,8 @@ pub fn parse_command(file: &Path) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
     let name = source_name(file);
     let (program, diags) = parse_source(&input, &mut pool, &name)?;
-    finalize_diags(diags, &input, &name)?;
     display_ast(&program, &pool);
+    finalize_diags(diags, &input, &name)?;
     Ok(())
 }
 

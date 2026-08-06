@@ -317,6 +317,12 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** I-125's recovery synchronizes at newline/`Dedent` boundaries line by line. When a block *header* is unparseable (e.g. `fn foo(` followed by an indented, individually-valid body), the header line recovers to one `Error` node, but each following indented body line then fails at top level and recovers separately — one diagnostic per line instead of one for the whole malformed declaration. Compilation still fails correctly and single broken lines report exactly once; this is purely diagnostic noise on multi-line constructs.
 **Resolution:** Add nesting-aware recovery for declaration headers — e.g. chumsky's `nested_delimiters` strategy, or making the line-recovery skip set indentation-aware so a failed `fn`/`if`/`while` header swallows its indented block as one region. Revisit when the grammar gains more multi-line constructs.
 
+### I-131 — Parser error recovery costs ~20% on the error-free hot path
+
+**Files:** `ryo-frontend/src/parser.rs` (`statement_list`, `indented_block`), `ryo-driver/src/pipeline.rs` (`parse_source`)
+**Summary:** CodSpeed on the I-125 PR reports a ~20% parse regression across all benchmark sizes (`parse_large[16/64/256]`, `parse_snippet[fizzbuzz/fibonacci]`). Every statement is now wrapped in two nested `recover_with(via_parser(...))` layers (`stmt_rec` + `tail`), so error-free files — the overwhelmingly common case — pay per-line rewind-checkpoint and error-accumulator bookkeeping for recovery that never fires. CodSpeed also warned the BASE and HEAD runs used different runtime environments, so the number needs local confirmation before optimizing.
+**Resolution:** Optimistic two-pass: keep the non-recovering parser (`stmt.separated_by(require_newlines())…`) as the primary path and fall back to the recovering parser only when the fast parse fails. Valid files parse at pre-recovery speed with ASTs identical by construction; malformed files parse twice, which is irrelevant since compilation fails anyway. Both shapes share `statement_parser()`, so grammar drift risk is contained to `statement_list`/`indented_block`. First confirm the regression locally (`cargo bench -p ryo-frontend`, A/B against `main`), then implement and re-measure.
+
 ---
 
 ## Cross-References

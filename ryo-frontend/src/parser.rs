@@ -60,7 +60,7 @@ fn peek<'a, I>(token: Token) -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    end().or_not().and_is(just(token)).ignored()
+    empty().and_is(just(token)).ignored()
 }
 
 /// One garbage token for line-level recovery: anything except the
@@ -70,6 +70,15 @@ where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     none_of([Token::Newline, Token::Dedent]).ignored()
+}
+
+/// Skip at least one non-boundary token. Recovering over zero tokens
+/// at a clean boundary would emit a spurious error.
+fn skip_garbage<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    garbage_token().repeated().at_least(1).ignored()
 }
 
 /// A list of newline-separated statements with per-line error
@@ -101,20 +110,13 @@ where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     let stmt_rec = stmt.clone().recover_with(via_parser(
-        garbage_token()
-            .repeated()
-            .at_least(1)
-            .ignored()
-            .map_with(|_, e| error_stmt(e.span())),
+        skip_garbage().map_with(|_, e| error_stmt(e.span())),
     ));
 
     let tail = require_newlines()
         .to(LineTail::Clean)
         .recover_with(via_parser(
-            garbage_token()
-                .repeated()
-                .at_least(1)
-                .ignored()
+            skip_garbage()
                 .then_ignore(require_newlines().or(terminator.clone()))
                 .to(LineTail::Garbage),
         ));
@@ -129,10 +131,7 @@ where
     let last = stmt
         .then_ignore(terminator.clone())
         .recover_with(via_parser(
-            garbage_token()
-                .repeated()
-                .at_least(1)
-                .ignored()
+            skip_garbage()
                 .then_ignore(terminator)
                 .map_with(|_, e| error_stmt(e.span())),
         ))
@@ -1852,6 +1851,38 @@ mod tests {
             StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
         ));
         assert!(matches!(program.statements[1].kind, StmtKind::Error));
+    }
+
+    #[test]
+    fn recovers_from_broken_block_final_statement_before_dedent() {
+        // The last body line is broken and the following top-level
+        // statement triggers the block's `Dedent`.
+        let (program, errs, _pool) =
+            lex_and_parse_recovering("fn main():\n\tx = 1\n\ty = = 2\nz = 3\n");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
+            panic!("expected FunctionDef");
+        };
+        assert_eq!(func.body.len(), 2);
+        assert!(matches!(func.body[1].kind, StmtKind::Error));
+        assert_eq!(program.statements.len(), 2);
+    }
+
+    #[test]
+    fn recovers_from_broken_block_final_statement_at_eof() {
+        // The broken final body line sits directly against the
+        // zero-width end-of-input `Dedent` (no terminating newline of
+        // its own) — the `peek(Dedent)` terminator path.
+        let (program, errs, _pool) = lex_and_parse_recovering("fn main():\n\tx = 1\n\ty = = 2");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
+            panic!("expected FunctionDef");
+        };
+        assert_eq!(func.body.len(), 2);
+        assert!(matches!(func.body[1].kind, StmtKind::Error));
+        assert_eq!(program.statements.len(), 1);
     }
 
     #[test]
