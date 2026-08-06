@@ -311,6 +311,12 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** R18's rule: side tables keyed by a dense arena index belong in a `Vec` indexed by that index; hash maps are for sparse/string-keyed/unbounded data only. The ownership pass keeps five per-inst `HashMap<TirRef, _>` tables on the hot per-expression path, builds a whole-body `HashMap<TirRef, u32>` program-order map twice per function, and sema keeps a whole-program `HashSet<InstRef>` queried per `Borrow` inst — all keyed by dense `u32` arena indices. Distinct from I-064/I-065/I-107/I-119, which cover recomputation and linear lookups in other helpers.
 **Resolution:** Convert to `Vec<Option<…>>`/`Vec<bool>` side tables sized from the arena length (`TirRef::index()`/`InstRef::index()`), built once per function (per program for `call_arg_refs`). Same refactor shape as I-107's param-index map; do them together.
 
+### I-130 — Parser recovery is line-granular; broken block headers cascade per-line errors
+
+**Files:** `ryo-frontend/src/parser.rs` (`statement_list`, `indented_block`)
+**Summary:** I-125's recovery synchronizes at newline/`Dedent` boundaries line by line. When a block *header* is unparseable (e.g. `fn foo(` followed by an indented, individually-valid body), the header line recovers to one `Error` node, but each following indented body line then fails at top level and recovers separately — one diagnostic per line instead of one for the whole malformed declaration. Compilation still fails correctly and single broken lines report exactly once; this is purely diagnostic noise on multi-line constructs.
+**Resolution:** Add nesting-aware recovery for declaration headers — e.g. chumsky's `nested_delimiters` strategy, or making the line-recovery skip set indentation-aware so a failed `fn`/`if`/`while` header swallows its indented block as one region. Revisit when the grammar gains more multi-line constructs.
+
 ---
 
 ## Cross-References
