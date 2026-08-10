@@ -53,10 +53,13 @@ enum LineTail {
     Garbage,
 }
 
-/// Positive lookahead: succeed (consuming nothing) only when `token`
-/// is next. Block-final statements must not eat the `Dedent` that the
-/// surrounding `delimited_by` expects.
-fn peek<'a, I>(token: Token) -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+/// Positive lookahead for a statement-list terminator: succeed
+/// (consuming nothing) only when `token` is next. Block-final
+/// statements must not eat the `Dedent` that the surrounding
+/// `delimited_by` expects.
+fn peek_terminator<'a, I>(
+    token: Token,
+) -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -86,7 +89,7 @@ where
 ///
 /// Shape: blank lines, then `line*`, then an optional unterminated
 /// final statement right before `terminator` (`end()` at top level,
-/// `peek(Dedent)` in blocks — the lexer emits no Newline before an
+/// `peek_terminator(Dedent)` in blocks — the lexer emits no Newline before an
 /// end-of-input `Dedent`, so block-final statements sit directly
 /// against it).
 ///
@@ -177,7 +180,7 @@ fn indented_block<'a, I>(
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    statement_list(stmt, peek(Token::Dedent)).delimited_by(
+    statement_list(stmt, peek_terminator(Token::Dedent)).delimited_by(
         skip_newlines().ignore_then(just(Token::Indent)),
         just(Token::Dedent),
     )
@@ -1873,7 +1876,7 @@ mod tests {
     fn recovers_from_broken_block_final_statement_at_eof() {
         // The broken final body line sits directly against the
         // zero-width end-of-input `Dedent` (no terminating newline of
-        // its own) — the `peek(Dedent)` terminator path.
+        // its own) — the `peek_terminator(Dedent)` terminator path.
         let (program, errs, _pool) = lex_and_parse_recovering("fn main():\n\tx = 1\n\ty = = 2");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
         let program = program.expect("recovery must produce a partial program");
