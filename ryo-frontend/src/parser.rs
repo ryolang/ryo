@@ -147,6 +147,7 @@ where
             lines.extend(last);
             lines
         })
+        .boxed()
 }
 
 /// Parse a complete Ryo program with multiple statements.
@@ -171,6 +172,7 @@ where
             };
             Program { statements, span }
         })
+        .boxed()
 }
 
 /// Parse an indented block of one or more statements.
@@ -180,10 +182,12 @@ fn indented_block<'a, I>(
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    statement_list(stmt, peek_terminator(Token::Dedent)).delimited_by(
-        skip_newlines().ignore_then(just(Token::Indent)),
-        just(Token::Dedent),
-    )
+    statement_list(stmt, peek_terminator(Token::Dedent))
+        .delimited_by(
+            skip_newlines().ignore_then(just(Token::Indent)),
+            just(Token::Dedent),
+        )
+        .boxed()
 }
 
 fn assign_or_decl_parser<'a, I>()
@@ -202,6 +206,7 @@ where
             span: e.span(),
             kind: StmtKind::AssignOrDecl { target, value },
         })
+        .boxed()
 }
 
 fn compound_assign_parser<'a, I>()
@@ -228,6 +233,7 @@ where
             span: e.span(),
             kind: StmtKind::CompoundAssign { target, op, value },
         })
+        .boxed()
 }
 
 /// Statements valid inside a function body.
@@ -322,6 +328,9 @@ where
             kind: StmtKind::ExprStmt(expr),
         });
 
+        // Boxed to keep the concrete type small: this parser is stored
+        // inside `Recursive`, which keeps the full type in its symbol
+        // names (see the note in `expression_parser`).
         choice((
             return_stmt,
             compound_assign_parser(),
@@ -334,6 +343,7 @@ where
             continue_stmt,
             expr_stmt,
         ))
+        .boxed()
     })
 }
 
@@ -369,6 +379,7 @@ where
             elif_branches,
             else_block,
         })
+        .boxed()
 }
 
 /// Top-level statements: only function defs and var decls.
@@ -396,7 +407,7 @@ where
         kind: StmtKind::ExprStmt(expr),
     });
 
-    choice((function_def, var_decl, expr_stmt))
+    choice((function_def, var_decl, expr_stmt)).boxed()
 }
 
 fn statement_parser<'a, I>()
@@ -404,7 +415,7 @@ fn statement_parser<'a, I>()
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    top_level_statement_parser()
+    top_level_statement_parser().boxed()
 }
 
 /// Type annotation: a plain name (`str`, `int`, ...) or the legacy
@@ -422,7 +433,7 @@ where
         .map_with(|name, e| TypeExpr::view(name, e.span()));
     let plain =
         select! { Token::Ident(name) => name }.map_with(|name, e| TypeExpr::new(name, e.span()));
-    view.or(plain)
+    view.or(plain).boxed()
 }
 
 fn function_def_parser<'a, I>()
@@ -473,6 +484,7 @@ where
             return_type,
             body,
         })
+        .boxed()
 }
 
 fn var_decl_parser<'a, I>() -> impl Parser<'a, I, VarDecl, extra::Err<Rich<'a, Token>>> + Clone + 'a
@@ -499,6 +511,7 @@ where
                 initializer,
             },
         )
+        .boxed()
 }
 
 fn expression_parser<'a, I>()
@@ -609,17 +622,24 @@ where
             .then(just(Token::IntLitMin))
             .map_with(|_, e| Expression::new(ExprKind::Literal(Literal::Int(i64::MIN)), e.span()));
 
-        let unary = neg_min.or(unary_op
-            .repeated()
-            .collect::<Vec<_>>()
-            .then(postfix)
-            .map_with(|(ops, expr), e| {
-                let mut result = expr;
-                for op in ops.into_iter().rev() {
-                    result = Expression::new(ExprKind::UnaryOp(op, Box::new(result)), e.span());
-                }
-                result
-            }));
+        // Each precedence level is `.boxed()` to erase the concrete
+        // combinator type. Without this the levels nest into each other
+        // (term contains unary, additive contains term, ...) and the
+        // demangled symbol names grow to hundreds of kilobytes, which
+        // breaks some profiling tooling (and compile times).
+        let unary = neg_min
+            .or(unary_op
+                .repeated()
+                .collect::<Vec<_>>()
+                .then(postfix)
+                .map_with(|(ops, expr), e| {
+                    let mut result = expr;
+                    for op in ops.into_iter().rev() {
+                        result = Expression::new(ExprKind::UnaryOp(op, Box::new(result)), e.span());
+                    }
+                    result
+                }))
+            .boxed();
 
         let term = unary.clone().foldl(
             choice((
@@ -639,6 +659,8 @@ where
             },
         );
 
+        let term = term.boxed();
+
         let additive = term.clone().foldl(
             choice((
                 just(Token::Add).to(BinaryOperator::Add),
@@ -655,6 +677,8 @@ where
                 )
             },
         );
+
+        let additive = additive.boxed();
 
         // Ordering (non-associative) sits between additive and equality.
         let ordering = additive
@@ -679,7 +703,8 @@ where
                         SimpleSpan::new((), start..end),
                     )
                 }
-            });
+            })
+            .boxed();
 
         // Equality is non-associative.
         let equality = ordering
@@ -702,7 +727,8 @@ where
                         SimpleSpan::new((), start..end),
                     )
                 }
-            });
+            })
+            .boxed();
 
         // Logical AND binds tighter than OR, below equality.
         let logical_and = equality.clone().foldl(
@@ -720,21 +746,26 @@ where
             },
         );
 
+        let logical_and = logical_and.boxed();
+
         // Logical OR is the lowest precedence.
-        logical_and.clone().foldl(
-            just(Token::Or)
-                .to(BinaryOperator::Or)
-                .then(logical_and)
-                .repeated(),
-            |left, (op, right)| {
-                let start = left.span.start;
-                let end = right.span.end;
-                Expression::new(
-                    ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
-                    SimpleSpan::new((), start..end),
-                )
-            },
-        )
+        logical_and
+            .clone()
+            .foldl(
+                just(Token::Or)
+                    .to(BinaryOperator::Or)
+                    .then(logical_and)
+                    .repeated(),
+                |left, (op, right)| {
+                    let start = left.span.start;
+                    let end = right.span.end;
+                    Expression::new(
+                        ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
+                        SimpleSpan::new((), start..end),
+                    )
+                },
+            )
+            .boxed()
     })
 }
 
