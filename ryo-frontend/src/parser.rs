@@ -87,13 +87,13 @@ where
 /// A list of newline-separated statements with per-line error
 /// recovery (R10).
 ///
-/// Shape: blank lines, then `line*`, then an optional unterminated
-/// final statement right before `terminator` (`end()` at top level,
-/// `peek_terminator(Dedent)` in blocks — the lexer emits no Newline before an
-/// end-of-input `Dedent`, so block-final statements sit directly
-/// against it).
+/// Shape: blank lines, then `line*`, where each line is `stmt tail`
+/// and the tail is either a newline run or the list `terminator`
+/// (`end()` at top level, `peek_terminator(Dedent)` in blocks). The
+/// terminator doubles as a line end because the lexer emits no
+/// Newline before an end-of-input `Dedent`: a block-final statement
+/// sits directly against it, so that one line has no newline tail.
 ///
-/// Each line is `stmt tail`:
 /// * if `stmt` itself fails, recovery skips the offending tokens and
 ///   yields an `Error` node;
 /// * if the statement parses but garbage follows on the same line
@@ -105,6 +105,13 @@ where
 /// clean boundary would emit a spurious error. Errors emitted by a
 /// recovery whose surrounding line later fails are rolled back by
 /// chumsky's rewind, so each broken line reports exactly once.
+///
+/// `not_at_boundary` decides where the loop stops without running the
+/// statement grammar: the grammar is deep and a failed alternative
+/// carries chumsky's `Rich` expected-set bookkeeping, so letting the
+/// loop fail its way through the whole of `stmt` against the
+/// `Dedent`/end-of-input that ends the list costs more than parsing a
+/// real statement. Lines the guard admits parse exactly as before.
 fn statement_list<'a, I>(
     stmt: impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a,
     terminator: impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a,
@@ -112,41 +119,34 @@ fn statement_list<'a, I>(
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    let stmt_rec = stmt.clone().recover_with(via_parser(
+    let stmt_rec = stmt.recover_with(via_parser(
         skip_garbage().map_with(|_, e| error_stmt(e.span())),
     ));
 
-    let tail = require_newlines()
+    let line_end = require_newlines().or(terminator);
+
+    let tail = line_end
+        .clone()
         .to(LineTail::Clean)
         .recover_with(via_parser(
-            skip_garbage()
-                .then_ignore(require_newlines().or(terminator.clone()))
-                .to(LineTail::Garbage),
+            skip_garbage().then_ignore(line_end).to(LineTail::Garbage),
         ));
 
-    let line = stmt_rec.then(tail).map_with(|(s, tail), e| match tail {
-        LineTail::Clean => s,
-        LineTail::Garbage => error_stmt(e.span()),
-    });
+    // Zero-width: succeeds only when another line can follow.
+    let not_at_boundary = empty().and_is(none_of([Token::Dedent])).ignored();
 
-    // Final statement with no terminating newline. Recovery covers a
-    // broken final line: skip whatever remains up to the terminator.
-    let last = stmt
-        .then_ignore(terminator.clone())
-        .recover_with(via_parser(
-            skip_garbage()
-                .then_ignore(terminator)
-                .map_with(|_, e| error_stmt(e.span())),
-        ))
-        .or_not();
+    let line =
+        not_at_boundary
+            .ignore_then(stmt_rec)
+            .then(tail)
+            .map_with(|(s, tail), e| match tail {
+                LineTail::Clean => s,
+                LineTail::Garbage => error_stmt(e.span()),
+            });
 
     skip_newlines()
         .ignore_then(line.repeated().collect::<Vec<_>>())
-        .then(skip_newlines().ignore_then(last))
-        .map(|(mut lines, last)| {
-            lines.extend(last);
-            lines
-        })
+        .then_ignore(skip_newlines())
         .boxed()
 }
 
@@ -1917,6 +1917,25 @@ mod tests {
         assert_eq!(func.body.len(), 2);
         assert!(matches!(func.body[1].kind, StmtKind::Error));
         assert_eq!(program.statements.len(), 1);
+    }
+
+    #[test]
+    fn parses_unterminated_final_statement_in_block() {
+        // The block-final statement has no terminating newline: it
+        // ends directly at the list terminator (the end-of-input
+        // `Dedent`). Valid input, so no error node and no diagnostic.
+        let (program, errs, _pool) = lex_and_parse_recovering("fn main():\n\tx = 1");
+        assert!(errs.is_empty(), "expected a clean parse: {errs:?}");
+        let program = program.expect("expected a program");
+        assert_eq!(program.statements.len(), 1);
+        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
+            panic!("expected FunctionDef");
+        };
+        assert_eq!(func.body.len(), 1);
+        assert!(matches!(
+            func.body[0].kind,
+            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+        ));
     }
 
     #[test]
