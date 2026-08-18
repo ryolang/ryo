@@ -5,7 +5,7 @@
 //! handles, so the parser only ever copies handles out of tokens —
 //! no `to_string` allocations, no `&'a str` slicing into source.
 
-use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan};
+use chumsky::{input::ValueInput, prelude::*, recovery::via_parser, span::SimpleSpan};
 
 use crate::lexer::Token;
 use ryo_core::ast::*;
@@ -35,6 +35,121 @@ where
         .to(())
 }
 
+/// Placeholder statement for a line the parser could not parse. The
+/// diagnostic comes from the recovered error itself; this node only
+/// keeps the partial AST well-formed (astgen lowers it to nothing).
+fn error_stmt(span: SimpleSpan) -> Statement {
+    Statement {
+        span,
+        kind: StmtKind::Error,
+    }
+}
+
+/// Whether a statement line ended cleanly (newline-terminated) or
+/// needed garbage-skipping recovery to reach the line boundary.
+#[derive(Clone)]
+enum LineTail {
+    Clean,
+    Garbage,
+}
+
+/// Positive lookahead for a statement-list terminator: succeed
+/// (consuming nothing) only when `token` is next. Block-final
+/// statements must not eat the `Dedent` that the surrounding
+/// `delimited_by` expects.
+fn peek_terminator<'a, I>(
+    token: Token,
+) -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    empty().and_is(just(token)).ignored()
+}
+
+/// One garbage token for line-level recovery: anything except the
+/// statement boundaries where resynchronization can happen.
+fn garbage_token<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    none_of([Token::Newline, Token::Dedent]).ignored()
+}
+
+/// Skip at least one non-boundary token. Recovering over zero tokens
+/// at a clean boundary would emit a spurious error.
+fn skip_garbage<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    garbage_token().repeated().at_least(1).ignored()
+}
+
+/// A list of newline-separated statements with per-line error
+/// recovery (R10).
+///
+/// Shape: blank lines, then `line*`, where each line is `stmt tail`
+/// and the tail is either a newline run or the list `terminator`
+/// (`end()` at top level, `peek_terminator(Dedent)` in blocks). The
+/// terminator doubles as a line end because the lexer emits no
+/// Newline before an end-of-input `Dedent`: a block-final statement
+/// sits directly against it, so that one line has no newline tail.
+///
+/// * if `stmt` itself fails, recovery skips the offending tokens and
+///   yields an `Error` node;
+/// * if the statement parses but garbage follows on the same line
+///   (`y = = 1`), the tail recovery skips to the boundary and the
+///   whole line collapses to one `Error` node — a half-parsed
+///   statement prefix never survives into the AST.
+///
+/// Every skip uses `at_least(1)`: recovering over zero tokens at a
+/// clean boundary would emit a spurious error. Errors emitted by a
+/// recovery whose surrounding line later fails are rolled back by
+/// chumsky's rewind, so each broken line reports exactly once.
+///
+/// `not_at_boundary` decides where the loop stops without running the
+/// statement grammar: the grammar is deep and a failed alternative
+/// carries chumsky's `Rich` expected-set bookkeeping, so letting the
+/// loop fail its way through the whole of `stmt` against the
+/// `Dedent`/end-of-input that ends the list costs more than parsing a
+/// real statement. Lines the guard admits parse exactly as before.
+fn statement_list<'a, I>(
+    stmt: impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a,
+    terminator: impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a,
+) -> impl Parser<'a, I, Vec<Statement>, extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let stmt_rec = stmt.recover_with(via_parser(
+        skip_garbage().map_with(|_, e| error_stmt(e.span())),
+    ));
+
+    let line_end = require_newlines().or(terminator);
+
+    let tail = line_end
+        .clone()
+        .to(LineTail::Clean)
+        .recover_with(via_parser(
+            skip_garbage().then_ignore(line_end).to(LineTail::Garbage),
+        ));
+
+    // Zero-width: succeeds only when another line can follow.
+    let not_at_boundary = empty().and_is(none_of([Token::Dedent])).ignored();
+
+    let line =
+        not_at_boundary
+            .ignore_then(stmt_rec)
+            .then(tail)
+            .map_with(|(s, tail), e| match tail {
+                LineTail::Clean => s,
+                LineTail::Garbage => error_stmt(e.span()),
+            });
+
+    skip_newlines()
+        .ignore_then(line.repeated().collect::<Vec<_>>())
+        .then_ignore(skip_newlines())
+        .boxed()
+}
+
 /// Parse a complete Ryo program with multiple statements.
 pub fn program_parser<'a, I>() -> impl Parser<'a, I, Program, extra::Err<Rich<'a, Token>>> + 'a
 where
@@ -42,15 +157,10 @@ where
 {
     // Statements are newline-separated. Leading/trailing newlines
     // are tolerated; consecutive statements must have at least one
-    // newline between them.
-    skip_newlines()
-        .ignore_then(
-            statement_parser()
-                .separated_by(require_newlines())
-                .allow_trailing()
-                .collect::<Vec<_>>(),
-        )
-        .then_ignore(skip_newlines())
+    // newline between them. Unparseable lines recover to `Error`
+    // nodes (see `statement_list`), so a syntax error never discards
+    // the rest of the file.
+    statement_list(statement_parser(), end())
         .then_ignore(end())
         .map_with(|statements, _e| {
             let span = if statements.is_empty() {
@@ -62,6 +172,7 @@ where
             };
             Program { statements, span }
         })
+        .boxed()
 }
 
 /// Parse an indented block of one or more statements.
@@ -71,17 +182,12 @@ fn indented_block<'a, I>(
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    skip_newlines()
-        .ignore_then(
-            stmt.separated_by(require_newlines())
-                .at_least(1)
-                .allow_trailing()
-                .collect::<Vec<_>>(),
-        )
+    statement_list(stmt, peek_terminator(Token::Dedent))
         .delimited_by(
             skip_newlines().ignore_then(just(Token::Indent)),
             just(Token::Dedent),
         )
+        .boxed()
 }
 
 fn assign_or_decl_parser<'a, I>()
@@ -100,6 +206,7 @@ where
             span: e.span(),
             kind: StmtKind::AssignOrDecl { target, value },
         })
+        .boxed()
 }
 
 fn compound_assign_parser<'a, I>()
@@ -126,6 +233,7 @@ where
             span: e.span(),
             kind: StmtKind::CompoundAssign { target, op, value },
         })
+        .boxed()
 }
 
 /// Statements valid inside a function body.
@@ -220,6 +328,9 @@ where
             kind: StmtKind::ExprStmt(expr),
         });
 
+        // Boxed to keep the concrete type small: this parser is stored
+        // inside `Recursive`, which keeps the full type in its symbol
+        // names (see the note in `expression_parser`).
         choice((
             return_stmt,
             compound_assign_parser(),
@@ -232,6 +343,7 @@ where
             continue_stmt,
             expr_stmt,
         ))
+        .boxed()
     })
 }
 
@@ -267,11 +379,12 @@ where
             elif_branches,
             else_block,
         })
+        .boxed()
 }
 
 /// Top-level statements: only function defs and var decls.
 fn top_level_statement_parser<'a, I>()
--> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + 'a
+-> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -294,14 +407,15 @@ where
         kind: StmtKind::ExprStmt(expr),
     });
 
-    choice((function_def, var_decl, expr_stmt))
+    choice((function_def, var_decl, expr_stmt)).boxed()
 }
 
-fn statement_parser<'a, I>() -> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + 'a
+fn statement_parser<'a, I>()
+-> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    top_level_statement_parser()
+    top_level_statement_parser().boxed()
 }
 
 /// Type annotation: a plain name (`str`, `int`, ...) or the legacy
@@ -319,10 +433,11 @@ where
         .map_with(|name, e| TypeExpr::view(name, e.span()));
     let plain =
         select! { Token::Ident(name) => name }.map_with(|name, e| TypeExpr::new(name, e.span()));
-    view.or(plain)
+    view.or(plain).boxed()
 }
 
-fn function_def_parser<'a, I>() -> impl Parser<'a, I, FunctionDef, extra::Err<Rich<'a, Token>>> + 'a
+fn function_def_parser<'a, I>()
+-> impl Parser<'a, I, FunctionDef, extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -369,6 +484,7 @@ where
             return_type,
             body,
         })
+        .boxed()
 }
 
 fn var_decl_parser<'a, I>() -> impl Parser<'a, I, VarDecl, extra::Err<Rich<'a, Token>>> + Clone + 'a
@@ -395,6 +511,7 @@ where
                 initializer,
             },
         )
+        .boxed()
 }
 
 fn expression_parser<'a, I>()
@@ -505,17 +622,24 @@ where
             .then(just(Token::IntLitMin))
             .map_with(|_, e| Expression::new(ExprKind::Literal(Literal::Int(i64::MIN)), e.span()));
 
-        let unary = neg_min.or(unary_op
-            .repeated()
-            .collect::<Vec<_>>()
-            .then(postfix)
-            .map_with(|(ops, expr), e| {
-                let mut result = expr;
-                for op in ops.into_iter().rev() {
-                    result = Expression::new(ExprKind::UnaryOp(op, Box::new(result)), e.span());
-                }
-                result
-            }));
+        // Each precedence level is `.boxed()` to erase the concrete
+        // combinator type. Without this the levels nest into each other
+        // (term contains unary, additive contains term, ...) and the
+        // demangled symbol names grow to hundreds of kilobytes, which
+        // breaks some profiling tooling (and compile times).
+        let unary = neg_min
+            .or(unary_op
+                .repeated()
+                .collect::<Vec<_>>()
+                .then(postfix)
+                .map_with(|(ops, expr), e| {
+                    let mut result = expr;
+                    for op in ops.into_iter().rev() {
+                        result = Expression::new(ExprKind::UnaryOp(op, Box::new(result)), e.span());
+                    }
+                    result
+                }))
+            .boxed();
 
         let term = unary.clone().foldl(
             choice((
@@ -535,6 +659,8 @@ where
             },
         );
 
+        let term = term.boxed();
+
         let additive = term.clone().foldl(
             choice((
                 just(Token::Add).to(BinaryOperator::Add),
@@ -551,6 +677,8 @@ where
                 )
             },
         );
+
+        let additive = additive.boxed();
 
         // Ordering (non-associative) sits between additive and equality.
         let ordering = additive
@@ -575,7 +703,8 @@ where
                         SimpleSpan::new((), start..end),
                     )
                 }
-            });
+            })
+            .boxed();
 
         // Equality is non-associative.
         let equality = ordering
@@ -598,7 +727,8 @@ where
                         SimpleSpan::new((), start..end),
                     )
                 }
-            });
+            })
+            .boxed();
 
         // Logical AND binds tighter than OR, below equality.
         let logical_and = equality.clone().foldl(
@@ -616,21 +746,26 @@ where
             },
         );
 
+        let logical_and = logical_and.boxed();
+
         // Logical OR is the lowest precedence.
-        logical_and.clone().foldl(
-            just(Token::Or)
-                .to(BinaryOperator::Or)
-                .then(logical_and)
-                .repeated(),
-            |left, (op, right)| {
-                let start = left.span.start;
-                let end = right.span.end;
-                Expression::new(
-                    ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
-                    SimpleSpan::new((), start..end),
-                )
-            },
-        )
+        logical_and
+            .clone()
+            .foldl(
+                just(Token::Or)
+                    .to(BinaryOperator::Or)
+                    .then(logical_and)
+                    .repeated(),
+                |left, (op, right)| {
+                    let start = left.span.start;
+                    let end = right.span.end;
+                    Expression::new(
+                        ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
+                        SimpleSpan::new((), start..end),
+                    )
+                },
+            )
+            .boxed()
     })
 }
 
@@ -1669,5 +1804,148 @@ mod tests {
         };
         assert!(f.params[0].type_annotation.is_view);
         assert_eq!(pool.str(f.params[0].type_annotation.name), "str");
+    }
+
+    /// Recovery-aware variant of `lex_and_parse`: returns the partial
+    /// program (if one could be produced) alongside every parse error.
+    fn lex_and_parse_recovering(
+        input: &str,
+    ) -> (Option<Program>, Vec<Rich<'static, Token>>, InternPool) {
+        let mut pool = InternPool::new();
+        let mut sink = ryo_core::diag::DiagSink::new();
+        let tokens = lex(input, &mut pool, &mut sink);
+        assert!(!sink.has_errors(), "test input must lex cleanly");
+        let token_stream = tokens[..].split_token_span((0..input.len()).into());
+        let (program, errs) = program_parser().parse(token_stream).into_output_errors();
+        (
+            program,
+            errs.into_iter().map(|rich| rich.into_owned()).collect(),
+            pool,
+        )
+    }
+
+    #[test]
+    fn recovers_from_bad_statement_between_good_ones() {
+        let (program, errs, _pool) = lex_and_parse_recovering("x = 1\ny = = 2\nz = 3\n");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        assert_eq!(program.statements.len(), 3);
+        assert!(matches!(
+            program.statements[0].kind,
+            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+        ));
+        assert!(matches!(program.statements[1].kind, StmtKind::Error));
+        assert!(matches!(
+            program.statements[2].kind,
+            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+        ));
+    }
+
+    #[test]
+    fn recovers_inside_function_body() {
+        let (program, errs, _pool) =
+            lex_and_parse_recovering("fn main():\n\tx = 1\n\ty = = 2\n\tz = 3\n");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
+            panic!("expected FunctionDef");
+        };
+        assert_eq!(func.body.len(), 3);
+        assert!(matches!(func.body[1].kind, StmtKind::Error));
+        assert!(matches!(func.body[2].kind, StmtKind::AssignOrDecl { .. }));
+    }
+
+    #[test]
+    fn reports_multiple_parse_errors_in_one_file() {
+        let (program, errs, _pool) = lex_and_parse_recovering("x = = 1\ny = 2\nz = = 3\nw = 4\n");
+        assert_eq!(errs.len(), 2, "expected two parse errors: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        assert_eq!(program.statements.len(), 4);
+        assert!(matches!(program.statements[0].kind, StmtKind::Error));
+        assert!(matches!(
+            program.statements[1].kind,
+            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+        ));
+        assert!(matches!(program.statements[2].kind, StmtKind::Error));
+        assert!(matches!(
+            program.statements[3].kind,
+            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+        ));
+    }
+
+    #[test]
+    fn recovers_from_trailing_garbage_without_newline_at_eof() {
+        // File does not end with a newline: the last line is broken.
+        let (program, errs, _pool) = lex_and_parse_recovering("x = 1\ny = = 2");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        assert_eq!(program.statements.len(), 2);
+        assert!(matches!(
+            program.statements[0].kind,
+            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+        ));
+        assert!(matches!(program.statements[1].kind, StmtKind::Error));
+    }
+
+    #[test]
+    fn recovers_from_broken_block_final_statement_before_dedent() {
+        // The last body line is broken and the following top-level
+        // statement triggers the block's `Dedent`.
+        let (program, errs, _pool) =
+            lex_and_parse_recovering("fn main():\n\tx = 1\n\ty = = 2\nz = 3\n");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
+            panic!("expected FunctionDef");
+        };
+        assert_eq!(func.body.len(), 2);
+        assert!(matches!(func.body[1].kind, StmtKind::Error));
+        assert_eq!(program.statements.len(), 2);
+    }
+
+    #[test]
+    fn recovers_from_broken_block_final_statement_at_eof() {
+        // The broken final body line sits directly against the
+        // zero-width end-of-input `Dedent` (no terminating newline of
+        // its own) — the `peek_terminator(Dedent)` terminator path.
+        let (program, errs, _pool) = lex_and_parse_recovering("fn main():\n\tx = 1\n\ty = = 2");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
+            panic!("expected FunctionDef");
+        };
+        assert_eq!(func.body.len(), 2);
+        assert!(matches!(func.body[1].kind, StmtKind::Error));
+        assert_eq!(program.statements.len(), 1);
+    }
+
+    #[test]
+    fn parses_unterminated_final_statement_in_block() {
+        // The block-final statement has no terminating newline: it
+        // ends directly at the list terminator (the end-of-input
+        // `Dedent`). Valid input, so no error node and no diagnostic.
+        let (program, errs, _pool) = lex_and_parse_recovering("fn main():\n\tx = 1");
+        assert!(errs.is_empty(), "expected a clean parse: {errs:?}");
+        let program = program.expect("expected a program");
+        assert_eq!(program.statements.len(), 1);
+        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
+            panic!("expected FunctionDef");
+        };
+        assert_eq!(func.body.len(), 1);
+        assert!(matches!(
+            func.body[0].kind,
+            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+        ));
+    }
+
+    #[test]
+    fn two_statements_on_one_line_still_error_with_recovery() {
+        // The no-two-statements-per-line rule must survive recovery:
+        // this is one parse error, not two silent statements.
+        let (program, errs, _pool) = lex_and_parse_recovering("x = 1 y = 2\n");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        assert_eq!(program.statements.len(), 1);
+        assert!(matches!(program.statements[0].kind, StmtKind::Error));
     }
 }

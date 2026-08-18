@@ -1874,6 +1874,36 @@ fn while_break_outside_loop_error() {
 }
 
 #[test]
+fn parse_error_recovers_and_sema_errors_co_surface() {
+    // R10: one syntax error must not discard the rest of the file.
+    // The parser recovers at the next statement boundary, so the
+    // type error on the following line still surfaces — both in one
+    // run, and the compile still fails.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = = 1\n\ty: int = \"hi\"\n";
+    let test_file = create_test_file(temp_dir.path(), "multi_error.ryo", code);
+
+    let output = run_ryo_command(&["run", "multi_error.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "a file with parse + type errors must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0100"),
+        "should emit E0100 for the parse error, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("E0012"),
+        "should emit E0012 for the type error despite the parse error, got: {}",
+        stderr
+    );
+}
+
+#[test]
 fn while_continue_outside_loop_error() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\tcontinue\n";

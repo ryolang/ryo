@@ -64,6 +64,7 @@ impl Statement {
             StmtKind::ForRange { .. } => "ForRange",
             StmtKind::Break => "Break",
             StmtKind::Continue => "Continue",
+            StmtKind::Error => "Error",
         };
         print!(
             "Statement [{}] ({}..{})",
@@ -163,6 +164,9 @@ impl Statement {
             StmtKind::Continue => {
                 println!("{}Continue", prefix);
             }
+            StmtKind::Error => {
+                println!("{}Error (unparseable)", prefix);
+            }
         }
     }
 }
@@ -197,6 +201,11 @@ pub enum StmtKind {
     },
     Break,
     Continue,
+    /// Placeholder for a statement the parser could not parse. The
+    /// parser emits the diagnostic itself and recovers at the next
+    /// statement boundary, producing this node so later passes keep
+    /// a well-formed (partial) AST; astgen lowers it to nothing.
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq)]

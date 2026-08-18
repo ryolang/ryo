@@ -14,16 +14,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 ---
 
-## 🔴 Blocking
-
-### I-125 — Parser has zero error recovery; one syntax error discards the whole AST
-
-**Files:** `ryo-frontend/src/parser.rs` (`program_parser` :39-65), `ryo-driver/src/pipeline.rs` (`parse_source` :127-143), `ryo-core/src/ast.rs`
-**Summary:** R10 requires the parser to emit a diagnostic, synchronize at the next statement/declaration boundary, and produce a partial AST with `Error` nodes. None of that exists: no `recover_with`/`skip_until` combinator anywhere in the parser, no `Error` node kind in the AST, and `parse_source` calls `.into_result()` and returns early on `Err` — so a single syntax error suppresses *all* semantic diagnostics in the file (one bad function stops analysis of the rest, violating R9's accumulation rule at the parse stage). This blocks the IDE/REPL use cases R10 exists for, and it caps diagnostic quality for every later milestone.
-**Resolution:** Add an `ExprKind::Error` / `StmtKind::Error` (or a dedicated `Error` literal node) to the AST, thread it through astgen/sema as error-typed no-ops (sema already has error-typed `Unreachable` slots to model from), and add chumsky `recover_with(skip_until(...))` synchronization at statement and declaration boundaries. Golden-test multi-error files. Natural sequencing: after I-014's lexer `DiagSink` migration so lex and parse errors co-surface through one sink (cf. I-030's `MapExtra::emit` note).
-
----
-
 ## 🟡 Correctness / Hygiene
 
 ### I-032 — IfStmt is statement-only, no expression-level conditional
@@ -320,6 +310,12 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Files:** `ryo-frontend/src/ownership.rs` (`origin` :113, `owner_at_read` :140, `view_last_use` :201, `view_defer_loop` :214, `consumer_of` :1749, `program_order` :1298-1315 built per function at :1504 and :1620), `ryo-frontend/src/sema.rs` (`call_arg_refs: HashSet<InstRef>` :198, :204-215, queried at :1169)
 **Summary:** R18's rule: side tables keyed by a dense arena index belong in a `Vec` indexed by that index; hash maps are for sparse/string-keyed/unbounded data only. The ownership pass keeps five per-inst `HashMap<TirRef, _>` tables on the hot per-expression path, builds a whole-body `HashMap<TirRef, u32>` program-order map twice per function, and sema keeps a whole-program `HashSet<InstRef>` queried per `Borrow` inst — all keyed by dense `u32` arena indices. Distinct from I-064/I-065/I-107/I-119, which cover recomputation and linear lookups in other helpers.
 **Resolution:** Convert to `Vec<Option<…>>`/`Vec<bool>` side tables sized from the arena length (`TirRef::index()`/`InstRef::index()`), built once per function (per program for `call_arg_refs`). Same refactor shape as I-107's param-index map; do them together.
+
+### I-130 — Parser recovery is line-granular; broken block headers silently mis-nest their body
+
+**Files:** `ryo-frontend/src/parser.rs` (`statement_list`, `indented_block`)
+**Summary:** I-125's recovery synchronizes at newline/`Dedent` boundaries line by line. When a block *header* is unparseable (e.g. `fn foo(` followed by an indented, individually-valid body), verified behavior is: exactly **two** diagnostics regardless of body length — one for the header, one for the dangling `Dedent` the body leaves behind at top level — and the body lines parse **silently as top-level statements**. The earlier "one diagnostic per body line" description did not reproduce; the real defect is the silent mis-nesting: a broken `fn`/`if`/`while` header leaks its body into the enclosing scope, so downstream passes (sema co-surfacing, R9) see those statements in the wrong scope and may report misleading secondary errors. Compilation still fails correctly on the parse errors themselves.
+**Resolution:** Add nesting-aware recovery for declaration headers — e.g. chumsky's `nested_delimiters` strategy, or making the line-recovery skip set indentation-aware so a failed `fn`/`if`/`while` header swallows its indented block as one region. Revisit when the grammar gains more multi-line constructs.
 
 ---
 

@@ -46,3 +46,6 @@ graphify-out/
 
 # Claude Code (personal settings)
 .claude/
+
+# Cargo llvm-cov info
+lcov.info
