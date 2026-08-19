@@ -257,7 +257,7 @@ fn write_expr(
     let name = match &expr.kind {
         ExprKind::Literal(lit) => match lit {
             Literal::Int(n) => format!("Literal(Int({}))", n),
-            Literal::Str(s) => format!("Literal(Str(\"{}\"))", pool.str(*s)),
+            Literal::Str(s) => format!("Literal(Str(\"{}\"))", pool.str(*s).escape_debug()),
             Literal::Bool(b) => format!("Literal(Bool({}))", b),
             Literal::Float(v) => format!("Literal(Float({}))", v),
         },
@@ -450,5 +450,31 @@ Program (0..0)
               └── Literal(Int(2)) (0..0)
 ";
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn str_literal_escapes_special_chars() {
+        let mut pool = InternPool::new();
+        let s = pool.intern_str("say \"hi\"\\n\n\t");
+        let stmt = Statement {
+            kind: StmtKind::ExprStmt(Expression::new(
+                ExprKind::Literal(Literal::Str(s)),
+                span(0, 0),
+            )),
+            span: span(0, 0),
+        };
+        let program = Program {
+            statements: vec![stmt],
+            span: span(0, 0),
+        };
+
+        let out = render_program(&program, &pool);
+        assert!(
+            out.contains(r#"Literal(Str("say \"hi\"\\n\n\t"))"#),
+            "special chars not escaped: {out}"
+        );
+        // One node per line: Program, Statement, Literal — the raw
+        // newline in the string must not split the literal's line.
+        assert_eq!(out.lines().count(), 3, "{out}");
     }
 }
