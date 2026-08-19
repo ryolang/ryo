@@ -332,7 +332,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
 
 fn display_ast(program: &ast::Program, pool: &InternPool) {
     println!("[AST]");
-    program.pretty_print(pool);
+    print!("{}", ryo_core::ast_pretty::render_program(program, pool));
 }
 
 /// Drive `ryo ir` with the requested set of IR sections.

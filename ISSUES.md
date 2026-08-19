@@ -34,12 +34,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** Hand-rolled `enum CompilerError` with manual `Display` and `From<io::Error>` impls. `thiserror` would cut ~20 lines and make variants more uniform.
 **Resolution:** Add `thiserror`, derive `Error` and `Display`, drop the hand-written impls.
 
-### I-012 — `pretty_print` lives on AST nodes
-
-**Files:** `ryo-core/src/ast.rs`
-**Summary:** Presentation logic (tree-drawing, prefixes) is mixed into the AST data types. Convenient now, painful as the AST grows. A separate `pretty` module — or `Debug`-derived JSON output for `--parse` — scales better and keeps `ast.rs` focused on data.
-**Resolution:** Extract into `ryo-core/src/ast_pretty.rs` (or similar) when the next AST node type is added.
-
 ### I-013 — `--emit` flag surface is fragmented across subcommands
 
 **Files:** `ryo/src/main.rs`, `ryo-driver/src/pipeline.rs`

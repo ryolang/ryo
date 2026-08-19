@@ -1,12 +1,11 @@
 //! Surface-syntax AST.
 //!
 //! Identifiers, type names, and string literals are stored as
-//! `StringId` handles into the compilation's `InternPool`. Pretty
-//! printing and Display impls accept a pool reference so they can
-//! resolve those handles back to source text.
+//! `StringId` handles into the compilation's `InternPool`.
+//! Tree-drawing lives in `crate::ast_pretty`.
 
 use crate::tir::ParamMode;
-use crate::types::{InternPool, StringId};
+use crate::types::StringId;
 use chumsky::span::SimpleSpan;
 use std::fmt;
 
@@ -21,24 +20,6 @@ pub struct Program {
     pub span: SimpleSpan,
 }
 
-impl Program {
-    pub fn pretty_print(&self, pool: &InternPool) {
-        println!("Program ({}..{})", self.span.start, self.span.end);
-        for (idx, stmt) in self.statements.iter().enumerate() {
-            let is_last = idx == self.statements.len() - 1;
-            let prefix = if is_last { "└── " } else { "├── " };
-            print!("{}", prefix);
-            stmt.pretty_print_inline();
-            println!();
-            if !is_last {
-                stmt.pretty_print_children("│   ", pool);
-            } else {
-                stmt.pretty_print_children("    ", pool);
-            }
-        }
-    }
-}
-
 // ============================================================================
 // Statements
 // ============================================================================
@@ -48,127 +29,6 @@ impl Program {
 pub struct Statement {
     pub kind: StmtKind,
     pub span: SimpleSpan,
-}
-
-impl Statement {
-    fn pretty_print_inline(&self) {
-        let label = match &self.kind {
-            StmtKind::VarDecl(_) => "VarDecl",
-            StmtKind::FunctionDef(_) => "FunctionDef",
-            StmtKind::Return(_) => "Return",
-            StmtKind::ExprStmt(_) => "ExprStmt",
-            StmtKind::IfStmt(_) => "IfStmt",
-            StmtKind::AssignOrDecl { .. } => "AssignOrDecl",
-            StmtKind::CompoundAssign { .. } => "CompoundAssign",
-            StmtKind::WhileLoop { .. } => "WhileLoop",
-            StmtKind::ForRange { .. } => "ForRange",
-            StmtKind::Break => "Break",
-            StmtKind::Continue => "Continue",
-            StmtKind::Error => "Error",
-        };
-        print!(
-            "Statement [{}] ({}..{})",
-            label, self.span.start, self.span.end
-        );
-    }
-
-    fn pretty_print_children(&self, prefix: &str, pool: &InternPool) {
-        match &self.kind {
-            StmtKind::VarDecl(decl) => decl.pretty_print(prefix, pool),
-            StmtKind::FunctionDef(func) => {
-                println!("{}FunctionDef: {}", prefix, pool.str(func.name.name));
-                let inner = format!("{}  ", prefix);
-                for param in &func.params {
-                    let mode_prefix = match param.mode {
-                        ParamMode::Move => "move ",
-                        ParamMode::Inout => "inout ",
-                        ParamMode::Borrow => "",
-                    };
-                    println!(
-                        "{}├── param: {}{}: {}",
-                        inner,
-                        mode_prefix,
-                        pool.str(param.name.name),
-                        pool.str(param.type_annotation.name),
-                    );
-                }
-                if let Some(ret_ty) = &func.return_type {
-                    println!("{}├── returns: {}", inner, pool.str(ret_ty.name));
-                }
-                println!("{}└── body:", inner);
-                for stmt in &func.body {
-                    print!("{}    ", inner);
-                    stmt.pretty_print_inline();
-                    println!();
-                }
-            }
-            StmtKind::Return(expr) => {
-                if let Some(e) = expr {
-                    e.pretty_print(prefix, pool);
-                }
-            }
-            StmtKind::ExprStmt(expr) => expr.pretty_print(prefix, pool),
-            StmtKind::IfStmt(_if_stmt) => {
-                println!("{}IfStmt", prefix);
-            }
-            StmtKind::AssignOrDecl { target, value } => {
-                println!("{}AssignOrDecl: {}", prefix, pool.str(target.name));
-                value.pretty_print(&format!("{}  └── ", prefix), pool);
-            }
-            StmtKind::CompoundAssign { target, op, value } => {
-                println!(
-                    "{}CompoundAssign: {} {:?}",
-                    prefix,
-                    pool.str(target.name),
-                    op
-                );
-                value.pretty_print(&format!("{}  └── ", prefix), pool);
-            }
-            StmtKind::WhileLoop { cond, body } => {
-                println!("{}WhileLoop", prefix);
-                cond.pretty_print(&format!("{}  ├── cond: ", prefix), pool);
-                for (i, stmt) in body.iter().enumerate() {
-                    let is_last = i == body.len() - 1;
-                    let branch = if is_last { "└──" } else { "├──" };
-                    print!("{}  {} ", prefix, branch);
-                    stmt.pretty_print_inline();
-                    println!();
-                }
-            }
-            StmtKind::ForRange {
-                var,
-                iterator,
-                start,
-                end,
-                body,
-            } => {
-                println!(
-                    "{}ForRange: {} in {}",
-                    prefix,
-                    pool.str(var.name),
-                    pool.str(iterator.name)
-                );
-                start.pretty_print(&format!("{}  ├── start: ", prefix), pool);
-                end.pretty_print(&format!("{}  ├── end: ", prefix), pool);
-                for (i, stmt) in body.iter().enumerate() {
-                    let is_last = i == body.len() - 1;
-                    let branch = if is_last { "└──" } else { "├──" };
-                    print!("{}  {} ", prefix, branch);
-                    stmt.pretty_print_inline();
-                    println!();
-                }
-            }
-            StmtKind::Break => {
-                println!("{}Break", prefix);
-            }
-            StmtKind::Continue => {
-                println!("{}Continue", prefix);
-            }
-            StmtKind::Error => {
-                println!("{}Error (unparseable)", prefix);
-            }
-        }
-    }
 }
 
 /// The kind of statement.
@@ -228,35 +88,6 @@ pub struct VarDecl {
     pub name: Ident,
     pub type_annotation: Option<TypeExpr>,
     pub initializer: Expression,
-}
-
-impl VarDecl {
-    fn pretty_print(&self, prefix: &str, pool: &InternPool) {
-        println!("{}VarDecl", prefix);
-        let new_prefix = format!("{}  ", prefix);
-        if self.mutable {
-            println!("{}├── mutable: true", new_prefix);
-        }
-        println!(
-            "{}├── name: {} ({}..{})",
-            new_prefix,
-            pool.str(self.name.name),
-            self.name.span.start,
-            self.name.span.end
-        );
-        if let Some(ty) = &self.type_annotation {
-            println!(
-                "{}├── type: {} ({}..{})",
-                new_prefix,
-                pool.str(ty.name),
-                ty.span.start,
-                ty.span.end
-            );
-        }
-        println!("{}└── initializer:", new_prefix);
-        self.initializer
-            .pretty_print(&format!("{}    ", new_prefix), pool);
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -345,72 +176,6 @@ pub struct Expression {
 impl Expression {
     pub fn new(kind: ExprKind, span: SimpleSpan) -> Self {
         Expression { kind, span }
-    }
-
-    fn pretty_print(&self, prefix: &str, pool: &InternPool) {
-        let connector_name = match &self.kind {
-            ExprKind::Literal(lit) => match lit {
-                Literal::Int(n) => format!("Literal(Int({}))", n),
-                Literal::Str(s) => format!("Literal(Str(\"{}\"))", pool.str(*s)),
-                Literal::Bool(b) => format!("Literal(Bool({}))", b),
-                Literal::Float(v) => format!("Literal(Float({}))", v),
-            },
-            ExprKind::Ident(name) => format!("Ident({})", pool.str(*name)),
-            ExprKind::BinaryOp(_, op, _) => format!("BinaryOp({})", op),
-            ExprKind::UnaryOp(op, _) => format!("UnaryOp({})", op),
-            ExprKind::Call(name, _) => format!("Call({})", pool.str(*name)),
-            ExprKind::MethodCall { method, .. } => {
-                format!("MethodCall(.{})", pool.str(*method))
-            }
-            ExprKind::Borrow(_) => "Borrow".to_string(),
-            ExprKind::Slice { .. } => "Slice".to_string(),
-        };
-
-        println!(
-            "{}{} ({}..{})",
-            prefix, connector_name, self.span.start, self.span.end
-        );
-
-        let new_prefix = format!("{}  ", prefix);
-        match &self.kind {
-            ExprKind::Literal(_) | ExprKind::Ident(_) => {}
-            ExprKind::BinaryOp(left, _op, right) => {
-                left.pretty_print(&format!("{}├── ", new_prefix), pool);
-                right.pretty_print(&format!("{}└── ", new_prefix), pool);
-            }
-            ExprKind::UnaryOp(_op, expr) => {
-                expr.pretty_print(&format!("{}└── ", new_prefix), pool);
-            }
-            ExprKind::Call(_name, args) => {
-                for (i, arg) in args.iter().enumerate() {
-                    let is_last = i == args.len() - 1;
-                    let prefix_char = if is_last { "└── " } else { "├── " };
-                    arg.pretty_print(&format!("{}{}", new_prefix, prefix_char), pool);
-                }
-            }
-            ExprKind::MethodCall { receiver, args, .. } => {
-                receiver.pretty_print(&format!("{}├── recv: ", new_prefix), pool);
-                for (i, arg) in args.iter().enumerate() {
-                    let is_last = i == args.len() - 1;
-                    let prefix_char = if is_last { "└── " } else { "├── " };
-                    arg.pretty_print(&format!("{}{}", new_prefix, prefix_char), pool);
-                }
-            }
-            ExprKind::Borrow(inner) => {
-                inner.pretty_print(&format!("{}└── ", new_prefix), pool);
-            }
-            ExprKind::Slice { base, start, end } => {
-                base.pretty_print(&format!("{}├── base: ", new_prefix), pool);
-                match start {
-                    Some(start) => start.pretty_print(&format!("{}├── start: ", new_prefix), pool),
-                    None => println!("{}├── start: <none>", new_prefix),
-                }
-                match end {
-                    Some(end) => end.pretty_print(&format!("{}└── end: ", new_prefix), pool),
-                    None => println!("{}└── end: <none>", new_prefix),
-                }
-            }
-        }
     }
 }
 
