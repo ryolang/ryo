@@ -257,7 +257,7 @@ fn write_expr(
     let name = match &expr.kind {
         ExprKind::Literal(lit) => match lit {
             Literal::Int(n) => format!("Literal(Int({}))", n),
-            Literal::Str(s) => format!("Literal(Str(\"{}\"))", pool.str(*s).escape_debug()),
+            Literal::Str(s) => format!("Literal(Str({:?}))", pool.str(*s)),
             Literal::Bool(b) => format!("Literal(Bool({}))", b),
             Literal::Float(v) => format!("Literal(Float({}))", v),
         },
