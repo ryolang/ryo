@@ -199,15 +199,21 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Resolution:** Add the `// SAFETY:` comment at the JIT site (function was finalized by cranelift-jit for this module; signature matches the compiled entry point; memory freed after execution), link this issue from both sites, and record the sign-off here. No code-semantics change.
 **Status (2026-08-03):** SAFETY comments + linked issue are in place at both sites, and `unsafe_code = "deny"` now guards the rest of the tree via `[workspace.lints]` (compiler crates opt in; `runtime/` is the curated boundary). Remaining: human sign-off in review.
 
+### I-131 — Panic-on-invariant sites outside the trusted-producer contract
+
+**Files:** `ryo-frontend/src/sema.rs` (:1248-1252 — `analyze_expr` fallthrough), `ryo-frontend/src/ownership.rs` (:89, :1831, :2903, :2923 — `expect("param exists")`)
+**Summary:** The I-106 audit established a documented trusted-producer contract for decode-path `unreachable!`s in UIR/TIR. Two newer sites sit outside that contract: `analyze_expr`'s fallthrough arm is a `panic!` naming the offending tag, so any UIR tag that drifts out of the expression set crashes the compiler instead of producing a diagnostic; and the ownership pass `expect("param exists")`s on its param-index map in four places. Both are compiler panics on internal-invariant violation, invisible to the R9 diagnostics pipeline.
+**Resolution:** Either route both through the sink as internal-error diagnostics (R9), or convert to plain `unreachable!` with a comment folding them into the documented trusted-producer contract so the next audit covers them.
+
+### I-132 — Runtime FFI boundary conflates failure modes and under-checks inputs
+
+**Files:** `runtime/src/lib.rs` (`oom_abort` call sites :166, :170, :200, :204, :270, :353, :361-363, :404, :426, :440-441; null checks :105, :117, :272)
+**Summary:** Two robustness gaps at the C-ABI boundary. (a) `oom_abort` is the handler for three distinct failure modes — genuine allocation failure, `u64 → usize` narrowing (32-bit-only), and `checked_add` capacity overflow — so all three abort identically with an OOM message. (b) `ryo_print` / `ryo_panic` / the slice path guard their pointer args with `debug_assert!(!ptr.is_null())` only; a release build passes a null pointer to `write`/`memcpy` unchecked when `len > 0`.
+**Resolution:** Split `oom_abort` into distinct abort paths (or a reason-code parameter) so overflow/narrowing is distinguishable from OOM in the message; downgrade the null checks to real `if ptr.is_null() { abort }` guards at the FFI entry points — they cost one branch on a cold path.
+
 ---
 
 ## 🟢 Cleanup
-
-### I-089 — `ParamMode::from_u32` silently coerces unknown values to `Borrow`
-
-**Files:** `ryo-core/src/tir.rs` (:240-246)
-**Summary:** Decoding an unknown mode word yields `Borrow` — the least restrictive convention — instead of an error. Harmless today; a footgun if the enum grows or a payload is corrupted.
-**Resolution:** Return `Option<ParamMode>` and internal-error on unknown values at the single decode site (`call_view`).
 
 ### I-091 — UIR/TIR view decoders allocate a `Vec` per decode
 
@@ -311,11 +317,35 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** I-125's recovery synchronizes at newline/`Dedent` boundaries line by line. When a block *header* is unparseable (e.g. `fn foo(` followed by an indented, individually-valid body), verified behavior is: exactly **two** diagnostics regardless of body length — one for the header, one for the dangling `Dedent` the body leaves behind at top level — and the body lines parse **silently as top-level statements**. The earlier "one diagnostic per body line" description did not reproduce; the real defect is the silent mis-nesting: a broken `fn`/`if`/`while` header leaks its body into the enclosing scope, so downstream passes (sema co-surfacing, R9) see those statements in the wrong scope and may report misleading secondary errors. Compilation still fails correctly on the parse errors themselves.
 **Resolution:** Add nesting-aware recovery for declaration headers — e.g. chumsky's `nested_delimiters` strategy, or making the line-recovery skip set indentation-aware so a failed `fn`/`if`/`while` header swallows its indented block as one region. Revisit when the grammar gains more multi-line constructs.
 
+### I-134 — Stale in-tree comments found during the 2026-08-20 architecture re-verification
+
+**Files:** `ryo-core/src/tir.rs` (:1-6), `ryo-core/src/uir.rs` (:1-6), `ryo-core/src/tir.rs` (:55), `ryo-frontend/src/ownership.rs` (:1932-1934)
+**Summary:** Four comments describe states the code has moved past: (a) the `tir.rs`/`uir.rs` module headers claim `ryo ir --emit=tir|uir` is "still TODO" — both are wired (`pipeline.rs:349,378-380,398-401`); (b) `tir.rs:55` cites `I-106`, which is resolved and deleted — exactly the dangling-ID pointer AGENTS.md forbids; (c) the dead-store drain comment says "Today no `free_on_reassign` entries exist; this guard activates with Task 6" — the field is populated and test-covered (`reassignment_records_free_on_old_owner`).
+**Resolution:** One-pass comment sweep; no code changes. (a)/(c) reword to current behavior, (b) drop the ID per AGENTS.md and let the sentence stand on its own.
+
+### I-135 — Rule-7 call-arg partition duplicates the view look-through logic
+
+**Files:** `ryo-frontend/src/ownership.rs` (:3752-3758 — owner partition, :3847-3853 — E0031 span search)
+**Summary:** The `mode == Borrow && tag == ViewAsStr → projection_root else underlying_owner` look-through is written out twice, near-verbatim, in two helpers that must agree for the P6'/E4 rules to stay coherent. A change to one side (e.g. a new look-through case) silently desynchronizes the diagnostic span search from the ownership partition.
+**Resolution:** Extract one `fn call_arg_owner(own, tir, pool, mode, arg) -> Owner` helper used by both sites.
+
+### I-136 — Ownership pass clones whole state maps on hot paths
+
+**Files:** `ryo-frontend/src/ownership.rs` (:2799, :2819, :2840-2841 — 15-field `Ownership` clone per if/elif/else arm; :3072-3078 — four map clones + `sidecar.clone()` per propagate pass)
+**Summary:** Every branch arm and every loop-propagate pass deep-clones the full ownership state (15 fields, several `HashMap`s). Correct, but against R3's allocation discipline on the hottest analysis path; the cost grows with function body size. (Codegen's per-block map clones are tracked separately as I-095.)
+**Resolution:** After I-129 converts the dense-index maps to `Vec` side tables, replace whole-state clones with snapshot/restore of the four non-monotone fields only, or a copy-on-write per-arm overlay. Measure on the benchmark suite before and after.
+
+### I-137 — No file-length gate; three files exceed 3000 lines
+
+**Files:** `ryo-frontend/src/ownership.rs` (9504), `ryo-frontend/src/sema.rs` (4168), `ryo/tests/integration_tests.rs` (4002)
+**Summary:** Nothing stops source files from growing unbounded; three files are already past the 3000-line mark used as the tidy limit (rust-lang `src/tools/tidy` convention, tests included). Full split plans with per-module anchors are in `docs/dev/architecture_analysis_2026_08_20.md` §4. Related to I-128 (function-level sizes) but distinct: this is file-level navigability, review surface, and merge-conflict scope.
+**Resolution:** Add a tidy check to CI failing on `*.rs` files over 3000 lines with an explicit allowlist for the three current files; shrink the allowlist as the §4 splits land (`ownership/` and `sema/` module directories, per-area integration test binaries sharing `common/mod.rs`).
+
 ---
 
 ## Cross-References
 
-- Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md)
+- Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md), refreshed at [docs/dev/architecture_analysis_2026_08_20.md](docs/dev/architecture_analysis_2026_08_20.md) (source of I-131–I-137)
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
