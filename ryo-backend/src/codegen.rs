@@ -2451,7 +2451,13 @@ impl<M: Module> Codegen<M> {
         // field; str spills the fat-pointer triple.
         let mut inout_reloads: Vec<(TirRef, StackSlot)> = Vec::new();
         for (i, arg) in view.args.iter().enumerate() {
-            let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+            let mode = view.modes.get(i).copied().ok_or_else(|| {
+                format!(
+                    "internal error: call '{name_str}' has {} args but {} modes",
+                    view.args.len(),
+                    view.modes.len()
+                )
+            })?;
             let arg_ty = ctx.tir.inst(*arg).ty;
             if mode == ParamMode::Inout {
                 if is_str_type(arg_ty, ctx.pool) {

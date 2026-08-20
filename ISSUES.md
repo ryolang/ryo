@@ -215,12 +215,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 
 ## 🟢 Cleanup
 
-### I-089 — `ParamMode::from_u32` silently coerces unknown values to `Borrow`
-
-**Files:** `ryo-core/src/tir.rs` (:240-246)
-**Summary:** Decoding an unknown mode word yields `Borrow` — the least restrictive convention — instead of an error. Harmless today; a footgun if the enum grows or a payload is corrupted.
-**Resolution:** Return `Option<ParamMode>` and internal-error on unknown values at the single decode site (`call_view`).
-
 ### I-091 — UIR/TIR view decoders allocate a `Vec` per decode
 
 **Files:** `ryo-core/src/uir.rs` (`call_view` :843-847, `if_stmt_view` :980-1001, `body_stmts` :320-326, `while_loop_view` :915, `for_range_view` :931-935, `method_call_view` :955-959), `ryo-core/src/tir.rs` (`call_view`), `ryo-backend/src/codegen.rs` (call view args/modes)
@@ -322,12 +316,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Files:** `ryo-frontend/src/parser.rs` (`statement_list`, `indented_block`)
 **Summary:** I-125's recovery synchronizes at newline/`Dedent` boundaries line by line. When a block *header* is unparseable (e.g. `fn foo(` followed by an indented, individually-valid body), verified behavior is: exactly **two** diagnostics regardless of body length — one for the header, one for the dangling `Dedent` the body leaves behind at top level — and the body lines parse **silently as top-level statements**. The earlier "one diagnostic per body line" description did not reproduce; the real defect is the silent mis-nesting: a broken `fn`/`if`/`while` header leaks its body into the enclosing scope, so downstream passes (sema co-surfacing, R9) see those statements in the wrong scope and may report misleading secondary errors. Compilation still fails correctly on the parse errors themselves.
 **Resolution:** Add nesting-aware recovery for declaration headers — e.g. chumsky's `nested_delimiters` strategy, or making the line-recovery skip set indentation-aware so a failed `fn`/`if`/`while` header swallows its indented block as one region. Revisit when the grammar gains more multi-line constructs.
-
-### I-133 — Codegen `ParamMode` lookup silently falls back to `Borrow` (I-089 twin)
-
-**Files:** `ryo-backend/src/codegen.rs` (:2454 — `view.modes.get(i).copied().unwrap_or(ParamMode::Borrow)`)
-**Summary:** Same footgun shape as I-089, introduced with the M8.4 view call path: a missing mode word decodes as `Borrow`, the least restrictive convention, instead of an error. I-089 covers the `ParamMode::from_u32` decode site in `tir.rs`; this is the writer/reader-lockstep gap on the codegen side.
-**Resolution:** Fix together with I-089 — make the lookup total (internal-error on missing mode) so the modes/args length invariant enforced by `TirBuilder::call`'s assert has no silent escape hatch.
 
 ### I-134 — Stale in-tree comments found during the 2026-08-19 architecture re-verification
 

@@ -300,11 +300,15 @@ impl ParamMode {
         self as u32
     }
 
-    fn from_u32(v: u32) -> Self {
+    /// Strict decode: `None` for any word not produced by
+    /// [`ParamMode::to_u32`]. Callers must treat `None` as producer
+    /// corruption, never as `Borrow`.
+    fn from_u32(v: u32) -> Option<Self> {
         match v {
-            1 => ParamMode::Move,
-            2 => ParamMode::Inout,
-            _ => ParamMode::Borrow,
+            0 => Some(ParamMode::Borrow),
+            1 => Some(ParamMode::Move),
+            2 => Some(ParamMode::Inout),
+            _ => None,
         }
     }
 }
@@ -1008,7 +1012,11 @@ impl Tir {
         let modes = slice[call_extra::ARGS + argc..call_extra::ARGS + 2 * argc]
             .iter()
             .copied()
-            .map(ParamMode::from_u32)
+            .map(|v| {
+                ParamMode::from_u32(v).unwrap_or_else(|| {
+                    unreachable!("call_extra mode word {v} not written by ParamMode::to_u32")
+                })
+            })
             .collect();
         CallView { name, args, modes }
     }
@@ -1802,6 +1810,45 @@ mod tests {
         assert_eq!(view.name, foo);
         assert_eq!(view.args, vec![a, bb]);
         assert_eq!(view.modes, vec![ParamMode::Borrow, ParamMode::Move]);
+    }
+
+    #[test]
+    fn param_mode_from_u32_is_strict() {
+        for (word, mode) in [
+            (0, ParamMode::Borrow),
+            (1, ParamMode::Move),
+            (2, ParamMode::Inout),
+        ] {
+            assert_eq!(ParamMode::from_u32(word), Some(mode));
+            assert_eq!(mode.to_u32(), word);
+        }
+        assert_eq!(ParamMode::from_u32(3), None);
+        assert_eq!(ParamMode::from_u32(u32::MAX), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "call_extra mode word 99")]
+    fn call_view_panics_on_corrupt_mode_word() {
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let foo = pool.intern_str("foo");
+        let main = pool.intern_str("main");
+
+        let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+        let a = b.int_const(1, int_ty, sp());
+        let call = b.call(foo, &[a], &[ParamMode::Borrow], int_ty, sp());
+        let ret = b.unary(TirTag::Return, pool.void(), call, sp());
+        let mut tir = b.finish(&[ret]);
+
+        // Corrupt the single mode word in the extra arena.
+        let inst = tir.inst(call);
+        let TirData::Extra(rng) = inst.data else {
+            panic!("Call must carry TirData::Extra")
+        };
+        let mode_idx = rng.as_range().start + call_extra::ARGS + 1;
+        tir.extra[mode_idx] = 99;
+
+        tir.call_view(call);
     }
 
     #[test]
