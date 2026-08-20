@@ -1,10 +1,10 @@
-**Status:** Complete (codebase snapshot 2026-08-19, branch `chore/ast-pretty-module` @ `3ca0f92`)
+**Status:** Complete (codebase snapshot 2026-08-20, branch `fix/i-089-param-mode-decode` @ `c24a224`)
 
-# Architecture Analysis — 2026-08-19
+# Architecture Analysis — 2026-08-20
 
 Refresh of [architecture_analysis.md](architecture_analysis.md) (snapshot 2026-07-18, `64b740a`, branch `feat/milestone-8.3-inout`). Every module was re-read at HEAD; each claim from the previous analysis was re-verified and is marked **fixed**, **open**, or **stale** below. Issue references (`I-xxx`) point to [ISSUES.md](../../ISSUES.md) — since M8.4.1 resolved entries are *removed* from that file, so this snapshot records both what was resolved since July and what remains open.
 
-Scale: ~29k lines of Rust source across 7 workspace crates, 809 `#[test]` (previous snapshot: ~22k lines, 6 crates, 542 tests). This branch itself is tiny — 3 commits over `main` extracting the AST pretty printer (`8f57d94`, `567526d`, `3ca0f92`); all other drift below landed on `main` via milestones M8.2–M8.4.2 (parser recovery, `inout`, strview slices, Windows support).
+Scale: ~29k lines of Rust source across 7 workspace crates, 811 `#[test]` (previous snapshot: ~22k lines, 6 crates, 542 tests). The snapshot branch adds the strict `ParamMode` decode fix (I-089/I-133, `9c6b6c6`) on top of `main`; all other drift below landed on `main` via milestones M8.2–M8.4.2 (parser recovery, `inout`, strview slices, Windows support) and the `ast_pretty` extraction (#113).
 
 ---
 
@@ -42,9 +42,9 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 
 | Crate | Files (lines) | Role |
 |---|---|---|
-| `ryo-core` | tir 1976, uir 1529, types 892, ast_pretty 480, ast 351, diag 337, ownership 112, errors 69 | IRs, InternPool, diagnostics, sidecar types |
+| `ryo-core` | tir 2023, uir 1529, types 892, ast_pretty 480, ast 351, diag 337, ownership 112, errors 69 | IRs, InternPool, diagnostics, sidecar types |
 | `ryo-frontend` | ownership 9504, sema 4168, parser 1951, lexer 1011, astgen 835, indent 277, builtins 233 | source → TIR + ownership |
-| `ryo-backend` | codegen 2705, toolchain 269, runtime_lib 66, linker 27 | TIR → object/binary |
+| `ryo-backend` | codegen 2711, toolchain 269, runtime_lib 66, linker 27 | TIR → object/binary |
 | `ryo-driver` | pipeline 823 | staging, ariadne rendering |
 | `ryo` | main 133 + integration tests (198) | CLI |
 | `ryo-runtime` | lib 1091 | string/slice runtime, staticlib+rlib |
@@ -62,9 +62,9 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 - New tokens: `Move`, `Struct`, `Enum`, `Match`, `Inout`, `Amp`, `Break`, `Continue`, `For`, `In`, compound-assign ops, `Percent`, `Arrow` (`lexer.rs:61-100`). CRLF handled in both lexer (`:316`) and indent (`indent.rs:47-50`).
 - **Open:** I-111 (4 touch points per token variant, verified `:36-117/:119-189/:195-330/:493-611`); I-027 (float regex still `[0-9]+\.[0-9]+`, `:201`). `unescape` relies on an implicit regex-guaranteed invariant (`:437`).
 
-### 2.2 AST (`ast.rs` 351 + `ast_pretty.rs` 480) — this branch's subject
+### 2.2 AST (`ast.rs` 351 + `ast_pretty.rs` 480)
 
-- **Fixed (this branch):** I-012 — `pretty_print`-on-stdout is gone from `ast.rs` (0 `print!` occurrences); the printer was extracted to `ast_pretty.rs` exposing `render_program(&Program, &InternPool) -> String` (`ast_pretty.rs:21-25`), with the single stdout call in the driver (`pipeline.rs:333-336`) behind `ryo ir --emit=ast`. The printer is now complete — if/elif/else children rendered and test-pinned (`ast_pretty.rs:189-211,359-415`). Follow-up commits fixed string escaping (`{:?}` on the pool string, `:260`).
+- **Fixed (landed as #113):** I-012 — `pretty_print`-on-stdout is gone from `ast.rs` (0 `print!` occurrences); the printer was extracted to `ast_pretty.rs` exposing `render_program(&Program, &InternPool) -> String` (`ast_pretty.rs:21-25`), with the single stdout call in the driver (`pipeline.rs:333-336`) behind `ryo ir --emit=ast`. The printer is now complete — if/elif/else children rendered and test-pinned (`ast_pretty.rs:189-211,359-415`). Follow-up commits fixed string escaping (`{:?}` on the pool string, `:260`).
 - Box-tree shape unchanged (I-126 open); `TypeExpr` pinned at 24 bytes by test (`ast.rs:346-350`); `TypeExpr.is_view` is now explicitly legacy (`:142-145`).
 - New: `StmtKind::Error` placeholder nodes from parser recovery, lowered to nothing by astgen (`ast.rs:64-68`, `astgen.rs:77-80`).
 - `AssignOrDecl` ambiguity still baked in (`ast.rs:42-45` → `astgen.rs:296-300` → `sema.rs:644-707`): unknown name → fresh **immutable** binding (typo silently declares), pinned by `sema.rs:3454`.
@@ -91,13 +91,14 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 - New: program-wide `call_arg_refs` pre-scan gating `&` to direct call-argument position (`:191-215,1236-1245`); M8.3 `inout` borrow-agreement checks replayed for builtins and user calls (`:1711-1824`); M8.4 view checking — slice bounds (`:1194-1226`), implicit `str → strview` and P6' view→str re-borrow in `check_call` (`:1668-1695`), `str(view)` materialize intercept synthesizing `__ryo_str_from_view` (`:1552-1558,2044-2100`); W0002 `RedundantMove`, W0003 case-A `RedundantMaterialize`; `__ryo_` prefix and `range` reserved; `VoidValueInExpression`.
 - **Open (re-verified):** I-028/I-034 (triplicated builtin validation, moved to `:1837-1926`; `BuiltinFunction` still lacks arity/type descriptors); I-092 (`String` alloc per method-dispatch site, `:1127`); I-037 (`byte_offset_to_line_col` O(offset) scan, `:2254-2269`; `__ryo_panic` still bypasses the signatures table); I-079 (unary `-` int-only). New risk: `analyze_expr` fallthrough is `panic!`, not a diag (`:1248-1251`).
 
-### 2.6 TIR (`tir.rs`, 1976 — largest core growth, +593)
+### 2.6 TIR (`tir.rs`, 2023 — largest core growth, +640)
 
 - **Fixed:** I-072 — `TirRef::is_param`/`as_param_index` exist with the param-sentinel band (`u32::MAX - idx`, collision-free `> u32::MAX/2`) debug-asserted on both constructors (`:79-133`); `Tir::inst`/`span` hard-`assert!` even in release (`:399-419`).
+- **Fixed:** I-089 — `ParamMode::from_u32` returns `Option` (`:306-316`) and the `call_view` decode rejects unknown mode words as producer corruption (`:1014-1018`); pinned by `param_mode_from_u32_is_strict` and `call_view_panics_on_corrupt_mode_word` (`:1816-1839`).
 - Tree-shape invariant now documented on `Tir` and debug-validated per built body via `validate_tree_shape` in `finish` (`:364-369,935-936,1275-1296`). `TirBuilder::call` asserts `modes.len() == args.len()` (`:730-734`).
 - **Fixed:** I-066 — structural-reachability primitives promoted to core and documented as the single source of truth for TIR shape: `walk_operands`/`ChildKind` (`:1167-1268`), `collect_reachable`, `loop_body`, `block_definitely_returns`/`stmt_definitely_returns` (`:1367-1415`, backs E0036), `collect_jump_path` (`:1435-1499`).
 - New tags: `Slice`, `ViewOfStr`, `ViewAsStr`, float op set, `StrLen`, `Unreachable` (error-recovery sentinel), `ParamMode::Inout`.
-- **Open:** I-091 (allocating view decoders); I-080 (`ExtraRange` duplication). `spans.len() == instructions.len()` still unchecked in `finish` (structurally maintained by `push`). **Resolved since the snapshot (this branch):** I-089 — `from_u32` now returns `Option` (`:303-313`) and the `call_view` decode rejects unknown words as producer corruption.
+- **Open:** I-091 (allocating view decoders); I-080 (`ExtraRange` duplication). `spans.len() == instructions.len()` still unchecked in `finish` (structurally maintained by `push`).
 - In-tree doc debt: stale header comment (`:1-6`, `--emit=tir` is wired at `pipeline.rs:398-401`); dangling `I-106` citation at `:55` — resolved entries are deleted from ISSUES.md, so AGENTS.md forbids exactly this.
 
 ### 2.7 Ownership — sidecar types (`ryo-core/src/ownership.rs`, 112) + pass (`ryo-frontend/src/ownership.rs`, 9504; 108 tests)
@@ -114,12 +115,12 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 - `BuiltinFunction` gained ABI metadata — `borrowed_scalar_params`, `view_borrow_params` (`:3-20`) — consumed by ownership's Rule-7 partition and codegen, replacing name-string matching there. `BUILTINS` holds 7 entries; `ABI_CALLEES` covers synthesized `__ryo_panic`/`__ryo_str_from_view`; `RESERVED_NAMES = ["range"]`.
 - **Open:** I-034 (linear-scan `lookup`, `:112-114`); still no arity/param-type validation metadata, so sema's hand-coded per-builtin checks remain.
 
-### 2.9 Codegen (`codegen.rs`, 2705)
+### 2.9 Codegen (`codegen.rs`, 2711)
 
 - `ValueRepr` gained a third variant `View { ptr, len }` (M8.4) alongside `Scalar`/`Str` (`:122-136`); `eval_inst_view`/`eval_str_or_view_parts` (`:2132-2269`); 2-word view ABI.
-- **Fixed:** I-081 (`Terminator` enum replaces the Break/Continue/Return-conflating bool, `:49-55`); I-082 (`never`-returning calls reload inout slots before the trap, `:2515-2527`); I-083 (`eval_inst` errors loudly on str/view reaching the scalar path `:1381-1398` — though the sret path still returns a dummy `Ok(ptr)` at `:2551`); I-088 (positional sidecar + name `debug_assert!`); I-006/I-010 (`print`/`panic` are ordinary runtime calls now — `ryo_print`/`ryo_panic`, `:2329-2388`); I-070 *mitigated* (end-of-function leak `debug_assert!`, `:713-722` — leak-direction only, and `sweep_due_frees` still silently filters never-anchored frees `:1756`).
+- **Fixed:** I-081 (`Terminator` enum replaces the Break/Continue/Return-conflating bool, `:49-55`); I-082 (`never`-returning calls reload inout slots before the trap, `:2515-2527`); I-083 (`eval_inst` errors loudly on str/view reaching the scalar path `:1381-1398` — though the sret path still returns a dummy `Ok(ptr)` at `:2551`); I-088 (positional sidecar + name `debug_assert!`); I-006/I-010 (`print`/`panic` are ordinary runtime calls now — `ryo_print`/`ryo_panic`, `:2329-2388`); I-070 *mitigated* (end-of-function leak `debug_assert!`, `:713-722` — leak-direction only, and `sweep_due_frees` still silently filters never-anchored frees `:1756`); I-133 (call-arg mode lookup is total — `ok_or_else` internal error naming the callee, `:2454-2461` — no silent `Borrow` fallback).
 - Frees fire through four paths (due/sweep/pre-terminator/conditional-dead-drop) with a `freed_at: HashSet<usize>` double-emission guard (`:204`). `emit_return` remains the single `return_` chokepoint with inout write-back (`:822-830`).
-- **Open (re-verified):** I-093 (no name→`FuncId` cache `:1653-1671`; dead `ryo_str_alloc` JIT registration `:312`); I-094 (unconditional `format!("{}", ctx.func)` per function `:727`); I-095 (now *three* map clones per block `:772-774`); I-034 (stringly builtin dispatch + `== "main"` at four sites); I-076 (`STR_SLOT_SIZE`/`VIEW_SLOT_SIZE`/I64 len-cap still hardcoded, `:40-43` — 32-bit-hostile); `Result<_, String>` everywhere + 38 `unreachable!`. **Resolved since the snapshot (this branch):** the `:2454` `modes.get(i).unwrap_or(Borrow)` fallback — the lookup is now total via an `ok_or_else` internal error (I-133, I-089 twin).
+- **Open (re-verified):** I-093 (no name→`FuncId` cache `:1653-1671`; dead `ryo_str_alloc` JIT registration `:312`); I-094 (unconditional `format!("{}", ctx.func)` per function `:727`); I-095 (now *three* map clones per block `:772-774`); I-034 (stringly builtin dispatch + `== "main"` at four sites); I-076 (`STR_SLOT_SIZE`/`VIEW_SLOT_SIZE`/I64 len-cap still hardcoded, `:40-43` — 32-bit-hostile); `Result<_, String>` everywhere + 38 `unreachable!`.
 
 ### 2.10 Toolchain / runtime_lib / linker / build scripts
 
@@ -130,7 +131,7 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 
 ### 2.11 Driver (`pipeline.rs`, 823)
 
-- `EmitKind { Ast, Uir, Tir, Clif }` staged behind `ryo ir --emit=…` (`:1-11,349`); `display_ast` calls `ast_pretty::render_program` (this branch).
+- `EmitKind { Ast, Uir, Tir, Clif }` staged behind `ryo ir --emit=…` (`:1-11,349`); `display_ast` calls `ast_pretty::render_program` (#113).
 - **Fixed:** I-125 (parser recovery co-surfaced: `parse_source` lexes into a sink, runs chumsky with `into_output_errors()`, returns partial programs with `StmtKind::Error` placeholders, `:109-155`); I-078 (`rich_error_message` re-renders identifiers/strings through the pool — no more `<id#N>`, `:174-203`); I-086 (E-code stability/uniqueness test pins all 41 codes, `:640-741`); I-103 (message in report header only, `:250-255`; duplicate print suppressed in `main.rs:91-98`); I-084 (`.o`/exe land next to the source via `with_extension`, `:39-47`, test-pinned).
 - `DiagCode` grew 35 → **41** variants (38 E + 3 W); new since snapshot: `InvalidCharacter`, `UnknownEscape`, `MissingReturn`, `DuplicateDeclaration`, `RedundantMove` (W0002), `RedundantMaterialize` (W0003), `ViewEscape`, `SourceProjected`, `RangeArgType`, `ReservedBuiltinName`, `UndefinedAssignTarget`. `DiagSink` 100-cap with error-count survival now test-pinned (`diag.rs:319-336`).
 - **Open:** I-099 (`run_file` still echoes `[Input Source]`/`[AST]`/`[Codegen]`; 37 integration-test assertions key on it); I-013 (`lex`/`parse`/`ir` still separate subcommands); I-130 (recovery is line-granular — a broken block *header* leaks its indented body into the enclosing scope; `skip_garbage` is indentation-unaware, `parser.rs:71-85`).
@@ -152,11 +153,11 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 
 ## 3. Delta Since the Previous Snapshot
 
-**Resolved (removed from ISSUES.md, verified in code):** I-006, I-010, I-012, I-014, I-016, I-017, I-031, I-045, I-053/054, I-061, I-064–I-066, I-068–I-072, I-075, I-077, I-078, I-081–I-088, I-090, I-101, I-103, I-106, I-108, I-110, I-112–I-119, I-125. I-070 mitigated (debug-only leak assert).
+**Resolved (removed from ISSUES.md, verified in code):** I-006, I-010, I-012, I-014, I-016, I-017, I-031, I-045, I-053/054, I-061, I-064–I-066, I-068–I-072, I-075, I-077, I-078, I-081–I-088, I-089, I-090, I-101, I-103, I-106, I-108, I-110, I-112–I-119, I-125. I-070 mitigated (debug-only leak assert). I-133 (filed by the 2026-08-19 draft of this analysis) resolved together with I-089 in `9c6b6c6`.
 
-**New architecture:** `ast_pretty` module (this branch); parser error recovery with `StmtKind::Error`; M8.3 `inout` end-to-end (parser → sema agreement checks → codegen spill/reload/write-back); M8.4/8.4.1 strview end-to-end (`Tag::View`, `Slice`/`ViewOfStr`/`ViewAsStr`, third `ValueRepr`, `RyoSlice`/`__ryo_slice`/`ryo_str_from_view`); TIR structural-reachability primitives + tree-shape validation; return-flow analysis (E0036); positional ownership-sidecar contract with codegen alignment assertion; staged `ryo ir --emit=ast|uir|tir|clif`; E-code stability test; `build-support` crate; Windows support (toolchain zip, runtime `_write`/`_fltused`, CLI stack size); ASan/Valgrind fixture harness.
+**New architecture:** `ast_pretty` module (#113); parser error recovery with `StmtKind::Error`; M8.3 `inout` end-to-end (parser → sema agreement checks → codegen spill/reload/write-back); M8.4/8.4.1 strview end-to-end (`Tag::View`, `Slice`/`ViewOfStr`/`ViewAsStr`, third `ValueRepr`, `RyoSlice`/`__ryo_slice`/`ryo_str_from_view`); TIR structural-reachability primitives + tree-shape validation; return-flow analysis (E0036); positional ownership-sidecar contract with codegen alignment assertion; staged `ryo ir --emit=ast|uir|tir|clif`; E-code stability test; `build-support` crate; Windows support (toolchain zip, runtime `_write`/`_fltused`, CLI stack size); ASan/Valgrind fixture harness.
 
-**New issues filed since the snapshot:** I-126 (AST Box-tree vs R1), I-127 (unsafe-utf8 sign-off), I-128 (pass entry-point sizes), I-129 (dense HashMaps vs `Vec` side tables), I-130 (parser recovery mis-nesting). This analysis itself filed I-131 (panic-on-invariant sites), I-132 (runtime FFI robustness), I-134 (the stale comments below), I-135 (Rule-7 look-through duplication), I-136 (ownership state cloning), I-137 (3K-line tidy gate + splits, see §4). **Resolved since the snapshot (this branch, `9c6b6c6`):** I-089 and its twin I-133 — strict `ParamMode` decode; both removed from ISSUES.md.
+**New issues filed since the snapshot:** I-126 (AST Box-tree vs R1), I-127 (unsafe-utf8 sign-off), I-128 (pass entry-point sizes), I-129 (dense HashMaps vs `Vec` side tables), I-130 (parser recovery mis-nesting). This analysis itself filed I-131 (panic-on-invariant sites), I-132 (runtime FFI robustness), I-133 (codegen `ParamMode` fallback, I-089 twin — since resolved, above), I-134 (the stale comments below), I-135 (Rule-7 look-through duplication), I-136 (ownership state cloning), I-137 (3K-line tidy gate + splits, see §4).
 
 **In-tree doc debt found during verification:** stale "emit flag still TODO" headers (`tir.rs:1-6`, `uir.rs:1-6`); dangling `I-106` citation (`tir.rs:55`, against the AGENTS.md no-dangling-IDs rule); stale "no `free_on_reassign` entries" comment (`ryo-frontend/src/ownership.rs:1932-1934`).
 
@@ -221,8 +222,8 @@ Also switch these from `cargo run --` to the `CARGO_BIN_EXE_ryo` harness (`commo
 
 ### 4.4 Watch list (under 3K, trending up)
 
-- `ryo-backend/src/codegen.rs` — **2705**, ~10% headroom. When it crosses: split the `eval_inst*` expression family and call emission (`:2000-2605`) from block/statement scaffolding.
-- `ryo-core/src/tir.rs` (1976), `ryo-frontend/src/parser.rs` (1951) — healthy; parser would split statement vs expression parsers if needed.
+- `ryo-backend/src/codegen.rs` — **2711**, ~10% headroom. When it crosses: split the `eval_inst*` expression family and call emission (`:2000-2605`) from block/statement scaffolding.
+- `ryo-core/src/tir.rs` (2023), `ryo-frontend/src/parser.rs` (1951) — healthy; parser would split statement vs expression parsers if needed.
 
 ### 4.5 Split discipline
 

@@ -317,7 +317,7 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** I-125's recovery synchronizes at newline/`Dedent` boundaries line by line. When a block *header* is unparseable (e.g. `fn foo(` followed by an indented, individually-valid body), verified behavior is: exactly **two** diagnostics regardless of body length — one for the header, one for the dangling `Dedent` the body leaves behind at top level — and the body lines parse **silently as top-level statements**. The earlier "one diagnostic per body line" description did not reproduce; the real defect is the silent mis-nesting: a broken `fn`/`if`/`while` header leaks its body into the enclosing scope, so downstream passes (sema co-surfacing, R9) see those statements in the wrong scope and may report misleading secondary errors. Compilation still fails correctly on the parse errors themselves.
 **Resolution:** Add nesting-aware recovery for declaration headers — e.g. chumsky's `nested_delimiters` strategy, or making the line-recovery skip set indentation-aware so a failed `fn`/`if`/`while` header swallows its indented block as one region. Revisit when the grammar gains more multi-line constructs.
 
-### I-134 — Stale in-tree comments found during the 2026-08-19 architecture re-verification
+### I-134 — Stale in-tree comments found during the 2026-08-20 architecture re-verification
 
 **Files:** `ryo-core/src/tir.rs` (:1-6), `ryo-core/src/uir.rs` (:1-6), `ryo-core/src/tir.rs` (:55), `ryo-frontend/src/ownership.rs` (:1932-1934)
 **Summary:** Four comments describe states the code has moved past: (a) the `tir.rs`/`uir.rs` module headers claim `ryo ir --emit=tir|uir` is "still TODO" — both are wired (`pipeline.rs:349,378-380,398-401`); (b) `tir.rs:55` cites `I-106`, which is resolved and deleted — exactly the dangling-ID pointer AGENTS.md forbids; (c) the dead-store drain comment says "Today no `free_on_reassign` entries exist; this guard activates with Task 6" — the field is populated and test-covered (`reassignment_records_free_on_old_owner`).
@@ -338,14 +338,14 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 ### I-137 — No file-length gate; three files exceed 3000 lines
 
 **Files:** `ryo-frontend/src/ownership.rs` (9504), `ryo-frontend/src/sema.rs` (4168), `ryo/tests/integration_tests.rs` (4002)
-**Summary:** Nothing stops source files from growing unbounded; three files are already past the 3000-line mark used as the tidy limit (rust-lang `src/tools/tidy` convention, tests included). Full split plans with per-module anchors are in `docs/dev/architecture_analysis_2026_08_19.md` §4. Related to I-128 (function-level sizes) but distinct: this is file-level navigability, review surface, and merge-conflict scope.
+**Summary:** Nothing stops source files from growing unbounded; three files are already past the 3000-line mark used as the tidy limit (rust-lang `src/tools/tidy` convention, tests included). Full split plans with per-module anchors are in `docs/dev/architecture_analysis_2026_08_20.md` §4. Related to I-128 (function-level sizes) but distinct: this is file-level navigability, review surface, and merge-conflict scope.
 **Resolution:** Add a tidy check to CI failing on `*.rs` files over 3000 lines with an explicit allowlist for the three current files; shrink the allowlist as the §4 splits land (`ownership/` and `sema/` module directories, per-area integration test binaries sharing `common/mod.rs`).
 
 ---
 
 ## Cross-References
 
-- Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md), refreshed at [docs/dev/architecture_analysis_2026_08_19.md](docs/dev/architecture_analysis_2026_08_19.md) (source of I-131–I-137)
+- Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md), refreshed at [docs/dev/architecture_analysis_2026_08_20.md](docs/dev/architecture_analysis_2026_08_20.md) (source of I-131–I-137)
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
