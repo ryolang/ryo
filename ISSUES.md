@@ -58,12 +58,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** `TypeKind::Bool` maps to Cranelift `I8`. Fine for internal logic, but C ABIs typically pass `_Bool` zero/sign-extended to a full register (often i32 on SysV, register-width on Win64). Passing or returning our raw `I8` across an FFI call would leave the upper bits undefined from the callee's perspective.
 **Resolution:** When FFI lands, insert explicit `uext` (zero-extension) on bool arguments at call sites and `ireduce` on bool returns, per the target ABI. Decide at the FFI design stage whether `bool` keeps its `I8` storage type and only widens at the boundary, or becomes register-width throughout. Latent until FFI exists.
 
-### I-023 — Integer division / modulo by zero is undefined behavior at codegen
-
-**Files:** `ryo-backend/src/codegen.rs` (`TirTag::ISDiv`, `TirTag::IMod` arms), `ryo-frontend/src/sema.rs` (`check_binary_op`)
-**Summary:** `a / 0` and `a % 0` lower directly to Cranelift `sdiv` / `srem` with no guard. Cranelift treats both as UB; the resulting native instruction (`idiv` on x86-64, `sdiv` on aarch64) traps or returns garbage depending on target. Sema does not constant-fold a known-zero divisor either.
-**Resolution:** When safety checks land, insert a runtime check at codegen: emit a compare-against-zero, branch to a trap / panic block on hit. Optionally constant-fold the obvious `x / 0` / `x % 0` cases at sema and emit a diagnostic. Coordinate with the eventual panic / safe-mode design so the trap path has somewhere to go.
-
 ### I-024 — Single `float` type, no `float32` / `float64` distinction
 
 **Files:** `ryo-core/src/types.rs` (`Tag::Float`, `TypeKind::Float`), `ryo-backend/src/codegen.rs` (`cranelift_type_for`)
@@ -210,6 +204,12 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Files:** `runtime/src/lib.rs` (`oom_abort` call sites :166, :170, :200, :204, :270, :353, :361-363, :404, :426, :440-441; null checks :105, :117, :272)
 **Summary:** Two robustness gaps at the C-ABI boundary. (a) `oom_abort` is the handler for three distinct failure modes — genuine allocation failure, `u64 → usize` narrowing (32-bit-only), and `checked_add` capacity overflow — so all three abort identically with an OOM message. (b) `ryo_print` / `ryo_panic` / the slice path guard their pointer args with `debug_assert!(!ptr.is_null())` only; a release build passes a null pointer to `write`/`memcpy` unchecked when `len > 0`.
 **Resolution:** Split `oom_abort` into distinct abort paths (or a reason-code parameter) so overflow/narrowing is distinguishable from OOM in the message; downgrade the null checks to real `if ptr.is_null() { abort }` guards at the FFI entry points — they cost one branch on a cold path.
+
+### I-138 — `INT_MIN / -1` (and `% -1`) signed-overflow is UB at codegen
+
+**Files:** `ryo-backend/src/codegen.rs` (`emit_div_zero_guard` call sites: `TirTag::ISDiv`, `TirTag::IMod`, compound-assign arms)
+**Summary:** The zero-divisor guard covers `x / 0` and `x % 0`, but Cranelift `sdiv`/`srem` are also UB on signed overflow: `INT_MIN / -1` (and `INT_MIN % -1`) has no representable result. x86-64 `idiv` traps (#DE); aarch64 `sdiv` silently wraps to `INT_MIN`. Sema's literal-zero check doesn't catch it either (`x / -1` is a unary-minus expression, not a literal).
+**Resolution:** Extend `emit_div_zero_guard` to also check `dividend == INT_MIN && divisor == -1`, branching to the same `ryo_panic` path with an "integer division overflow" message. Sema can reject the literal form `x / -1` only when the dividend is a known `INT_MIN` constant — likely not worth it; the runtime guard alone suffices.
 
 ---
 

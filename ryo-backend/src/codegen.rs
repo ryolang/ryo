@@ -107,7 +107,17 @@ pub struct Codegen<M: Module> {
     /// Keyed on `StringId` so duplicate string literals reuse the
     /// same `.rodata` blob without an extra hash on the bytes.
     string_data: HashMap<StringId, DataId>,
+    /// Cache of `DataId` per compiler-generated guard message
+    /// (zero-divisor checks). These strings never pass through the
+    /// `InternPool`, so they are keyed on the static text itself.
+    guard_msg_data: HashMap<&'static str, DataId>,
 }
+
+/// Zero-divisor guard messages, written verbatim by `ryo_panic`
+/// (raw bytes, trailing newline — same convention as the runtime's
+/// slice-failure messages).
+const DIV_ZERO_MSG: &str = "integer division by zero\n";
+const MOD_ZERO_MSG: &str = "integer modulo by zero\n";
 
 /// Per-loop codegen state: the Cranelift blocks that `break` and
 /// `continue` jump to.
@@ -248,6 +258,9 @@ struct FunctionContext<'a, M: Module> {
     /// so a Free anchored to a parent arm still fires from inside a
     /// nested child arm of the same parent.
     branch_stack: Vec<ryo_core::ownership::BranchId>,
+    /// Module-level cache for compiler-generated guard messages;
+    /// see `Codegen::guard_msg_data`.
+    guard_msg_data: &'a mut HashMap<&'static str, DataId>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -260,6 +273,7 @@ impl<M: Module> Codegen<M> {
             int_type,
             data_ctx: DataDescription::new(),
             string_data: HashMap::new(),
+            guard_msg_data: HashMap::new(),
         }
     }
 }
@@ -658,6 +672,7 @@ impl<M: Module> Codegen<M> {
                 sret_ptr,
                 sidecar: func_sidecar,
                 branch_stack: Vec::new(),
+                guard_msg_data: &mut self.guard_msg_data,
             };
 
             for (idx, param) in tir.params.iter().enumerate() {
@@ -1023,21 +1038,30 @@ impl<M: Module> Codegen<M> {
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
                 let rhs = Self::eval_inst(builder, ctx, view.value)?;
-                let var = ctx.locals.get(&view.name).ok_or_else(|| {
+                // Copy the Variable handle out: the zero-divisor guard
+                // below needs &mut ctx, which an outstanding borrow of
+                // ctx.locals would block.
+                let var = *ctx.locals.get(&view.name).ok_or_else(|| {
                     format!(
                         "Undefined variable in compound assign: '{}'",
                         ctx.pool.str(view.name)
                     )
                 })?;
-                let current = builder.use_var(*var);
+                let current = builder.use_var(var);
 
                 let is_float = inst.ty == ctx.pool.float();
                 let result = match (view.op, is_float) {
                     (CompoundOp::Add, false) => builder.ins().iadd(current, rhs),
                     (CompoundOp::Sub, false) => builder.ins().isub(current, rhs),
                     (CompoundOp::Mul, false) => builder.ins().imul(current, rhs),
-                    (CompoundOp::Div, false) => builder.ins().sdiv(current, rhs),
-                    (CompoundOp::Mod, false) => builder.ins().srem(current, rhs),
+                    (CompoundOp::Div, false) => {
+                        Self::emit_div_zero_guard(builder, ctx, rhs, DIV_ZERO_MSG)?;
+                        builder.ins().sdiv(current, rhs)
+                    }
+                    (CompoundOp::Mod, false) => {
+                        Self::emit_div_zero_guard(builder, ctx, rhs, MOD_ZERO_MSG)?;
+                        builder.ins().srem(current, rhs)
+                    }
                     (CompoundOp::Add, true) => builder.ins().fadd(current, rhs),
                     (CompoundOp::Sub, true) => builder.ins().fsub(current, rhs),
                     (CompoundOp::Mul, true) => builder.ins().fmul(current, rhs),
@@ -1045,7 +1069,7 @@ impl<M: Module> Codegen<M> {
                     (CompoundOp::Mod, true) => return Err("float modulo not supported".to_string()),
                 };
 
-                builder.def_var(*var, result);
+                builder.def_var(var, result);
                 Ok(Terminator::None)
             }
             TirTag::WhileLoop => Self::generate_while_loop(builder, ctx, r),
@@ -1474,8 +1498,14 @@ impl<M: Module> Codegen<M> {
                     TirTag::IAdd => builder.ins().iadd(lv, rv),
                     TirTag::ISub => builder.ins().isub(lv, rv),
                     TirTag::IMul => builder.ins().imul(lv, rv),
-                    TirTag::ISDiv => builder.ins().sdiv(lv, rv),
-                    TirTag::IMod => builder.ins().srem(lv, rv),
+                    TirTag::ISDiv => {
+                        Self::emit_div_zero_guard(builder, ctx, rv, DIV_ZERO_MSG)?;
+                        builder.ins().sdiv(lv, rv)
+                    }
+                    TirTag::IMod => {
+                        Self::emit_div_zero_guard(builder, ctx, rv, MOD_ZERO_MSG)?;
+                        builder.ins().srem(lv, rv)
+                    }
                     TirTag::ICmpEq => builder.ins().icmp(IntCC::Equal, lv, rv),
                     TirTag::ICmpNe => builder.ins().icmp(IntCC::NotEqual, lv, rv),
                     TirTag::ICmpLt => builder.ins().icmp(IntCC::SignedLessThan, lv, rv),
@@ -1646,6 +1676,73 @@ impl<M: Module> Codegen<M> {
         let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
         let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
         Ok(builder.ins().global_value(ctx.int_type, data_ref))
+    }
+
+    /// Define a compiler-generated message as a read-only data object,
+    /// deduped per module through `Codegen::guard_msg_data`.
+    fn store_guard_msg(
+        module: &mut M,
+        data_ctx: &mut DataDescription,
+        cache: &mut HashMap<&'static str, DataId>,
+        msg: &'static str,
+    ) -> Result<DataId, String> {
+        if let Some(&data_id) = cache.get(msg) {
+            return Ok(data_id);
+        }
+        let data_id = module
+            .declare_anonymous_data(false, false)
+            .map_err(|e| format!("Failed to declare guard message data: {}", e))?;
+        data_ctx.clear();
+        data_ctx.define(msg.as_bytes().into());
+        module
+            .define_data(data_id, data_ctx)
+            .map_err(|e| format!("Failed to define guard message data: {}", e))?;
+        cache.insert(msg, data_id);
+        Ok(data_id)
+    }
+
+    /// Zero-divisor guard for `sdiv`/`srem`, which are UB in Cranelift
+    /// when the divisor is zero (`idiv` traps on x86-64; `sdiv`
+    /// silently returns garbage on aarch64). A zero divisor branches to
+    /// a block that calls `ryo_panic` — stderr message + exit 101, the
+    /// same contract as the `panic()` builtin — then traps; otherwise
+    /// execution falls through to the division. Only the divisor is
+    /// checked: `INT_MIN / -1` overflow remains UB (out of scope).
+    fn emit_div_zero_guard(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        divisor: Value,
+        msg: &'static str,
+    ) -> Result<(), String> {
+        let zero = builder.ins().iconst(ctx.int_type, 0);
+        let is_zero = builder.ins().icmp(IntCC::Equal, divisor, zero);
+        let panic_block = builder.create_block();
+        let ok_block = builder.create_block();
+        builder.ins().brif(is_zero, panic_block, &[], ok_block, &[]);
+
+        // Both blocks have exactly one predecessor (the brif above),
+        // so they can be sealed immediately.
+        builder.seal_block(panic_block);
+        builder.switch_to_block(panic_block);
+        let data_id = Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, msg)?;
+        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+        let ptr = builder.ins().global_value(ctx.int_type, data_ref);
+        let len = builder.ins().iconst(ctx.int_type, msg.len() as i64);
+        let panic_ref = Self::declare_runtime_fn(
+            ctx.module,
+            builder,
+            "ryo_panic",
+            &[ctx.int_type, ctx.int_type],
+            &[],
+        )?;
+        builder.ins().call(panic_ref, &[ptr, len]);
+        // Unreachable in practice (ryo_panic never returns); keeps
+        // Cranelift honest about the block having a terminator.
+        builder.ins().trap(TrapCode::user(1).unwrap());
+
+        builder.seal_block(ok_block);
+        builder.switch_to_block(ok_block);
+        Ok(())
     }
 
     /// Declare an external runtime function by name and return a

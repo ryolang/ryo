@@ -1734,6 +1734,175 @@ fn panic_aot_run_exits_101() {
     );
 }
 
+// ============================================================================
+// Division / modulo by zero
+// ============================================================================
+
+#[test]
+fn div_by_zero_literal_rejected() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 1 / 0\n";
+    let test_file = create_test_file(temp_dir.path(), "div_zero_lit.ryo", code);
+
+    let output = run_ryo_command(&["run", "div_zero_lit.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "literal division by zero should be a compile error"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("division by zero"),
+        "expected division-by-zero diagnostic, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn mod_by_zero_literal_rejected() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 1 % 0\n";
+    let test_file = create_test_file(temp_dir.path(), "mod_zero_lit.ryo", code);
+
+    let output = run_ryo_command(&["run", "mod_zero_lit.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "literal modulo by zero should be a compile error"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("modulo by zero"),
+        "expected modulo-by-zero diagnostic, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn div_by_zero_panics_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 0\n\ty = 10 / x\n";
+    let test_file = create_test_file(temp_dir.path(), "div_zero.ryo", code);
+
+    let output = run_ryo_command(&["run", "div_zero.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "division by zero should exit nonzero. stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("integer division by zero"),
+        "stderr should contain division-by-zero message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn mod_by_zero_panics_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 0\n\ty = 10 % x\n";
+    let test_file = create_test_file(temp_dir.path(), "mod_zero.ryo", code);
+
+    let output = run_ryo_command(&["run", "mod_zero.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "modulo by zero should exit nonzero. stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("integer modulo by zero"),
+        "stderr should contain modulo-by-zero message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn compound_div_by_zero_panics_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\ty = 0\n\tmut x = 10\n\tx /= y\n";
+    let test_file = create_test_file(temp_dir.path(), "compound_div_zero.ryo", code);
+
+    let output = run_ryo_command(&["run", "compound_div_zero.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "compound division by zero should exit nonzero. stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("integer division by zero"),
+        "stderr should contain division-by-zero message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn compound_mod_by_zero_panics_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\ty = 0\n\tmut x = 10\n\tx %= y\n";
+    let test_file = create_test_file(temp_dir.path(), "compound_mod_zero.ryo", code);
+
+    let output = run_ryo_command(&["run", "compound_mod_zero.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "compound modulo by zero should exit nonzero. stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("integer modulo by zero"),
+        "stderr should contain modulo-by-zero message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn div_by_zero_aot_run_exits_101() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 0\n\ty = 10 / x\n";
+    let test_file = create_test_file(temp_dir.path(), "div_zero_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = exe_path(temp_dir.path(), "div_zero_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+
+    assert_eq!(
+        run_output.status.code(),
+        Some(101),
+        "binary should exit 101 on division by zero"
+    );
+    let stderr = String::from_utf8_lossy(&run_output.stderr);
+    assert!(
+        stderr.contains("integer division by zero"),
+        "stderr should contain division-by-zero message, got: {}",
+        stderr
+    );
+}
+
 // ─── while loops ──────────────────────────────────────────────────────────
 
 #[test]

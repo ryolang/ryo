@@ -112,6 +112,12 @@ pub enum DiagCode {
     /// fires when the copy can outlive or outlast its view.
     RedundantMaterialize,
 
+    /// Integer division or modulo with a literal zero divisor
+    /// (`x / 0`, `x % 0`, `x /= 0`, `x %= 0`). Always panics at
+    /// runtime, so it is rejected at compile time. Non-literal
+    /// divisors are caught by the codegen zero-divisor guard instead.
+    DivisionByZero,
+
     /// A declaration's resolution requires its own resolution to be
     /// already complete — e.g. a chain of decls whose types depend
     /// transitively on themselves. Today this is an infrastructure-

@@ -787,6 +787,24 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                 ));
             }
 
+            // Same literal-zero-divisor rule as binary `x / 0`:
+            // always panics at runtime, so reject it here.
+            if matches!(op, CompoundOp::Div | CompoundOp::Mod)
+                && is_int
+                && matches!(sema.uir.inst(view.value).data, InstData::Int(0))
+            {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::DivisionByZero,
+                    if op == CompoundOp::Div {
+                        "division by zero".to_string()
+                    } else {
+                        "modulo by zero".to_string()
+                    },
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+
             fcx.builder
                 .compound_assign(view.name, view.op, existing_ty, value_tir, span)
         }
@@ -1058,6 +1076,25 @@ fn analyze_expr_allow_never(
             let r2 = analyze_expr(sema, fcx, scope, rhs);
             let lhs_ty = fcx.builder.ty_of(l);
             let rhs_ty = fcx.builder.ty_of(r2);
+            // A literal-zero divisor in int division always panics at
+            // runtime (the codegen zero-divisor guard), so reject it
+            // at compile time instead. Float `x / 0.0` is IEEE-defined
+            // (inf) and unaffected.
+            if matches!(inst.tag, InstTag::Div | InstTag::Mod)
+                && lhs_ty == sema.pool.int()
+                && matches!(sema.uir.inst(rhs).data, InstData::Int(0))
+            {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::DivisionByZero,
+                    if inst.tag == InstTag::Div {
+                        "division by zero".to_string()
+                    } else {
+                        "modulo by zero".to_string()
+                    },
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
             check_binary_op(sema, fcx, inst.tag, lhs_ty, rhs_ty, l, r2, span)
         }
         InstTag::Neg => {
@@ -3442,6 +3479,41 @@ mod tests {
     fn compound_assign_undeclared_rejected() {
         let diags = run("fn main():\n\ty += 5\n").unwrap_err();
         assert!(any_code(&diags, DiagCode::UndefinedAssignTarget));
+    }
+
+    #[test]
+    fn div_by_zero_literal_rejected() {
+        let diags = run("fn main():\n\tx = 1 / 0\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn mod_by_zero_literal_rejected() {
+        let diags = run("fn main():\n\tx = 1 % 0\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn compound_div_by_zero_literal_rejected() {
+        let diags = run("fn main():\n\tmut x = 10\n\tx /= 0\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn compound_mod_by_zero_literal_rejected() {
+        let diags = run("fn main():\n\tmut x = 10\n\tx %= 0\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn float_div_by_zero_literal_allowed() {
+        // IEEE 754: float division by zero yields inf, no diagnostic.
+        let result = run("fn main():\n\tx = 1.0 / 0.0\n");
+        assert!(
+            result.is_ok(),
+            "float division by zero should compile: {:?}",
+            result.err()
+        );
     }
 
     #[test]
