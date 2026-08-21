@@ -266,11 +266,14 @@ struct FunctionContext<'a, M: Module> {
     /// see `Codegen::guard_msg_data`.
     guard_msg_data: &'a mut HashMap<&'static str, DataId>,
     /// Cold panic blocks for guard failures (overflow, div-by-zero),
-    /// keyed by message so all guards with the same message share one
-    /// block. Emitted at end-of-function (see `compile_function`) so
-    /// the hot path falls through the guard `brif` instead of jumping
-    /// over inline panic code.
-    panic_blocks: HashMap<&'static str, Block>,
+    /// paired with their message so all guards with the same message
+    /// share one block. A Vec (not a map) keeps the drain order
+    /// deterministic — identical input must produce identical binary
+    /// bytes — and there are only two guard messages in total.
+    /// Emitted at end-of-function (see `compile_function`) so the hot
+    /// path falls through the guard `brif` instead of jumping over
+    /// inline panic code.
+    panic_blocks: Vec<(&'static str, Block)>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -683,7 +686,7 @@ impl<M: Module> Codegen<M> {
                 sidecar: func_sidecar,
                 branch_stack: Vec::new(),
                 guard_msg_data: &mut self.guard_msg_data,
-                panic_blocks: HashMap::new(),
+                panic_blocks: Vec::new(),
             };
 
             for (idx, param) in tir.params.iter().enumerate() {
@@ -1843,10 +1846,14 @@ impl<M: Module> Codegen<M> {
         flag: Value,
         msg: &'static str,
     ) -> Result<(), String> {
-        let panic_block = *ctx
-            .panic_blocks
-            .entry(msg)
-            .or_insert_with(|| builder.create_block());
+        let panic_block = match ctx.panic_blocks.iter().find(|(m, _)| *m == msg) {
+            Some(&(_, block)) => block,
+            None => {
+                let block = builder.create_block();
+                ctx.panic_blocks.push((msg, block));
+                block
+            }
+        };
         let ok_block = builder.create_block();
         builder.ins().brif(flag, panic_block, &[], ok_block, &[]);
 
