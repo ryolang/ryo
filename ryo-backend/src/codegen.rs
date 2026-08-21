@@ -22,7 +22,9 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use cranelift::codegen::ir::{ArgumentPurpose, BlockArg, FuncRef, StackSlot};
+use cranelift::codegen::ir::{
+    ArgumentPurpose, BlockArg, FuncRef, InstructionData, Opcode, StackSlot, ValueDef,
+};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -107,7 +109,19 @@ pub struct Codegen<M: Module> {
     /// Keyed on `StringId` so duplicate string literals reuse the
     /// same `.rodata` blob without an extra hash on the bytes.
     string_data: HashMap<StringId, DataId>,
+    /// Cache of `DataId` per compiler-generated guard message
+    /// (zero-divisor checks). These strings never pass through the
+    /// `InternPool`, so they are keyed on the static text itself.
+    guard_msg_data: HashMap<&'static str, DataId>,
 }
+
+/// Zero-divisor guard messages, written verbatim by `ryo_panic`
+/// (raw bytes, trailing newline — same convention as the runtime's
+/// slice-failure messages).
+const DIV_ZERO_MSG: &str = "integer division by zero\n";
+const MOD_ZERO_MSG: &str = "integer modulo by zero\n";
+/// Overflow guard message for the spec §18 checked-arithmetic traps.
+const OVERFLOW_MSG: &str = "integer overflow\n";
 
 /// Per-loop codegen state: the Cranelift blocks that `break` and
 /// `continue` jump to.
@@ -248,6 +262,18 @@ struct FunctionContext<'a, M: Module> {
     /// so a Free anchored to a parent arm still fires from inside a
     /// nested child arm of the same parent.
     branch_stack: Vec<ryo_core::ownership::BranchId>,
+    /// Module-level cache for compiler-generated guard messages;
+    /// see `Codegen::guard_msg_data`.
+    guard_msg_data: &'a mut HashMap<&'static str, DataId>,
+    /// Cold panic blocks for guard failures (overflow, div-by-zero),
+    /// paired with their message so all guards with the same message
+    /// share one block. A Vec (not a map) keeps the drain order
+    /// deterministic — identical input must produce identical binary
+    /// bytes — and there are only two guard messages in total.
+    /// Emitted at end-of-function (see `compile_function`) so the hot
+    /// path falls through the guard `brif` instead of jumping over
+    /// inline panic code.
+    panic_blocks: Vec<(&'static str, Block)>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -260,6 +286,7 @@ impl<M: Module> Codegen<M> {
             int_type,
             data_ctx: DataDescription::new(),
             string_data: HashMap::new(),
+            guard_msg_data: HashMap::new(),
         }
     }
 }
@@ -658,6 +685,8 @@ impl<M: Module> Codegen<M> {
                 sret_ptr,
                 sidecar: func_sidecar,
                 branch_stack: Vec::new(),
+                guard_msg_data: &mut self.guard_msg_data,
+                panic_blocks: Vec::new(),
             };
 
             for (idx, param) in tir.params.iter().enumerate() {
@@ -720,6 +749,8 @@ impl<M: Module> Codegen<M> {
                 "frees anchored to unmaterialized instructions were dropped: {:?}",
                 ctx.pending_sweep
             );
+
+            Self::emit_deferred_panic_blocks(&mut builder, &mut ctx)?;
 
             builder.finalize();
         }
@@ -1023,21 +1054,37 @@ impl<M: Module> Codegen<M> {
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
                 let rhs = Self::eval_inst(builder, ctx, view.value)?;
-                let var = ctx.locals.get(&view.name).ok_or_else(|| {
+                // Copy the Variable handle out: the zero-divisor guard
+                // below needs &mut ctx, which an outstanding borrow of
+                // ctx.locals would block.
+                let var = *ctx.locals.get(&view.name).ok_or_else(|| {
                     format!(
                         "Undefined variable in compound assign: '{}'",
                         ctx.pool.str(view.name)
                     )
                 })?;
-                let current = builder.use_var(*var);
+                let current = builder.use_var(var);
 
                 let is_float = inst.ty == ctx.pool.float();
                 let result = match (view.op, is_float) {
-                    (CompoundOp::Add, false) => builder.ins().iadd(current, rhs),
-                    (CompoundOp::Sub, false) => builder.ins().isub(current, rhs),
-                    (CompoundOp::Mul, false) => builder.ins().imul(current, rhs),
-                    (CompoundOp::Div, false) => builder.ins().sdiv(current, rhs),
-                    (CompoundOp::Mod, false) => builder.ins().srem(current, rhs),
+                    // Same spec §18 checked arithmetic as the binop arm.
+                    (CompoundOp::Add, false) => {
+                        Self::emit_checked_iadd(builder, ctx, current, rhs)?
+                    }
+                    (CompoundOp::Sub, false) => {
+                        Self::emit_checked_isub(builder, ctx, current, rhs)?
+                    }
+                    (CompoundOp::Mul, false) => {
+                        Self::emit_checked_imul(builder, ctx, current, rhs)?
+                    }
+                    (CompoundOp::Div, false) => {
+                        Self::emit_div_zero_guard(builder, ctx, rhs, DIV_ZERO_MSG)?;
+                        builder.ins().sdiv(current, rhs)
+                    }
+                    (CompoundOp::Mod, false) => {
+                        Self::emit_div_zero_guard(builder, ctx, rhs, MOD_ZERO_MSG)?;
+                        builder.ins().srem(current, rhs)
+                    }
                     (CompoundOp::Add, true) => builder.ins().fadd(current, rhs),
                     (CompoundOp::Sub, true) => builder.ins().fsub(current, rhs),
                     (CompoundOp::Mul, true) => builder.ins().fmul(current, rhs),
@@ -1045,7 +1092,7 @@ impl<M: Module> Codegen<M> {
                     (CompoundOp::Mod, true) => return Err("float modulo not supported".to_string()),
                 };
 
-                builder.def_var(*var, result);
+                builder.def_var(var, result);
                 Ok(Terminator::None)
             }
             TirTag::WhileLoop => Self::generate_while_loop(builder, ctx, r),
@@ -1431,7 +1478,12 @@ impl<M: Module> Codegen<M> {
             TirTag::INeg => match inst.data {
                 TirData::UnOp(operand) => {
                     let v = Self::eval_inst(builder, ctx, operand)?;
-                    builder.ins().ineg(v)
+                    // Spec §18 checked negation: `-(x)` as `0 - x` so
+                    // `-(i64::MIN)` sets the overflow flag and panics.
+                    let zero = builder.ins().iconst(ctx.int_type, 0);
+                    let (r, of) = builder.ins().ssub_overflow(zero, v);
+                    Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+                    r
                 }
                 _ => unreachable!("INeg must carry TirData::UnOp"),
             },
@@ -1471,11 +1523,21 @@ impl<M: Module> Codegen<M> {
                 let lv = Self::eval_inst(builder, ctx, lhs)?;
                 let rv = Self::eval_inst(builder, ctx, rhs)?;
                 match inst.tag {
-                    TirTag::IAdd => builder.ins().iadd(lv, rv),
-                    TirTag::ISub => builder.ins().isub(lv, rv),
-                    TirTag::IMul => builder.ins().imul(lv, rv),
-                    TirTag::ISDiv => builder.ins().sdiv(lv, rv),
-                    TirTag::IMod => builder.ins().srem(lv, rv),
+                    // Spec §18: signed +,-,* trap on overflow in all
+                    // build modes. The s*_overflow ops return the
+                    // wrapped result plus an i8 overflow flag; a set
+                    // flag branches to ryo_panic.
+                    TirTag::IAdd => Self::emit_checked_iadd(builder, ctx, lv, rv)?,
+                    TirTag::ISub => Self::emit_checked_isub(builder, ctx, lv, rv)?,
+                    TirTag::IMul => Self::emit_checked_imul(builder, ctx, lv, rv)?,
+                    TirTag::ISDiv => {
+                        Self::emit_div_zero_guard(builder, ctx, rv, DIV_ZERO_MSG)?;
+                        builder.ins().sdiv(lv, rv)
+                    }
+                    TirTag::IMod => {
+                        Self::emit_div_zero_guard(builder, ctx, rv, MOD_ZERO_MSG)?;
+                        builder.ins().srem(lv, rv)
+                    }
                     TirTag::ICmpEq => builder.ins().icmp(IntCC::Equal, lv, rv),
                     TirTag::ICmpNe => builder.ins().icmp(IntCC::NotEqual, lv, rv),
                     TirTag::ICmpLt => builder.ins().icmp(IntCC::SignedLessThan, lv, rv),
@@ -1646,6 +1708,193 @@ impl<M: Module> Codegen<M> {
         let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
         let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
         Ok(builder.ins().global_value(ctx.int_type, data_ref))
+    }
+
+    /// Define a compiler-generated message as a read-only data object,
+    /// deduped per module through `Codegen::guard_msg_data`.
+    fn store_guard_msg(
+        module: &mut M,
+        data_ctx: &mut DataDescription,
+        cache: &mut HashMap<&'static str, DataId>,
+        msg: &'static str,
+    ) -> Result<DataId, String> {
+        if let Some(&data_id) = cache.get(msg) {
+            return Ok(data_id);
+        }
+        let data_id = module
+            .declare_anonymous_data(false, false)
+            .map_err(|e| format!("Failed to declare guard message data: {}", e))?;
+        data_ctx.clear();
+        data_ctx.define(msg.as_bytes().into());
+        module
+            .define_data(data_id, data_ctx)
+            .map_err(|e| format!("Failed to define guard message data: {}", e))?;
+        cache.insert(msg, data_id);
+        Ok(data_id)
+    }
+
+    /// The immediate behind `v` when it was produced by an `iconst`
+    /// in the function being built, otherwise `None`. The checked
+    /// arithmetic guards use it to drop a check the constant makes
+    /// unreachable (`x + 0`, `x * 1`, a non-zero constant divisor).
+    /// Sema only const-folds when *every* operand is constant, so
+    /// these mixed const/runtime shapes reach codegen intact.
+    fn const_int(builder: &FunctionBuilder, v: Value) -> Option<i64> {
+        let ValueDef::Result(inst, _) = builder.func.dfg.value_def(v) else {
+            return None;
+        };
+        match builder.func.dfg.insts[inst] {
+            InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } => Some(imm.bits()),
+            _ => None,
+        }
+    }
+
+    /// Checked signed addition (spec §18): `sadd_overflow` plus the
+    /// `ryo_panic` guard, except when a constant operand makes the
+    /// operation exact. `x + 0` is `x` for every `x`, so the guard —
+    /// and the add itself — is dropped.
+    fn emit_checked_iadd(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        // Addition commutes, so either side may carry the zero.
+        if Self::const_int(builder, rhs) == Some(0) {
+            return Ok(lhs);
+        }
+        if Self::const_int(builder, lhs) == Some(0) {
+            return Ok(rhs);
+        }
+        let (sum, of) = builder.ins().sadd_overflow(lhs, rhs);
+        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+        Ok(sum)
+    }
+
+    /// Checked signed subtraction (spec §18). `x - 0` is exact for
+    /// every `x`; a constant minuend has no such shortcut (`0 - x`
+    /// overflows at `INT_MIN`), so it keeps the guard.
+    fn emit_checked_isub(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        if Self::const_int(builder, rhs) == Some(0) {
+            return Ok(lhs);
+        }
+        let (diff, of) = builder.ins().ssub_overflow(lhs, rhs);
+        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+        Ok(diff)
+    }
+
+    /// Checked signed multiplication (spec §18). `x * 0` and `x * 1`
+    /// are exact for every `x`, so those drop the guard — `x * -1`
+    /// does not, since `INT_MIN * -1` overflows.
+    fn emit_checked_imul(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        let konst = Self::const_int(builder, rhs).or_else(|| Self::const_int(builder, lhs));
+        if matches!(konst, Some(0) | Some(1)) {
+            return Ok(builder.ins().imul(lhs, rhs));
+        }
+        let (prod, of) = builder.ins().smul_overflow(lhs, rhs);
+        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+        Ok(prod)
+    }
+
+    /// Zero-divisor guard for `sdiv`/`srem`, which are UB in Cranelift
+    /// when the divisor is zero (`idiv` traps on x86-64; `sdiv`
+    /// silently returns garbage on aarch64). Only the divisor is
+    /// checked: `INT_MIN / -1` overflow remains UB (out of scope).
+    fn emit_div_zero_guard(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        divisor: Value,
+        msg: &'static str,
+    ) -> Result<(), String> {
+        // A non-zero constant divisor can never trip the guard. The
+        // zero constant keeps it: sema rejects the literal forms, so
+        // anything reaching here must still panic at runtime.
+        if Self::const_int(builder, divisor).is_some_and(|c| c != 0) {
+            return Ok(());
+        }
+        let zero = builder.ins().iconst(ctx.int_type, 0);
+        let is_zero = builder.ins().icmp(IntCC::Equal, divisor, zero);
+        Self::emit_panic_guard(builder, ctx, is_zero, msg)
+    }
+
+    /// Branch to a shared cold block that calls `ryo_panic` — stderr
+    /// message + exit 101, the same contract as the `panic()` builtin —
+    /// when `flag` is set; otherwise fall through. Shared by the
+    /// zero-divisor guard and the spec §18 overflow checks.
+    ///
+    /// The panic block is NOT emitted here: it is deferred to
+    /// end-of-function (`emit_deferred_panic_blocks`) so the hot path
+    /// falls through the `brif` and all cold code sits out of line,
+    /// after the function body. Guards with the same message share one
+    /// panic block.
+    fn emit_panic_guard(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        flag: Value,
+        msg: &'static str,
+    ) -> Result<(), String> {
+        let panic_block = match ctx.panic_blocks.iter().find(|(m, _)| *m == msg) {
+            Some(&(_, block)) => block,
+            None => {
+                let block = builder.create_block();
+                ctx.panic_blocks.push((msg, block));
+                block
+            }
+        };
+        let ok_block = builder.create_block();
+        builder.ins().brif(flag, panic_block, &[], ok_block, &[]);
+
+        // `ok_block` has exactly one predecessor (the brif above), so
+        // it can be sealed immediately. The shared panic block gains a
+        // predecessor per guard and is sealed when emitted.
+        builder.seal_block(ok_block);
+        builder.switch_to_block(ok_block);
+        Ok(())
+    }
+
+    /// Emit the deferred guard-failure blocks collected in
+    /// `ctx.panic_blocks` after the function body. Must be called once
+    /// per function, after `emit_body`, before `builder.finalize()`.
+    fn emit_deferred_panic_blocks(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+    ) -> Result<(), String> {
+        let panic_blocks = std::mem::take(&mut ctx.panic_blocks);
+        for (msg, block) in panic_blocks {
+            builder.seal_block(block);
+            builder.switch_to_block(block);
+            let data_id = Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, msg)?;
+            let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+            let ptr = builder.ins().global_value(ctx.int_type, data_ref);
+            let len = builder.ins().iconst(types::I64, msg.len() as i64);
+            let panic_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                "ryo_panic",
+                // Runtime contract: ryo_panic(ptr, len: u64) — the
+                // length is fixed I64 regardless of target pointer width.
+                &[ctx.int_type, types::I64],
+                &[],
+            )?;
+            builder.ins().call(panic_ref, &[ptr, len]);
+            // Unreachable in practice (ryo_panic never returns); keeps
+            // Cranelift honest about the block having a terminator.
+            builder.ins().trap(TrapCode::user(1).unwrap());
+        }
+        Ok(())
     }
 
     /// Declare an external runtime function by name and return a
@@ -2348,7 +2597,9 @@ impl<M: Module> Codegen<M> {
                 ctx.module,
                 builder,
                 "ryo_panic",
-                &[ctx.int_type, ctx.int_type],
+                // Runtime contract: ryo_panic(ptr, len: u64) — the
+                // length is fixed I64 regardless of target pointer width.
+                &[ctx.int_type, types::I64],
                 &[],
             )?;
             builder.ins().call(panic_ref, &arg_values);

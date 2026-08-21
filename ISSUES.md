@@ -58,12 +58,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** `TypeKind::Bool` maps to Cranelift `I8`. Fine for internal logic, but C ABIs typically pass `_Bool` zero/sign-extended to a full register (often i32 on SysV, register-width on Win64). Passing or returning our raw `I8` across an FFI call would leave the upper bits undefined from the callee's perspective.
 **Resolution:** When FFI lands, insert explicit `uext` (zero-extension) on bool arguments at call sites and `ireduce` on bool returns, per the target ABI. Decide at the FFI design stage whether `bool` keeps its `I8` storage type and only widens at the boundary, or becomes register-width throughout. Latent until FFI exists.
 
-### I-023 — Integer division / modulo by zero is undefined behavior at codegen
-
-**Files:** `ryo-backend/src/codegen.rs` (`TirTag::ISDiv`, `TirTag::IMod` arms), `ryo-frontend/src/sema.rs` (`check_binary_op`)
-**Summary:** `a / 0` and `a % 0` lower directly to Cranelift `sdiv` / `srem` with no guard. Cranelift treats both as UB; the resulting native instruction (`idiv` on x86-64, `sdiv` on aarch64) traps or returns garbage depending on target. Sema does not constant-fold a known-zero divisor either.
-**Resolution:** When safety checks land, insert a runtime check at codegen: emit a compare-against-zero, branch to a trap / panic block on hit. Optionally constant-fold the obvious `x / 0` / `x % 0` cases at sema and emit a diagnostic. Coordinate with the eventual panic / safe-mode design so the trap path has somewhere to go.
-
 ### I-024 — Single `float` type, no `float32` / `float64` distinction
 
 **Files:** `ryo-core/src/types.rs` (`Tag::Float`, `TypeKind::Float`), `ryo-backend/src/codegen.rs` (`cranelift_type_for`)
@@ -211,6 +205,12 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** Two robustness gaps at the C-ABI boundary. (a) `oom_abort` is the handler for three distinct failure modes — genuine allocation failure, `u64 → usize` narrowing (32-bit-only), and `checked_add` capacity overflow — so all three abort identically with an OOM message. (b) `ryo_print` / `ryo_panic` / the slice path guard their pointer args with `debug_assert!(!ptr.is_null())` only; a release build passes a null pointer to `write`/`memcpy` unchecked when `len > 0`.
 **Resolution:** Split `oom_abort` into distinct abort paths (or a reason-code parameter) so overflow/narrowing is distinguishable from OOM in the message; downgrade the null checks to real `if ptr.is_null() { abort }` guards at the FFI entry points — they cost one branch on a cold path.
 
+### I-138 — `INT_MIN / -1` (and `% -1`) signed-overflow is UB at codegen
+
+**Files:** `ryo-backend/src/codegen.rs` (`emit_div_zero_guard` call sites: `TirTag::ISDiv`, `TirTag::IMod`, compound-assign arms)
+**Summary:** The zero-divisor guard covers `x / 0` and `x % 0`, but Cranelift `sdiv`/`srem` are also UB on signed overflow: `INT_MIN / -1` (and `INT_MIN % -1`) has no representable result. x86-64 `idiv` traps (#DE); aarch64 `sdiv` silently wraps to `INT_MIN`. Sema's literal-zero check doesn't catch it either (`x / -1` is a unary-minus expression, not a literal).
+**Resolution:** Extend `emit_div_zero_guard` to also check `dividend == INT_MIN && divisor == -1`, branching to the same `ryo_panic` path with an "integer division overflow" message. Sema can reject the literal form `x / -1` only when the dividend is a known `INT_MIN` constant — likely not worth it; the runtime guard alone suffices.
+
 ---
 
 ## 🟢 Cleanup
@@ -340,6 +340,24 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Files:** `ryo-frontend/src/ownership.rs` (9504), `ryo-frontend/src/sema.rs` (4168), `ryo/tests/integration_tests.rs` (4002)
 **Summary:** Nothing stops source files from growing unbounded; three files are already past the 3000-line mark used as the tidy limit (rust-lang `src/tools/tidy` convention, tests included). Full split plans with per-module anchors are in `docs/dev/architecture_analysis_2026_08_20.md` §4. Related to I-128 (function-level sizes) but distinct: this is file-level navigability, review surface, and merge-conflict scope.
 **Resolution:** Add a tidy check to CI failing on `*.rs` files over 3000 lines with an explicit allowlist for the three current files; shrink the allowlist as the §4 splits land (`ownership/` and `sema/` module directories, per-area integration test binaries sharing `common/mod.rs`).
+
+### I-140 — Cranelift upgrade 0.131.1 → 0.135.x (MSRV ladder + breaking removals)
+
+**Files:** `Cargo.toml` (workspace deps), `Cargo.lock`, `scripts/check_cranelift.sh`, `ryo-backend/src/codegen.rs`
+**Summary:** Ryo pins Cranelift 0.131.1; latest is 0.135.0. Upgrading is blocked on two things: (1) the MSRV ladder — 0.132 needs Rust 1.93, 0.133 needs 1.94, 0.135 needs 1.95; (2) instruction-set removals that surface at compile time — all `*_imm` instructions removed in 0.133 (`iadd_imm`, `imul_imm`, `icmp_imm`, `udiv_imm`, `sdiv_imm` — Ryo uses none of these today), and in 0.134 `global_value`, `band_not`/`bor_not`/`bxor_not`, `stack_load`/`stack_store` removed plus `MemFlags` renamed to `MemFlagsData`. No new overflow-detection instructions exist in 0.132–0.135, so the upgrade is not urgent for correctness.
+**Resolution:** Bump the Cranelift workspace deps release-by-release with `./scripts/check_cranelift.sh <version>` review per step, fixing compile breaks from the removals above; confirm CI toolchains meet the MSRV of the target release before merging.
+
+### I-141 — Adopt 0.134/0.135 guard-codegen and compile-time improvements after the Cranelift upgrade
+
+**Files:** `ryo-backend/src/codegen.rs` (`emit_panic_guard` and the checked-arithmetic/div-zero call sites)
+**Summary:** Two upstream changes directly benefit the panic guards added for div-by-zero and signed-overflow: 0.134 folds branch-to-trap patterns into single conditional traps in the egraph pass (#13688) and treats trapping blocks as cold during lowering (#13689); 0.135 reuses `regalloc2` context/output across function compilations and trims hashmaps on the lowering hot path, cutting compile time. These apply automatically once the upgrade (I-140) lands, but the guard codegen should be re-inspected to confirm the brif→panic-block shape actually gets the cold-block treatment (our guards branch to a `ryo_panic` call, not a raw `trap`, so #13688's trap folding does not apply — switching to `trapz`/`trapnz` was rejected because it would bypass the ryo_panic message/exit-code contract).
+**Resolution:** After I-140, diff the emitted CLIF/disassembly of the overflow and div-zero test cases before/after the upgrade; verify guard blocks are laid out cold and measure compile time on the benchmark suite. Keep the explicit `ryo_panic` call convention.
+
+### I-142 — Overflow guards fire on operations a value-range analysis could prove safe
+
+**Files:** `ryo-backend/src/codegen.rs` (`emit_checked_iadd`, `emit_checked_isub`, `emit_checked_imul`)
+**Summary:** Spec §18 checked arithmetic costs 3–4 machine instructions per integer op, and codegen currently elides a guard only when a constant operand makes it unreachable (`x + 0`, `x - 0`, `x * 0`, `x * 1`, non-zero constant divisors). Everything else pays, including operations whose operands are already bounded by a dominating comparison. `benchmarks/fibonacci/fib.ryo` is the worst case: `if n <= 1: return n` proves `n >= 2`, so neither `n - 1` nor `n - 2` can overflow, yet both are guarded. Measured cost of the guards on that benchmark — aarch64 (CodSpeed walltime runner): the `fibonacci` hot path grows from 19 to 29 instructions per call, 1.10 s → 1.47 s for `fib(40)` (+33%); x86-64 (callgrind, `fib(28)`): 19.7 M → 25.3 M instructions (+29%). Encoding experiments (`icmp`-based checks that Cranelift fuses into one compare-and-branch, comparisons against precomputed boundary constants, `trapnz` instead of a branch to the shared panic block) all moved the totals by ≤4% in either direction on one ISA while regressing the other — the cost is the number of checks, not their encoding. Two upstream gaps add to it on aarch64: Cranelift materialises the constant operand into a register instead of using the immediate form (`mov x1, #1` + `subs x1, x0, x1`), and branches on the overflow flag through `cset` + `uxtb` + `cbnz` instead of `b.vs`.
+**Resolution:** Give codegen a small value-range fact map (variable → inclusive bounds) seeded from dominating `if`/`while` comparisons against constants — including the fall-through path of an if whose arms all terminate, which is the fibonacci shape — and skip the guard when the operand bounds make overflow impossible. Facts must be invalidated on assignment, on `inout` argument passing, and at every join whose predecessors disagree; each elision needs a pinning test at the boundary value, since a wrong one silently drops a mandated trap. Until then the checked-arithmetic cost on arithmetic-heavy code is expected and matches other trap-on-overflow languages (Swift is ~1.28× Rust on the same benchmark).
 
 ---
 
