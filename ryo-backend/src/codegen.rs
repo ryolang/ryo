@@ -263,6 +263,12 @@ struct FunctionContext<'a, M: Module> {
     /// Module-level cache for compiler-generated guard messages;
     /// see `Codegen::guard_msg_data`.
     guard_msg_data: &'a mut HashMap<&'static str, DataId>,
+    /// Cold panic blocks for guard failures (overflow, div-by-zero),
+    /// keyed by message so all guards with the same message share one
+    /// block. Emitted at end-of-function (see `compile_function`) so
+    /// the hot path falls through the guard `brif` instead of jumping
+    /// over inline panic code.
+    panic_blocks: HashMap<&'static str, Block>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -675,6 +681,7 @@ impl<M: Module> Codegen<M> {
                 sidecar: func_sidecar,
                 branch_stack: Vec::new(),
                 guard_msg_data: &mut self.guard_msg_data,
+                panic_blocks: HashMap::new(),
             };
 
             for (idx, param) in tir.params.iter().enumerate() {
@@ -737,6 +744,8 @@ impl<M: Module> Codegen<M> {
                 "frees anchored to unmaterialized instructions were dropped: {:?}",
                 ctx.pending_sweep
             );
+
+            Self::emit_deferred_panic_blocks(&mut builder, &mut ctx)?;
 
             builder.finalize();
         }
@@ -1752,42 +1761,64 @@ impl<M: Module> Codegen<M> {
         Self::emit_panic_guard(builder, ctx, is_zero, msg)
     }
 
-    /// Branch to a block that calls `ryo_panic` — stderr message +
-    /// exit 101, the same contract as the `panic()` builtin — when
-    /// `flag` is set, then trap; otherwise fall through. Shared by the
+    /// Branch to a shared cold block that calls `ryo_panic` — stderr
+    /// message + exit 101, the same contract as the `panic()` builtin —
+    /// when `flag` is set; otherwise fall through. Shared by the
     /// zero-divisor guard and the spec §18 overflow checks.
+    ///
+    /// The panic block is NOT emitted here: it is deferred to
+    /// end-of-function (`emit_deferred_panic_blocks`) so the hot path
+    /// falls through the `brif` and all cold code sits out of line,
+    /// after the function body. Guards with the same message share one
+    /// panic block.
     fn emit_panic_guard(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         flag: Value,
         msg: &'static str,
     ) -> Result<(), String> {
-        let panic_block = builder.create_block();
+        let panic_block = *ctx
+            .panic_blocks
+            .entry(msg)
+            .or_insert_with(|| builder.create_block());
         let ok_block = builder.create_block();
         builder.ins().brif(flag, panic_block, &[], ok_block, &[]);
 
-        // Both blocks have exactly one predecessor (the brif above),
-        // so they can be sealed immediately.
-        builder.seal_block(panic_block);
-        builder.switch_to_block(panic_block);
-        let data_id = Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, msg)?;
-        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-        let ptr = builder.ins().global_value(ctx.int_type, data_ref);
-        let len = builder.ins().iconst(ctx.int_type, msg.len() as i64);
-        let panic_ref = Self::declare_runtime_fn(
-            ctx.module,
-            builder,
-            "ryo_panic",
-            &[ctx.int_type, ctx.int_type],
-            &[],
-        )?;
-        builder.ins().call(panic_ref, &[ptr, len]);
-        // Unreachable in practice (ryo_panic never returns); keeps
-        // Cranelift honest about the block having a terminator.
-        builder.ins().trap(TrapCode::user(1).unwrap());
-
+        // `ok_block` has exactly one predecessor (the brif above), so
+        // it can be sealed immediately. The shared panic block gains a
+        // predecessor per guard and is sealed when emitted.
         builder.seal_block(ok_block);
         builder.switch_to_block(ok_block);
+        Ok(())
+    }
+
+    /// Emit the deferred guard-failure blocks collected in
+    /// `ctx.panic_blocks` after the function body. Must be called once
+    /// per function, after `emit_body`, before `builder.finalize()`.
+    fn emit_deferred_panic_blocks(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+    ) -> Result<(), String> {
+        let panic_blocks = std::mem::take(&mut ctx.panic_blocks);
+        for (msg, block) in panic_blocks {
+            builder.seal_block(block);
+            builder.switch_to_block(block);
+            let data_id = Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, msg)?;
+            let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+            let ptr = builder.ins().global_value(ctx.int_type, data_ref);
+            let len = builder.ins().iconst(ctx.int_type, msg.len() as i64);
+            let panic_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                "ryo_panic",
+                &[ctx.int_type, ctx.int_type],
+                &[],
+            )?;
+            builder.ins().call(panic_ref, &[ptr, len]);
+            // Unreachable in practice (ryo_panic never returns); keeps
+            // Cranelift honest about the block having a terminator.
+            builder.ins().trap(TrapCode::user(1).unwrap());
+        }
         Ok(())
     }
 
