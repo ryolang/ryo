@@ -1781,6 +1781,29 @@ fn mod_by_zero_literal_rejected() {
 }
 
 #[test]
+fn div_by_neg_zero_literal_rejected_e0037() {
+    // `-0` is unary minus over the zero literal, not a signed literal —
+    // sema must still reject it with the same E0037 diagnostic.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 1 / -0\n";
+    let test_file = create_test_file(temp_dir.path(), "div_neg_zero_lit.ryo", code);
+
+    let output = run_ryo_command(&["run", "div_neg_zero_lit.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "division by -0 should be a compile error"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0037") && stderr.contains("division by zero"),
+        "expected E0037 division-by-zero diagnostic, got: {}",
+        stderr
+    );
+}
+
+#[test]
 fn div_by_zero_panics_jit() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\tx = 0\n\ty = 10 / x\n";

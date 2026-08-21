@@ -791,7 +791,7 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             // always panics at runtime, so reject it here.
             if matches!(op, CompoundOp::Div | CompoundOp::Mod)
                 && is_int
-                && matches!(sema.uir.inst(view.value).data, InstData::Int(0))
+                && is_zero_int_literal(sema.uir, view.value)
             {
                 sema.sink.emit(Diag::error(
                     span,
@@ -1082,7 +1082,7 @@ fn analyze_expr_allow_never(
             // (inf) and unaffected.
             if matches!(inst.tag, InstTag::Div | InstTag::Mod)
                 && lhs_ty == sema.pool.int()
-                && matches!(sema.uir.inst(rhs).data, InstData::Int(0))
+                && is_zero_int_literal(sema.uir, rhs)
             {
                 sema.sink.emit(Diag::error(
                     span,
@@ -1308,6 +1308,21 @@ fn check_slice_bound(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, b: I
         ));
     }
     t
+}
+
+/// True when `r` is a literal integer zero divisor: `0` directly, or
+/// `-0` (unary minus over the zero literal, since the lexer has no
+/// signed literals). Deeper expressions (`x * 0`, `-(-0)`) are not
+/// folded — they fall through to the codegen zero-divisor guard.
+fn is_zero_int_literal(uir: &Uir, r: InstRef) -> bool {
+    let inst = uir.inst(r);
+    match inst.data {
+        InstData::Int(0) => true,
+        InstData::UnOp(operand) if inst.tag == InstTag::Neg => {
+            matches!(uir.inst(operand).data, InstData::Int(0))
+        }
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3502,6 +3517,32 @@ mod tests {
     #[test]
     fn compound_mod_by_zero_literal_rejected() {
         let diags = run("fn main():\n\tmut x = 10\n\tx %= 0\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn div_by_neg_zero_literal_rejected() {
+        // `-0` parses as unary minus over the zero literal, not as a
+        // signed literal — the check must see through the Neg.
+        let diags = run("fn main():\n\tx = 1 / -0\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn mod_by_neg_zero_literal_rejected() {
+        let diags = run("fn main():\n\tx = 1 % -0\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn compound_div_by_neg_zero_literal_rejected() {
+        let diags = run("fn main():\n\tmut x = 10\n\tx /= -0\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn compound_mod_by_neg_zero_literal_rejected() {
+        let diags = run("fn main():\n\tmut x = 10\n\tx %= -0\n").unwrap_err();
         assert!(any_code(&diags, DiagCode::DivisionByZero));
     }
 
