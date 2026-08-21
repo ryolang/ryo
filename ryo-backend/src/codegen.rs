@@ -118,6 +118,8 @@ pub struct Codegen<M: Module> {
 /// slice-failure messages).
 const DIV_ZERO_MSG: &str = "integer division by zero\n";
 const MOD_ZERO_MSG: &str = "integer modulo by zero\n";
+/// Overflow guard message for the spec §18 checked-arithmetic traps.
+const OVERFLOW_MSG: &str = "integer overflow\n";
 
 /// Per-loop codegen state: the Cranelift blocks that `break` and
 /// `continue` jump to.
@@ -1051,9 +1053,22 @@ impl<M: Module> Codegen<M> {
 
                 let is_float = inst.ty == ctx.pool.float();
                 let result = match (view.op, is_float) {
-                    (CompoundOp::Add, false) => builder.ins().iadd(current, rhs),
-                    (CompoundOp::Sub, false) => builder.ins().isub(current, rhs),
-                    (CompoundOp::Mul, false) => builder.ins().imul(current, rhs),
+                    // Same spec §18 checked arithmetic as the binop arm.
+                    (CompoundOp::Add, false) => {
+                        let (v, of) = builder.ins().sadd_overflow(current, rhs);
+                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+                        v
+                    }
+                    (CompoundOp::Sub, false) => {
+                        let (v, of) = builder.ins().ssub_overflow(current, rhs);
+                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+                        v
+                    }
+                    (CompoundOp::Mul, false) => {
+                        let (v, of) = builder.ins().smul_overflow(current, rhs);
+                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+                        v
+                    }
                     (CompoundOp::Div, false) => {
                         Self::emit_div_zero_guard(builder, ctx, rhs, DIV_ZERO_MSG)?;
                         builder.ins().sdiv(current, rhs)
@@ -1455,7 +1470,12 @@ impl<M: Module> Codegen<M> {
             TirTag::INeg => match inst.data {
                 TirData::UnOp(operand) => {
                     let v = Self::eval_inst(builder, ctx, operand)?;
-                    builder.ins().ineg(v)
+                    // Spec §18 checked negation: `-(x)` as `0 - x` so
+                    // `-(i64::MIN)` sets the overflow flag and panics.
+                    let zero = builder.ins().iconst(ctx.int_type, 0);
+                    let (r, of) = builder.ins().ssub_overflow(zero, v);
+                    Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+                    r
                 }
                 _ => unreachable!("INeg must carry TirData::UnOp"),
             },
@@ -1495,9 +1515,25 @@ impl<M: Module> Codegen<M> {
                 let lv = Self::eval_inst(builder, ctx, lhs)?;
                 let rv = Self::eval_inst(builder, ctx, rhs)?;
                 match inst.tag {
-                    TirTag::IAdd => builder.ins().iadd(lv, rv),
-                    TirTag::ISub => builder.ins().isub(lv, rv),
-                    TirTag::IMul => builder.ins().imul(lv, rv),
+                    // Spec §18: signed +,-,* trap on overflow in all
+                    // build modes. The s*_overflow ops return the
+                    // wrapped result plus an i8 overflow flag; a set
+                    // flag branches to ryo_panic.
+                    TirTag::IAdd => {
+                        let (v, of) = builder.ins().sadd_overflow(lv, rv);
+                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+                        v
+                    }
+                    TirTag::ISub => {
+                        let (v, of) = builder.ins().ssub_overflow(lv, rv);
+                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+                        v
+                    }
+                    TirTag::IMul => {
+                        let (v, of) = builder.ins().smul_overflow(lv, rv);
+                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+                        v
+                    }
                     TirTag::ISDiv => {
                         Self::emit_div_zero_guard(builder, ctx, rv, DIV_ZERO_MSG)?;
                         builder.ins().sdiv(lv, rv)
@@ -1703,10 +1739,7 @@ impl<M: Module> Codegen<M> {
 
     /// Zero-divisor guard for `sdiv`/`srem`, which are UB in Cranelift
     /// when the divisor is zero (`idiv` traps on x86-64; `sdiv`
-    /// silently returns garbage on aarch64). A zero divisor branches to
-    /// a block that calls `ryo_panic` — stderr message + exit 101, the
-    /// same contract as the `panic()` builtin — then traps; otherwise
-    /// execution falls through to the division. Only the divisor is
+    /// silently returns garbage on aarch64). Only the divisor is
     /// checked: `INT_MIN / -1` overflow remains UB (out of scope).
     fn emit_div_zero_guard(
         builder: &mut FunctionBuilder,
@@ -1716,9 +1749,22 @@ impl<M: Module> Codegen<M> {
     ) -> Result<(), String> {
         let zero = builder.ins().iconst(ctx.int_type, 0);
         let is_zero = builder.ins().icmp(IntCC::Equal, divisor, zero);
+        Self::emit_panic_guard(builder, ctx, is_zero, msg)
+    }
+
+    /// Branch to a block that calls `ryo_panic` — stderr message +
+    /// exit 101, the same contract as the `panic()` builtin — when
+    /// `flag` is set, then trap; otherwise fall through. Shared by the
+    /// zero-divisor guard and the spec §18 overflow checks.
+    fn emit_panic_guard(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        flag: Value,
+        msg: &'static str,
+    ) -> Result<(), String> {
         let panic_block = builder.create_block();
         let ok_block = builder.create_block();
-        builder.ins().brif(is_zero, panic_block, &[], ok_block, &[]);
+        builder.ins().brif(flag, panic_block, &[], ok_block, &[]);
 
         // Both blocks have exactly one predecessor (the brif above),
         // so they can be sealed immediately.

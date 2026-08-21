@@ -1969,6 +1969,93 @@ fn div_by_zero_aot_run_exits_101() {
     );
 }
 
+// ============================================================================
+// Integer overflow traps (spec §18: checked arithmetic in all build modes)
+// ============================================================================
+
+/// Runs `code` via the JIT and asserts an "integer overflow" panic
+/// (stderr message + nonzero exit).
+fn assert_int_overflow_panics(name: &str, code: &str) {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), name, code);
+
+    let output =
+        run_ryo_command(&["run", name], &test_file).expect("Failed to run ryo run command");
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "integer overflow should exit nonzero. stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("integer overflow"),
+        "stderr should contain overflow message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn add_overflow_panics_jit() {
+    // Var operand defeats sema const-eval; the trap fires at runtime.
+    assert_int_overflow_panics(
+        "add_overflow.ryo",
+        "fn main():\n\tx = 9223372036854775807\n\ty = x + 1\n",
+    );
+}
+
+#[test]
+fn sub_overflow_panics_jit() {
+    // x const-evals to i64::MIN (no overflow); x - 1 overflows at runtime.
+    assert_int_overflow_panics(
+        "sub_overflow.ryo",
+        "fn main():\n\tx = (0 - 9223372036854775807) - 1\n\ty = x - 1\n",
+    );
+}
+
+#[test]
+fn mul_overflow_panics_jit() {
+    assert_int_overflow_panics(
+        "mul_overflow.ryo",
+        "fn main():\n\tx = 9223372036854775807\n\ty = x * 2\n",
+    );
+}
+
+#[test]
+fn neg_overflow_panics_jit() {
+    // `-(i64::MIN)` with a non-constant operand.
+    assert_int_overflow_panics(
+        "neg_overflow.ryo",
+        "fn main():\n\tx = (0 - 9223372036854775807) - 1\n\ty = -x\n",
+    );
+}
+
+#[test]
+fn compound_add_overflow_panics_jit() {
+    assert_int_overflow_panics(
+        "compound_add_overflow.ryo",
+        "fn main():\n\tmut x = 9223372036854775807\n\tx += 1\n",
+    );
+}
+
+#[test]
+fn add_at_max_does_not_trap() {
+    // Boundary: i64::MAX + 0 must NOT trip the overflow guard.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 9223372036854775807\n\ty = x + 0\n\tassert(y == 9223372036854775807, \"max\")\n";
+    let test_file = create_test_file(temp_dir.path(), "add_max_ok.ryo", code);
+
+    let output = run_ryo_command(&["run", "add_max_ok.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "i64::MAX + 0 should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // ─── while loops ──────────────────────────────────────────────────────────
 
 #[test]

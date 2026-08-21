@@ -211,12 +211,6 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** The zero-divisor guard covers `x / 0` and `x % 0`, but Cranelift `sdiv`/`srem` are also UB on signed overflow: `INT_MIN / -1` (and `INT_MIN % -1`) has no representable result. x86-64 `idiv` traps (#DE); aarch64 `sdiv` silently wraps to `INT_MIN`. Sema's literal-zero check doesn't catch it either (`x / -1` is a unary-minus expression, not a literal).
 **Resolution:** Extend `emit_div_zero_guard` to also check `dividend == INT_MIN && divisor == -1`, branching to the same `ryo_panic` path with an "integer division overflow" message. Sema can reject the literal form `x / -1` only when the dividend is a known `INT_MIN` constant — likely not worth it; the runtime guard alone suffices.
 
-### I-139 — Runtime integer overflow wraps silently, contradicting spec §18
-
-**Files:** `ryo-backend/src/codegen.rs` (`TirTag::IAdd`, `TirTag::ISub`, `TirTag::IMul`, `TirTag::INeg`, and compound-assign arms)
-**Summary:** Spec §18 mandates that integer arithmetic traps (panics) on overflow in all build modes. Codegen emits bare `iadd`/`isub`/`imul`/`ineg`, which wrap silently. Constant expressions are covered — sema's `const_eval_int` rejects overflowing constant arithmetic with E0200 — but non-constant arithmetic (`a + b` with runtime values) still wraps, so behavior diverges from the spec and from the compile-time regime.
-**Resolution:** Mirror the zero-divisor guard pattern: compute each `+`/`-`/`*`/unary-`-` with overflow detection (widened-i128 arithmetic and range check, or explicit operand bounds checks — Cranelift has no portable signed-overflow flag read) and branch to `ryo_panic` with an "integer overflow" message on hit. Constants are already diagnosed at sema, so the guard only fires for runtime values. Bundle with I-138 (`INT_MIN / -1`) so all of §18 lands in one pass. Note the steady-state cost: one predictable branch per integer op, as §18's rationale accepts.
-
 ---
 
 ## 🟢 Cleanup
