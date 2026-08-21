@@ -1982,10 +1982,10 @@ fn assert_int_overflow_panics(name: &str, code: &str) {
     let output =
         run_ryo_command(&["run", name], &test_file).expect("Failed to run ryo run command");
 
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
-        Some(0),
-        "integer overflow should exit nonzero. stdout: {}",
+        Some(101),
+        "integer overflow should exit 101. stdout: {}",
         String::from_utf8_lossy(&output.stdout),
     );
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -1879,12 +1879,14 @@ impl<M: Module> Codegen<M> {
             let data_id = Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, msg)?;
             let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
             let ptr = builder.ins().global_value(ctx.int_type, data_ref);
-            let len = builder.ins().iconst(ctx.int_type, msg.len() as i64);
+            let len = builder.ins().iconst(types::I64, msg.len() as i64);
             let panic_ref = Self::declare_runtime_fn(
                 ctx.module,
                 builder,
                 "ryo_panic",
-                &[ctx.int_type, ctx.int_type],
+                // Runtime contract: ryo_panic(ptr, len: u64) — the
+                // length is fixed I64 regardless of target pointer width.
+                &[ctx.int_type, types::I64],
                 &[],
             )?;
             builder.ins().call(panic_ref, &[ptr, len]);
@@ -2595,7 +2597,9 @@ impl<M: Module> Codegen<M> {
                 ctx.module,
                 builder,
                 "ryo_panic",
-                &[ctx.int_type, ctx.int_type],
+                // Runtime contract: ryo_panic(ptr, len: u64) — the
+                // length is fixed I64 regardless of target pointer width.
+                &[ctx.int_type, types::I64],
                 &[],
             )?;
             builder.ins().call(panic_ref, &arg_values);
