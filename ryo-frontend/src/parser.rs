@@ -67,12 +67,16 @@ where
 }
 
 /// One garbage token for line-level recovery: anything except the
-/// statement boundaries where resynchronization can happen.
+/// statement boundaries where resynchronization can happen — and
+/// except `Indent`, which the indent pre-processor emits *before* the
+/// newline that opens a block. Keeping `Indent` out of the garbage
+/// set preserves the signal that a broken line was a block header, so
+/// recovery can swallow its body (see `swallow_block`).
 fn garbage_token<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    none_of([Token::Newline, Token::Dedent]).ignored()
+    none_of([Token::Newline, Token::Indent, Token::Dedent]).ignored()
 }
 
 /// Skip at least one non-boundary token. Recovering over zero tokens
@@ -82,6 +86,50 @@ where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     garbage_token().repeated().at_least(1).ignored()
+}
+
+/// Skip one balanced `Indent` … `Dedent` region, including any blocks
+/// nested inside it.
+///
+/// Line recovery uses this right after a failed statement: when the
+/// garbage on the broken line is followed by an `Indent`, the line was
+/// almost certainly a block header (`fn`/`if`/`while`/…), so its body
+/// is swallowed as part of the same error region. Without this the
+/// body lines would go on to parse at the enclosing scope — silently
+/// mis-nested — and the block's closing `Dedent` would be left
+/// dangling for the enclosing list to trip over.
+///
+/// Blank lines between the broken header and its body are tolerated:
+/// the pre-processor emits their newlines before the `Indent`.
+fn swallow_block<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let balanced = recursive(|region| {
+        choice((
+            // A nested block, consumed whole so its `Dedent` does not
+            // terminate the outer region early.
+            just(Token::Indent)
+                .ignore_then(region)
+                .then_ignore(just(Token::Dedent)),
+            // Any token that cannot change the nesting depth.
+            none_of([Token::Indent, Token::Dedent]).ignored(),
+        ))
+        .repeated()
+        .ignored()
+    });
+
+    skip_newlines()
+        .ignore_then(just(Token::Indent))
+        .ignore_then(balanced)
+        .then_ignore(just(Token::Dedent))
+        // The pre-processor emits the block-closing `Dedent` *before*
+        // the line-break newline, so that newline (and any blank
+        // lines) sit between the swallowed block and the next
+        // statement. Consume them: the swallowed region has no tail
+        // of its own, and the statement-list loop only skips newlines
+        // ahead of its first line.
+        .then_ignore(skip_newlines())
 }
 
 /// A list of newline-separated statements with per-line error
@@ -94,12 +142,17 @@ where
 /// Newline before an end-of-input `Dedent`: a block-final statement
 /// sits directly against it, so that one line has no newline tail.
 ///
-/// * if `stmt` itself fails, recovery skips the offending tokens and
-///   yields an `Error` node;
 /// * if the statement parses but garbage follows on the same line
 ///   (`y = = 1`), the tail recovery skips to the boundary and the
 ///   whole line collapses to one `Error` node — a half-parsed
-///   statement prefix never survives into the AST.
+///   statement prefix never survives into the AST;
+/// * if `stmt` itself fails and the broken line is a block header
+///   (`fn foo(` followed by an indented body), the recovery skips the
+///   header's garbage and swallows the whole indented block as one
+///   `Error` region (see `swallow_block`), so the body cannot
+///   mis-nest into the enclosing scope and no `Dedent` dangles;
+/// * any other broken line is skipped to the line boundary and
+///   becomes an `Error` node.
 ///
 /// Every skip uses `at_least(1)`: recovering over zero tokens at a
 /// clean boundary would emit a spurious error. Errors emitted by a
@@ -119,30 +172,40 @@ fn statement_list<'a, I>(
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    let stmt_rec = stmt.recover_with(via_parser(
-        skip_garbage().map_with(|_, e| error_stmt(e.span())),
-    ));
-
     let line_end = require_newlines().or(terminator);
 
     let tail = line_end
         .clone()
         .to(LineTail::Clean)
         .recover_with(via_parser(
-            skip_garbage().then_ignore(line_end).to(LineTail::Garbage),
+            skip_garbage()
+                .then_ignore(line_end.clone())
+                .to(LineTail::Garbage),
         ));
 
     // Zero-width: succeeds only when another line can follow.
     let not_at_boundary = empty().and_is(none_of([Token::Dedent])).ignored();
 
-    let line =
-        not_at_boundary
-            .ignore_then(stmt_rec)
-            .then(tail)
-            .map_with(|(s, tail), e| match tail {
-                LineTail::Clean => s,
-                LineTail::Garbage => error_stmt(e.span()),
-            });
+    // The recoveries attach to the whole line, not to `stmt`: the
+    // block-swallowing variant consumes the block's closing `Dedent`,
+    // which doubles as the line end, so no tail follows it.
+    let line = not_at_boundary
+        .ignore_then(stmt)
+        .then(tail)
+        .map_with(|(s, tail), e| match tail {
+            LineTail::Clean => s,
+            LineTail::Garbage => error_stmt(e.span()),
+        })
+        .recover_with(via_parser(
+            skip_garbage()
+                .then_ignore(swallow_block())
+                .map_with(|_, e| error_stmt(e.span())),
+        ))
+        .recover_with(via_parser(
+            skip_garbage()
+                .then_ignore(line_end)
+                .map_with(|_, e| error_stmt(e.span())),
+        ));
 
     skip_newlines()
         .ignore_then(line.repeated().collect::<Vec<_>>())
@@ -1943,6 +2006,68 @@ mod tests {
         // The no-two-statements-per-line rule must survive recovery:
         // this is one parse error, not two silent statements.
         let (program, errs, _pool) = lex_and_parse_recovering("x = 1 y = 2\n");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        assert_eq!(program.statements.len(), 1);
+        assert!(matches!(program.statements[0].kind, StmtKind::Error));
+    }
+
+    #[test]
+    fn broken_block_header_swallows_body_at_top_level() {
+        // The `fn` header is unparseable; its indented body must be
+        // swallowed as one region — not parse silently as top-level
+        // statements, and not leave a dangling `Dedent` behind.
+        let (program, errs, _pool) =
+            lex_and_parse_recovering("fn main(:\n\tx = 1\n\ty = 2\nz = 3\n");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        assert_eq!(program.statements.len(), 2);
+        assert!(matches!(program.statements[0].kind, StmtKind::Error));
+        assert!(matches!(
+            program.statements[1].kind,
+            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+        ));
+    }
+
+    #[test]
+    fn broken_block_header_inside_block_swallows_body() {
+        // Same mis-nesting one level down: the broken `if` header must
+        // swallow its body inside the enclosing `fn` block, and the
+        // following body line must still parse in that block.
+        let (program, errs, _pool) =
+            lex_and_parse_recovering("fn main():\n\tif x(:\n\t\ty = 1\n\tz = 2\n");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
+            panic!("expected FunctionDef");
+        };
+        assert_eq!(func.body.len(), 2);
+        assert!(matches!(func.body[0].kind, StmtKind::Error));
+        assert!(matches!(func.body[1].kind, StmtKind::AssignOrDecl { .. }));
+        assert_eq!(program.statements.len(), 1);
+    }
+
+    #[test]
+    fn broken_block_header_swallows_nested_blocks() {
+        // The swallowed region must be balanced: the inner block's
+        // `Dedent` does not end the swallow early.
+        let (program, errs, _pool) =
+            lex_and_parse_recovering("while x(:\n\tif y:\n\t\tz = 1\n\tw = 2\nv = 3\n");
+        assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
+        let program = program.expect("recovery must produce a partial program");
+        assert_eq!(program.statements.len(), 2);
+        assert!(matches!(program.statements[0].kind, StmtKind::Error));
+        assert!(matches!(
+            program.statements[1].kind,
+            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+        ));
+    }
+
+    #[test]
+    fn broken_block_header_with_body_at_eof() {
+        // No trailing statement: the swallowed body runs into the
+        // end-of-input `Dedent`, and that is still a single error.
+        let (program, errs, _pool) = lex_and_parse_recovering("fn main(:\n\tx = 1");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
         let program = program.expect("recovery must produce a partial program");
         assert_eq!(program.statements.len(), 1);
