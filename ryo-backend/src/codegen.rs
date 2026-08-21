@@ -22,7 +22,9 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use cranelift::codegen::ir::{ArgumentPurpose, BlockArg, FuncRef, StackSlot};
+use cranelift::codegen::ir::{
+    ArgumentPurpose, BlockArg, FuncRef, InstructionData, Opcode, StackSlot, ValueDef,
+};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -1064,19 +1066,13 @@ impl<M: Module> Codegen<M> {
                 let result = match (view.op, is_float) {
                     // Same spec §18 checked arithmetic as the binop arm.
                     (CompoundOp::Add, false) => {
-                        let (v, of) = builder.ins().sadd_overflow(current, rhs);
-                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
-                        v
+                        Self::emit_checked_iadd(builder, ctx, current, rhs)?
                     }
                     (CompoundOp::Sub, false) => {
-                        let (v, of) = builder.ins().ssub_overflow(current, rhs);
-                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
-                        v
+                        Self::emit_checked_isub(builder, ctx, current, rhs)?
                     }
                     (CompoundOp::Mul, false) => {
-                        let (v, of) = builder.ins().smul_overflow(current, rhs);
-                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
-                        v
+                        Self::emit_checked_imul(builder, ctx, current, rhs)?
                     }
                     (CompoundOp::Div, false) => {
                         Self::emit_div_zero_guard(builder, ctx, rhs, DIV_ZERO_MSG)?;
@@ -1528,21 +1524,9 @@ impl<M: Module> Codegen<M> {
                     // build modes. The s*_overflow ops return the
                     // wrapped result plus an i8 overflow flag; a set
                     // flag branches to ryo_panic.
-                    TirTag::IAdd => {
-                        let (v, of) = builder.ins().sadd_overflow(lv, rv);
-                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
-                        v
-                    }
-                    TirTag::ISub => {
-                        let (v, of) = builder.ins().ssub_overflow(lv, rv);
-                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
-                        v
-                    }
-                    TirTag::IMul => {
-                        let (v, of) = builder.ins().smul_overflow(lv, rv);
-                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
-                        v
-                    }
+                    TirTag::IAdd => Self::emit_checked_iadd(builder, ctx, lv, rv)?,
+                    TirTag::ISub => Self::emit_checked_isub(builder, ctx, lv, rv)?,
+                    TirTag::IMul => Self::emit_checked_imul(builder, ctx, lv, rv)?,
                     TirTag::ISDiv => {
                         Self::emit_div_zero_guard(builder, ctx, rv, DIV_ZERO_MSG)?;
                         builder.ins().sdiv(lv, rv)
@@ -1746,6 +1730,82 @@ impl<M: Module> Codegen<M> {
         Ok(data_id)
     }
 
+    /// The immediate behind `v` when it was produced by an `iconst`
+    /// in the function being built, otherwise `None`. The checked
+    /// arithmetic guards use it to drop a check the constant makes
+    /// unreachable (`x + 0`, `x * 1`, a non-zero constant divisor).
+    /// Sema only const-folds when *every* operand is constant, so
+    /// these mixed const/runtime shapes reach codegen intact.
+    fn const_int(builder: &FunctionBuilder, v: Value) -> Option<i64> {
+        let ValueDef::Result(inst, _) = builder.func.dfg.value_def(v) else {
+            return None;
+        };
+        match builder.func.dfg.insts[inst] {
+            InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } => Some(imm.bits()),
+            _ => None,
+        }
+    }
+
+    /// Checked signed addition (spec §18): `sadd_overflow` plus the
+    /// `ryo_panic` guard, except when a constant operand makes the
+    /// operation exact. `x + 0` is `x` for every `x`, so the guard —
+    /// and the add itself — is dropped.
+    fn emit_checked_iadd(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        // Addition commutes, so either side may carry the zero.
+        if Self::const_int(builder, rhs) == Some(0) {
+            return Ok(lhs);
+        }
+        if Self::const_int(builder, lhs) == Some(0) {
+            return Ok(rhs);
+        }
+        let (sum, of) = builder.ins().sadd_overflow(lhs, rhs);
+        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+        Ok(sum)
+    }
+
+    /// Checked signed subtraction (spec §18). `x - 0` is exact for
+    /// every `x`; a constant minuend has no such shortcut (`0 - x`
+    /// overflows at `INT_MIN`), so it keeps the guard.
+    fn emit_checked_isub(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        if Self::const_int(builder, rhs) == Some(0) {
+            return Ok(lhs);
+        }
+        let (diff, of) = builder.ins().ssub_overflow(lhs, rhs);
+        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+        Ok(diff)
+    }
+
+    /// Checked signed multiplication (spec §18). `x * 0` and `x * 1`
+    /// are exact for every `x`, so those drop the guard — `x * -1`
+    /// does not, since `INT_MIN * -1` overflows.
+    fn emit_checked_imul(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        let konst = Self::const_int(builder, rhs).or_else(|| Self::const_int(builder, lhs));
+        if matches!(konst, Some(0) | Some(1)) {
+            return Ok(builder.ins().imul(lhs, rhs));
+        }
+        let (prod, of) = builder.ins().smul_overflow(lhs, rhs);
+        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+        Ok(prod)
+    }
+
     /// Zero-divisor guard for `sdiv`/`srem`, which are UB in Cranelift
     /// when the divisor is zero (`idiv` traps on x86-64; `sdiv`
     /// silently returns garbage on aarch64). Only the divisor is
@@ -1756,6 +1816,12 @@ impl<M: Module> Codegen<M> {
         divisor: Value,
         msg: &'static str,
     ) -> Result<(), String> {
+        // A non-zero constant divisor can never trip the guard. The
+        // zero constant keeps it: sema rejects the literal forms, so
+        // anything reaching here must still panic at runtime.
+        if Self::const_int(builder, divisor).is_some_and(|c| c != 0) {
+            return Ok(());
+        }
         let zero = builder.ins().iconst(ctx.int_type, 0);
         let is_zero = builder.ins().icmp(IntCC::Equal, divisor, zero);
         Self::emit_panic_guard(builder, ctx, is_zero, msg)

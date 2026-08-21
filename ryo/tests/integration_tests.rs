@@ -2056,6 +2056,55 @@ fn add_at_max_does_not_trap() {
     );
 }
 
+/// Runs `code` via the JIT and asserts it completes successfully.
+fn assert_program_succeeds(name: &str, code: &str) {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), name, code);
+
+    let output =
+        run_ryo_command(&["run", name], &test_file).expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "{} should succeed. STDERR: {}",
+        name,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ─── guard elision (codegen drops checks a constant makes unreachable) ────
+
+#[test]
+fn identity_arithmetic_at_boundaries_does_not_trap() {
+    // `x - 0`, `x * 1` and `x * 0` are exact for every x, so codegen
+    // drops their overflow guards. Pinned at i64::MIN, where a wrong
+    // elision (or a wrongly kept guard) would show up immediately.
+    assert_program_succeeds(
+        "identity_arith.ryo",
+        "fn main():\n\tx = (0 - 9223372036854775807) - 1\n\ty = x - 0\n\tz = x * 1\n\tw = x * 0\n\tassert(y == x, \"sub zero\")\n\tassert(z == x, \"mul one\")\n\tassert(w == 0, \"mul zero\")\n",
+    );
+}
+
+#[test]
+fn mul_by_minus_one_at_min_still_traps() {
+    // The mirror of the test above: -1 is *not* an exact factor, so
+    // the guard must survive — `INT_MIN * -1` has no i64 result.
+    assert_int_overflow_panics(
+        "mul_minus_one.ryo",
+        "fn main():\n\tx = (0 - 9223372036854775807) - 1\n\tmut f = 0 - 1\n\ty = x * f\n",
+    );
+}
+
+#[test]
+fn constant_divisor_still_divides() {
+    // A non-zero constant divisor cannot trip the zero-divisor guard,
+    // so codegen skips it. The arithmetic must be unaffected.
+    assert_program_succeeds(
+        "const_divisor.ryo",
+        "fn main():\n\tmut x = 17\n\tassert(x / 2 == 8, \"div\")\n\tassert(x % 5 == 2, \"mod\")\n\tx /= 4\n\tassert(x == 4, \"compound div\")\n\tx %= 3\n\tassert(x == 1, \"compound mod\")\n",
+    );
+}
+
 // ─── while loops ──────────────────────────────────────────────────────────
 
 #[test]
