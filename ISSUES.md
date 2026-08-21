@@ -341,6 +341,18 @@ Resolved entries are **removed** from this file (convention changed in M8.4.1 �
 **Summary:** Nothing stops source files from growing unbounded; three files are already past the 3000-line mark used as the tidy limit (rust-lang `src/tools/tidy` convention, tests included). Full split plans with per-module anchors are in `docs/dev/architecture_analysis_2026_08_20.md` §4. Related to I-128 (function-level sizes) but distinct: this is file-level navigability, review surface, and merge-conflict scope.
 **Resolution:** Add a tidy check to CI failing on `*.rs` files over 3000 lines with an explicit allowlist for the three current files; shrink the allowlist as the §4 splits land (`ownership/` and `sema/` module directories, per-area integration test binaries sharing `common/mod.rs`).
 
+### I-140 — Cranelift upgrade 0.131.1 → 0.135.x (MSRV ladder + breaking removals)
+
+**Files:** `Cargo.toml` (workspace deps), `Cargo.lock`, `scripts/check_cranelift.sh`, `ryo-backend/src/codegen.rs`
+**Summary:** Ryo pins Cranelift 0.131.1; latest is 0.135.0. Upgrading is blocked on two things: (1) the MSRV ladder — 0.132 needs Rust 1.93, 0.133 needs 1.94, 0.135 needs 1.95; (2) instruction-set removals that surface at compile time — all `*_imm` instructions removed in 0.133 (`iadd_imm`, `imul_imm`, `icmp_imm`, `udiv_imm`, `sdiv_imm` — Ryo uses none of these today), and in 0.134 `global_value`, `band_not`/`bor_not`/`bxor_not`, `stack_load`/`stack_store` removed plus `MemFlags` renamed to `MemFlagsData`. No new overflow-detection instructions exist in 0.132–0.135, so the upgrade is not urgent for correctness.
+**Resolution:** Bump the Cranelift workspace deps release-by-release with `./scripts/check_cranelift.sh <version>` review per step, fixing compile breaks from the removals above; confirm CI toolchains meet the MSRV of the target release before merging.
+
+### I-141 — Adopt 0.134/0.135 guard-codegen and compile-time improvements after the Cranelift upgrade
+
+**Files:** `ryo-backend/src/codegen.rs` (`emit_panic_guard` and the checked-arithmetic/div-zero call sites)
+**Summary:** Two upstream changes directly benefit the panic guards added for div-by-zero and signed-overflow: 0.134 folds branch-to-trap patterns into single conditional traps in the egraph pass (#13688) and treats trapping blocks as cold during lowering (#13689); 0.135 reuses `regalloc2` context/output across function compilations and trims hashmaps on the lowering hot path, cutting compile time. These apply automatically once the upgrade (I-140) lands, but the guard codegen should be re-inspected to confirm the brif→panic-block shape actually gets the cold-block treatment (our guards branch to a `ryo_panic` call, not a raw `trap`, so #13688's trap folding does not apply — switching to `trapz`/`trapnz` was rejected because it would bypass the ryo_panic message/exit-code contract).
+**Resolution:** After I-140, diff the emitted CLIF/disassembly of the overflow and div-zero test cases before/after the upgrade; verify guard blocks are laid out cold and measure compile time on the benchmark suite. Keep the explicit `ryo_panic` call convention.
+
 ---
 
 ## Cross-References
