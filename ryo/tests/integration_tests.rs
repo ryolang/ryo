@@ -1804,6 +1804,49 @@ fn div_by_neg_zero_literal_rejected_e0037() {
 }
 
 #[test]
+fn div_by_const_expr_zero_rejected_e0037() {
+    // The divisor const-evals to zero without being a literal.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 1 / (2 - 2)\n";
+    let test_file = create_test_file(temp_dir.path(), "div_const_zero.ryo", code);
+
+    let output = run_ryo_command(&["run", "div_const_zero.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "division by constant-zero expression should be a compile error"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0037") && stderr.contains("division by zero"),
+        "expected E0037 division-by-zero diagnostic, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn const_int_overflow_rejected_e0200() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 9223372036854775807 + 1\n";
+    let test_file = create_test_file(temp_dir.path(), "const_overflow.ryo", code);
+
+    let output = run_ryo_command(&["run", "const_overflow.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        !output.status.success(),
+        "constant integer overflow should be a compile error"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0200") && stderr.contains("overflow"),
+        "expected E0200 overflow diagnostic, got: {}",
+        stderr
+    );
+}
+
+#[test]
 fn div_by_zero_panics_jit() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\tx = 0\n\ty = 10 / x\n";

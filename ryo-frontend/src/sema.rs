@@ -787,11 +787,11 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
                 ));
             }
 
-            // Same literal-zero-divisor rule as binary `x / 0`:
+            // Same constant-zero-divisor rule as binary `x / 0`:
             // always panics at runtime, so reject it here.
             if matches!(op, CompoundOp::Div | CompoundOp::Mod)
                 && is_int
-                && is_zero_int_literal(sema.uir, view.value)
+                && matches!(const_eval_int(sema.uir, view.value), ConstInt::Value(0))
             {
                 sema.sink.emit(Diag::error(
                     span,
@@ -1076,24 +1076,40 @@ fn analyze_expr_allow_never(
             let r2 = analyze_expr(sema, fcx, scope, rhs);
             let lhs_ty = fcx.builder.ty_of(l);
             let rhs_ty = fcx.builder.ty_of(r2);
-            // A literal-zero divisor in int division always panics at
+            // Constant-evaluate pure integer arithmetic for
+            // diagnostics. A constant-zero divisor always panics at
             // runtime (the codegen zero-divisor guard), so reject it
-            // at compile time instead. Float `x / 0.0` is IEEE-defined
-            // (inf) and unaffected.
-            if matches!(inst.tag, InstTag::Div | InstTag::Mod)
-                && lhs_ty == sema.pool.int()
-                && is_zero_int_literal(sema.uir, rhs)
+            // at compile time; constant overflow is a compile error
+            // per §18 (overflow traps in all build modes). Float
+            // `x / 0.0` is IEEE-defined (inf) and unaffected.
+            if matches!(
+                inst.tag,
+                InstTag::Add | InstTag::Sub | InstTag::Mul | InstTag::Div | InstTag::Mod
+            ) && lhs_ty == sema.pool.int()
+                && rhs_ty == sema.pool.int()
             {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::DivisionByZero,
-                    if inst.tag == InstTag::Div {
-                        "division by zero".to_string()
-                    } else {
-                        "modulo by zero".to_string()
-                    },
-                ));
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
+                if matches!(inst.tag, InstTag::Div | InstTag::Mod)
+                    && matches!(const_eval_int(sema.uir, rhs), ConstInt::Value(0))
+                {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::DivisionByZero,
+                        if inst.tag == InstTag::Div {
+                            "division by zero".to_string()
+                        } else {
+                            "modulo by zero".to_string()
+                        },
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+                if matches!(const_eval_int(sema.uir, r), ConstInt::Overflow) {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::ConstEvalFailure,
+                        "integer overflow in constant expression".to_string(),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
             }
             check_binary_op(sema, fcx, inst.tag, lhs_ty, rhs_ty, l, r2, span)
         }
@@ -1105,7 +1121,20 @@ fn analyze_expr_allow_never(
             let sub = analyze_expr(sema, fcx, scope, operand);
             let sub_ty = fcx.builder.ty_of(sub);
             match sema.pool.kind(sub_ty) {
-                TypeKind::Int => fcx.builder.unary(TirTag::INeg, sema.pool.int(), sub, span),
+                TypeKind::Int => {
+                    // `-(i64::MIN)` is the only Neg that can overflow,
+                    // reachable through constant sub-expressions.
+                    if matches!(const_eval_int(sema.uir, r), ConstInt::Overflow) {
+                        sema.sink.emit(Diag::error(
+                            span,
+                            DiagCode::ConstEvalFailure,
+                            "integer overflow in constant expression".to_string(),
+                        ));
+                        fcx.builder.unreachable(sema.pool.error_type(), span)
+                    } else {
+                        fcx.builder.unary(TirTag::INeg, sema.pool.int(), sub, span)
+                    }
+                }
                 TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
                 _ => {
                     sema.sink.emit(Diag::error(
@@ -1310,18 +1339,64 @@ fn check_slice_bound(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &Scope, b: I
     t
 }
 
-/// True when `r` is a literal integer zero divisor: `0` directly, or
-/// `-0` (unary minus over the zero literal, since the lexer has no
-/// signed literals). Deeper expressions (`x * 0`, `-(-0)`) are not
-/// folded — they fall through to the codegen zero-divisor guard.
-fn is_zero_int_literal(uir: &Uir, r: InstRef) -> bool {
+/// Result of compile-time evaluating a pure integer constant
+/// expression: int literals, unary minus, and `+ - * / %` over
+/// constants.
+enum ConstInt {
+    /// Not a constant expression, or contains an inner division /
+    /// modulo by zero (that inner node reports E0037 itself — don't
+    /// double-report here).
+    NotConst,
+    Value(i64),
+    /// Evaluation overflowed `int` (i64). Spec §18 traps overflow in
+    /// all build modes, so a constant expression that would trap at
+    /// runtime is a compile error instead.
+    Overflow,
+}
+
+/// Evaluate a UIR expression as a compile-time integer constant.
+/// Purely diagnostic: the TIR is left unfolded — Cranelift already
+/// constant-folds at `opt_level = "speed"` for codegen, so sema
+/// evaluates only to reject constant-zero divisors (E0037) and
+/// overflowing constant arithmetic (E0200) early.
+fn const_eval_int(uir: &Uir, r: InstRef) -> ConstInt {
     let inst = uir.inst(r);
     match inst.data {
-        InstData::Int(0) => true,
-        InstData::UnOp(operand) if inst.tag == InstTag::Neg => {
-            matches!(uir.inst(operand).data, InstData::Int(0))
+        InstData::Int(v) => ConstInt::Value(v),
+        InstData::UnOp(operand) if inst.tag == InstTag::Neg => match const_eval_int(uir, operand) {
+            ConstInt::Value(v) => v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value),
+            other => other,
+        },
+        InstData::BinOp { lhs, rhs }
+            if matches!(
+                inst.tag,
+                InstTag::Add | InstTag::Sub | InstTag::Mul | InstTag::Div | InstTag::Mod
+            ) =>
+        {
+            let l = const_eval_int(uir, lhs);
+            let rv = const_eval_int(uir, rhs);
+            // Overflow propagates past non-constant sub-expressions;
+            // anything else non-constant poisons the whole tree.
+            if matches!(l, ConstInt::Overflow) || matches!(rv, ConstInt::Overflow) {
+                return ConstInt::Overflow;
+            }
+            let (ConstInt::Value(l), ConstInt::Value(rv)) = (l, rv) else {
+                return ConstInt::NotConst;
+            };
+            let result = match inst.tag {
+                InstTag::Add => l.checked_add(rv),
+                InstTag::Sub => l.checked_sub(rv),
+                InstTag::Mul => l.checked_mul(rv),
+                // A constant zero divisor gets E0037 from the inner
+                // division's own analysis — treat as non-constant here.
+                InstTag::Div if rv != 0 => l.checked_div(rv),
+                InstTag::Mod if rv != 0 => l.checked_rem(rv),
+                InstTag::Div | InstTag::Mod => return ConstInt::NotConst,
+                _ => unreachable!("tag set fixed by the match guard"),
+            };
+            result.map_or(ConstInt::Overflow, ConstInt::Value)
         }
-        _ => false,
+        _ => ConstInt::NotConst,
     }
 }
 
@@ -3544,6 +3619,68 @@ mod tests {
     fn compound_mod_by_neg_zero_literal_rejected() {
         let diags = run("fn main():\n\tmut x = 10\n\tx %= -0\n").unwrap_err();
         assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn div_by_const_expr_zero_rejected() {
+        let diags = run("fn main():\n\tx = 1 / (2 - 2)\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn div_by_double_neg_zero_rejected() {
+        let diags = run("fn main():\n\tx = 1 / -(-0)\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn compound_div_by_const_expr_zero_rejected() {
+        let diags = run("fn main():\n\tmut x = 10\n\tx /= (5 - 5)\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::DivisionByZero));
+    }
+
+    #[test]
+    fn const_add_overflow_rejected() {
+        // i64::MAX + 1: §18 traps overflow in all build modes, so a
+        // constant expression that would trap is a compile error.
+        let diags = run("fn main():\n\tx = 9223372036854775807 + 1\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ConstEvalFailure));
+    }
+
+    #[test]
+    fn const_mul_overflow_rejected() {
+        let diags = run("fn main():\n\tx = 9223372036854775807 * 2\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ConstEvalFailure));
+    }
+
+    #[test]
+    fn const_neg_min_overflow_rejected() {
+        // `(0 - MAX) - 1` const-evals to i64::MIN; negating it overflows.
+        let diags = run("fn main():\n\tx = -((0 - 9223372036854775807) - 1)\n").unwrap_err();
+        assert!(any_code(&diags, DiagCode::ConstEvalFailure));
+    }
+
+    #[test]
+    fn const_eval_at_boundary_ok() {
+        // i64::MIN itself is reachable without overflow.
+        let result = run("fn main():\n\tx = (0 - 9223372036854775807) - 1\n");
+        assert!(
+            result.is_ok(),
+            "i64::MIN should compile: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn non_constant_zero_divisor_still_compiles() {
+        // `x - x` is not a constant expression; the runtime guard
+        // catches it instead of a compile error.
+        let result = run("fn main():\n\tx = 5\n\ty = 1 / (x - x)\n");
+        assert!(
+            result.is_ok(),
+            "non-constant divisor should compile: {:?}",
+            result.err()
+        );
     }
 
     #[test]

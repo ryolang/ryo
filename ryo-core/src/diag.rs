@@ -173,8 +173,12 @@ pub enum DiagCode {
     /// preserved verbatim in the interned string.
     UnknownEscape,
 
-    // --- reserved (not constructed in Phase 1) ---
+    /// A constant integer expression overflowed `int` during
+    /// compile-time evaluation (spec §18: overflow traps in all build
+    /// modes, so constants that would trap fail at compile time).
     ConstEvalFailure,
+
+    // --- reserved (not constructed yet) ---
     CycleInComptime,
     GenericInstantiation,
 }
