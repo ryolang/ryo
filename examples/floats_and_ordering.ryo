@@ -10,6 +10,7 @@ fn main():
 	y: float = 2.71
 	pi_approx = x + y / 2.0   # float arithmetic
 	cmp = x > y               # ordering on float, result is bool
+	assert(cmp, "x is not greater than y")
 
 	a = 10
 	b = 3
