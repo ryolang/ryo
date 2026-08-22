@@ -78,11 +78,12 @@ fn parse(src: &str) {
     let tokens = lexer::lex(src, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
     let token_stream = tokens[..].split_token_span((0..src.len()).into());
-    let program = program_parser()
-        .parse(token_stream)
+    let mut ast = ryo_core::ast::Ast::new();
+    program_parser()
+        .parse_with_state(token_stream, &mut ast)
         .into_result()
         .expect("parse should succeed");
-    divan::black_box(&program);
+    divan::black_box(&ast);
 }
 
 // ============================================================================
@@ -121,18 +122,19 @@ fn parse_large(bencher: divan::Bencher, functions: usize) {
 // Sema / Middle-End benchmarks (AstGen + Sema pipeline)
 // ============================================================================
 
-/// Full parse of a source string, returning the AST Program and populated InternPool.
-fn parse_program(src: &str) -> (ryo_core::ast::Program, InternPool) {
+/// Full parse of a source string, returning the AST arena and populated InternPool.
+fn parse_program(src: &str) -> (ryo_core::ast::Ast, InternPool) {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lexer::lex(src, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
     let token_stream = tokens[..].split_token_span((0..src.len()).into());
-    let program = program_parser()
-        .parse(token_stream)
+    let mut ast = ryo_core::ast::Ast::new();
+    program_parser()
+        .parse_with_state(token_stream, &mut ast)
         .into_result()
         .expect("parse should succeed");
-    (program, pool)
+    (ast, pool)
 }
 
 #[divan::bench(args = [("fizzbuzz", FIZZBUZZ), ("fibonacci", FIBONACCI)])]

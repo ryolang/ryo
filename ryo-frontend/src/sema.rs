@@ -2488,13 +2488,14 @@ mod tests {
             lex_sink.into_diags()
         );
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
-        let program = program_parser()
-            .parse(token_stream)
+        let mut ast = ryo_core::ast::Ast::new();
+        program_parser()
+            .parse_with_state(token_stream, &mut ast)
             .into_result()
             .expect("parse ok");
 
         let mut sink = DiagSink::new();
-        let uir = astgen::generate(&program, &mut pool, &mut sink);
+        let uir = astgen::generate(&ast, &mut pool, &mut sink);
         if sink.has_errors() {
             return Err(sink.into_diags());
         }
@@ -2517,13 +2518,14 @@ mod tests {
             lex_sink.into_diags()
         );
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
-        let program = program_parser()
-            .parse(token_stream)
+        let mut ast = ryo_core::ast::Ast::new();
+        program_parser()
+            .parse_with_state(token_stream, &mut ast)
             .into_result()
             .expect("parse ok");
 
         let mut sink = DiagSink::new();
-        let uir = astgen::generate(&program, &mut pool, &mut sink);
+        let uir = astgen::generate(&ast, &mut pool, &mut sink);
         let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
         (tirs, sink.into_diags(), pool)
     }

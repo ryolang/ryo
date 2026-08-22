@@ -4,16 +4,38 @@
 //! type names, and string literals come pre-interned as `StringId`
 //! handles, so the parser only ever copies handles out of tokens —
 //! no `to_string` allocations, no `&'a str` slicing into source.
+//!
+//! The parser builds directly into the flat [`Ast`] arena: the arena
+//! is threaded as chumsky parser state (`extra::Full<_, Ast, _>`,
+//! entered via `parse_with_state`), and node-producing combinators
+//! push through `e.state()` inside `map_with`/`foldl_with` closures,
+//! yielding [`NodeRef`]s. `Ast`'s `Inspector` impl truncates the
+//! arena on rewind, so backtracking alternatives and error recovery
+//! leave no orphan nodes behind.
 
-use chumsky::{input::ValueInput, prelude::*, recovery::via_parser, span::SimpleSpan};
+use chumsky::{
+    input::{MapExtra, ValueInput},
+    prelude::*,
+    recovery::via_parser,
+    span::SimpleSpan,
+};
 
 use crate::lexer::Token;
 use ryo_core::ast::*;
 use ryo_core::tir::ParamMode;
 use ryo_core::types::StringId;
 
+/// Parser extra: `Rich` errors, the [`Ast`] arena as state, no
+/// context. Every grammar rule below is parameterized over it.
+type PExtra<'a> = extra::Full<Rich<'a, Token>, Ast, ()>;
+
+/// `MapExtra` with our extra config. Annotating `map_with` closure
+/// parameters with it pins the `E` type parameter that `e.state()`
+/// otherwise cannot infer.
+type Mx<'a, 'b, I> = MapExtra<'a, 'b, I, PExtra<'a>>;
+
 /// Helper: skip zero or more newline tokens.
-fn skip_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn skip_newlines<'a, I>() -> impl Parser<'a, I, (), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -25,7 +47,7 @@ where
 /// (matters now that bare expression statements are allowed at the
 /// top level — without this, `x 42` would silently parse as two
 /// separate expression statements).
-fn require_newlines<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn require_newlines<'a, I>() -> impl Parser<'a, I, (), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -33,16 +55,6 @@ where
         .repeated()
         .at_least(1)
         .to(())
-}
-
-/// Placeholder statement for a line the parser could not parse. The
-/// diagnostic comes from the recovered error itself; this node only
-/// keeps the partial AST well-formed (astgen lowers it to nothing).
-fn error_stmt(span: SimpleSpan) -> Statement {
-    Statement {
-        span,
-        kind: StmtKind::Error,
-    }
 }
 
 /// Whether a statement line ended cleanly (newline-terminated) or
@@ -57,9 +69,7 @@ enum LineTail {
 /// (consuming nothing) only when `token` is next. Block-final
 /// statements must not eat the `Dedent` that the surrounding
 /// `delimited_by` expects.
-fn peek_terminator<'a, I>(
-    token: Token,
-) -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn peek_terminator<'a, I>(token: Token) -> impl Parser<'a, I, (), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -72,7 +82,7 @@ where
 /// newline that opens a block. Keeping `Indent` out of the garbage
 /// set preserves the signal that a broken line was a block header, so
 /// recovery can swallow its body (see `swallow_block`).
-fn garbage_token<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn garbage_token<'a, I>() -> impl Parser<'a, I, (), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -81,7 +91,7 @@ where
 
 /// Skip at least one non-boundary token. Recovering over zero tokens
 /// at a clean boundary would emit a spurious error.
-fn skip_garbage<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn skip_garbage<'a, I>() -> impl Parser<'a, I, (), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -101,7 +111,7 @@ where
 ///
 /// Blank lines between the broken header and its body are tolerated:
 /// the pre-processor emits their newlines before the `Indent`.
-fn swallow_block<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn swallow_block<'a, I>() -> impl Parser<'a, I, (), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -157,7 +167,9 @@ where
 /// Every skip uses `at_least(1)`: recovering over zero tokens at a
 /// clean boundary would emit a spurious error. Errors emitted by a
 /// recovery whose surrounding line later fails are rolled back by
-/// chumsky's rewind, so each broken line reports exactly once.
+/// chumsky's rewind (as are any arena nodes pushed inside the failed
+/// region — see the `Inspector` impl on `Ast`), so each broken line
+/// reports exactly once.
 ///
 /// `not_at_boundary` decides where the loop stops without running the
 /// statement grammar: the grammar is deep and a failed alternative
@@ -166,9 +178,9 @@ where
 /// `Dedent`/end-of-input that ends the list costs more than parsing a
 /// real statement. Lines the guard admits parse exactly as before.
 fn statement_list<'a, I>(
-    stmt: impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a,
-    terminator: impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone + 'a,
-) -> impl Parser<'a, I, Vec<Statement>, extra::Err<Rich<'a, Token>>> + Clone + 'a
+    stmt: impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a,
+    terminator: impl Parser<'a, I, (), PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, Vec<NodeRef>, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -192,20 +204,27 @@ where
     let line = not_at_boundary
         .ignore_then(stmt)
         .then(tail)
-        .map_with(|(s, tail), e| match tail {
+        .map_with(|(s, tail), e: &mut Mx<'a, '_, I>| match tail {
             LineTail::Clean => s,
-            LineTail::Garbage => error_stmt(e.span()),
+            LineTail::Garbage => {
+                let span = e.span();
+                e.state().error_stmt(span)
+            }
         })
         .recover_with(via_parser(
             skip_garbage()
                 .then_ignore(swallow_block())
-                .map_with(|_, e| error_stmt(e.span())),
+                .map_with(|_, e: &mut Mx<'a, '_, I>| {
+                    let span = e.span();
+                    e.state().error_stmt(span)
+                }),
         ))
-        .recover_with(via_parser(
-            skip_garbage()
-                .then_ignore(line_end)
-                .map_with(|_, e| error_stmt(e.span())),
-        ));
+        .recover_with(via_parser(skip_garbage().then_ignore(line_end).map_with(
+            |_, e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                e.state().error_stmt(span)
+            },
+        )));
 
     skip_newlines()
         .ignore_then(line.repeated().collect::<Vec<_>>())
@@ -213,8 +232,10 @@ where
         .boxed()
 }
 
-/// Parse a complete Ryo program with multiple statements.
-pub fn program_parser<'a, I>() -> impl Parser<'a, I, Program, extra::Err<Rich<'a, Token>>> + 'a
+/// Parse a complete Ryo program. The arena is the parser state: on
+/// success (including recovered partial parses) its `top_level` range
+/// lists the program's statements; the output `()` carries nothing.
+pub fn program_parser<'a, I>() -> impl Parser<'a, I, (), PExtra<'a>> + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -225,23 +246,14 @@ where
     // the rest of the file.
     statement_list(statement_parser(), end())
         .then_ignore(end())
-        .map_with(|statements, _e| {
-            let span = if statements.is_empty() {
-                SimpleSpan::new((), 0..0)
-            } else {
-                let start = statements.first().unwrap().span.start;
-                let end = statements.last().unwrap().span.end;
-                SimpleSpan::new((), start..end)
-            };
-            Program { statements, span }
-        })
+        .map_with(|statements, e: &mut Mx<'a, '_, I>| e.state().set_top_level(&statements))
         .boxed()
 }
 
 /// Parse an indented block of one or more statements.
 fn indented_block<'a, I>(
-    stmt: impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a,
-) -> impl Parser<'a, I, Vec<Statement>, extra::Err<Rich<'a, Token>>> + Clone + 'a
+    stmt: impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, Vec<NodeRef>, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -253,27 +265,25 @@ where
         .boxed()
 }
 
-fn assign_or_decl_parser<'a, I>()
--> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn assign_or_decl_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     select! { Token::Ident(s) => s }
-        .map_with(|s, e| Ident {
+        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident {
             name: s,
             span: e.span(),
         })
         .then_ignore(just(Token::Assign))
         .then(expression_parser())
-        .map_with(|(target, value), e| Statement {
-            span: e.span(),
-            kind: StmtKind::AssignOrDecl { target, value },
+        .map_with(|(target, value), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().assign_or_decl(target, value, span)
         })
         .boxed()
 }
 
-fn compound_assign_parser<'a, I>()
--> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn compound_assign_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -286,67 +296,65 @@ where
     ));
 
     select! { Token::Ident(s) => s }
-        .map_with(|s, e| Ident {
+        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident {
             name: s,
             span: e.span(),
         })
         .then(op)
         .then(expression_parser())
-        .map_with(|((target, op), value), e| Statement {
-            span: e.span(),
-            kind: StmtKind::CompoundAssign { target, op, value },
+        .map_with(|((target, op), value), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().compound_assign(target, op, value, span)
         })
         .boxed()
 }
 
 /// Statements valid inside a function body.
-fn body_statement_parser<'a, I>()
--> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn body_statement_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     recursive(|body_stmt| {
         let return_stmt = just(Token::Return)
             .ignore_then(expression_parser().or_not())
-            .map_with(|expr, e| Statement {
-                span: e.span(),
-                kind: StmtKind::Return(expr),
+            .map_with(|expr, e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                e.state().return_stmt(expr, span)
             });
 
-        let var_decl = var_decl_parser().map_with(|kind, e| Statement {
-            span: e.span(),
-            kind: StmtKind::VarDecl(kind),
+        let break_stmt = just(Token::Break).map_with(|_, e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().break_stmt(span)
         });
 
-        let break_stmt = just(Token::Break).map_with(|_, e| Statement {
-            span: e.span(),
-            kind: StmtKind::Break,
-        });
-
-        let continue_stmt = just(Token::Continue).map_with(|_, e| Statement {
-            span: e.span(),
-            kind: StmtKind::Continue,
+        let continue_stmt = just(Token::Continue).map_with(|_, e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().continue_stmt(span)
         });
 
         let while_stmt = just(Token::While)
             .ignore_then(expression_parser())
             .then_ignore(just(Token::Colon))
             .then(indented_block(body_stmt.clone()))
-            .map_with(|(cond, body), e| Statement {
-                span: e.span(),
-                kind: StmtKind::WhileLoop { cond, body },
+            .map_with(|(cond, body), e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                e.state().while_loop(cond, &body, span)
             });
 
         let for_range_stmt = just(Token::For)
-            .ignore_then(select! { Token::Ident(s) => s }.map_with(|s, e| Ident {
-                name: s,
-                span: e.span(),
-            }))
+            .ignore_then(
+                select! { Token::Ident(s) => s }.map_with(|s, e: &mut Mx<'a, '_, I>| Ident {
+                    name: s,
+                    span: e.span(),
+                }),
+            )
             .then_ignore(just(Token::In))
-            .then(select! { Token::Ident(s) => s }.map_with(|s, e| Ident {
-                name: s,
-                span: e.span(),
-            }))
+            .then(
+                select! { Token::Ident(s) => s }.map_with(|s, e: &mut Mx<'a, '_, I>| Ident {
+                    name: s,
+                    span: e.span(),
+                }),
+            )
             .then_ignore(just(Token::LParen))
             .then(
                 expression_parser()
@@ -356,7 +364,7 @@ where
             .then_ignore(just(Token::RParen))
             .then_ignore(just(Token::Colon))
             .then(indented_block(body_stmt.clone()))
-            .try_map_with(|(((var, iterator), args), body), e| {
+            .try_map_with(|(((var, iterator), args), body), e: &mut Mx<'a, '_, I>| {
                 if args.len() != 2 {
                     return Err(Rich::custom(
                         e.span(),
@@ -369,26 +377,13 @@ where
                 let mut args = args.into_iter();
                 let start = args.next().unwrap();
                 let end = args.next().unwrap();
-                Ok(Statement {
-                    span: e.span(),
-                    kind: StmtKind::ForRange {
-                        var,
-                        iterator,
-                        start,
-                        end,
-                        body,
-                    },
-                })
+                let span = e.span();
+                Ok(e.state().for_range(var, iterator, start, end, &body, span))
             });
 
-        let if_stmt = if_stmt_parser(body_stmt).map_with(|if_s, e| Statement {
-            span: e.span(),
-            kind: StmtKind::IfStmt(if_s),
-        });
-
-        let expr_stmt = expression_parser().map_with(|expr, e| Statement {
-            span: e.span(),
-            kind: StmtKind::ExprStmt(expr),
+        let expr_stmt = expression_parser().map_with(|expr, e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().expr_stmt(expr, span)
         });
 
         // Boxed to keep the concrete type small: this parser is stored
@@ -398,8 +393,8 @@ where
             return_stmt,
             compound_assign_parser(),
             assign_or_decl_parser(),
-            var_decl,
-            if_stmt,
+            var_decl_parser(),
+            if_stmt_parser(body_stmt),
             while_stmt,
             for_range_stmt,
             break_stmt,
@@ -411,8 +406,8 @@ where
 }
 
 fn if_stmt_parser<'a, I>(
-    body_stmt: impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a,
-) -> impl Parser<'a, I, IfStmt, extra::Err<Rich<'a, Token>>> + Clone + 'a
+    body_stmt: impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -422,8 +417,7 @@ where
         .ignore_then(just(Token::Elif))
         .ignore_then(expression_parser())
         .then_ignore(just(Token::Colon))
-        .then(block.clone())
-        .map(|(cond, block)| ElifBranch { cond, block });
+        .then(block.clone());
 
     let else_block = skip_newlines()
         .ignore_then(just(Token::Else))
@@ -436,45 +430,39 @@ where
         .then(block)
         .then(elif_branch.repeated().collect::<Vec<_>>())
         .then(else_block.or_not())
-        .map(|(((cond, then_block), elif_branches), else_block)| IfStmt {
-            cond,
-            then_block,
-            elif_branches,
-            else_block,
-        })
+        .map_with(
+            |(((cond, then_block), elif_branches), else_block), e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                e.state().if_stmt(
+                    cond,
+                    &then_block,
+                    &elif_branches,
+                    else_block.as_deref(),
+                    span,
+                )
+            },
+        )
         .boxed()
 }
 
 /// Top-level statements: only function defs and var decls.
-fn top_level_statement_parser<'a, I>()
--> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn top_level_statement_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    let function_def = function_def_parser().map_with(|func, e| Statement {
-        span: e.span(),
-        kind: StmtKind::FunctionDef(func),
-    });
-
-    let var_decl = var_decl_parser().map_with(|kind, e| Statement {
-        span: e.span(),
-        kind: StmtKind::VarDecl(kind),
-    });
-
     // Bare expression statements at top level (e.g. `print("hi")`)
     // get wrapped into the synthesized implicit-main body by
     // astgen. This is what makes Pythonic flat scripts feel
     // natural — no `_ = ...` binding required.
-    let expr_stmt = expression_parser().map_with(|expr, e| Statement {
-        span: e.span(),
-        kind: StmtKind::ExprStmt(expr),
+    let expr_stmt = expression_parser().map_with(|expr, e: &mut Mx<'a, '_, I>| {
+        let span = e.span();
+        e.state().expr_stmt(expr, span)
     });
 
-    choice((function_def, var_decl, expr_stmt)).boxed()
+    choice((function_def_parser(), var_decl_parser(), expr_stmt)).boxed()
 }
 
-fn statement_parser<'a, I>()
--> impl Parser<'a, I, Statement, extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn statement_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -486,26 +474,27 @@ where
 /// syntax — it survives here only so astgen can emit the targeted
 /// migration error. The view alternative comes first so the `&` is
 /// consumed before the plain form can reject it.
-fn type_expr_parser<'a, I>()
--> impl Parser<'a, I, TypeExpr, extra::Err<Rich<'a, Token>>> + Clone + 'a
+///
+/// Yields a plain `TypeExpr` value, not a node: annotations are
+/// packed into their parent node's `extra` header.
+fn type_expr_parser<'a, I>() -> impl Parser<'a, I, TypeExpr, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     let view = just(Token::Amp)
         .ignore_then(select! { Token::Ident(name) => name })
-        .map_with(|name, e| TypeExpr::view(name, e.span()));
-    let plain =
-        select! { Token::Ident(name) => name }.map_with(|name, e| TypeExpr::new(name, e.span()));
+        .map_with(|name, e: &mut Mx<'a, '_, I>| TypeExpr::view(name, e.span()));
+    let plain = select! { Token::Ident(name) => name }
+        .map_with(|name, e: &mut Mx<'a, '_, I>| TypeExpr::new(name, e.span()));
     view.or(plain).boxed()
 }
 
-fn function_def_parser<'a, I>()
--> impl Parser<'a, I, FunctionDef, extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn function_def_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    let ident =
-        select! { Token::Ident(name) => name }.map_with(|name, e| Ident::new(name, e.span()));
+    let ident = select! { Token::Ident(name) => name }
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()));
 
     let param_mode = choice((
         just(Token::Move).to(ParamMode::Move),
@@ -515,15 +504,20 @@ where
     .map(|m| m.unwrap_or(ParamMode::Borrow));
 
     let param = param_mode
-        .then(select! { Token::Ident(name) => name }.map_with(|name, e| Ident::new(name, e.span())))
+        .then(
+            select! { Token::Ident(name) => name }
+                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
+        )
         .then_ignore(just(Token::Colon))
         .then(type_expr_parser())
-        .map_with(|((mode, name), type_annotation), e| Param {
-            name,
-            type_annotation,
-            mode,
-            span: e.span(),
-        });
+        .map_with(
+            |((mode, name), type_annotation), e: &mut Mx<'a, '_, I>| Param {
+                name,
+                type_annotation,
+                mode,
+                span: e.span(),
+            },
+        );
 
     let params = param
         .separated_by(just(Token::Comma))
@@ -541,23 +535,24 @@ where
         .then(return_type)
         .then_ignore(just(Token::Colon))
         .then(body)
-        .map(|(((name, params), return_type), body)| FunctionDef {
-            name,
-            params,
-            return_type,
-            body,
-        })
+        .map_with(
+            |(((name, params), return_type), body), e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                e.state()
+                    .function_def(name, &params, return_type, &body, span)
+            },
+        )
         .boxed()
 }
 
-fn var_decl_parser<'a, I>() -> impl Parser<'a, I, VarDecl, extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn var_decl_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     let mutable = just(Token::Mut).or_not().map(|m| m.is_some());
 
-    let ident =
-        select! { Token::Ident(name) => name }.map_with(|name, e| Ident::new(name, e.span()));
+    let ident = select! { Token::Ident(name) => name }
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()));
 
     let type_annotation = just(Token::Colon).ignore_then(type_expr_parser()).or_not();
 
@@ -566,32 +561,33 @@ where
         .then(type_annotation)
         .then_ignore(just(Token::Assign))
         .then(expression_parser())
-        .map(
-            |(((mutable, name), type_annotation), initializer)| VarDecl {
-                mutable,
-                name,
-                type_annotation,
-                initializer,
+        .map_with(
+            |(((mutable, name), type_annotation), initializer), e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                e.state()
+                    .var_decl(mutable, name, type_annotation, initializer, span)
             },
         )
         .boxed()
 }
 
-fn expression_parser<'a, I>()
--> impl Parser<'a, I, Expression, extra::Err<Rich<'a, Token>>> + Clone + 'a
+fn expression_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     recursive(|expr| {
         let atom = {
             let literal = select! {
-                Token::IntLit(n) => ExprKind::Literal(Literal::Int(n)),
-                Token::FloatLit(bits) => ExprKind::Literal(Literal::Float(f64::from_bits(bits))),
-                Token::StrLit(id) => ExprKind::Literal(Literal::Str(id)),
-                Token::True => ExprKind::Literal(Literal::Bool(true)),
-                Token::False => ExprKind::Literal(Literal::Bool(false)),
+                Token::IntLit(n) => Literal::Int(n),
+                Token::FloatLit(bits) => Literal::Float(f64::from_bits(bits)),
+                Token::StrLit(id) => Literal::Str(id),
+                Token::True => Literal::Bool(true),
+                Token::False => Literal::Bool(false),
             }
-            .map_with(|kind, e| Expression::new(kind, e.span()));
+            .map_with(|lit, e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                e.state().literal(lit, span)
+            });
 
             let call = select! { Token::Ident(name) => name }
                 .then(
@@ -601,17 +597,26 @@ where
                         .collect::<Vec<_>>()
                         .delimited_by(just(Token::LParen), just(Token::RParen)),
                 )
-                .map_with(|(name, args), e| Expression::new(ExprKind::Call(name, args), e.span()));
+                .map_with(|(name, args), e: &mut Mx<'a, '_, I>| {
+                    let span = e.span();
+                    e.state().call(name, &args, span)
+                });
 
-            let ident_expr = select! { Token::Ident(name) => name }
-                .map_with(|name, e| Expression::new(ExprKind::Ident(name), e.span()));
+            let ident_expr =
+                select! { Token::Ident(name) => name }.map_with(|name, e: &mut Mx<'a, '_, I>| {
+                    let span = e.span();
+                    e.state().ident(name, span)
+                });
 
             // `&ident` — call-site mutable-borrow marker (M8.3). Restricted to
             // a bare identifier in v0.1; sema validates the target is an
             // assignable lvalue (`mut` local or `inout` param).
-            let borrow = just(Token::Amp)
-                .ignore_then(ident_expr)
-                .map_with(|inner, e| Expression::new(ExprKind::Borrow(Box::new(inner)), e.span()));
+            let borrow = just(Token::Amp).ignore_then(ident_expr).map_with(
+                |inner, e: &mut Mx<'a, '_, I>| {
+                    let span = e.span();
+                    e.state().borrow(inner, span)
+                },
+            );
 
             let parenthesized = expr
                 .clone()
@@ -626,8 +631,8 @@ where
         // grammatically — the colon is mandatory — so no extra
         // validation is needed for the empty slice.
         enum PostfixOp {
-            Method(StringId, Vec<Expression>, SimpleSpan),
-            Slice(Option<Expression>, Option<Expression>, SimpleSpan),
+            Method(StringId, Vec<NodeRef>, SimpleSpan),
+            Slice(Option<NodeRef>, Option<NodeRef>, SimpleSpan),
         }
 
         let method_op = just(Token::Dot)
@@ -639,37 +644,36 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(Token::LParen), just(Token::RParen)),
             )
-            .map_with(|(method, args), e| PostfixOp::Method(method, args, e.span()));
+            .map_with(|(method, args), e: &mut Mx<'a, '_, I>| {
+                PostfixOp::Method(method, args, e.span())
+            });
 
         let slice_op = just(Token::LBracket)
             .ignore_then(expr.clone().or_not())
             .then_ignore(just(Token::Colon))
             .then(expr.clone().or_not())
             .then_ignore(just(Token::RBracket))
-            .map_with(|(start, end), e| PostfixOp::Slice(start, end, e.span()));
+            .map_with(|(start, end), e: &mut Mx<'a, '_, I>| PostfixOp::Slice(start, end, e.span()));
 
         let postfix = atom
-            .foldl(choice((method_op, slice_op)).repeated(), |receiver, op| {
-                let start = receiver.span.start;
-                match op {
-                    PostfixOp::Method(method, args, span) => Expression::new(
-                        ExprKind::MethodCall {
-                            receiver: Box::new(receiver),
+            .foldl_with(
+                choice((method_op, slice_op)).repeated(),
+                |receiver, op, e: &mut Mx<'a, '_, I>| {
+                    let start = e.state().span(receiver).start;
+                    match op {
+                        PostfixOp::Method(method, args, span) => e.state().method_call(
+                            receiver,
                             method,
-                            args,
-                        },
-                        SimpleSpan::new((), start..span.end),
-                    ),
-                    PostfixOp::Slice(lo, hi, span) => Expression::new(
-                        ExprKind::Slice {
-                            base: Box::new(receiver),
-                            start: lo.map(Box::new),
-                            end: hi.map(Box::new),
-                        },
-                        SimpleSpan::new((), start..span.end),
-                    ),
-                }
-            })
+                            &args,
+                            SimpleSpan::new((), start..span.end),
+                        ),
+                        PostfixOp::Slice(lo, hi, span) => {
+                            e.state()
+                                .slice(receiver, lo, hi, SimpleSpan::new((), start..span.end))
+                        }
+                    }
+                },
+            )
             .boxed();
 
         let unary_op = choice((
@@ -681,9 +685,13 @@ where
         // time: the positive form `9223372036854775808` overflows
         // `i64`, so the lexer marks it with a dedicated token that is
         // only grammatical directly after unary `-`.
-        let neg_min = just(Token::Sub)
-            .then(just(Token::IntLitMin))
-            .map_with(|_, e| Expression::new(ExprKind::Literal(Literal::Int(i64::MIN)), e.span()));
+        let neg_min =
+            just(Token::Sub)
+                .then(just(Token::IntLitMin))
+                .map_with(|_, e: &mut Mx<'a, '_, I>| {
+                    let span = e.span();
+                    e.state().literal_int(i64::MIN, span)
+                });
 
         // Each precedence level is `.boxed()` to erase the concrete
         // combinator type. Without this the levels nest into each other
@@ -695,16 +703,33 @@ where
                 .repeated()
                 .collect::<Vec<_>>()
                 .then(postfix)
-                .map_with(|(ops, expr), e| {
+                .map_with(|(ops, expr), e: &mut Mx<'a, '_, I>| {
+                    let span = e.span();
                     let mut result = expr;
                     for op in ops.into_iter().rev() {
-                        result = Expression::new(ExprKind::UnaryOp(op, Box::new(result)), e.span());
+                        result = e.state().unary(op, result, span);
                     }
                     result
                 }))
             .boxed();
 
-        let term = unary.clone().foldl(
+        // Fold `left op right` into a BinaryOp node spanning both
+        // operands — the same span rule at every precedence level.
+        fn fold_binary<'a, I>(
+            left: NodeRef,
+            (op, right): (BinaryOperator, NodeRef),
+            e: &mut Mx<'a, '_, I>,
+        ) -> NodeRef
+        where
+            I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+        {
+            let start = e.state().span(left).start;
+            let end = e.state().span(right).end;
+            e.state()
+                .binary(op, left, right, SimpleSpan::new((), start..end))
+        }
+
+        let term = unary.clone().foldl_with(
             choice((
                 just(Token::Mul).to(BinaryOperator::Mul),
                 just(Token::Div).to(BinaryOperator::Div),
@@ -712,33 +737,19 @@ where
             ))
             .then(unary)
             .repeated(),
-            |left, (op, right)| {
-                let start = left.span.start;
-                let end = right.span.end;
-                Expression::new(
-                    ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
-                    SimpleSpan::new((), start..end),
-                )
-            },
+            fold_binary,
         );
 
         let term = term.boxed();
 
-        let additive = term.clone().foldl(
+        let additive = term.clone().foldl_with(
             choice((
                 just(Token::Add).to(BinaryOperator::Add),
                 just(Token::Sub).to(BinaryOperator::Sub),
             ))
             .then(term)
             .repeated(),
-            |left, (op, right)| {
-                let start = left.span.start;
-                let end = right.span.end;
-                Expression::new(
-                    ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
-                    SimpleSpan::new((), start..end),
-                )
-            },
+            fold_binary,
         );
 
         let additive = additive.boxed();
@@ -756,16 +767,9 @@ where
                 .then(additive)
                 .or_not(),
             )
-            .map(|(left, maybe_rhs)| match maybe_rhs {
+            .map_with(|(left, maybe_rhs), e: &mut Mx<'a, '_, I>| match maybe_rhs {
                 None => left,
-                Some((op, right)) => {
-                    let start = left.span.start;
-                    let end = right.span.end;
-                    Expression::new(
-                        ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
-                        SimpleSpan::new((), start..end),
-                    )
-                }
+                Some((op, right)) => fold_binary(left, (op, right), e),
             })
             .boxed();
 
@@ -780,33 +784,19 @@ where
                 .then(ordering)
                 .or_not(),
             )
-            .map(|(left, maybe_rhs)| match maybe_rhs {
+            .map_with(|(left, maybe_rhs), e: &mut Mx<'a, '_, I>| match maybe_rhs {
                 None => left,
-                Some((op, right)) => {
-                    let start = left.span.start;
-                    let end = right.span.end;
-                    Expression::new(
-                        ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
-                        SimpleSpan::new((), start..end),
-                    )
-                }
+                Some((op, right)) => fold_binary(left, (op, right), e),
             })
             .boxed();
 
         // Logical AND binds tighter than OR, below equality.
-        let logical_and = equality.clone().foldl(
+        let logical_and = equality.clone().foldl_with(
             just(Token::And)
                 .to(BinaryOperator::And)
                 .then(equality)
                 .repeated(),
-            |left, (op, right)| {
-                let start = left.span.start;
-                let end = right.span.end;
-                Expression::new(
-                    ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
-                    SimpleSpan::new((), start..end),
-                )
-            },
+            fold_binary,
         );
 
         let logical_and = logical_and.boxed();
@@ -814,26 +804,18 @@ where
         // Logical OR is the lowest precedence.
         logical_and
             .clone()
-            .foldl(
+            .foldl_with(
                 just(Token::Or)
                     .to(BinaryOperator::Or)
                     .then(logical_and)
                     .repeated(),
-                |left, (op, right)| {
-                    let start = left.span.start;
-                    let end = right.span.end;
-                    Expression::new(
-                        ExprKind::BinaryOp(Box::new(left), op, Box::new(right)),
-                        SimpleSpan::new((), start..end),
-                    )
-                },
+                fold_binary,
             )
             .boxed()
     })
 }
 
 #[cfg(test)]
-#[allow(irrefutable_let_patterns)]
 mod tests {
     use super::*;
     use crate::lexer::lex;
@@ -841,7 +823,7 @@ mod tests {
     use chumsky::input::Input;
     use ryo_core::types::InternPool;
 
-    fn lex_and_parse(input: &str) -> Result<(Program, InternPool), Vec<Rich<'static, Token>>> {
+    fn lex_and_parse(input: &str) -> Result<(Ast, InternPool), Vec<Rich<'static, Token>>> {
         let mut pool = InternPool::new();
         let mut sink = ryo_core::diag::DiagSink::new();
         let tokens = lex(input, &mut pool, &mut sink);
@@ -854,124 +836,116 @@ mod tests {
         }
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
 
-        let program = program_parser()
-            .parse(token_stream)
+        let mut ast = Ast::new();
+        program_parser()
+            .parse_with_state(token_stream, &mut ast)
             .into_result()
             .map_err(|e| {
                 e.into_iter()
                     .map(|rich| rich.into_owned())
                     .collect::<Vec<_>>()
             })?;
-        Ok((program, pool))
+        Ok((ast, pool))
     }
 
-    fn ident_text<'a>(id: &Ident, pool: &'a InternPool) -> &'a str {
-        pool.str(id.name)
+    /// The single top-level statement of a parsed snippet.
+    fn only_stmt(ast: &Ast) -> NodeRef {
+        let stmts = ast.top_level_stmts();
+        assert_eq!(stmts.len(), 1);
+        stmts[0]
+    }
+
+    fn var_decl(ast: &Ast, stmt: NodeRef) -> VarDeclView {
+        assert_eq!(ast.tag(stmt), NodeTag::VarDecl);
+        ast.var_decl_view(stmt)
+    }
+
+    fn fn_def(ast: &Ast, stmt: NodeRef) -> FunctionDefView {
+        assert_eq!(ast.tag(stmt), NodeTag::FunctionDef);
+        ast.function_def_view(stmt)
+    }
+
+    /// Initializer of a top-level `x = <init>` declaration.
+    fn decl_init(ast: &Ast) -> NodeRef {
+        var_decl(ast, only_stmt(ast)).initializer
+    }
+
+    fn bin_op(ast: &Ast, r: NodeRef) -> BinaryOpView {
+        assert_eq!(ast.tag(r), NodeTag::BinaryOp);
+        ast.binary_op_view(r)
+    }
+
+    fn assert_int_lit(ast: &Ast, r: NodeRef, expected: i64) {
+        assert_eq!(ast.tag(r), NodeTag::LiteralInt);
+        assert!(
+            matches!(ast.literal_view(r), Literal::Int(v) if v == expected),
+            "expected Int({expected})"
+        );
     }
 
     #[test]
     fn parse_simple_variable_declaration() {
-        let (program, pool) = lex_and_parse("x = 42").unwrap();
-        assert_eq!(program.statements.len(), 1);
-        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
-            assert!(!decl.mutable);
-            assert_eq!(ident_text(&decl.name, &pool), "x");
-            assert!(decl.type_annotation.is_none());
-            assert!(matches!(
-                decl.initializer.kind,
-                ExprKind::Literal(Literal::Int(42))
-            ));
-        } else {
-            panic!("Expected VarDecl");
-        }
+        let (ast, pool) = lex_and_parse("x = 42").unwrap();
+        assert_eq!(ast.top_level_stmts().len(), 1);
+        let decl = var_decl(&ast, only_stmt(&ast));
+        assert!(!decl.mutable);
+        assert_eq!(pool.str(decl.name.name), "x");
+        assert!(decl.type_annotation.is_none());
+        assert_int_lit(&ast, decl.initializer, 42);
     }
 
     #[test]
     fn parse_variable_with_type_annotation() {
-        let (program, pool) = lex_and_parse("x: int = 42").unwrap();
-        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
-            assert_eq!(ident_text(&decl.name, &pool), "x");
-            assert_eq!(pool.str(decl.type_annotation.as_ref().unwrap().name), "int");
-        } else {
-            panic!("Expected VarDecl");
-        }
+        let (ast, pool) = lex_and_parse("x: int = 42").unwrap();
+        let decl = var_decl(&ast, only_stmt(&ast));
+        assert_eq!(pool.str(decl.name.name), "x");
+        assert_eq!(pool.str(decl.type_annotation.unwrap().name), "int");
     }
 
     #[test]
     fn parse_mutable_variable() {
-        let (program, pool) = lex_and_parse("mut x = 42").unwrap();
-        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
-            assert!(decl.mutable);
-            assert_eq!(ident_text(&decl.name, &pool), "x");
-        } else {
-            panic!("Expected VarDecl");
-        }
+        let (ast, pool) = lex_and_parse("mut x = 42").unwrap();
+        let decl = var_decl(&ast, only_stmt(&ast));
+        assert!(decl.mutable);
+        assert_eq!(pool.str(decl.name.name), "x");
     }
 
     #[test]
     fn parse_mutable_with_type() {
-        let (program, pool) = lex_and_parse("mut counter: int = 0").unwrap();
-        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
-            assert!(decl.mutable);
-            assert_eq!(ident_text(&decl.name, &pool), "counter");
-            assert_eq!(pool.str(decl.type_annotation.as_ref().unwrap().name), "int");
-            assert!(matches!(
-                decl.initializer.kind,
-                ExprKind::Literal(Literal::Int(0))
-            ));
-        } else {
-            panic!("Expected VarDecl");
-        }
+        let (ast, pool) = lex_and_parse("mut counter: int = 0").unwrap();
+        let decl = var_decl(&ast, only_stmt(&ast));
+        assert!(decl.mutable);
+        assert_eq!(pool.str(decl.name.name), "counter");
+        assert_eq!(pool.str(decl.type_annotation.unwrap().name), "int");
+        assert_int_lit(&ast, decl.initializer, 0);
     }
 
     #[test]
     fn parse_expression_addition() {
-        let (program, _) = lex_and_parse("x = 1 + 2").unwrap();
-        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
-            match &decl.initializer.kind {
-                ExprKind::BinaryOp(left, BinaryOperator::Add, right) => {
-                    assert!(matches!(left.kind, ExprKind::Literal(Literal::Int(1))));
-                    assert!(matches!(right.kind, ExprKind::Literal(Literal::Int(2))));
-                }
-                _ => panic!("Expected BinaryOp(Add)"),
-            }
-        } else {
-            panic!("Expected VarDecl");
-        }
+        let (ast, _) = lex_and_parse("x = 1 + 2").unwrap();
+        let view = bin_op(&ast, decl_init(&ast));
+        assert_eq!(view.op, BinaryOperator::Add);
+        assert_int_lit(&ast, view.lhs, 1);
+        assert_int_lit(&ast, view.rhs, 2);
     }
 
     #[test]
     fn parse_expression_precedence() {
-        let (program, _) = lex_and_parse("x = 2 + 3 * 4").unwrap();
-        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
-            match &decl.initializer.kind {
-                ExprKind::BinaryOp(left, BinaryOperator::Add, right) => {
-                    assert!(matches!(left.kind, ExprKind::Literal(Literal::Int(2))));
-                    assert!(matches!(
-                        right.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::Mul, _)
-                    ));
-                }
-                _ => panic!("Expected BinaryOp(Add)"),
-            }
-        } else {
-            panic!("Expected VarDecl");
-        }
+        let (ast, _) = lex_and_parse("x = 2 + 3 * 4").unwrap();
+        let view = bin_op(&ast, decl_init(&ast));
+        assert_eq!(view.op, BinaryOperator::Add);
+        assert_int_lit(&ast, view.lhs, 2);
+        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Mul);
     }
 
     #[test]
     fn parse_expression_negation() {
-        let (program, _) = lex_and_parse("x = -42").unwrap();
-        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
-            match &decl.initializer.kind {
-                ExprKind::UnaryOp(UnaryOperator::Neg, expr) => {
-                    assert!(matches!(expr.kind, ExprKind::Literal(Literal::Int(42))));
-                }
-                _ => panic!("Expected UnaryOp(Neg)"),
-            }
-        } else {
-            panic!("Expected VarDecl");
-        }
+        let (ast, _) = lex_and_parse("x = -42").unwrap();
+        let init = decl_init(&ast);
+        assert_eq!(ast.tag(init), NodeTag::UnaryOp);
+        let view = ast.unary_op_view(init);
+        assert_eq!(view.op, UnaryOperator::Neg);
+        assert_int_lit(&ast, view.operand, 42);
     }
 
     #[test]
@@ -979,19 +953,13 @@ mod tests {
         // `-9223372036854775808` (i64::MIN): the lexer emits IntLitMin
         // for the overflowing positive form and the parser folds
         // `- IntLitMin` directly to the literal — no UnaryOp.
-        let (program, _) = lex_and_parse("x = -9223372036854775808").unwrap();
-        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
-            assert!(
-                matches!(
-                    decl.initializer.kind,
-                    ExprKind::Literal(Literal::Int(i64::MIN))
-                ),
-                "expected folded i64::MIN literal, got {:?}",
-                decl.initializer.kind
-            );
-        } else {
-            panic!("Expected VarDecl");
-        }
+        let (ast, _) = lex_and_parse("x = -9223372036854775808").unwrap();
+        let init = decl_init(&ast);
+        assert!(
+            matches!(ast.literal_view(init), Literal::Int(i64::MIN)),
+            "expected folded i64::MIN literal, got {:?}",
+            ast.node(init)
+        );
     }
 
     #[test]
@@ -1006,33 +974,26 @@ mod tests {
 
     #[test]
     fn parse_expression_parenthesized() {
-        let (program, _) = lex_and_parse("x = (2 + 3) * 4").unwrap();
-        if let StmtKind::VarDecl(decl) = &program.statements[0].kind {
-            assert!(matches!(
-                decl.initializer.kind,
-                ExprKind::BinaryOp(_, BinaryOperator::Mul, _)
-            ));
-        } else {
-            panic!("Expected VarDecl");
-        }
+        let (ast, _) = lex_and_parse("x = (2 + 3) * 4").unwrap();
+        assert_eq!(bin_op(&ast, decl_init(&ast)).op, BinaryOperator::Mul);
     }
 
     #[test]
     fn parse_multiple_statements() {
-        let (program, _) = lex_and_parse("x = 42\ny = 10").unwrap();
-        assert_eq!(program.statements.len(), 2);
+        let (ast, _) = lex_and_parse("x = 42\ny = 10").unwrap();
+        assert_eq!(ast.top_level_stmts().len(), 2);
     }
 
     #[test]
     fn parse_multiple_with_types() {
-        let (program, _) = lex_and_parse("x: int = 42\nmut y: float = 3\nz = 1 + 2").unwrap();
-        assert_eq!(program.statements.len(), 3);
+        let (ast, _) = lex_and_parse("x: int = 42\nmut y: float = 3\nz = 1 + 2").unwrap();
+        assert_eq!(ast.top_level_stmts().len(), 3);
     }
 
     #[test]
     fn parse_empty_program() {
-        let (program, _) = lex_and_parse("").unwrap();
-        assert_eq!(program.statements.len(), 0);
+        let (ast, _) = lex_and_parse("").unwrap();
+        assert_eq!(ast.top_level_stmts().len(), 0);
     }
 
     #[test]
@@ -1047,8 +1008,8 @@ mod tests {
 
     #[test]
     fn accept_statements_on_separate_lines() {
-        let (program, _) = lex_and_parse("x = 1\ny = 2").unwrap();
-        assert_eq!(program.statements.len(), 2);
+        let (ast, _) = lex_and_parse("x = 1\ny = 2").unwrap();
+        assert_eq!(ast.top_level_stmts().len(), 2);
     }
 
     #[test]
@@ -1063,88 +1024,54 @@ mod tests {
 
     #[test]
     fn accept_blank_lines_between_statements() {
-        let (program, _) = lex_and_parse("x = 1\n\ny = 2").unwrap();
-        assert_eq!(program.statements.len(), 2);
+        let (ast, _) = lex_and_parse("x = 1\n\ny = 2").unwrap();
+        assert_eq!(ast.top_level_stmts().len(), 2);
     }
 
     #[test]
     fn parse_true_false_literals() {
-        let (program, _) = lex_and_parse("x = true\ny = false").unwrap();
-        assert_eq!(program.statements.len(), 2);
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => {
-                assert!(matches!(
-                    decl.initializer.kind,
-                    ExprKind::Literal(Literal::Bool(true))
-                ));
-            }
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
-        match &program.statements[1].kind {
-            StmtKind::VarDecl(decl) => {
-                assert!(matches!(
-                    decl.initializer.kind,
-                    ExprKind::Literal(Literal::Bool(false))
-                ));
-            }
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = true\ny = false").unwrap();
+        let stmts = ast.top_level_stmts();
+        assert_eq!(stmts.len(), 2);
+        let first = var_decl(&ast, stmts[0]);
+        assert!(matches!(
+            ast.literal_view(first.initializer),
+            Literal::Bool(true)
+        ));
+        let second = var_decl(&ast, stmts[1]);
+        assert!(matches!(
+            ast.literal_view(second.initializer),
+            Literal::Bool(false)
+        ));
     }
 
     #[test]
     fn parse_equality_expression() {
-        let (program, _) = lex_and_parse("x = 1 == 2").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => assert!(matches!(
-                decl.initializer.kind,
-                ExprKind::BinaryOp(_, BinaryOperator::Eq, _)
-            )),
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = 1 == 2").unwrap();
+        assert_eq!(bin_op(&ast, decl_init(&ast)).op, BinaryOperator::Eq);
     }
 
     #[test]
     fn parse_not_equal_expression() {
-        let (program, _) = lex_and_parse("x = 1 != 2").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => assert!(matches!(
-                decl.initializer.kind,
-                ExprKind::BinaryOp(_, BinaryOperator::NotEq, _)
-            )),
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = 1 != 2").unwrap();
+        assert_eq!(bin_op(&ast, decl_init(&ast)).op, BinaryOperator::NotEq);
     }
 
     #[test]
     fn parse_equality_has_lower_precedence_than_addition() {
-        let (program, _) = lex_and_parse("x = a + b == c + d").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
-                ExprKind::BinaryOp(lhs, BinaryOperator::Eq, rhs) => {
-                    assert!(matches!(
-                        lhs.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::Add, _)
-                    ));
-                    assert!(matches!(
-                        rhs.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::Add, _)
-                    ));
-                }
-                other => panic!("expected top-level BinaryOp(Eq), got {:?}", other),
-            },
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = a + b == c + d").unwrap();
+        let view = bin_op(&ast, decl_init(&ast));
+        assert_eq!(view.op, BinaryOperator::Eq);
+        assert_eq!(bin_op(&ast, view.lhs).op, BinaryOperator::Add);
+        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Add);
     }
 
     #[test]
     fn parse_float_literal() {
-        let (program, _) = lex_and_parse("x = 2.5").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
-                ExprKind::Literal(Literal::Float(v)) => assert!((*v - 2.5).abs() < 1e-12),
-                other => panic!("expected Float literal, got {:?}", other),
-            },
-            other => panic!("expected VarDecl, got {:?}", other),
+        let (ast, _) = lex_and_parse("x = 2.5").unwrap();
+        match ast.literal_view(decl_init(&ast)) {
+            Literal::Float(v) => assert!((v - 2.5).abs() < 1e-12),
+            other => panic!("expected Float literal, got {:?}", other),
         }
     }
 
@@ -1156,74 +1083,35 @@ mod tests {
             ("x = a <= b", BinaryOperator::LtEq),
             ("x = a >= b", BinaryOperator::GtEq),
         ] {
-            let (program, _) = lex_and_parse(src).unwrap();
-            match &program.statements[0].kind {
-                StmtKind::VarDecl(decl) => match &decl.initializer.kind {
-                    ExprKind::BinaryOp(_, op, _) => assert_eq!(op, expected_op),
-                    other => panic!("expected BinaryOp, got {:?}", other),
-                },
-                other => panic!("expected VarDecl, got {:?}", other),
-            }
+            let (ast, _) = lex_and_parse(src).unwrap();
+            assert_eq!(bin_op(&ast, decl_init(&ast)).op, *expected_op);
         }
     }
 
     #[test]
     fn parse_modulo_at_multiplicative_precedence() {
-        let (program, _) = lex_and_parse("x = a + b % c").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
-                ExprKind::BinaryOp(_, BinaryOperator::Add, rhs) => {
-                    assert!(matches!(
-                        rhs.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::Mod, _)
-                    ));
-                }
-                other => panic!("expected top-level BinaryOp(Add), got {:?}", other),
-            },
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = a + b % c").unwrap();
+        let view = bin_op(&ast, decl_init(&ast));
+        assert_eq!(view.op, BinaryOperator::Add);
+        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Mod);
     }
 
     #[test]
     fn parse_ordering_below_additive_precedence() {
-        let (program, _) = lex_and_parse("x = a + b < c + d").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
-                ExprKind::BinaryOp(lhs, BinaryOperator::Lt, rhs) => {
-                    assert!(matches!(
-                        lhs.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::Add, _)
-                    ));
-                    assert!(matches!(
-                        rhs.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::Add, _)
-                    ));
-                }
-                other => panic!("expected top-level BinaryOp(Lt), got {:?}", other),
-            },
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = a + b < c + d").unwrap();
+        let view = bin_op(&ast, decl_init(&ast));
+        assert_eq!(view.op, BinaryOperator::Lt);
+        assert_eq!(bin_op(&ast, view.lhs).op, BinaryOperator::Add);
+        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Add);
     }
 
     #[test]
     fn parse_equality_below_ordering_precedence() {
-        let (program, _) = lex_and_parse("x = a < b == c < d").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
-                ExprKind::BinaryOp(lhs, BinaryOperator::Eq, rhs) => {
-                    assert!(matches!(
-                        lhs.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::Lt, _)
-                    ));
-                    assert!(matches!(
-                        rhs.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::Lt, _)
-                    ));
-                }
-                other => panic!("expected top-level BinaryOp(Eq), got {:?}", other),
-            },
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = a < b == c < d").unwrap();
+        let view = bin_op(&ast, decl_init(&ast));
+        assert_eq!(view.op, BinaryOperator::Eq);
+        assert_eq!(bin_op(&ast, view.lhs).op, BinaryOperator::Lt);
+        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Lt);
     }
 
     #[test]
@@ -1240,13 +1128,10 @@ mod tests {
     /// `x = "..."` declaration and return the interned bytes of
     /// its string literal.
     fn parse_str_literal(src: &str) -> String {
-        let (program, pool) = lex_and_parse(src).expect("parse ok");
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => match decl.initializer.kind {
-                ExprKind::Literal(Literal::Str(id)) => pool.str(id).to_string(),
-                ref other => panic!("expected Str literal, got {:?}", other),
-            },
-            other => panic!("expected VarDecl, got {:?}", other),
+        let (ast, pool) = lex_and_parse(src).expect("parse ok");
+        match ast.literal_view(decl_init(&ast)) {
+            Literal::Str(id) => pool.str(id).to_string(),
+            other => panic!("expected Str literal, got {:?}", other),
         }
     }
 
@@ -1273,204 +1158,125 @@ mod tests {
 
     #[test]
     fn parse_and_operator() {
-        let (program, _) = lex_and_parse("x = true and false").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => assert!(matches!(
-                decl.initializer.kind,
-                ExprKind::BinaryOp(_, BinaryOperator::And, _)
-            )),
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = true and false").unwrap();
+        assert_eq!(bin_op(&ast, decl_init(&ast)).op, BinaryOperator::And);
     }
 
     #[test]
     fn parse_or_operator() {
-        let (program, _) = lex_and_parse("x = true or false").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => assert!(matches!(
-                decl.initializer.kind,
-                ExprKind::BinaryOp(_, BinaryOperator::Or, _)
-            )),
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = true or false").unwrap();
+        assert_eq!(bin_op(&ast, decl_init(&ast)).op, BinaryOperator::Or);
     }
 
     #[test]
     fn parse_not_operator() {
-        let (program, _) = lex_and_parse("x = not true").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => assert!(matches!(
-                decl.initializer.kind,
-                ExprKind::UnaryOp(UnaryOperator::Not, _)
-            )),
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = not true").unwrap();
+        let init = decl_init(&ast);
+        assert_eq!(ast.tag(init), NodeTag::UnaryOp);
+        assert_eq!(ast.unary_op_view(init).op, UnaryOperator::Not);
     }
 
     #[test]
     fn parse_and_binds_tighter_than_or() {
         // a or b and c  =>  a or (b and c)
-        let (program, _) = lex_and_parse("x = true or false and true").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
-                ExprKind::BinaryOp(_, BinaryOperator::Or, rhs) => {
-                    assert!(matches!(
-                        rhs.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::And, _)
-                    ));
-                }
-                other => panic!("expected top-level Or, got {:?}", other),
-            },
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = true or false and true").unwrap();
+        let view = bin_op(&ast, decl_init(&ast));
+        assert_eq!(view.op, BinaryOperator::Or);
+        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::And);
     }
 
     #[test]
     fn parse_not_binds_tighter_than_and() {
         // not a and b  =>  (not a) and b
-        let (program, _) = lex_and_parse("x = not true and false").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
-                ExprKind::BinaryOp(lhs, BinaryOperator::And, _) => {
-                    assert!(matches!(lhs.kind, ExprKind::UnaryOp(UnaryOperator::Not, _)));
-                }
-                other => panic!("expected top-level And, got {:?}", other),
-            },
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = not true and false").unwrap();
+        let view = bin_op(&ast, decl_init(&ast));
+        assert_eq!(view.op, BinaryOperator::And);
+        let lhs = view.lhs;
+        assert_eq!(ast.tag(lhs), NodeTag::UnaryOp);
+        assert_eq!(ast.unary_op_view(lhs).op, UnaryOperator::Not);
     }
 
     #[test]
     fn parse_not_not_chains() {
-        let (program, _) = lex_and_parse("x = not not true").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
-                ExprKind::UnaryOp(UnaryOperator::Not, inner) => {
-                    assert!(matches!(
-                        inner.kind,
-                        ExprKind::UnaryOp(UnaryOperator::Not, _)
-                    ));
-                }
-                other => panic!("expected outer Not, got {:?}", other),
-            },
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = not not true").unwrap();
+        let outer = decl_init(&ast);
+        assert_eq!(ast.tag(outer), NodeTag::UnaryOp);
+        let view = ast.unary_op_view(outer);
+        assert_eq!(view.op, UnaryOperator::Not);
+        let inner = view.operand;
+        assert_eq!(ast.tag(inner), NodeTag::UnaryOp);
+        assert_eq!(ast.unary_op_view(inner).op, UnaryOperator::Not);
     }
 
     #[test]
     fn parse_simple_if() {
         let input = "fn main():\n\tif true:\n\t\tx = 1\n";
-        let (program, _) = lex_and_parse(input).unwrap();
-        match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => {
-                assert_eq!(f.body.len(), 1);
-                assert!(matches!(f.body[0].kind, StmtKind::IfStmt(_)));
-            }
-            other => panic!("expected FunctionDef, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse(input).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(f.body.len(), 1);
+        assert_eq!(ast.tag(f.body[0]), NodeTag::IfStmt);
     }
 
     #[test]
     fn parse_if_else() {
         let input = "fn main():\n\tif true:\n\t\tx = 1\n\telse:\n\t\tx = 2\n";
-        let (program, _) = lex_and_parse(input).unwrap();
-        match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => match &f.body[0].kind {
-                StmtKind::IfStmt(if_stmt) => {
-                    assert!(if_stmt.else_block.is_some());
-                    assert!(if_stmt.elif_branches.is_empty());
-                }
-                other => panic!("expected IfStmt, got {:?}", other),
-            },
-            other => panic!("expected FunctionDef, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse(input).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        let view = ast.if_stmt_view(f.body[0]);
+        assert!(view.else_block.is_some());
+        assert!(view.elif_branches.is_empty());
     }
 
     #[test]
     fn parse_if_elif_else() {
         let input =
             "fn main():\n\tif true:\n\t\tx = 1\n\telif false:\n\t\tx = 2\n\telse:\n\t\tx = 3\n";
-        let (program, _) = lex_and_parse(input).unwrap();
-        match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => match &f.body[0].kind {
-                StmtKind::IfStmt(if_stmt) => {
-                    assert_eq!(if_stmt.elif_branches.len(), 1);
-                    assert!(if_stmt.else_block.is_some());
-                }
-                other => panic!("expected IfStmt, got {:?}", other),
-            },
-            other => panic!("expected FunctionDef, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse(input).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        let view = ast.if_stmt_view(f.body[0]);
+        assert_eq!(view.elif_branches.len(), 1);
+        assert!(view.else_block.is_some());
     }
 
     #[test]
     fn parse_multiple_elif() {
         let input = "fn main():\n\tif true:\n\t\tx = 1\n\telif false:\n\t\tx = 2\n\telif true:\n\t\tx = 3\n\telse:\n\t\tx = 4\n";
-        let (program, _) = lex_and_parse(input).unwrap();
-        match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => match &f.body[0].kind {
-                StmtKind::IfStmt(if_stmt) => {
-                    assert_eq!(if_stmt.elif_branches.len(), 2);
-                    assert!(if_stmt.else_block.is_some());
-                }
-                other => panic!("expected IfStmt, got {:?}", other),
-            },
-            other => panic!("expected FunctionDef, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse(input).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        let view = ast.if_stmt_view(f.body[0]);
+        assert_eq!(view.elif_branches.len(), 2);
+        assert!(view.else_block.is_some());
     }
 
     #[test]
     fn parse_if_without_else() {
         let input = "fn main():\n\tif true:\n\t\tx = 1\n\tprint(\"done\")\n";
-        let (program, _) = lex_and_parse(input).unwrap();
-        match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => {
-                assert_eq!(f.body.len(), 2);
-                match &f.body[0].kind {
-                    StmtKind::IfStmt(if_stmt) => {
-                        assert!(if_stmt.else_block.is_none());
-                        assert!(if_stmt.elif_branches.is_empty());
-                    }
-                    other => panic!("expected IfStmt, got {:?}", other),
-                }
-            }
-            other => panic!("expected FunctionDef, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse(input).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(f.body.len(), 2);
+        let view = ast.if_stmt_view(f.body[0]);
+        assert!(view.else_block.is_none());
+        assert!(view.elif_branches.is_empty());
     }
 
     #[test]
     fn parse_assign_or_decl() {
-        let (program, pool) = lex_and_parse("fn main():\n\tx = 42\n").unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        match &func.body[0].kind {
-            StmtKind::AssignOrDecl { target, value } => {
-                assert_eq!(pool.str(target.name), "x");
-                match &value.kind {
-                    ExprKind::Literal(Literal::Int(42)) => {}
-                    other => panic!("expected Int(42), got {:?}", other),
-                }
-            }
-            other => panic!("expected AssignOrDecl, got {:?}", other),
-        }
+        let (ast, pool) = lex_and_parse("fn main():\n\tx = 42\n").unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(ast.tag(f.body[0]), NodeTag::AssignOrDecl);
+        let view = ast.assign_or_decl_view(f.body[0]);
+        assert_eq!(pool.str(view.target.name), "x");
+        assert_int_lit(&ast, view.value, 42);
     }
 
     #[test]
     fn parse_compound_assign_plus() {
-        let (program, pool) = lex_and_parse("fn main():\n\tx += 1\n").unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        match &func.body[0].kind {
-            StmtKind::CompoundAssign { target, op, .. } => {
-                assert_eq!(pool.str(target.name), "x");
-                assert_eq!(*op, CompoundOp::Add);
-            }
-            other => panic!("expected CompoundAssign, got {:?}", other),
-        }
+        let (ast, pool) = lex_and_parse("fn main():\n\tx += 1\n").unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(ast.tag(f.body[0]), NodeTag::CompoundAssign);
+        let view = ast.compound_assign_view(f.body[0]);
+        assert_eq!(pool.str(view.target.name), "x");
+        assert_eq!(view.op, CompoundOp::Add);
     }
 
     #[test]
@@ -1483,210 +1289,125 @@ mod tests {
             ("x %= 1", CompoundOp::Mod),
         ] {
             let code = format!("fn main():\n\t{}\n", src);
-            let (program, _pool) = lex_and_parse(&code).unwrap();
-            let func = match &program.statements[0].kind {
-                StmtKind::FunctionDef(f) => f,
-                other => panic!("expected FunctionDef, got {:?}", other),
-            };
-            match &func.body[0].kind {
-                StmtKind::CompoundAssign { op, .. } => {
-                    assert_eq!(*op, expected_op, "failed for: {}", src);
-                }
-                other => panic!("expected CompoundAssign for '{}', got {:?}", src, other),
-            }
+            let (ast, _pool) = lex_and_parse(&code).unwrap();
+            let f = fn_def(&ast, only_stmt(&ast));
+            assert_eq!(ast.tag(f.body[0]), NodeTag::CompoundAssign);
+            assert_eq!(
+                ast.compound_assign_view(f.body[0]).op,
+                expected_op,
+                "failed for: {}",
+                src
+            );
         }
     }
 
     #[test]
     fn vardecl_still_works_with_mut() {
-        let (program, pool) = lex_and_parse("fn main():\n\tmut x = 10\n").unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        match &func.body[0].kind {
-            StmtKind::VarDecl(decl) => {
-                assert!(decl.mutable);
-                assert_eq!(pool.str(decl.name.name), "x");
-            }
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, pool) = lex_and_parse("fn main():\n\tmut x = 10\n").unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        let decl = var_decl(&ast, f.body[0]);
+        assert!(decl.mutable);
+        assert_eq!(pool.str(decl.name.name), "x");
     }
 
     #[test]
     fn vardecl_with_type_annotation_still_works() {
-        let (program, _pool) = lex_and_parse("fn main():\n\tx: int = 10\n").unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        match &func.body[0].kind {
-            StmtKind::VarDecl(decl) => {
-                assert!(!decl.mutable);
-                assert!(decl.type_annotation.is_some());
-            }
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _pool) = lex_and_parse("fn main():\n\tx: int = 10\n").unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        let decl = var_decl(&ast, f.body[0]);
+        assert!(!decl.mutable);
+        assert!(decl.type_annotation.is_some());
     }
 
     #[test]
     fn parse_while_loop() {
         let code = "fn main():\n\twhile true:\n\t\tbreak\n";
-        let (program, _pool) = lex_and_parse(code).unwrap();
-        match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => {
-                assert_eq!(f.body.len(), 1);
-                match &f.body[0].kind {
-                    StmtKind::WhileLoop { body, .. } => {
-                        assert_eq!(body.len(), 1);
-                    }
-                    other => panic!("expected WhileLoop, got {:?}", other),
-                }
-            }
-            other => panic!("expected FunctionDef, got {:?}", other),
-        }
+        let (ast, _pool) = lex_and_parse(code).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(f.body.len(), 1);
+        assert_eq!(ast.tag(f.body[0]), NodeTag::WhileLoop);
+        assert_eq!(ast.while_loop_view(f.body[0]).body.len(), 1);
     }
 
     #[test]
     fn parse_break_statement() {
         let code = "fn main():\n\twhile true:\n\t\tbreak\n";
-        let (program, _pool) = lex_and_parse(code).unwrap();
-        match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => match &f.body[0].kind {
-                StmtKind::WhileLoop { body, .. } => {
-                    assert!(matches!(body[0].kind, StmtKind::Break));
-                }
-                other => panic!("expected WhileLoop, got {:?}", other),
-            },
-            other => panic!("expected FunctionDef, got {:?}", other),
-        }
+        let (ast, _pool) = lex_and_parse(code).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        let view = ast.while_loop_view(f.body[0]);
+        assert_eq!(ast.tag(view.body[0]), NodeTag::Break);
     }
 
     #[test]
     fn parse_continue_statement() {
         let code = "fn main():\n\twhile true:\n\t\tcontinue\n";
-        let (program, _pool) = lex_and_parse(code).unwrap();
-        match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => match &f.body[0].kind {
-                StmtKind::WhileLoop { body, .. } => {
-                    assert!(matches!(body[0].kind, StmtKind::Continue));
-                }
-                other => panic!("expected WhileLoop, got {:?}", other),
-            },
-            other => panic!("expected FunctionDef, got {:?}", other),
-        }
+        let (ast, _pool) = lex_and_parse(code).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        let view = ast.while_loop_view(f.body[0]);
+        assert_eq!(ast.tag(view.body[0]), NodeTag::Continue);
     }
 
     #[test]
     fn parse_nested_while() {
         let code = "fn main():\n\twhile true:\n\t\twhile false:\n\t\t\tbreak\n";
-        let (program, _pool) = lex_and_parse(code).unwrap();
-        match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => match &f.body[0].kind {
-                StmtKind::WhileLoop { body, .. } => {
-                    assert_eq!(body.len(), 1);
-                    assert!(matches!(body[0].kind, StmtKind::WhileLoop { .. }));
-                }
-                other => panic!("expected WhileLoop, got {:?}", other),
-            },
-            other => panic!("expected FunctionDef, got {:?}", other),
-        }
+        let (ast, _pool) = lex_and_parse(code).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        let view = ast.while_loop_view(f.body[0]);
+        assert_eq!(view.body.len(), 1);
+        assert_eq!(ast.tag(view.body[0]), NodeTag::WhileLoop);
     }
 
     #[test]
     fn parse_logical_below_equality() {
         // a == b and c == d  =>  (a == b) and (c == d)
-        let (program, _) = lex_and_parse("x = 1 == 2 and 3 == 4").unwrap();
-        match &program.statements[0].kind {
-            StmtKind::VarDecl(decl) => match &decl.initializer.kind {
-                ExprKind::BinaryOp(lhs, BinaryOperator::And, rhs) => {
-                    assert!(matches!(
-                        lhs.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::Eq, _)
-                    ));
-                    assert!(matches!(
-                        rhs.kind,
-                        ExprKind::BinaryOp(_, BinaryOperator::Eq, _)
-                    ));
-                }
-                other => panic!("expected top-level And, got {:?}", other),
-            },
-            other => panic!("expected VarDecl, got {:?}", other),
-        }
+        let (ast, _) = lex_and_parse("x = 1 == 2 and 3 == 4").unwrap();
+        let view = bin_op(&ast, decl_init(&ast));
+        assert_eq!(view.op, BinaryOperator::And);
+        assert_eq!(bin_op(&ast, view.lhs).op, BinaryOperator::Eq);
+        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Eq);
     }
 
     #[test]
     fn parse_for_range() {
         let code = "fn main():\n\tfor i in range(0, 10):\n\t\tprint(i)\n";
-        let (program, pool) = lex_and_parse(code).unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        let stmts = &func.body;
-        assert_eq!(stmts.len(), 1);
-        match &stmts[0].kind {
-            StmtKind::ForRange {
-                var,
-                iterator,
-                body,
-                ..
-            } => {
-                assert_eq!(pool.str(var.name), "i");
-                assert_eq!(pool.str(iterator.name), "range");
-                assert_eq!(body.len(), 1);
-            }
-            other => panic!("expected ForRange, got {:?}", other),
-        }
+        let (ast, pool) = lex_and_parse(code).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(f.body.len(), 1);
+        assert_eq!(ast.tag(f.body[0]), NodeTag::ForRange);
+        let view = ast.for_range_view(f.body[0]);
+        assert_eq!(pool.str(view.var.name), "i");
+        assert_eq!(pool.str(view.iterator.name), "range");
+        assert_eq!(view.body.len(), 1);
     }
 
     #[test]
     fn parse_for_range_with_expressions() {
         let code = "fn main():\n\tfor x in range(1 + 2, 10 - 3):\n\t\tprint(x)\n";
-        let (program, pool) = lex_and_parse(code).unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        let stmts = &func.body;
-        match &stmts[0].kind {
-            StmtKind::ForRange { var, iterator, .. } => {
-                assert_eq!(pool.str(var.name), "x");
-                assert_eq!(pool.str(iterator.name), "range");
-            }
-            other => panic!("expected ForRange, got {:?}", other),
-        }
+        let (ast, pool) = lex_and_parse(code).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(ast.tag(f.body[0]), NodeTag::ForRange);
+        let view = ast.for_range_view(f.body[0]);
+        assert_eq!(pool.str(view.var.name), "x");
+        assert_eq!(pool.str(view.iterator.name), "range");
     }
 
     #[test]
     fn parse_for_range_nested() {
         let code =
             "fn main():\n\tfor i in range(0, 5):\n\t\tfor j in range(0, 3):\n\t\t\tprint(i)\n";
-        let (program, _pool) = lex_and_parse(code).unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        let stmts = &func.body;
-        match &stmts[0].kind {
-            StmtKind::ForRange { body, .. } => {
-                assert_eq!(body.len(), 1);
-                assert!(matches!(body[0].kind, StmtKind::ForRange { .. }));
-            }
-            other => panic!("expected ForRange, got {:?}", other),
-        }
+        let (ast, _pool) = lex_and_parse(code).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        let view = ast.for_range_view(f.body[0]);
+        assert_eq!(view.body.len(), 1);
+        assert_eq!(ast.tag(view.body[0]), NodeTag::ForRange);
     }
 
     #[test]
     fn parse_for_break_continue() {
         let code = "fn main():\n\tfor i in range(0, 10):\n\t\tif i == 5:\n\t\t\tbreak\n\t\tif i == 3:\n\t\t\tcontinue\n";
-        let (program, _pool) = lex_and_parse(code).unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        let stmts = &func.body;
-        assert!(matches!(stmts[0].kind, StmtKind::ForRange { .. }));
+        let (ast, _pool) = lex_and_parse(code).unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(ast.tag(f.body[0]), NodeTag::ForRange);
     }
 
     #[test]
@@ -1715,46 +1436,37 @@ mod tests {
 
     #[test]
     fn parse_move_parameter() {
-        let (program, pool) = lex_and_parse("fn consume(move s: str):\n\tprint(s)\n").unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        assert_eq!(func.params.len(), 1);
+        let (ast, pool) = lex_and_parse("fn consume(move s: str):\n\tprint(s)\n").unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(f.params.len(), 1);
         assert!(
-            func.params[0].mode == ParamMode::Move,
+            f.params[0].mode == ParamMode::Move,
             "param `s` should be marked move"
         );
-        assert_eq!(pool.str(func.params[0].name.name), "s");
-        assert_eq!(pool.str(func.params[0].type_annotation.name), "str");
+        assert_eq!(pool.str(f.params[0].name.name), "s");
+        assert_eq!(pool.str(f.params[0].type_annotation.name), "str");
     }
 
     #[test]
     fn parse_default_parameter_is_not_move() {
-        let (program, pool) = lex_and_parse("fn read(s: str):\n\tprint(s)\n").unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        assert_eq!(func.params.len(), 1);
+        let (ast, pool) = lex_and_parse("fn read(s: str):\n\tprint(s)\n").unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(f.params.len(), 1);
         assert!(
-            func.params[0].mode == ParamMode::Borrow,
+            f.params[0].mode == ParamMode::Borrow,
             "bare param `s` should default to Borrow mode"
         );
-        assert_eq!(pool.str(func.params[0].name.name), "s");
-        assert_eq!(pool.str(func.params[0].type_annotation.name), "str");
+        assert_eq!(pool.str(f.params[0].name.name), "s");
+        assert_eq!(pool.str(f.params[0].type_annotation.name), "str");
     }
 
     #[test]
     fn parse_inout_param() {
-        let (program, _pool) = lex_and_parse("fn f(inout x: int):\n\tx += 1\n").unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        assert_eq!(func.params.len(), 1);
+        let (ast, _pool) = lex_and_parse("fn f(inout x: int):\n\tx += 1\n").unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(f.params.len(), 1);
         assert_eq!(
-            func.params[0].mode,
+            f.params[0].mode,
             ParamMode::Inout,
             "param `x` should be marked inout"
         );
@@ -1762,47 +1474,33 @@ mod tests {
 
     #[test]
     fn parse_borrow_arg() {
-        let (program, _pool) = lex_and_parse("fn main():\n\tmut c = 0\n\tf(&c)\n").unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
+        let (ast, _pool) = lex_and_parse("fn main():\n\tmut c = 0\n\tf(&c)\n").unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
         // body[1] is the `f(&c)` expression statement.
-        let expr = match &func.body[1].kind {
-            StmtKind::ExprStmt(e) => e,
-            other => panic!("expected ExprStmt, got {:?}", other),
-        };
-        let args = match &expr.kind {
-            ExprKind::Call(_name, args) => args,
-            other => panic!("expected Call, got {:?}", other),
-        };
-        assert_eq!(args.len(), 1);
-        assert!(
-            matches!(args[0].kind, ExprKind::Borrow(_)),
+        let expr = f.body[1];
+        assert_eq!(ast.tag(expr), NodeTag::ExprStmt);
+        let call = ast.expr_stmt_value(expr);
+        let view = ast.call_view(call);
+        assert_eq!(view.args.len(), 1);
+        assert_eq!(
+            ast.tag(view.args[0]),
+            NodeTag::Borrow,
             "call argument should be a Borrow expression"
         );
     }
 
     #[test]
     fn parse_slice_full() {
-        let (program, _pool) = lex_and_parse("fn main():\n\tx = s[1:2]\n").unwrap();
-        // `fn main():` wraps the body: statements[0] is the FunctionDef.
-        // A bare `x = ...` in a body surfaces as AssignOrDecl (see
-        // `parse_assign_or_decl`); the slice sits in its value.
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        let StmtKind::AssignOrDecl { value, .. } = &func.body[0].kind else {
-            panic!("expected AssignOrDecl");
-        };
-        match &value.kind {
-            ExprKind::Slice { base, start, end } => {
-                assert!(matches!(base.kind, ExprKind::Ident(_)));
-                assert!(start.is_some() && end.is_some());
-            }
-            other => panic!("expected Slice, got {:?}", other),
-        }
+        let (ast, _pool) = lex_and_parse("fn main():\n\tx = s[1:2]\n").unwrap();
+        // `fn main():` wraps the body: the slice sits in the value of
+        // the body's AssignOrDecl (see `parse_assign_or_decl`).
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(ast.tag(f.body[0]), NodeTag::AssignOrDecl);
+        let value = ast.assign_or_decl_view(f.body[0]).value;
+        assert_eq!(ast.tag(value), NodeTag::Slice);
+        let view = ast.slice_view(value);
+        assert_eq!(ast.tag(view.base), NodeTag::Ident);
+        assert!(view.start.is_some() && view.end.is_some());
     }
 
     #[test]
@@ -1813,40 +1511,25 @@ mod tests {
             ("x = s[:]", false, false),
         ] {
             let snippet = format!("fn main():\n\t{}\n", src);
-            let (program, _pool) = lex_and_parse(&snippet).unwrap();
-            let func = match &program.statements[0].kind {
-                StmtKind::FunctionDef(f) => f,
-                other => panic!("expected FunctionDef for {}, got {:?}", src, other),
-            };
-            let StmtKind::AssignOrDecl { value, .. } = &func.body[0].kind else {
-                panic!("expected AssignOrDecl for {}", src);
-            };
-            match &value.kind {
-                ExprKind::Slice { start, end, .. } => {
-                    assert_eq!(start.is_some(), want_start, "{}: start", src);
-                    assert_eq!(end.is_some(), want_end, "{}: end", src);
-                }
-                other => panic!("{}: expected Slice, got {:?}", src, other),
-            }
+            let (ast, _pool) = lex_and_parse(&snippet).unwrap();
+            let f = fn_def(&ast, only_stmt(&ast));
+            assert_eq!(ast.tag(f.body[0]), NodeTag::AssignOrDecl);
+            let value = ast.assign_or_decl_view(f.body[0]).value;
+            assert_eq!(ast.tag(value), NodeTag::Slice, "{src}");
+            let view = ast.slice_view(value);
+            assert_eq!(view.start.is_some(), want_start, "{}: start", src);
+            assert_eq!(view.end.is_some(), want_end, "{}: end", src);
         }
     }
 
     #[test]
     fn parse_slice_after_method_call() {
-        let (program, _pool) = lex_and_parse("fn main():\n\tx = s.len()[0:1]\n").unwrap();
-        let func = match &program.statements[0].kind {
-            StmtKind::FunctionDef(f) => f,
-            other => panic!("expected FunctionDef, got {:?}", other),
-        };
-        let StmtKind::AssignOrDecl { value, .. } = &func.body[0].kind else {
-            panic!("expected AssignOrDecl");
-        };
-        match &value.kind {
-            ExprKind::Slice { base, .. } => {
-                assert!(matches!(base.kind, ExprKind::MethodCall { .. }));
-            }
-            other => panic!("expected Slice over MethodCall, got {:?}", other),
-        }
+        let (ast, _pool) = lex_and_parse("fn main():\n\tx = s.len()[0:1]\n").unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
+        assert_eq!(ast.tag(f.body[0]), NodeTag::AssignOrDecl);
+        let value = ast.assign_or_decl_view(f.body[0]).value;
+        assert_eq!(ast.tag(value), NodeTag::Slice);
+        assert_eq!(ast.tag(ast.slice_view(value).base), NodeTag::MethodCall);
     }
 
     #[test]
@@ -1861,27 +1544,28 @@ mod tests {
 
     #[test]
     fn parse_view_param_annotation() {
-        let (program, pool) = lex_and_parse("fn first(text: &str):\n\tprint(text)\n").unwrap();
-        let StmtKind::FunctionDef(f) = &program.statements[0].kind else {
-            panic!("expected FunctionDef");
-        };
+        let (ast, pool) = lex_and_parse("fn first(text: &str):\n\tprint(text)\n").unwrap();
+        let f = fn_def(&ast, only_stmt(&ast));
         assert!(f.params[0].type_annotation.is_view);
         assert_eq!(pool.str(f.params[0].type_annotation.name), "str");
     }
 
-    /// Recovery-aware variant of `lex_and_parse`: returns the partial
-    /// program (if one could be produced) alongside every parse error.
-    fn lex_and_parse_recovering(
-        input: &str,
-    ) -> (Option<Program>, Vec<Rich<'static, Token>>, InternPool) {
+    /// Recovery-aware variant of `lex_and_parse`: returns whether a
+    /// (possibly partial) program could be produced, the arena it was
+    /// built into, every parse error, and the pool.
+    fn lex_and_parse_recovering(input: &str) -> (bool, Ast, Vec<Rich<'static, Token>>, InternPool) {
         let mut pool = InternPool::new();
         let mut sink = ryo_core::diag::DiagSink::new();
         let tokens = lex(input, &mut pool, &mut sink);
         assert!(!sink.has_errors(), "test input must lex cleanly");
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
-        let (program, errs) = program_parser().parse(token_stream).into_output_errors();
+        let mut ast = Ast::new();
+        let (out, errs) = program_parser()
+            .parse_with_state(token_stream, &mut ast)
+            .into_output_errors();
         (
-            program,
+            out.is_some(),
+            ast,
             errs.into_iter().map(|rich| rich.into_owned()).collect(),
             pool,
         )
@@ -1889,81 +1573,81 @@ mod tests {
 
     #[test]
     fn recovers_from_bad_statement_between_good_ones() {
-        let (program, errs, _pool) = lex_and_parse_recovering("x = 1\ny = = 2\nz = 3\n");
+        let (ok, ast, errs, _pool) = lex_and_parse_recovering("x = 1\ny = = 2\nz = 3\n");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        assert_eq!(program.statements.len(), 3);
+        assert!(ok, "recovery must produce a partial program");
+        let stmts = ast.top_level_stmts();
+        assert_eq!(stmts.len(), 3);
         assert!(matches!(
-            program.statements[0].kind,
-            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+            ast.tag(stmts[0]),
+            NodeTag::VarDecl | NodeTag::AssignOrDecl
         ));
-        assert!(matches!(program.statements[1].kind, StmtKind::Error));
+        assert_eq!(ast.tag(stmts[1]), NodeTag::Error);
         assert!(matches!(
-            program.statements[2].kind,
-            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+            ast.tag(stmts[2]),
+            NodeTag::VarDecl | NodeTag::AssignOrDecl
         ));
     }
 
     #[test]
     fn recovers_inside_function_body() {
-        let (program, errs, _pool) =
+        let (ok, ast, errs, _pool) =
             lex_and_parse_recovering("fn main():\n\tx = 1\n\ty = = 2\n\tz = 3\n");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
-            panic!("expected FunctionDef");
-        };
+        assert!(ok, "recovery must produce a partial program");
+        let func = fn_def(&ast, only_stmt(&ast));
         assert_eq!(func.body.len(), 3);
-        assert!(matches!(func.body[1].kind, StmtKind::Error));
-        assert!(matches!(func.body[2].kind, StmtKind::AssignOrDecl { .. }));
+        assert_eq!(ast.tag(func.body[1]), NodeTag::Error);
+        assert_eq!(ast.tag(func.body[2]), NodeTag::AssignOrDecl);
     }
 
     #[test]
     fn reports_multiple_parse_errors_in_one_file() {
-        let (program, errs, _pool) = lex_and_parse_recovering("x = = 1\ny = 2\nz = = 3\nw = 4\n");
+        let (ok, ast, errs, _pool) = lex_and_parse_recovering("x = = 1\ny = 2\nz = = 3\nw = 4\n");
         assert_eq!(errs.len(), 2, "expected two parse errors: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        assert_eq!(program.statements.len(), 4);
-        assert!(matches!(program.statements[0].kind, StmtKind::Error));
+        assert!(ok, "recovery must produce a partial program");
+        let stmts = ast.top_level_stmts();
+        assert_eq!(stmts.len(), 4);
+        assert_eq!(ast.tag(stmts[0]), NodeTag::Error);
         assert!(matches!(
-            program.statements[1].kind,
-            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+            ast.tag(stmts[1]),
+            NodeTag::VarDecl | NodeTag::AssignOrDecl
         ));
-        assert!(matches!(program.statements[2].kind, StmtKind::Error));
+        assert_eq!(ast.tag(stmts[2]), NodeTag::Error);
         assert!(matches!(
-            program.statements[3].kind,
-            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+            ast.tag(stmts[3]),
+            NodeTag::VarDecl | NodeTag::AssignOrDecl
         ));
     }
 
     #[test]
     fn recovers_from_trailing_garbage_without_newline_at_eof() {
         // File does not end with a newline: the last line is broken.
-        let (program, errs, _pool) = lex_and_parse_recovering("x = 1\ny = = 2");
+        let (ok, ast, errs, _pool) = lex_and_parse_recovering("x = 1\ny = = 2");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        assert_eq!(program.statements.len(), 2);
+        assert!(ok, "recovery must produce a partial program");
+        let stmts = ast.top_level_stmts();
+        assert_eq!(stmts.len(), 2);
         assert!(matches!(
-            program.statements[0].kind,
-            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+            ast.tag(stmts[0]),
+            NodeTag::VarDecl | NodeTag::AssignOrDecl
         ));
-        assert!(matches!(program.statements[1].kind, StmtKind::Error));
+        assert_eq!(ast.tag(stmts[1]), NodeTag::Error);
     }
 
     #[test]
     fn recovers_from_broken_block_final_statement_before_dedent() {
         // The last body line is broken and the following top-level
         // statement triggers the block's `Dedent`.
-        let (program, errs, _pool) =
+        let (ok, ast, errs, _pool) =
             lex_and_parse_recovering("fn main():\n\tx = 1\n\ty = = 2\nz = 3\n");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
-            panic!("expected FunctionDef");
-        };
+        assert!(ok, "recovery must produce a partial program");
+        let stmts = ast.top_level_stmts();
+        let func = fn_def(&ast, stmts[0]);
         assert_eq!(func.body.len(), 2);
-        assert!(matches!(func.body[1].kind, StmtKind::Error));
-        assert_eq!(program.statements.len(), 2);
+        assert_eq!(ast.tag(func.body[1]), NodeTag::Error);
+        assert_eq!(stmts.len(), 2);
     }
 
     #[test]
@@ -1971,15 +1655,13 @@ mod tests {
         // The broken final body line sits directly against the
         // zero-width end-of-input `Dedent` (no terminating newline of
         // its own) — the `peek_terminator(Dedent)` terminator path.
-        let (program, errs, _pool) = lex_and_parse_recovering("fn main():\n\tx = 1\n\ty = = 2");
+        let (ok, ast, errs, _pool) = lex_and_parse_recovering("fn main():\n\tx = 1\n\ty = = 2");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
-            panic!("expected FunctionDef");
-        };
+        assert!(ok, "recovery must produce a partial program");
+        let func = fn_def(&ast, only_stmt(&ast));
         assert_eq!(func.body.len(), 2);
-        assert!(matches!(func.body[1].kind, StmtKind::Error));
-        assert_eq!(program.statements.len(), 1);
+        assert_eq!(ast.tag(func.body[1]), NodeTag::Error);
+        assert_eq!(ast.top_level_stmts().len(), 1);
     }
 
     #[test]
@@ -1987,17 +1669,14 @@ mod tests {
         // The block-final statement has no terminating newline: it
         // ends directly at the list terminator (the end-of-input
         // `Dedent`). Valid input, so no error node and no diagnostic.
-        let (program, errs, _pool) = lex_and_parse_recovering("fn main():\n\tx = 1");
+        let (ok, ast, errs, _pool) = lex_and_parse_recovering("fn main():\n\tx = 1");
         assert!(errs.is_empty(), "expected a clean parse: {errs:?}");
-        let program = program.expect("expected a program");
-        assert_eq!(program.statements.len(), 1);
-        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
-            panic!("expected FunctionDef");
-        };
+        assert!(ok, "expected a program");
+        let func = fn_def(&ast, only_stmt(&ast));
         assert_eq!(func.body.len(), 1);
         assert!(matches!(
-            func.body[0].kind,
-            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+            ast.tag(func.body[0]),
+            NodeTag::VarDecl | NodeTag::AssignOrDecl
         ));
     }
 
@@ -2005,11 +1684,12 @@ mod tests {
     fn two_statements_on_one_line_still_error_with_recovery() {
         // The no-two-statements-per-line rule must survive recovery:
         // this is one parse error, not two silent statements.
-        let (program, errs, _pool) = lex_and_parse_recovering("x = 1 y = 2\n");
+        let (ok, ast, errs, _pool) = lex_and_parse_recovering("x = 1 y = 2\n");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        assert_eq!(program.statements.len(), 1);
-        assert!(matches!(program.statements[0].kind, StmtKind::Error));
+        assert!(ok, "recovery must produce a partial program");
+        let stmts = ast.top_level_stmts();
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(ast.tag(stmts[0]), NodeTag::Error);
     }
 
     #[test]
@@ -2017,15 +1697,16 @@ mod tests {
         // The `fn` header is unparseable; its indented body must be
         // swallowed as one region — not parse silently as top-level
         // statements, and not leave a dangling `Dedent` behind.
-        let (program, errs, _pool) =
+        let (ok, ast, errs, _pool) =
             lex_and_parse_recovering("fn main(:\n\tx = 1\n\ty = 2\nz = 3\n");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        assert_eq!(program.statements.len(), 2);
-        assert!(matches!(program.statements[0].kind, StmtKind::Error));
+        assert!(ok, "recovery must produce a partial program");
+        let stmts = ast.top_level_stmts();
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(ast.tag(stmts[0]), NodeTag::Error);
         assert!(matches!(
-            program.statements[1].kind,
-            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+            ast.tag(stmts[1]),
+            NodeTag::VarDecl | NodeTag::AssignOrDecl
         ));
     }
 
@@ -2034,32 +1715,31 @@ mod tests {
         // Same mis-nesting one level down: the broken `if` header must
         // swallow its body inside the enclosing `fn` block, and the
         // following body line must still parse in that block.
-        let (program, errs, _pool) =
+        let (ok, ast, errs, _pool) =
             lex_and_parse_recovering("fn main():\n\tif x(:\n\t\ty = 1\n\tz = 2\n");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        let StmtKind::FunctionDef(func) = &program.statements[0].kind else {
-            panic!("expected FunctionDef");
-        };
+        assert!(ok, "recovery must produce a partial program");
+        let func = fn_def(&ast, only_stmt(&ast));
         assert_eq!(func.body.len(), 2);
-        assert!(matches!(func.body[0].kind, StmtKind::Error));
-        assert!(matches!(func.body[1].kind, StmtKind::AssignOrDecl { .. }));
-        assert_eq!(program.statements.len(), 1);
+        assert_eq!(ast.tag(func.body[0]), NodeTag::Error);
+        assert_eq!(ast.tag(func.body[1]), NodeTag::AssignOrDecl);
+        assert_eq!(ast.top_level_stmts().len(), 1);
     }
 
     #[test]
     fn broken_block_header_swallows_nested_blocks() {
         // The swallowed region must be balanced: the inner block's
         // `Dedent` does not end the swallow early.
-        let (program, errs, _pool) =
+        let (ok, ast, errs, _pool) =
             lex_and_parse_recovering("while x(:\n\tif y:\n\t\tz = 1\n\tw = 2\nv = 3\n");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        assert_eq!(program.statements.len(), 2);
-        assert!(matches!(program.statements[0].kind, StmtKind::Error));
+        assert!(ok, "recovery must produce a partial program");
+        let stmts = ast.top_level_stmts();
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(ast.tag(stmts[0]), NodeTag::Error);
         assert!(matches!(
-            program.statements[1].kind,
-            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+            ast.tag(stmts[1]),
+            NodeTag::VarDecl | NodeTag::AssignOrDecl
         ));
     }
 
@@ -2067,10 +1747,10 @@ mod tests {
     fn broken_block_header_with_body_at_eof() {
         // No trailing statement: the swallowed body runs into the
         // end-of-input `Dedent`, and that is still a single error.
-        let (program, errs, _pool) = lex_and_parse_recovering("fn main(:\n\tx = 1");
+        let (ok, ast, errs, _pool) = lex_and_parse_recovering("fn main(:\n\tx = 1");
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
-        let program = program.expect("recovery must produce a partial program");
-        assert_eq!(program.statements.len(), 1);
-        assert!(matches!(program.statements[0].kind, StmtKind::Error));
+        assert!(ok, "recovery must produce a partial program");
+        assert_eq!(ast.top_level_stmts().len(), 1);
+        assert_eq!(ast.tag(ast.top_level_stmts()[0]), NodeTag::Error);
     }
 }
