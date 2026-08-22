@@ -2275,6 +2275,37 @@ fn parse_error_recovers_and_sema_errors_co_surface() {
 }
 
 #[test]
+fn broken_block_header_body_does_not_leak_into_enclosing_scope() {
+    // A broken `fn` header must swallow its indented body as one error
+    // region: the body's type error must NOT surface (the body is not
+    // analyzed at top level), and exactly one parse diagnostic is
+    // emitted — no second one for a dangling `Dedent`.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn broken(:\n\ty: int = \"hi\"\nfn main():\n\tz = 3\n";
+    let test_file = create_test_file(temp_dir.path(), "broken_header.ryo", code);
+
+    let output = run_ryo_command(&["run", "broken_header.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "a file with a broken block header must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("E0100").count(),
+        1,
+        "expected exactly one parse error (no dangling-Dedent diagnostic), got: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("E0012"),
+        "the swallowed body must not be analyzed at the enclosing scope, got: {}",
+        stderr
+    );
+}
+
+#[test]
 fn while_continue_outside_loop_error() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\tcontinue\n";
