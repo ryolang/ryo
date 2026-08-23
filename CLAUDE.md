@@ -94,6 +94,8 @@ IMPORTANT: Never author Claude on commits nor PRs.
 
 Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, pick the appropriate severity (Blocking / Correctness / Cleanup), and include Files, Summary, and Resolution fields.
 
+**Never reuse an `I-XXX` number, even after its entry is deleted.** IDs are cited in commit messages and live on in git history; a reused number silently retargets those references to a different issue. Deleted numbers stay retired — the next entry always takes the highest number ever used + 1.
+
 Do **not** create issues for things you're fixing right now — just fix them. Do **not** use GitHub Issues for these; `ISSUES.md` is the single source of truth.
 
 Do **not** cite issue IDs (`I-XXX`) in code or doc comments. Resolved entries are deleted from `ISSUES.md`, so the comment becomes a dangling pointer to context that no longer exists — comments must stand on their own. Put the ID in the commit message instead, where it survives in git history.
