@@ -63,7 +63,7 @@ cargo run -- run <file>          # JIT compile and execute
 cargo run -- build <file>        # AOT compile to binary
 cargo run -- toolchain install   # Download Zig linker
 cargo run -- toolchain status    # Check Zig status
-cargo clippy --all-targets       # Lint (warnings are errors)
+cargo clippy --workspace --all-targets  # Lint (warnings are errors); `--workspace` is required — bare `--all-targets` only checks the default member `ryo` and misses other crates' test/bench targets
 cargo fmt --check                # Check code formatting style
 ```
 
@@ -75,7 +75,7 @@ cargo fmt --check                # Check code formatting style
 
 ## CI
 
-GitHub Actions runs on pushes to `main` and PRs targeting `main`: `cargo fmt --check` with `-Dwarnings`, `cargo clippy --all-targets` (warnings are errors), and `cargo test` (Ubuntu x64, Ubuntu ARM64, macOS). All three must pass for merge.
+GitHub Actions runs on pushes to `main` and PRs targeting `main`: `cargo fmt --check` with `-Dwarnings`, `cargo clippy --workspace --all-targets` (warnings are errors), and `cargo test` (Ubuntu x64, Ubuntu ARM64, macOS). All three must pass for merge.
 
 ---
 
