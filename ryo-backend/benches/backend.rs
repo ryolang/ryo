@@ -19,22 +19,6 @@ fn main() {
     divan::main();
 }
 
-/// A small, representative program: nested control flow and calls.
-const FIZZBUZZ: &str = r#"fn fizzbuzz(n: int):
-	if n % 15 == 0:
-		print("FizzBuzz\n")
-	elif n % 3 == 0:
-		print("Fizz\n")
-	elif n % 5 == 0:
-		print("Buzz\n")
-
-fn main():
-	fizzbuzz(3)
-	fizzbuzz(5)
-	fizzbuzz(15)
-	fizzbuzz(7)
-"#;
-
 /// Arithmetic-dense functions — many instructions per body, which
 /// stresses codegen's per-instruction value bookkeeping.
 fn arith_source(functions: usize) -> String {
@@ -126,17 +110,12 @@ fn bench_codegen(bencher: divan::Bencher, src: &str) {
         });
 }
 
-#[divan::bench]
-fn codegen_snippet(bencher: divan::Bencher) {
-    bench_codegen(bencher, FIZZBUZZ);
-}
-
-#[divan::bench(args = [16, 64, 256])]
+#[divan::bench(args = [16, 256])]
 fn codegen_arith(bencher: divan::Bencher, functions: usize) {
     bench_codegen(bencher, &arith_source(functions));
 }
 
-#[divan::bench(args = [(4, 4), (16, 6), (64, 8)])]
+#[divan::bench(args = [(4, 4), (64, 8)])]
 fn codegen_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
     bench_codegen(bencher, &nested_control_source(case.0, case.1));
 }

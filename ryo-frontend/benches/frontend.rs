@@ -248,20 +248,7 @@ fn sema_program(src: &str) -> (Vec<ryo_core::tir::Tir>, InternPool) {
     (tirs, pool)
 }
 
-#[divan::bench(args = [("fizzbuzz", FIZZBUZZ), ("fibonacci", FIBONACCI)])]
-fn ownership_snippet(bencher: divan::Bencher, case: (&str, &str)) {
-    let src = case.1;
-    bencher
-        .with_inputs(|| sema_program(src))
-        .bench_values(|(tirs, pool)| {
-            let mut sink = ryo_core::diag::DiagSink::new();
-            let sidecar = ryo_frontend::ownership::check(divan::black_box(&tirs), &pool, &mut sink);
-            assert!(!sink.has_errors(), "ownership should succeed");
-            divan::black_box(sidecar);
-        });
-}
-
-#[divan::bench(args = [(4, 4), (16, 6), (64, 8)])]
+#[divan::bench(args = [(4, 4), (64, 8)])]
 fn ownership_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
     let src = nested_control_source(case.0, case.1);
     bencher
@@ -274,7 +261,7 @@ fn ownership_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
         });
 }
 
-#[divan::bench(args = [16, 64, 256])]
+#[divan::bench(args = [16, 256])]
 fn ownership_call_heavy(bencher: divan::Bencher, functions: usize) {
     let src = call_heavy_source(functions);
     bencher
