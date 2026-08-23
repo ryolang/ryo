@@ -1,6 +1,6 @@
 profile.json.gz
 
-# AOT binaries — `ryo build` writes them next to the source (I-084).
+# AOT binaries — `ryo build` writes them next to the source.
 fibonacci/fib
 fibonacci/fib.exe
 eager_destruction/eager_destruction

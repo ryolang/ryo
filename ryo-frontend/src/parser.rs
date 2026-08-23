@@ -380,8 +380,12 @@ where
                     ));
                 }
                 let mut args = args.into_iter();
-                let start = args.next().unwrap();
-                let end = args.next().unwrap();
+                let start = args
+                    .next()
+                    .expect("arity checked above: range() has exactly 2 arguments");
+                let end = args
+                    .next()
+                    .expect("arity checked above: range() has exactly 2 arguments");
                 let span = e.span();
                 Ok(e.state().for_range(var, iterator, start, end, &body, span))
             });

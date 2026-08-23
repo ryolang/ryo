@@ -432,7 +432,10 @@ fn unescape(inner: &str, token_span: Span, sink: &mut DiagSink) -> String {
         // `i` only ever advances by a full char (`len_utf8`) or a
         // two-byte ASCII escape, so it is always a char boundary.
         debug_assert!(inner.is_char_boundary(i));
-        let ch = inner[i..].chars().next().unwrap();
+        let ch = inner[i..]
+            .chars()
+            .next()
+            .expect("the `i < inner.len()` loop condition guarantees a char at i");
         if ch == '\\' {
             match inner[i + 1..].chars().next() {
                 Some('n') => {

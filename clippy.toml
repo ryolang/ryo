@@ -10,12 +10,13 @@ disallowed-types = [
     { path = "std::cell::RefCell", reason = "R1: indices are Copy; no runtime borrow-checking in compiler data structures" },
 ]
 
-# R7 — small functions (target < 50 lines). 500 is a ratchet just above the
-# current worst offender (`visit_expr`, ~411 lines, I-128). Lower towards 50
-# as the oversized pass entry points are split.
-too-many-lines-threshold = 500
+# R7 — small functions (target < 50 lines). 360 is a ratchet just above the
+# current worst offender (`sema.rs`'s `analyze_expr`, 353 lines at :517,
+# I-128). Lower towards 50 as the oversized pass entry points are split.
+too-many-lines-threshold = 360
 
-# R8 — the workspace warns on unwrap/expect/panic; tests may use them freely.
+# R8 — the workspace denies unwrap/panic/todo/unimplemented; tests may use
+# them freely.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true

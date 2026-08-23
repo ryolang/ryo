@@ -51,8 +51,7 @@
 //! error, because malformed TIR is a compiler bug, not user input. If
 //! a second producer ever lands (cached IR, plugins, an alternative
 //! front end), the decode paths must first be converted to report an
-//! internal-error `Diag` — see the `unreachable!` sites in this file
-//! and the audit in ISSUES.md history (I-106).
+//! internal-error `Diag` — see the `unreachable!` sites in this file.
 
 use crate::ast::CompoundOp;
 use crate::types::{InternPool, StringId, TypeId};

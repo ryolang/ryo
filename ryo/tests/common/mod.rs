@@ -434,6 +434,9 @@ fn main():
     ),
 ];
 
+// Test-helper module, not `cfg(test)`-gated, so clippy.toml's
+// `allow-panic-in-tests` does not recognize it.
+#[allow(clippy::panic)]
 pub fn find_fixture(name: &str) -> &'static str {
     RYO_FIXTURES
         .iter()

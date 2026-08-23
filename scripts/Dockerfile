@@ -6,7 +6,8 @@
 #   note Cranelift-emitted main is not instrumented, so ASan's leak detection
 #   misses leaks originating from generated code).
 # - Valgrind for runtime-instrumented leak detection that DOES see
-#   Cranelift-emitted allocations. This is what catches I-058-shaped leaks.
+#   Cranelift-emitted allocations — the leaks a missing Free in codegen
+#   would produce.
 FROM rust:latest
 
 # valgrind: runtime leak detector used by tests/valgrind_smoke.rs.

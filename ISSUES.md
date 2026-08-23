@@ -110,7 +110,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-034 — Builtin name comparison uses string compare instead of interned ID
 
 **Files:** `ryo-frontend/src/sema.rs` (`check_call`, `check_builtin_call`)
-**Summary:** `sema.pool.str(name_id) == "assert"` (and similar for `"panic"`, `"print"`) does a string dereference and byte comparison on every `check_call` invocation. Since the intern pool already deduplicates strings, comparing `name_id == assert_id` (where `assert_id` is cached once during builtin registration or sema init) would be a direct integer compare. Negligible today with three builtins and small programs, but the cost scales linearly with both the number of call sites and the number of builtins. Additional sites found in the M8.4.2 audit: `sema.rs:1489` and `:1945` compare `pool.str(name_id) == "str"` for the `str(view)` materialize intercept (explicitly *not* a `BUILTINS`-table entry, so a table-driven fix misses them), codegen detects `main` by `pool.str(tir.name) == "main"` at `codegen.rs:430, :480, :861`, and `sema.rs:281` does `name.starts_with("__ryo_")` per decl.
+**Summary:** `sema.pool.str(name_id) == "assert"` (and similar for `"panic"`, `"print"`) does a string dereference and byte comparison on every `check_call` invocation. Since the intern pool already deduplicates strings, comparing `name_id == assert_id` (where `assert_id` is cached once during builtin registration or sema init) would be a direct integer compare. Negligible today with three builtins and small programs, but the cost scales linearly with both the number of call sites and the number of builtins. Additional sites found in the M8.4.2 audit: `sema.rs:1489` and `:1945` compare `pool.str(name_id) == "str"` for the `str(view)` materialize intercept (explicitly *not* a `BUILTINS`-table entry, so a table-driven fix misses them), codegen detects `main` by `pool.str(tir.name) == "main"` at `codegen.rs:457, :496, :567, :955` (line refs refreshed 2026-08), and `sema.rs:281` does `name.starts_with("__ryo_")` per decl. New sites from the 2026-08 arena-perf review: `astgen.rs:355` compares `pool.str(iterator.name) != "range"` per for-loop, `astgen.rs:234` hash-probes `pool.find_str("main")` per function def (the already-interned id could be threaded through), and `sema.rs:2448` runs `check_reserved_builtin` per VarDecl.
 **Resolution:** Cache `StringId`s for each builtin name (e.g., in `Sema` or alongside `builtins::BUILTINS`) and match on the id instead of the string. Same applies to the codegen-side `name_str == "print"` comparisons. Also intern `"str"`, `"main"`, and the `"__ryo_"` prefix check — the materialize intercept and `main` detection are not covered by a BUILTINS-table-driven fix.
 
 ### I-037 — Panic/Assert mechanism lacks `#file` / `#line` intrinsic expansion
@@ -187,11 +187,11 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Resolution:** Add the `// SAFETY:` comment at the JIT site (function was finalized by cranelift-jit for this module; signature matches the compiled entry point; memory freed after execution), link this issue from both sites, and record the sign-off here. No code-semantics change.
 **Status (2026-08-03):** SAFETY comments + linked issue are in place at both sites, and `unsafe_code = "deny"` now guards the rest of the tree via `[workspace.lints]` (compiler crates opt in; `runtime/` is the curated boundary). Remaining: human sign-off in review.
 
-### I-131 — Panic-on-invariant sites outside the trusted-producer contract
+### I-131 — Ownership param-map `expect("param exists")` sites
 
-**Files:** `ryo-frontend/src/sema.rs` (:1248-1252 — `analyze_expr` fallthrough), `ryo-frontend/src/ownership.rs` (:89, :1831, :2903, :2923 — `expect("param exists")`)
-**Summary:** The I-106 audit established a documented trusted-producer contract for decode-path `unreachable!`s in UIR/TIR. Two newer sites sit outside that contract: `analyze_expr`'s fallthrough arm is a `panic!` naming the offending tag, so any UIR tag that drifts out of the expression set crashes the compiler instead of producing a diagnostic; and the ownership pass `expect("param exists")`s on its param-index map in four places. Both are compiler panics on internal-invariant violation, invisible to the R9 diagnostics pipeline.
-**Resolution:** Either route both through the sink as internal-error diagnostics (R9), or convert to plain `unreachable!` with a comment folding them into the documented trusted-producer contract so the next audit covers them.
+**Files:** `ryo-frontend/src/ownership.rs` (:89, :1827, :2903, :2923 — `expect("param exists")`)
+**Summary:** The ownership pass `expect("param exists")`s on its param-index map in four places — compiler panics on internal-invariant violation, invisible to the R9 diagnostics pipeline. (The sema `analyze_stmt`/`analyze_expr` fallthrough `panic!`s originally tracked here were folded into the documented UIR trusted-producer contract as `unreachable!` — resolution option (b) for the sema half.)
+**Resolution:** Either route through the sink as internal-error diagnostics (R9), or convert to `unreachable!` with a comment folding them into the documented trusted-producer contract so the next audit covers them.
 
 ### I-132 — Runtime FFI boundary conflates failure modes and under-checks inputs
 
@@ -212,7 +212,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-091 — UIR/TIR view decoders allocate a `Vec` per decode
 
 **Files:** `ryo-core/src/uir.rs` (`call_view` :843-847, `if_stmt_view` :980-1001, `body_stmts` :320-326, `while_loop_view` :915, `for_range_view` :931-935, `method_call_view` :955-959), `ryo-core/src/tir.rs` (`call_view`), `ryo-backend/src/codegen.rs` (call view args/modes)
-**Summary:** Every accessor decode collects refs out of `extra` into a fresh `Vec<InstRef>`/`Vec<TirRef>`, and `body_stmts()` collects a slice that is already contiguous. Sema and codegen call these in their hottest loops. Additionally `ExtraRange.len` is write-only metadata (decoders re-derive counts from inline `argc` words) — a second source of truth.
+**Summary:** Every accessor decode collects refs out of `extra` into a fresh `Vec<InstRef>`/`Vec<TirRef>`, and `body_stmts()` collects a slice that is already contiguous. Sema and codegen call these in their hottest loops. Multipliers found in the 2026-08 arena-perf review: `Tir::walk_operands` (`tir.rs:1194-1266`) decodes views per visited instruction, so every `collect_reachable` costs several Vec allocs per inst; sema calls `uir.body_stmts(body)` twice per function (`sema.rs:478-479`); ownership calls `tir.body_stmts()` per whole-body-walk query (`ownership.rs:558, :619, :742, :802, :852, :1135, :1601, :1713, :1729`). Additionally `ExtraRange.len` is write-only metadata (decoders re-derive counts from inline `argc` words) — a second source of truth.
 **Resolution:** Return borrowed slices (`&[InstRef]` over `extra`) or `impl Iterator` from the views; `body_stmts` can be a slice iter directly. Add `assert_eq!(size_of::<Inst>(), 24)` before any `InstData` refactor.
 
 ### I-092 — Sema per-function and per-call allocation churn
@@ -233,10 +233,10 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** `compile_function` always `format!`s the Cranelift function even on the plain `compile` path where the caller discards it — one full CLIF pretty-print per function per compile, thrown away.
 **Resolution:** Only render when an IR dump was requested (thread a flag, or render separately in `compile_and_dump_ir`).
 
-### I-095 — `emit_scoped_body` clones both locals maps per block
+### I-095 — `emit_scoped_body` clones the locals maps per block
 
-**Files:** `ryo-backend/src/codegen.rs` (:646-650)
-**Summary:** Each if-arm/loop body clones the `locals` and `str_locals` HashMaps to get restore-on-exit semantics — O(locals) per block, quadratic-ish on deep nesting.
+**Files:** `ryo-backend/src/codegen.rs` (:803-805)
+**Summary:** Each if-arm/loop body clones the `locals`, `str_locals`, and `view_locals` HashMaps to get restore-on-exit semantics — O(locals) per block, quadratic-ish on deep nesting. (Entry predates `view_locals`; all three maps are cloned today.)
 **Resolution:** Track per-block bindings as a small undo log (name → previous `Variable`) and restore on exit instead of cloning whole maps.
 
 ### I-096 — `~/.ryo/cache` grows unbounded
@@ -297,19 +297,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** measured by brace-depth scan, tests excluded — worst offenders: `ryo-frontend/src/ownership.rs` `visit_expr` :3633 (~411 lines), `analyze_function` :1560 (~383), `analyze_if_stmt` :2588 (~283); `ryo-frontend/src/sema.rs` `analyze_stmt` :483 (~370), `check_binary_op` :1210 (~264), `analyze_expr` :932 (~259), `emit_builtin_call` :1715 (~218), `check_call` :1475 (~215); `ryo-backend/src/codegen.rs` `emit_call` :2198 (~310), `eval_inst` :1272 (~249), `emit_stmt` :773 (~245), `compile_function` :448 (~228), `eval_inst_str` :1803 (~201); `ryo-frontend/src/parser.rs` `expression_parser` :400 (~228); `ryo-core/src/uir.rs` `write_inst` :1106 (~152) and the same pattern in `ryo-core/src/tir.rs:1155` (~108)
 **Summary:** R7 targets functions under 50 lines so a human reviewer can hold each one in their head. Sixteen functions sit between ~150 and ~410 lines, almost all of them giant per-tag dispatch `match`es in the hottest passes. These are the files every milestone touches; review cost and merge-conflict surface scale with their length. (Distinct from I-090/I-094/I-111, which track *content* problems inside three of these functions, not size.)
-**Resolution:** Split the entry points into one helper per tag/arm family (`lower_match_expr`-style naming per R7), keeping the dispatch match as a thin table. Do it opportunistically when a function is next touched for a feature — starting with `visit_expr` and `analyze_stmt`, the two worst — rather than as one big-bang refactor. `clippy::too_many_lines` is denied workspace-wide with `too-many-lines-threshold = 500` as a ratchet; lower the threshold towards 50 as functions split.
+**Resolution:** Split the entry points into one helper per tag/arm family (`lower_match_expr`-style naming per R7), keeping the dispatch match as a thin table. Do it opportunistically when a function is next touched for a feature — starting with `visit_expr` and `analyze_stmt`, the two worst — rather than as one big-bang refactor. `clippy::too_many_lines` is denied workspace-wide with `too-many-lines-threshold = 360` as a ratchet; lower the threshold towards 50 as functions split.
 
 ### I-129 — Dense-index state kept in `HashMap`s where R18 wants `Vec` side tables
 
-**Files:** `ryo-frontend/src/ownership.rs` (`origin` :113, `owner_at_read` :140, `view_last_use` :201, `view_defer_loop` :214, `consumer_of` :1749, `program_order` :1298-1315 built per function at :1504 and :1620), `ryo-frontend/src/sema.rs` (`call_arg_refs: HashSet<InstRef>` :198, :204-215, queried at :1169)
-**Summary:** R18's rule: side tables keyed by a dense arena index belong in a `Vec` indexed by that index; hash maps are for sparse/string-keyed/unbounded data only. The ownership pass keeps five per-inst `HashMap<TirRef, _>` tables on the hot per-expression path, builds a whole-body `HashMap<TirRef, u32>` program-order map twice per function, and sema keeps a whole-program `HashSet<InstRef>` queried per `Borrow` inst — all keyed by dense `u32` arena indices. Distinct from I-064/I-065/I-107/I-119, which cover recomputation and linear lookups in other helpers.
+**Files:** `ryo-frontend/src/ownership.rs` (`origin` :113, `owner_at_read` :140, `view_last_use` :201, `view_defer_loop` :214, `consumer_of` :1749, `program_order` :1298-1315 built per function at :1504 and :1620), `ryo-frontend/src/sema.rs` (`call_arg_refs: HashSet<InstRef>` :198, :204-215, queried at :1169), `ryo-backend/src/codegen.rs` (`freed_at: HashSet<usize>` :218, `free_by_after` :222, `locals`/`str_locals`/`view_locals` :188-231 keyed by dense `StringId`, sidecar maps `free_on_reassign`/`if_branches` from `ryo-core/src/ownership.rs:86-90`), plus the `collect_loop_nesting` map (`ownership.rs:1087-1137`, also per-statement `HashSet` allocations)
+**Summary:** R18's rule: side tables keyed by a dense arena index belong in a `Vec` indexed by that index; hash maps are for sparse/string-keyed/unbounded data only. The ownership pass keeps five per-inst `HashMap<TirRef, _>` tables on the hot per-expression path, builds a whole-body `HashMap<TirRef, u32>` program-order map twice per function, and sema keeps a whole-program `HashSet<InstRef>` queried per `Borrow` inst — all keyed by dense `u32` arena indices. Codegen has the same class: per-statement `HashSet`/`HashMap` side tables keyed by `TirRef` or `StringId` (the `inst_values` memo was the worst of these and was converted to a `Vec` side table in the 2026-08 perf pass). Distinct from I-064/I-065/I-107/I-119, which cover recomputation and linear lookups in other helpers.
 **Resolution:** Convert to `Vec<Option<…>>`/`Vec<bool>` side tables sized from the arena length (`TirRef::index()`/`InstRef::index()`), built once per function (per program for `call_arg_refs`). Same refactor shape as I-107's param-index map; do them together.
 
 ### I-134 — Stale in-tree comments found during the 2026-08-20 architecture re-verification
 
-**Files:** `ryo-core/src/tir.rs` (:1-6), `ryo-core/src/uir.rs` (:1-6), `ryo-core/src/tir.rs` (:55), `ryo-frontend/src/ownership.rs` (:1932-1934)
-**Summary:** Four comments describe states the code has moved past: (a) the `tir.rs`/`uir.rs` module headers claim `ryo ir --emit=tir|uir` is "still TODO" — both are wired (`pipeline.rs:349,378-380,398-401`); (b) `tir.rs:55` cites `I-106`, which is resolved and deleted — exactly the dangling-ID pointer AGENTS.md forbids; (c) the dead-store drain comment says "Today no `free_on_reassign` entries exist; this guard activates with Task 6" — the field is populated and test-covered (`reassignment_records_free_on_old_owner`).
-**Resolution:** One-pass comment sweep; no code changes. (a)/(c) reword to current behavior, (b) drop the ID per AGENTS.md and let the sentence stand on its own.
+**Files:** `ryo-core/src/tir.rs` (:1-6), `ryo-core/src/uir.rs` (:1-6), `ryo-frontend/src/ownership.rs` (:1932-1934)
+**Summary:** Three comments describe states the code has moved past: (a) the `tir.rs`/`uir.rs` module headers claim `ryo ir --emit=tir|uir` is "still TODO" — both are wired (`pipeline.rs:349,378-380,398-401`); (b) the dead-store drain comment says "Today no `free_on_reassign` entries exist; this guard activates with Task 6" — the field is populated and test-covered (`reassignment_records_free_on_old_owner`). (The `tir.rs:55` dangling issue-ID cite originally tracked here was dropped from the comment, per AGENTS.md.)
+**Resolution:** One-pass comment sweep; no code changes. (a)/(b) reword to current behavior.
 
 ### I-135 — Rule-7 call-arg partition duplicates the view look-through logic
 
@@ -346,6 +346,66 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-backend/src/codegen.rs` (`emit_checked_iadd`, `emit_checked_isub`, `emit_checked_imul`)
 **Summary:** Spec §18 checked arithmetic costs 3–4 machine instructions per integer op, and codegen currently elides a guard only when a constant operand makes it unreachable (`x + 0`, `x - 0`, `x * 0`, `x * 1`, non-zero constant divisors). Everything else pays, including operations whose operands are already bounded by a dominating comparison. `benchmarks/fibonacci/fib.ryo` is the worst case: `if n <= 1: return n` proves `n >= 2`, so neither `n - 1` nor `n - 2` can overflow, yet both are guarded. Measured cost of the guards on that benchmark — aarch64 (CodSpeed walltime runner): the `fibonacci` hot path grows from 19 to 29 instructions per call, 1.10 s → 1.47 s for `fib(40)` (+33%); x86-64 (callgrind, `fib(28)`): 19.7 M → 25.3 M instructions (+29%). Encoding experiments (`icmp`-based checks that Cranelift fuses into one compare-and-branch, comparisons against precomputed boundary constants, `trapnz` instead of a branch to the shared panic block) all moved the totals by ≤4% in either direction on one ISA while regressing the other — the cost is the number of checks, not their encoding. Two upstream gaps add to it on aarch64: Cranelift materialises the constant operand into a register instead of using the immediate form (`mov x1, #1` + `subs x1, x0, x1`), and branches on the overflow flag through `cset` + `uxtb` + `cbnz` instead of `b.vs`.
 **Resolution:** Give codegen a small value-range fact map (variable → inclusive bounds) seeded from dominating `if`/`while` comparisons against constants — including the fall-through path of an if whose arms all terminate, which is the fibonacci shape — and skip the guard when the operand bounds make overflow impossible. Facts must be invalidated on assignment, on `inout` argument passing, and at every join whose predecessors disagree; each elision needs a pinning test at the boundary value, since a wrong one silently drops a mandated trap. Until then the checked-arithmetic cost on arithmetic-heavy code is expected and matches other trap-on-overflow languages (Swift is ~1.28× Rust on the same benchmark).
+
+### I-144 — Per-if clone and repeated dead-drop scans in codegen
+
+**Files:** `ryo-backend/src/codegen.rs` (`if_branches.get(...).cloned().unwrap_or_default()` :1154, `conditional_dead_drops` linear scan :1164-1169, `emit_conditional_dead_drops` :2092-2114 called per arm :1195/:1231/:1247/:1263)
+**Summary:** Every if-statement clones the `IfBranchIds` payload (heap `Vec` for elif branches) out of the sidecar even when there is no entry, because `.cloned().unwrap_or_default()` goes through `ctx`. Separately, `emit_conditional_dead_drops` re-scans the whole per-function `conditional_dead_drops` Vec at the start of *every* if arm with no empty-check early exit, and re-imports `ryo_str_free` inside the drop loop (:2108, cross-ref I-093). On if-heavy functions with dead drops this is O(ifs × arms × drops).
+**Resolution:** Borrow the sidecar out of `ctx` first so `get` returns a reference instead of cloning; add the same `is_empty()` early-return `emit_due_frees` already has (:1960) or index dead drops by `if_stmt` in a map built once per function; hoist the `ryo_str_free` import out of the loop.
+
+### I-145 — Ownership materializes the full states map per break/continue
+
+**Files:** `ryo-frontend/src/ownership.rs` (`schedule_break_continue_frees` :3537-3539, per-jump scans :3500-3532)
+**Summary:** Every break/continue jump clones the entire `own.states` map into a sorted `Vec`, then builds `on_path`/`covers_this_jump`/`free_inside_loop` sets and scans the whole `free_schedule` — all per jump, though the snapshot is constant within a loop body walk. I-064 precomputed the per-loop invariants; this per-jump residue was out of its scope.
+**Resolution:** Hoist the sorted snapshot to once per loop body walk (or iterate the map with an index); reuse scratch sets across jumps.
+
+### I-146 — `collect_view_liveness` clones the bindings map per if/arm/loop
+
+**Files:** `ryo-frontend/src/ownership.rs` (:1260-1319, :1346)
+**Summary:** The view-liveness pre-walk clones the full `bindings` map per if statement (`pre = bindings.clone()`) and again per arm (:1278, :1294, :1310), plus per-arm fresh read maps, and clones per loop body (:1346). Same class as I-136's merge-path clones but a different pass, so I-136's resolution won't sweep it up unless extended.
+**Resolution:** Apply the same snapshot/undo-log or overlay approach chosen for I-136; fix both passes together.
+
+### I-147 — `emit_builtin_call` allocates mode Vecs per builtin call
+
+**Files:** `ryo-frontend/src/sema.rs` (:1922-1932)
+**Summary:** Every `print`/`panic`/`assert`/conversion call site builds `vec![ParamMode::Borrow; arg_tirs.len()]` and clones it — two allocations per builtin call though builtin arities and modes are statically known. Adjacent to I-092(b), which covers `check_call` but not the builtin path.
+**Resolution:** Static per-builtin mode tables; only `str_push` needs a non-uniform one.
+
+### I-148 — Per-argument callee-name string lookups in the ownership pass
+
+**Files:** `ryo-frontend/src/ownership.rs` (`is_borrowed_scalar_param` :3665, `view_borrow_params` :3735), `ryo-frontend/src/builtins.rs` (:128-148)
+**Summary:** `is_borrowed_scalar_param` runs `pool.str(name_id)` plus two linear `&'static str` table scans *per argument of every call*, though the result depends only on the callee; `view_borrow_params` repeats it per borrow-mode Call arg. Same string-compare class as I-034, but the per-arg (not per-call) repetition is a new facet.
+**Resolution:** Hoist the lookup out of the arg loop (once per Call inst); the longer-term fix is I-034's cached-`StringId` table.
+
+### I-149 — Lexer allocates a `String` per escape-free string literal
+
+**Files:** `ryo-frontend/src/lexer.rs` (`unescape` :425-491, called at :542)
+**Summary:** Every string literal gets an owned `String` from `unescape` even when it contains no escapes — the common case. Per string literal.
+**Resolution:** Fast-path with `memchr(b'\\')` (or a byte scan) returning `Cow::Borrowed(inner)` when no escape is present; build the owned string only on the escape path.
+
+### I-150 — Each function's Cranelift `Signature` is built twice
+
+**Files:** `ryo-backend/src/codegen.rs` (`declare_all_functions` :455, `compile_function` :555)
+**Summary:** `declare_all_functions` builds every function's `Signature` to register the `FuncId`, then `compile_function` rebuilds the identical signature — redundant pool queries and two Vec allocations per function.
+**Resolution:** Store the `Signature` alongside the `FuncId` in `func_ids` and move/clone it into `ctx.func`.
+
+### I-151 — `collect_loop_nesting` allocates per statement and per instruction
+
+**Files:** `ryo-frontend/src/ownership.rs` (:1087-1137)
+**Summary:** Once per function, but O(body²) worst case: a fresh `HashSet` + `collect_reachable` per body statement (:1095-1096), then `inner.clone()` (:1105) / `stack.to_vec()` (:1118) per subtree instruction into a `HashMap<TirRef, Vec<TirRef>>`. Dense-index keyed — same R18 class as I-129 (listed there); the per-statement set allocations are the extra cost.
+**Resolution:** Reuse one scratch set (clear between statements); share nesting stacks via parent-pointer chains or a `Vec<Vec<TirRef>>` indexed by depth; fold into the I-129 side-table conversion.
+
+### I-152 — Parser builds a throwaway `Vec` per call/params node before the arena copy
+
+**Files:** `ryo-frontend/src/parser.rs` (:604-615, :650-661, :534-538, :436-446)
+**Summary:** Call args, method args, params, and elif branches are `collect::<Vec<_>>()`ed into a temporary, copied into the AST side arena by the builder, then dropped — a double buffer per node. Partly inherent to chumsky's `IterParser`; impact is small next to the win the arena already delivered.
+**Resolution:** A custom collector writing straight into the arena (chumsky 0.12 collects via `FromIterator`, so an arena-append adapter is feasible), or accept as-is. Measure before bothering.
+
+### I-153 — `expect_used` audit before promoting to deny
+
+**Files:** the `cargo clippy --all-targets -- -W clippy::expect_used` hit list (`ryo-frontend/src/ownership.rs`, `ryo-core/src/ast.rs`, `ryo-core/src/types.rs`, `ryo-core/src/uir.rs`, `ryo-core/src/tir.rs` are the dense ones)
+**Summary:** `expect_used` is the one panic-family lint still at `allow` in `[workspace.lints.clippy]` (`panic`/`todo`/`unimplemented`/`unwrap_used` are denied). 70 sites fire at last count, 56 of them outside `ryo/tests/`; many are deliberate arena-boundary guards (`from_index`, side-arena overflow checks) — legitimate invariant enforcement, not laziness.
+**Resolution:** Classify each site as keep-with-message (genuine internal invariant) vs convert-to-diagnostic (reachable from user input), then consider promoting `expect_used` to `deny`.
 
 ---
 

@@ -46,7 +46,7 @@ These are technically structs defined in the library, but the **compiler knows t
 
 These are normal modules (written in Ryo or Rust-via-FFI).
 
-> **`no_std` scope & binary size.** `#![no_std]` (see `ISSUES.md` I-043) applies only to the unconditional **floor** — `std.core` / `std.mem` (alloc, `panic`, `str`, `Drop`). `std.sys` and the OS modules (`net`, `fs`, `time`, …) are OS-bound by nature and therefore *never* `no_std`; they are linked only when a program reaches them via `import` (Milestone 6). **Availability** (batteries-included: every module ships with the toolchain, zero config) and **floor size** (`no_std`) are independent axes — an unreached module costs nothing in the binary. This is how Ryo stays batteries-included like Python/Go without every binary paying for TLS/crypto.
+> **`no_std` scope & binary size.** `#![no_std]` applies only to the unconditional **floor** — `std.core` / `std.mem` (alloc, `panic`, `str`, `Drop`). `std.sys` and the OS modules (`net`, `fs`, `time`, …) are OS-bound by nature and therefore *never* `no_std`; they are linked only when a program reaches them via `import` (Milestone 6). **Availability** (batteries-included: every module ships with the toolchain, zero config) and **floor size** (`no_std`) are independent axes — an unreached module costs nothing in the binary. This is how Ryo stays batteries-included like Python/Go without every binary paying for TLS/crypto.
 
 #### A. The "Core" Module (`std.core` / `std.mem`)
 
