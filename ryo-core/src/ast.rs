@@ -524,6 +524,19 @@ impl Ast {
         &self.top_level
     }
 
+    /// Number of expression slots, including the reserved slot-0
+    /// sentinel and any unreachable orphans left behind by parser
+    /// speculation (see the `Inspector` impl below). Exposed for
+    /// diagnostics and tests.
+    pub fn expr_count(&self) -> usize {
+        self.exprs.len()
+    }
+
+    /// Number of statement slots; see [`Self::expr_count`].
+    pub fn stmt_count(&self) -> usize {
+        self.stmts.len()
+    }
+
     /// Span covering the whole program (first through last top-level
     /// statement; `0..0` for an empty program).
     pub fn span(&self) -> SimpleSpan {
@@ -818,43 +831,39 @@ impl Ast {
 /// into the arenas via `map_with`/`foldl_with` closures that call
 /// `e.state()`, with the `Ast` itself as the state object.
 ///
-/// A failed alternative (`or`/`choice` backtracking, `repeated`
-/// iteration rollbacks, error recovery) can push nodes before it
-/// fails; those ids never escape into a kept node, but without
-/// rollback the arenas would accumulate dead entries. Like chumsky's
-/// own `TruncateState`, the checkpoint records the five arena
-/// lengths and `on_rewind` truncates them, so a rewound region
-/// leaves the arenas exactly as it found them. Ids created before
-/// the checkpoint sit below the truncation point and stay valid;
-/// ids created after it are discarded together with the failed
-/// output that held them. (`top_level` needs no checkpoint: it is
-/// written once by the final combinator, after which nothing can
-/// rewind.)
+/// The `Inspector` hooks are deliberately no-ops. A failed
+/// alternative (`or`/`choice` backtracking, `repeated` iteration
+/// rollbacks, error recovery) can push nodes before it fails, and
+/// those nodes stay in the arenas as unreachable orphans: the arenas
+/// are append-only and ids are stable, so a rewind can never
+/// invalidate a node that a kept id still references — the failed
+/// branch's ids simply never escape into a kept node. Orphans cost
+/// nothing downstream: consumers reach nodes only by following ids
+/// out of `top_level`, and the whole `Ast` is dropped once astgen
+/// has lowered it. On valid inputs speculation almost never pushes
+/// before failing (alternatives die on their first token), so the
+/// orphan count is zero in practice; `ryo-frontend`'s parser tests
+/// assert that over the example corpus.
+///
+/// The alternative — snapshotting the arena lengths in `on_save` and
+/// truncating in `on_rewind`, chumsky's `TruncateState` pattern —
+/// was measured to cost ~20% of total parse time
+/// (`parse_large` in `ryo-frontend/benches/frontend.rs`): chumsky
+/// checkpoints at every `choice`/`repeated` boundary, so the hooks
+/// fire constantly even though they almost always truncate nothing.
+/// Exact arenas are not worth that; the `Ast` is a transient
+/// parse-to-astgen buffer, not a long-lived structure.
 impl<'src, I: chumsky::input::Input<'src>> chumsky::inspector::Inspector<'src, I> for Ast {
-    type Checkpoint = (usize, usize, usize, usize, usize);
+    type Checkpoint = ();
 
     fn on_token(&mut self, _: &I::Token) {}
 
-    fn on_save<'parse>(&self, _: &chumsky::input::Cursor<'src, 'parse, I>) -> Self::Checkpoint {
-        (
-            self.exprs.len(),
-            self.stmts.len(),
-            self.expr_lists.len(),
-            self.stmt_lists.len(),
-            self.elifs.len(),
-        )
-    }
+    fn on_save<'parse>(&self, _: &chumsky::input::Cursor<'src, 'parse, I>) -> Self::Checkpoint {}
 
     fn on_rewind<'parse>(
         &mut self,
-        marker: &chumsky::input::Checkpoint<'src, 'parse, I, Self::Checkpoint>,
+        _: &chumsky::input::Checkpoint<'src, 'parse, I, Self::Checkpoint>,
     ) {
-        let &(exprs, stmts, expr_lists, stmt_lists, elifs) = marker.inspector();
-        self.exprs.truncate(exprs);
-        self.stmts.truncate(stmts);
-        self.expr_lists.truncate(expr_lists);
-        self.stmt_lists.truncate(stmt_lists);
-        self.elifs.truncate(elifs);
     }
 }
 

@@ -10,9 +10,12 @@
 //! entered via `parse_with_state`), and node-producing combinators
 //! push `Expr`/`Stmt` values through `e.state()` inside
 //! `map_with`/`foldl_with` closures, yielding [`ExprId`]s /
-//! [`StmtId`]s. `Ast`'s `Inspector` impl truncates the arenas on
-//! rewind, so backtracking alternatives and error recovery leave no
-//! orphan nodes behind.
+//! [`StmtId`]s. The arenas are append-only: a backtracking
+//! alternative that pushed nodes before failing leaves them behind
+//! as unreachable orphans (the `Inspector` hooks on `Ast` are
+//! no-ops by design — snapshotting and truncating on every rewind
+//! was measured to cost ~20% of parse time, and orphan nodes are
+//! never reachable from `top_level`).
 
 use chumsky::{
     input::{MapExtra, ValueInput},
@@ -168,9 +171,10 @@ where
 /// Every skip uses `at_least(1)`: recovering over zero tokens at a
 /// clean boundary would emit a spurious error. Errors emitted by a
 /// recovery whose surrounding line later fails are rolled back by
-/// chumsky's rewind (as are any arena nodes pushed inside the failed
-/// region — see the `Inspector` impl on `Ast`), so each broken line
-/// reports exactly once.
+/// chumsky's rewind, so each broken line reports exactly once.
+/// (Arena nodes pushed inside a failed region are *not* rolled back
+/// — they stay as unreachable orphans, which is safe because no kept
+/// node references them; see the `Inspector` impl on `Ast`.)
 ///
 /// `not_at_boundary` decides where the loop stops without running the
 /// statement grammar: the grammar is deep and a failed alternative
@@ -1844,5 +1848,131 @@ mod tests {
         assert!(ok, "recovery must produce a partial program");
         assert_eq!(ast.top_level_stmts().len(), 1);
         assert!(is_error_stmt(&ast, ast.top_level_stmts()[0]));
+    }
+
+    /// Count nodes reachable from `top_level` by following child ids.
+    fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
+        let mut expr_seen = vec![false; ast.expr_count()];
+        let mut stmt_seen = vec![false; ast.stmt_count()];
+        let mut expr_work: Vec<ExprId> = Vec::new();
+        let mut stmt_work: Vec<StmtId> = ast.top_level_stmts().to_vec();
+        while let Some(stmt) = stmt_work.pop() {
+            if stmt_seen[stmt.index()] {
+                continue;
+            }
+            stmt_seen[stmt.index()] = true;
+            match &ast.stmt(stmt).kind {
+                StmtKind::VarDecl(decl) => expr_work.push(decl.initializer),
+                StmtKind::FunctionDef(def) => {
+                    stmt_work.extend_from_slice(ast.stmt_list(def.body));
+                }
+                StmtKind::Return(value) => {
+                    if let Some(value) = value {
+                        expr_work.push(*value);
+                    }
+                }
+                StmtKind::ExprStmt(value) => expr_work.push(*value),
+                StmtKind::IfStmt(if_stmt) => {
+                    expr_work.push(if_stmt.cond);
+                    stmt_work.extend_from_slice(ast.stmt_list(if_stmt.then_block));
+                    for elif in ast.elif_list(if_stmt.elif_branches) {
+                        expr_work.push(elif.cond);
+                        stmt_work.extend_from_slice(ast.stmt_list(elif.block));
+                    }
+                    if let Some(else_block) = if_stmt.else_block {
+                        stmt_work.extend_from_slice(ast.stmt_list(else_block));
+                    }
+                }
+                StmtKind::AssignOrDecl { value, .. } | StmtKind::CompoundAssign { value, .. } => {
+                    expr_work.push(*value);
+                }
+                StmtKind::WhileLoop { cond, body } => {
+                    expr_work.push(*cond);
+                    stmt_work.extend_from_slice(ast.stmt_list(*body));
+                }
+                StmtKind::ForRange {
+                    start, end, body, ..
+                } => {
+                    expr_work.push(*start);
+                    expr_work.push(*end);
+                    stmt_work.extend_from_slice(ast.stmt_list(*body));
+                }
+                StmtKind::Break | StmtKind::Continue | StmtKind::Error => {}
+            }
+            while let Some(expr) = expr_work.pop() {
+                if expr_seen[expr.index()] {
+                    continue;
+                }
+                expr_seen[expr.index()] = true;
+                match ast.expr(expr).kind {
+                    ExprKind::Literal(_) | ExprKind::Ident(_) => {}
+                    ExprKind::BinaryOp(lhs, _, rhs) => {
+                        expr_work.push(lhs);
+                        expr_work.push(rhs);
+                    }
+                    ExprKind::UnaryOp(_, operand) | ExprKind::Borrow(operand) => {
+                        expr_work.push(operand);
+                    }
+                    ExprKind::Call(_, args) => {
+                        expr_work.extend_from_slice(ast.expr_list(args));
+                    }
+                    ExprKind::MethodCall { receiver, args, .. } => {
+                        expr_work.push(receiver);
+                        expr_work.extend_from_slice(ast.expr_list(args));
+                    }
+                    ExprKind::Slice { base, start, end } => {
+                        expr_work.push(base);
+                        if let Some(start) = start {
+                            expr_work.push(start);
+                        }
+                        if let Some(end) = end {
+                            expr_work.push(end);
+                        }
+                    }
+                }
+            }
+        }
+        (
+            expr_seen.iter().filter(|&&seen| seen).count(),
+            stmt_seen.iter().filter(|&&seen| seen).count(),
+        )
+    }
+
+    #[test]
+    fn successful_parses_leave_no_orphan_nodes() {
+        // The `Inspector` hooks on `Ast` are deliberate no-ops for
+        // performance (a truncating checkpoint cost ~20% of parse
+        // time on `parse_large`). This guards the invariant that
+        // makes that safe in practice: on valid input, speculative
+        // alternatives fail on their first token without pushing, so
+        // every arena slot except the slot-0 sentinel is reachable
+        // from `top_level`.
+        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&examples).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("ryo") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).unwrap();
+            let Ok((ast, _)) = lex_and_parse(&src) else {
+                continue;
+            };
+            let (exprs, stmts) = reachable_node_counts(&ast);
+            assert_eq!(
+                exprs + 1,
+                ast.expr_count(),
+                "orphan expressions in {}",
+                path.display()
+            );
+            assert_eq!(
+                stmts + 1,
+                ast.stmt_count(),
+                "orphan statements in {}",
+                path.display()
+            );
+            checked += 1;
+        }
+        assert!(checked > 5, "expected to check several example files");
     }
 }
