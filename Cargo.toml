@@ -61,12 +61,14 @@ disallowed_types = "deny"
 # oversized pass entry points are split.
 too_many_lines = "deny"
 # R8/R13 — never panic on user input, no `todo!()` in shipped milestones.
-# These stay `allow` for now: CI builds with RUSTFLAGS=-Dwarnings, so even
-# `warn` fails the build, and the existing call sites (tracked as I-103,
-# I-106; I-107 and I-115 already fixed) must be converted before these can
-# be promoted to `warn` and then `deny`. Tests are exempt via clippy.toml.
-unwrap_used = "allow"
+# `panic`/`todo`/`unimplemented`/`unwrap_used` are denied workspace-wide;
+# `expect_used` stays `allow` pending the per-site audit (I-153). Tests are
+# exempt for unwrap/expect/panic only via clippy.toml (`allow-*-in-tests`);
+# todo/unimplemented stay denied in tests too. Build tooling (build scripts,
+# `build-support`) carries file-level `#![allow]`s — panics are its error
+# channel.
+unwrap_used = "deny"
 expect_used = "allow"
-panic = "allow"
-todo = "allow"
-unimplemented = "allow"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

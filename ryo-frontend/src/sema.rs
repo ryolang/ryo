@@ -897,7 +897,10 @@ fn analyze_stmt(sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope, r: In
             }
             fcx.builder.continue_stmt(sema.pool.void(), span)
         }
-        other => panic!(
+        // UIR trusted-producer contract (see the `uir.rs` module
+        // header): astgen is the only producer, so a non-statement tag
+        // reaching `analyze_stmt` is a compiler bug, not user input.
+        other => unreachable!(
             "analyze_stmt: instruction at %{} is not a statement (tag={:?})",
             r.index(),
             other
@@ -1311,7 +1314,10 @@ fn analyze_expr_allow_never(
             }
             analyze_expr(sema, fcx, scope, inner)
         }
-        other => panic!(
+        // UIR trusted-producer contract (see the `uir.rs` module
+        // header): astgen is the only producer, so a non-expression tag
+        // reaching `analyze_expr` is a compiler bug, not user input.
+        other => unreachable!(
             "analyze_expr: instruction at %{} is not an expression (tag={:?})",
             r.index(),
             other

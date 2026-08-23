@@ -59,7 +59,7 @@ enum Terminator {
 /// Returns `true` if `ty` resolves to `Str` in the pool.
 ///
 /// Callers use this to gate multi-value (fat-pointer) paths before
-/// reaching `cranelift_type_for`, which panics on `Str`.
+/// reaching `cranelift_type_for`, where a `Str` is a caller bug.
 fn is_str_type(ty: TypeId, pool: &InternPool) -> bool {
     matches!(pool.kind(ty), TypeKind::Str)
 }
@@ -76,25 +76,28 @@ fn is_str_type(ty: TypeId, pool: &InternPool) -> bool {
 fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) -> types::Type {
     match pool.kind(ty) {
         TypeKind::Int => pointer_ty,
-        TypeKind::Str => panic!("cranelift_type_for: str is multi-value; use is_str_type gate"),
+        TypeKind::Str => {
+            unreachable!("cranelift_type_for: str is multi-value; use is_str_type gate")
+        }
         TypeKind::View(_) => {
-            panic!("cranelift_type_for: strview is two-word; use pool.is_view() gate")
+            unreachable!("cranelift_type_for: strview is two-word; use pool.is_view() gate")
         }
         TypeKind::Bool => types::I8,
         TypeKind::Float => types::F64,
         // Dead code after trap, but Cranelift needs a concrete type for every SSA value
         TypeKind::Never => types::I8,
-        TypeKind::Void => panic!("cranelift_type_for: void has no representation"),
+        TypeKind::Void => unreachable!("cranelift_type_for: void has no representation"),
         TypeKind::Error => {
             // Reaching codegen with the Error sentinel means sema
             // accepted a program despite a resolution failure. The
             // driver must short-circuit on `sink.has_errors()`.
-            panic!("cranelift_type_for: <error> sentinel reached codegen")
+            unreachable!("cranelift_type_for: <error> sentinel reached codegen")
         }
         TypeKind::Tuple => {
-            // Tuple ABI is not implemented yet; the variant exists
-            // only to validate the InternPool's sidecar encoding.
-            unimplemented!("cranelift_type_for: tuple lowering")
+            // No surface syntax constructs tuples today, so a tuple
+            // TypeId cannot reach codegen; the variant exists only to
+            // validate the InternPool's sidecar encoding.
+            unreachable!("cranelift_type_for: tuple TypeId reached codegen")
         }
     }
 }
@@ -191,9 +194,16 @@ struct FunctionContext<'a, M: Module> {
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
     ///
-    /// INVARIANT: this map is deliberately cross-block (one flat map
-    /// per function, not scoped per basic block). That is sound only
-    /// because the current TIR producers guarantee:
+    /// Dense table indexed directly by `TirRef::index()` (slot 0
+    /// unused — refs are 1-based), sized once per function from the
+    /// TIR instruction count: TIR is tree-shaped today, so the memo
+    /// almost never hits and per-instruction HashMap hashing was pure
+    /// overhead. Param sentinel refs (`TirRef::param`) are not valid
+    /// arena indices and live in `param_values` instead.
+    ///
+    /// INVARIANT: this table is deliberately cross-block (one flat
+    /// table per function, not scoped per basic block). That is sound
+    /// only because the current TIR producers guarantee:
     ///   (a) TIR instructions are unique per use — no shared
     ///       sub-expressions, so a `TirRef` is materialized in exactly
     ///       one block and read only where that block dominates;
@@ -207,7 +217,12 @@ struct FunctionContext<'a, M: Module> {
     /// flow (ternary if) or shared sub-expressions across blocks, this
     /// memo MUST be re-scoped per-block or reads will hit Cranelift
     /// dominator errors.
-    inst_values: HashMap<TirRef, ValueRepr>,
+    inst_values: Vec<Option<ValueRepr>>,
+    /// Memo entries keyed by param sentinel refs (`TirRef::param`),
+    /// which cannot index `inst_values`. Only str/view params ever
+    /// land here — two inserts per function at most — so a tiny map
+    /// is fine.
+    param_values: HashMap<TirRef, ValueRepr>,
     /// Indices into `sidecar.free_schedule` whose Frees have already
     /// been emitted in codegen. A given anchor TirRef can be reached
     /// through both `eval_inst` and `eval_inst_str` (e.g. a `Var`
@@ -392,6 +407,26 @@ impl<M: Module> Codegen<M> {
         pool: &InternPool,
     ) -> Result<HashMap<StringId, FuncId>, String> {
         self.declare_all_functions(tirs, pool)
+    }
+
+    /// Read the `TirRef → ValueRepr` memo. Param sentinel refs
+    /// (`TirRef::param`) are not valid arena indices, so they are
+    /// served from the `param_values` side map.
+    fn cached_repr(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<ValueRepr> {
+        if r.is_param() {
+            ctx.param_values.get(&r).copied()
+        } else {
+            ctx.inst_values.get(r.index()).copied().flatten()
+        }
+    }
+
+    /// Write the `TirRef → ValueRepr` memo; see `cached_repr`.
+    fn cache_repr(ctx: &mut FunctionContext<'_, M>, r: TirRef, repr: ValueRepr) {
+        if r.is_param() {
+            ctx.param_values.insert(r, repr);
+        } else {
+            ctx.inst_values[r.index()] = Some(repr);
+        }
     }
 
     pub fn compile(
@@ -673,7 +708,8 @@ impl<M: Module> Codegen<M> {
                 tir,
                 locals,
                 func_ids,
-                inst_values: HashMap::new(),
+                inst_values: vec![None; tir.instructions.len()],
+                param_values: HashMap::new(),
                 freed_at: HashSet::new(),
                 free_by_after,
                 pending_sweep,
@@ -691,22 +727,28 @@ impl<M: Module> Codegen<M> {
 
             for (idx, param) in tir.params.iter().enumerate() {
                 if is_str_type(param.ty, pool) {
-                    let locals = ctx.str_locals.get(&param.name).unwrap();
+                    let locals = ctx
+                        .str_locals
+                        .get(&param.name)
+                        .expect("every str param gets StrLocals in the param preamble above");
                     let virtual_ref = TirRef::param(idx);
                     let repr = ValueRepr::Str {
                         ptr: builder.use_var(locals.ptr),
                         len: builder.use_var(locals.len),
                         cap: builder.use_var(locals.cap),
                     };
-                    ctx.inst_values.insert(virtual_ref, repr);
+                    ctx.param_values.insert(virtual_ref, repr);
                 } else if pool.is_view(param.ty) {
-                    let locals = ctx.view_locals.get(&param.name).unwrap();
+                    let locals = ctx
+                        .view_locals
+                        .get(&param.name)
+                        .expect("every view param gets ViewLocals in the param preamble above");
                     let virtual_ref = TirRef::param(idx);
                     let repr = ValueRepr::View {
                         ptr: builder.use_var(locals.ptr),
                         len: builder.use_var(locals.len),
                     };
-                    ctx.inst_values.insert(virtual_ref, repr);
+                    ctx.param_values.insert(virtual_ref, repr);
                 }
             }
 
@@ -1417,9 +1459,9 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<Value, String> {
-        if let Some(repr) = ctx.inst_values.get(&r) {
+        if let Some(repr) = Self::cached_repr(ctx, r) {
             return match repr {
-                ValueRepr::Scalar(v) => Ok(*v),
+                ValueRepr::Scalar(v) => Ok(v),
                 // Str/view-typed values have no scalar stand-in.
                 // A multi-word repr reaching the scalar entry point
                 // means a consumer forgot to gate through eval_inst_str
@@ -1691,7 +1733,7 @@ impl<M: Module> Codegen<M> {
         // Scalar-only entry point: str/view-typed insts are
         // rejected above, so no path here can have cached a non-scalar
         // repr for `r` mid-evaluation.
-        ctx.inst_values.insert(r, ValueRepr::Scalar(value));
+        Self::cache_repr(ctx, r, ValueRepr::Scalar(value));
         Ok(value)
     }
 
@@ -1892,7 +1934,9 @@ impl<M: Module> Codegen<M> {
             builder.ins().call(panic_ref, &[ptr, len]);
             // Unreachable in practice (ryo_panic never returns); keeps
             // Cranelift honest about the block having a terminator.
-            builder.ins().trap(TrapCode::user(1).unwrap());
+            builder.ins().trap(
+                TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
+            );
         }
         Ok(())
     }
@@ -2002,8 +2046,8 @@ impl<M: Module> Codegen<M> {
             .filter(|&idx| {
                 let fp = &ctx.sidecar.free_schedule[idx];
                 Self::branch_active(fp.branch, &ctx.branch_stack)
-                    && ctx.inst_values.contains_key(&fp.after)
-                    && ctx.inst_values.contains_key(&fp.target)
+                    && Self::cached_repr(ctx, fp.after).is_some()
+                    && Self::cached_repr(ctx, fp.target).is_some()
             })
             .map(|idx| (idx, ctx.sidecar.free_schedule[idx].target))
             .collect();
@@ -2046,7 +2090,7 @@ impl<M: Module> Codegen<M> {
                 builder.ins().call(free_ref, &[ptr, cap]);
                 continue;
             }
-            let repr = ctx.inst_values.get(&target).copied().ok_or_else(|| {
+            let repr = Self::cached_repr(ctx, target).ok_or_else(|| {
                 format!(
                     "ownership pass scheduled Free for %{} but no ValueRepr cached",
                     target.index()
@@ -2223,8 +2267,8 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<ValueRepr, String> {
-        if let Some(repr) = ctx.inst_values.get(&r) {
-            return Ok(*repr);
+        if let Some(repr) = Self::cached_repr(ctx, r) {
+            return Ok(repr);
         }
         let inst = ctx.tir.inst(r);
         let repr = match inst.tag {
@@ -2289,8 +2333,8 @@ impl<M: Module> Codegen<M> {
                     // (not via eval_inst): the scalar path rejects
                     // str-returning calls.
                     Self::emit_call(builder, ctx, r)?;
-                    if let Some(repr) = ctx.inst_values.get(&r) {
-                        return Ok(*repr);
+                    if let Some(repr) = Self::cached_repr(ctx, r) {
+                        return Ok(repr);
                     }
                     unreachable!("str-returning user call must cache ValueRepr::Str via emit_call");
                 }
@@ -2367,7 +2411,7 @@ impl<M: Module> Codegen<M> {
                 return Ok(ValueRepr::Scalar(val));
             }
         };
-        ctx.inst_values.insert(r, repr);
+        Self::cache_repr(ctx, r, repr);
         Ok(repr)
     }
 
@@ -2383,8 +2427,8 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<ValueRepr, String> {
-        if let Some(repr) = ctx.inst_values.get(&r) {
-            return Ok(*repr);
+        if let Some(repr) = Self::cached_repr(ctx, r) {
+            return Ok(repr);
         }
         let inst = ctx.tir.inst(r);
         let repr = match inst.tag {
@@ -2474,7 +2518,7 @@ impl<M: Module> Codegen<M> {
                 ));
             }
         };
-        ctx.inst_values.insert(r, repr);
+        Self::cache_repr(ctx, r, repr);
         Ok(repr)
     }
 
@@ -2603,7 +2647,9 @@ impl<M: Module> Codegen<M> {
                 &[],
             )?;
             builder.ins().call(panic_ref, &arg_values);
-            builder.ins().trap(TrapCode::user(1).unwrap());
+            builder.ins().trap(
+                TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
+            );
             let dead = builder.create_block();
             builder.seal_block(dead);
             builder.switch_to_block(dead);
@@ -2775,7 +2821,9 @@ impl<M: Module> Codegen<M> {
             // callee as an ordinary (returning) call, so the mutations
             // must be visible on the path where control resumes.
             Self::reload_inout_args(builder, ctx, &inout_reloads)?;
-            builder.ins().trap(TrapCode::user(1).unwrap());
+            builder.ins().trap(
+                TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
+            );
             let dead = builder.create_block();
             builder.seal_block(dead);
             builder.switch_to_block(dead);
@@ -2804,7 +2852,7 @@ impl<M: Module> Codegen<M> {
                 .load(ctx.int_type, MemFlags::trusted(), out, 0);
             let len = builder.ins().load(types::I64, MemFlags::trusted(), out, 8);
             let cap = builder.ins().load(types::I64, MemFlags::trusted(), out, 16);
-            ctx.inst_values.insert(r, ValueRepr::Str { ptr, len, cap });
+            Self::cache_repr(ctx, r, ValueRepr::Str { ptr, len, cap });
             return Ok(ptr); // dummy scalar — consumers use eval_inst_str
         }
 

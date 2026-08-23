@@ -695,9 +695,7 @@ fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
             if r == target {
                 return stack.first().copied();
             }
-            let mut sub: HashSet<TirRef> = HashSet::new();
-            tir.collect_reachable(r, &mut sub);
-            if !sub.contains(&target) {
+            if !tir.contains_reachable(r, target) {
                 continue;
             }
             // `target` is inside this statement's subtree. Descend
@@ -758,9 +756,7 @@ fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
             if r == target {
                 return Some(stack.clone());
             }
-            let mut sub: HashSet<TirRef> = HashSet::new();
-            tir.collect_reachable(r, &mut sub);
-            if !sub.contains(&target) {
+            if !tir.contains_reachable(r, target) {
                 continue;
             }
             match tir.inst(r).tag {
@@ -1989,14 +1985,18 @@ fn analyze_function(
         };
         sidecar.free_schedule.push(FreePoint {
             after: anchor,
-            target: owner.inst_tirref().unwrap(),
+            target: owner.inst_tirref().expect(
+                "pending_dead_store keys are always Owner::Inst (register_pending_dead_store)",
+            ),
             span: *span,
             branch: None,
         });
         if also_in_body {
             sidecar.free_schedule.push(FreePoint {
                 after: *decl_inst,
-                target: owner.inst_tirref().unwrap(),
+                target: owner.inst_tirref().expect(
+                    "pending_dead_store keys are always Owner::Inst (register_pending_dead_store)",
+                ),
                 span: *span,
                 branch: None,
             });
@@ -3597,6 +3597,15 @@ fn schedule_break_continue_frees(
     }
 }
 
+/// Insert into an arg-partition set. These sets are arg-count-sized
+/// (usually ≤ 3 entries, very often empty), so a linear-scan Vec beats
+/// a HashSet: no `RandomState` seeding or hashing per Call.
+fn push_unique(set: &mut Vec<Owner>, owner: Owner) {
+    if !set.contains(&owner) {
+        set.push(owner);
+    }
+}
+
 fn visit_expr(
     tir: &Tir,
     pool: &InternPool,
@@ -3650,14 +3659,14 @@ fn visit_expr(
             }
 
             // Phase 2 — use-safety check + borrow/move/inout partition.
-            let mut borrowed: HashSet<Owner> = HashSet::new();
-            let mut moved: HashSet<Owner> = HashSet::new();
+            let mut borrowed: Vec<Owner> = Vec::new();
+            let mut moved: Vec<Owner> = Vec::new();
             // E4 (final spec §3.3): a view argument borrows its ROOT
             // owner for the duration of the call — tracked separately
             // from `borrowed` so a same-call move of the root is
             // reported as a P2 freeze violation (SourceProjected)
             // rather than as a plain borrow/move overlap (E0031).
-            let mut view_borrowed: HashSet<Owner> = HashSet::new();
+            let mut view_borrowed: Vec<Owner> = Vec::new();
             // inout occurrences: (owner, arg span) — a Vec, not a Set, so
             // a double-inout of one owner is detectable by count (Rule 7).
             let mut inout_uses: Vec<(Owner, Span)> = Vec::new();
@@ -3709,7 +3718,7 @@ fn visit_expr(
                         // (inout, strview) signature would escape the
                         // Rule-7 partition.
                         if let Some(root) = projection_root(own, tir, pool, *arg) {
-                            view_borrowed.insert(root);
+                            push_unique(&mut view_borrowed, root);
                         }
                     } else if mode == ParamMode::Borrow && matches!(tir.inst(*arg).tag, TirTag::Var)
                     {
@@ -3718,7 +3727,7 @@ fn visit_expr(
                         // record Var reads by name for the Rule 7 overlap check.
                         // (A Copy `move` arg is rejected by sema's RedundantMove,
                         // so only the Borrow arm is reachable from real code.)
-                        borrowed.insert(inout_owner(own, tir, *arg));
+                        push_unique(&mut borrowed, inout_owner(own, tir, *arg));
                     }
                     continue;
                 }
@@ -3738,7 +3747,7 @@ fn visit_expr(
                             if let Some(&varg) = inner.args.get(idx)
                                 && let Some(root) = projection_root(own, tir, pool, varg)
                             {
-                                view_borrowed.insert(root);
+                                push_unique(&mut view_borrowed, root);
                             }
                         }
                         continue;
@@ -3758,18 +3767,17 @@ fn visit_expr(
                 };
                 if mode == ParamMode::Borrow {
                     check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
-                    borrowed.insert(owner);
+                    push_unique(&mut borrowed, owner);
                 } else {
-                    moved.insert(owner);
+                    push_unique(&mut moved, owner);
                 }
             }
             // Rule 7 (M8.3): at most one mutable borrow per owner in a call,
             // and no immutable borrow / move alongside it. Each DISTINCT
-            // inout owner is handled exactly once (the `seen_owners` guard)
-            // so cases 2/3 don't re-fire per occurrence.
-            let mut seen_owners: HashSet<Owner> = HashSet::new();
-            for (owner, _span) in &inout_uses {
-                if !seen_owners.insert(*owner) {
+            // inout owner is handled exactly once (the prefix scan skips
+            // repeat occurrences) so cases 2/3 don't re-fire per occurrence.
+            for (pos, (owner, _span)) in inout_uses.iter().enumerate() {
+                if inout_uses[..pos].iter().any(|(o, _)| o == owner) {
                     continue;
                 }
                 let name = rule7_owner_name(own, tir, pool, &view.args, *owner);
@@ -3829,7 +3837,7 @@ fn visit_expr(
                 }
             }
             // Overlap — same owner borrowed AND moved in one call.
-            for owner in borrowed.intersection(&moved) {
+            for owner in borrowed.iter().filter(|o| moved.contains(o)) {
                 let name = owner_name_for_diag(*owner, tir, pool);
 
                 // Find spans of the conflicting arguments for this owner
@@ -3882,8 +3890,11 @@ fn visit_expr(
             // same owner in the same call is a freeze violation. The
             // projection's own last use may be this very call — the
             // borrow is call-bounded (E4) but the move is not.
-            let mut view_move_overlap: Vec<Owner> =
-                view_borrowed.intersection(&moved).copied().collect();
+            let mut view_move_overlap: Vec<Owner> = view_borrowed
+                .iter()
+                .filter(|o| moved.contains(o))
+                .copied()
+                .collect();
             view_move_overlap.sort_by_key(owner_sort_key);
             for owner in view_move_overlap {
                 // E0020/E0021 already cover owners that are `Moved` or

@@ -196,7 +196,7 @@ Intended payoffs (not realised — the newtype keeps the pre-split ergonomics):
 
 ### 2.3 Sub-step C — Strings interned in the same pool
 
-Add `StringId(u32)` and `pool.intern_str(&str) -> StringId`. Identifiers (`Var`, `Call`, function names, parameter names) move from `String` to `StringId`. Tokens stop holding `&'a str` slices into source — they hold `StringId` — which kills `lexer::leak_token` and resolves I-008.
+Add `StringId(u32)` and `pool.intern_str(&str) -> StringId`. Identifiers (`Var`, `Call`, function names, parameter names) move from `String` to `StringId`. Tokens stop holding `&'a str` slices into source — they hold `StringId` — which kills `lexer::leak_token` (the token-lifetime workaround).
 
 This is the change that lets UIR (Phase 3) be a pure `Vec<u32>`-shaped thing instead of carrying owned `String`s.
 
@@ -450,8 +450,8 @@ These belong on the roadmap, not this plan:
 - Inline expansion logic (substrate only).
 - Splitting UIR into per-file files (Zig does this for incremental compilation; Ryo doesn't compile incrementally yet).
 - Replacing `String`-backed source storage with a `SourceMap`. Useful for multi-file diagnostics; orthogonal here.
-- Moving `print` to a runtime crate (ISSUES.md I-006). Falls out trivially after Phase 4 — `sema::check_builtin_call` becomes a normal type-checked call against an external decl — but is not gated on this plan.
-- Control flow (`if`/`else`/`match`) — ISSUES.md I-003. Reserved variants in UIR/TIR are listed above; the actual feature lands as its own milestone after Phase 4.
+- Moving `print` to a runtime crate. Falls out trivially after Phase 4 — `sema::check_builtin_call` becomes a normal type-checked call against an external decl — but is not gated on this plan.
+- Control flow (`if`/`else`/`match`). Reserved variants in UIR/TIR are listed above; the actual feature lands as its own milestone after Phase 4.
 - **TIR legalization** (Zig's `Air.Legalize` / per-backend `legalizeFeatures()`). Zig has an explicit pass between Sema and codegen that scalarizes vectors, expands overflow checks, and rewrites operations the target backend can't handle. Cranelift owns target legalization for us, so we don't need a parallel pass — but if/when a non-Cranelift backend lands, this gap re-opens and a `air::legalize` module becomes the right place for it.
 - **A separate MIR layer.** Zig lowers TIR → MIR (per-backend, unified through `AnyMir`) → machine code. Cranelift IR plays the role of MIR for us: codegen translates TIR directly into Cranelift IR and Cranelift handles instruction selection, register allocation, and emission. The plan's "TIR-to-Cranelift translator" framing in §4.3 is deliberate — there is no Ryo-owned MIR and won't be unless we drop Cranelift.
 - **`Compilation` / `Zcu` split.** Zig separates the overall build (`Compilation`: C interop, linking, output) from the Zig-source-only analysis context (`Zcu`: InternPool, decl table, export tracking). Today a Ryo program is a single compilation unit with no C interop, so we collapse both into the pipeline driver + `InternPool`. The split becomes interesting alongside C interop or multi-package builds; until then it's noise.
@@ -476,5 +476,5 @@ For one implementer, including review cycles. Phases 1 and 2 can run in parallel
 - Spec: §4 (Types), §10 (Compile-time evaluation — when written) — the type and comptime systems this work enables.
 - Dev: root `CLAUDE.md` — the authoritative map of the shipped `Lexer → … → UIR → Sema → TIR → Ownership → Codegen` pipeline this plan produced. Source: `ryo-core/src/{uir,tir,types,diag}.rs`, `ryo-frontend/src/{astgen,sema}.rs`.
 - Milestone/Roadmap: Phases 3–5 prerequisite *Compile-time Execution (comptime)* and *Full Generics System* in [implementation_roadmap.md](implementation_roadmap.md) (Phase 5, v0.2+).
-- Issues: [../../ISSUES.md](../../ISSUES.md) — Phases 1, 2, 3 collectively close I-008 (token lifetime), and Phase 4 makes I-006 (print to runtime) a one-day follow-up.
+- Issues: [../../ISSUES.md](../../ISSUES.md) — Phases 1, 2, 3 collectively close the token-lifetime workaround, and Phase 4 makes moving `print` to the runtime crate a one-day follow-up.
 - Inspiration: Zig's `src/InternPool.zig` (sidecar `extra` array, named primitive indices, single pool for types/strings/values), `src/AstGen.zig` → `src/Sema.zig` separation, `src/Zir.zig` and `src/Air.zig` shapes, `src/Module.zig`'s decl worklist.

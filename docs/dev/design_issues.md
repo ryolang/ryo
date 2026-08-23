@@ -84,7 +84,7 @@ These are underspecified aspects that will confuse developers if left undefined.
 
 *   `print` is variadic. Can users define them?
 *   **Proposal: Reserve for built-ins only (v0.1).** Users accept lists: `fn log(msgs: list[str])`.
-*   **Status:** Matches the current implementation (`print` is special-cased in codegen — I-006 — and user-defined variadics don't exist), but the reservation is not yet documented in the spec.
+*   **Status:** Matches the current implementation (`print` is special-cased in codegen and user-defined variadics don't exist), but the reservation is not yet documented in the spec.
 
 ### 11. Iterator Invalidation — OPEN (runtime piece only)
 

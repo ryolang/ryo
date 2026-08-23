@@ -2,6 +2,9 @@
 //! the `ryo-runtime` static archive build, previously duplicated
 //! verbatim between `ryo/build.rs` and `ryo-backend/build.rs`.
 
+// Build-time tooling; panics are the error channel.
+#![allow(clippy::panic, clippy::unwrap_used)]
+
 use std::path::{Path, PathBuf};
 
 /// Archive filename cargo emits for a `staticlib` crate on the given

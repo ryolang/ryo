@@ -1208,12 +1208,15 @@ name = "ryo-backend"
 version = "0.1.0"
 dependencies = [
  "build-support",
+ "chumsky",
+ "codspeed-divan-compat",
  "cranelift",
  "cranelift-jit",
  "cranelift-module",
  "cranelift-object",
  "dirs",
  "ryo-core",
+ "ryo-frontend",
  "ryo-runtime",
  "sha2",
  "tar",

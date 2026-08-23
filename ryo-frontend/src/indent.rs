@@ -58,17 +58,27 @@ pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, 
                     });
                 }
                 let new_level = whitespace.chars().filter(|c| *c == '\t').count();
-                let current_level = *indent_stack.last().unwrap();
+                let current_level = *indent_stack
+                    .last()
+                    .expect("indent stack is seeded with base level 0 and never fully popped");
 
                 if new_level > current_level {
                     indent_stack.push(new_level);
                     result.push((RawToken::Indent, *span));
                 } else if new_level < current_level {
-                    while *indent_stack.last().unwrap() > new_level {
+                    while *indent_stack
+                        .last()
+                        .expect("base level 0 stays on the stack: pops stop at `> new_level` and new_level >= 0")
+                        > new_level
+                    {
                         indent_stack.pop();
                         result.push((RawToken::Dedent, *span));
                     }
-                    if *indent_stack.last().unwrap() != new_level {
+                    if *indent_stack
+                        .last()
+                        .expect("dedent loop above cannot pop the base level 0")
+                        != new_level
+                    {
                         return Err(IndentError {
                             span: *span,
                             message: format!(

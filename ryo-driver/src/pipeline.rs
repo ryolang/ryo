@@ -199,7 +199,9 @@ fn rich_error_message(e: &Rich<'_, Token>, pool: &InternPool) -> String {
                 _ => format!(
                     "{}, or {}",
                     expected[..expected.len() - 1].join(", "),
-                    expected.last().unwrap()
+                    expected
+                        .last()
+                        .expect("this arm only runs when expected.len() >= 2")
                 ),
             };
             format!("{} expected {}", found, expected_part)

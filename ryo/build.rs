@@ -1,3 +1,6 @@
+// Build-time tooling; panics are the error channel.
+#![allow(clippy::panic, clippy::unwrap_used)]
+
 use sha2::{Digest, Sha256};
 use std::env;
 use std::path::PathBuf;
