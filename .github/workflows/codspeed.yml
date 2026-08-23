@@ -52,6 +52,27 @@ jobs:
           mode: simulation
           run: cargo codspeed run -p ryo-frontend
 
+  backend-benchmarks:
+    name: Run Backend Simulation Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: codspeed-backend
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+      - name: Build the benchmark target
+        run: cargo codspeed build -p ryo-backend
+      - name: Run backend benchmarks
+        uses: CodSpeedHQ/action@v4
+        with:
+          mode: simulation
+          run: cargo codspeed run -p ryo-backend
+
   aot-benchmarks:
     name: Run AOT Walltime Benchmarks
     runs-on: codspeed-macro

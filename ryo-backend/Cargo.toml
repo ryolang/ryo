@@ -24,6 +24,13 @@ build-support = { path = "../build-support" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryo-frontend = { workspace = true }
+chumsky = { workspace = true }
+divan = { version = "5.0.1", package = "codspeed-divan-compat" }
+
+[[bench]]
+name = "backend"
+harness = false
 
 [lints]
 workspace = true
