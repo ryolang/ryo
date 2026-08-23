@@ -63,7 +63,8 @@ too_many_lines = "deny"
 # R8/R13 — never panic on user input, no `todo!()` in shipped milestones.
 # `panic`/`todo`/`unimplemented`/`unwrap_used` are denied workspace-wide;
 # `expect_used` stays `allow` pending the per-site audit (I-153). Tests are
-# exempt via clippy.toml (`allow-*-in-tests`); build tooling (build scripts,
+# exempt for unwrap/expect/panic only via clippy.toml (`allow-*-in-tests`);
+# todo/unimplemented stay denied in tests too. Build tooling (build scripts,
 # `build-support`) carries file-level `#![allow]`s — panics are its error
 # channel.
 unwrap_used = "deny"
