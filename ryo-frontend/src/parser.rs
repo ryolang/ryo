@@ -894,7 +894,7 @@ mod tests {
     }
 
     /// Body statements of a `while` statement.
-    fn while_body<'a>(ast: &'a Ast, stmt: StmtId) -> &'a [StmtId] {
+    fn while_body(ast: &Ast, stmt: StmtId) -> &[StmtId] {
         match &ast.stmt(stmt).kind {
             StmtKind::WhileLoop { body, .. } => ast.stmt_list(*body),
             other => panic!("expected WhileLoop, got {other:?}"),
@@ -902,7 +902,7 @@ mod tests {
     }
 
     /// `(var, iterator, body)` of a `for` statement.
-    fn for_range<'a>(ast: &'a Ast, stmt: StmtId) -> (Ident, Ident, &'a [StmtId]) {
+    fn for_range(ast: &Ast, stmt: StmtId) -> (Ident, Ident, &[StmtId]) {
         match &ast.stmt(stmt).kind {
             StmtKind::ForRange {
                 var,
