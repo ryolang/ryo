@@ -1,0 +1,5 @@
+
+fn main():
+	iee754_infinite = 1.0/(2.0-2.0)
+	#TODO: assert inf
+	print(float_to_str(iee754_infinite))
