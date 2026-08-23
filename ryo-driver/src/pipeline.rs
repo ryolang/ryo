@@ -110,7 +110,7 @@ fn parse_source(
     input: &str,
     pool: &mut InternPool,
     source_name: &str,
-) -> Result<(ast::Program, Vec<Diag>), CompilerError> {
+) -> Result<(ast::Ast, Vec<Diag>), CompilerError> {
     // `lexer::lex` runs logos + indent processing + string and
     // integer interning in a single pass and never fails hard: it
     // emits structured `Diag`s into the sink and recovers so the
@@ -138,7 +138,12 @@ fn parse_source(
     // placeholder nodes). Callers thread the diagnostics into the
     // middle-end sink and keep analyzing, so one bad statement never
     // suppresses semantic diagnostics elsewhere in the file (R9).
-    let (program, errs) = program_parser().parse(token_stream).into_output_errors();
+    // The parser builds directly into the AST arenas, threaded
+    // as chumsky parser state.
+    let mut ast = ast::Ast::new();
+    let (out, errs) = program_parser()
+        .parse_with_state(token_stream, &mut ast)
+        .into_output_errors();
     for e in &errs {
         sink.emit(Diag::error(
             chumsky::span::SimpleSpan::new((), e.span().start..e.span().end),
@@ -146,8 +151,8 @@ fn parse_source(
             rich_error_message(e, pool),
         ));
     }
-    match program {
-        Some(program) => Ok((program, sink.into_diags())),
+    match out {
+        Some(()) => Ok((ast, sink.into_diags())),
         // Unrecoverable parse (no output even after recovery — e.g.
         // trailing garbage that swallows the end-of-input marker).
         None => Err(fail_with_diags(sink.into_diags(), input, source_name)),
@@ -331,7 +336,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
     }
 }
 
-fn display_ast(program: &ast::Program, pool: &InternPool) {
+fn display_ast(program: &ast::Ast, pool: &InternPool) {
     println!("[AST]");
     print!("{}", ryo_core::ast_pretty::render_program(program, pool));
 }
@@ -497,7 +502,7 @@ fn display_tir(tirs: &[Tir], pool: &InternPool) {
 /// front-end before codegen). `ryo ir` does its own staging so it
 /// can print partial UIR / TIR after a failure.
 fn lower_and_analyze(
-    program: &ast::Program,
+    program: &ast::Ast,
     pool: &mut InternPool,
     input: &str,
     source_name: &str,
@@ -781,14 +786,15 @@ mod tests {
             1,
             "expected exactly one parse diagnostic: {diags:?}"
         );
-        assert_eq!(program.statements.len(), 3);
+        let stmts = program.top_level_stmts();
+        assert_eq!(stmts.len(), 3);
         assert!(matches!(
-            program.statements[0].kind,
+            program.stmt(stmts[0]).kind,
             ast::StmtKind::VarDecl(_)
         ));
-        assert!(matches!(program.statements[1].kind, ast::StmtKind::Error));
+        assert!(matches!(program.stmt(stmts[1]).kind, ast::StmtKind::Error));
         assert!(matches!(
-            program.statements[2].kind,
+            program.stmt(stmts[2]).kind,
             ast::StmtKind::VarDecl(_)
         ));
     }

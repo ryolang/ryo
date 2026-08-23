@@ -180,12 +180,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
 
-### I-126 — AST is a `Box<Expression>` pointer tree, contradicting R1
-
-**Files:** `ryo-core/src/ast.rs` (`ExprKind` :412-428 — `BinaryOp`, `UnaryOp`, `MethodCall.receiver`, `Borrow`, `Slice` all box children), consumed by `ryo-frontend/src/astgen.rs` (`gen_expr` :370)
-**Summary:** R1 is absolute: *never* `Box<Node>` trees in compiler IR — flat `Vec`s with `u32` newtype indices, hot tags split from cold payloads. The AST is the one pipeline IR that still violates it: a recursive pointer tree with per-node heap allocation (R3's "count every allocation" applies too). Everything downstream (UIR/TIR) already follows the flat-arena discipline, so the AST is the outlier, and every new expression form deepens the tree shape that will eventually have to be rewritten. Works today; bites later — the rewrite only gets bigger.
-**Resolution:** Migrate `ast.rs` to a flat `Ast { tags: Vec<ExprTag>, payloads, spans }` struct-of-arrays with `ExprId(u32)` indices, mirroring the UIR/TIR encoding already in tree. Parser builds into the arena; astgen walks indices instead of `&Box`. Sizeable but mechanical; do it before the AST gains many more node kinds, and sequence it with I-012 (extract `pretty_print`) and I-029 (`FloatBits`) since all three touch the same file.
-
 ### I-127 — In-tree `unsafe` sites don't meet the R5 bar
 
 **Files:** `ryo-backend/src/codegen.rs` (:311, :314 — JIT `execute`), `ryo-core/src/types.rs` (:568 — `InternPool::str`)

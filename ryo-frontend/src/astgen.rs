@@ -58,22 +58,22 @@ impl Primitives {
     }
 }
 
-/// Lower an AST `Program` to UIR, accumulating diagnostics in `sink`.
+/// Lower an [`ast::Ast`] to UIR, accumulating diagnostics in `sink`.
 ///
 /// Returns the lowered UIR even on error (using `pool.error_type()`
 /// for any annotation that failed to resolve) so subsequent passes
 /// can keep type-checking and surface their own diagnostics. The
 /// driver decides whether to proceed based on `sink.has_errors()`.
-pub fn generate(program: &ast::Program, pool: &mut InternPool, sink: &mut DiagSink) -> Uir {
+pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) -> Uir {
     let mut func_defs: Vec<&ast::FunctionDef> = Vec::new();
-    let mut top_level: Vec<&ast::Statement> = Vec::new();
+    let mut top_level: Vec<ast::StmtId> = Vec::new();
 
     let main_id = pool.intern_str("main");
     let prims = Primitives::new(pool);
 
-    for stmt in &program.statements {
-        match &stmt.kind {
-            ast::StmtKind::FunctionDef(f) => func_defs.push(f),
+    for &stmt in program.top_level_stmts() {
+        match &program.stmt(stmt).kind {
+            ast::StmtKind::FunctionDef(def) => func_defs.push(def),
             // Parser-recovery placeholder: already diagnosed at the
             // parse stage, and not a "top-level statement" for the
             // explicit-main check.
@@ -82,13 +82,13 @@ pub fn generate(program: &ast::Program, pool: &mut InternPool, sink: &mut DiagSi
         }
     }
 
-    let has_explicit_main = func_defs.iter().any(|f| f.name.name == main_id);
+    let has_explicit_main = func_defs.iter().any(|def| def.name.name == main_id);
 
     if has_explicit_main && !top_level.is_empty() {
         // Anchor the diagnostic on the first stray top-level stmt;
         // pointing at "the program" with a 0..0 span is useless in
         // a renderer.
-        let span = top_level[0].span;
+        let span = program.stmt_span(top_level[0]);
         sink.emit(Diag::error(
             span,
             DiagCode::TopLevelWithExplicitMain,
@@ -101,14 +101,14 @@ pub fn generate(program: &ast::Program, pool: &mut InternPool, sink: &mut DiagSi
     let mut b = UirBuilder::new();
 
     for func in &func_defs {
-        gen_function_def(&mut b, func, &prims, pool, sink);
+        gen_function_def(&mut b, program, func, &prims, pool, sink);
     }
     if !has_explicit_main {
         // Synthesize an implicit `main` from top-level statements.
         // User-defined helper functions still appear above;
         // without this, calls to them in top-level code would
         // dangle as "undefined function" errors in sema.
-        gen_implicit_main(&mut b, &top_level, main_id, &prims, pool, sink);
+        gen_implicit_main(&mut b, program, &top_level, main_id, &prims, pool, sink);
     }
 
     b.finish()
@@ -160,21 +160,23 @@ fn resolve_type(
 
 fn lower_block(
     b: &mut UirBuilder,
-    stmts: &[ast::Statement],
+    ast: &ast::Ast,
+    stmts: &[ast::StmtId],
     prims: &Primitives,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> Vec<InstRef> {
     let mut out = Vec::new();
-    for s in stmts {
-        gen_stmt(b, s, prims, pool, sink, &mut out);
+    for &s in stmts {
+        gen_stmt(b, ast, s, prims, pool, sink, &mut out);
     }
     out
 }
 
 fn gen_implicit_main(
     b: &mut UirBuilder,
-    stmts: &[&ast::Statement],
+    ast: &ast::Ast,
+    stmts: &[ast::StmtId],
     main_id: StringId,
     prims: &Primitives,
     pool: &mut InternPool,
@@ -186,8 +188,8 @@ fn gen_implicit_main(
     // body shape matches an explicit `fn main():` written by the
     // user.
     let mut body_stmts: Vec<InstRef> = Vec::new();
-    for stmt in stmts {
-        gen_stmt(b, stmt, prims, pool, sink, &mut body_stmts);
+    for &stmt in stmts {
+        gen_stmt(b, ast, stmt, prims, pool, sink, &mut body_stmts);
     }
 
     let void_ty = pool.void();
@@ -196,6 +198,7 @@ fn gen_implicit_main(
 
 fn gen_function_def(
     b: &mut UirBuilder,
+    ast: &ast::Ast,
     func: &ast::FunctionDef,
     prims: &Primitives,
     pool: &mut InternPool,
@@ -246,7 +249,7 @@ fn gen_function_def(
         }
     }
 
-    let body_stmts = lower_block(b, &func.body, prims, pool, sink);
+    let body_stmts = lower_block(b, ast, ast.stmt_list(func.body), prims, pool, sink);
 
     b.add_function(
         func.name.name,
@@ -259,82 +262,87 @@ fn gen_function_def(
 
 fn gen_stmt(
     b: &mut UirBuilder,
-    stmt: &ast::Statement,
+    ast: &ast::Ast,
+    stmt: ast::StmtId,
     prims: &Primitives,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     out: &mut Vec<InstRef>,
 ) {
-    match &stmt.kind {
+    let span = ast.stmt_span(stmt);
+    match &ast.stmt(stmt).kind {
         ast::StmtKind::VarDecl(decl) => {
-            let initializer = gen_expr(b, &decl.initializer);
+            let initializer = gen_expr(b, ast, decl.initializer);
             let ty = decl
                 .type_annotation
                 .as_ref()
                 .map(|ann| resolve_type(ann.name, ann.is_view, ann.span, prims, pool, sink));
-            let r = b.var_decl(decl.name.name, decl.mutable, ty, initializer, stmt.span);
+            let r = b.var_decl(decl.name.name, decl.mutable, ty, initializer, span);
             out.push(r);
         }
-        ast::StmtKind::Return(Some(expr)) => {
-            let value = gen_expr(b, expr);
-            out.push(b.unary(InstTag::Return, value, stmt.span));
-        }
-        ast::StmtKind::Return(None) => {
-            out.push(b.return_void(stmt.span));
-        }
-        ast::StmtKind::ExprStmt(expr) => {
-            let value = gen_expr(b, expr);
-            out.push(b.unary(InstTag::ExprStmt, value, stmt.span));
+        ast::StmtKind::Return(value) => match value {
+            Some(expr) => {
+                let value = gen_expr(b, ast, *expr);
+                out.push(b.unary(InstTag::Return, value, span));
+            }
+            None => {
+                out.push(b.return_void(span));
+            }
+        },
+        ast::StmtKind::ExprStmt(value) => {
+            let value = gen_expr(b, ast, *value);
+            out.push(b.unary(InstTag::ExprStmt, value, span));
         }
         ast::StmtKind::FunctionDef(_) => {
             sink.emit(Diag::error(
-                stmt.span,
+                span,
                 DiagCode::NestedFunctionDef,
                 "nested function definitions are not supported",
             ));
         }
         ast::StmtKind::AssignOrDecl { target, value } => {
-            let value_ref = gen_expr(b, value);
-            let r = b.assign_or_decl(target.name, value_ref, stmt.span);
+            let value_ref = gen_expr(b, ast, *value);
+            let r = b.assign_or_decl(target.name, value_ref, span);
             out.push(r);
         }
         ast::StmtKind::CompoundAssign { target, op, value } => {
-            let value_ref = gen_expr(b, value);
-            let r = b.compound_assign(target.name, *op, value_ref, stmt.span);
+            let value_ref = gen_expr(b, ast, *value);
+            let r = b.compound_assign(target.name, *op, value_ref, span);
             out.push(r);
         }
         ast::StmtKind::IfStmt(if_stmt) => {
-            let cond = gen_expr(b, &if_stmt.cond);
-            let then_stmts = lower_block(b, &if_stmt.then_block, prims, pool, sink);
+            let cond = gen_expr(b, ast, if_stmt.cond);
+            let then_stmts =
+                lower_block(b, ast, ast.stmt_list(if_stmt.then_block), prims, pool, sink);
 
-            let elif_branches: Vec<_> = if_stmt
-                .elif_branches
+            let elif_branches: Vec<_> = ast
+                .elif_list(if_stmt.elif_branches)
                 .iter()
                 .map(|elif| {
-                    let elif_cond = gen_expr(b, &elif.cond);
-                    let elif_body = lower_block(b, &elif.block, prims, pool, sink);
+                    let elif_cond = gen_expr(b, ast, elif.cond);
+                    let elif_body =
+                        lower_block(b, ast, ast.stmt_list(elif.block), prims, pool, sink);
                     (elif_cond, elif_body)
                 })
                 .collect();
 
             let else_stmts = if_stmt
                 .else_block
-                .as_ref()
-                .map(|stmts| lower_block(b, stmts, prims, pool, sink));
+                .map(|stmts| lower_block(b, ast, ast.stmt_list(stmts), prims, pool, sink));
 
             let r = b.if_stmt(
                 cond,
                 &then_stmts,
                 &elif_branches,
                 else_stmts.as_deref(),
-                stmt.span,
+                span,
             );
             out.push(r);
         }
         ast::StmtKind::WhileLoop { cond, body } => {
-            let cond_ref = gen_expr(b, cond);
-            let body_refs = lower_block(b, body, prims, pool, sink);
-            let r = b.while_loop(cond_ref, &body_refs, stmt.span);
+            let cond_ref = gen_expr(b, ast, *cond);
+            let body_refs = lower_block(b, ast, ast.stmt_list(*body), prims, pool, sink);
+            let r = b.while_loop(cond_ref, &body_refs, span);
             out.push(r);
         }
         ast::StmtKind::ForRange {
@@ -354,18 +362,18 @@ fn gen_stmt(
                     ),
                 ));
             }
-            let start_ref = gen_expr(b, start);
-            let end_ref = gen_expr(b, end);
-            let body_refs = lower_block(b, body, prims, pool, sink);
-            let r = b.for_range(var.name, start_ref, end_ref, &body_refs, stmt.span);
+            let start_ref = gen_expr(b, ast, *start);
+            let end_ref = gen_expr(b, ast, *end);
+            let body_refs = lower_block(b, ast, ast.stmt_list(*body), prims, pool, sink);
+            let r = b.for_range(var.name, start_ref, end_ref, &body_refs, span);
             out.push(r);
         }
         ast::StmtKind::Break => {
-            let r = b.break_stmt(stmt.span);
+            let r = b.break_stmt(span);
             out.push(r);
         }
         ast::StmtKind::Continue => {
-            let r = b.continue_stmt(stmt.span);
+            let r = b.continue_stmt(span);
             out.push(r);
         }
         // Unparseable statement recovered by the parser. The parse
@@ -375,17 +383,19 @@ fn gen_stmt(
     }
 }
 
-fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
-    let span = expr.span;
-    match &expr.kind {
-        ast::ExprKind::Literal(ast::Literal::Int(n)) => b.int_literal(*n, span),
-        ast::ExprKind::Literal(ast::Literal::Str(id)) => b.str_literal(*id, span),
-        ast::ExprKind::Literal(ast::Literal::Bool(v)) => b.bool_literal(*v, span),
-        ast::ExprKind::Literal(ast::Literal::Float(v)) => b.float_literal(*v, span),
-        ast::ExprKind::Ident(id) => b.var_ref(*id, span),
+fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
+    let span = ast.expr_span(expr);
+    match ast.expr(expr).kind {
+        ast::ExprKind::Literal(lit) => match lit {
+            ast::Literal::Int(n) => b.int_literal(n, span),
+            ast::Literal::Str(id) => b.str_literal(id, span),
+            ast::Literal::Bool(v) => b.bool_literal(v, span),
+            ast::Literal::Float(v) => b.float_literal(v, span),
+        },
+        ast::ExprKind::Ident(name) => b.var_ref(name, span),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
-            let l = gen_expr(b, lhs);
-            let r = gen_expr(b, rhs);
+            let l = gen_expr(b, ast, lhs);
+            let r = gen_expr(b, ast, rhs);
             let tag = match op {
                 ast::BinaryOperator::Add => InstTag::Add,
                 ast::BinaryOperator::Sub => InstTag::Sub,
@@ -403,8 +413,8 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
             };
             b.binary(tag, l, r, span)
         }
-        ast::ExprKind::UnaryOp(op, sub) => {
-            let s = gen_expr(b, sub);
+        ast::ExprKind::UnaryOp(op, operand) => {
+            let s = gen_expr(b, ast, operand);
             let tag = match op {
                 ast::UnaryOperator::Neg => InstTag::Neg,
                 ast::UnaryOperator::Not => InstTag::Not,
@@ -412,29 +422,37 @@ fn gen_expr(b: &mut UirBuilder, expr: &ast::Expression) -> InstRef {
             b.unary(tag, s, span)
         }
         ast::ExprKind::Call(name, args) => {
-            let arg_refs: Vec<InstRef> = args.iter().map(|a| gen_expr(b, a)).collect();
-            b.call(*name, &arg_refs, span)
+            let arg_refs: Vec<InstRef> = ast
+                .expr_list(args)
+                .iter()
+                .map(|&a| gen_expr(b, ast, a))
+                .collect();
+            b.call(name, &arg_refs, span)
         }
         ast::ExprKind::MethodCall {
             receiver,
             method,
             args,
         } => {
-            let receiver_ref = gen_expr(b, receiver);
-            let arg_refs: Vec<InstRef> = args.iter().map(|a| gen_expr(b, a)).collect();
-            b.method_call(receiver_ref, *method, &arg_refs, span)
+            let receiver_ref = gen_expr(b, ast, receiver);
+            let arg_refs: Vec<InstRef> = ast
+                .expr_list(args)
+                .iter()
+                .map(|&a| gen_expr(b, ast, a))
+                .collect();
+            b.method_call(receiver_ref, method, &arg_refs, span)
         }
         ast::ExprKind::Borrow(inner) => {
-            let inner_ref = gen_expr(b, inner);
+            let inner_ref = gen_expr(b, ast, inner);
             b.borrow(inner_ref, span)
         }
         ast::ExprKind::Slice { base, start, end } => {
             // Slice projection `base[start:end]` (final spec §3);
             // bounds are optional shorthands. Sema type-checks the
             // base and yields `strview`.
-            let base_ref = gen_expr(b, base);
-            let start_ref = start.as_ref().map(|e| gen_expr(b, e));
-            let end_ref = end.as_ref().map(|e| gen_expr(b, e));
+            let base_ref = gen_expr(b, ast, base);
+            let start_ref = start.map(|e| gen_expr(b, ast, e));
+            let end_ref = end.map(|e| gen_expr(b, ast, e));
             b.slice(base_ref, start_ref, end_ref, span)
         }
     }
@@ -463,13 +481,14 @@ mod tests {
             lex_sink.into_diags()
         );
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
-        let program = program_parser()
-            .parse(token_stream)
+        let mut ast = ryo_core::ast::Ast::new();
+        program_parser()
+            .parse_with_state(token_stream, &mut ast)
             .into_result()
             .expect("parse ok");
 
         let mut sink = DiagSink::new();
-        let uir = generate(&program, &mut pool, &mut sink);
+        let uir = generate(&ast, &mut pool, &mut sink);
         if sink.has_errors() {
             Err(sink.into_diags())
         } else {

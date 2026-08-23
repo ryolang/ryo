@@ -9396,12 +9396,13 @@ mod tests {
             lex_sink.into_diags()
         );
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
-        let program = crate::parser::program_parser()
-            .parse(token_stream)
+        let mut ast = ryo_core::ast::Ast::new();
+        crate::parser::program_parser()
+            .parse_with_state(token_stream, &mut ast)
             .into_result()
             .expect("parse ok");
         let mut sink = DiagSink::new();
-        let uir = crate::astgen::generate(&program, &mut pool, &mut sink);
+        let uir = crate::astgen::generate(&ast, &mut pool, &mut sink);
         let tirs = crate::sema::analyze(
             &uir,
             &mut pool,

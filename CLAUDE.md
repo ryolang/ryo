@@ -63,7 +63,7 @@ cargo run -- run <file>          # JIT compile and execute
 cargo run -- build <file>        # AOT compile to binary
 cargo run -- toolchain install   # Download Zig linker
 cargo run -- toolchain status    # Check Zig status
-cargo clippy --all-targets       # Lint (warnings are errors)
+cargo clippy --workspace --all-targets -- -D warnings  # Lint; `-- -D warnings` matches CI (ci.yml sets RUSTFLAGS=-Dwarnings). `--workspace` is required — bare `--all-targets` only checks the default member `ryo` and misses other crates' test/bench targets
 cargo fmt --check                # Check code formatting style
 ```
 
@@ -75,7 +75,7 @@ cargo fmt --check                # Check code formatting style
 
 ## CI
 
-GitHub Actions runs on pushes to `main` and PRs targeting `main`: `cargo fmt --check` with `-Dwarnings`, `cargo clippy --all-targets` (warnings are errors), and `cargo test` (Ubuntu x64, Ubuntu ARM64, macOS). All three must pass for merge.
+GitHub Actions runs on pushes to `main` and PRs targeting `main`: `cargo fmt --check` with `-Dwarnings`, `cargo clippy --workspace --all-targets` (warnings are errors), and `cargo test` (Ubuntu x64, Ubuntu ARM64, macOS). All three must pass for merge.
 
 ---
 
@@ -200,7 +200,7 @@ See `docs/dev/pipeline_alignment.md` for the full design rationale (motivation, 
 #### 5. Shared Core Crate (`ryo-core`)
 | File | Role |
 |------|------|
-| `ryo-core/src/ast.rs` | Surface-syntax AST; identifiers/types/strings stored as `StringId` |
+| `ryo-core/src/ast.rs` | Surface-syntax AST: typed arenas (`Vec<Expr>` / `Vec<Stmt>` indexed by `ExprId` / `StmtId`, with `ExprKind` / `StmtKind` payload enums, list side arenas, and inline spans); identifiers/types/strings stored as `StringId` |
 | `ryo-core/src/uir.rs` | Untyped IR data structures (flat, program-wide arena) |
 | `ryo-core/src/tir.rs` | Typed IR data structures (flat, per-function arena) |
 | `ryo-core/src/ownership.rs` | Ownership pass side-tables and data structures (`BranchId`, `FreePoint`, etc.) |
@@ -230,28 +230,33 @@ Keyword,
 Number(&'a str),
 ```
 
-### 2. Add AST Node (ryo-core/src/ast.rs)
-- Add variant to `StmtKind` or `ExprKind`
-- Define a struct if complex (like `VarDecl`, `FunctionDef`)
-- Include `span: SimpleSpan` for error reporting
-- All nodes use `SimpleSpan` from Chumsky
+### 2. Add AST Enum Variant (ryo-core/src/ast.rs)
+The AST is a pair of typed arenas (`exprs` / `stmts`), not a pointer tree:
+- Add a variant to `StmtKind` or `ExprKind` with `ExprId` / `StmtId` children (never boxed subtrees)
+- Variable-size child lists (arg lists, block bodies) go into the `expr_lists` / `stmt_lists` side arenas behind `ExprList` / `StmtList` ranges; scalar payload structs (`VarDecl`, `FunctionDef`, …) stay inline in the variant
+- Add a builder method on `Ast` (pushes the value with its inline span, returns the id)
+- Consumers write plain exhaustive `match`es on `expr.kind` / `stmt.kind` — adding a variant makes the compiler flag every site you must update
 
 ### 3. Add Parser Rule (ryo-frontend/src/parser.rs)
-Use Chumsky combinators: `just(Token::X)` for exact match, `.then()` for sequence, `.or_not()` for optional, `.repeated()` for repetition, `.map_with()` to capture span.
+Use Chumsky combinators: `just(Token::X)` for exact match, `.then()` for sequence, `.or_not()` for optional, `.repeated()` for repetition. The parser is stateful: the `Ast` arenas are the chumsky state (`extra::Full<_, Ast, _>`, entered via `parse_with_state`), so node-producing combinators push through `e.state()` and yield `ExprId` / `StmtId` (annotate the closure param as `e: &mut Mx<'a, '_, I>` so `e.state()` type-checks). Use `foldl_with` when folding needs state.
 ```rust
 let my_feature = just(Token::Keyword).ignore_then(expression_parser())
-    .map_with(|expr, e| Statement { span: e.span(), kind: StmtKind::MyFeature(expr) });
+    .map_with(|expr, e: &mut Mx<'a, '_, I>| {
+        let span = e.span();
+        e.state().my_feature(expr, span)
+    });
 ```
 
 ### 4. Add UIR Instruction (ryo-core/src/uir.rs)
 UIR is **untyped**. Add a tag to the `Inst` tag enum (and a payload in `InstData` if needed). For variable-size payloads (arg lists, body statement lists), encode them into the `extra: Vec<u32>` arena and reference them via `ExtraRange`. Add a span entry parallel to the instruction. Avoid nesting: each sub-expression is its own `InstRef`.
 
 ### 5. Add AstGen Case (ryo-frontend/src/astgen.rs)
-In `astgen::generate` (and the per-stmt/per-expr helpers), translate the new AST node into UIR instructions. AstGen does *no* type checking — it only flattens the tree, interns identifiers via `InternPool`, and emits diagnostics through the `DiagSink` for structural issues.
+In `astgen::generate` (and the per-stmt/per-expr helpers), match the new variant and translate it into UIR instructions, following child ids via `ast.expr(id)` / `ast.stmt(id)` / `ast.stmt_list(range)`. AstGen does *no* type checking — it only flattens the AST into UIR, interns identifiers via `InternPool`, and emits diagnostics through the `DiagSink` for structural issues.
 ```rust
 ast::StmtKind::MyFeature(expr) => {
-    let expr_ref = self.gen_expr(expr);
-    self.emit(Inst::my_feature(expr_ref), stmt.span)
+    let expr_ref = gen_expr(b, ast, *expr);
+    let r = b.my_feature(expr_ref, ast.stmt_span(stmt));
+    out.push(r);
 }
 ```
 
