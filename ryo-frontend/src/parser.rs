@@ -234,8 +234,8 @@ where
 }
 
 /// Parse a complete Ryo program. The arena is the parser state: on
-/// success (including recovered partial parses) its `top_level` range
-/// lists the program's statements; the output `()` carries nothing.
+/// success (including recovered partial parses) its `top_level` list
+/// holds the program's statements; the output `()` carries nothing.
 pub fn program_parser<'a, I>() -> impl Parser<'a, I, (), PExtra<'a>> + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -247,7 +247,7 @@ where
     // the rest of the file.
     statement_list(statement_parser(), end())
         .then_ignore(end())
-        .map_with(|statements, e: &mut Mx<'a, '_, I>| e.state().set_top_level(&statements))
+        .map_with(|statements, e: &mut Mx<'a, '_, I>| e.state().set_top_level(statements))
         .boxed()
 }
 
@@ -433,6 +433,13 @@ where
         .then(else_block.or_not())
         .map_with(
             |(((cond, then_block), elif_branches), else_block), e: &mut Mx<'a, '_, I>| {
+                // Push each elif body into the `stmt_lists` arena up
+                // front: `if_stmt` takes `(ExprId, StmtList)` pairs,
+                // so no owned `Vec` crosses the builder API.
+                let elif_branches: Vec<(ExprId, StmtList)> = elif_branches
+                    .into_iter()
+                    .map(|(elif_cond, block)| (elif_cond, e.state().push_stmt_list(&block)))
+                    .collect();
                 let span = e.span();
                 e.state().if_stmt(
                     cond,
@@ -1084,7 +1091,7 @@ mod tests {
     #[test]
     fn parse_true_false_literals() {
         let (ast, _) = lex_and_parse("x = true\ny = false").unwrap();
-        let stmts = ast.top_level_stmts().to_vec();
+        let stmts = ast.top_level_stmts();
         let first = var_decl(&ast, stmts[0]);
         assert!(matches!(
             ast.expr(first.initializer).kind,
@@ -1288,7 +1295,7 @@ mod tests {
         let f = fn_def(&ast, only_stmt(&ast));
         let view = if_stmt(&ast, fn_body(&ast, f)[0]);
         assert!(view.else_block.is_some());
-        assert!(view.elif_branches.is_empty());
+        assert!(ast.elif_list(view.elif_branches).is_empty());
     }
 
     #[test]
@@ -1298,7 +1305,7 @@ mod tests {
         let (ast, _) = lex_and_parse(input).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
         let view = if_stmt(&ast, fn_body(&ast, f)[0]);
-        assert_eq!(view.elif_branches.len(), 1);
+        assert_eq!(ast.elif_list(view.elif_branches).len(), 1);
         assert!(view.else_block.is_some());
     }
 
@@ -1308,7 +1315,7 @@ mod tests {
         let (ast, _) = lex_and_parse(input).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
         let view = if_stmt(&ast, fn_body(&ast, f)[0]);
-        assert_eq!(view.elif_branches.len(), 2);
+        assert_eq!(ast.elif_list(view.elif_branches).len(), 2);
         assert!(view.else_block.is_some());
     }
 
@@ -1320,7 +1327,7 @@ mod tests {
         assert_eq!(fn_body(&ast, f).len(), 2);
         let view = if_stmt(&ast, fn_body(&ast, f)[0]);
         assert!(view.else_block.is_none());
-        assert!(view.elif_branches.is_empty());
+        assert!(ast.elif_list(view.elif_branches).is_empty());
     }
 
     #[test]

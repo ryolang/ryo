@@ -16,6 +16,7 @@
 use crate::ast::{Ast, ExprId, ExprKind, FunctionDef, IfStmt, Literal, StmtId, StmtKind, VarDecl};
 use crate::tir::ParamMode;
 use crate::types::InternPool;
+use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write as _;
 
@@ -27,7 +28,7 @@ pub fn render_program(ast: &Ast, pool: &InternPool) -> String {
 }
 
 fn write_program(out: &mut String, ast: &Ast, pool: &InternPool) -> fmt::Result {
-    writeln!(out, "Program ({}..{})", ast.span.start, ast.span.end)?;
+    writeln!(out, "Program ({}..{})", ast.span().start, ast.span().end)?;
     let stmts = ast.top_level_stmts();
     for (idx, &stmt) in stmts.iter().enumerate() {
         write_stmt_tree(out, ast, stmt, "", idx == stmts.len() - 1, pool)?;
@@ -214,10 +215,11 @@ fn write_if_stmt(
 ) -> fmt::Result {
     writeln!(out, "{}IfStmt", prefix)?;
     let inner = format!("{}  ", prefix);
+    let elifs = ast.elif_list(if_stmt.elif_branches);
     // Children: cond, then, elif*, else?. `then` always follows `cond`,
     // so `cond` is never the last child.
     write_expr(out, ast, if_stmt.cond, &inner, false, "cond: ", pool)?;
-    let has_tail = !if_stmt.elif_branches.is_empty() || if_stmt.else_block.is_some();
+    let has_tail = !elifs.is_empty() || if_stmt.else_block.is_some();
     write_block(
         out,
         "then:",
@@ -227,8 +229,8 @@ fn write_if_stmt(
         ast,
         pool,
     )?;
-    for (i, elif) in if_stmt.elif_branches.iter().enumerate() {
-        let last_elif = i == if_stmt.elif_branches.len() - 1 && if_stmt.else_block.is_none();
+    for (i, elif) in elifs.iter().enumerate() {
+        let last_elif = i == elifs.len() - 1 && if_stmt.else_block.is_none();
         write_expr(out, ast, elif.cond, &inner, false, "elif cond: ", pool)?;
         write_block(
             out,
@@ -301,20 +303,23 @@ fn write_expr(
     pool: &InternPool,
 ) -> fmt::Result {
     let expr = ast.expr(expr);
-    let name = match expr.kind {
+    // `Cow` so the constant labels borrow instead of allocating.
+    let name: Cow<'static, str> = match expr.kind {
         ExprKind::Literal(lit) => match lit {
-            Literal::Int(n) => format!("Literal(Int({}))", n),
-            Literal::Str(s) => format!("Literal(Str({:?}))", pool.str(s)),
-            Literal::Bool(b) => format!("Literal(Bool({}))", b),
-            Literal::Float(v) => format!("Literal(Float({}))", v),
+            Literal::Int(n) => Cow::Owned(format!("Literal(Int({}))", n)),
+            Literal::Str(s) => Cow::Owned(format!("Literal(Str({:?}))", pool.str(s))),
+            Literal::Bool(b) => Cow::Owned(format!("Literal(Bool({}))", b)),
+            Literal::Float(v) => Cow::Owned(format!("Literal(Float({}))", v)),
         },
-        ExprKind::Ident(name) => format!("Ident({})", pool.str(name)),
-        ExprKind::BinaryOp(_, op, _) => format!("BinaryOp({})", op),
-        ExprKind::UnaryOp(op, _) => format!("UnaryOp({})", op),
-        ExprKind::Call(name, _) => format!("Call({})", pool.str(name)),
-        ExprKind::MethodCall { method, .. } => format!("MethodCall(.{})", pool.str(method)),
-        ExprKind::Borrow(_) => "Borrow".to_string(),
-        ExprKind::Slice { .. } => "Slice".to_string(),
+        ExprKind::Ident(name) => Cow::Owned(format!("Ident({})", pool.str(name))),
+        ExprKind::BinaryOp(_, op, _) => Cow::Owned(format!("BinaryOp({})", op)),
+        ExprKind::UnaryOp(op, _) => Cow::Owned(format!("UnaryOp({})", op)),
+        ExprKind::Call(name, _) => Cow::Owned(format!("Call({})", pool.str(name))),
+        ExprKind::MethodCall { method, .. } => {
+            Cow::Owned(format!("MethodCall(.{})", pool.str(method)))
+        }
+        ExprKind::Borrow(_) => Cow::Borrowed("Borrow"),
+        ExprKind::Slice { .. } => Cow::Borrowed("Slice"),
     };
 
     writeln!(
@@ -423,16 +428,17 @@ mod tests {
         let then_s = return_stmt(&mut ast, 1);
         let elif_cond = int_expr(&mut ast, 2);
         let elif_s = return_stmt(&mut ast, 3);
+        let elif_block = ast.push_stmt_list(&[elif_s]);
         let else_s = return_stmt(&mut ast, 4);
         let if_stmt = ast.if_stmt(
             cond,
             &[then_s],
-            &[(elif_cond, vec![elif_s])],
+            &[(elif_cond, elif_block)],
             Some(&[else_s]),
             span(0, 0),
         );
         let func = ast.function_def(ident(&mut pool, "f"), &[], None, &[if_stmt], span(0, 0));
-        ast.set_top_level(&[func]);
+        ast.set_top_level(vec![func]);
 
         let out = render_program(&ast, &pool);
         assert!(out.contains("FunctionDef: f"), "missing function: {out}");
@@ -460,7 +466,7 @@ mod tests {
         let two = int_expr(&mut ast, 2);
         let init = ast.binary(BinaryOperator::Add, one, two, span(0, 0));
         let decl = ast.var_decl(false, ident(&mut pool, "x"), None, init, span(0, 0));
-        ast.set_top_level(&[decl]);
+        ast.set_top_level(vec![decl]);
 
         let out = render_program(&ast, &pool);
         let expected = "\
@@ -483,7 +489,7 @@ Program (0..0)
         let s = pool.intern_str("say \"hi\"\\n\n\t");
         let lit = ast.literal_str(s, span(0, 0));
         let stmt = ast.expr_stmt(lit, span(0, 0));
-        ast.set_top_level(&[stmt]);
+        ast.set_top_level(vec![stmt]);
 
         let out = render_program(&ast, &pool);
         assert!(

@@ -315,8 +315,8 @@ fn gen_stmt(
             let then_stmts =
                 lower_block(b, ast, ast.stmt_list(if_stmt.then_block), prims, pool, sink);
 
-            let elif_branches: Vec<_> = if_stmt
-                .elif_branches
+            let elif_branches: Vec<_> = ast
+                .elif_list(if_stmt.elif_branches)
                 .iter()
                 .map(|elif| {
                     let elif_cond = gen_expr(b, ast, elif.cond);

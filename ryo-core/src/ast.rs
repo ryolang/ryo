@@ -15,20 +15,26 @@
 //!   reserved sentinel that is never handed out.
 //! - `stmts: Vec<Stmt>` — indexed by [`StmtId`], same sentinel
 //!   convention.
-//! - `expr_lists: Vec<ExprId>` / `stmt_lists: Vec<StmtId>` — side
-//!   arenas for variable-length child lists (call arguments, block
-//!   bodies). A node that owns such a list stores an [`ExprList`] /
-//!   [`StmtList`] range into the side arena.
+//! - `expr_lists: Vec<ExprId>` / `stmt_lists: Vec<StmtId>` —
+//!   side arenas for variable-length child lists (call arguments,
+//!   block bodies). A node that owns such a list stores an
+//!   [`ExprList`] / [`StmtList`] range into the side arena.
+//! - `elifs: Vec<ElifBranch>` — side arena for an `if`'s elif
+//!   chain, behind an [`ElifList`] range.
 //! - `top_level: Vec<StmtId>` — the program's statements in source
 //!   order; everything below is reached by following ids out of them.
 //!
 //! `Expr`/`Stmt` carry their `span` inline and a plain Rust enum
 //! payload ([`ExprKind`]/[`StmtKind`]); consumers write ordinary
 //! exhaustive `match`es and follow child ids through
-//! [`Ast::expr`]/[`Ast::stmt`]/[`Ast::expr_list`]/[`Ast::stmt_list`].
-//! Payload structs with scalar metadata (`Ident`, `TypeExpr`,
-//! `Param`, `VarDecl`, `FunctionDef`, `IfStmt`, `ElifBranch`) are
-//! carried inline in the variants — only *nodes* are arena-allocated.
+//! [`Ast::expr`]/[`Ast::stmt`]/[`Ast::expr_list`]/
+//! [`Ast::stmt_list`]/[`Ast::elif_list`]. Payload structs (`Ident`,
+//! `TypeExpr`, `Param`, `VarDecl`, `FunctionDef`, `IfStmt`,
+//! `ElifBranch`) are carried inline in the variants — only *nodes*
+//! are arena-allocated. Every variable-length node list lives in a
+//! side arena, with one deliberate exception:
+//! [`FunctionDef::params`] stays an inline `Vec<Param>` because
+//! params are scalar metadata, not nodes.
 //!
 //! ## Why `NonZeroU32` for the ids
 //!
@@ -123,6 +129,21 @@ pub struct StmtList {
 }
 
 impl StmtList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+/// A `[offset, offset+len)` slice of the `elifs` side arena — an
+/// `if` statement's elif chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElifList {
+    offset: u32,
+    len: u32,
+}
+
+impl ElifList {
     fn as_range(self) -> std::ops::Range<usize> {
         let start = self.offset as usize;
         start..start + self.len as usize
@@ -225,11 +246,13 @@ pub enum StmtKind {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+// All fields are `Copy` handles, so the struct is too — matching on
+// `StmtKind::IfStmt(...)` can move it out of a shared reference.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IfStmt {
     pub cond: ExprId,
     pub then_block: StmtList,
-    pub elif_branches: Vec<ElifBranch>,
+    pub elif_branches: ElifList,
     pub else_block: Option<StmtList>,
 }
 
@@ -250,7 +273,9 @@ pub struct VarDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDef {
     pub name: Ident,
-    /// Scalar metadata, not nodes — kept inline rather than arena'd.
+    /// The one deliberate exception to the side-arena discipline:
+    /// params are scalar metadata, not nodes, so they stay an
+    /// inline `Vec`.
     pub params: Vec<Param>,
     pub return_type: Option<TypeExpr>,
     pub body: StmtList,
@@ -422,11 +447,12 @@ pub struct Ast {
     stmts: Vec<Stmt>,
     expr_lists: Vec<ExprId>,
     stmt_lists: Vec<StmtId>,
+    elifs: Vec<ElifBranch>,
     top_level: Vec<StmtId>,
     /// Span covering the first through last top-level statement;
     /// `0..0` for an empty program. Kept for the pretty-printer's
     /// `Program (start..end)` header.
-    pub span: SimpleSpan,
+    span: SimpleSpan,
 }
 
 impl Default for Ast {
@@ -452,6 +478,7 @@ impl Ast {
             }],
             expr_lists: Vec::new(),
             stmt_lists: Vec::new(),
+            elifs: Vec::new(),
             top_level: Vec::new(),
             span: SimpleSpan::new((), 0..0),
         }
@@ -487,22 +514,33 @@ impl Ast {
         &self.stmt_lists[list.as_range()]
     }
 
+    /// The element slice behind an [`ElifList`] range.
+    pub fn elif_list(&self, list: ElifList) -> &[ElifBranch] {
+        &self.elifs[list.as_range()]
+    }
+
     /// The program's top-level statements in source order.
     pub fn top_level_stmts(&self) -> &[StmtId] {
         &self.top_level
     }
 
+    /// Span covering the whole program (first through last top-level
+    /// statement; `0..0` for an empty program).
+    pub fn span(&self) -> SimpleSpan {
+        self.span
+    }
+
     /// Record the top-level statement list (called once by the
     /// parser at end of input) and stamp the program span from the
     /// first and last statements.
-    pub fn set_top_level(&mut self, stmts: &[StmtId]) {
-        self.top_level = stmts.to_vec();
+    pub fn set_top_level(&mut self, stmts: Vec<StmtId>) {
         self.span = match (stmts.first(), stmts.last()) {
             (Some(&first), Some(&last)) => {
                 SimpleSpan::new((), self.stmt_span(first).start..self.stmt_span(last).end)
             }
             _ => SimpleSpan::new((), 0..0),
         };
+        self.top_level = stmts;
     }
 }
 
@@ -541,15 +579,33 @@ impl Ast {
         }
     }
 
-    /// Copy a block body into the `stmt_lists` side arena; see
-    /// [`Self::push_expr_list`].
-    fn push_stmt_list(&mut self, items: &[StmtId]) -> StmtList {
+    /// Copy a block body into the `stmt_lists` side arena,
+    /// returning its range; see [`Self::push_expr_list`] for the
+    /// checked-conversion rationale. Public so the parser can push
+    /// elif bodies before calling [`Self::if_stmt`] — no owned `Vec`
+    /// crosses the builder API.
+    pub fn push_stmt_list(&mut self, items: &[StmtId]) -> StmtList {
         let offset =
             u32::try_from(self.stmt_lists.len()).expect("AST stmt_lists arena exceeded u32::MAX");
         self.stmt_lists.extend_from_slice(items);
         StmtList {
             offset,
             len: u32::try_from(items.len()).expect("AST stmt list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Copy an elif chain into the `elifs` side arena; see
+    /// [`Self::push_expr_list`].
+    fn push_elif_list(&mut self, items: &[(ExprId, StmtList)]) -> ElifList {
+        let offset = u32::try_from(self.elifs.len()).expect("AST elifs arena exceeded u32::MAX");
+        self.elifs.extend(
+            items
+                .iter()
+                .map(|&(cond, block)| ElifBranch { cond, block }),
+        );
+        ElifList {
+            offset,
+            len: u32::try_from(items.len()).expect("AST elif chain length exceeded u32::MAX"),
         }
     }
 
@@ -710,22 +766,19 @@ impl Ast {
         )
     }
 
+    /// Elif bodies must already live in the `stmt_lists` arena —
+    /// push each block with [`Self::push_stmt_list`] first, so no
+    /// owned `Vec` crosses this API.
     pub fn if_stmt(
         &mut self,
         cond: ExprId,
         then_stmts: &[StmtId],
-        elif_branches: &[(ExprId, Vec<StmtId>)],
+        elif_branches: &[(ExprId, StmtList)],
         else_stmts: Option<&[StmtId]>,
         span: SimpleSpan,
     ) -> StmtId {
         let then_block = self.push_stmt_list(then_stmts);
-        let elif_branches = elif_branches
-            .iter()
-            .map(|(cond, block)| ElifBranch {
-                cond: *cond,
-                block: self.push_stmt_list(block),
-            })
-            .collect();
+        let elif_branches = self.push_elif_list(elif_branches);
         let else_block = else_stmts.map(|stmts| self.push_stmt_list(stmts));
         self.push_stmt(
             StmtKind::IfStmt(IfStmt {
@@ -769,7 +822,7 @@ impl Ast {
 /// iteration rollbacks, error recovery) can push nodes before it
 /// fails; those ids never escape into a kept node, but without
 /// rollback the arenas would accumulate dead entries. Like chumsky's
-/// own `TruncateState`, the checkpoint records the four arena
+/// own `TruncateState`, the checkpoint records the five arena
 /// lengths and `on_rewind` truncates them, so a rewound region
 /// leaves the arenas exactly as it found them. Ids created before
 /// the checkpoint sit below the truncation point and stay valid;
@@ -778,7 +831,7 @@ impl Ast {
 /// written once by the final combinator, after which nothing can
 /// rewind.)
 impl<'src, I: chumsky::input::Input<'src>> chumsky::inspector::Inspector<'src, I> for Ast {
-    type Checkpoint = (usize, usize, usize, usize);
+    type Checkpoint = (usize, usize, usize, usize, usize);
 
     fn on_token(&mut self, _: &I::Token) {}
 
@@ -788,6 +841,7 @@ impl<'src, I: chumsky::input::Input<'src>> chumsky::inspector::Inspector<'src, I
             self.stmts.len(),
             self.expr_lists.len(),
             self.stmt_lists.len(),
+            self.elifs.len(),
         )
     }
 
@@ -795,11 +849,12 @@ impl<'src, I: chumsky::input::Input<'src>> chumsky::inspector::Inspector<'src, I
         &mut self,
         marker: &chumsky::input::Checkpoint<'src, 'parse, I, Self::Checkpoint>,
     ) {
-        let &(exprs, stmts, expr_lists, stmt_lists) = marker.inspector();
+        let &(exprs, stmts, expr_lists, stmt_lists, elifs) = marker.inspector();
         self.exprs.truncate(exprs);
         self.stmts.truncate(stmts);
         self.expr_lists.truncate(expr_lists);
         self.stmt_lists.truncate(stmt_lists);
+        self.elifs.truncate(elifs);
     }
 }
 
@@ -955,11 +1010,12 @@ mod tests {
         let then_s = ast.break_stmt(span(1, 2));
         let elif_cond = ast.literal_int(2, span(2, 3));
         let elif_s = ast.continue_stmt(span(3, 4));
+        let elif_block = ast.push_stmt_list(&[elif_s]);
         let else_s = ast.error_stmt(span(4, 5));
         let node = ast.if_stmt(
             cond,
             &[then_s],
-            &[(elif_cond, vec![elif_s])],
+            &[(elif_cond, elif_block)],
             Some(&[else_s]),
             span(0, 5),
         );
@@ -967,9 +1023,10 @@ mod tests {
             StmtKind::IfStmt(if_stmt) => {
                 assert_eq!(if_stmt.cond, cond);
                 assert_eq!(ast.stmt_list(if_stmt.then_block), &[then_s]);
-                assert_eq!(if_stmt.elif_branches.len(), 1);
-                assert_eq!(if_stmt.elif_branches[0].cond, elif_cond);
-                assert_eq!(ast.stmt_list(if_stmt.elif_branches[0].block), &[elif_s]);
+                let elifs = ast.elif_list(if_stmt.elif_branches);
+                assert_eq!(elifs.len(), 1);
+                assert_eq!(elifs[0].cond, elif_cond);
+                assert_eq!(ast.stmt_list(elifs[0].block), &[elif_s]);
                 assert_eq!(
                     if_stmt.else_block.map(|l| ast.stmt_list(l)),
                     Some(&[else_s][..])
