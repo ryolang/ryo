@@ -65,32 +65,30 @@ impl Primitives {
 /// can keep type-checking and surface their own diagnostics. The
 /// driver decides whether to proceed based on `sink.has_errors()`.
 pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) -> Uir {
-    let mut func_defs: Vec<ast::NodeRef> = Vec::new();
-    let mut top_level: Vec<ast::NodeRef> = Vec::new();
+    let mut func_defs: Vec<&ast::FunctionDef> = Vec::new();
+    let mut top_level: Vec<ast::StmtId> = Vec::new();
 
     let main_id = pool.intern_str("main");
     let prims = Primitives::new(pool);
 
-    for stmt in program.top_level_stmts() {
-        match program.tag(stmt) {
-            ast::NodeTag::FunctionDef => func_defs.push(stmt),
+    for &stmt in program.top_level_stmts() {
+        match &program.stmt(stmt).kind {
+            ast::StmtKind::FunctionDef(def) => func_defs.push(def),
             // Parser-recovery placeholder: already diagnosed at the
             // parse stage, and not a "top-level statement" for the
             // explicit-main check.
-            ast::NodeTag::Error => {}
+            ast::StmtKind::Error => {}
             _ => top_level.push(stmt),
         }
     }
 
-    let has_explicit_main = func_defs
-        .iter()
-        .any(|&f| program.function_def_view(f).name.name == main_id);
+    let has_explicit_main = func_defs.iter().any(|def| def.name.name == main_id);
 
     if has_explicit_main && !top_level.is_empty() {
         // Anchor the diagnostic on the first stray top-level stmt;
         // pointing at "the program" with a 0..0 span is useless in
         // a renderer.
-        let span = program.span(top_level[0]);
+        let span = program.stmt_span(top_level[0]);
         sink.emit(Diag::error(
             span,
             DiagCode::TopLevelWithExplicitMain,
@@ -102,7 +100,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
 
     let mut b = UirBuilder::new();
 
-    for &func in &func_defs {
+    for func in &func_defs {
         gen_function_def(&mut b, program, func, &prims, pool, sink);
     }
     if !has_explicit_main {
@@ -163,7 +161,7 @@ fn resolve_type(
 fn lower_block(
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    stmts: &[ast::NodeRef],
+    stmts: &[ast::StmtId],
     prims: &Primitives,
     pool: &mut InternPool,
     sink: &mut DiagSink,
@@ -178,7 +176,7 @@ fn lower_block(
 fn gen_implicit_main(
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    stmts: &[ast::NodeRef],
+    stmts: &[ast::StmtId],
     main_id: StringId,
     prims: &Primitives,
     pool: &mut InternPool,
@@ -201,12 +199,11 @@ fn gen_implicit_main(
 fn gen_function_def(
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    func_ref: ast::NodeRef,
+    func: &ast::FunctionDef,
     prims: &Primitives,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) {
-    let func = ast.function_def_view(func_ref);
     let params: Vec<UirParam> = func
         .params
         .iter()
@@ -252,7 +249,7 @@ fn gen_function_def(
         }
     }
 
-    let body_stmts = lower_block(b, ast, &func.body, prims, pool, sink);
+    let body_stmts = lower_block(b, ast, ast.stmt_list(func.body), prims, pool, sink);
 
     b.add_function(
         func.name.name,
@@ -266,16 +263,15 @@ fn gen_function_def(
 fn gen_stmt(
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    stmt: ast::NodeRef,
+    stmt: ast::StmtId,
     prims: &Primitives,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     out: &mut Vec<InstRef>,
 ) {
-    let span = ast.span(stmt);
-    match ast.tag(stmt) {
-        ast::NodeTag::VarDecl => {
-            let decl = ast.var_decl_view(stmt);
+    let span = ast.stmt_span(stmt);
+    match &ast.stmt(stmt).kind {
+        ast::StmtKind::VarDecl(decl) => {
             let initializer = gen_expr(b, ast, decl.initializer);
             let ty = decl
                 .type_annotation
@@ -284,57 +280,55 @@ fn gen_stmt(
             let r = b.var_decl(decl.name.name, decl.mutable, ty, initializer, span);
             out.push(r);
         }
-        ast::NodeTag::Return => match ast.return_value(stmt) {
+        ast::StmtKind::Return(value) => match value {
             Some(expr) => {
-                let value = gen_expr(b, ast, expr);
+                let value = gen_expr(b, ast, *expr);
                 out.push(b.unary(InstTag::Return, value, span));
             }
             None => {
                 out.push(b.return_void(span));
             }
         },
-        ast::NodeTag::ExprStmt => {
-            let value = gen_expr(b, ast, ast.expr_stmt_value(stmt));
+        ast::StmtKind::ExprStmt(value) => {
+            let value = gen_expr(b, ast, *value);
             out.push(b.unary(InstTag::ExprStmt, value, span));
         }
-        ast::NodeTag::FunctionDef => {
+        ast::StmtKind::FunctionDef(_) => {
             sink.emit(Diag::error(
                 span,
                 DiagCode::NestedFunctionDef,
                 "nested function definitions are not supported",
             ));
         }
-        ast::NodeTag::AssignOrDecl => {
-            let view = ast.assign_or_decl_view(stmt);
-            let value_ref = gen_expr(b, ast, view.value);
-            let r = b.assign_or_decl(view.target.name, value_ref, span);
+        ast::StmtKind::AssignOrDecl { target, value } => {
+            let value_ref = gen_expr(b, ast, *value);
+            let r = b.assign_or_decl(target.name, value_ref, span);
             out.push(r);
         }
-        ast::NodeTag::CompoundAssign => {
-            let view = ast.compound_assign_view(stmt);
-            let value_ref = gen_expr(b, ast, view.value);
-            let r = b.compound_assign(view.target.name, view.op, value_ref, span);
+        ast::StmtKind::CompoundAssign { target, op, value } => {
+            let value_ref = gen_expr(b, ast, *value);
+            let r = b.compound_assign(target.name, *op, value_ref, span);
             out.push(r);
         }
-        ast::NodeTag::IfStmt => {
-            let if_stmt = ast.if_stmt_view(stmt);
+        ast::StmtKind::IfStmt(if_stmt) => {
             let cond = gen_expr(b, ast, if_stmt.cond);
-            let then_stmts = lower_block(b, ast, &if_stmt.then_block, prims, pool, sink);
+            let then_stmts =
+                lower_block(b, ast, ast.stmt_list(if_stmt.then_block), prims, pool, sink);
 
             let elif_branches: Vec<_> = if_stmt
                 .elif_branches
                 .iter()
                 .map(|elif| {
                     let elif_cond = gen_expr(b, ast, elif.cond);
-                    let elif_body = lower_block(b, ast, &elif.block, prims, pool, sink);
+                    let elif_body =
+                        lower_block(b, ast, ast.stmt_list(elif.block), prims, pool, sink);
                     (elif_cond, elif_body)
                 })
                 .collect();
 
             let else_stmts = if_stmt
                 .else_block
-                .as_ref()
-                .map(|stmts| lower_block(b, ast, stmts, prims, pool, sink));
+                .map(|stmts| lower_block(b, ast, ast.stmt_list(stmts), prims, pool, sink));
 
             let r = b.if_stmt(
                 cond,
@@ -345,68 +339,64 @@ fn gen_stmt(
             );
             out.push(r);
         }
-        ast::NodeTag::WhileLoop => {
-            let view = ast.while_loop_view(stmt);
-            let cond_ref = gen_expr(b, ast, view.cond);
-            let body_refs = lower_block(b, ast, &view.body, prims, pool, sink);
+        ast::StmtKind::WhileLoop { cond, body } => {
+            let cond_ref = gen_expr(b, ast, *cond);
+            let body_refs = lower_block(b, ast, ast.stmt_list(*body), prims, pool, sink);
             let r = b.while_loop(cond_ref, &body_refs, span);
             out.push(r);
         }
-        ast::NodeTag::ForRange => {
-            let view = ast.for_range_view(stmt);
-            if pool.str(view.iterator.name) != "range" {
+        ast::StmtKind::ForRange {
+            var,
+            iterator,
+            start,
+            end,
+            body,
+        } => {
+            if pool.str(iterator.name) != "range" {
                 sink.emit(Diag::error(
-                    view.iterator.span,
+                    iterator.span,
                     DiagCode::ParseError,
                     format!(
                         "only `range(...)` is supported in `for` loops in v0.1, got `{}`",
-                        pool.str(view.iterator.name),
+                        pool.str(iterator.name),
                     ),
                 ));
             }
-            let start_ref = gen_expr(b, ast, view.start);
-            let end_ref = gen_expr(b, ast, view.end);
-            let body_refs = lower_block(b, ast, &view.body, prims, pool, sink);
-            let r = b.for_range(view.var.name, start_ref, end_ref, &body_refs, span);
+            let start_ref = gen_expr(b, ast, *start);
+            let end_ref = gen_expr(b, ast, *end);
+            let body_refs = lower_block(b, ast, ast.stmt_list(*body), prims, pool, sink);
+            let r = b.for_range(var.name, start_ref, end_ref, &body_refs, span);
             out.push(r);
         }
-        ast::NodeTag::Break => {
+        ast::StmtKind::Break => {
             let r = b.break_stmt(span);
             out.push(r);
         }
-        ast::NodeTag::Continue => {
+        ast::StmtKind::Continue => {
             let r = b.continue_stmt(span);
             out.push(r);
         }
         // Unparseable statement recovered by the parser. The parse
         // diagnostic was already emitted; lower it to nothing so the
         // rest of the program still reaches sema.
-        ast::NodeTag::Error => {}
-        // Expression nodes never appear in statement position: the
-        // parser wraps them in ExprStmt/Return/etc. (trusted
-        // producer).
-        _ => unreachable!("expression node in statement position"),
+        ast::StmtKind::Error => {}
     }
 }
 
-fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::NodeRef) -> InstRef {
-    let span = ast.span(expr);
-    match ast.tag(expr) {
-        ast::NodeTag::LiteralInt
-        | ast::NodeTag::LiteralStr
-        | ast::NodeTag::LiteralBool
-        | ast::NodeTag::LiteralFloat => match ast.literal_view(expr) {
+fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
+    let span = ast.expr_span(expr);
+    match ast.expr(expr).kind {
+        ast::ExprKind::Literal(lit) => match lit {
             ast::Literal::Int(n) => b.int_literal(n, span),
             ast::Literal::Str(id) => b.str_literal(id, span),
             ast::Literal::Bool(v) => b.bool_literal(v, span),
             ast::Literal::Float(v) => b.float_literal(v, span),
         },
-        ast::NodeTag::Ident => b.var_ref(ast.ident_name(expr), span),
-        ast::NodeTag::BinaryOp => {
-            let view = ast.binary_op_view(expr);
-            let l = gen_expr(b, ast, view.lhs);
-            let r = gen_expr(b, ast, view.rhs);
-            let tag = match view.op {
+        ast::ExprKind::Ident(name) => b.var_ref(name, span),
+        ast::ExprKind::BinaryOp(lhs, op, rhs) => {
+            let l = gen_expr(b, ast, lhs);
+            let r = gen_expr(b, ast, rhs);
+            let tag = match op {
                 ast::BinaryOperator::Add => InstTag::Add,
                 ast::BinaryOperator::Sub => InstTag::Sub,
                 ast::BinaryOperator::Mul => InstTag::Mul,
@@ -423,43 +413,48 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::NodeRef) -> InstRef {
             };
             b.binary(tag, l, r, span)
         }
-        ast::NodeTag::UnaryOp => {
-            let view = ast.unary_op_view(expr);
-            let s = gen_expr(b, ast, view.operand);
-            let tag = match view.op {
+        ast::ExprKind::UnaryOp(op, operand) => {
+            let s = gen_expr(b, ast, operand);
+            let tag = match op {
                 ast::UnaryOperator::Neg => InstTag::Neg,
                 ast::UnaryOperator::Not => InstTag::Not,
             };
             b.unary(tag, s, span)
         }
-        ast::NodeTag::Call => {
-            let view = ast.call_view(expr);
-            let arg_refs: Vec<InstRef> = view.args.iter().map(|&a| gen_expr(b, ast, a)).collect();
-            b.call(view.name, &arg_refs, span)
+        ast::ExprKind::Call(name, args) => {
+            let arg_refs: Vec<InstRef> = ast
+                .expr_list(args)
+                .iter()
+                .map(|&a| gen_expr(b, ast, a))
+                .collect();
+            b.call(name, &arg_refs, span)
         }
-        ast::NodeTag::MethodCall => {
-            let view = ast.method_call_view(expr);
-            let receiver_ref = gen_expr(b, ast, view.receiver);
-            let arg_refs: Vec<InstRef> = view.args.iter().map(|&a| gen_expr(b, ast, a)).collect();
-            b.method_call(receiver_ref, view.method, &arg_refs, span)
+        ast::ExprKind::MethodCall {
+            receiver,
+            method,
+            args,
+        } => {
+            let receiver_ref = gen_expr(b, ast, receiver);
+            let arg_refs: Vec<InstRef> = ast
+                .expr_list(args)
+                .iter()
+                .map(|&a| gen_expr(b, ast, a))
+                .collect();
+            b.method_call(receiver_ref, method, &arg_refs, span)
         }
-        ast::NodeTag::Borrow => {
-            let inner_ref = gen_expr(b, ast, ast.borrow_inner(expr));
+        ast::ExprKind::Borrow(inner) => {
+            let inner_ref = gen_expr(b, ast, inner);
             b.borrow(inner_ref, span)
         }
-        ast::NodeTag::Slice => {
+        ast::ExprKind::Slice { base, start, end } => {
             // Slice projection `base[start:end]` (final spec §3);
             // bounds are optional shorthands. Sema type-checks the
             // base and yields `strview`.
-            let view = ast.slice_view(expr);
-            let base_ref = gen_expr(b, ast, view.base);
-            let start_ref = view.start.map(|e| gen_expr(b, ast, e));
-            let end_ref = view.end.map(|e| gen_expr(b, ast, e));
+            let base_ref = gen_expr(b, ast, base);
+            let start_ref = start.map(|e| gen_expr(b, ast, e));
+            let end_ref = end.map(|e| gen_expr(b, ast, e));
             b.slice(base_ref, start_ref, end_ref, span)
         }
-        // Statement nodes never appear in expression position
-        // (trusted producer).
-        _ => unreachable!("statement node in expression position"),
     }
 }
 

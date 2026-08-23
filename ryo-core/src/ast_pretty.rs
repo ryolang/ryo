@@ -3,9 +3,9 @@
 //! Presentation logic lives here so `ast.rs` stays data-only. The
 //! printer resolves `StringId` handles through the compilation's
 //! `InternPool` and renders into a `String`, so callers decide where
-//! the output goes and tests can capture it. It walks [`NodeRef`]s
-//! into the flat arena — the AST is not a pointer tree, so the
-//! printer carries `&Ast` alongside every ref.
+//! the output goes and tests can capture it. It walks the typed
+//! arenas — the AST is not a pointer tree, so the printer carries
+//! `&Ast` alongside every id.
 //!
 //! Layout convention: every node occupies one line as
 //! `{prefix}{connector}{label} (span)`, where `connector` is `├── `
@@ -13,7 +13,7 @@
 //! `{prefix}{"│   " | "    "}` depending on whether the node was the
 //! last child of its parent.
 
-use crate::ast::{Ast, Literal, NodeRef, NodeTag};
+use crate::ast::{Ast, ExprId, ExprKind, FunctionDef, IfStmt, Literal, StmtId, StmtKind, VarDecl};
 use crate::tir::ParamMode;
 use crate::types::InternPool;
 use std::fmt;
@@ -40,7 +40,7 @@ fn write_program(out: &mut String, ast: &Ast, pool: &InternPool) -> fmt::Result 
 fn write_stmt_tree(
     out: &mut String,
     ast: &Ast,
-    stmt: NodeRef,
+    stmt: StmtId,
     prefix: &str,
     is_last: bool,
     pool: &InternPool,
@@ -60,24 +60,27 @@ fn continuation(is_last: bool) -> &'static str {
     if is_last { "    " } else { "│   " }
 }
 
-fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: NodeRef) -> fmt::Result {
-    let label = match ast.tag(stmt) {
-        NodeTag::VarDecl => "VarDecl",
-        NodeTag::FunctionDef => "FunctionDef",
-        NodeTag::Return => "Return",
-        NodeTag::ExprStmt => "ExprStmt",
-        NodeTag::IfStmt => "IfStmt",
-        NodeTag::AssignOrDecl => "AssignOrDecl",
-        NodeTag::CompoundAssign => "CompoundAssign",
-        NodeTag::WhileLoop => "WhileLoop",
-        NodeTag::ForRange => "ForRange",
-        NodeTag::Break => "Break",
-        NodeTag::Continue => "Continue",
-        NodeTag::Error => "Error",
-        other => unreachable!("statement node expected, got {other:?}"),
+fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
+    let stmt = ast.stmt(stmt);
+    let label = match stmt.kind {
+        StmtKind::VarDecl(_) => "VarDecl",
+        StmtKind::FunctionDef(_) => "FunctionDef",
+        StmtKind::Return(_) => "Return",
+        StmtKind::ExprStmt(_) => "ExprStmt",
+        StmtKind::IfStmt(_) => "IfStmt",
+        StmtKind::AssignOrDecl { .. } => "AssignOrDecl",
+        StmtKind::CompoundAssign { .. } => "CompoundAssign",
+        StmtKind::WhileLoop { .. } => "WhileLoop",
+        StmtKind::ForRange { .. } => "ForRange",
+        StmtKind::Break => "Break",
+        StmtKind::Continue => "Continue",
+        StmtKind::Error => "Error",
     };
-    let span = ast.span(stmt);
-    write!(out, "Statement [{}] ({}..{})", label, span.start, span.end)
+    write!(
+        out,
+        "Statement [{}] ({}..{})",
+        label, stmt.span.start, stmt.span.end
+    )
 }
 
 /// Write a list of block statements (function/if/loop bodies) under a
@@ -85,7 +88,7 @@ fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: NodeRef) -> fmt::Result 
 fn write_block(
     out: &mut String,
     header: &str,
-    body: &[NodeRef],
+    body: &[StmtId],
     prefix: &str,
     is_last: bool,
     ast: &Ast,
@@ -102,106 +105,113 @@ fn write_block(
 fn write_stmt_children(
     out: &mut String,
     ast: &Ast,
-    stmt: NodeRef,
+    stmt: StmtId,
     prefix: &str,
     pool: &InternPool,
 ) -> fmt::Result {
-    match ast.tag(stmt) {
-        NodeTag::VarDecl => write_var_decl(out, ast, stmt, prefix, pool),
-        NodeTag::FunctionDef => {
-            let func = ast.function_def_view(stmt);
-            writeln!(out, "{}FunctionDef: {}", prefix, pool.str(func.name.name))?;
-            let inner = format!("{}  ", prefix);
-            for param in &func.params {
-                let mode_prefix = match param.mode {
-                    ParamMode::Move => "move ",
-                    ParamMode::Inout => "inout ",
-                    ParamMode::Borrow => "",
-                };
-                writeln!(
-                    out,
-                    "{}├── param: {}{}: {}",
-                    inner,
-                    mode_prefix,
-                    pool.str(param.name.name),
-                    pool.str(param.type_annotation.name),
-                )?;
-            }
-            if let Some(ret_ty) = &func.return_type {
-                writeln!(out, "{}├── returns: {}", inner, pool.str(ret_ty.name))?;
-            }
-            write_block(out, "body:", &func.body, &inner, true, ast, pool)
-        }
-        NodeTag::Return => {
-            if let Some(e) = ast.return_value(stmt) {
-                write_expr(out, ast, e, prefix, true, "", pool)?;
+    match &ast.stmt(stmt).kind {
+        StmtKind::VarDecl(decl) => write_var_decl(out, ast, decl, prefix, pool),
+        StmtKind::FunctionDef(func) => write_function_def(out, ast, func, prefix, pool),
+        StmtKind::Return(value) => {
+            if let Some(e) = value {
+                write_expr(out, ast, *e, prefix, true, "", pool)?;
             }
             Ok(())
         }
-        NodeTag::ExprStmt => {
-            let value = ast.expr_stmt_value(stmt);
-            write_expr(out, ast, value, prefix, true, "", pool)
-        }
-        NodeTag::IfStmt => write_if_stmt(out, ast, stmt, prefix, pool),
-        NodeTag::AssignOrDecl => {
-            let view = ast.assign_or_decl_view(stmt);
-            writeln!(
-                out,
-                "{}AssignOrDecl: {}",
-                prefix,
-                pool.str(view.target.name)
-            )?;
+        StmtKind::ExprStmt(value) => write_expr(out, ast, *value, prefix, true, "", pool),
+        StmtKind::IfStmt(if_stmt) => write_if_stmt(out, ast, if_stmt, prefix, pool),
+        StmtKind::AssignOrDecl { target, value } => {
+            writeln!(out, "{}AssignOrDecl: {}", prefix, pool.str(target.name))?;
             let inner = format!("{}  ", prefix);
-            write_expr(out, ast, view.value, &inner, true, "", pool)
+            write_expr(out, ast, *value, &inner, true, "", pool)
         }
-        NodeTag::CompoundAssign => {
-            let view = ast.compound_assign_view(stmt);
+        StmtKind::CompoundAssign { target, op, value } => {
             writeln!(
                 out,
                 "{}CompoundAssign: {} {:?}",
                 prefix,
-                pool.str(view.target.name),
-                view.op
+                pool.str(target.name),
+                op
             )?;
             let inner = format!("{}  ", prefix);
-            write_expr(out, ast, view.value, &inner, true, "", pool)
+            write_expr(out, ast, *value, &inner, true, "", pool)
         }
-        NodeTag::WhileLoop => {
-            let view = ast.while_loop_view(stmt);
+        StmtKind::WhileLoop { cond, body } => {
             writeln!(out, "{}WhileLoop", prefix)?;
             let inner = format!("{}  ", prefix);
-            write_expr(out, ast, view.cond, &inner, false, "cond: ", pool)?;
-            write_block(out, "body:", &view.body, &inner, true, ast, pool)
+            write_expr(out, ast, *cond, &inner, false, "cond: ", pool)?;
+            write_block(out, "body:", ast.stmt_list(*body), &inner, true, ast, pool)
         }
-        NodeTag::ForRange => {
-            let view = ast.for_range_view(stmt);
+        StmtKind::ForRange {
+            var,
+            iterator,
+            start,
+            end,
+            body,
+        } => {
             writeln!(
                 out,
                 "{}ForRange: {} in {}",
                 prefix,
-                pool.str(view.var.name),
-                pool.str(view.iterator.name)
+                pool.str(var.name),
+                pool.str(iterator.name)
             )?;
             let inner = format!("{}  ", prefix);
-            write_expr(out, ast, view.start, &inner, false, "start: ", pool)?;
-            write_expr(out, ast, view.end, &inner, false, "end: ", pool)?;
-            write_block(out, "body:", &view.body, &inner, true, ast, pool)
+            write_expr(out, ast, *start, &inner, false, "start: ", pool)?;
+            write_expr(out, ast, *end, &inner, false, "end: ", pool)?;
+            write_block(out, "body:", ast.stmt_list(*body), &inner, true, ast, pool)
         }
-        NodeTag::Break => writeln!(out, "{}Break", prefix),
-        NodeTag::Continue => writeln!(out, "{}Continue", prefix),
-        NodeTag::Error => writeln!(out, "{}Error (unparseable)", prefix),
-        other => unreachable!("statement node expected, got {other:?}"),
+        StmtKind::Break => writeln!(out, "{}Break", prefix),
+        StmtKind::Continue => writeln!(out, "{}Continue", prefix),
+        StmtKind::Error => writeln!(out, "{}Error (unparseable)", prefix),
     }
+}
+
+fn write_function_def(
+    out: &mut String,
+    ast: &Ast,
+    func: &FunctionDef,
+    prefix: &str,
+    pool: &InternPool,
+) -> fmt::Result {
+    writeln!(out, "{}FunctionDef: {}", prefix, pool.str(func.name.name))?;
+    let inner = format!("{}  ", prefix);
+    for param in &func.params {
+        let mode_prefix = match param.mode {
+            ParamMode::Move => "move ",
+            ParamMode::Inout => "inout ",
+            ParamMode::Borrow => "",
+        };
+        writeln!(
+            out,
+            "{}├── param: {}{}: {}",
+            inner,
+            mode_prefix,
+            pool.str(param.name.name),
+            pool.str(param.type_annotation.name),
+        )?;
+    }
+    if let Some(ret_ty) = &func.return_type {
+        writeln!(out, "{}├── returns: {}", inner, pool.str(ret_ty.name))?;
+    }
+    write_block(
+        out,
+        "body:",
+        ast.stmt_list(func.body),
+        &inner,
+        true,
+        ast,
+        pool,
+    )
 }
 
 fn write_if_stmt(
     out: &mut String,
     ast: &Ast,
-    stmt: NodeRef,
+    if_stmt: &IfStmt,
     prefix: &str,
     pool: &InternPool,
 ) -> fmt::Result {
-    let if_stmt = ast.if_stmt_view(stmt);
     writeln!(out, "{}IfStmt", prefix)?;
     let inner = format!("{}  ", prefix);
     // Children: cond, then, elif*, else?. `then` always follows `cond`,
@@ -211,7 +221,7 @@ fn write_if_stmt(
     write_block(
         out,
         "then:",
-        &if_stmt.then_block,
+        ast.stmt_list(if_stmt.then_block),
         &inner,
         !has_tail,
         ast,
@@ -220,10 +230,26 @@ fn write_if_stmt(
     for (i, elif) in if_stmt.elif_branches.iter().enumerate() {
         let last_elif = i == if_stmt.elif_branches.len() - 1 && if_stmt.else_block.is_none();
         write_expr(out, ast, elif.cond, &inner, false, "elif cond: ", pool)?;
-        write_block(out, "elif body:", &elif.block, &inner, last_elif, ast, pool)?;
+        write_block(
+            out,
+            "elif body:",
+            ast.stmt_list(elif.block),
+            &inner,
+            last_elif,
+            ast,
+            pool,
+        )?;
     }
-    if let Some(else_block) = &if_stmt.else_block {
-        write_block(out, "else:", else_block, &inner, true, ast, pool)?;
+    if let Some(else_block) = if_stmt.else_block {
+        write_block(
+            out,
+            "else:",
+            ast.stmt_list(else_block),
+            &inner,
+            true,
+            ast,
+            pool,
+        )?;
     }
     Ok(())
 }
@@ -231,11 +257,10 @@ fn write_if_stmt(
 fn write_var_decl(
     out: &mut String,
     ast: &Ast,
-    stmt: NodeRef,
+    decl: &VarDecl,
     prefix: &str,
     pool: &InternPool,
 ) -> fmt::Result {
-    let decl = ast.var_decl_view(stmt);
     writeln!(out, "{}VarDecl", prefix)?;
     let new_prefix = format!("{}  ", prefix);
     if decl.mutable {
@@ -269,39 +294,29 @@ fn write_var_decl(
 fn write_expr(
     out: &mut String,
     ast: &Ast,
-    expr: NodeRef,
+    expr: ExprId,
     prefix: &str,
     is_last: bool,
     label: &str,
     pool: &InternPool,
 ) -> fmt::Result {
-    let tag = ast.tag(expr);
-    let name = match tag {
-        NodeTag::LiteralInt
-        | NodeTag::LiteralStr
-        | NodeTag::LiteralBool
-        | NodeTag::LiteralFloat => match ast.literal_view(expr) {
+    let expr = ast.expr(expr);
+    let name = match expr.kind {
+        ExprKind::Literal(lit) => match lit {
             Literal::Int(n) => format!("Literal(Int({}))", n),
             Literal::Str(s) => format!("Literal(Str({:?}))", pool.str(s)),
             Literal::Bool(b) => format!("Literal(Bool({}))", b),
             Literal::Float(v) => format!("Literal(Float({}))", v),
         },
-        NodeTag::Ident => format!("Ident({})", pool.str(ast.ident_name(expr))),
-        NodeTag::BinaryOp => format!("BinaryOp({})", ast.binary_op_view(expr).op),
-        NodeTag::UnaryOp => format!("UnaryOp({})", ast.unary_op_view(expr).op),
-        NodeTag::Call => format!("Call({})", pool.str(ast.call_view(expr).name)),
-        NodeTag::MethodCall => {
-            format!(
-                "MethodCall(.{})",
-                pool.str(ast.method_call_view(expr).method)
-            )
-        }
-        NodeTag::Borrow => "Borrow".to_string(),
-        NodeTag::Slice => "Slice".to_string(),
-        other => unreachable!("expression node expected, got {other:?}"),
+        ExprKind::Ident(name) => format!("Ident({})", pool.str(name)),
+        ExprKind::BinaryOp(_, op, _) => format!("BinaryOp({})", op),
+        ExprKind::UnaryOp(op, _) => format!("UnaryOp({})", op),
+        ExprKind::Call(name, _) => format!("Call({})", pool.str(name)),
+        ExprKind::MethodCall { method, .. } => format!("MethodCall(.{})", pool.str(method)),
+        ExprKind::Borrow(_) => "Borrow".to_string(),
+        ExprKind::Slice { .. } => "Slice".to_string(),
     };
 
-    let span = ast.span(expr);
     writeln!(
         out,
         "{}{}{}{} ({}..{})",
@@ -309,61 +324,47 @@ fn write_expr(
         connector(is_last),
         label,
         name,
-        span.start,
-        span.end
+        expr.span.start,
+        expr.span.end
     )?;
 
     let new_prefix = format!("{}{}", prefix, continuation(is_last));
-    match tag {
-        NodeTag::LiteralInt
-        | NodeTag::LiteralStr
-        | NodeTag::LiteralBool
-        | NodeTag::LiteralFloat
-        | NodeTag::Ident => Ok(()),
-        NodeTag::BinaryOp => {
-            let view = ast.binary_op_view(expr);
-            write_expr(out, ast, view.lhs, &new_prefix, false, "", pool)?;
-            write_expr(out, ast, view.rhs, &new_prefix, true, "", pool)
+    match expr.kind {
+        ExprKind::Literal(_) | ExprKind::Ident(_) => Ok(()),
+        ExprKind::BinaryOp(lhs, _, rhs) => {
+            write_expr(out, ast, lhs, &new_prefix, false, "", pool)?;
+            write_expr(out, ast, rhs, &new_prefix, true, "", pool)
         }
-        NodeTag::UnaryOp => {
-            let view = ast.unary_op_view(expr);
-            write_expr(out, ast, view.operand, &new_prefix, true, "", pool)
+        ExprKind::UnaryOp(_, operand) => write_expr(out, ast, operand, &new_prefix, true, "", pool),
+        ExprKind::Call(_, args) => {
+            write_expr_args(out, ast, ast.expr_list(args), &new_prefix, pool)
         }
-        NodeTag::Call => {
-            let view = ast.call_view(expr);
-            write_expr_args(out, ast, &view.args, &new_prefix, pool)
-        }
-        NodeTag::MethodCall => {
-            let view = ast.method_call_view(expr);
+        ExprKind::MethodCall { receiver, args, .. } => {
+            let args = ast.expr_list(args);
             write_expr(
                 out,
                 ast,
-                view.receiver,
+                receiver,
                 &new_prefix,
-                view.args.is_empty(),
+                args.is_empty(),
                 "recv: ",
                 pool,
             )?;
-            write_expr_args(out, ast, &view.args, &new_prefix, pool)
+            write_expr_args(out, ast, args, &new_prefix, pool)
         }
-        NodeTag::Borrow => {
-            let inner = ast.borrow_inner(expr);
-            write_expr(out, ast, inner, &new_prefix, true, "", pool)
+        ExprKind::Borrow(inner) => write_expr(out, ast, inner, &new_prefix, true, "", pool),
+        ExprKind::Slice { base, start, end } => {
+            write_expr(out, ast, base, &new_prefix, false, "base: ", pool)?;
+            write_optional_bound(out, ast, start, &new_prefix, false, "start: ", pool)?;
+            write_optional_bound(out, ast, end, &new_prefix, true, "end: ", pool)
         }
-        NodeTag::Slice => {
-            let view = ast.slice_view(expr);
-            write_expr(out, ast, view.base, &new_prefix, false, "base: ", pool)?;
-            write_optional_bound(out, ast, view.start, &new_prefix, false, "start: ", pool)?;
-            write_optional_bound(out, ast, view.end, &new_prefix, true, "end: ", pool)
-        }
-        other => unreachable!("expression node expected, got {other:?}"),
     }
 }
 
 fn write_expr_args(
     out: &mut String,
     ast: &Ast,
-    args: &[NodeRef],
+    args: &[ExprId],
     prefix: &str,
     pool: &InternPool,
 ) -> fmt::Result {
@@ -376,7 +377,7 @@ fn write_expr_args(
 fn write_optional_bound(
     out: &mut String,
     ast: &Ast,
-    bound: Option<NodeRef>,
+    bound: Option<ExprId>,
     prefix: &str,
     is_last: bool,
     label: &str,
@@ -402,11 +403,11 @@ mod tests {
         Ident::new(pool.intern_str(name), span(0, 0))
     }
 
-    fn int_expr(ast: &mut Ast, n: i64) -> NodeRef {
+    fn int_expr(ast: &mut Ast, n: i64) -> ExprId {
         ast.literal_int(n, span(0, 0))
     }
 
-    fn return_stmt(ast: &mut Ast, value: i64) -> NodeRef {
+    fn return_stmt(ast: &mut Ast, value: i64) -> StmtId {
         let v = int_expr(ast, value);
         ast.return_stmt(Some(v), span(0, 0))
     }

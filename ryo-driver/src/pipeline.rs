@@ -138,7 +138,7 @@ fn parse_source(
     // placeholder nodes). Callers thread the diagnostics into the
     // middle-end sink and keep analyzing, so one bad statement never
     // suppresses semantic diagnostics elsewhere in the file (R9).
-    // The parser builds directly into the flat AST arena, threaded
+    // The parser builds directly into the AST arenas, threaded
     // as chumsky parser state.
     let mut ast = ast::Ast::new();
     let (out, errs) = program_parser()
@@ -788,9 +788,15 @@ mod tests {
         );
         let stmts = program.top_level_stmts();
         assert_eq!(stmts.len(), 3);
-        assert_eq!(program.tag(stmts[0]), ast::NodeTag::VarDecl);
-        assert_eq!(program.tag(stmts[1]), ast::NodeTag::Error);
-        assert_eq!(program.tag(stmts[2]), ast::NodeTag::VarDecl);
+        assert!(matches!(
+            program.stmt(stmts[0]).kind,
+            ast::StmtKind::VarDecl(_)
+        ));
+        assert!(matches!(program.stmt(stmts[1]).kind, ast::StmtKind::Error));
+        assert!(matches!(
+            program.stmt(stmts[2]).kind,
+            ast::StmtKind::VarDecl(_)
+        ));
     }
 
     #[test]

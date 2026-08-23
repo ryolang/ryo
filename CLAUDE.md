@@ -200,7 +200,7 @@ See `docs/dev/pipeline_alignment.md` for the full design rationale (motivation, 
 #### 5. Shared Core Crate (`ryo-core`)
 | File | Role |
 |------|------|
-| `ryo-core/src/ast.rs` | Surface-syntax AST: flat `(tag, data)` node arena with `NodeRef(NonZeroU32)` indices and an `extra` payload arena (UIR-style); identifiers/types/strings stored as `StringId` |
+| `ryo-core/src/ast.rs` | Surface-syntax AST: typed arenas (`Vec<Expr>` / `Vec<Stmt>` indexed by `ExprId` / `StmtId`, with `ExprKind` / `StmtKind` payload enums, list side arenas, and inline spans); identifiers/types/strings stored as `StringId` |
 | `ryo-core/src/uir.rs` | Untyped IR data structures (flat, program-wide arena) |
 | `ryo-core/src/tir.rs` | Typed IR data structures (flat, per-function arena) |
 | `ryo-core/src/ownership.rs` | Ownership pass side-tables and data structures (`BranchId`, `FreePoint`, etc.) |
@@ -230,15 +230,15 @@ Keyword,
 Number(&'a str),
 ```
 
-### 2. Add AST Node Tag (ryo-core/src/ast.rs)
-The AST is a flat arena (`Ast { nodes, extra, spans, top_level }`), not a tree — mirror UIR:
-- Add a variant to `NodeTag` (one enum covers both statement and expression forms)
-- Pick a `NodeData` shape for the inline payload (existing shapes: `Node`, `OptNode`, `Str`, `Bool`, `Wide`, `BinOp`, `UnOp`, `Slice`, `Extra`); variable-size payloads (arg lists, block bodies, `Ident`/`TypeExpr` headers) go in `extra: Vec<u32>` behind an `ExtraRange` with a documented `*_extra` layout module
-- Add a builder method on `Ast` (pushes `(tag, data)` + parallel span, returns `NodeRef`) and a trusted-producer view decoder (`debug_assert` tag, `unreachable!` on mismatch)
-- Spans live in the parallel `spans` arena — never inside `Node`
+### 2. Add AST Enum Variant (ryo-core/src/ast.rs)
+The AST is a pair of typed arenas (`exprs` / `stmts`), not a pointer tree:
+- Add a variant to `StmtKind` or `ExprKind` with `ExprId` / `StmtId` children (never boxed subtrees)
+- Variable-size child lists (arg lists, block bodies) go into the `expr_lists` / `stmt_lists` side arenas behind `ExprList` / `StmtList` ranges; scalar payload structs (`VarDecl`, `FunctionDef`, …) stay inline in the variant
+- Add a builder method on `Ast` (pushes the value with its inline span, returns the id)
+- Consumers write plain exhaustive `match`es on `expr.kind` / `stmt.kind` — adding a variant makes the compiler flag every site you must update
 
 ### 3. Add Parser Rule (ryo-frontend/src/parser.rs)
-Use Chumsky combinators: `just(Token::X)` for exact match, `.then()` for sequence, `.or_not()` for optional, `.repeated()` for repetition. The parser is stateful: the `Ast` arena is the chumsky state (`extra::Full<_, Ast, _>`, entered via `parse_with_state`), so node-producing combinators push through `e.state()` and yield `NodeRef` (annotate the closure param as `e: &mut Mx<'a, '_, I>` so `e.state()` type-checks). Use `foldl_with` when folding needs state.
+Use Chumsky combinators: `just(Token::X)` for exact match, `.then()` for sequence, `.or_not()` for optional, `.repeated()` for repetition. The parser is stateful: the `Ast` arenas are the chumsky state (`extra::Full<_, Ast, _>`, entered via `parse_with_state`), so node-producing combinators push through `e.state()` and yield `ExprId` / `StmtId` (annotate the closure param as `e: &mut Mx<'a, '_, I>` so `e.state()` type-checks). Use `foldl_with` when folding needs state.
 ```rust
 let my_feature = just(Token::Keyword).ignore_then(expression_parser())
     .map_with(|expr, e: &mut Mx<'a, '_, I>| {
@@ -251,12 +251,11 @@ let my_feature = just(Token::Keyword).ignore_then(expression_parser())
 UIR is **untyped**. Add a tag to the `Inst` tag enum (and a payload in `InstData` if needed). For variable-size payloads (arg lists, body statement lists), encode them into the `extra: Vec<u32>` arena and reference them via `ExtraRange`. Add a span entry parallel to the instruction. Avoid nesting: each sub-expression is its own `InstRef`.
 
 ### 5. Add AstGen Case (ryo-frontend/src/astgen.rs)
-In `astgen::generate` (and the per-stmt/per-expr helpers), decode the new node via its view and translate it into UIR instructions. AstGen does *no* type checking — it only flattens the arena into UIR, interns identifiers via `InternPool`, and emits diagnostics through the `DiagSink` for structural issues.
+In `astgen::generate` (and the per-stmt/per-expr helpers), match the new variant and translate it into UIR instructions, following child ids via `ast.expr(id)` / `ast.stmt(id)` / `ast.stmt_list(range)`. AstGen does *no* type checking — it only flattens the AST into UIR, interns identifiers via `InternPool`, and emits diagnostics through the `DiagSink` for structural issues.
 ```rust
-ast::NodeTag::MyFeature => {
-    let view = ast.my_feature_view(stmt);
-    let expr_ref = gen_expr(b, ast, view.expr);
-    let r = b.my_feature(expr_ref, ast.span(stmt));
+ast::StmtKind::MyFeature(expr) => {
+    let expr_ref = gen_expr(b, ast, *expr);
+    let r = b.my_feature(expr_ref, ast.stmt_span(stmt));
     out.push(r);
 }
 ```

@@ -5,13 +5,14 @@
 //! handles, so the parser only ever copies handles out of tokens —
 //! no `to_string` allocations, no `&'a str` slicing into source.
 //!
-//! The parser builds directly into the flat [`Ast`] arena: the arena
-//! is threaded as chumsky parser state (`extra::Full<_, Ast, _>`,
+//! The parser builds directly into the [`Ast`] arenas: the `Ast` is
+//! threaded as chumsky parser state (`extra::Full<_, Ast, _>`,
 //! entered via `parse_with_state`), and node-producing combinators
-//! push through `e.state()` inside `map_with`/`foldl_with` closures,
-//! yielding [`NodeRef`]s. `Ast`'s `Inspector` impl truncates the
-//! arena on rewind, so backtracking alternatives and error recovery
-//! leave no orphan nodes behind.
+//! push `Expr`/`Stmt` values through `e.state()` inside
+//! `map_with`/`foldl_with` closures, yielding [`ExprId`]s /
+//! [`StmtId`]s. `Ast`'s `Inspector` impl truncates the arenas on
+//! rewind, so backtracking alternatives and error recovery leave no
+//! orphan nodes behind.
 
 use chumsky::{
     input::{MapExtra, ValueInput},
@@ -178,9 +179,9 @@ where
 /// `Dedent`/end-of-input that ends the list costs more than parsing a
 /// real statement. Lines the guard admits parse exactly as before.
 fn statement_list<'a, I>(
-    stmt: impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a,
+    stmt: impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a,
     terminator: impl Parser<'a, I, (), PExtra<'a>> + Clone + 'a,
-) -> impl Parser<'a, I, Vec<NodeRef>, PExtra<'a>> + Clone + 'a
+) -> impl Parser<'a, I, Vec<StmtId>, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -252,8 +253,8 @@ where
 
 /// Parse an indented block of one or more statements.
 fn indented_block<'a, I>(
-    stmt: impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a,
-) -> impl Parser<'a, I, Vec<NodeRef>, PExtra<'a>> + Clone + 'a
+    stmt: impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, Vec<StmtId>, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -265,7 +266,7 @@ where
         .boxed()
 }
 
-fn assign_or_decl_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
+fn assign_or_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -283,7 +284,7 @@ where
         .boxed()
 }
 
-fn compound_assign_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
+fn compound_assign_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -310,7 +311,7 @@ where
 }
 
 /// Statements valid inside a function body.
-fn body_statement_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
+fn body_statement_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -406,8 +407,8 @@ where
 }
 
 fn if_stmt_parser<'a, I>(
-    body_stmt: impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a,
-) -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
+    body_stmt: impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -446,7 +447,7 @@ where
 }
 
 /// Top-level statements: only function defs and var decls.
-fn top_level_statement_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
+fn top_level_statement_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -462,7 +463,7 @@ where
     choice((function_def_parser(), var_decl_parser(), expr_stmt)).boxed()
 }
 
-fn statement_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
+fn statement_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -489,7 +490,7 @@ where
     view.or(plain).boxed()
 }
 
-fn function_def_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
+fn function_def_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -545,7 +546,7 @@ where
         .boxed()
 }
 
-fn var_decl_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
+fn var_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -571,7 +572,7 @@ where
         .boxed()
 }
 
-fn expression_parser<'a, I>() -> impl Parser<'a, I, NodeRef, PExtra<'a>> + Clone + 'a
+fn expression_parser<'a, I>() -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -631,8 +632,8 @@ where
         // grammatically — the colon is mandatory — so no extra
         // validation is needed for the empty slice.
         enum PostfixOp {
-            Method(StringId, Vec<NodeRef>, SimpleSpan),
-            Slice(Option<NodeRef>, Option<NodeRef>, SimpleSpan),
+            Method(StringId, Vec<ExprId>, SimpleSpan),
+            Slice(Option<ExprId>, Option<ExprId>, SimpleSpan),
         }
 
         let method_op = just(Token::Dot)
@@ -659,7 +660,7 @@ where
             .foldl_with(
                 choice((method_op, slice_op)).repeated(),
                 |receiver, op, e: &mut Mx<'a, '_, I>| {
-                    let start = e.state().span(receiver).start;
+                    let start = e.state().expr_span(receiver).start;
                     match op {
                         PostfixOp::Method(method, args, span) => e.state().method_call(
                             receiver,
@@ -716,15 +717,15 @@ where
         // Fold `left op right` into a BinaryOp node spanning both
         // operands — the same span rule at every precedence level.
         fn fold_binary<'a, I>(
-            left: NodeRef,
-            (op, right): (BinaryOperator, NodeRef),
+            left: ExprId,
+            (op, right): (BinaryOperator, ExprId),
             e: &mut Mx<'a, '_, I>,
-        ) -> NodeRef
+        ) -> ExprId
         where
             I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
         {
-            let start = e.state().span(left).start;
-            let end = e.state().span(right).end;
+            let start = e.state().expr_span(left).start;
+            let end = e.state().expr_span(right).end;
             e.state()
                 .binary(op, left, right, SimpleSpan::new((), start..end))
         }
@@ -849,37 +850,84 @@ mod tests {
     }
 
     /// The single top-level statement of a parsed snippet.
-    fn only_stmt(ast: &Ast) -> NodeRef {
+    fn only_stmt(ast: &Ast) -> StmtId {
         let stmts = ast.top_level_stmts();
         assert_eq!(stmts.len(), 1);
         stmts[0]
     }
 
-    fn var_decl(ast: &Ast, stmt: NodeRef) -> VarDeclView {
-        assert_eq!(ast.tag(stmt), NodeTag::VarDecl);
-        ast.var_decl_view(stmt)
+    fn var_decl(ast: &Ast, stmt: StmtId) -> &VarDecl {
+        match &ast.stmt(stmt).kind {
+            StmtKind::VarDecl(decl) => decl,
+            other => panic!("expected VarDecl, got {other:?}"),
+        }
     }
 
-    fn fn_def(ast: &Ast, stmt: NodeRef) -> FunctionDefView {
-        assert_eq!(ast.tag(stmt), NodeTag::FunctionDef);
-        ast.function_def_view(stmt)
+    fn fn_def(ast: &Ast, stmt: StmtId) -> &FunctionDef {
+        match &ast.stmt(stmt).kind {
+            StmtKind::FunctionDef(def) => def,
+            other => panic!("expected FunctionDef, got {other:?}"),
+        }
+    }
+
+    /// Body statements of a parsed function definition.
+    fn fn_body<'a>(ast: &'a Ast, def: &FunctionDef) -> &'a [StmtId] {
+        ast.stmt_list(def.body)
+    }
+
+    fn if_stmt(ast: &Ast, stmt: StmtId) -> &IfStmt {
+        match &ast.stmt(stmt).kind {
+            StmtKind::IfStmt(if_stmt) => if_stmt,
+            other => panic!("expected IfStmt, got {other:?}"),
+        }
+    }
+
+    /// Body statements of a `while` statement.
+    fn while_body<'a>(ast: &'a Ast, stmt: StmtId) -> &'a [StmtId] {
+        match &ast.stmt(stmt).kind {
+            StmtKind::WhileLoop { body, .. } => ast.stmt_list(*body),
+            other => panic!("expected WhileLoop, got {other:?}"),
+        }
+    }
+
+    /// `(var, iterator, body)` of a `for` statement.
+    fn for_range<'a>(ast: &'a Ast, stmt: StmtId) -> (Ident, Ident, &'a [StmtId]) {
+        match &ast.stmt(stmt).kind {
+            StmtKind::ForRange {
+                var,
+                iterator,
+                body,
+                ..
+            } => (*var, *iterator, ast.stmt_list(*body)),
+            other => panic!("expected ForRange, got {other:?}"),
+        }
+    }
+
+    /// The value of an `x = <value>` AssignOrDecl statement.
+    fn assign_value(ast: &Ast, stmt: StmtId) -> ExprId {
+        match &ast.stmt(stmt).kind {
+            StmtKind::AssignOrDecl { value, .. } => *value,
+            other => panic!("expected AssignOrDecl, got {other:?}"),
+        }
     }
 
     /// Initializer of a top-level `x = <init>` declaration.
-    fn decl_init(ast: &Ast) -> NodeRef {
+    fn decl_init(ast: &Ast) -> ExprId {
         var_decl(ast, only_stmt(ast)).initializer
     }
 
-    fn bin_op(ast: &Ast, r: NodeRef) -> BinaryOpView {
-        assert_eq!(ast.tag(r), NodeTag::BinaryOp);
-        ast.binary_op_view(r)
+    fn bin_op(ast: &Ast, id: ExprId) -> (ExprId, BinaryOperator, ExprId) {
+        match ast.expr(id).kind {
+            ExprKind::BinaryOp(lhs, op, rhs) => (lhs, op, rhs),
+            other => panic!("expected BinaryOp, got {other:?}"),
+        }
     }
 
-    fn assert_int_lit(ast: &Ast, r: NodeRef, expected: i64) {
-        assert_eq!(ast.tag(r), NodeTag::LiteralInt);
+    fn assert_int_lit(ast: &Ast, id: ExprId, expected: i64) {
         assert!(
-            matches!(ast.literal_view(r), Literal::Int(v) if v == expected),
-            "expected Int({expected})"
+            matches!(ast.expr(id).kind, ExprKind::Literal(Literal::Int(v)) if v == expected),
+            "expected Int({expected}), got {:?}",
+            ast.expr(id).kind
         );
     }
 
@@ -923,29 +971,31 @@ mod tests {
     #[test]
     fn parse_expression_addition() {
         let (ast, _) = lex_and_parse("x = 1 + 2").unwrap();
-        let view = bin_op(&ast, decl_init(&ast));
-        assert_eq!(view.op, BinaryOperator::Add);
-        assert_int_lit(&ast, view.lhs, 1);
-        assert_int_lit(&ast, view.rhs, 2);
+        let (lhs, op, rhs) = bin_op(&ast, decl_init(&ast));
+        assert_eq!(op, BinaryOperator::Add);
+        assert_int_lit(&ast, lhs, 1);
+        assert_int_lit(&ast, rhs, 2);
     }
 
     #[test]
     fn parse_expression_precedence() {
         let (ast, _) = lex_and_parse("x = 2 + 3 * 4").unwrap();
-        let view = bin_op(&ast, decl_init(&ast));
-        assert_eq!(view.op, BinaryOperator::Add);
-        assert_int_lit(&ast, view.lhs, 2);
-        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Mul);
+        let (lhs, op, rhs) = bin_op(&ast, decl_init(&ast));
+        assert_eq!(op, BinaryOperator::Add);
+        assert_int_lit(&ast, lhs, 2);
+        assert_eq!(bin_op(&ast, rhs).1, BinaryOperator::Mul);
     }
 
     #[test]
     fn parse_expression_negation() {
         let (ast, _) = lex_and_parse("x = -42").unwrap();
-        let init = decl_init(&ast);
-        assert_eq!(ast.tag(init), NodeTag::UnaryOp);
-        let view = ast.unary_op_view(init);
-        assert_eq!(view.op, UnaryOperator::Neg);
-        assert_int_lit(&ast, view.operand, 42);
+        match ast.expr(decl_init(&ast)).kind {
+            ExprKind::UnaryOp(op, operand) => {
+                assert_eq!(op, UnaryOperator::Neg);
+                assert_int_lit(&ast, operand, 42);
+            }
+            other => panic!("expected UnaryOp, got {other:?}"),
+        }
     }
 
     #[test]
@@ -956,9 +1006,12 @@ mod tests {
         let (ast, _) = lex_and_parse("x = -9223372036854775808").unwrap();
         let init = decl_init(&ast);
         assert!(
-            matches!(ast.literal_view(init), Literal::Int(i64::MIN)),
+            matches!(
+                ast.expr(init).kind,
+                ExprKind::Literal(Literal::Int(i64::MIN))
+            ),
             "expected folded i64::MIN literal, got {:?}",
-            ast.node(init)
+            ast.expr(init).kind
         );
     }
 
@@ -975,7 +1028,7 @@ mod tests {
     #[test]
     fn parse_expression_parenthesized() {
         let (ast, _) = lex_and_parse("x = (2 + 3) * 4").unwrap();
-        assert_eq!(bin_op(&ast, decl_init(&ast)).op, BinaryOperator::Mul);
+        assert_eq!(bin_op(&ast, decl_init(&ast)).1, BinaryOperator::Mul);
     }
 
     #[test]
@@ -1031,46 +1084,45 @@ mod tests {
     #[test]
     fn parse_true_false_literals() {
         let (ast, _) = lex_and_parse("x = true\ny = false").unwrap();
-        let stmts = ast.top_level_stmts();
-        assert_eq!(stmts.len(), 2);
+        let stmts = ast.top_level_stmts().to_vec();
         let first = var_decl(&ast, stmts[0]);
         assert!(matches!(
-            ast.literal_view(first.initializer),
-            Literal::Bool(true)
+            ast.expr(first.initializer).kind,
+            ExprKind::Literal(Literal::Bool(true))
         ));
         let second = var_decl(&ast, stmts[1]);
         assert!(matches!(
-            ast.literal_view(second.initializer),
-            Literal::Bool(false)
+            ast.expr(second.initializer).kind,
+            ExprKind::Literal(Literal::Bool(false))
         ));
     }
 
     #[test]
     fn parse_equality_expression() {
         let (ast, _) = lex_and_parse("x = 1 == 2").unwrap();
-        assert_eq!(bin_op(&ast, decl_init(&ast)).op, BinaryOperator::Eq);
+        assert_eq!(bin_op(&ast, decl_init(&ast)).1, BinaryOperator::Eq);
     }
 
     #[test]
     fn parse_not_equal_expression() {
         let (ast, _) = lex_and_parse("x = 1 != 2").unwrap();
-        assert_eq!(bin_op(&ast, decl_init(&ast)).op, BinaryOperator::NotEq);
+        assert_eq!(bin_op(&ast, decl_init(&ast)).1, BinaryOperator::NotEq);
     }
 
     #[test]
     fn parse_equality_has_lower_precedence_than_addition() {
         let (ast, _) = lex_and_parse("x = a + b == c + d").unwrap();
-        let view = bin_op(&ast, decl_init(&ast));
-        assert_eq!(view.op, BinaryOperator::Eq);
-        assert_eq!(bin_op(&ast, view.lhs).op, BinaryOperator::Add);
-        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Add);
+        let (lhs, op, rhs) = bin_op(&ast, decl_init(&ast));
+        assert_eq!(op, BinaryOperator::Eq);
+        assert_eq!(bin_op(&ast, lhs).1, BinaryOperator::Add);
+        assert_eq!(bin_op(&ast, rhs).1, BinaryOperator::Add);
     }
 
     #[test]
     fn parse_float_literal() {
         let (ast, _) = lex_and_parse("x = 2.5").unwrap();
-        match ast.literal_view(decl_init(&ast)) {
-            Literal::Float(v) => assert!((v - 2.5).abs() < 1e-12),
+        match ast.expr(decl_init(&ast)).kind {
+            ExprKind::Literal(Literal::Float(v)) => assert!((v - 2.5).abs() < 1e-12),
             other => panic!("expected Float literal, got {:?}", other),
         }
     }
@@ -1084,34 +1136,34 @@ mod tests {
             ("x = a >= b", BinaryOperator::GtEq),
         ] {
             let (ast, _) = lex_and_parse(src).unwrap();
-            assert_eq!(bin_op(&ast, decl_init(&ast)).op, *expected_op);
+            assert_eq!(bin_op(&ast, decl_init(&ast)).1, *expected_op);
         }
     }
 
     #[test]
     fn parse_modulo_at_multiplicative_precedence() {
         let (ast, _) = lex_and_parse("x = a + b % c").unwrap();
-        let view = bin_op(&ast, decl_init(&ast));
-        assert_eq!(view.op, BinaryOperator::Add);
-        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Mod);
+        let (_, op, rhs) = bin_op(&ast, decl_init(&ast));
+        assert_eq!(op, BinaryOperator::Add);
+        assert_eq!(bin_op(&ast, rhs).1, BinaryOperator::Mod);
     }
 
     #[test]
     fn parse_ordering_below_additive_precedence() {
         let (ast, _) = lex_and_parse("x = a + b < c + d").unwrap();
-        let view = bin_op(&ast, decl_init(&ast));
-        assert_eq!(view.op, BinaryOperator::Lt);
-        assert_eq!(bin_op(&ast, view.lhs).op, BinaryOperator::Add);
-        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Add);
+        let (lhs, op, rhs) = bin_op(&ast, decl_init(&ast));
+        assert_eq!(op, BinaryOperator::Lt);
+        assert_eq!(bin_op(&ast, lhs).1, BinaryOperator::Add);
+        assert_eq!(bin_op(&ast, rhs).1, BinaryOperator::Add);
     }
 
     #[test]
     fn parse_equality_below_ordering_precedence() {
         let (ast, _) = lex_and_parse("x = a < b == c < d").unwrap();
-        let view = bin_op(&ast, decl_init(&ast));
-        assert_eq!(view.op, BinaryOperator::Eq);
-        assert_eq!(bin_op(&ast, view.lhs).op, BinaryOperator::Lt);
-        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Lt);
+        let (lhs, op, rhs) = bin_op(&ast, decl_init(&ast));
+        assert_eq!(op, BinaryOperator::Eq);
+        assert_eq!(bin_op(&ast, lhs).1, BinaryOperator::Lt);
+        assert_eq!(bin_op(&ast, rhs).1, BinaryOperator::Lt);
     }
 
     #[test]
@@ -1129,8 +1181,8 @@ mod tests {
     /// its string literal.
     fn parse_str_literal(src: &str) -> String {
         let (ast, pool) = lex_and_parse(src).expect("parse ok");
-        match ast.literal_view(decl_init(&ast)) {
-            Literal::Str(id) => pool.str(id).to_string(),
+        match ast.expr(decl_init(&ast)).kind {
+            ExprKind::Literal(Literal::Str(id)) => pool.str(id).to_string(),
             other => panic!("expected Str literal, got {:?}", other),
         }
     }
@@ -1159,53 +1211,64 @@ mod tests {
     #[test]
     fn parse_and_operator() {
         let (ast, _) = lex_and_parse("x = true and false").unwrap();
-        assert_eq!(bin_op(&ast, decl_init(&ast)).op, BinaryOperator::And);
+        assert_eq!(bin_op(&ast, decl_init(&ast)).1, BinaryOperator::And);
     }
 
     #[test]
     fn parse_or_operator() {
         let (ast, _) = lex_and_parse("x = true or false").unwrap();
-        assert_eq!(bin_op(&ast, decl_init(&ast)).op, BinaryOperator::Or);
+        assert_eq!(bin_op(&ast, decl_init(&ast)).1, BinaryOperator::Or);
     }
 
     #[test]
     fn parse_not_operator() {
         let (ast, _) = lex_and_parse("x = not true").unwrap();
         let init = decl_init(&ast);
-        assert_eq!(ast.tag(init), NodeTag::UnaryOp);
-        assert_eq!(ast.unary_op_view(init).op, UnaryOperator::Not);
+        assert!(
+            matches!(
+                ast.expr(init).kind,
+                ExprKind::UnaryOp(UnaryOperator::Not, _)
+            ),
+            "expected UnaryOp(Not), got {:?}",
+            ast.expr(init).kind
+        );
     }
 
     #[test]
     fn parse_and_binds_tighter_than_or() {
         // a or b and c  =>  a or (b and c)
         let (ast, _) = lex_and_parse("x = true or false and true").unwrap();
-        let view = bin_op(&ast, decl_init(&ast));
-        assert_eq!(view.op, BinaryOperator::Or);
-        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::And);
+        let (_, op, rhs) = bin_op(&ast, decl_init(&ast));
+        assert_eq!(op, BinaryOperator::Or);
+        assert_eq!(bin_op(&ast, rhs).1, BinaryOperator::And);
     }
 
     #[test]
     fn parse_not_binds_tighter_than_and() {
         // not a and b  =>  (not a) and b
         let (ast, _) = lex_and_parse("x = not true and false").unwrap();
-        let view = bin_op(&ast, decl_init(&ast));
-        assert_eq!(view.op, BinaryOperator::And);
-        let lhs = view.lhs;
-        assert_eq!(ast.tag(lhs), NodeTag::UnaryOp);
-        assert_eq!(ast.unary_op_view(lhs).op, UnaryOperator::Not);
+        let (lhs, op, _) = bin_op(&ast, decl_init(&ast));
+        assert_eq!(op, BinaryOperator::And);
+        assert!(matches!(
+            ast.expr(lhs).kind,
+            ExprKind::UnaryOp(UnaryOperator::Not, _)
+        ));
     }
 
     #[test]
     fn parse_not_not_chains() {
         let (ast, _) = lex_and_parse("x = not not true").unwrap();
-        let outer = decl_init(&ast);
-        assert_eq!(ast.tag(outer), NodeTag::UnaryOp);
-        let view = ast.unary_op_view(outer);
-        assert_eq!(view.op, UnaryOperator::Not);
-        let inner = view.operand;
-        assert_eq!(ast.tag(inner), NodeTag::UnaryOp);
-        assert_eq!(ast.unary_op_view(inner).op, UnaryOperator::Not);
+        let inner = match ast.expr(decl_init(&ast)).kind {
+            ExprKind::UnaryOp(op, operand) => {
+                assert_eq!(op, UnaryOperator::Not);
+                operand
+            }
+            other => panic!("expected UnaryOp, got {other:?}"),
+        };
+        assert!(matches!(
+            ast.expr(inner).kind,
+            ExprKind::UnaryOp(UnaryOperator::Not, _)
+        ));
     }
 
     #[test]
@@ -1213,8 +1276,9 @@ mod tests {
         let input = "fn main():\n\tif true:\n\t\tx = 1\n";
         let (ast, _) = lex_and_parse(input).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(f.body.len(), 1);
-        assert_eq!(ast.tag(f.body[0]), NodeTag::IfStmt);
+        let body = fn_body(&ast, f);
+        assert_eq!(body.len(), 1);
+        assert!(matches!(ast.stmt(body[0]).kind, StmtKind::IfStmt(_)));
     }
 
     #[test]
@@ -1222,7 +1286,7 @@ mod tests {
         let input = "fn main():\n\tif true:\n\t\tx = 1\n\telse:\n\t\tx = 2\n";
         let (ast, _) = lex_and_parse(input).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        let view = ast.if_stmt_view(f.body[0]);
+        let view = if_stmt(&ast, fn_body(&ast, f)[0]);
         assert!(view.else_block.is_some());
         assert!(view.elif_branches.is_empty());
     }
@@ -1233,7 +1297,7 @@ mod tests {
             "fn main():\n\tif true:\n\t\tx = 1\n\telif false:\n\t\tx = 2\n\telse:\n\t\tx = 3\n";
         let (ast, _) = lex_and_parse(input).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        let view = ast.if_stmt_view(f.body[0]);
+        let view = if_stmt(&ast, fn_body(&ast, f)[0]);
         assert_eq!(view.elif_branches.len(), 1);
         assert!(view.else_block.is_some());
     }
@@ -1243,7 +1307,7 @@ mod tests {
         let input = "fn main():\n\tif true:\n\t\tx = 1\n\telif false:\n\t\tx = 2\n\telif true:\n\t\tx = 3\n\telse:\n\t\tx = 4\n";
         let (ast, _) = lex_and_parse(input).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        let view = ast.if_stmt_view(f.body[0]);
+        let view = if_stmt(&ast, fn_body(&ast, f)[0]);
         assert_eq!(view.elif_branches.len(), 2);
         assert!(view.else_block.is_some());
     }
@@ -1253,8 +1317,8 @@ mod tests {
         let input = "fn main():\n\tif true:\n\t\tx = 1\n\tprint(\"done\")\n";
         let (ast, _) = lex_and_parse(input).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(f.body.len(), 2);
-        let view = ast.if_stmt_view(f.body[0]);
+        assert_eq!(fn_body(&ast, f).len(), 2);
+        let view = if_stmt(&ast, fn_body(&ast, f)[0]);
         assert!(view.else_block.is_none());
         assert!(view.elif_branches.is_empty());
     }
@@ -1263,20 +1327,28 @@ mod tests {
     fn parse_assign_or_decl() {
         let (ast, pool) = lex_and_parse("fn main():\n\tx = 42\n").unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(ast.tag(f.body[0]), NodeTag::AssignOrDecl);
-        let view = ast.assign_or_decl_view(f.body[0]);
-        assert_eq!(pool.str(view.target.name), "x");
-        assert_int_lit(&ast, view.value, 42);
+        let stmt = fn_body(&ast, f)[0];
+        let value = assign_value(&ast, stmt);
+        match &ast.stmt(stmt).kind {
+            StmtKind::AssignOrDecl { target, .. } => {
+                assert_eq!(pool.str(target.name), "x");
+            }
+            other => panic!("expected AssignOrDecl, got {other:?}"),
+        }
+        assert_int_lit(&ast, value, 42);
     }
 
     #[test]
     fn parse_compound_assign_plus() {
         let (ast, pool) = lex_and_parse("fn main():\n\tx += 1\n").unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(ast.tag(f.body[0]), NodeTag::CompoundAssign);
-        let view = ast.compound_assign_view(f.body[0]);
-        assert_eq!(pool.str(view.target.name), "x");
-        assert_eq!(view.op, CompoundOp::Add);
+        match &ast.stmt(fn_body(&ast, f)[0]).kind {
+            StmtKind::CompoundAssign { target, op, .. } => {
+                assert_eq!(pool.str(target.name), "x");
+                assert_eq!(*op, CompoundOp::Add);
+            }
+            other => panic!("expected CompoundAssign, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1291,13 +1363,12 @@ mod tests {
             let code = format!("fn main():\n\t{}\n", src);
             let (ast, _pool) = lex_and_parse(&code).unwrap();
             let f = fn_def(&ast, only_stmt(&ast));
-            assert_eq!(ast.tag(f.body[0]), NodeTag::CompoundAssign);
-            assert_eq!(
-                ast.compound_assign_view(f.body[0]).op,
-                expected_op,
-                "failed for: {}",
-                src
-            );
+            match &ast.stmt(fn_body(&ast, f)[0]).kind {
+                StmtKind::CompoundAssign { op, .. } => {
+                    assert_eq!(*op, expected_op, "failed for: {}", src);
+                }
+                other => panic!("expected CompoundAssign, got {other:?}"),
+            }
         }
     }
 
@@ -1305,7 +1376,7 @@ mod tests {
     fn vardecl_still_works_with_mut() {
         let (ast, pool) = lex_and_parse("fn main():\n\tmut x = 10\n").unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        let decl = var_decl(&ast, f.body[0]);
+        let decl = var_decl(&ast, fn_body(&ast, f)[0]);
         assert!(decl.mutable);
         assert_eq!(pool.str(decl.name.name), "x");
     }
@@ -1314,7 +1385,7 @@ mod tests {
     fn vardecl_with_type_annotation_still_works() {
         let (ast, _pool) = lex_and_parse("fn main():\n\tx: int = 10\n").unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        let decl = var_decl(&ast, f.body[0]);
+        let decl = var_decl(&ast, fn_body(&ast, f)[0]);
         assert!(!decl.mutable);
         assert!(decl.type_annotation.is_some());
     }
@@ -1324,9 +1395,9 @@ mod tests {
         let code = "fn main():\n\twhile true:\n\t\tbreak\n";
         let (ast, _pool) = lex_and_parse(code).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(f.body.len(), 1);
-        assert_eq!(ast.tag(f.body[0]), NodeTag::WhileLoop);
-        assert_eq!(ast.while_loop_view(f.body[0]).body.len(), 1);
+        let body = fn_body(&ast, f);
+        assert_eq!(body.len(), 1);
+        assert_eq!(while_body(&ast, body[0]).len(), 1);
     }
 
     #[test]
@@ -1334,8 +1405,8 @@ mod tests {
         let code = "fn main():\n\twhile true:\n\t\tbreak\n";
         let (ast, _pool) = lex_and_parse(code).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        let view = ast.while_loop_view(f.body[0]);
-        assert_eq!(ast.tag(view.body[0]), NodeTag::Break);
+        let body = while_body(&ast, fn_body(&ast, f)[0]);
+        assert!(matches!(ast.stmt(body[0]).kind, StmtKind::Break));
     }
 
     #[test]
@@ -1343,8 +1414,8 @@ mod tests {
         let code = "fn main():\n\twhile true:\n\t\tcontinue\n";
         let (ast, _pool) = lex_and_parse(code).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        let view = ast.while_loop_view(f.body[0]);
-        assert_eq!(ast.tag(view.body[0]), NodeTag::Continue);
+        let body = while_body(&ast, fn_body(&ast, f)[0]);
+        assert!(matches!(ast.stmt(body[0]).kind, StmtKind::Continue));
     }
 
     #[test]
@@ -1352,19 +1423,19 @@ mod tests {
         let code = "fn main():\n\twhile true:\n\t\twhile false:\n\t\t\tbreak\n";
         let (ast, _pool) = lex_and_parse(code).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        let view = ast.while_loop_view(f.body[0]);
-        assert_eq!(view.body.len(), 1);
-        assert_eq!(ast.tag(view.body[0]), NodeTag::WhileLoop);
+        let body = while_body(&ast, fn_body(&ast, f)[0]);
+        assert_eq!(body.len(), 1);
+        assert!(matches!(ast.stmt(body[0]).kind, StmtKind::WhileLoop { .. }));
     }
 
     #[test]
     fn parse_logical_below_equality() {
         // a == b and c == d  =>  (a == b) and (c == d)
         let (ast, _) = lex_and_parse("x = 1 == 2 and 3 == 4").unwrap();
-        let view = bin_op(&ast, decl_init(&ast));
-        assert_eq!(view.op, BinaryOperator::And);
-        assert_eq!(bin_op(&ast, view.lhs).op, BinaryOperator::Eq);
-        assert_eq!(bin_op(&ast, view.rhs).op, BinaryOperator::Eq);
+        let (lhs, op, rhs) = bin_op(&ast, decl_init(&ast));
+        assert_eq!(op, BinaryOperator::And);
+        assert_eq!(bin_op(&ast, lhs).1, BinaryOperator::Eq);
+        assert_eq!(bin_op(&ast, rhs).1, BinaryOperator::Eq);
     }
 
     #[test]
@@ -1372,12 +1443,12 @@ mod tests {
         let code = "fn main():\n\tfor i in range(0, 10):\n\t\tprint(i)\n";
         let (ast, pool) = lex_and_parse(code).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(f.body.len(), 1);
-        assert_eq!(ast.tag(f.body[0]), NodeTag::ForRange);
-        let view = ast.for_range_view(f.body[0]);
-        assert_eq!(pool.str(view.var.name), "i");
-        assert_eq!(pool.str(view.iterator.name), "range");
-        assert_eq!(view.body.len(), 1);
+        let body = fn_body(&ast, f);
+        assert_eq!(body.len(), 1);
+        let (var, iterator, loop_body) = for_range(&ast, body[0]);
+        assert_eq!(pool.str(var.name), "i");
+        assert_eq!(pool.str(iterator.name), "range");
+        assert_eq!(loop_body.len(), 1);
     }
 
     #[test]
@@ -1385,10 +1456,9 @@ mod tests {
         let code = "fn main():\n\tfor x in range(1 + 2, 10 - 3):\n\t\tprint(x)\n";
         let (ast, pool) = lex_and_parse(code).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(ast.tag(f.body[0]), NodeTag::ForRange);
-        let view = ast.for_range_view(f.body[0]);
-        assert_eq!(pool.str(view.var.name), "x");
-        assert_eq!(pool.str(view.iterator.name), "range");
+        let (var, iterator, _) = for_range(&ast, fn_body(&ast, f)[0]);
+        assert_eq!(pool.str(var.name), "x");
+        assert_eq!(pool.str(iterator.name), "range");
     }
 
     #[test]
@@ -1397,9 +1467,9 @@ mod tests {
             "fn main():\n\tfor i in range(0, 5):\n\t\tfor j in range(0, 3):\n\t\t\tprint(i)\n";
         let (ast, _pool) = lex_and_parse(code).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        let view = ast.for_range_view(f.body[0]);
-        assert_eq!(view.body.len(), 1);
-        assert_eq!(ast.tag(view.body[0]), NodeTag::ForRange);
+        let (_, _, body) = for_range(&ast, fn_body(&ast, f)[0]);
+        assert_eq!(body.len(), 1);
+        assert!(matches!(ast.stmt(body[0]).kind, StmtKind::ForRange { .. }));
     }
 
     #[test]
@@ -1407,7 +1477,10 @@ mod tests {
         let code = "fn main():\n\tfor i in range(0, 10):\n\t\tif i == 5:\n\t\t\tbreak\n\t\tif i == 3:\n\t\t\tcontinue\n";
         let (ast, _pool) = lex_and_parse(code).unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(ast.tag(f.body[0]), NodeTag::ForRange);
+        assert!(matches!(
+            ast.stmt(fn_body(&ast, f)[0]).kind,
+            StmtKind::ForRange { .. }
+        ));
     }
 
     #[test]
@@ -1477,16 +1550,21 @@ mod tests {
         let (ast, _pool) = lex_and_parse("fn main():\n\tmut c = 0\n\tf(&c)\n").unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
         // body[1] is the `f(&c)` expression statement.
-        let expr = f.body[1];
-        assert_eq!(ast.tag(expr), NodeTag::ExprStmt);
-        let call = ast.expr_stmt_value(expr);
-        let view = ast.call_view(call);
-        assert_eq!(view.args.len(), 1);
-        assert_eq!(
-            ast.tag(view.args[0]),
-            NodeTag::Borrow,
-            "call argument should be a Borrow expression"
-        );
+        let call = match &ast.stmt(fn_body(&ast, f)[1]).kind {
+            StmtKind::ExprStmt(value) => *value,
+            other => panic!("expected ExprStmt, got {other:?}"),
+        };
+        match ast.expr(call).kind {
+            ExprKind::Call(_, args) => {
+                let args = ast.expr_list(args);
+                assert_eq!(args.len(), 1);
+                assert!(
+                    matches!(ast.expr(args[0]).kind, ExprKind::Borrow(_)),
+                    "call argument should be a Borrow expression"
+                );
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1495,12 +1573,14 @@ mod tests {
         // `fn main():` wraps the body: the slice sits in the value of
         // the body's AssignOrDecl (see `parse_assign_or_decl`).
         let f = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(ast.tag(f.body[0]), NodeTag::AssignOrDecl);
-        let value = ast.assign_or_decl_view(f.body[0]).value;
-        assert_eq!(ast.tag(value), NodeTag::Slice);
-        let view = ast.slice_view(value);
-        assert_eq!(ast.tag(view.base), NodeTag::Ident);
-        assert!(view.start.is_some() && view.end.is_some());
+        let value = assign_value(&ast, fn_body(&ast, f)[0]);
+        match ast.expr(value).kind {
+            ExprKind::Slice { base, start, end } => {
+                assert!(matches!(ast.expr(base).kind, ExprKind::Ident(_)));
+                assert!(start.is_some() && end.is_some());
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1513,12 +1593,14 @@ mod tests {
             let snippet = format!("fn main():\n\t{}\n", src);
             let (ast, _pool) = lex_and_parse(&snippet).unwrap();
             let f = fn_def(&ast, only_stmt(&ast));
-            assert_eq!(ast.tag(f.body[0]), NodeTag::AssignOrDecl);
-            let value = ast.assign_or_decl_view(f.body[0]).value;
-            assert_eq!(ast.tag(value), NodeTag::Slice, "{src}");
-            let view = ast.slice_view(value);
-            assert_eq!(view.start.is_some(), want_start, "{}: start", src);
-            assert_eq!(view.end.is_some(), want_end, "{}: end", src);
+            let value = assign_value(&ast, fn_body(&ast, f)[0]);
+            match ast.expr(value).kind {
+                ExprKind::Slice { start, end, .. } => {
+                    assert_eq!(start.is_some(), want_start, "{}: start", src);
+                    assert_eq!(end.is_some(), want_end, "{}: end", src);
+                }
+                other => panic!("expected Slice, got {other:?}"),
+            }
         }
     }
 
@@ -1526,10 +1608,13 @@ mod tests {
     fn parse_slice_after_method_call() {
         let (ast, _pool) = lex_and_parse("fn main():\n\tx = s.len()[0:1]\n").unwrap();
         let f = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(ast.tag(f.body[0]), NodeTag::AssignOrDecl);
-        let value = ast.assign_or_decl_view(f.body[0]).value;
-        assert_eq!(ast.tag(value), NodeTag::Slice);
-        assert_eq!(ast.tag(ast.slice_view(value).base), NodeTag::MethodCall);
+        let value = assign_value(&ast, fn_body(&ast, f)[0]);
+        match ast.expr(value).kind {
+            ExprKind::Slice { base, .. } => {
+                assert!(matches!(ast.expr(base).kind, ExprKind::MethodCall { .. }));
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1571,6 +1656,19 @@ mod tests {
         )
     }
 
+    /// The statement is a parser-recovery placeholder.
+    fn is_error_stmt(ast: &Ast, stmt: StmtId) -> bool {
+        matches!(ast.stmt(stmt).kind, StmtKind::Error)
+    }
+
+    /// The statement is a variable declaration of either form.
+    fn is_decl_stmt(ast: &Ast, stmt: StmtId) -> bool {
+        matches!(
+            ast.stmt(stmt).kind,
+            StmtKind::VarDecl(_) | StmtKind::AssignOrDecl { .. }
+        )
+    }
+
     #[test]
     fn recovers_from_bad_statement_between_good_ones() {
         let (ok, ast, errs, _pool) = lex_and_parse_recovering("x = 1\ny = = 2\nz = 3\n");
@@ -1578,15 +1676,9 @@ mod tests {
         assert!(ok, "recovery must produce a partial program");
         let stmts = ast.top_level_stmts();
         assert_eq!(stmts.len(), 3);
-        assert!(matches!(
-            ast.tag(stmts[0]),
-            NodeTag::VarDecl | NodeTag::AssignOrDecl
-        ));
-        assert_eq!(ast.tag(stmts[1]), NodeTag::Error);
-        assert!(matches!(
-            ast.tag(stmts[2]),
-            NodeTag::VarDecl | NodeTag::AssignOrDecl
-        ));
+        assert!(is_decl_stmt(&ast, stmts[0]));
+        assert!(is_error_stmt(&ast, stmts[1]));
+        assert!(is_decl_stmt(&ast, stmts[2]));
     }
 
     #[test]
@@ -1596,9 +1688,13 @@ mod tests {
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
         assert!(ok, "recovery must produce a partial program");
         let func = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(func.body.len(), 3);
-        assert_eq!(ast.tag(func.body[1]), NodeTag::Error);
-        assert_eq!(ast.tag(func.body[2]), NodeTag::AssignOrDecl);
+        let body = fn_body(&ast, func);
+        assert_eq!(body.len(), 3);
+        assert!(is_error_stmt(&ast, body[1]));
+        assert!(matches!(
+            ast.stmt(body[2]).kind,
+            StmtKind::AssignOrDecl { .. }
+        ));
     }
 
     #[test]
@@ -1608,16 +1704,10 @@ mod tests {
         assert!(ok, "recovery must produce a partial program");
         let stmts = ast.top_level_stmts();
         assert_eq!(stmts.len(), 4);
-        assert_eq!(ast.tag(stmts[0]), NodeTag::Error);
-        assert!(matches!(
-            ast.tag(stmts[1]),
-            NodeTag::VarDecl | NodeTag::AssignOrDecl
-        ));
-        assert_eq!(ast.tag(stmts[2]), NodeTag::Error);
-        assert!(matches!(
-            ast.tag(stmts[3]),
-            NodeTag::VarDecl | NodeTag::AssignOrDecl
-        ));
+        assert!(is_error_stmt(&ast, stmts[0]));
+        assert!(is_decl_stmt(&ast, stmts[1]));
+        assert!(is_error_stmt(&ast, stmts[2]));
+        assert!(is_decl_stmt(&ast, stmts[3]));
     }
 
     #[test]
@@ -1628,11 +1718,8 @@ mod tests {
         assert!(ok, "recovery must produce a partial program");
         let stmts = ast.top_level_stmts();
         assert_eq!(stmts.len(), 2);
-        assert!(matches!(
-            ast.tag(stmts[0]),
-            NodeTag::VarDecl | NodeTag::AssignOrDecl
-        ));
-        assert_eq!(ast.tag(stmts[1]), NodeTag::Error);
+        assert!(is_decl_stmt(&ast, stmts[0]));
+        assert!(is_error_stmt(&ast, stmts[1]));
     }
 
     #[test]
@@ -1645,8 +1732,9 @@ mod tests {
         assert!(ok, "recovery must produce a partial program");
         let stmts = ast.top_level_stmts();
         let func = fn_def(&ast, stmts[0]);
-        assert_eq!(func.body.len(), 2);
-        assert_eq!(ast.tag(func.body[1]), NodeTag::Error);
+        let body = fn_body(&ast, func);
+        assert_eq!(body.len(), 2);
+        assert!(is_error_stmt(&ast, body[1]));
         assert_eq!(stmts.len(), 2);
     }
 
@@ -1659,8 +1747,9 @@ mod tests {
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
         assert!(ok, "recovery must produce a partial program");
         let func = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(func.body.len(), 2);
-        assert_eq!(ast.tag(func.body[1]), NodeTag::Error);
+        let body = fn_body(&ast, func);
+        assert_eq!(body.len(), 2);
+        assert!(is_error_stmt(&ast, body[1]));
         assert_eq!(ast.top_level_stmts().len(), 1);
     }
 
@@ -1673,11 +1762,9 @@ mod tests {
         assert!(errs.is_empty(), "expected a clean parse: {errs:?}");
         assert!(ok, "expected a program");
         let func = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(func.body.len(), 1);
-        assert!(matches!(
-            ast.tag(func.body[0]),
-            NodeTag::VarDecl | NodeTag::AssignOrDecl
-        ));
+        let body = fn_body(&ast, func);
+        assert_eq!(body.len(), 1);
+        assert!(is_decl_stmt(&ast, body[0]));
     }
 
     #[test]
@@ -1689,7 +1776,7 @@ mod tests {
         assert!(ok, "recovery must produce a partial program");
         let stmts = ast.top_level_stmts();
         assert_eq!(stmts.len(), 1);
-        assert_eq!(ast.tag(stmts[0]), NodeTag::Error);
+        assert!(is_error_stmt(&ast, stmts[0]));
     }
 
     #[test]
@@ -1703,11 +1790,8 @@ mod tests {
         assert!(ok, "recovery must produce a partial program");
         let stmts = ast.top_level_stmts();
         assert_eq!(stmts.len(), 2);
-        assert_eq!(ast.tag(stmts[0]), NodeTag::Error);
-        assert!(matches!(
-            ast.tag(stmts[1]),
-            NodeTag::VarDecl | NodeTag::AssignOrDecl
-        ));
+        assert!(is_error_stmt(&ast, stmts[0]));
+        assert!(is_decl_stmt(&ast, stmts[1]));
     }
 
     #[test]
@@ -1720,9 +1804,13 @@ mod tests {
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
         assert!(ok, "recovery must produce a partial program");
         let func = fn_def(&ast, only_stmt(&ast));
-        assert_eq!(func.body.len(), 2);
-        assert_eq!(ast.tag(func.body[0]), NodeTag::Error);
-        assert_eq!(ast.tag(func.body[1]), NodeTag::AssignOrDecl);
+        let body = fn_body(&ast, func);
+        assert_eq!(body.len(), 2);
+        assert!(is_error_stmt(&ast, body[0]));
+        assert!(matches!(
+            ast.stmt(body[1]).kind,
+            StmtKind::AssignOrDecl { .. }
+        ));
         assert_eq!(ast.top_level_stmts().len(), 1);
     }
 
@@ -1736,11 +1824,8 @@ mod tests {
         assert!(ok, "recovery must produce a partial program");
         let stmts = ast.top_level_stmts();
         assert_eq!(stmts.len(), 2);
-        assert_eq!(ast.tag(stmts[0]), NodeTag::Error);
-        assert!(matches!(
-            ast.tag(stmts[1]),
-            NodeTag::VarDecl | NodeTag::AssignOrDecl
-        ));
+        assert!(is_error_stmt(&ast, stmts[0]));
+        assert!(is_decl_stmt(&ast, stmts[1]));
     }
 
     #[test]
@@ -1751,6 +1836,6 @@ mod tests {
         assert_eq!(errs.len(), 1, "expected one parse error: {errs:?}");
         assert!(ok, "recovery must produce a partial program");
         assert_eq!(ast.top_level_stmts().len(), 1);
-        assert_eq!(ast.tag(ast.top_level_stmts()[0]), NodeTag::Error);
+        assert!(is_error_stmt(&ast, ast.top_level_stmts()[0]));
     }
 }
