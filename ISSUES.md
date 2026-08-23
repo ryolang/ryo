@@ -82,6 +82,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Float literals must have digits on both sides of the dot. None of `.5`, `5.`, `1e10`, `1.5e-3`, `1_000_000.0` parse. Sufficient for M7's example programs but obviously incomplete.
 **Resolution:** Extend the regex to cover `[0-9]+(_[0-9]+)*(\.[0-9]+(_[0-9]+)*)?([eE][+-]?[0-9]+)?` (or break it into named sub-patterns). Mirror the same underscore + exponent treatment for integer literals at the same time so the two grammars stay parallel. Watch out for ambiguities with method-call syntax (`5.bit_count()`) once methods land.
 
+### I-154 — No way to name infinity (or NaN) in Ryo source
+
+**Files:** `ryo-frontend/src/lexer.rs` (`RawToken::Float` regex, cf. I-027), `ryo-frontend/src/builtins.rs`, `ryo-frontend/src/sema.rs`, `docs/specification.md`
+**Summary:** There is no source-level spelling for IEEE infinity or NaN. The float literal grammar (`[0-9]+\.[0-9]+`, I-027) cannot express either — infinity has no decimal spelling, and the grammar has no exponent notation. IEEE edge cases are reachable at runtime (`1.0 / 0.0` yields `+inf`, see `examples/float_zero_div.ryo`) but can only be *detected* indirectly via identities like `x > 0.0 and x * 2.0 == x`, which is opaque and fragile. Almost no language spells infinity as a literal (Rust, Go, Python, C all use named constants), so this is a naming gap, not a grammar gap.
+**Resolution:** Add `inf` as a predefined name that sema resolves to `FloatLit(f64::INFINITY.to_bits())` — same mechanism as the other builtins, no new literal grammar. Decide `nan` deliberately rather than by default: a `nan` constant makes `nan == nan` false in surface syntax, which is a real footgun; consider whether `x != x` suffices for NaN detection instead. This is a language design change — it requires explicit spec approval and a paragraph in the specification's literals/constants section before implementation.
+
 ### I-028 — No `print(float)` (or `print` on anything but a `str` literal)
 
 **Files:** `ryo-frontend/src/builtins.rs`, `ryo-frontend/src/sema.rs` (`check_builtin_call`), `ryo-backend/src/codegen.rs` (`generate_print_call`)
@@ -187,7 +193,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Resolution:** Add the `// SAFETY:` comment at the JIT site (function was finalized by cranelift-jit for this module; signature matches the compiled entry point; memory freed after execution), link this issue from both sites, and record the sign-off here. No code-semantics change.
 **Status (2026-08-03):** SAFETY comments + linked issue are in place at both sites, and `unsafe_code = "deny"` now guards the rest of the tree via `[workspace.lints]` (compiler crates opt in; `runtime/` is the curated boundary). Remaining: human sign-off in review.
 
-### I-131 — Ownership param-map `expect("param exists")` sites
+### I-155 — Ownership param-map `expect("param exists")` sites
 
 **Files:** `ryo-frontend/src/ownership.rs` (:89, :1827, :2903, :2923 — `expect("param exists")`)
 **Summary:** The ownership pass `expect("param exists")`s on its param-index map in four places — compiler panics on internal-invariant violation, invisible to the R9 diagnostics pipeline. (The sema `analyze_stmt`/`analyze_expr` fallthrough `panic!`s originally tracked here were folded into the documented UIR trusted-producer contract as `unreachable!` — resolution option (b) for the sema half.)
