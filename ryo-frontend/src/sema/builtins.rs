@@ -7,7 +7,6 @@ use ryo_core::types::{StringId, TypeKind};
 use ryo_core::uir::{CallView, InstData, InstRef, InstTag, Span};
 
 /// Front-end validation for builtin calls.
-///
 pub(crate) fn emit_builtin_call(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,

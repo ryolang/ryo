@@ -1,5 +1,6 @@
 use super::super::*;
 use super::common::*;
+use crate::builtins::is_borrowed_scalar_param;
 
 #[test]
 fn dead_store_schedules_free_after_decl() {

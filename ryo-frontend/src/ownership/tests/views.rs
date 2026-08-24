@@ -2097,5 +2097,3 @@ fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
         sc.free_schedule
     );
 }
-
-// ---------- W0003 RedundantMaterialize, case B (M8.4.1.2) ----------

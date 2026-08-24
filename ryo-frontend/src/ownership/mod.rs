@@ -26,7 +26,6 @@
 //!
 //! See `docs/dev/mojo_reference.md`.
 
-use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 
 mod diag_fmt;
@@ -38,15 +37,16 @@ pub(crate) use loops::*;
 mod merge;
 pub(crate) use merge::*;
 mod views;
-pub use ryo_core::ownership::{
-    BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
-};
-use ryo_core::tir::{ParamMode, Span, Tir, TirData, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
-use std::collections::{HashMap, HashSet};
 pub(crate) use views::*;
 mod walk;
 pub(crate) use walk::*;
+
+pub use ryo_core::ownership::{
+    BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
+};
+use ryo_core::tir::{ParamMode, Span, Tir, TirRef, TirTag};
+use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
+use std::collections::{HashMap, HashSet};
 
 // ---------- Classification ----------
 

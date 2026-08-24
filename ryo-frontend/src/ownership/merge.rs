@@ -33,7 +33,7 @@ impl Ownership {
     /// - Final pass: per-binding state is recomputed through whichever
     ///   end-of-branch owner each branch left, so reseats inside a branch
     ///   contribute their state to the merged binding.
-    pub(crate) fn merge_branches(&mut self, branches: &[&Ownership]) {
+    pub(super) fn merge_branches(&mut self, branches: &[&Ownership]) {
         // BranchId monotonicity: never let a merge roll the allocator
         // backward. The loop fixed-point (analyze_loop_body) merges
         // only the four non-monotone fields via merge_non_monotone,
@@ -143,7 +143,7 @@ pub(crate) fn merge_current_owner_first_wins(
 
 /// One side of a binding-aware merge: the side's binding → owner map
 /// paired with its owner-state map.
-pub(crate) type MergeSide<'a> = (&'a HashMap<StringId, Owner>, &'a HashMap<Owner, OwnerState>);
+type MergeSide<'a> = (&'a HashMap<StringId, Owner>, &'a HashMap<Owner, OwnerState>);
 
 /// Binding-aware override, shared by `Ownership::merge_branches`
 /// (sides = the branch lattices) and `merge_non_monotone` (sides =

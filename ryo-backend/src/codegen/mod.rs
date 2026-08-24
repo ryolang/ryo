@@ -22,9 +22,7 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use cranelift::codegen::ir::{
-    ArgumentPurpose, BlockArg, FuncRef, InstructionData, Opcode, StackSlot, ValueDef,
-};
+use cranelift::codegen::ir::ArgumentPurpose;
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;

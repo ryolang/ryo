@@ -1,6 +1,15 @@
 //! Expression evaluation and call emission — split from `mod.rs`; see module docs there.
 
-use super::*;
+use super::{
+    Codegen, DIV_ZERO_MSG, FunctionContext, MOD_ZERO_MSG, OFF_LEN, OFF_PTR, OVERFLOW_MSG,
+    STR_SLOT_SIZE, VIEW_SLOT_SIZE, ValueRepr, cranelift_type_for, is_str_type, store_string,
+};
+use cranelift::codegen::ir::{BlockArg, FuncRef, InstructionData, Opcode, StackSlot, ValueDef};
+use cranelift::prelude::*;
+use cranelift_module::{DataDescription, DataId, Linkage, Module};
+use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
+use ryo_core::types::{InternPool, StringId, TypeKind};
+use std::collections::HashMap;
 
 impl<M: Module> Codegen<M> {
     /// Materialize an instruction's value, recursively materializing

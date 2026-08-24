@@ -1,6 +1,19 @@
 //! Forward statement/expression walk — split from `mod.rs`.
 
-use super::*;
+use super::{
+    Owner, OwnerState, Ownership, ReseatDrop, analyze_for_range, analyze_while_loop,
+    check_source_projected, consumed_binding_name, drain_dying_views, format_binding,
+    needs_tracking, owner_name_for_diag, owner_sort_key, projection_root,
+    prune_branch_dead_projections, push_unique, record_return_epilogue,
+    refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
+    rule7_owner_name,
+};
+use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
+use ryo_core::diag::{Diag, DiagCode, DiagSink};
+use ryo_core::ownership::{BranchId, FreePoint, FunctionSidecar, IfBranchIds};
+use ryo_core::tir::{ParamMode, Span, Tir, TirData, TirRef, TirTag};
+use ryo_core::types::{InternPool, StringId};
+use std::collections::HashSet;
 
 pub(crate) fn analyze_stmt(
     tir: &Tir,
