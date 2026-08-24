@@ -3,7 +3,9 @@ mod frees;
 mod inout;
 mod loops;
 mod merge;
-mod views;
+mod views_basics;
+mod views_branches;
+mod views_calls;
 
 use super::*;
 use common::*;
