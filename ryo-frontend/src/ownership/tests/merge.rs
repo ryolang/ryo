@@ -30,7 +30,7 @@ fn branch_ids_unique_across_post_loop_if() {
     // `Some(BranchId)` entries to inspect. The strong regression
     // for Bug 4 lives in
     // `branch_ids_do_not_collide_after_loop` in
-    // `tests/integration_tests.rs`.
+    // `tests/integration_ownership.rs`.
     let mut tb = TirBuilder::new(main, vec![], void, span);
 
     let cond_w = tb.bool_const(false, bool_ty, span);

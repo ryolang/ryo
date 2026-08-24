@@ -1,5 +1,4 @@
 use super::*;
-use common::*;
 
 #[test]
 fn param_slice_read_defers_free_to_projection_last_use() {

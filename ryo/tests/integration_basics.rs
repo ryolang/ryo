@@ -1348,14 +1348,17 @@ fn test_str_shadowed_by_int_assignment_does_not_panic() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // Assert on the program's runtime output only (the slice after the
+    // "[Codegen]" marker), not the full stdout.
+    let runtime = stdout.split("[Codegen]").nth(1).unwrap();
     assert!(
-        stdout.contains("2"),
+        runtime.contains("2"),
         "Output should contain '2', got: {}",
-        stdout
+        runtime
     );
     assert!(
-        stdout.contains("hello"),
+        runtime.contains("hello"),
         "Output should contain 'hello', got: {}",
-        stdout
+        runtime
     );
 }

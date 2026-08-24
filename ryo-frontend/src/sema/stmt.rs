@@ -416,15 +416,7 @@ pub(crate) fn analyze_block(
     scope: &Scope,
     stmts: &[InstRef],
 ) -> Vec<TirRef> {
-    let mut child_scope = Scope {
-        parent: Some(scope),
-        bindings: HashMap::new(),
-    };
-    let mut tirs = Vec::with_capacity(stmts.len());
-    for stmt_ref in stmts {
-        tirs.push(analyze_stmt(sema, fcx, &mut child_scope, *stmt_ref));
-    }
-    tirs
+    analyze_block_seeded(sema, fcx, scope, stmts, |_| {})
 }
 
 /// Variant of [`analyze_block`] that accepts a closure to seed the
