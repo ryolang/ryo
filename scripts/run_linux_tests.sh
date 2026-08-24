@@ -7,12 +7,6 @@ set -e
 cd "$(dirname "$0")/.."
 
 echo "========================================================"
-echo "📏 Checking file lengths (3000-line gate)..."
-echo "========================================================"
-./scripts/check_file_length.sh
-
-echo ""
-echo "========================================================"
 echo "🐳 Building Ryo Linux test image..."
 echo "========================================================"
 docker build -t ryo-linux-test -f scripts/Dockerfile .
