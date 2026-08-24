@@ -329,12 +329,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Every branch arm and every loop-propagate pass deep-clones the full ownership state (15 fields, several `HashMap`s). Correct, but against R3's allocation discipline on the hottest analysis path; the cost grows with function body size. (Codegen's per-block map clones are tracked separately as I-095.)
 **Resolution:** After I-129 converts the dense-index maps to `Vec` side tables, replace whole-state clones with snapshot/restore of the four non-monotone fields only, or a copy-on-write per-arm overlay. Measure on the benchmark suite before and after.
 
-### I-137 — No file-length gate; three files exceed 3000 lines
-
-**Files:** `ryo-frontend/src/ownership.rs` (9504), `ryo-frontend/src/sema.rs` (4168), `ryo/tests/integration_tests.rs` (4002)
-**Summary:** Nothing stops source files from growing unbounded; three files are already past the 3000-line mark used as the tidy limit (rust-lang `src/tools/tidy` convention, tests included). Full split plans with per-module anchors are in `docs/dev/architecture_analysis_2026_08_20.md` §4. Related to I-128 (function-level sizes) but distinct: this is file-level navigability, review surface, and merge-conflict scope.
-**Resolution:** Add a tidy check to CI failing on `*.rs` files over 3000 lines with an explicit allowlist for the three current files; shrink the allowlist as the §4 splits land (`ownership/` and `sema/` module directories, per-area integration test binaries sharing `common/mod.rs`).
-
 ### I-140 — Cranelift upgrade 0.131.1 → 0.135.x (MSRV ladder + breaking removals)
 
 **Files:** `Cargo.toml` (workspace deps), `Cargo.lock`, `scripts/check_cranelift.sh`, `ryo-backend/src/codegen.rs`
