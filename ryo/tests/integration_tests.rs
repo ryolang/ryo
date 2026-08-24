@@ -1,46 +1,9 @@
-use std::fs;
+mod common;
+use common::*;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
-
-// Helper function to run ryo compiler and capture output
-fn run_ryo_command(
-    args: &[&str],
-    file_path: &Path,
-) -> Result<std::process::Output, std::io::Error> {
-    let mut cmd = Command::new("cargo");
-    cmd.args(["run", "--"])
-        .args(&args[..args.len() - 1]) // All args except the filename
-        .arg(file_path); // Use absolute path for the file
-    cmd.output()
-}
-
-// Helper function to create a temporary test file
-fn create_test_file(dir: &Path, filename: &str, content: &str) -> std::path::PathBuf {
-    let file_path = dir.join(filename);
-    fs::write(&file_path, content).expect("Failed to write test file");
-    file_path
-}
-
-/// Path to an AOT-built binary, with the platform `.exe` suffix.
-fn exe_path(dir: &Path, stem: &str) -> PathBuf {
-    dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
-}
-
-macro_rules! assert_ryo_runs {
-    ($test_name:expr, $code:expr) => {{
-        let temp_dir = TempDir::new().expect("Failed to create temp directory");
-        let test_file = create_test_file(temp_dir.path(), $test_name, $code);
-        let output =
-            run_ryo_command(&["run", $test_name], &test_file).expect("Failed to run ryo command");
-
-        assert!(
-            output.status.success(),
-            "STDERR: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }};
-}
 
 #[test]
 fn test_lex_command_integration() {
@@ -1284,30 +1247,6 @@ fn panic_inside_if_branch_not_taken() {
     );
 }
 
-/// A `never` value anywhere but a bare statement is a compile error
-/// — `panic` diverges and produces no value to bind, return, pass,
-/// or operate on. Assert on the user-facing message, not the exit
-/// code alone.
-fn assert_never_rejected(file_name: &str, code: &str) {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let test_file = create_test_file(temp_dir.path(), file_name, code);
-
-    let output =
-        run_ryo_command(&["run", file_name], &test_file).expect("Failed to run ryo run command");
-
-    assert!(
-        !output.status.success(),
-        "never-binding should be rejected. stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("'never' value"),
-        "stderr should name the never-binding error, got: {}",
-        stderr
-    );
-}
-
 #[test]
 fn never_var_decl_scalar_rejected() {
     assert_never_rejected(
@@ -1558,27 +1497,6 @@ fn test_cross_scope_mut_reassign() {
 // =============================================================================
 // AOT Build + Run Verification Tests
 // =============================================================================
-
-/// Run `ryo build` and return the path to the compiled binary.
-///
-/// The AOT pipeline writes the binary next to the source file. Tests
-/// place (or copy) the source into a dedicated output directory so the
-/// artifact lands somewhere predictable and is cleaned up with the
-/// `TempDir`.
-fn run_ryo_build(source_file: &Path, out_dir: &Path) -> std::process::Output {
-    // We need the Cargo project root so `cargo run` can find Cargo.toml.
-    // CARGO_MANIFEST_DIR is set by Cargo during `cargo test`.
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-
-    Command::new("cargo")
-        .args(["run", "--manifest-path"])
-        .arg(format!("{}/Cargo.toml", manifest_dir))
-        .args(["--", "build"])
-        .arg(source_file)
-        .current_dir(out_dir)
-        .output()
-        .expect("Failed to run ryo build command")
-}
 
 #[test]
 fn assert_true_aot_run_succeeds() {
@@ -1973,29 +1891,6 @@ fn div_by_zero_aot_run_exits_101() {
 // Integer overflow traps (spec §18: checked arithmetic in all build modes)
 // ============================================================================
 
-/// Runs `code` via the JIT and asserts an "integer overflow" panic
-/// (stderr message + nonzero exit).
-fn assert_int_overflow_panics(name: &str, code: &str) {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let test_file = create_test_file(temp_dir.path(), name, code);
-
-    let output =
-        run_ryo_command(&["run", name], &test_file).expect("Failed to run ryo run command");
-
-    assert_eq!(
-        output.status.code(),
-        Some(101),
-        "integer overflow should exit 101. stdout: {}",
-        String::from_utf8_lossy(&output.stdout),
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("integer overflow"),
-        "stderr should contain overflow message, got: {}",
-        stderr
-    );
-}
-
 #[test]
 fn add_overflow_panics_jit() {
     // Var operand defeats sema const-eval; the trap fires at runtime.
@@ -2052,22 +1947,6 @@ fn add_at_max_does_not_trap() {
     assert!(
         output.status.success(),
         "i64::MAX + 0 should succeed. STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Runs `code` via the JIT and asserts it completes successfully.
-fn assert_program_succeeds(name: &str, code: &str) {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let test_file = create_test_file(temp_dir.path(), name, code);
-
-    let output =
-        run_ryo_command(&["run", name], &test_file).expect("Failed to run ryo run command");
-
-    assert!(
-        output.status.success(),
-        "{} should succeed. STDERR: {}",
-        name,
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -2392,40 +2271,40 @@ fn while_true_with_return() {
 fn test_for_range_sum() {
     // 0+1+2+3+4 = 10
     let code = "fn main():\n\tmut sum = 0\n\tfor i in range(0, 5):\n\t\tsum += i\n\tassert(sum == 10, \"0+1+2+3+4 should be 10\")\n";
-    assert_ryo_runs!("for_sum.ryo", code);
+    assert_ryo_runs("for_sum.ryo", code);
 }
 
 #[test]
 fn test_for_range_zero_iterations_start_gt_end() {
     let code = "fn main():\n\tmut ran = 0\n\tfor i in range(5, 3):\n\t\tran = 1\n\tassert(ran == 0, \"body should never run when start > end\")\n";
-    assert_ryo_runs!("for_empty.ryo", code);
+    assert_ryo_runs("for_empty.ryo", code);
 }
 
 #[test]
 fn test_for_range_zero_iterations_equal() {
     let code = "fn main():\n\tmut ran = 0\n\tfor i in range(5, 5):\n\t\tran = 1\n\tassert(ran == 0, \"body should never run when start == end\")\n";
-    assert_ryo_runs!("for_equal.ryo", code);
+    assert_ryo_runs("for_equal.ryo", code);
 }
 
 #[test]
 fn test_for_range_with_break() {
     // break at i==3, so last assigned is 2
     let code = "fn main():\n\tmut last = 0\n\tfor i in range(0, 10):\n\t\tif i == 3:\n\t\t\tbreak\n\t\tlast = i\n\tassert(last == 2, \"last before break at 3 should be 2\")\n";
-    assert_ryo_runs!("for_break.ryo", code);
+    assert_ryo_runs("for_break.ryo", code);
 }
 
 #[test]
 fn test_for_range_with_continue() {
     // 0+1+3+4 = 8 (skipped 2)
     let code = "fn main():\n\tmut sum = 0\n\tfor i in range(0, 5):\n\t\tif i == 2:\n\t\t\tcontinue\n\t\tsum += i\n\tassert(sum == 8, \"0+1+3+4 should be 8\")\n";
-    assert_ryo_runs!("for_continue.ryo", code);
+    assert_ryo_runs("for_continue.ryo", code);
 }
 
 #[test]
 fn test_nested_for_loops() {
     // 3 * 2 = 6
     let code = "fn main():\n\tmut sum = 0\n\tfor i in range(0, 3):\n\t\tfor j in range(0, 2):\n\t\t\tsum += 1\n\tassert(sum == 6, \"3*2 should be 6\")\n";
-    assert_ryo_runs!("nested_for.ryo", code);
+    assert_ryo_runs("nested_for.ryo", code);
 }
 
 #[test]
@@ -2571,20 +2450,20 @@ fn test_str_concat_chained() {
 #[test]
 fn test_str_equality() {
     let code = "fn main():\n\ta: str = \"hello\"\n\tb: str = \"hello\"\n\tassert(a == b, \"equal strings should be equal\")\n";
-    assert_ryo_runs!("str_equality.ryo", code);
+    assert_ryo_runs("str_equality.ryo", code);
 }
 
 #[test]
 fn test_str_inequality() {
     let code = "fn main():\n\ta: str = \"hello\"\n\tb: str = \"world\"\n\tassert(a != b, \"different strings should not be equal\")\n";
-    assert_ryo_runs!("str_inequality.ryo", code);
+    assert_ryo_runs("str_inequality.ryo", code);
 }
 
 #[test]
 fn test_slice_print_roundtrip() {
-    assert_ryo_runs!(
+    assert_ryo_runs(
         "slice_print.ryo",
-        "fn main():\n\ts: str = \"hello world\"\n\tprint(s[0:5])\n\tprint(s[6:])\n\tprint(s[:5])\n"
+        "fn main():\n\ts: str = \"hello world\"\n\tprint(s[0:5])\n\tprint(s[6:])\n\tprint(s[:5])\n",
     );
 }
 
@@ -2592,28 +2471,28 @@ fn test_slice_print_roundtrip() {
 fn test_bare_int_to_str_statement() {
     // A formatter builtin called as a bare statement (result
     // discarded) must not trip the scalar-Free guard in codegen.
-    assert_ryo_runs!("bare_int_to_str.ryo", "fn main():\n\tint_to_str(5)\n");
+    assert_ryo_runs("bare_int_to_str.ryo", "fn main():\n\tint_to_str(5)\n");
 }
 
 #[test]
 fn test_bare_float_to_str_statement() {
     // Same, for the float formatter.
-    assert_ryo_runs!("bare_float_to_str.ryo", "fn main():\n\tfloat_to_str(2.5)\n");
+    assert_ryo_runs("bare_float_to_str.ryo", "fn main():\n\tfloat_to_str(2.5)\n");
 }
 
 #[test]
 fn test_bare_bool_to_str_statement() {
     // Same, for the bool formatter.
-    assert_ryo_runs!("bare_bool_to_str.ryo", "fn main():\n\tbool_to_str(true)\n");
+    assert_ryo_runs("bare_bool_to_str.ryo", "fn main():\n\tbool_to_str(true)\n");
 }
 
 #[test]
 fn test_bare_slice_statement() {
     // A bare view-typed expression statement (result discarded) must
     // evaluate through the view entry point, not the scalar path.
-    assert_ryo_runs!(
+    assert_ryo_runs(
         "bare_slice.ryo",
-        "fn main():\n\ts: str = \"hello\"\n\ts[0:2]\n"
+        "fn main():\n\ts: str = \"hello\"\n\ts[0:2]\n",
     );
 }
 
@@ -4074,17 +3953,17 @@ fn test_benchmark_files_aot_compile_and_run() {
 
 #[test]
 fn test_slice_shorthands_and_reslice() {
-    assert_ryo_runs!(
+    assert_ryo_runs(
         "slice_forms.ryo",
-        "fn main():\n\ts: str = \"hello world\"\n\tprint(s[0:5])\n\tprint(s[6:])\n\tprint(s[:5])\n\tprint(s[:])\n\tv = s[0:5]\n\tprint(v[1:3])\n"
+        "fn main():\n\ts: str = \"hello world\"\n\tprint(s[0:5])\n\tprint(s[6:])\n\tprint(s[:5])\n\tprint(s[:])\n\tv = s[0:5]\n\tprint(v[1:3])\n",
     );
 }
 
 #[test]
 fn test_slice_multibyte_utf8() {
-    assert_ryo_runs!(
+    assert_ryo_runs(
         "slice_utf8.ryo",
-        "fn main():\n\ts: str = \"héllo wörld\"\n\tprint(s[0:6])\n\tprint(s[7:13])\n"
+        "fn main():\n\ts: str = \"héllo wörld\"\n\tprint(s[0:6])\n\tprint(s[7:13])\n",
     );
 }
 
@@ -4094,25 +3973,25 @@ fn test_view_param_with_owned_and_view_args() {
     // owner → view conversion, §3.4) and an existing view. The
     // function prints rather than returns the slice — E1 forbids
     // view returns (see test_view_return_diag).
-    assert_ryo_runs!(
+    assert_ryo_runs(
         "view_param.ryo",
-        "fn print_first_word(text: strview):\n\tmut i: int = 0\n\twhile i < text.len():\n\t\tif text[i:i+1] == \" \":\n\t\t\tprint(text[0:i])\n\t\t\treturn\n\t\ti += 1\n\tprint(text)\n\nfn main():\n\ts: str = \"hello world\"\n\tprint_first_word(s)\n\tprint_first_word(s[6:])\n"
+        "fn print_first_word(text: strview):\n\tmut i: int = 0\n\twhile i < text.len():\n\t\tif text[i:i+1] == \" \":\n\t\t\tprint(text[0:i])\n\t\t\treturn\n\t\ti += 1\n\tprint(text)\n\nfn main():\n\ts: str = \"hello world\"\n\tprint_first_word(s)\n\tprint_first_word(s[6:])\n",
     );
 }
 
 #[test]
 fn test_slice_of_borrowed_param_ok() {
-    assert_ryo_runs!(
+    assert_ryo_runs(
         "slice_param_ok.ryo",
-        "fn head(s: str):\n\tprint(s[0:1])\n\nfn main():\n\tx: str = \"hi\"\n\thead(x)\n"
+        "fn head(s: str):\n\tprint(s[0:1])\n\nfn main():\n\tx: str = \"hi\"\n\thead(x)\n",
     );
 }
 
 #[test]
 fn test_slice_empty() {
-    assert_ryo_runs!(
+    assert_ryo_runs(
         "slice_empty.ryo",
-        "fn main():\n\ts: str = \"abc\"\n\tprint(s[3:])\n\tprint(s[0:0])\n"
+        "fn main():\n\ts: str = \"abc\"\n\tprint(s[3:])\n\tprint(s[0:0])\n",
     );
 }
 
@@ -4290,9 +4169,9 @@ fn test_view_to_str_param_end_to_end() {
     // call-scoped), so both slice args compile and run. (`assert`'s
     // message stays string-literal-only: the panic text is formatted
     // at compile time, so a runtime view cannot flow through it.)
-    assert_ryo_runs!(
+    assert_ryo_runs(
         "view_str_param.ryo",
-        "fn show(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hello\"\n\tshow(s[0:3])\n\tshow(s[0:2])\n"
+        "fn show(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hello\"\n\tshow(s[0:3])\n\tshow(s[0:2])\n",
     );
 }
 
