@@ -1,10 +1,10 @@
-**Status:** Complete (codebase snapshot 2026-08-24, branch `fix/file-length-gate` @ `c068448`)
+**Status:** Complete (codebase snapshot 2026-08-24, branch `fix/file-length-gate` @ `333dbca`)
 
 # Architecture Analysis — 2026-08-24
 
 Refresh of [architecture_analysis_2026_08_20.md](architecture_analysis_2026_08_20.md) (snapshot 2026-08-20, `c24a224`, branch `fix/i-089-param-mode-decode`). Every module was re-verified at HEAD; claims from the previous analysis are marked **fixed**, **open**, or **stale**. Issue references (`I-xxx`) point to [ISSUES.md](../../ISSUES.md) — resolved entries are removed from that file.
 
-The delta splits in two: `main` landed #114 (strict `ParamMode` decode), #115 (integer div/mod-by-zero guards, I-023), #116 (parser-recovery block-header fix, I-130), #117 (AST flattened into a typed arena, I-126), and #118 (hot-path bookkeeping removal + lint-policy tightening); the snapshot branch then executed the §4 file-length plan from the previous analysis almost verbatim (I-137): `ownership.rs`/`sema.rs`/`codegen.rs` became module directories, `integration_tests.rs` became six per-area test binaries, and a 3000-line gate now runs locally (`scripts/check_file_length.sh`) and in CI (`tidy` job) with **no allowlist**.
+The delta splits in two: `main` landed #114 (strict `ParamMode` decode), #115 (integer div/mod-by-zero guards, I-023), #116 (parser-recovery block-header fix, I-130), #117 (AST flattened into a typed arena, I-126), and #118 (hot-path bookkeeping removal + lint-policy tightening); the snapshot branch then executed the §4 file-length plan from the previous analysis almost verbatim (I-137): `ownership.rs`/`sema.rs`/`codegen.rs` became module directories, `integration_tests.rs` became six per-area test binaries, and a file-length gate now runs locally (`scripts/check_file_length.sh`) and in CI (`tidy` job) with **no allowlist** — initially 3000 lines, tightened to **2000** the same day after the views-test split and `tir.rs` test extraction.
 
 Scale: ~36.5k lines of Rust source across 7 workspace crates, ~860 `#[test]` (previous snapshot: ~29k lines, 811 tests). A macOS `cargo test --workspace` run at HEAD: **828 passed, 0 failed** (valgrind smoke suite skips without valgrind installed).
 
@@ -44,8 +44,8 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 
 | Crate | Files (lines) | Role |
 |---|---|---|
-| `ryo-core` | tir 2022, uir 1529, ast 1047, types 892, ast_pretty 503, diag 347, ownership 112, errors 69 | IRs, AST arena, InternPool, diagnostics, sidecar types |
-| `ryo-frontend` | parser 1982, lexer 1014, astgen 854, indent 287, builtins 233; **sema/** = tests 1945, expr 721, mod 525, stmt 521, builtins 501, call 272; **ownership/** = walk 1263, loops 877, mod 717, views 567, frees 351, merge 346, diag_fmt 55, tests 5440 (7 files) | source → TIR + ownership |
+| `ryo-core` | tir 1712 (+ tir/tests 309), uir 1529, ast 1047, types 892, ast_pretty 503, diag 347, ownership 112, errors 69 | IRs, AST arena, InternPool, diagnostics, sidecar types |
+| `ryo-frontend` | parser 1982, lexer 1014, astgen 854, indent 287, builtins 233; **sema/** = tests 1945, expr 721, mod 525, stmt 521, builtins 501, call 272; **ownership/** = walk 1263, loops 877, mod 717, views 567, frees 351, merge 346, diag_fmt 55, tests 5444 (9 files) | source → TIR + ownership |
 | `ryo-backend` | **codegen/** = mod 1537, expr 1490; toolchain 269, runtime_lib 66, linker 27 | TIR → object/binary |
 | `ryo-driver` | pipeline 834 | staging, ariadne rendering |
 | `ryo` | main 133 + six integration binaries (218 tests) + asan/valgrind smoke (27/28) | CLI |
@@ -74,7 +74,7 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 
 - Invariants intact: slot-0 sentinel, niche-filled `InstRef`, `Inst ≤ 24` bytes pinned by `inst_stays_small`, checked u32 conversions on arena pushes.
 - **Open (refreshed):** I-091 (allocating view decoders — `call_view :870-886`, `if_stmt_view :1004-1046`, `body_stmts :344`, `while_loop_view :942`, `for_range_view :956`, `method_call_view :981`); I-109 (`func_bodies :307`, no reverse map); I-080 (`ExtraRange` duplicated with tir.rs, `:119` vs `tir.rs:138`); I-047 (`UirParam.mode: ParamMode :285` still a pass-through).
-- **Stale (I-134a):** the `:1-6` header still claims `--emit=uir` is "still TODO" — it is wired (`pipeline.rs` `ir_command :357-424`); `#![allow(dead_code)]` still at `:6`.
+- **Fixed (I-134, `8ec3494`):** the `:1-6` header no longer claims `--emit=uir` is "still TODO" — it is wired (`pipeline.rs` `ir_command :357-424`); `#![allow(dead_code)]` remains at `:6`.
 
 ### 2.4 Types (`types.rs`, 892) — unchanged, still the best structure in the tree
 
@@ -89,22 +89,21 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 - **New / open:** I-147 — `vec![ParamMode::Borrow; arg_tirs.len()]` per builtin call (`builtins.rs:22`; same pattern for view calls at `call.rs:91`).
 - I-128 note: the file split did not shrink entry points — `analyze_stmt` (`stmt.rs:14`) sits at exactly **360** code-lines, at the ratchet; `analyze_expr_allow_never` ~322 raw, `check_binary_op` ~265, `emit_builtin_call` ~225.
 
-### 2.6 TIR (`tir.rs`, 2022)
+### 2.6 TIR (`tir.rs` 1712 + `tir/tests.rs` 309)
 
-- **Fixed:** the dangling `I-106` citation is gone, replaced by a generic trusted-producer paragraph (`~:46-54`).
+- **Fixed:** the dangling `I-106` citation is gone, replaced by a generic trusted-producer paragraph (`~:46-54`). The `:1-6` header no longer claims `--emit=tir` is TODO (I-134 swept, `8ec3494`). The inline test module now lives in the child module `tir/tests.rs` (`#[cfg(test)] mod tests;` — private access preserved via `use super::*`).
 - Anchors refreshed: param sentinel band `is_param :121`/`as_param_index :126`; strict `ParamMode::from_u32 -> Option` (`:305`); tree-shape validation via `finish :922` → `validate_tree_shape :939`.
 - **New since the snapshot:** #118 replaced per-statement `HashSet` reachability scans with allocation-free `Tir::contains_reachable` (`:1353`), consumed by ownership's loop/branch predicates.
-- **Stale (I-134a):** the `:1-6` header still claims `--emit=tir` is TODO — it is wired (`pipeline.rs:357-424`).
 - **Open:** I-091 (allocating view decoders); I-080 (`ExtraRange` duplication).
 
-### 2.7 Ownership — sidecar (`ryo-core/src/ownership.rs`, 112, unchanged) + pass (`ownership/`: mod 717, walk 1263, loops 877, views 567, frees 351, merge 346, diag_fmt 55; tests/ 5440, 108 tests)
+### 2.7 Ownership — sidecar (`ryo-core/src/ownership.rs`, 112, unchanged) + pass (`ownership/`: mod 717, walk 1263, loops 877, views 567, frees 351, merge 346, diag_fmt 55; tests/ 5444 in 9 files, 108 tests)
 
 - The §4.1 split plan from the previous analysis landed almost exactly as proposed. Refreshed anchors: `check()` `mod.rs:276`; `analyze_function :286`; pre-passes `collect_loop_nesting` (`loops.rs:376`) + `collect_view_liveness` (`views.rs:254`); forward walk `analyze_stmt` (`walk.rs:18`), `analyze_if_stmt :507`, `visit_expr :782`, `recurse_operands :1208`; merges in `merge.rs` (`merge_branches :36` — now `pub(super)`; `MergeSide` now private); loop fixed-point `analyze_loop_body` (`loops.rs:468`, `MAX_PROPAGATE_PASSES = 2 :498`).
 - **State grew 15 → 19 fields** (`mod.rs:116-254`); the non-monotone snapshot set is still **4** fields (`walk.rs:556-563`).
 - **#118 changes:** `outermost_branch_of`/`ancestor_branches_of` now use allocation-free `Tir::contains_reachable` (`loops.rs:207,:268`); the `visit_expr` Call arm's per-call `HashSet`s became small `Vec`s with prefix scans (`walk.rs:836-845`).
 - **Open (refreshed):** I-128 (`visit_expr` `walk.rs:782` = 298 code-lines / ~424 raw — the largest function in the tree; `analyze_if_stmt :507` = 210); I-129 (dense-keyed HashMaps remain: `origin :119`, `param_index :127`, `owner_at_read :154`, `view_last_use :215`, `view_defer_loop :228`, `loop_nesting :237`); I-136 (per-arm `own.clone()` `walk.rs:571`; propagate-pass map + sidecar clones `loops.rs:480-537`); I-135 (Rule-7 look-through guard still duplicated: `walk.rs:934-936` vs `:1029-1030`); I-145 (full-states snapshot per break/continue, `loops.rs:546,:753`); I-146 (`bindings.clone()` per if/arm/loop in `collect_view_liveness`, `views.rs:344,:430`); I-155 (4 `expect("param exists")` sites: `mod.rs:102,:456`, `walk.rs:675,:695`).
 - **New / open:** I-148 (per-arg callee-name string scans: `is_borrowed_scalar_param` per call-arg at `walk.rs:847`, `view_borrow_params` at `:917`, linear scans `builtins.rs:128,:142`); I-151 (`collect_loop_nesting` per-statement/per-instruction allocs, `loops.rs:376,:394`).
-- **Stale (I-134b):** the "Today no `free_on_reassign` entries exist" comment still exists at `ownership/mod.rs:556-557` — the field is populated and test-covered.
+- **Fixed (I-134, `8ec3494`):** the "Today no `free_on_reassign` entries exist" comment at `ownership/mod.rs:556-557` was reworded to current behavior — the field is populated and test-covered.
 
 ### 2.8 Builtins (`builtins.rs`, 233 — unchanged)
 
@@ -148,50 +147,53 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 
 ## 3. Delta Since the Previous Snapshot
 
-**Resolved (removed from ISSUES.md, verified in code):** I-023 (#115 div/mod-by-zero guards), I-126 (#117 AST arena), I-130 (#116 parser recovery), I-131 (sema half #118; ownership half re-filed as I-155), I-137 (this branch — splits + 3000-line gate). I-098 fixed in code on this branch (harness switch) — ISSUES.md entry still present and stale.
+**Resolved (removed from ISSUES.md, verified in code):** I-023 (#115 div/mod-by-zero guards), I-126 (#117 AST arena), I-130 (#116 parser recovery), I-131 (sema half #118; ownership half re-filed as I-155), I-137 (this branch — splits + file-length gate), I-098 (harness switch to `CARGO_BIN_EXE_ryo`, this branch), I-134 (comment sweep, `8ec3494`).
 
 **New architecture:** typed-arena AST (`Ast`, `ExprId`/`StmtId`, side arenas, parser builds in-arena with a no-op `Inspector`); compile-time + runtime integer div/mod-by-zero guarding with shared cold panic blocks (`DIV_ZERO_MSG`/`MOD_ZERO_MSG`/`OVERFLOW_MSG`, `guard_msg_data` cache, `panic_blocks` deferred to end-of-function); checked `INeg` and compound-assign; dense `Vec` codegen memo replacing the `inst_values` HashMap; allocation-free `Tir::contains_reachable`; module-directory layout for sema/ownership/codegen; six-binary integration layout with the `CARGO_BIN_EXE_ryo` harness; `scripts/check_file_length.sh` + CI `tidy` job; backend CodSpeed benchmarks (`ryo-backend/benches/backend.rs` + `backend-benchmarks` job); lint ratchet — `too-many-lines-threshold = 360`, `panic`/`todo`/`unimplemented`/`unwrap_used` at **deny** (`expect_used` stays allow pending the I-153 audit, ~70 sites).
 
 **New issues filed since the snapshot:** I-138 (`INT_MIN / -1` UB), I-140/I-141 (Cranelift 0.131.1 → 0.135.x upgrade ladder + follow-on guard-codegen review), I-142 (value-range guard elision), I-144 (per-if clone + dead-drop scans), I-145 (per-jump states snapshot), I-146 (view-liveness bindings clones), I-147 (builtin mode-Vec allocs), I-148 (per-arg callee-name lookups), I-149 (per-literal unescape String), I-150 (signature built twice), I-151 (loop-nesting allocs), I-152 (throwaway parser Vecs), I-153 (`expect_used` audit), I-154 (no inf/NaN spelling), I-155 (ownership `expect("param exists")`).
 
-**ISSUES.md staleness found during verification:** I-098 describes the pre-split test world; I-097 still quotes the pre-`no_std` 17 MB archive; many `Files:` fields throughout still cite monolithic `codegen.rs`/`sema.rs`/`ownership.rs`/`integration_tests.rs` line numbers (the §2 anchors above are the current sites). Also still open from the previous analysis's doc-debt list (I-134): the `--emit` "still TODO" headers at `tir.rs:1-6`/`uir.rs:1-6` and the "no `free_on_reassign` entries" comment at `ownership/mod.rs:556-557`.
+**ISSUES.md hygiene:** the staleness found during verification (I-098's pre-split text, I-097's pre-`no_std` 17 MB numbers, monolithic-path `Files:` refs, I-134's comments) was swept in `8ec3494`: I-098/I-134 removed, I-097 corrected to 6.06 MB debug / 5.81 MB release, and `Files:` anchors across 35 entries refreshed to the post-split layout.
 
 ---
 
-## 4. File-Length Gate (3K-line limit) — landed
+## 4. File-Length Gate (2K-line limit) — landed
 
-**Rule (unchanged):** no Rust source file in the workspace should exceed **3000 lines**, tests included. I-137 resolved on this branch (`8c08abf`): `scripts/check_file_length.sh` runs the gate locally, and CI runs it as the `tidy` job (ubuntu, `actions/checkout@v6` with `persist-credentials: false`). There is deliberately **no allowlist** — the splits are the fix. It was kept out of `scripts/run_linux_tests.sh`, which stays scoped to the ASan/Valgrind container run.
+**Rule:** no Rust source file in the workspace should exceed **2000 lines**, tests included. I-137 resolved on this branch (`8c08abf`): `scripts/check_file_length.sh` runs the gate locally, and CI runs it as the `tidy` job (ubuntu, `actions/checkout@v6` with `persist-credentials: false`). There is deliberately **no allowlist** — the splits are the fix. It was kept out of `scripts/run_linux_tests.sh`, which stays scoped to the ASan/Valgrind container run. The gate landed at 3000 and was tightened to 2000 the same day (`333dbca`) once the two remaining >2K files were split.
 
 Largest files at HEAD, verified with `wc -l`:
 
 | File | Lines |
 |---|---|
-| `ryo-frontend/src/ownership/tests/views.rs` | 2098 |
-| `ryo-core/src/tir.rs` | 2022 |
 | `ryo-frontend/src/parser.rs` | 1982 |
 | `ryo-frontend/src/sema/tests.rs` | 1945 |
+| `ryo-core/src/tir.rs` | 1712 |
 | `ryo-backend/src/codegen/mod.rs` | 1537 |
 | `ryo-backend/src/codegen/expr.rs` | 1490 |
+| `ryo-frontend/src/ownership/tests/frees.rs` | 1479 |
 
 ### 4.1 What landed
 
-- `ownership.rs` (9504) → `ownership/`: mod 717 + walk 1263 + loops 877 + views 567 + frees 351 + merge 346 + diag_fmt 55, tests split into `tests/{mod,frees,inout,loops,merge,views}.rs` + `tests/common/` (108 tests, moved verbatim).
+- `ownership.rs` (9504) → `ownership/`: mod 717 + walk 1263 + loops 877 + views 567 + frees 351 + merge 346 + diag_fmt 55, tests split into `tests/{mod,frees,inout,loops,merge}.rs` + `tests/common.rs` (108 tests, moved verbatim).
 - `sema.rs` (4168) → `sema/`: mod 525 + stmt 521 + expr 721 + call 272 + builtins 501 + tests 1945 (190 tests).
 - `codegen.rs` (3010) → `codegen/`: mod 1537 + expr 1490 (the §4.4 watch-list item, split pre-emptively).
 - `integration_tests.rs` (4002) → six per-area binaries (§2.12); harness moved to `CARGO_BIN_EXE_ryo` in the same pass.
+- Gate-tightening splits (`d613074`, `333d409`): `ownership/tests/views.rs` (2098) → `views_basics.rs` (426, projection/freeze basics) + `views_branches.rs` (1065, per-arm liveness) + `views_calls.rs` (610, Rule-7 call args / materialize); `tir.rs` inline tests → `tir/tests.rs` (309) as a `#[cfg(test)]` child module, keeping `tir.rs` a plain file.
 
 ### 4.2 Split discipline (as executed)
 
 - Pure moves, zero logic changes; one module per commit, `cargo test` green after each. Moves were verified line-multiset-identical against the originals.
 - Module header docs kept on `mod.rs`; child modules carry a one-line `//!` pointing back.
 - Re-exports through `mod.rs` (`pub(crate) use`) left all `pipeline.rs` call sites untouched; sibling modules import explicitly (`use super::{…}`), globs only in test modules.
-- Shared test fixtures live in `tests/common/` (ownership) and `ryo/tests/common/` (integration).
+- Test extraction to a child-module file (`tir/tests.rs`) is preferred over converting a file to a `mod.rs` directory — no path churn, private access preserved.
+- Shared test fixtures live in `tests/common.rs` (ownership) and `ryo/tests/common/` (integration).
 
-### 4.3 Watch list (under 3K, trending up)
+### 4.3 Watch list (under 2K, tight by design)
 
-- `ryo-frontend/src/ownership/tests/views.rs` — **2098**. When it crosses, split the M8.4 view tests by rule family (P-rules vs E/W diagnostics).
-- `ryo-core/src/tir.rs` (2022), `ryo-frontend/src/parser.rs` (1982), `ryo-frontend/src/sema/tests.rs` (1945) — healthy; parser would split statement vs expression parsers, sema tests by feature area.
-- `ryo-core/src/ast.rs` grew 351 → **1047** with the arena (#117) — new entry; healthy.
+- `ryo-frontend/src/parser.rs` — **1982**, 18 lines of headroom. The next feature touching it forces the split: statement vs expression parsers.
+- `ryo-frontend/src/sema/tests.rs` — **1945**, 55 lines of headroom; splits by feature area when it crosses.
+- `ryo-core/src/tir.rs` (1712), `ryo-backend/src/codegen/mod.rs` (1537) — healthy.
+- `ryo-core/src/ast.rs` grew 351 → **1047** with the arena (#117) — healthy.
 
 ---
 
