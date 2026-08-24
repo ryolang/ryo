@@ -64,7 +64,7 @@ cargo run -- run <file>          # JIT compile and execute
 cargo run -- build <file>        # AOT compile to binary
 cargo run -- toolchain install   # Download Zig linker
 cargo run -- toolchain status    # Check Zig status
-cargo clippy --workspace --all-targets -- -D warnings  # Lint; `-- -D warnings` matches CI (ci.yml sets RUSTFLAGS=-Dwarnings). `--workspace` is required — bare `--all-targets` only checks the default member `ryo` and misses other crates' test/bench targets
+RUSTFLAGS=-Dwarnings cargo clippy --workspace --all-targets  # Lint; RUSTFLAGS=-Dwarnings matches CI exactly (ci.yml sets it env-wide). `--workspace` is required — bare `--all-targets` only checks the default member `ryo` and misses other crates' test/bench targets
 cargo fmt --check                # Check code formatting style
 ```
 
