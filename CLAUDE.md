@@ -59,7 +59,7 @@ cargo check                      # Check compiler for errors
 cargo test                       # Run all unit + integration tests
 ./scripts/run_linux_tests.sh             # Build Docker image and run entire test suite in Linux (ASan + Valgrind leak detection)
 ./scripts/check_cranelift.sh [version]   # Diff Ryo's Cranelift version (from Cargo.lock) against another (default: latest) — see below
-./scripts/check_file_length.sh           # Fail on Rust files over 3000 lines (no allowlist; CI runs the same check)
+./scripts/check_file_length.sh           # Fail on Rust files over 2000 lines (no allowlist; CI runs the same check)
 cargo run -- run <file>          # JIT compile and execute
 cargo run -- build <file>        # AOT compile to binary
 cargo run -- toolchain install   # Download Zig linker

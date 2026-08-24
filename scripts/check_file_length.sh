@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Usage: ./scripts/check_file_length.sh
 
-MAX_LINES=3000
+MAX_LINES=2000
 
 main() {
     cd "$(dirname "$0")/.."
