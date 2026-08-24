@@ -303,7 +303,7 @@ fn last_use_across_multiple_top_level_statements() {
     // first read instead — turning the second read into use-after-free.
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     // Compute the printed value (7 * 6 == 42) so the literal "42" never
-    // appears in the source dump that `cargo run --` emits under the
+    // appears in the source dump that `ryo run` emits under the
     // `[Input Source]` heading. That way `stdout.matches("42").count()`
     // reflects only the two `print(s)` calls, not the echoed source.
     let code = "fn main():\n\ts: str = int_to_str(7 * 6)\n\tprint(s)\n\tprint(s)\n";

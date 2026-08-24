@@ -1,6 +1,6 @@
 // Some helpers (the `Display` dump, primitive `from_raw` /
 // `as_range` accessors, and `unreachable` builder) are reachable
-// only from the (still TODO) `ryo ir --emit=tir` flag and from
+// only from the `ryo ir --emit=tir` flag and from
 // future phases (lazy sema, comptime). Allow until then so CI's
 // `-Dwarnings` doesn't fire on shape-only scaffolding.
 #![allow(dead_code)]

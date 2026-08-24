@@ -553,10 +553,8 @@ fn analyze_function(
 
     // Dead-store survivors: emit W0001 and schedule a Free anchored
     // after the declaring instruction. Skip owners already covered by
-    // `free_on_reassign` (Task 6) to avoid double-freeing the same
-    // allocation. Today no `free_on_reassign` entries exist; this
-    // guard activates with Task 6. (`reassign_targets` was computed
-    // above for the last-use pass.)
+    // `free_on_reassign` to avoid double-freeing the same allocation.
+    // (`reassign_targets` was computed above for the last-use pass.)
     let mut sorted_dead: Vec<(Owner, (StringId, Span, TirRef))> = own
         .pending_dead_store
         .iter()

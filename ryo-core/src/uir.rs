@@ -1,7 +1,7 @@
 // Some helpers (the `Display` dump, primitive `from_raw` /
 // `as_range` accessors, and decoders for tags not yet emitted from
 // astgen) are reachable only from the `ryo ir --emit=uir` flag
-// (still TODO) and from future phases (TIR, comptime). Allow until
+// and from future phases (comptime). Allow until
 // then so CI's `-Dwarnings` doesn't fire on shape-only scaffolding.
 #![allow(dead_code)]
 
