@@ -854,9 +854,9 @@ fn loop_deferred_view_stays_frozen_across_arm_without_read() {
 #[test]
 fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
     // Same contract as loop_deferred_view_stays_frozen_across_arm_without_read
-    // but through the ForRange path (analyze_for_range →
-    // remove_loop_deferred_views at :3017 instead of the while-loop
-    // call at :2994):
+    // but through the ForRange path (loops::analyze_for_range →
+    // views::remove_loop_deferred_views instead of the while-loop call in
+    // loops::analyze_while_loop):
     //   s: str = "hello"; v = s[0:2]
     //   for i in range(0, 3):
     //       if cond: str_push(&s, "!")   # v unread on this arm's path

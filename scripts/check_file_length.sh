@@ -17,7 +17,7 @@ main() {
     local file lines
 
     while IFS= read -r file; do
-        lines=$(wc -l < "$file")
+        lines=$(awk 'END {print NR}' "$file")
         if [ "$lines" -gt "$MAX_LINES" ]; then
             echo "Error: $file has $lines lines (limit: $MAX_LINES)" >&2
             failed=1
