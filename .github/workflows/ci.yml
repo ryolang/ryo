@@ -30,6 +30,15 @@ permissions:
   contents: read
 
 jobs:
+  tidy:
+    name: File length
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: ./scripts/check_file_length.sh
+
   fmt:
     name: Format
     runs-on: ubuntu-latest

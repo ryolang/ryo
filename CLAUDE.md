@@ -59,11 +59,12 @@ cargo check                      # Check compiler for errors
 cargo test                       # Run all unit + integration tests
 ./scripts/run_linux_tests.sh             # Build Docker image and run entire test suite in Linux (ASan + Valgrind leak detection)
 ./scripts/check_cranelift.sh [version]   # Diff Ryo's Cranelift version (from Cargo.lock) against another (default: latest) — see below
+./scripts/check_file_length.sh           # Fail on Rust files over 2000 lines (no allowlist; CI runs the same check)
 cargo run -- run <file>          # JIT compile and execute
 cargo run -- build <file>        # AOT compile to binary
 cargo run -- toolchain install   # Download Zig linker
 cargo run -- toolchain status    # Check Zig status
-cargo clippy --workspace --all-targets -- -D warnings  # Lint; `-- -D warnings` matches CI (ci.yml sets RUSTFLAGS=-Dwarnings). `--workspace` is required — bare `--all-targets` only checks the default member `ryo` and misses other crates' test/bench targets
+RUSTFLAGS=-Dwarnings cargo clippy --workspace --all-targets  # Lint; RUSTFLAGS=-Dwarnings matches CI exactly (ci.yml sets it env-wide). `--workspace` is required — bare `--all-targets` only checks the default member `ryo` and misses other crates' test/bench targets
 cargo fmt --check                # Check code formatting style
 ```
 
