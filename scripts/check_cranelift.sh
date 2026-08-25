@@ -4,9 +4,16 @@ set -euo pipefail
 # check_cranelift.sh — show what changed in Cranelift between the version Ryo
 # currently uses (parsed from Cargo.lock) and any other version (default: the
 # latest release). Resolves Ryo's Cranelift dependency version, queries
-# crates.io and the GitHub API for the exact commit SHAs, and prints the
-# history of commits touching the cranelift/ directory (handling parallel
-# release-branch history). Usage: ./scripts/check_cranelift.sh [target-version]
+# crates.io for the exact commit SHAs, and prints the history of commits
+# touching the cranelift/ directory (handling parallel release-branch
+# history). Usage: ./scripts/check_cranelift.sh [target-version]
+#
+# GitHub API authentication: uses $GITHUB_TOKEN if set, otherwise falls back
+# to `gh auth token` when the gh CLI is authenticated. Unauthenticated calls
+# are limited to 60 requests/hour, which this script can exceed.
+
+GITHUB_API="https://api.github.com/repos/bytecodealliance/wasmtime"
+TOKEN=""
 
 # Extract cranelift version from Cargo.lock string
 get_cranelift_version_from_lockfile() {
@@ -27,7 +34,7 @@ get_sha_for_version() {
     local version="$1"
     local crates_io_json="$2"
     echo "$crates_io_json" | jq -r --arg ver "$version" '
-        .versions[] | select(.num == $ver) | .trustpub_data.sha
+        .versions[] | select(.num == $ver) | .trustpub_data.sha // empty
     '
 }
 
@@ -35,61 +42,78 @@ get_sha_for_version() {
 get_latest_version() {
     local crates_io_json="$1"
     echo "$crates_io_json" | jq -r '
-        [.versions[] | select(.yanked == false)] |
+        [.versions[] | select(.yanked == false) | select(.num | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] |
         sort_by(.num | split(".") | map(tonumber)) |
         last | .num
     '
 }
 
-# Print commits from JSON, stop and return 0 if any SHA matches the stop_shas list.
-# Otherwise, print all and return 1.
-parse_and_print_commits() {
-    local commits_json="$1"
-    local stop_shas="$2"
-    
-    # We iterate using jq to get the output fields, formatted as a TSV/delimited string:
-    # sha|date|author|message
-    local IFS=$'\n'
-    local found_start=1 # 1 is failure/not found in Bash return terms, 0 is success/found
-
-    # Use a delimiter that is unlikely to be in fields
-    local lines
-    lines=$(echo "$commits_json" | jq -r '
-        .[] | select(. != null) | 
-        "\(.sha)\t\(.commit.committer.date)\t\(.commit.author.name)\t\(.commit.message | split("\n")[0])"
-    ')
-
-    for line in $lines; do
-        local sha date author msg
-        sha=$(echo "$line" | cut -d$'\t' -f1)
-        date=$(echo "$line" | cut -d$'\t' -f2 | cut -d'T' -f1)
-        author=$(echo "$line" | cut -d$'\t' -f3)
-        msg=$(echo "$line" | cut -d$'\t' -f4)
-        
-        local short_sha="${sha:0:7}"
-        
-        # If this SHA is in our list of stop SHAs, we stop!
-        # Wrap with spaces to prevent partial substring matches
-        if [[ " $stop_shas " =~ " $sha " ]]; then
-            found_start=0
-            break
-        fi
-
-        # Print formatted commit line
-        printf "[%s] %s | %-15s | %s\n" "$short_sha" "$date" "${author:0:15}" "$msg"
-    done
-
-    return $found_start
+# Resolve a GitHub token from the environment or the gh CLI
+resolve_token() {
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        TOKEN="$GITHUB_TOKEN"
+    elif command -v gh &>/dev/null && gh auth status &>/dev/null; then
+        TOKEN=$(gh auth token)
+    fi
 }
 
-# Perform safe API curl calls with GitHub token if available
+# Perform an API call, printing the response body on success. On HTTP errors,
+# print a diagnostic to stderr and return 1.
 fetch_api() {
     local url="$1"
     local headers=("-H" "User-Agent: ryo-compiler-dev-agent")
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        headers+=("-H" "Authorization: Bearer $GITHUB_TOKEN")
+    if [ -n "$TOKEN" ]; then
+        headers+=("-H" "Authorization: Bearer $TOKEN")
     fi
-    curl -s --fail --max-time 30 "${headers[@]}" "$url"
+
+    local body http_code
+    body=$(curl -sS --max-time 30 "${headers[@]}" -w $'\n%{http_code}' "$url") || {
+        echo "Error: Failed to connect to $url" >&2
+        return 1
+    }
+    http_code="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+
+    if [ "$http_code" != "200" ]; then
+        local msg
+        msg=$(echo "$body" | jq -r '.message // empty' 2>/dev/null || true)
+        echo "Error: API request failed (HTTP $http_code): ${msg:-$url}" >&2
+        if [ "$http_code" = "403" ] && [ -z "$TOKEN" ]; then
+            echo "Hint: unauthenticated GitHub API access is limited to 60 requests/hour." >&2
+            echo "      Set GITHUB_TOKEN or authenticate the gh CLI to raise the limit." >&2
+        fi
+        return 1
+    fi
+
+    printf '%s' "$body"
+}
+
+# Echo "yes" if commit $1 is an ancestor of commit $2 (or equal to it),
+# "no" otherwise. Uses the GitHub compare API: status "ahead"/"identical"
+# means the base is reachable from the head. Returns 1 on API error.
+check_ancestor() {
+    local probe="$1" base="$2"
+    local json status
+    json=$(fetch_api "$GITHUB_API/compare/${probe}...${base}")
+    status=$(echo "$json" | jq -r '.status')
+    if [ "$status" = "ahead" ] || [ "$status" = "identical" ]; then
+        echo "yes"
+    else
+        echo "no"
+    fi
+}
+
+# Print formatted commit lines from a commits JSON array, for indices
+# $2..$3 inclusive (0-based, newest first).
+print_commits() {
+    local commits_json="$1" from="$2" to="$3"
+    [ "$from" -gt "$to" ] && return 0
+    echo "$commits_json" | jq -r --argjson from "$from" --argjson to "$to" '
+        .[$from : ($to + 1)][] |
+        "\(.sha[0:7])\t\(.commit.committer.date | split("T")[0])\t\(.commit.author.name[0:15])\t\(.commit.message | split("\n")[0])"
+    ' | while IFS=$'\t' read -r short_sha date author msg; do
+        printf "[%s] %s | %-15s | %s\n" "$short_sha" "$date" "$author" "$msg"
+    done
 }
 
 main() {
@@ -102,6 +126,8 @@ main() {
         exit 1
     fi
 
+    resolve_token
+
     local start_ver=""
     local end_ver=""
 
@@ -112,7 +138,8 @@ main() {
             echo "Error: Cargo.lock not found in current directory. Run from the Ryo workspace root." >&2
             exit 1
         fi
-        local lock_content=$(cat "$lock_file")
+        local lock_content
+        lock_content=$(cat "$lock_file")
         start_ver=$(get_cranelift_version_from_lockfile "$lock_content")
         if [ -z "$start_ver" ]; then
             echo "Error: Could not resolve current cranelift version from Cargo.lock." >&2
@@ -124,11 +151,8 @@ main() {
 
     # 2. Get crates.io metadata
     echo "Fetching Cranelift package information from crates.io..." >&2
-    local crates_io_json=$(fetch_api "https://crates.io/api/v1/crates/cranelift")
-    if [ -z "$crates_io_json" ] || [ "$crates_io_json" = "null" ]; then
-        echo "Error: Failed to query crates.io API." >&2
-        exit 1
-    fi
+    local crates_io_json
+    crates_io_json=$(fetch_api "https://crates.io/api/v1/crates/cranelift")
 
     # 3. Resolve end version
     if [ $# -eq 0 ]; then
@@ -145,31 +169,16 @@ main() {
     fi
 
     # 4. Resolve SHAs
-    local start_sha=$(get_sha_for_version "$start_ver" "$crates_io_json")
-    local end_sha=$(get_sha_for_version "$end_ver" "$crates_io_json")
+    local start_sha end_sha
+    start_sha=$(get_sha_for_version "$start_ver" "$crates_io_json")
+    end_sha=$(get_sha_for_version "$end_ver" "$crates_io_json")
 
-    if [ -z "$start_sha" ] || [ "$start_sha" = "null" ]; then
+    if [ -z "$start_sha" ]; then
         echo "Error: Could not find Git commit SHA for Cranelift version $start_ver on crates.io." >&2
         exit 1
     fi
-    if [ -z "$end_sha" ] || [ "$end_sha" = "null" ]; then
+    if [ -z "$end_sha" ]; then
         echo "Error: Could not find Git commit SHA for Cranelift version $end_ver on crates.io." >&2
-        exit 1
-    fi
-
-    echo "Fetching starting commit history to find branch common ancestors..." >&2
-    local stop_shas=""
-    local stop_page=1
-    local page_shas=""
-    while true; do
-        page_shas=$(fetch_api "https://api.github.com/repos/bytecodealliance/wasmtime/commits?path=cranelift&sha=${start_sha}&per_page=100&page=${stop_page}" | jq -r 'if (type == "array" and length > 0) then .[].sha else empty end' | tr '\n' ' ') || page_shas=""
-        [ -z "$page_shas" ] && break
-        stop_shas+="$page_shas"
-        stop_page=$((stop_page + 1))
-    done
-
-    if [ -z "$stop_shas" ]; then
-        echo "Error: Failed to fetch commit history for starting SHA $start_sha." >&2
         exit 1
     fi
 
@@ -181,29 +190,46 @@ main() {
     echo "Commits touching cranelift/:"
     echo "---------------------------"
 
-    # 5. Fetch commits from GitHub with pagination
+    # 5. Walk the end-branch history (newest first) page by page. Release
+    # branches diverge, so stop at the first commit that is also an ancestor
+    # of the start release. Each page costs one ancestor probe; the boundary
+    # page is pinpointed with a binary search (~7 extra probes).
     local page=1
-    local finished=1 # 1 means not finished, 0 means finished (found stop SHA)
-    local total_count=0
+    while true; do
+        local commits_json length
+        commits_json=$(fetch_api "$GITHUB_API/commits?path=cranelift&sha=${end_sha}&per_page=100&page=${page}")
+        length=$(echo "$commits_json" | jq 'length')
 
-    while [ $finished -ne 0 ]; do
-        local url="https://api.github.com/repos/bytecodealliance/wasmtime/commits?path=cranelift&sha=${end_sha}&per_page=100&page=${page}"
-        local commits_json=$(fetch_api "$url")
-        
-        if [ -z "$commits_json" ] || [ "$commits_json" = "null" ] || [ "$(echo "$commits_json" | jq -r 'type')" != "array" ] || [ "$(echo "$commits_json" | jq '. | length')" -eq 0 ]; then
-            echo "Error: Reached end of GitHub commit history without finding starting SHA history." >&2
-            break
+        if [ "$length" -eq 0 ]; then
+            echo "Error: Reached end of commit history without finding commits shared with $start_ver." >&2
+            exit 1
         fi
 
-        local page_count=$(echo "$commits_json" | jq '. | length')
-        total_count=$((total_count + page_count))
-
-        # parse_and_print_commits outputs lines and returns 0 if a stop SHA is reached
-        if parse_and_print_commits "$commits_json" "$stop_shas"; then
-            finished=0
-        else
+        local oldest
+        oldest=$(echo "$commits_json" | jq -r '.[-1].sha')
+        if [ "$(check_ancestor "$oldest" "$start_sha")" = "no" ]; then
+            # The whole page is newer than the shared history: print and continue.
+            print_commits "$commits_json" 0 $((length - 1))
             page=$((page + 1))
+            continue
         fi
+
+        # The boundary between release-only and shared commits is on this
+        # page. Binary search for the first commit that is an ancestor of the
+        # start release (invariant: commit at index hi is an ancestor).
+        local lo=0 hi=$((length - 1))
+        while [ "$lo" -lt "$hi" ]; do
+            local mid=$(( (lo + hi) / 2 ))
+            local mid_sha
+            mid_sha=$(echo "$commits_json" | jq -r ".[$mid].sha")
+            if [ "$(check_ancestor "$mid_sha" "$start_sha")" = "yes" ]; then
+                hi=$mid
+            else
+                lo=$((mid + 1))
+            fi
+        done
+        print_commits "$commits_json" 0 $((lo - 1))
+        break
     done
 
     echo ""

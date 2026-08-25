@@ -4,7 +4,9 @@ use super::{
     Codegen, DIV_ZERO_MSG, FunctionContext, MOD_ZERO_MSG, OFF_LEN, OFF_PTR, OVERFLOW_MSG,
     STR_SLOT_SIZE, VIEW_SLOT_SIZE, ValueRepr, cranelift_type_for, is_str_type, store_string,
 };
-use cranelift::codegen::ir::{BlockArg, FuncRef, InstructionData, Opcode, StackSlot, ValueDef};
+use cranelift::codegen::ir::{
+    BlockArg, FuncRef, InstructionData, MemFlagsData, Opcode, StackSlot, ValueDef,
+};
 use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, Linkage, Module};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
@@ -310,7 +312,7 @@ impl<M: Module> Codegen<M> {
         let content = ctx.pool.str(id);
         let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
         let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-        Ok(builder.ins().global_value(ctx.int_type, data_ref))
+        Ok(builder.ins().symbol_value(ctx.int_type, data_ref))
     }
 
     /// Define a compiler-generated message as a read-only data object,
@@ -481,7 +483,7 @@ impl<M: Module> Codegen<M> {
             builder.switch_to_block(block);
             let data_id = Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, msg)?;
             let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-            let ptr = builder.ins().global_value(ctx.int_type, data_ref);
+            let ptr = builder.ins().symbol_value(ctx.int_type, data_ref);
             let len = builder.ins().iconst(types::I64, msg.len() as i64);
             let panic_ref = Self::declare_runtime_fn(
                 ctx.module,
@@ -816,13 +818,13 @@ impl<M: Module> Codegen<M> {
 
         let ptr = builder
             .ins()
-            .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+            .load(ctx.int_type, MemFlagsData::trusted(), out_ptr, 0);
         let len = builder
             .ins()
-            .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+            .load(types::I64, MemFlagsData::trusted(), out_ptr, 8);
         let cap = builder
             .ins()
-            .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+            .load(types::I64, MemFlagsData::trusted(), out_ptr, 16);
         Ok(ValueRepr::Str { ptr, len, cap })
     }
 
@@ -945,13 +947,13 @@ impl<M: Module> Codegen<M> {
 
                 let ptr = builder
                     .ins()
-                    .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+                    .load(ctx.int_type, MemFlagsData::trusted(), out_ptr, 0);
                 let len = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+                    .load(types::I64, MemFlagsData::trusted(), out_ptr, 8);
                 let cap = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+                    .load(types::I64, MemFlagsData::trusted(), out_ptr, 16);
 
                 ValueRepr::Str { ptr, len, cap }
             }
@@ -1033,12 +1035,13 @@ impl<M: Module> Codegen<M> {
                 builder
                     .ins()
                     .call(slice_ref, &[base_ptr, base_len, start_v, end_v, out_ptr]);
-                let ptr = builder
-                    .ins()
-                    .load(ctx.int_type, MemFlags::trusted(), out_ptr, OFF_PTR);
+                let ptr =
+                    builder
+                        .ins()
+                        .load(ctx.int_type, MemFlagsData::trusted(), out_ptr, OFF_PTR);
                 let len = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), out_ptr, OFF_LEN);
+                    .load(types::I64, MemFlagsData::trusted(), out_ptr, OFF_LEN);
                 ValueRepr::View { ptr, len }
             }
             TirTag::ViewOfStr => {
@@ -1135,7 +1138,7 @@ impl<M: Module> Codegen<M> {
         let content = ctx.pool.str(id);
         let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
         let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-        let rodata_ptr = builder.ins().global_value(ctx.int_type, data_ref);
+        let rodata_ptr = builder.ins().symbol_value(ctx.int_type, data_ref);
         let lit_len = builder.ins().iconst(types::I64, content.len() as i64);
 
         // Allocate 24-byte stack slot for out parameter (8-byte aligned)
@@ -1161,13 +1164,13 @@ impl<M: Module> Codegen<M> {
         // Load the triple back from the stack slot
         let ptr = builder
             .ins()
-            .load(ctx.int_type, MemFlags::trusted(), out_ptr, 0);
+            .load(ctx.int_type, MemFlagsData::trusted(), out_ptr, 0);
         let len = builder
             .ins()
-            .load(types::I64, MemFlags::trusted(), out_ptr, 8);
+            .load(types::I64, MemFlagsData::trusted(), out_ptr, 8);
         let cap = builder
             .ins()
-            .load(types::I64, MemFlags::trusted(), out_ptr, 16);
+            .load(types::I64, MemFlagsData::trusted(), out_ptr, 16);
 
         Ok(ValueRepr::Str { ptr, len, cap })
     }
@@ -1265,9 +1268,11 @@ impl<M: Module> Codegen<M> {
             let ValueRepr::Str { ptr, len, cap } = s_repr else {
                 unreachable!("str_push target must be a str");
             };
-            builder.ins().store(MemFlags::trusted(), ptr, s_addr, 0);
-            builder.ins().store(MemFlags::trusted(), len, s_addr, 8);
-            builder.ins().store(MemFlags::trusted(), cap, s_addr, 16);
+            builder.ins().store(MemFlagsData::trusted(), ptr, s_addr, 0);
+            builder.ins().store(MemFlagsData::trusted(), len, s_addr, 8);
+            builder
+                .ins()
+                .store(MemFlagsData::trusted(), cap, s_addr, 16);
             // M8.4: the suffix may be either repr — an owned `str`
             // passes its ptr+len, a slice/view passes directly (no
             // ViewOfStr wrap: builtins bypass check_call's §3.4
@@ -1284,13 +1289,13 @@ impl<M: Module> Codegen<M> {
             // Reload the mutated fat pointer back into the caller's StrLocals.
             let np = builder
                 .ins()
-                .load(ctx.int_type, MemFlags::trusted(), s_addr, 0);
+                .load(ctx.int_type, MemFlagsData::trusted(), s_addr, 0);
             let nl = builder
                 .ins()
-                .load(types::I64, MemFlags::trusted(), s_addr, 8);
+                .load(types::I64, MemFlagsData::trusted(), s_addr, 8);
             let nc = builder
                 .ins()
-                .load(types::I64, MemFlags::trusted(), s_addr, 16);
+                .load(types::I64, MemFlagsData::trusted(), s_addr, 16);
             if let Some(name) = Self::local_name_of(ctx, s_ref)
                 && let Some(sl) = ctx.str_locals.get(&name).cloned()
             {
@@ -1332,9 +1337,9 @@ impl<M: Module> Codegen<M> {
                     let ValueRepr::Str { ptr, len, cap } = repr else {
                         unreachable!("inout str arg must produce ValueRepr::Str");
                     };
-                    builder.ins().store(MemFlags::trusted(), ptr, addr, 0);
-                    builder.ins().store(MemFlags::trusted(), len, addr, 8);
-                    builder.ins().store(MemFlags::trusted(), cap, addr, 16);
+                    builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+                    builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+                    builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
                     arg_values.push(addr);
                     inout_reloads.push((*arg, slot));
                 } else {
@@ -1347,7 +1352,7 @@ impl<M: Module> Codegen<M> {
                     ));
                     let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
                     let cur = Self::eval_inst(builder, ctx, *arg)?;
-                    builder.ins().store(MemFlags::trusted(), cur, addr, 0);
+                    builder.ins().store(MemFlagsData::trusted(), cur, addr, 0);
                     arg_values.push(addr);
                     inout_reloads.push((*arg, slot));
                 }
@@ -1413,9 +1418,13 @@ impl<M: Module> Codegen<M> {
 
             let ptr = builder
                 .ins()
-                .load(ctx.int_type, MemFlags::trusted(), out, 0);
-            let len = builder.ins().load(types::I64, MemFlags::trusted(), out, 8);
-            let cap = builder.ins().load(types::I64, MemFlags::trusted(), out, 16);
+                .load(ctx.int_type, MemFlagsData::trusted(), out, 0);
+            let len = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), out, 8);
+            let cap = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), out, 16);
             Self::cache_repr(ctx, r, ValueRepr::Str { ptr, len, cap });
             return Ok(ptr); // dummy scalar — consumers use eval_inst_str
         }
@@ -1448,11 +1457,13 @@ impl<M: Module> Codegen<M> {
             if is_str_type(arg_ty, ctx.pool) {
                 let np = builder
                     .ins()
-                    .load(ctx.int_type, MemFlags::trusted(), addr, 0);
-                let nl = builder.ins().load(types::I64, MemFlags::trusted(), addr, 8);
+                    .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+                let nl = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), addr, 8);
                 let nc = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), addr, 16);
+                    .load(types::I64, MemFlagsData::trusted(), addr, 16);
                 if let Some(name) = Self::local_name_of(ctx, *arg_ref)
                     && let Some(sl) = ctx.str_locals.get(&name).cloned()
                 {
@@ -1462,7 +1473,7 @@ impl<M: Module> Codegen<M> {
                 }
             } else {
                 let cl_ty = cranelift_type_for(arg_ty, ctx.pool, ctx.int_type);
-                let updated = builder.ins().load(cl_ty, MemFlags::trusted(), addr, 0);
+                let updated = builder.ins().load(cl_ty, MemFlagsData::trusted(), addr, 0);
                 if let Some(name) = Self::local_name_of(ctx, *arg_ref)
                     && let Some(var) = ctx.locals.get(&name).copied()
                 {

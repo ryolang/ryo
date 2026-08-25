@@ -22,7 +22,7 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use cranelift::codegen::ir::ArgumentPurpose;
+use cranelift::codegen::ir::{ArgumentPurpose, MemFlagsData};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -626,9 +626,15 @@ impl<M: Module> Codegen<M> {
                         // StrLocals so the body reads/mutates it like any
                         // str local; write all three fields back before
                         // each return_.
-                        let p = builder.ins().load(int_type, MemFlags::trusted(), ptr, 0);
-                        let l = builder.ins().load(types::I64, MemFlags::trusted(), ptr, 8);
-                        let c = builder.ins().load(types::I64, MemFlags::trusted(), ptr, 16);
+                        let p = builder
+                            .ins()
+                            .load(int_type, MemFlagsData::trusted(), ptr, 0);
+                        let l = builder
+                            .ins()
+                            .load(types::I64, MemFlagsData::trusted(), ptr, 8);
+                        let c = builder
+                            .ins()
+                            .load(types::I64, MemFlagsData::trusted(), ptr, 16);
                         let var_ptr = builder.declare_var(int_type);
                         let var_len = builder.declare_var(types::I64);
                         let var_cap = builder.declare_var(types::I64);
@@ -645,7 +651,7 @@ impl<M: Module> Codegen<M> {
                         );
                     } else {
                         let cl_ty = cranelift_type_for(param.ty, pool, int_type);
-                        let cur = builder.ins().load(cl_ty, MemFlags::trusted(), ptr, 0);
+                        let cur = builder.ins().load(cl_ty, MemFlagsData::trusted(), ptr, 0);
                         let var = builder.declare_var(cl_ty);
                         builder.def_var(var, cur);
                         locals.insert(param.name, var);
@@ -794,7 +800,7 @@ impl<M: Module> Codegen<M> {
 
             Self::emit_deferred_panic_blocks(&mut builder, &mut ctx)?;
 
-            builder.finalize();
+            builder.finalize(self.module.isa().frontend_config());
         }
 
         let ir_text = format!("{}", self.ctx.func);
@@ -870,9 +876,9 @@ impl<M: Module> Codegen<M> {
                 let p = builder.use_var(sl.ptr);
                 let l = builder.use_var(sl.len);
                 let c = builder.use_var(sl.cap);
-                builder.ins().store(MemFlags::trusted(), p, *ptr, 0);
-                builder.ins().store(MemFlags::trusted(), l, *ptr, 8);
-                builder.ins().store(MemFlags::trusted(), c, *ptr, 16);
+                builder.ins().store(MemFlagsData::trusted(), p, *ptr, 0);
+                builder.ins().store(MemFlagsData::trusted(), l, *ptr, 8);
+                builder.ins().store(MemFlagsData::trusted(), c, *ptr, 16);
             } else {
                 // Scalar pointee: a single store at offset 0.
                 let var = ctx.locals.get(name).ok_or_else(|| {
@@ -882,7 +888,7 @@ impl<M: Module> Codegen<M> {
                     )
                 })?;
                 let val = builder.use_var(*var);
-                builder.ins().store(MemFlags::trusted(), val, *ptr, 0);
+                builder.ins().store(MemFlagsData::trusted(), val, *ptr, 0);
             }
         }
         Ok(())
@@ -979,9 +985,9 @@ impl<M: Module> Codegen<M> {
                         ValueRepr::Str { ptr, len, cap } => (ptr, len, cap),
                         _ => unreachable!("str return must produce ValueRepr::Str"),
                     };
-                    builder.ins().store(MemFlags::trusted(), ptr, sret, 0);
-                    builder.ins().store(MemFlags::trusted(), len, sret, 8);
-                    builder.ins().store(MemFlags::trusted(), cap, sret, 16);
+                    builder.ins().store(MemFlagsData::trusted(), ptr, sret, 0);
+                    builder.ins().store(MemFlagsData::trusted(), len, sret, 8);
+                    builder.ins().store(MemFlagsData::trusted(), cap, sret, 16);
                     Self::emit_due_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[])?;
                 } else {
