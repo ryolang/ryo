@@ -5,3 +5,15 @@ fibonacci/fib
 fibonacci/fib.exe
 eager_destruction/eager_destruction
 eager_destruction/eager_destruction.exe
+string_building/string_building
+string_building/string_building.exe
+string_slicing/string_slicing
+string_slicing/string_slicing.exe
+mandelbrot/mandelbrot
+mandelbrot/mandelbrot.exe
+collatz/collatz
+collatz/collatz.exe
+doubling_concat/doubling_concat
+doubling_concat/doubling_concat.exe
+many_small_strings/many_small_strings
+many_small_strings/many_small_strings.exe
