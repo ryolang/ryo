@@ -12,7 +12,7 @@ Context for agents editing files in `docs/`.
 
 * Ryo is a general programming language — no system programming features needed
 * Ryo prioritizes DX
-* Ryo is not yet implemented; this is the first specification. No versioning concerns — all spec is future work.
+* The spec covers both implemented and future features. Do not annotate implementation status in the spec or in docs — status is owned by `docs/dev/implementation_roadmap.md`.
 * Built-in types are lowercase, user-defined types are PascalCase
 
 ## Diagrams
@@ -39,10 +39,10 @@ fn divide(a: int, b: int) -> DivisionByZero!int:
 user: ?User = none
 name = user?.name orelse "Unknown"
 
-# Constrained types (v0.2)
+# Constrained types
 type Port = int(1..65535)
 
-# Contracts (v0.2)
+# Contracts
 #[pre(x > 0)]
 fn double(x: int) -> int:
     return x * 2
