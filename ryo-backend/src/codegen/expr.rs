@@ -1,8 +1,8 @@
 //! Expression evaluation and call emission — split from `mod.rs`; see module docs there.
 
 use super::{
-    Codegen, DIV_ZERO_MSG, FunctionContext, MOD_ZERO_MSG, OFF_LEN, OFF_PTR, OVERFLOW_MSG,
-    STR_SLOT_SIZE, VIEW_SLOT_SIZE, ValueRepr, cranelift_type_for, is_str_type, store_string,
+    Codegen, DIV_ZERO_MSG, FunctionContext, MOD_ZERO_MSG, OVERFLOW_MSG, STR_SLOT_SIZE, ValueRepr,
+    cranelift_type_for, is_str_type, store_string,
 };
 use cranelift::codegen::ir::{
     BlockArg, FuncRef, InstructionData, MemFlagsData, Opcode, StackSlot, ValueDef,
@@ -12,6 +12,22 @@ use cranelift_module::{DataDescription, DataId, Linkage, Module};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind};
 use std::collections::HashMap;
+
+/// Cap derivation for the packed-u128 runtime string ABI (Phase 0):
+/// string-producing runtime functions return `{ptr, len}` packed in
+/// one u128 (lo = ptr, hi = len) — a true register return on every
+/// supported target (see `pack_pair` in `runtime/src/lib.rs` for why
+/// not a struct). The `cap` word is a codegen-side derivation:
+/// `Static` (cap = 0, the .rodata sentinel) for
+/// `ryo_str_from_literal`, `LenIsCap` (cap = len) for every
+/// allocating producer — the runtime never over-allocates, and
+/// `__ryo_str_push` manages growth capacity through its unchanged
+/// slot ABI.
+#[derive(Clone, Copy)]
+enum CapRule {
+    Static,
+    LenIsCap,
+}
 
 impl<M: Module> Codegen<M> {
     /// Materialize an instruction's value, recursively materializing
@@ -787,44 +803,47 @@ impl<M: Module> Codegen<M> {
     /// Materialize a str-typed TIR instruction, returning a
     /// `ValueRepr::Str` triple. Falls back to scalar `eval_inst`
     /// for non-str instructions.
-    /// Shared sret pattern for runtime calls that produce a `str`
-    /// through a caller-allocated stack slot: pass `args` plus the
-    /// slot address, then reload the (ptr, len, cap) triple. Used by
-    /// both the value path (`eval_inst_str`) and the bare-statement
-    /// path (`emit_call`) so the two cannot drift.
-    /// Does NOT touch `ctx.inst_values` — caching is the caller's job.
-    fn emit_sret_str_call(
+    /// Emit a call to a runtime function that returns a (ptr, len) pair
+    /// packed as `u128` (lo = ptr, hi = len), and unpack both halves
+    /// into SSA values — no stack slot, no out-pointer, no reload at
+    /// the call site. `ushr`'s shift amount is any integer type
+    /// (masked to the value width), so a plain i64 constant works.
+    fn emit_rv_pair_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         fn_name: &str,
         args: &[(Type, Value)],
+    ) -> Result<(Value, Value), String> {
+        let param_tys: Vec<Type> = args.iter().map(|(ty, _)| *ty).collect();
+        let func_ref =
+            Self::declare_runtime_fn(ctx.module, builder, fn_name, &param_tys, &[types::I128])?;
+        let call_args: Vec<Value> = args.iter().map(|(_, val)| *val).collect();
+        let call = builder.ins().call(func_ref, &call_args);
+        let pair = builder.inst_results(call)[0];
+        let ptr = builder.ins().ireduce(ctx.int_type, pair);
+        let shift = builder.ins().iconst(types::I64, 64);
+        let hi = builder.ins().ushr(pair, shift);
+        let len = builder.ins().ireduce(types::I64, hi);
+        Ok((ptr, len))
+    }
+
+    /// String-producing variant of `emit_rv_pair_call`: appends the
+    /// derived `cap` word so the triple lands entirely in SSA values.
+    /// Shared by every str-producing runtime call site so they cannot
+    /// drift. Does NOT touch `ctx.inst_values` — caching is the
+    /// caller's job.
+    fn emit_rv_str_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &str,
+        args: &[(Type, Value)],
+        cap_rule: CapRule,
     ) -> Result<ValueRepr, String> {
-        let slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            STR_SLOT_SIZE,
-            3,
-        ));
-        let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
-        let param_tys: Vec<Type> = args
-            .iter()
-            .map(|(ty, _)| *ty)
-            .chain([ctx.int_type])
-            .collect();
-        let func_ref = Self::declare_runtime_fn(ctx.module, builder, fn_name, &param_tys, &[])?;
-        let mut call_args: Vec<Value> = args.iter().map(|(_, val)| *val).collect();
-        call_args.push(out_ptr);
-        builder.ins().call(func_ref, &call_args);
-
-        let ptr = builder
-            .ins()
-            .load(ctx.int_type, MemFlagsData::trusted(), out_ptr, 0);
-        let len = builder
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), out_ptr, 8);
-        let cap = builder
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), out_ptr, 16);
+        let (ptr, len) = Self::emit_rv_pair_call(builder, ctx, fn_name, args)?;
+        let cap = match cap_rule {
+            CapRule::Static => builder.ins().iconst(types::I64, 0),
+            CapRule::LenIsCap => len,
+        };
         Ok(ValueRepr::Str { ptr, len, cap })
     }
 
@@ -875,11 +894,12 @@ impl<M: Module> Codegen<M> {
                     else {
                         unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
                     };
-                    Self::emit_sret_str_call(
+                    Self::emit_rv_str_call(
                         builder,
                         ctx,
                         "ryo_str_from_view",
                         &[(ctx.int_type, v_ptr), (types::I64, v_len)],
+                        CapRule::LenIsCap,
                     )?
                 } else if name_str == "int_to_str"
                     || name_str == "float_to_str"
@@ -892,7 +912,13 @@ impl<M: Module> Codegen<M> {
                         "bool_to_str" => ("ryo_bool_to_str", types::I8),
                         _ => unreachable!(),
                     };
-                    Self::emit_sret_str_call(builder, ctx, fn_name, &[(param_ty, arg_val)])?
+                    Self::emit_rv_str_call(
+                        builder,
+                        ctx,
+                        fn_name,
+                        &[(param_ty, arg_val)],
+                        CapRule::LenIsCap,
+                    )?
                 } else {
                     // User call — emit_call handles sret for str-returning
                     // calls and caches ValueRepr::Str. Called directly
@@ -921,41 +947,18 @@ impl<M: Module> Codegen<M> {
                     _ => unreachable!(),
                 };
 
-                let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    STR_SLOT_SIZE,
-                    3,
-                ));
-                let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
-                let concat_ref = Self::declare_runtime_fn(
-                    ctx.module,
+                Self::emit_rv_str_call(
                     builder,
+                    ctx,
                     "ryo_str_concat",
                     &[
-                        ctx.int_type,
-                        types::I64,
-                        ctx.int_type,
-                        types::I64,
-                        ctx.int_type,
+                        (ctx.int_type, l_ptr),
+                        (types::I64, l_len),
+                        (ctx.int_type, r_ptr),
+                        (types::I64, r_len),
                     ],
-                    &[],
-                )?;
-                builder
-                    .ins()
-                    .call(concat_ref, &[l_ptr, l_len, r_ptr, r_len, out_ptr]);
-
-                let ptr = builder
-                    .ins()
-                    .load(ctx.int_type, MemFlagsData::trusted(), out_ptr, 0);
-                let len = builder
-                    .ins()
-                    .load(types::I64, MemFlagsData::trusted(), out_ptr, 8);
-                let cap = builder
-                    .ins()
-                    .load(types::I64, MemFlagsData::trusted(), out_ptr, 16);
-
-                ValueRepr::Str { ptr, len, cap }
+                    CapRule::LenIsCap,
+                )?
             }
             TirTag::ViewAsStr => {
                 let operand = match inst.data {
@@ -1013,35 +1016,17 @@ impl<M: Module> Codegen<M> {
                     Some(e) => Self::eval_inst(builder, ctx, e)?,
                     None => base_len,
                 };
-                let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    VIEW_SLOT_SIZE,
-                    3,
-                ));
-                let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-                let slice_ref = Self::declare_runtime_fn(
-                    ctx.module,
+                let (ptr, len) = Self::emit_rv_pair_call(
                     builder,
+                    ctx,
                     "__ryo_slice",
                     &[
-                        ctx.int_type,
-                        types::I64,
-                        types::I64,
-                        types::I64,
-                        ctx.int_type,
+                        (ctx.int_type, base_ptr),
+                        (types::I64, base_len),
+                        (types::I64, start_v),
+                        (types::I64, end_v),
                     ],
-                    &[],
                 )?;
-                builder
-                    .ins()
-                    .call(slice_ref, &[base_ptr, base_len, start_v, end_v, out_ptr]);
-                let ptr =
-                    builder
-                        .ins()
-                        .load(ctx.int_type, MemFlagsData::trusted(), out_ptr, OFF_PTR);
-                let len = builder
-                    .ins()
-                    .load(types::I64, MemFlagsData::trusted(), out_ptr, OFF_LEN);
                 ValueRepr::View { ptr, len }
             }
             TirTag::ViewOfStr => {
@@ -1141,38 +1126,13 @@ impl<M: Module> Codegen<M> {
         let rodata_ptr = builder.ins().symbol_value(ctx.int_type, data_ref);
         let lit_len = builder.ins().iconst(types::I64, content.len() as i64);
 
-        // Allocate 24-byte stack slot for out parameter (8-byte aligned)
-        let slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            STR_SLOT_SIZE,
-            3,
-        ));
-        let out_ptr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
-        // Call ryo_str_from_literal(data, len, out)
-        let from_literal_ref = Self::declare_runtime_fn(
-            ctx.module,
+        Self::emit_rv_str_call(
             builder,
+            ctx,
             "ryo_str_from_literal",
-            &[ctx.int_type, types::I64, ctx.int_type],
-            &[],
-        )?;
-        builder
-            .ins()
-            .call(from_literal_ref, &[rodata_ptr, lit_len, out_ptr]);
-
-        // Load the triple back from the stack slot
-        let ptr = builder
-            .ins()
-            .load(ctx.int_type, MemFlagsData::trusted(), out_ptr, 0);
-        let len = builder
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), out_ptr, 8);
-        let cap = builder
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), out_ptr, 16);
-
-        Ok(ValueRepr::Str { ptr, len, cap })
+            &[(ctx.int_type, rodata_ptr), (types::I64, lit_len)],
+            CapRule::Static,
+        )
     }
 
     fn emit_call(

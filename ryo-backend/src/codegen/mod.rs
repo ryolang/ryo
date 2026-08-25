@@ -38,11 +38,8 @@ use target_lexicon::Triple;
 mod expr;
 
 /// Fat-str triple layout (24 bytes): ptr at 0, len at 8, cap at 16.
-/// View layout (16 bytes): ptr at 0, len at 8. Derived, not re-hardcoded.
+/// Derived from `RyoStrFat`, not re-hardcoded.
 const STR_SLOT_SIZE: u32 = 24;
-const VIEW_SLOT_SIZE: u32 = 16;
-const OFF_PTR: i32 = 0;
-const OFF_LEN: i32 = 8;
 
 /// How a statement or body ended the current block, if it did.
 /// Replaces the `bool` that conflated Break/Continue with Return:

@@ -419,6 +419,72 @@ fn ir_emit_default_is_ast_and_clif() {
 }
 
 #[test]
+fn clif_string_ops_use_packed_return_no_stack_slots() {
+    // Phase 0 runtime ABI: string-producing runtime calls return
+    // {ptr, len} packed in one u128 — no per-call-site stack slots,
+    // no out-pointer, no reload (spec 2026-08-25 §2 amendment).
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "clif_str.ryo",
+        "fn main():\n\ts: str = \"a\" + \"b\"\n\tt: str = int_to_str(42)\n\tprint(s + t)\n",
+    );
+
+    let output = run_ryo_command(&["ir", "--emit=clif", "clif_str.ryo"], &test_file)
+        .expect("Failed to run ryo ir --emit=clif");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("-> i128"),
+        "runtime string calls must return the packed u128 pair: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("explicit_slot"),
+        "string call paths must not allocate stack slots: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("stack_addr"),
+        "string call paths must not take stack-slot addresses: {}",
+        stdout
+    );
+}
+
+#[test]
+fn clif_user_str_return_keeps_sret() {
+    // Copy-elision boundary (docs/dev/copy_elision.md G1/G2): user
+    // functions returning `str` keep the hidden sret destination-slot
+    // convention — the Phase 0 ABI change touches the *runtime* ABI only.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "clif_sret.ryo",
+        "fn make() -> str:\n\treturn \"x\"\n\nfn main():\n\tprint(make())\n",
+    );
+
+    let output = run_ryo_command(&["ir", "--emit=clif", "clif_sret.ryo"], &test_file)
+        .expect("Failed to run ryo ir --emit=clif");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("(i64 sret)"),
+        "user str-returning function must keep the sret convention: {}",
+        stdout
+    );
+}
+
+#[test]
 fn ir_emit_order_is_pipeline_not_flag() {
     // Section order must be AST → UIR → TIR → CLIF regardless of
     // the order in which flags are listed. We exercise this two
