@@ -6,12 +6,14 @@
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-25. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-25 (post-ABI). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux). Pre-ABI rows are the same-day checkpoint recorded before commit `7d0a047`.
 
 | Candidate | Mean time | Max RSS |
 |---|---|---|
 | **Ryo (AOT)** | 15.0 ms ± 0.6 ms | 1.36 MB |
-| **Ryo (JIT)** | 15.5 ms ± 0.6 ms | 4.88 MB |
+| **Ryo (JIT)** | 15.5 ms ± 0.4 ms | 5.00 MB |
+| Ryo (AOT), pre-ABI | 15.0 ms ± 0.6 ms | 1.36 MB |
+| Ryo (JIT), pre-ABI | 15.5 ms ± 0.6 ms | 4.88 MB |
 
 ## How to Run
 
