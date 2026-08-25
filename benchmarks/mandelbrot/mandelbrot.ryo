@@ -1,0 +1,25 @@
+fn escapes(cr: float, ci: float) -> int:
+	mut zr: float = 0.0
+	mut zi: float = 0.0
+	mut i: int = 0
+	while i < 80:
+		zr2 = zr * zr
+		zi2 = zi * zi
+		if zr2 + zi2 > 4.0:
+			return i
+		zi = 2.0 * zr * zi + ci
+		zr = zr2 - zi2 + cr
+		i += 1
+	return i
+
+fn main():
+	mut total = 0
+	mut ci: float = 0.0 - 1.0
+	while ci <= 1.0:
+		mut cr: float = 0.0 - 2.0
+		while cr <= 0.5:
+			total += escapes(cr, ci)
+			cr += 0.005
+		ci += 0.005
+	assert(total == 5926720, "mandelbrot checksum")
+	print("assert passed, mandelbrot is correct\n")
