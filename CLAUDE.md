@@ -76,7 +76,7 @@ cargo fmt --check                # Check code formatting style
 
 ## CI
 
-GitHub Actions runs on pushes to `main` and PRs targeting `main`: `cargo fmt --check` with `-Dwarnings`, `cargo clippy --workspace --all-targets` (warnings are errors), and `cargo test` (Ubuntu x64, Ubuntu ARM64, macOS). All three must pass for merge.
+GitHub Actions runs on pushes to `main` and PRs targeting `main` (see `.github/workflows/ci.yml` for the authoritative job list): the file-length check, `cargo fmt --check`, `cargo clippy --workspace --all-targets`, and `cargo test --workspace` across Linux and macOS (plus a Windows test job and ASan/Valgrind leak checks). `RUSTFLAGS=-Dwarnings` is set env-wide, so warnings are errors in every job. All jobs must pass for merge.
 
 ---
 
@@ -129,8 +129,8 @@ This section is for agents extending the Ryo compiler.
 
 - **Compiler architecture (lexer → parser → UIR → Sema → TIR → Codegen):** takes inspiration from the Zig compiler — see [`/docs/dev/zig_reference.md`](docs/dev/zig_reference.md).
 - **Concurrency:** takes inspiration from Go — see [`/docs/dev/go_reference.md`](docs/dev/go_reference.md).
-- **Ownership pass (`ryo-frontend/src/ownership.rs` & `ryo-core/src/ownership.rs`, M8.1+):** takes inspiration from Mojo — see [`/docs/dev/mojo_reference.md`](docs/dev/mojo_reference.md). Zig has no borrow checker, so it stops being a useful reference once M8.1 introduces move semantics. Mojo's MLIR-based lifetime/ASAP-destruction passes are the closest published precedent for what Ryo's spec already commits to (no annotated lifetimes, parameters borrow by default, eager destruction at last use). Sema and the IRs themselves remain Zig-shaped.
-- **`shared[T]` refcounting & ARC optimizer (`ryo-driver/src/arc_optimizer.rs` or `ryo-frontend/src/arc_optimizer.rs`, post-M11):** takes inspiration from Swift — see [`/docs/dev/arc_optimizer.md`](docs/dev/arc_optimizer.md). Swift's SIL ARC optimizer (aggressive retain/release elision, stack promotion, copy-on-write for collections) is the model. The performance promise of `shared[T]` in spec 5.6 depends on this pass actually existing and working; without it `shared[T]` benchmarks badly.
+- **Ownership pass (`ryo-frontend/src/ownership.rs` & `ryo-core/src/ownership.rs`):** takes inspiration from Mojo — see [`/docs/dev/mojo_reference.md`](docs/dev/mojo_reference.md). Zig has no borrow checker, so it is not a useful reference for move semantics. Mojo's MLIR-based lifetime/ASAP-destruction passes are the closest published precedent for what Ryo's spec commits to (no annotated lifetimes, parameters borrow by default, eager destruction at last use). Sema and the IRs themselves remain Zig-shaped.
+- **`shared[T]` refcounting & ARC optimizer (planned; status lives in `docs/dev/implementation_roadmap.md`):** takes inspiration from Swift — see [`/docs/dev/arc_optimizer.md`](docs/dev/arc_optimizer.md). Swift's SIL ARC optimizer (aggressive retain/release elision, stack promotion, copy-on-write for collections) is the model. The performance promise of `shared[T]` in spec 5.6 depends on this pass actually existing and working; without it `shared[T]` benchmarks badly.
 - **Comparison reference for Rust:** see [`/docs/dev/rust_reference.md`](docs/dev/rust_reference.md). Rust's `rustc_borrowck` and `Arc<T>` story is the obvious comparison point for both the ownership pass and `shared[T]`. Diagnostic UX bar is set against Rust's renderer.
 
 ### Rust Patterns ([Microsoft Rust Guidelines](https://microsoft.github.io/rust-guidelines/agents/all.txt))
@@ -147,7 +147,7 @@ This section is for agents extending the Ryo compiler.
 Source → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema → TIR → Ownership → TIR' → Codegen → Linker → Executable
 ```
 
-(The **Ownership** stage lands in M8.1 — see `docs/dev/mojo_reference.md` and `ryo-frontend/src/ownership.rs`. Before M8.1 the pipeline goes straight from Sema to Codegen.)
+(The **Ownership** pass runs post-sema, pre-codegen — see `docs/dev/mojo_reference.md` and `ryo-frontend/src/ownership.rs`.)
 
 The middle-end is split into two flat-arena IRs modeled after Zig's ZIR/AIR:
 
@@ -178,7 +178,7 @@ See `docs/dev/pipeline_alignment.md` for the full design rationale (motivation, 
 #### 2. Driver Orchestration Crate (`ryo-driver`)
 | File | Role |
 |------|------|
-| `ryo-driver/src/pipeline.rs` | Orchestrates pipeline stages: lex → parse → astgen → sema → codegen → link → run |
+| `ryo-driver/src/pipeline.rs` | Orchestrates pipeline stages: lex → parse → astgen → sema → ownership → codegen → link → run |
 
 #### 3. Frontend Compilation Crate (`ryo-frontend`)
 | File | Role |
@@ -189,7 +189,7 @@ See `docs/dev/pipeline_alignment.md` for the full design rationale (motivation, 
 | `ryo-frontend/src/astgen.rs` | AST → UIR structural lowering |
 | `ryo-frontend/src/sema.rs` | Semantic analysis: type-checks UIR, emits one TIR per function body |
 | `ryo-frontend/src/ownership.rs` | Post-sema, pre-codegen ownership flow analysis |
-| `ryo-frontend/src/builtins.rs` | Builtin function registry (currently `print`, `panic`, etc.) |
+| `ryo-frontend/src/builtins.rs` | Builtin function and runtime ABI callee registry |
 
 #### 4. Code Generation and Linking Crate (`ryo-backend`)
 | File | Role |

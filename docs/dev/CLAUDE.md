@@ -46,11 +46,11 @@ Dev docs are referenced FROM the roadmap, not FROM the spec (see docs/CLAUDE.md 
 
 ## Milestone Dependencies
 
-Known sequencing constraints:
-- M20 (`inout` / mutable borrows) MUST precede M22 (collections) and M23 (Drop)
-- Closure capture analysis MUST follow M15 (ownership basics)
+Known sequencing constraints (named per the current roadmap):
+- M8.3 (`inout` / mutable borrows) precedes M22 (collections) and M23 (Drop)
+- Closure capture analysis (roadmap Phase 5) follows the ownership milestones
 
-When proposing roadmap changes, verify they don't violate these dependencies.
+The roadmap owns sequencing and milestone numbering — verify proposals against `implementation_roadmap.md`, not this list.
 
 ---
 
