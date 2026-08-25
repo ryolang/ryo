@@ -383,6 +383,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** `expect_used` is the one panic-family lint still at `allow` in `[workspace.lints.clippy]` (`panic`/`todo`/`unimplemented`/`unwrap_used` are denied). 70 sites fire at last count, 56 of them outside `ryo/tests/`; many are deliberate arena-boundary guards (`from_index`, side-arena overflow checks) — legitimate invariant enforcement, not laziness.
 **Resolution:** Classify each site as keep-with-message (genuine internal invariant) vs convert-to-diagnostic (reachable from user input), then consider promoting `expect_used` to `deny`.
 
+### I-157 — Linux AOT links host glibc by accident; evaluate static musl
+
+**Files:** `ryo-backend/src/linker.rs` (:13-15, no `-target` passed to `zig cc`), `build-support/src/lib.rs` (:41, runtime archive built for the compiler's `TARGET`)
+**Summary:** On Linux, `ryo build` links natively via `zig cc` with no `-target`, so binaries are dynamically coupled to whatever glibc the build host has — a silent portability gap, not a decision. The runtime staticlib is already `no_std` (I-043), so produced binaries need almost nothing from libc, which makes fully static musl (`-target <arch>-linux-musl`) nearly free and matches where Go (no libc), Rust (musl tier-1 opt-in), and Swift (Static Linux SDK) all converged. macOS (libSystem, dynamic mandatory) and Windows (MSVC ABI + UCRT via zig) need no equivalent change.
+**Resolution:** Before applying, re-verify the drawbacks: (1) musl mallocng is slow under multithreaded allocation-heavy load — matters once Go-style concurrency and `shared[T]` refcount churn land; may force shipping our own allocator in `ryo-runtime` first; (2) no NSS, limited `getaddrinfo`, no dlopen of glibc-built libs. If accepted: pass `-target <arch>-linux-musl` in `linker.rs` and switch the `build-support` archive build to the matching `*-unknown-linux-musl` triple in the same change (the two must move together), then check what the ASan/Valgrind smoke lanes still exercise under a static link.
+
 ---
 
 ## Cross-References
