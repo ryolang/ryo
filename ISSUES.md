@@ -219,6 +219,18 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 — panics with `slice index is not a UTF-8 char boundary` under JIT and silently computes a wrong count under AOT (use-after-free symptoms: literal-backed strings pass, heap-backed fail; printing the same slices instead of comparing them also passes). (b) `assert(s.len() == 100, "…")` as the last use of a concat-reassigned string SIGTRAPs on both JIT and AOT; binding `n = s.len()` before the assert works. Both point at the ownership pass scheduling the owner's Free before the consuming expression has fully materialized, or at codegen's free anchoring on the comparison/assert paths (`emit_due_frees` / `sweep_due_frees`).
 **Resolution:** Trace the scheduled Free anchor for the owner in each shape (start: `build_free_binding_names` / the `StrCmpEq` arm's anonymous-temporary frees), fix the ordering, and pin with integration tests for last-use-in-loop-condition-comparison and last-use-in-inline-assert. The `string_slicing` benchmark's `count_fox(text: strview)` structure and the benchmarks' `n = …; assert(n == …)` binding pattern are deliberate workarounds — they can be simplified once this is fixed.
 
+### I-158 — `string_slicing` JIT regressed +53% with the packed-u128 runtime ABI (AOT flat)
+
+**Files:** `ryo-backend/src/codegen/` (JIT module path), `benchmarks/string_slicing/`
+**Summary:** After the Phase 0 ABI change (commit `7d0a047`, string-producing runtime functions return `{ptr, len}` packed in `u128` instead of writing through an out-pointer stack slot), the `string_slicing` benchmark's JIT leg regressed from ~6.6 ms to ~10.1 ms (+53%, reproduced across runs) while AOT stayed flat (~4.9 → ~5.4 ms). Recorded in `benchmarks/string_slicing/README.md`. Cause not investigated — candidates: JIT code layout/instruction-count change around the view-slice call path, or extra `ireduce`/`ushr` unpack work that the JIT's lower optimization level doesn't fold.
+**Resolution:** Profile the JIT leg (e.g. Samply per `benchmarks/README.md`), compare CLIF for `count_fox` pre/post `7d0a047`, and either reclaim the delta or document it as accepted. Re-run the suite checkpoint per the manual checkpoint convention when resolved.
+
+### I-159 — W0001 dead-store false positive: method-call receiver not counted as a use
+
+**Files:** `ryo-frontend/src/ownership/walk.rs` (:296-305), `ryo-frontend/src/ownership/mod.rs` (:577-581)
+**Summary:** `t = int_to_str(i) + "!"; total += t.len()` triggers W0001 ("`t` declared but never used") — the ownership pass's dead-store tracking does not count a method-call receiver read (`t.len()`) as a use. Reproduces on `benchmarks/many_small_strings/many_small_strings.ryo` (the only suite member that hits it; sibling benchmarks are clean). User-visible false-positive warning on a shipped benchmark.
+**Resolution:** Count method-call receiver reads as uses in the dead-store/last-use walk (check how `StrLen`/`MethodCall`-shaped TIR reads propagate), then pin with an ownership test for `x = <expr>; … x.len()` staying warning-free.
+
 ---
 
 ## 🟢 Cleanup

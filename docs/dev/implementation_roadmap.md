@@ -1276,7 +1276,7 @@ fn main():
 - Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated, `try`-able) and `text.to_bytes() -> bytes` (owned copy)
 - `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`)
 - Buffer building via the builder idiom: `bytes.builder().u8(v).u16_be(n).bytes(b).build()` (`move self -> Self` chaining, spec §5.2.1)
-- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice mirroring the **post-fix `str` ABI** — producing functions return `{ptr, len}` by value packed in one `u128` (lo = ptr, hi = len) with `cap` derived at the call site, per `docs/superpowers/specs/2026-08-25-phase0-runtime-abi-and-benchmarks-design.md` §2 (no out-pointer stack slots); memory fixtures for both JIT and AOT (ASan/Valgrind)
+- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice mirroring the **post-fix `str` ABI** — producing functions return `{ptr, len}` by value packed in one `u128` (lo = ptr, hi = len) with `cap` derived at the call site, per the Phase 0 ABI decision recorded on `pack_pair` in `runtime/src/lib.rs` and pinned by `clif_string_ops_use_packed_return_no_stack_slots` (no out-pointer stack slots); memory fixtures for both JIT and AOT (ASan/Valgrind)
 
 **Visible Progress:** Protocol/binary code reads and slices raw buffers zero-copy; text bridging is explicit and error-checked.
 

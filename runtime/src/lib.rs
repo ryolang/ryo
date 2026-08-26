@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn str_from_view_empty() {
-        // ptr may be null/dangling when len == 0 (`__ryo_slice` invariant).
+        // ptr may be null/dangling when len == 0 (`ryo_str_from_view` invariant).
         // SAFETY: len == 0, so the pointer is never dereferenced.
         let pair = unsafe { ryo_str_from_view(core::ptr::null(), 0) };
         let (out_ptr, out_len) = unpack_pair(pair);
