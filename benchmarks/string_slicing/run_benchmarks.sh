@@ -7,8 +7,20 @@ if ! command -v hyperfine &> /dev/null; then
     exit 1
 fi
 
+if ! command -v rustc &> /dev/null; then
+    echo "Error: 'rustc' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v swiftc &> /dev/null; then
+    echo "Error: 'swiftc' is not installed or not in PATH."
+    exit 1
+fi
+
 echo "Building benchmarks..."
 (cd ../.. && cargo build --release > /dev/null)
+rustc -O string_slicing.rs -o string_slicing_rs
+swiftc -O string_slicing.swift -o string_slicing_swift
 ryo_bin="../../target/release/ryo"
 $ryo_bin build string_slicing.ryo > /dev/null
 
@@ -16,6 +28,8 @@ echo ""
 echo "-------------------"
 echo "Compiler Version"
 echo "-------------------"
+echo "Rust:     $(rustc --version | cut -d' ' -f2)"
+echo "Swift:    $(swiftc --version | head -1 | awk '{print $4}')"
 echo "Ryo:      $($ryo_bin --version 2>&1 || echo 'dev')"
 
 echo ""
@@ -52,6 +66,8 @@ measure_mem() {
 }
 
 # Run once each to collect memory usage
+measure_mem "Rust" ./string_slicing_rs
+measure_mem "Swift" ./string_slicing_swift
 measure_mem "Ryo (AOT)" ./string_slicing
 measure_mem "Ryo (JIT)" $ryo_bin run string_slicing.ryo
 
@@ -61,5 +77,7 @@ echo "Running Benchmarks (scan 688 KiB via views, count 16384 matches) using hyp
 echo "-------------------"
 
 hyperfine --warmup 3 --shell=none \
+  './string_slicing_rs' \
+  './string_slicing_swift' \
   './string_slicing' \
   "$ryo_bin run string_slicing.ryo"
