@@ -3305,6 +3305,7 @@ ContractViolation: precondition failed: amount > 0
 
 - Small-string optimization: inline storage for strings ≤23 bytes (zero allocation)
 - Copy-on-write: immutable strings share backing buffers, allocate on mutation
+- In-place concat-reassign: with COW refcounts and growth capacity, `s = s + suffix` on a uniquely-referenced buffer appends in place instead of allocate-copy-free — turns the loop-built-string pattern from O(n²) into amortized O(n). The ownership pass already proves the old binding dead at the concat and a reassignable binding provably has no live views, so uniqueness is compiler-known; the missing piece is the allocation policy (today every buffer is exact-size, `cap == len`). `benchmarks/string_building` is the tracking measure (~12.5× Rust `push_str` at the 2026-08-26 checkpoint).
 - Sink-parameter convention: `move T -> T` pattern for buffer-building APIs
 - Atomic COW refcounts for thread safety
 
