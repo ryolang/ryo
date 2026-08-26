@@ -29,7 +29,7 @@ echo "-------------------"
 echo "Compiler Version"
 echo "-------------------"
 echo "Rust:     $(rustc --version | cut -d' ' -f2)"
-echo "Swift:    $(swiftc --version | head -1 | awk '{print $4}')"
+echo "Swift:    $(swiftc --version | head -1 | awk '{for (i = 1; i < NF; i++) if ($i == "Swift" && $(i+1) == "version") { print $(i+2); exit }}')"
 echo "Ryo:      $($ryo_bin --version 2>&1 || echo 'dev')"
 
 echo ""
