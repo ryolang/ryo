@@ -35,7 +35,7 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 | **Go**   | 1.26.6 | ~290.2 ms | 1.11x slower  | 4.16 MB               |
 | **Swift**| 6.3.3 | ~329.9 ms | 1.26x slower  | 1.56 MB               |
 | **Ryo (AOT)** | 0.1.0 | ~354.9 ms | 1.35x slower | **1.34 MB**           |
-| **Ryo (JIT)** | 0.1.0 | ~356.5 ms | 1.36x slower | 4.59 MB               |
+| **Ryo (JIT)** | 0.1.0 | ~348.8 ms | 1.33x slower | 4.81 MB               |
 | **Bun (TS)**  | 1.3.13 | ~400.9 ms | 1.53x slower | 27.47 MB              |
 | **Julia** | 1.12.6 | ~417.5 ms | 1.59x slower | 213.56 MB             |
 | **Elixir**    | 1.20.3 | ~884.6 ms | 3.37x slower | 90.19 MB              |
@@ -49,6 +49,6 @@ See [`../README.md`](../README.md#why-ryo-trails-rust-here-checked-arithmetic-is
 ### Notes on Memory Usage
 Ryo's Ahead-Of-Time (AOT) compiled binary stands out aggressively in memory footprint—claiming the **lightest memory usage of all languages tested** (1.34 MB vs Rust's 1.45 MB).
 
-Even operating entirely as a JIT script interpreting/compiling source code directly, Ryo's compiler (via Cranelift) maintains an incredibly small memory footprint (~4.6 MB).
+Even operating entirely as a JIT script interpreting/compiling source code directly, Ryo's compiler (via Cranelift) maintains an incredibly small memory footprint (~4.8 MB).
 
 

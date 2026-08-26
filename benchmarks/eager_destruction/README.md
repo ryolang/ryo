@@ -71,7 +71,7 @@ Measurements executed on **macOS 26.6.2 (Build 25G83) on a MacBook Pro (Apple M3
 | Benchmark Candidate | Language | Execution Strategy | Max Resident Memory (RSS) | Memory Efficiency (vs Rust Scope-Based) | Result at 50,000 Depth |
 |---------------------|----------|--------------------|---------------------------|-------------------|-------------------|
 | **Ryo (AOT)** | Ryo 0.1.0 | Standalone Binary (Eager) | **2.86 MB** | **2.90x more efficient** | **Succeeds** |
-| **Ryo (JIT)** | Ryo 0.1.0 | JIT Compiler (Eager) | **6.06 MB** | 1.37x more efficient | **Succeeds** |
+| **Ryo (JIT)** | Ryo 0.1.0 | JIT Compiler (Eager) | **6.22 MB** | 1.33x more efficient | **Succeeds** |
 | **Rust (Manual Drop)** | Rust 1.98.0 | AOT Compiled (Manual `drop(s)`) | **6.80 MB** | 1.22x more efficient | **Succeeds** |
 | **Rust (Scope-Based)** | Rust 1.98.0 | AOT Compiled (Scope RAII) | **8.30 MB** | 1.00x (baseline) | **Succeeds** |
 

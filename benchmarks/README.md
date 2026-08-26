@@ -24,7 +24,7 @@ The fair like-for-like is **Swift**, which also traps on overflow and sits at ~1
 - **I-142** (`ISSUES.md`): value-range guard elision — e.g. `if n <= 1: return n` proves `n - 1` and `n - 2` cannot overflow, so their guards should not be emitted at all. This alone would put Ryo near Rust/Go on this benchmark.
 - Cranelift itself is pinned and upgraded regularly (0.135.1 at the time of writing); a flag-fusing lowering (branch directly on the overflow flag) is upstream work.
 
-JIT and AOT land within noise of each other (~1.35–1.36×) because both share the same Cranelift codegen.
+JIT and AOT land within noise of each other (~1.33–1.35×) because both share the same Cranelift codegen (both at `opt_level=speed`).
 
 ### 2. [Eager Destruction Benchmark](./eager_destruction/)
 * **Focus:** Eager memory deallocation at last use (Eager Destruction / ASAP Destruction) vs. scope-based (RAII) destruction under deep recursion.

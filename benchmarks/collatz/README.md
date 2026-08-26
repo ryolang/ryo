@@ -13,7 +13,7 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08
 | **Rust** | 103.7 ms ± 0.3 ms | 1.00x | 1.44 MB |
 | **Swift** | 166.8 ms ± 5.5 ms | 1.61x slower | 5.55 MB |
 | **Ryo (AOT)** | 219.3 ms ± 5.6 ms | 2.11x slower | 1.34 MB |
-| **Ryo (JIT)** | 335.5 ms ± 3.7 ms | 3.24x slower | 4.88 MB |
+| **Ryo (JIT)** | 220.1 ms ± 4.6 ms | 2.12x slower | 5.12 MB |
 
 ## How to Run
 

@@ -358,8 +358,13 @@ impl Codegen<JITModule> {
     pub fn new_jit() -> Result<Self, String> {
         // enable_llvm_abi_extensions: same rationale as `aot_shared_flags` —
         // the packed-u128 string runtime ABI requires it on x64.
+        // opt_level=speed: run the egraph optimization pipeline (constant
+        // folding, algebraic simplification, GVN/LICM) like the AOT path.
         let mut jit_builder = JITBuilder::with_flags(
-            &[("enable_llvm_abi_extensions", "true")],
+            &[
+                ("enable_llvm_abi_extensions", "true"),
+                ("opt_level", "speed"),
+            ],
             cranelift_module::default_libcall_names(),
         )
         .map_err(|e| format!("Failed to create JIT builder: {}", e))?;
