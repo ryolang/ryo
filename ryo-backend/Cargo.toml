@@ -23,6 +23,9 @@ sha2 = { workspace = true }
 build-support = { path = "../build-support" }
 
 [dev-dependencies]
+# Tests build ISAs for foreign triples (e.g. the Windows x64 ABI on a macOS
+# host); without these features cranelift-codegen only compiles the host arch.
+cranelift-codegen = { version = "0.135", features = ["x86", "arm64"] }
 tempfile = { workspace = true }
 ryo-frontend = { workspace = true }
 chumsky = { workspace = true }

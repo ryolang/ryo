@@ -1220,6 +1220,7 @@ dependencies = [
  "chumsky",
  "codspeed-divan-compat",
  "cranelift",
+ "cranelift-codegen",
  "cranelift-jit",
  "cranelift-module",
  "cranelift-object",
