@@ -327,6 +327,21 @@ fn aot_shared_flags() -> Result<settings::Flags, String> {
     shared_builder
         .enable("enable_llvm_abi_extensions")
         .map_err(|e| format!("Error enabling enable_llvm_abi_extensions: {}", e))?;
+    // The Cranelift verifier is a compiler-developer aid (it catches
+    // malformed IR our codegen emits); users cannot act on its
+    // failures. Keep it in debug builds and the test suite — where
+    // compiler developers run — and skip its cost in release builds
+    // (the wasmtime pattern). It accounts for ~23–27% of codegen time.
+    shared_builder
+        .set(
+            "enable_verifier",
+            if cfg!(debug_assertions) {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .map_err(|e| format!("Error setting enable_verifier: {}", e))?;
     Ok(settings::Flags::new(shared_builder))
 }
 
@@ -360,10 +375,20 @@ impl Codegen<JITModule> {
         // the packed-u128 string runtime ABI requires it on x64.
         // opt_level=speed: run the egraph optimization pipeline (constant
         // folding, algebraic simplification, GVN/LICM) like the AOT path.
+        // enable_verifier: debug builds and tests only, same rationale as
+        // `aot_shared_flags`.
         let mut jit_builder = JITBuilder::with_flags(
             &[
                 ("enable_llvm_abi_extensions", "true"),
                 ("opt_level", "speed"),
+                (
+                    "enable_verifier",
+                    if cfg!(debug_assertions) {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                ),
             ],
             cranelift_module::default_libcall_names(),
         )
