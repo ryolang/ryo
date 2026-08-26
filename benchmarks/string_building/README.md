@@ -10,10 +10,10 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08
 
 | Candidate | Mean time | vs fastest | Max RSS |
 |---|---|---|---|
-| **Rust** | 1.5 ms ± 0.1 ms | 1.00x | 1.61 MB |
-| **Swift** | 2.4 ms ± 0.1 ms | 1.60x slower | 1.81 MB |
-| **Ryo (AOT)** | 18.1 ms ± 0.8 ms | 12.07x slower | 2.27 MB |
-| **Ryo (JIT)** | 18.9 ms ± 0.4 ms | 12.60x slower | 5.77 MB |
+| **Rust** | 1.4 ms ± 0.1 ms | 1.00x | 1.61 MB |
+| **Swift** | 2.3 ms ± 0.4 ms | 1.61x slower | 1.81 MB |
+| **Ryo (AOT)** | 17.8 ms ± 0.3 ms | 12.46x slower | 2.25 MB |
+| **Ryo (JIT)** | 19.4 ms ± 0.3 ms | 13.52x slower | 5.84 MB |
 
 ## How to Run
 
