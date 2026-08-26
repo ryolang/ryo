@@ -2,18 +2,18 @@
 
 **Focus:** Float codegen. Mandelbrot escape-iteration sum over a 401×501 grid (max 80 iterations per pixel, `zr`/`zi` scalarized — no complex numbers or arrays in the language yet). No overflow guards are in play for floats, so this is the cleanest readout of raw Cranelift floating-point codegen.
 
-**Languages compared:** Ryo only (AOT vs JIT). Cross-language comparators are added per-benchmark when a phase needs that measurement.
+**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-25 (post-ABI). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux). Pre-ABI rows are the same-day checkpoint recorded before commit `7d0a047`.
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-26. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
 | Candidate | Mean time | Max RSS |
 |---|---|---|
-| **Ryo (AOT)** | 15.0 ms ± 0.6 ms | 1.36 MB |
-| **Ryo (JIT)** | 15.5 ms ± 0.4 ms | 5.00 MB |
-| Ryo (AOT), pre-ABI | 15.0 ms ± 0.6 ms | 1.36 MB |
-| Ryo (JIT), pre-ABI | 15.5 ms ± 0.6 ms | 4.88 MB |
+| **Rust** | 13.4 ms ± 0.3 ms | 1.44 MB |
+| **Swift** | 14.3 ms ± 1.1 ms | 5.55 MB |
+| **Ryo (AOT)** | 15.2 ms ± 0.6 ms | 1.36 MB |
+| **Ryo (JIT)** | 16.1 ms ± 0.6 ms | 4.92 MB |
 
 ## How to Run
 
