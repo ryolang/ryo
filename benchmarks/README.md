@@ -19,10 +19,10 @@ We maintain self-contained, reproducible benchmarks in separate subdirectories:
 
 The 1.00× Rust baseline is compiled in release mode, where integer overflow **wraps silently** — it pays nothing for safety. Ryo's spec (§18) mandates the opposite: every integer `+`, `-`, `*` is checked and **panics on overflow** (spec §18), so each operation carries one predicted-not-taken branch. On this benchmark — three integer ops per recursive call and nothing else — that is the worst possible case for the policy.
 
-The fair like-for-like is **Swift**, which also traps on overflow and sits at ~1.25× Rust. Ryo's remaining margin over Swift is not semantic but mechanical: Cranelift 0.131 lowers each overflow check to `cset` + `uxtb` + `cbnz` (~3 extra instructions per op) instead of a single branch on the CPU overflow flag. Closing that gap is tracked as compiler work, not accepted as a language cost:
+The fair like-for-like is **Swift**, which also traps on overflow and sits at ~1.25× Rust. Ryo's remaining margin over Swift is not semantic but mechanical: Cranelift 0.135.1 lowers each overflow check to `cset` + `tst` + `b.ne` (~3 extra instructions per op; verified by disassembly) instead of a single branch on the CPU overflow flag. Closing that gap is tracked as compiler work, not accepted as a language cost:
 
 - **I-142** (`ISSUES.md`): value-range guard elision — e.g. `if n <= 1: return n` proves `n - 1` and `n - 2` cannot overflow, so their guards should not be emitted at all. This alone would put Ryo near Rust/Go on this benchmark.
-- **I-140 / I-141**: Cranelift upgrade tracking; the flag-fusion lowering improvements are upstream work.
+- Cranelift itself is pinned and upgraded regularly (0.135.1 at the time of writing); a flag-fusing lowering (branch directly on the overflow flag) is upstream work.
 
 JIT and AOT land at the same ~1.41× because both share the same Cranelift codegen.
 
@@ -33,27 +33,27 @@ JIT and AOT land at the same ~1.41× because both share the same Cranelift codeg
 
 ### 3. [String Building Benchmark](./string_building/)
 * **Focus:** Runtime string ABI + eager destruction — concat over 50,000 iterations; the direct before/after measure for the packed-`u128` runtime ABI.
-* **Languages compared:** Ryo only (AOT vs JIT).
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 4. [String Slicing Benchmark](./string_slicing/)
 * **Focus:** Zero-copy views — scan a 688 KiB in-program-generated string counting substring matches through `strview` slices, copying and storing nothing.
-* **Languages compared:** Ryo only (AOT vs JIT).
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 5. [Mandelbrot Benchmark](./mandelbrot/)
 * **Focus:** Float codegen — 401×501 grid, max 80 iterations per pixel; no overflow guards in play, the cleanest Cranelift readout.
-* **Languages compared:** Ryo only (AOT vs JIT).
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 6. [Collatz Benchmark](./collatz/)
 * **Focus:** Integer loop/branch — total stopping time for seeds 1..1,000,000; a hot flat loop complementing fibonacci's recursion profile.
-* **Languages compared:** Ryo only (AOT vs JIT).
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 7. [Doubling Concat Benchmark](./doubling_concat/)
 * **Focus:** Runtime allocation strategy — `s = s + s` exponential growth to 16 MiB, stressing `ryo_str_alloc` / `ryo_str_concat`.
-* **Languages compared:** Ryo only (AOT vs JIT).
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 8. [Many Small Strings Benchmark](./many_small_strings/)
 * **Focus:** Flat-loop alloc/free churn — 500,000 short strings built and dropped, complementing eager_destruction's recursion angle.
-* **Languages compared:** Ryo only (AOT vs JIT).
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ---
 
