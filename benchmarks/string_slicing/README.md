@@ -21,14 +21,14 @@ One fairness note: Rust scans raw bytes (`&[u8]`), while Ryo's slice validates U
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-26 — Ryo rows re-measured after literal hoisting + static-cap free elision landed (same day; Rust/Swift rows re-measured too). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-26 — all rows re-measured after literal hoisting + static-cap free elision landed (same day); the Swift arm's match loop now uses a zero-copy slice `elementsEqual` (same shape as Rust's `&text[i..i+3] == b"fox"`). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
 | Candidate | Mean time | vs fastest | Max RSS |
 |---|---|---|---|
-| **Rust** | 2.2 ms ± 0.7 ms | 1.00x | 2.97 MB |
-| **Swift** | 3.0 ms ± 0.8 ms | 1.36x slower | 7.09 MB |
-| **Ryo (AOT)** | 5.1 ms ± 0.3 ms | 2.32x slower | 2.75 MB |
-| **Ryo (JIT)** | 6.8 ms ± 0.3 ms | 3.09x slower | 6.58 MB |
+| **Rust** | 1.8 ms ± 0.6 ms | 1.00x | 2.97 MB |
+| **Swift** | 2.4 ms ± 0.1 ms | 1.39x slower | 7.09 MB |
+| **Ryo (AOT)** | 4.9 ms ± 0.2 ms | 2.80x slower | 2.75 MB |
+| **Ryo (JIT)** | 6.7 ms ± 0.7 ms | 3.84x slower | 6.58 MB |
 
 Note: the JIT regression from the packed-`u128` ABI (~6.6 ms → ~10 ms) is gone — the JIT is back to ~6.8 ms now that the per-iteration `ryo_str_from_literal` / `ryo_str_free` calls are eliminated, confirming those extern calls priced higher under the JIT than under AOT.
 
