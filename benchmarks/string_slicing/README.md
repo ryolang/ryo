@@ -21,7 +21,7 @@ Note: the JIT time moved from ~6.6 ms to ~10 ms with the packed-`u128` ABI while
 
 ## How to Run
 
-Prerequisites: `hyperfine`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
+Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
 
 ```bash
 ./run_benchmarks.sh
