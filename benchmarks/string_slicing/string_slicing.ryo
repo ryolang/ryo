@@ -1,4 +1,4 @@
-fn count_fox(text: strview) -> int:
+fn count_fox(text: str) -> int:
 	mut count = 0
 	mut i = 0
 	n = text.len()
@@ -13,7 +13,6 @@ fn main():
 	for i in range(0, 14):
 		s = s + s
 	count = count_fox(s)
-	n = s.len()
-	assert(n == 704512, "string_slicing length check")
+	assert(s.len() == 704512, "string_slicing length check")
 	assert(count == 16384, "string_slicing match count check")
 	print("assert passed, string_slicing is correct\n")

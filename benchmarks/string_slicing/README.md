@@ -1,6 +1,6 @@
 # String Slicing Benchmark
 
-**Focus:** Zero-copy views. Builds a 688 KiB string in-program (doubling concat of a 43-byte seed), then scans it through `strview` slices counting `fox` occurrences — every comparison is a view into the original buffer; nothing is copied or stored. This is the projection pattern from M8.4: views flow in, scanning allocates nothing.
+**Focus:** Zero-copy views. Builds a 688 KiB string in-program (doubling concat of a 43-byte seed), then scans it through `strview` slices counting `fox` occurrences — `count_fox` borrows the `str` and every comparison is a view into the original buffer; nothing is copied or stored.
 
 **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
