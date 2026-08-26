@@ -31,6 +31,7 @@ impl IntRange {
 
     /// `from_i128` rejects any bound outside `i64`; the elision caller
     /// treats `None` as "keep the guard".
+    #[allow(dead_code)] // Task 3 (elision) is the first caller.
     fn from_i128(lo: i128, hi: i128) -> Option<Self> {
         if lo < i64::MIN as i128 || hi > i64::MAX as i128 {
             return None;
@@ -53,6 +54,7 @@ impl IntRange {
     }
 
     /// `Some` result range of `self + rhs` iff it provably fits `i64`.
+    #[allow(dead_code)] // Task 3 (elision) is the first caller.
     pub fn checked_add(self, rhs: Self) -> Option<Self> {
         Self::from_i128(
             self.lo as i128 + rhs.lo as i128,
@@ -60,6 +62,7 @@ impl IntRange {
         )
     }
 
+    #[allow(dead_code)] // Task 3 (elision) is the first caller.
     pub fn checked_sub(self, rhs: Self) -> Option<Self> {
         Self::from_i128(
             self.lo as i128 - rhs.hi as i128,
@@ -67,6 +70,7 @@ impl IntRange {
         )
     }
 
+    #[allow(dead_code)] // Task 3 (elision) is the first caller.
     pub fn checked_mul(self, rhs: Self) -> Option<Self> {
         let corners = [
             self.lo as i128 * rhs.lo as i128,
@@ -80,6 +84,7 @@ impl IntRange {
     }
 
     /// `Some` iff `-self` fits `i64` — i.e. `lo > i64::MIN`.
+    #[allow(dead_code)] // Task 3 (elision) is the first caller.
     pub fn checked_neg(self) -> Option<Self> {
         Self::from_i128(-(self.hi as i128), -(self.lo as i128))
     }
@@ -87,6 +92,7 @@ impl IntRange {
 
 /// Bounds for a TIR expression: exact for integer constants, the
 /// recorded fact for variables, unknown (`None`) for everything else.
+#[allow(dead_code)] // Task 3 (elision) is the first caller.
 pub(crate) fn int_range_of(
     tir: &Tir,
     facts: &HashMap<StringId, IntRange>,

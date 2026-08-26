@@ -1495,20 +1495,24 @@ impl<M: Module> Codegen<M> {
                 let nc = builder
                     .ins()
                     .load(types::I64, MemFlagsData::trusted(), addr, 16);
-                if let Some(name) = Self::local_name_of(ctx, *arg_ref)
-                    && let Some(sl) = ctx.str_locals.get(&name).cloned()
-                {
-                    builder.def_var(sl.ptr, np);
-                    builder.def_var(sl.len, nl);
-                    builder.def_var(sl.cap, nc);
+                if let Some(name) = Self::local_name_of(ctx, *arg_ref) {
+                    // The callee may have written anything through the
+                    // pointer — the binding's range fact dies here.
+                    Self::kill_fact(ctx, name);
+                    if let Some(sl) = ctx.str_locals.get(&name).cloned() {
+                        builder.def_var(sl.ptr, np);
+                        builder.def_var(sl.len, nl);
+                        builder.def_var(sl.cap, nc);
+                    }
                 }
             } else {
                 let cl_ty = cranelift_type_for(arg_ty, ctx.pool, ctx.int_type);
                 let updated = builder.ins().load(cl_ty, MemFlagsData::trusted(), addr, 0);
-                if let Some(name) = Self::local_name_of(ctx, *arg_ref)
-                    && let Some(var) = ctx.locals.get(&name).copied()
-                {
-                    builder.def_var(var, updated);
+                if let Some(name) = Self::local_name_of(ctx, *arg_ref) {
+                    Self::kill_fact(ctx, name);
+                    if let Some(var) = ctx.locals.get(&name).copied() {
+                        builder.def_var(var, updated);
+                    }
                 }
             }
         }
