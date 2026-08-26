@@ -1224,17 +1224,37 @@ impl<M: Module> Codegen<M> {
                 let current = builder.use_var(var);
 
                 let is_float = inst.ty == ctx.pool.float();
+                let lhs_range = ctx.range_facts.get(&view.name).copied();
+                let rhs_range = ranges::int_range_of(ctx.tir, &ctx.range_facts, view.value);
                 let result = match (view.op, is_float) {
                     // Same spec §18 checked arithmetic as the binop arm.
-                    (CompoundOp::Add, false) => {
-                        Self::emit_checked_iadd(builder, ctx, current, rhs)?
-                    }
-                    (CompoundOp::Sub, false) => {
-                        Self::emit_checked_isub(builder, ctx, current, rhs)?
-                    }
-                    (CompoundOp::Mul, false) => {
-                        Self::emit_checked_imul(builder, ctx, current, rhs)?
-                    }
+                    (CompoundOp::Add, false) => Self::emit_int_binop(
+                        builder,
+                        ctx,
+                        TirTag::IAdd,
+                        lhs_range,
+                        rhs_range,
+                        current,
+                        rhs,
+                    )?,
+                    (CompoundOp::Sub, false) => Self::emit_int_binop(
+                        builder,
+                        ctx,
+                        TirTag::ISub,
+                        lhs_range,
+                        rhs_range,
+                        current,
+                        rhs,
+                    )?,
+                    (CompoundOp::Mul, false) => Self::emit_int_binop(
+                        builder,
+                        ctx,
+                        TirTag::IMul,
+                        lhs_range,
+                        rhs_range,
+                        current,
+                        rhs,
+                    )?,
                     (CompoundOp::Div, false) => {
                         Self::emit_div_zero_guard(builder, ctx, rhs, DIV_ZERO_MSG)?;
                         builder.ins().sdiv(current, rhs)

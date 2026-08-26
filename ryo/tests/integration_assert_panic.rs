@@ -637,3 +637,97 @@ fn constant_divisor_still_divides() {
         "fn main():\n\tmut x = 17\n\tassert(x / 2 == 8, \"div\")\n\tassert(x % 5 == 2, \"mod\")\n\tx /= 4\n\tassert(x == 4, \"compound div\")\n\tx %= 3\n\tassert(x == 1, \"compound mod\")\n",
     );
 }
+
+// ─── value-range guard elision (Phase 1: dominating comparisons prove
+//     bounds; guards on provably-safe ops are dropped) ───────────────
+
+#[test]
+fn range_elided_subs_at_boundary_run() {
+    // The fibonacci shape: `if n <= 1: return n` proves n >= 2 on the
+    // fall-through path. At n = 2, `n - 2` is exactly 0 — the boundary
+    // value where a wrongly-kept or wrongly-computed elision shows up.
+    assert_program_succeeds(
+        "range_fib_boundary.ryo",
+        "fn fib(n: int) -> int:\n\tif n <= 1:\n\t\treturn n\n\treturn fib(n - 1) + fib(n - 2)\n\nfn main():\n\tassert(fib(2) == 1, \"fib2\")\n\tassert(fib(20) == 6765, \"fib20\")\n",
+    );
+}
+
+#[test]
+fn range_unbounded_side_still_traps() {
+    // `x >= 0` bounds only the low side: i64::MAX + 1 must still trap.
+    assert_int_overflow_panics(
+        "range_unbounded.ryo",
+        "fn main():\n\tmut x = 9223372036854775807\n\tif x >= 0:\n\t\ty = x + 1\n",
+    );
+}
+
+#[test]
+fn range_killed_by_assignment_still_traps() {
+    // The inner if reassigns m, killing the [1, MAX] fact from the
+    // outer condition. `m - 1` with m = i64::MIN must trap — a stale
+    // fact would silently wrap instead.
+    assert_int_overflow_panics(
+        "range_assign_kill.ryo",
+        "fn main():\n\tmut m = 5\n\tif m > 0:\n\t\tif m < 100:\n\t\t\tm = (0 - 9223372036854775807) - 1\n\t\ty = m - 1\n",
+    );
+}
+
+#[test]
+fn range_killed_by_inout_still_traps() {
+    // Passing m as inout lets the callee write anything; the pre-call
+    // fact is dead and `m - 1` on i64::MIN must trap.
+    assert_int_overflow_panics(
+        "range_inout_kill.ryo",
+        "fn setmin(inout x: int):\n\tx = (0 - 9223372036854775807) - 1\n\nfn main():\n\tmut m = 5\n\tif m > 0:\n\t\tsetmin(&m)\n\t\ty = m - 1\n",
+    );
+}
+
+#[test]
+fn range_while_body_at_boundary_runs() {
+    // `i = i - 1` under `while i > 0` is exact; at i = 1 it yields 0 —
+    // the boundary iteration.
+    assert_program_succeeds(
+        "range_while.ryo",
+        "fn main():\n\tmut total = 0\n\tmut i = 10\n\twhile i > 0:\n\t\ttotal = total + i\n\t\ti = i - 1\n\tassert(total == 55, \"sum\")\n",
+    );
+}
+
+#[test]
+fn range_neg_at_min_still_traps() {
+    // `x <= 0` does not exclude i64::MIN, so `-x` keeps its guard.
+    assert_int_overflow_panics(
+        "range_neg_min.ryo",
+        "fn main():\n\tx = (0 - 9223372036854775807) - 1\n\tif x <= 0:\n\t\ty = -x\n",
+    );
+}
+
+#[test]
+fn range_neg_positive_runs() {
+    // `x > 0` excludes i64::MIN; `-x` is exact.
+    assert_program_succeeds(
+        "range_neg_pos.ryo",
+        "fn neg_if_pos(x: int) -> int:\n\tif x > 0:\n\t\treturn -x\n\treturn x\n\nfn main():\n\tassert(neg_if_pos(5) == 0 - 5, \"neg\")\n\tassert(neg_if_pos(0 - 7) == 0 - 7, \"passthrough\")\n",
+    );
+}
+
+#[test]
+fn range_elif_body_still_traps_at_max() {
+    // Regression (Task-2 review): the then arm's true-polarity seed must
+    // not leak into the elif body. n = i64::MAX takes the `n >= 10` arm,
+    // where `n + 1` must still trap.
+    assert_int_overflow_panics(
+        "range_elif_pollution.ryo",
+        "fn main():\n\tmut n = 9223372036854775807\n\tif n <= 1:\n\t\ty = n\n\telif n >= 10:\n\t\ty = n + 1\n",
+    );
+}
+
+#[test]
+fn range_for_range_shadow_still_traps_at_max() {
+    // Regression (Task-2 review): facts the body leaves on the loop
+    // variable's name must not transfer to the shadowed outer binding.
+    // After the loop, `i` is the param again — i64::MAX + 1 must trap.
+    assert_int_overflow_panics(
+        "range_for_shadow.ryo",
+        "fn f(i: int) -> int:\n\tfor i in range(0, 3):\n\t\tif i > 1:\n\t\t\tbreak\n\treturn i + 1\n\nfn main():\n\tx = f(9223372036854775807)\n",
+    );
+}
