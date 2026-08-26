@@ -401,6 +401,8 @@ impl<M: Module> Codegen<M> {
         lv: Value,
         rv: Value,
     ) -> Result<Value, String> {
+        // Both dispatch sites below assume IMul in their `_` arm.
+        debug_assert!(matches!(tag, TirTag::IAdd | TirTag::ISub | TirTag::IMul));
         let fits = lhs_range.zip(rhs_range).and_then(|(a, b)| match tag {
             TirTag::IAdd => a.checked_add(b),
             TirTag::ISub => a.checked_sub(b),

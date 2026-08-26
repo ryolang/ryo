@@ -213,6 +213,32 @@ fn elif_arms_do_not_inherit_sibling_true_seeds() {
 }
 
 #[test]
+fn loop_backedge_kills_pre_loop_fact() {
+    // Regression (final review): a fact seeded before a loop on a
+    // variable the body assigns is stale from iteration 2 — the header
+    // joins entry and back-edge. The pre-scan must kill it BEFORE the
+    // condition is emitted, so `m + 1` keeps its guard. Here `m + 1`
+    // is the only addition, so `sadd_overflow` must appear.
+    let clif = clif_of(
+        "fn main():\n\
+         \tmut m = 50\n\
+         \tif m < 0:\n\
+         \t\treturn\n\
+         \tif m > 100:\n\
+         \t\treturn\n\
+         \tmut j = 2\n\
+         \twhile j > 0:\n\
+         \t\tz = m + 1\n\
+         \t\tm = 9223372036854775807\n\
+         \t\tj = j - 1\n",
+    );
+    assert!(
+        clif.contains("sadd_overflow"),
+        "m + 1 inside the loop must keep its overflow guard:\n{clif}"
+    );
+}
+
+#[test]
 fn for_range_var_fact_does_not_leak_to_shadowed_binding() {
     // Regression for a Task-2 review finding: an if inside the loop body
     // can leave a fact on the loop variable's name (fall-through re-seed);

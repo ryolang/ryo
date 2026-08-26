@@ -731,3 +731,74 @@ fn range_for_range_shadow_still_traps_at_max() {
         "fn f(i: int) -> int:\n\tfor i in range(0, 3):\n\t\tif i > 1:\n\t\t\tbreak\n\treturn i + 1\n\nfn main():\n\tx = f(9223372036854775807)\n",
     );
 }
+
+#[test]
+fn range_loop_body_backedge_still_traps() {
+    // Regression (final review): the pre-loop fact m ∈ [0, 100] is stale
+    // from iteration 2 onward — the body reassigns m, and the header is
+    // a join of entry and back-edge. Iteration 2 computes i64::MAX + 1;
+    // a stale fact would elide the guard and wrap silently.
+    assert_int_overflow_panics(
+        "range_loop_backedge.ryo",
+        "fn main():\n\tmut m = 50\n\tif m < 0:\n\t\treturn\n\tif m > 100:\n\t\treturn\n\tmut j = 2\n\twhile j > 0:\n\t\tz = m + 1\n\t\tm = 9223372036854775807\n\t\tj = j - 1\n",
+    );
+}
+
+#[test]
+fn range_while_cond_backedge_still_traps() {
+    // Regression (final review): the while CONDITION re-evaluates every
+    // iteration, so facts it consults must hold on every one. Iteration
+    // 2's `m - 1` is i64::MIN - 1 and must trap.
+    assert_int_overflow_panics(
+        "range_while_cond_backedge.ryo",
+        "fn main():\n\tmut m = 50\n\tif m < 0:\n\t\treturn\n\tif m > 100:\n\t\treturn\n\tmut j = 0\n\twhile m - 1 > 0:\n\t\tm = (0 - 9223372036854775807) - 1\n\t\tj = j + 1\n\t\tif j > 3:\n\t\t\tm = 1\n",
+    );
+}
+
+#[test]
+fn range_for_range_backedge_still_traps() {
+    // Regression (final review): same back-edge rule for `for range` —
+    // iteration 2's `m + 1` is i64::MAX + 1 and must trap.
+    assert_int_overflow_panics(
+        "range_for_backedge.ryo",
+        "fn main():\n\tmut m = 50\n\tif m < 0:\n\t\treturn\n\tif m > 100:\n\t\treturn\n\tfor i in range(0, 2):\n\t\tz = m + 1\n\t\tm = 9223372036854775807\n",
+    );
+}
+
+#[test]
+fn range_elif_cond_inout_still_traps() {
+    // Regression (final review): evaluating `setmax(&m) == 1` kills m's
+    // fact via the inout reload, but the elif cond block re-baselines
+    // from the if-entry map and resurrects it. With m = i64::MAX the
+    // elif condition's `m + 1` must trap, not wrap into a return 3.
+    assert_int_overflow_panics(
+        "range_elif_cond_inout.ryo",
+        "fn setmax(inout x: int) -> int:\n\tx = 9223372036854775807\n\treturn 0\n\nfn f(y: int) -> int:\n\tmut m = y\n\tif m < 0:\n\t\treturn 0\n\tif m > 100:\n\t\treturn 0\n\tif setmax(&m) == 1:\n\t\treturn 1\n\telif m + 1 > 50:\n\t\treturn 2\n\treturn 3\n\nfn main():\n\tx = f(50)\n",
+    );
+}
+
+#[test]
+fn range_join_cond_inout_still_traps() {
+    // Regression (final review, same class as the elif re-baseline):
+    // at the final join with no else and all arms terminated, the
+    // fall-through negation seeding must not resurrect a fact on a
+    // binding an earlier condition's inout call wrote. `m > 0` false
+    // seeds m ∈ [MIN, 0], but setmax(&m) ran and wrote i64::MAX —
+    // `m + 1` after the if must trap, not wrap.
+    assert_int_overflow_panics(
+        "range_join_cond_inout.ryo",
+        "fn setmax(inout x: int) -> int:\n\tx = 9223372036854775807\n\treturn 0\n\nfn main():\n\tmut m = 0 - 50\n\tif m > 0:\n\t\treturn\n\telif setmax(&m) == 1:\n\t\treturn\n\tz = m + 1\n",
+    );
+}
+
+#[test]
+fn range_while_cond_inout_write_still_traps() {
+    // The while condition re-evaluates every iteration; an inout call
+    // INSIDE it writes through its pointer on every one. `m + 1` is
+    // emitted before the call's reload-kill, so the pre-scan must also
+    // cover condition writes — iteration 2's `m + 1` is i64::MAX + 1.
+    assert_int_overflow_panics(
+        "range_while_cond_inout.ryo",
+        "fn setmax(inout x: int) -> int:\n\tx = 9223372036854775807\n\treturn 0\n\nfn main():\n\tmut m = 50\n\tif m < 0:\n\t\treturn\n\tif m > 100:\n\t\treturn\n\tmut j = 0\n\twhile m + 1 > setmax(&m):\n\t\tj = j + 1\n\t\tif j > 3:\n\t\t\treturn\n",
+    );
+}

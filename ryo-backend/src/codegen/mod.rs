@@ -521,6 +521,66 @@ impl<M: Module> Codegen<M> {
         }
     }
 
+    /// Kill facts for every binding a loop may write (see
+    /// `collect_loop_writes`): anything in the body, plus anything in
+    /// `cond` when one is passed. Back-edge rule: a fact consulted
+    /// inside a loop must hold on EVERY iteration, not just the first —
+    /// the header is a join of the entry edge and the back-edge, which
+    /// disagree once the body has run. The while-condition also
+    /// re-evaluates per iteration, so this must run before the
+    /// condition is emitted, not just before the body — and the
+    /// condition itself is scanned, since an inout call inside it
+    /// writes through its pointer on every iteration too.
+    fn kill_loop_writes(ctx: &mut FunctionContext<'_, M>, cond: Option<TirRef>, body: &[TirRef]) {
+        let mut writes = Vec::new();
+        if let Some(cond) = cond {
+            Self::collect_writes_in(ctx.tir, cond, &mut writes);
+        }
+        Self::collect_loop_writes(ctx.tir, body, &mut writes);
+        for name in writes {
+            ctx.range_facts.remove(&name);
+        }
+    }
+
+    /// Collect every binding a statement slice may write: `Assign` /
+    /// `CompoundAssign` targets and names passed as `inout` call args
+    /// (the callee may write through the pointer). Recursion drives off
+    /// `walk_operands`, so nested if/elif/else/while/for-range bodies
+    /// are covered.
+    fn collect_loop_writes(tir: &Tir, stmts: &[TirRef], out: &mut Vec<StringId>) {
+        for &stmt in stmts {
+            Self::collect_writes_in(tir, stmt, out);
+        }
+    }
+
+    fn collect_writes_in(tir: &Tir, r: TirRef, out: &mut Vec<StringId>) {
+        let inst = tir.inst(r);
+        match inst.tag {
+            TirTag::Assign => out.push(tir.assign_view(r).name),
+            TirTag::CompoundAssign => out.push(tir.compound_assign_view(r).name),
+            TirTag::Call => {
+                let view = tir.call_view(r);
+                for (&arg, &mode) in view.args.iter().zip(view.modes.iter()) {
+                    if mode != ParamMode::Inout {
+                        continue;
+                    }
+                    // The inout arg was sema-lowered to its inner
+                    // `Var(name)` ref — the same rule `local_name_of`
+                    // uses. Anything else is not a plain binding write;
+                    // ignore it conservatively.
+                    let arg_inst = tir.inst(arg);
+                    if let (TirTag::Var, TirData::Var(name)) = (arg_inst.tag, arg_inst.data) {
+                        out.push(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+        tir.walk_operands(r, &mut |_parent, child, _kind| {
+            Self::collect_writes_in(tir, child, out);
+        });
+    }
+
     pub fn compile(
         &mut self,
         tirs: &[Tir],
@@ -1063,6 +1123,10 @@ impl<M: Module> Codegen<M> {
                         }
                         _ => unreachable!("view-typed initializer should produce ValueRepr::View"),
                     }
+                    // Same defensive fact removal as the scalar path
+                    // below: a same-scope redefinition must not inherit
+                    // a stale fact from the shadowed binding.
+                    ctx.range_facts.remove(&view.name);
                     return Ok(Terminator::None);
                 }
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
@@ -1404,6 +1468,12 @@ impl<M: Module> Codegen<M> {
             for &prev in &negated_conds {
                 Self::seed_cond_facts(ctx, prev, false);
             }
+            // The clone above predates every earlier condition's
+            // evaluation — an inout call in one of them killed its
+            // binding's fact via the reload path, and the re-baseline
+            // (or a negation seed on the same name) would resurrect it.
+            // Re-apply every kill logged since scope_mark.
+            Self::kill_assigned_since(ctx, scope_mark);
 
             let elif_cond_val = Self::eval_inst(builder, ctx, elif.cond)?;
             let elif_body_block = builder.create_block();
@@ -1451,6 +1521,9 @@ impl<M: Module> Codegen<M> {
             for &cond in &negated_conds {
                 Self::seed_cond_facts(ctx, cond, false);
             }
+            // Same re-application of cond-eval kills as the elif cond
+            // blocks above.
+            Self::kill_assigned_since(ctx, scope_mark);
             let else_branch_id = branch_ids.else_branch.unwrap_or_default();
             ctx.branch_stack.push(else_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, else_branch_id)?;
@@ -1491,12 +1564,16 @@ impl<M: Module> Codegen<M> {
         // and every written arm terminated is the merge dominated by
         // the fall-through edge alone — seed all negations there.
         ctx.range_facts = outer_facts;
-        Self::kill_assigned_since(ctx, scope_mark);
         if !has_else && written_arms_terminated {
             for &cond in &negated_conds {
                 Self::seed_cond_facts(ctx, cond, false);
             }
         }
+        // Re-apply kills AFTER the fall-through seeding: a condition's
+        // inout call wrote through its pointer on EVERY path past it,
+        // so a negation seed from another condition must not resurrect
+        // that binding's fact here.
+        Self::kill_assigned_since(ctx, scope_mark);
 
         // The if terminates the block only when every arm does; it
         // counts as a Return for the caller only when every arm
@@ -1527,6 +1604,15 @@ impl<M: Module> Codegen<M> {
         builder.ins().jump(header_block, &[]);
 
         builder.switch_to_block(header_block);
+        // Back-edge rule: kill facts on bindings the body writes BEFORE
+        // emitting the condition — the condition re-evaluates every
+        // iteration, so a fact it consults must hold on every one.
+        // `pre_loop_facts` is cloned after this kill, so the post-loop
+        // restore keeps these names dead (a body-written binding's
+        // pre-loop fact does not hold at the exit either). The
+        // cond-true seeds applied below stay sound: the header's brif
+        // re-establishes the condition on every iteration.
+        Self::kill_loop_writes(ctx, Some(view.cond), &view.body);
         let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
         builder
             .ins()
@@ -1611,6 +1697,14 @@ impl<M: Module> Codegen<M> {
         // The loop variable is a different quantity than any shadowed
         // outer binding — its fact must not leak onto the counter.
         let shadowed_fact = ctx.range_facts.remove(&view.var_name);
+
+        // Back-edge rule (see generate_while_loop): the bounds were
+        // evaluated once pre-loop, so pre-loop facts were valid there —
+        // but a fact consulted inside the body must hold on every
+        // iteration. Kill every binding the body writes before
+        // emitting it. There is no post-loop map restore here, so the
+        // kills simply persist past the loop.
+        Self::kill_loop_writes(ctx, None, &view.body);
 
         let body_term = Self::emit_body(builder, ctx, &view.body)?;
 
