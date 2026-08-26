@@ -2454,6 +2454,7 @@ file ./hello
   - Comprehensive end-to-end testing of all features
   - Fix remaining bugs from GitHub issues
   - Performance optimization passes
+    - String-codegen fast paths tracked in `ISSUES.md`: inline the tiny runtime string ops (`pack_pair`/`ryo_str_from_literal`, `__ryo_slice`, short-literal `ryo_str_eq`) as Cranelift IR instead of extern calls, hoist literal materialization out of loops, skip free emission for statically-known cap=0 values, and elide overflow guards a value-range analysis proves safe. `benchmarks/string_slicing` is the tracking measure (~3.5× Rust at the 2026-08-26 checkpoint — a runtime call per scan-loop iteration, not a semantics gap).
   - Memory leak detection and fixes
 - **Package Manager:**
   - Implement `ryo new <project>`: Create new project
