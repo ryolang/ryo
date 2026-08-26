@@ -11,7 +11,7 @@ use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, Linkage, Module};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Cap derivation for the packed-u128 runtime string ABI (Phase 0):
 /// string-producing runtime functions return `{ptr, len}` packed in
@@ -633,6 +633,20 @@ impl<M: Module> Codegen<M> {
         Self::emit_frees(builder, ctx, pending)
     }
 
+    /// True when `cap` is a materialized `iconst 0` — the static
+    /// .rodata sentinel. `ryo_str_free` returns immediately for
+    /// cap == 0, so the call is dead at the emission site and can be
+    /// skipped; the ownership schedule itself stays untouched.
+    fn is_static_cap_zero(func: &cranelift::codegen::ir::Function, cap: Value) -> bool {
+        let ValueDef::Result(inst, _) = func.dfg.value_def(cap) else {
+            return false;
+        };
+        let InstructionData::UnaryImm { opcode, imm } = &func.dfg.insts[inst] else {
+            return false;
+        };
+        *opcode == Opcode::Iconst && imm.bits() == 0
+    }
+
     /// Shared emission body for `emit_due_frees` / `sweep_due_frees`.
     /// Given the already-filtered `(free_schedule index, target)`
     /// pairs, declare `ryo_str_free` and emit one call per pair, marking
@@ -666,7 +680,9 @@ impl<M: Module> Codegen<M> {
             if let Some(sl) = binding {
                 let ptr = builder.use_var(sl.ptr);
                 let cap = builder.use_var(sl.cap);
-                builder.ins().call(free_ref, &[ptr, cap]);
+                if !Self::is_static_cap_zero(builder.func, cap) {
+                    builder.ins().call(free_ref, &[ptr, cap]);
+                }
                 continue;
             }
             let repr = Self::cached_repr(ctx, target).ok_or_else(|| {
@@ -685,7 +701,9 @@ impl<M: Module> Codegen<M> {
             );
             match repr {
                 ValueRepr::Str { ptr, cap, .. } => {
-                    builder.ins().call(free_ref, &[ptr, cap]);
+                    if !Self::is_static_cap_zero(builder.func, cap) {
+                        builder.ins().call(free_ref, &[ptr, cap]);
+                    }
                 }
                 ValueRepr::View { .. } => {
                     return Err(format!(
@@ -1111,6 +1129,59 @@ impl<M: Module> Codegen<M> {
     ) -> Result<Value, String> {
         let (_, len) = Self::eval_str_or_view_parts(builder, ctx, r)?;
         Ok(len)
+    }
+
+    /// Materialize every distinct string literal exactly once, in the
+    /// entry block, and pre-seed the `TirRef → ValueRepr` memo so each
+    /// use reads the hoisted triple. A literal is pure .rodata packing
+    /// (`symbol_value` + `iconst` + the side-effect-free
+    /// `ryo_str_from_literal` call), so entry-block materialization is
+    /// sound — the entry block dominates every use — and keeps loop
+    /// bodies from re-packing the same (ptr, len) per iteration.
+    ///
+    /// `StrConst` args of `__ryo_panic` are excluded: `emit_call`
+    /// consumes them through the raw (ptr, len) path and never touches
+    /// the memo, so hoisting them would add a dead call to the hot
+    /// path of every function that panics.
+    ///
+    /// Runs while the entry block is still the builder's current
+    /// block (called from `compile_function` right before
+    /// `emit_body`).
+    pub(crate) fn hoist_str_literals(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+    ) -> Result<(), String> {
+        let mut panic_args: HashSet<usize> = HashSet::new();
+        for idx in 1..ctx.tir.instructions.len() {
+            if ctx.tir.instructions[idx].tag != TirTag::Call {
+                continue;
+            }
+            let r = TirRef::from_raw(u32::try_from(idx).expect("TirRef index out of range"));
+            let view = ctx.tir.call_view(r);
+            if ctx.pool.str(view.name) == "__ryo_panic" {
+                panic_args.extend(view.args.iter().map(|a| a.index()));
+            }
+        }
+        let mut hoisted: HashMap<StringId, ValueRepr> = HashMap::new();
+        for idx in 1..ctx.tir.instructions.len() {
+            let inst = &ctx.tir.instructions[idx];
+            if inst.tag != TirTag::StrConst || panic_args.contains(&idx) {
+                continue;
+            }
+            let TirData::Str(id) = inst.data else {
+                continue;
+            };
+            let repr = match hoisted.get(&id) {
+                Some(repr) => *repr,
+                None => {
+                    let repr = Self::emit_str_literal_fat(builder, ctx, id)?;
+                    hoisted.insert(id, repr);
+                    repr
+                }
+            };
+            ctx.inst_values[idx] = Some(repr);
+        }
+        Ok(())
     }
 
     /// Emit a string literal as a fat pointer triple (ptr, len, cap)

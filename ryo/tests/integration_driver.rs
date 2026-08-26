@@ -484,6 +484,130 @@ fn clif_user_str_return_keeps_sret() {
     );
 }
 
+/// The `fnN` names in a single-function CLIF dump whose signature
+/// text satisfies `sig_pred`. Runtime names are opaque in the text
+/// format (`fn0 = u0:1 sig0`), so the signature shape parsed from the
+/// preamble is the only handle a test has. Only valid for dumps of a
+/// single Cranelift function — `fn`/`sig` numbering restarts per
+/// function.
+fn clif_fns_matching_sig(clif: &str, sig_pred: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut matching_sigs: Vec<String> = Vec::new();
+    let mut matching_fns: Vec<String> = Vec::new();
+    for line in clif.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("sig") {
+            if let Some((id, sig)) = rest.split_once(" = ")
+                && sig_pred(sig)
+            {
+                matching_sigs.push(format!("sig{}", id.trim()));
+            }
+        } else if let Some(rest) = line.strip_prefix("fn") {
+            // rhs is "<extern ref> <sig>", e.g. "u0:1 sig0".
+            if let Some((id, rhs)) = rest.split_once(" = ")
+                && let Some(sig) = rhs.split_whitespace().nth(1)
+                && matching_sigs.iter().any(|s| s == sig)
+            {
+                matching_fns.push(format!("fn{}", id.trim()));
+            }
+        }
+    }
+    matching_fns
+}
+
+/// Count call sites to any of `fns` within a CLIF text region.
+fn count_calls_to(region: &str, fns: &[String]) -> usize {
+    region
+        .lines()
+        .filter(|line| fns.iter().any(|f| line.contains(&format!("call {}(", f))))
+        .count()
+}
+
+/// The CLIF text of the entry block (`block0:` up to the next block
+/// header) of a single-function dump.
+fn clif_entry_block(clif: &str) -> &str {
+    let start = clif.find("block0:").expect("dump has an entry block");
+    let rest = &clif[start..];
+    match rest[1..].find("\nblock") {
+        Some(end) => &rest[..end + 1],
+        None => rest,
+    }
+}
+
+#[test]
+fn clif_str_literal_materialized_once_per_function() {
+    // A string literal is pure .rodata packing with no side effects,
+    // so each distinct literal must be materialized exactly once per
+    // function — hoisted into the entry block — instead of emitting a
+    // fresh ryo_str_from_literal call at every use (loop bodies
+    // included). `ryo_str_from_literal(ptr, len) -> i128` is the only
+    // (i64, i64) -> i128 runtime call this program can emit.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "clif_lit.ryo",
+        "fn main():\n\ttext: str = \"the quick brown fox\"\n\tmut count = 0\n\tfor i in range(0, 16):\n\t\tif text[i:i+3] == \"fox\":\n\t\t\tcount = count + 1\n\tprint(\"fox\")\n\tprint(int_to_str(count))\n",
+    );
+
+    let output = run_ryo_command(&["ir", "--emit=clif", "clif_lit.ryo"], &test_file)
+        .expect("Failed to run ryo ir --emit=clif");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let is_from_literal = |sig: &str| sig.starts_with("(i64, i64) -> i128");
+    let from_literal_fns = clif_fns_matching_sig(&stdout, is_from_literal);
+    // Two distinct literals ("the quick brown fox", "fox") — "fox"
+    // appears at two source sites but must materialize only once.
+    assert_eq!(
+        count_calls_to(&stdout, &from_literal_fns),
+        2,
+        "each distinct literal must be materialized exactly once per function: {}",
+        stdout
+    );
+    assert_eq!(
+        count_calls_to(clif_entry_block(&stdout), &from_literal_fns),
+        2,
+        "literal materializations must be hoisted out of the loop into the entry block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn clif_static_cap_str_free_is_elided() {
+    // ryo_str_free(ptr, 0) returns immediately for literal-backed
+    // strings (cap == 0 is the .rodata sentinel), so codegen must not
+    // emit the call when the freed value's cap is statically 0 at the
+    // emission site. In this all-literal function the only remaining
+    // two-word void runtime call is ryo_print.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "clif_free.ryo",
+        "fn main():\n\ts: str = \"hello\"\n\tprint(s)\n",
+    );
+
+    let output = run_ryo_command(&["ir", "--emit=clif", "clif_free.ryo"], &test_file)
+        .expect("Failed to run ryo ir --emit=clif");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let is_two_word_void = |sig: &str| sig.starts_with("(i64, i64)") && !sig.contains("->");
+    let two_word_void_fns = clif_fns_matching_sig(&stdout, is_two_word_void);
+    assert_eq!(
+        count_calls_to(&stdout, &two_word_void_fns),
+        1,
+        "only ryo_print may remain; ryo_str_free on a cap=0 literal must be elided: {}",
+        stdout
+    );
+}
+
 #[test]
 fn ir_emit_order_is_pipeline_not_flag() {
     // Section order must be AST → UIR → TIR → CLIF regardless of

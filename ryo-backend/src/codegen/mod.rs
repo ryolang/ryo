@@ -807,6 +807,11 @@ impl<M: Module> Codegen<M> {
                 }
             }
 
+            // Hoist string literals while the entry block is still the
+            // current block: one ryo_str_from_literal call per distinct
+            // literal per function, dominating every use.
+            Self::hoist_str_literals(&mut builder, &mut ctx)?;
+
             let body_term = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
 
             if body_term == Terminator::None {

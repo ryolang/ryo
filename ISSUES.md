@@ -405,19 +405,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** `ryo-backend/src/codegen/expr.rs` (`ryo_str_eq` call :282, `__ryo_slice` call :1022, `ryo_str_from_literal` call :1132), `runtime/src/lib.rs` (bodies: `ryo_str_from_literal` :251, `__ryo_slice` :319, `ryo_str_eq` :448)
 **Summary:** Codegen imports these as opaque extern calls, so every use pays a full call that Cranelift can neither inline nor hoist. The bodies are a handful of instructions: `ryo_str_from_literal` is just `pack_pair` (shift + or), `__ryo_slice` is two bounds checks, two UTF-8 boundary tests, and a `ptr.add`, and `ryo_str_eq` against a short literal is a few byte compares. In `benchmarks/string_slicing` the scan loop makes three such calls per iteration (slice + literal materialization + eq) where Rust inlines all of it to pointer arithmetic and a 3-byte memcmp — the bulk of the measured 3.5× AOT gap (CLIF verified 2026-08-26: the `str`/`strview` param variants are instruction-identical in the loop except for these calls, and a same-compiler A/B ties at 5.9 ms both ways).
-**Resolution:** Emit the tiny bodies as inline Cranelift IR at the call sites instead of extern calls (slice keeps its panic paths; eq can specialize when one side is a known short literal). Inlining `pack_pair` also turns literal materialization into hoistable loop-invariant code (I-162). Larger ops (`ryo_str_concat`, `__ryo_str_push`) stay extern.
-
-### I-162 — Literal `str` values are re-materialized at every use, including inside loops
-
-**Files:** `ryo-backend/src/codegen/expr.rs` (`ryo_str_from_literal` emission :1117-1132)
-**Summary:** Each executed occurrence of a string literal emits a fresh `ryo_str_from_literal` call, so `if text[i:i+3] == "fox":` inside a loop re-packs the same `(ptr, len)` every iteration. The value is loop-invariant and effectively side-effect-free, but as an opaque extern call no Cranelift pass can move it. Confirmed in the `string_slicing` `count_fox` CLIF: `symbol_value gv0` + `iconst 3` → call, per iteration.
-**Resolution:** Once `pack_pair` is inlined (I-161) LICM can hoist the materialization; alternatively emit each distinct literal once per function into a hoisted value. Pin with a CLIF test asserting one materialization per literal per function (same style as `clif_string_ops_use_packed_return_no_stack_slots`).
-
-### I-163 — Codegen emits `ryo_str_free` calls for known-static (cap=0) values
-
-**Files:** `ryo-backend/src/codegen/expr.rs` (free emission :562-, sweep :638-, import :784-797)
-**Summary:** `ryo_str_free(ptr, 0)` returns immediately for literal-backed strings (the cap=0 static sentinel, `runtime/src/lib.rs:199-205`), yet codegen still emits the call — with a constant-0 cap argument — for every scheduled free of a literal-derived temp. In the `string_slicing` scan loop that is one dead extern call per iteration. The ownership sidecar legitimately schedules these frees; the waste is purely at emission.
-**Resolution:** When the freed value's cap is statically known to be 0 at the emission site (literal-derived temps, empty-string values), skip the call; leave the ownership schedule untouched so non-static paths are unaffected. Pin with a CLIF test asserting no `ryo_str_free` in an all-literal-temp function.
+**Resolution:** Emit the tiny bodies as inline Cranelift IR at the call sites instead of extern calls (slice keeps its panic paths; eq can specialize when one side is a known short literal). Literal re-materialization is already handled (each distinct literal is emitted once per function in the entry block); inlining `pack_pair` would remove the remaining extern call from that one materialization. Larger ops (`ryo_str_concat`, `__ryo_str_push`) stay extern.
 
 ---
 

@@ -6,31 +6,31 @@
 
 ## Why Ryo trails here: a runtime call per operation (and the planned fix)
 
-Unlike string_building, this gap is **not** semantic — it is codegen quality, and it is filed as tracked work. Each of the ~700k scan iterations makes four calls across the runtime-library boundary where Rust inlines everything (CLIF-verified 2026-08-26):
+Unlike string_building, this gap is **not** semantic — it is codegen quality, and it is filed as tracked work. Each of the ~700k scan iterations makes two calls across the runtime-library boundary where Rust inlines everything (CLIF-verified 2026-08-26):
 
 1. `__ryo_slice(ptr, len, i, i+3)` — two bounds checks, two UTF-8 char-boundary tests, and a `ptr.add`. Rust's `&text[i..i+3]` is inlined pointer arithmetic.
-2. `ryo_str_from_literal("fox", 3)` — re-packs the same `(ptr, len)` every iteration; loop-invariant, but as an opaque extern call no Cranelift pass can hoist it.
-3. `ryo_str_eq(...)` — an extern call to compare 3 bytes; LLVM turns Rust's into a load-and-cmp.
-4. `ryo_str_free(lit, 0)` — a guaranteed no-op on the literal's cap=0 static sentinel, still emitted per iteration.
+2. `ryo_str_eq(...)` — an extern call to compare 3 bytes; LLVM turns Rust's into a load-and-cmp.
+
+Two more per-iteration calls used to be on this list and are now removed (2026-08-26, verified by the `clif_str_literal_materialized_once_per_function` and `clif_static_cap_str_free_is_elided` tests): `ryo_str_from_literal("fox", 3)` re-packed the same `(ptr, len)` every iteration — each distinct literal is now materialized once per function in the entry block — and `ryo_str_free(lit, 0)`, a guaranteed no-op on the literal's cap=0 static sentinel, is no longer emitted when the cap is statically 0.
 
 Plus three checked-arithmetic guard-and-branch pairs per iteration (`i + 3`, `i + 1`, `count += 1`) — spec §18 mandates them; Rust release wraps silently (same story as fibonacci).
 
 One fairness note: Rust scans raw bytes (`&[u8]`), while Ryo's slice validates UTF-8 char boundaries per spec §3.1 — a mandated check Rust never pays. Inlined, it is two bit tests; across an extern call it is part of the per-iteration call cost above.
 
-**The fix path** (tracked in `ISSUES.md`, no language change): emit the tiny runtime bodies as inline Cranelift IR at the call sites; once `pack_pair` is inlined, literal materialization becomes hoistable loop-invariant code; skip free emission for statically-known cap=0 values; elide overflow guards a value-range analysis proves safe. These should remove most of the call overhead; whatever margin remains after that is Cranelift-vs-LLVM mid-end quality plus the spec-mandated boundary checks. This benchmark is the tracking measure.
+**The fix path** (tracked in `ISSUES.md`, no language change): emit the tiny runtime bodies as inline Cranelift IR at the call sites, and elide overflow guards a value-range analysis proves safe. These should remove most of the remaining call overhead; whatever margin remains after that is Cranelift-vs-LLVM mid-end quality plus the spec-mandated boundary checks. This benchmark is the tracking measure.
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-26. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-26 — Ryo rows re-measured after literal hoisting + static-cap free elision landed (same day; Rust/Swift rows re-measured too). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
 | Candidate | Mean time | vs fastest | Max RSS |
 |---|---|---|---|
-| **Rust** | 1.7 ms ± 0.3 ms | 1.00x | 2.95 MB |
-| **Swift** | 2.5 ms ± 0.1 ms | 1.51x slower | 7.09 MB |
-| **Ryo (AOT)** | 5.8 ms ± 0.2 ms | 3.49x slower | 2.75 MB |
-| **Ryo (JIT)** | 10.8 ms ± 0.6 ms | 6.57x slower | 6.70 MB |
+| **Rust** | 2.2 ms ± 0.7 ms | 1.00x | 2.97 MB |
+| **Swift** | 3.0 ms ± 0.8 ms | 1.36x slower | 7.09 MB |
+| **Ryo (AOT)** | 5.1 ms ± 0.3 ms | 2.32x slower | 2.75 MB |
+| **Ryo (JIT)** | 6.8 ms ± 0.3 ms | 3.09x slower | 6.58 MB |
 
-Note: the JIT time moved from ~6.6 ms to ~10 ms with the packed-`u128` ABI while AOT stayed flat; the delta reproduced across runs on the same day. Cause not yet investigated. Still ~10 ms with the JIT at `opt_level=speed` (2026-08-26), so the gap is not an unoptimized-JIT-codegen artifact.
+Note: the JIT regression from the packed-`u128` ABI (~6.6 ms → ~10 ms) is gone — the JIT is back to ~6.8 ms now that the per-iteration `ryo_str_from_literal` / `ryo_str_free` calls are eliminated, confirming those extern calls priced higher under the JIT than under AOT.
 
 ## How to Run
 
