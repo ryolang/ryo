@@ -6,7 +6,7 @@ use super::{
 };
 use ryo_core::diag::DiagSink;
 use ryo_core::ownership::{FreePoint, FunctionSidecar};
-use ryo_core::tir::{Tir, TirRef, TirTag};
+use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
 
@@ -189,10 +189,11 @@ pub(crate) fn branch_may_not_return(tir: &Tir, branch_stmt: TirRef) -> bool {
     }
 }
 /// Outermost branch statement (`IfStmt`/`WhileLoop`/`ForRange`) whose
-/// arm or body contains `target`, or `None` when `target` is not
-/// inside any branch. `target` may be a sub-expression (e.g. a `Var`
-/// read inside a call), so statements are matched by subtree, not by
-/// reference equality. Used by the conditional-last-use re-anchor.
+/// arm, body, or condition/bounds contains `target`, or `None` when
+/// `target` is not inside any branch. `target` may be a sub-expression
+/// (e.g. a `Var` read inside a call or in a branch condition), so
+/// statements are matched by subtree, not by reference equality. Used
+/// by the conditional-last-use re-anchor.
 pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
     fn walk(
         tir: &Tir,
@@ -225,6 +226,17 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                     {
                         found = walk(tir, else_stmts, target, stack);
                     }
+                    // Not in any arm body, but the if's subtree contains
+                    // `target` (the caller's `contains_reachable` guard):
+                    // it sits in the if/elif CONDITION. Conditions run on
+                    // every path through the branch, so the branch still
+                    // contains the read — without this, a last use in a
+                    // condition keeps its raw anchor and its Free fires at
+                    // the first statement end inside an arm (mid-loop UAF
+                    // when the whole shape sits in a loop body).
+                    if found.is_none() {
+                        found = stack.first().copied();
+                    }
                     stack.pop();
                     if found.is_some() {
                         return found;
@@ -232,16 +244,36 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
                     stack.push(r);
-                    let found = match tir.loop_body(r) {
+                    let mut found = match tir.loop_body(r) {
                         Some(body) => walk(tir, &body, target, stack),
                         None => None,
                     };
+                    // Same condition case as the if arm: a read in the
+                    // loop's condition or bounds is inside the loop.
+                    if found.is_none() {
+                        found = stack.first().copied();
+                    }
                     stack.pop();
                     if found.is_some() {
                         return found;
                     }
                 }
-                _ => return stack.first().copied(),
+                // Transparent wrapper: an `ExprStmt` around a branch
+                // (sema's `assert` desugars to `ExprStmt(IfStmt)`) must
+                // not hide the branch from the walk — descend into the
+                // operand with the branch stack unchanged.
+                _ => {
+                    if let TirData::UnOp(o) = tir.inst(r).data
+                        && matches!(
+                            tir.inst(o).tag,
+                            TirTag::IfStmt | TirTag::WhileLoop | TirTag::ForRange
+                        )
+                        && tir.contains_reachable(o, target)
+                    {
+                        return walk(tir, &[o], target, stack);
+                    }
+                    return stack.first().copied();
+                }
             }
         }
         None

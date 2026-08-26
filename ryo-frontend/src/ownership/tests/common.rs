@@ -25,6 +25,20 @@ pub(super) fn take_function_sidecar(
 /// the full front-end, so the case-B tests read like the programs
 /// users write. Returns every diagnostic from all four stages.
 pub(super) fn check_src(input: &str) -> Vec<Diag> {
+    check_src_full(input).0
+}
+
+/// `check_src` variant that also returns the ownership sidecar, the
+/// TIRs, and the pool — for tests that pin Free anchors to specific
+/// instructions.
+pub(super) fn check_src_full(
+    input: &str,
+) -> (
+    Vec<Diag>,
+    OwnershipSidecar,
+    Vec<ryo_core::tir::Tir>,
+    InternPool,
+) {
     use chumsky::Parser as _;
     use chumsky::input::Input as _;
     let mut pool = InternPool::new();
@@ -50,8 +64,8 @@ pub(super) fn check_src(input: &str) -> Vec<Diag> {
         input,
         std::path::Path::new("<test>"),
     );
-    check(&tirs, &pool, &mut sink);
-    sink.into_diags()
+    let sidecar = check(&tirs, &pool, &mut sink);
+    (sink.into_diags(), sidecar, tirs, pool)
 }
 
 pub(super) fn w0003_count(diags: &[Diag]) -> usize {

@@ -847,12 +847,19 @@ pub(crate) fn visit_expr(
                 if is_borrowed_scalar_param(view.name, pool, i)
                     && matches!(tir.inst(*arg).tag, TirTag::StrConst)
                 {
-                    // Undo the temp_owners insertion seeded by visit_expr's
-                    // StrConst arm. `states`, `origin`, and `owner_at_read`
-                    // entries are harmless to leave populated — only
-                    // `temp_owners` is consulted by the anonymous-temp Free
-                    // pass.
+                    // Undo the lattice seeding from visit_expr's StrConst
+                    // arm: the borrowed-scalar ABI never owns its argument,
+                    // so the arg is not an owner at all. `temp_owners` (the
+                    // anon-temp Free pass) AND `states` (the loop-exit
+                    // defensive emit, the if-arm divergence scan) must both
+                    // forget it — a Valid-but-never-scheduled owner that
+                    // only exists on a noreturn panic path otherwise earns
+                    // a defensive Free at every `break`, targeting a repr
+                    // codegen never materializes. `origin` /
+                    // `owner_at_read` entries are harmless to leave
+                    // populated — nothing resolves the arg as a read.
                     own.temp_owners.remove(&Owner::Inst(*arg));
+                    own.states.remove(&Owner::Inst(*arg));
                 }
                 let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
                 let arg_ty = tir.inst(*arg).ty;
@@ -1197,6 +1204,17 @@ pub(crate) fn visit_expr(
                 }
             }
         }
+        // ---- Statement-tagged instructions in expression position ----
+        // Sema's `assert` desugars to an `IfStmt` handed back as the
+        // call's value, which the statement path wraps in an ExprStmt —
+        // so statement tags DO reach `visit_expr`. They need their real
+        // statement handlers: `recurse_operands` deliberately skips
+        // `Extra` payloads, so without this dispatch the condition and
+        // arms are never walked — reads inside them record no
+        // `owner_at_read` and clear no dead-store entry.
+        TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, sidecar, r),
+        TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, sidecar, r),
+        TirTag::ForRange => analyze_for_range(tir, pool, own, sink, sidecar, r),
         // ---- Everything else: recurse on operands so nested
         // ---- producers/aliases are still observed.
         _ => {
