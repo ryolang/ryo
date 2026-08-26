@@ -1090,3 +1090,41 @@ fn branch_ids_do_not_collide_after_loop() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn heap_str_last_use_in_loop_slice_comparison() {
+    // A heap-owned str whose last use is a slice comparison inside a
+    // loop-condition-guarded `if` must stay alive until the loop exits —
+    // the Free anchor is the loop statement, not the in-loop read.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tmut s: str = \"\"\n\tfor i in range(0, 8):\n\t\tstr_push(&s, \"fox \")\n\tmut i = 0\n\tmut count = 0\n\twhile i + 3 <= s.len():\n\t\tif s[i:i+3] == \"fox\":\n\t\t\tcount += 1\n\t\ti += 1\n\tassert(count == 8, \"count must be 8\")\n\tprint(\"ok\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "loop_slice_cmp.ryo", code);
+    let output = run_ryo_command(&["run", "loop_slice_cmp.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "loop slice comparison on heap str should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn heap_str_last_use_in_inline_assert() {
+    // `assert(s.len() == ...)` as the last use of a concat-built string:
+    // the desugared if's condition read must count as a use (no W0001,
+    // no Free before the assert).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tmut s: str = \"\"\n\tfor i in range(0, 25):\n\t\ts = s + \"fox \"\n\tassert(s.len() == 100, \"len must be 100\")\n\tprint(\"ok\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "inline_assert.ryo", code);
+    let output = run_ryo_command(&["run", "inline_assert.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "inline assert on heap str should succeed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("never used"),
+        "assert condition read must count as a use (no W0001), got: {}",
+        stdout
+    );
+}

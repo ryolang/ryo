@@ -6,7 +6,7 @@ use super::{
 };
 use ryo_core::diag::DiagSink;
 use ryo_core::ownership::{FreePoint, FunctionSidecar};
-use ryo_core::tir::{Tir, TirRef, TirTag};
+use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
 
@@ -164,6 +164,132 @@ pub(crate) fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
     false
 }
 
+/// True when any statement in `stmts` is a `Break`/`Continue` whose
+/// target is the loop ENCLOSING `stmts` — i.e. the list may jump out
+/// instead of falling through. Recurses into `if` arms (including an
+/// `ExprStmt`-wrapped if, sema's `assert` desugaring) but NOT into
+/// nested loops: their breaks/continues target the inner loop and
+/// don't leave the arm.
+pub(crate) fn body_may_jump_out(tir: &Tir, stmts: &[TirRef]) -> bool {
+    for &r in stmts {
+        match tir.inst(r).tag {
+            TirTag::Break | TirTag::Continue => return true,
+            TirTag::IfStmt => {
+                let view = tir.if_stmt_view(r);
+                if body_may_jump_out(tir, &view.then_stmts)
+                    || view
+                        .elif_branches
+                        .iter()
+                        .any(|e| body_may_jump_out(tir, &e.body))
+                    || view
+                        .else_stmts
+                        .as_ref()
+                        .is_some_and(|es| body_may_jump_out(tir, es))
+                {
+                    return true;
+                }
+            }
+            _ => {
+                if let TirData::UnOp(o) = tir.inst(r).data
+                    && tir.inst(o).tag == TirTag::IfStmt
+                    && body_may_jump_out(tir, std::slice::from_ref(&o))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// True when at least one path through the if reaches its merge block:
+/// an else-less if always has the fall-through path; with an else,
+/// some arm's body must neither return nor jump out of the enclosing
+/// loop. A Free anchored after an if whose merge block is unreachable
+/// would never fire.
+pub(crate) fn if_may_fall_through(tir: &Tir, if_stmt: TirRef) -> bool {
+    let view = tir.if_stmt_view(if_stmt);
+    if view.else_stmts.is_none() {
+        return true;
+    }
+    let arm_falls_through =
+        |body: &[TirRef]| !body_may_return(tir, body) && !body_may_jump_out(tir, body);
+    arm_falls_through(&view.then_stmts)
+        || view
+            .elif_branches
+            .iter()
+            .any(|e| arm_falls_through(&e.body))
+        || view
+            .else_stmts
+            .as_ref()
+            .is_some_and(|es| arm_falls_through(es))
+}
+
+/// The `IfStmt` whose MAIN condition's subtree contains `target`, or
+/// `None`. Descends through arm bodies, loop bodies, and `ExprStmt`
+/// wrappers. Elif conditions are deliberately excluded: they are
+/// evaluated only on the paths that reach them, so a temp produced
+/// there does not exist on every exit path and cannot be freed at the
+/// merge block. Used by the anonymous-temporary Free pass.
+pub(crate) fn enclosing_if_main_cond(tir: &Tir, target: TirRef) -> Option<TirRef> {
+    fn walk(tir: &Tir, stmts: &[TirRef], target: TirRef) -> Option<TirRef> {
+        for &r in stmts {
+            if !tir.contains_reachable(r, target) {
+                continue;
+            }
+            match tir.inst(r).tag {
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(r);
+                    if tir.contains_reachable(view.cond, target) {
+                        return Some(r);
+                    }
+                    if let Some(found) = walk(tir, &view.then_stmts, target) {
+                        return Some(found);
+                    }
+                    for arm in &view.elif_branches {
+                        if let Some(found) = walk(tir, &arm.body, target) {
+                            return Some(found);
+                        }
+                    }
+                    if let Some(else_stmts) = &view.else_stmts
+                        && let Some(found) = walk(tir, else_stmts, target)
+                    {
+                        return Some(found);
+                    }
+                    // In an elif condition: not eligible (see doc).
+                    return None;
+                }
+                TirTag::WhileLoop | TirTag::ForRange => {
+                    if let Some(body) = tir.loop_body(r)
+                        && let Some(found) = walk(tir, &body, target)
+                    {
+                        return Some(found);
+                    }
+                    // In the loop's condition/bounds: not an if cond.
+                    return None;
+                }
+                _ => {
+                    // Transparent wrapper: an `ExprStmt` around a branch
+                    // (sema's `assert` desugars to `ExprStmt(IfStmt)`).
+                    if let TirData::UnOp(o) = tir.inst(r).data
+                        && matches!(
+                            tir.inst(o).tag,
+                            TirTag::IfStmt | TirTag::WhileLoop | TirTag::ForRange
+                        )
+                    {
+                        return walk(tir, std::slice::from_ref(&o), target);
+                    }
+                    // A plain statement's subtree contains `target` —
+                    // not an if condition.
+                    return None;
+                }
+            }
+        }
+        None
+    }
+    walk(tir, &tir.body_stmts(), target)
+}
+
 /// True when the branch (`IfStmt`/`WhileLoop`/`ForRange`) contains no
 /// `Return`/`ReturnVoid` on any path — its exit anchor is reachable on
 /// every path, so a conditional-last-use Free can safely move there.
@@ -189,10 +315,11 @@ pub(crate) fn branch_may_not_return(tir: &Tir, branch_stmt: TirRef) -> bool {
     }
 }
 /// Outermost branch statement (`IfStmt`/`WhileLoop`/`ForRange`) whose
-/// arm or body contains `target`, or `None` when `target` is not
-/// inside any branch. `target` may be a sub-expression (e.g. a `Var`
-/// read inside a call), so statements are matched by subtree, not by
-/// reference equality. Used by the conditional-last-use re-anchor.
+/// arm, body, or condition/bounds contains `target`, or `None` when
+/// `target` is not inside any branch. `target` may be a sub-expression
+/// (e.g. a `Var` read inside a call or in a branch condition), so
+/// statements are matched by subtree, not by reference equality. Used
+/// by the conditional-last-use re-anchor.
 pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
     fn walk(
         tir: &Tir,
@@ -225,6 +352,17 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                     {
                         found = walk(tir, else_stmts, target, stack);
                     }
+                    // Not in any arm body, but the if's subtree contains
+                    // `target` (the caller's `contains_reachable` guard):
+                    // it sits in the if/elif CONDITION. Conditions run on
+                    // every path through the branch, so the branch still
+                    // contains the read — without this, a last use in a
+                    // condition keeps its raw anchor and its Free fires at
+                    // the first statement end inside an arm (mid-loop UAF
+                    // when the whole shape sits in a loop body).
+                    if found.is_none() {
+                        found = stack.first().copied();
+                    }
                     stack.pop();
                     if found.is_some() {
                         return found;
@@ -232,16 +370,36 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
                     stack.push(r);
-                    let found = match tir.loop_body(r) {
+                    let mut found = match tir.loop_body(r) {
                         Some(body) => walk(tir, &body, target, stack),
                         None => None,
                     };
+                    // Same condition case as the if arm: a read in the
+                    // loop's condition or bounds is inside the loop.
+                    if found.is_none() {
+                        found = stack.first().copied();
+                    }
                     stack.pop();
                     if found.is_some() {
                         return found;
                     }
                 }
-                _ => return stack.first().copied(),
+                // Transparent wrapper: an `ExprStmt` around a branch
+                // (sema's `assert` desugars to `ExprStmt(IfStmt)`) must
+                // not hide the branch from the walk — descend into the
+                // operand with the branch stack unchanged.
+                _ => {
+                    if let TirData::UnOp(o) = tir.inst(r).data
+                        && matches!(
+                            tir.inst(o).tag,
+                            TirTag::IfStmt | TirTag::WhileLoop | TirTag::ForRange
+                        )
+                        && tir.contains_reachable(o, target)
+                    {
+                        return walk(tir, &[o], target, stack);
+                    }
+                    return stack.first().copied();
+                }
             }
         }
         None

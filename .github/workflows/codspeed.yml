@@ -95,6 +95,12 @@ jobs:
         run: |
           ./target/release/ryo build benchmarks/fibonacci/fib.ryo
           ./target/release/ryo build benchmarks/eager_destruction/eager_destruction.ryo
+          ./target/release/ryo build benchmarks/string_building/string_building.ryo
+          ./target/release/ryo build benchmarks/doubling_concat/doubling_concat.ryo
+          ./target/release/ryo build benchmarks/many_small_strings/many_small_strings.ryo
+          ./target/release/ryo build benchmarks/string_slicing/string_slicing.ryo
+          ./target/release/ryo build benchmarks/mandelbrot/mandelbrot.ryo
+          ./target/release/ryo build benchmarks/collatz/collatz.ryo
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:
@@ -122,6 +128,12 @@ jobs:
         run: |
           ./target/release/ryo build benchmarks/fibonacci/fib.ryo
           ./target/release/ryo build benchmarks/eager_destruction/eager_destruction.ryo
+          ./target/release/ryo build benchmarks/string_building/string_building.ryo
+          ./target/release/ryo build benchmarks/doubling_concat/doubling_concat.ryo
+          ./target/release/ryo build benchmarks/many_small_strings/many_small_strings.ryo
+          ./target/release/ryo build benchmarks/string_slicing/string_slicing.ryo
+          ./target/release/ryo build benchmarks/mandelbrot/mandelbrot.ryo
+          ./target/release/ryo build benchmarks/collatz/collatz.ryo
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:

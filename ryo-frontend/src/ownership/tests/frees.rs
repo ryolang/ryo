@@ -1477,3 +1477,143 @@ fn w0003_defensive_copy_before_inout_pass_does_not_warn() {
         "defensive copy before an inout pass must not warn; got: {diags:?}"
     );
 }
+
+#[test]
+fn last_use_in_loop_condition_comparison_anchors_after_loop() {
+    // A heap str scanned by a slice comparison in a loop-body `if`
+    // condition: the owner's last use sits in a CONDITION, which still
+    // counts as inside the loop — the Free must anchor after the whole
+    // `while`, not after the in-loop read (which fires mid-loop).
+    let src = "fn main():\n\tmut s: str = \"\"\n\tfor i in range(0, 8):\n\t\tstr_push(&s, \"fox \")\n\tmut i = 0\n\tmut count = 0\n\twhile i + 3 <= s.len():\n\t\tif s[i:i+3] == \"fox\":\n\t\t\tcount += 1\n\t\ti += 1\n\tassert(count == 8, \"count\")\n";
+    let (diags, sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
+        "no dead-store warning expected; got: {diags:?}"
+    );
+    let tir = &tirs[0];
+    let body = tir.body_stmts();
+    let s_init = body
+        .iter()
+        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
+        .map(|&s| tir.var_decl_view(s).initializer)
+        .expect("var_decl for s");
+    let while_stmt = body
+        .iter()
+        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::WhileLoop)
+        .copied()
+        .expect("while loop stmt");
+    let frees_for_s: Vec<_> = sidecar.functions[0]
+        .free_schedule
+        .iter()
+        .filter(|fp| fp.target == s_init)
+        .collect();
+    assert_eq!(
+        frees_for_s.len(),
+        1,
+        "exactly one Free for s's owner; got: {:?}",
+        sidecar.functions[0].free_schedule
+    );
+    assert_eq!(
+        frees_for_s[0].after, while_stmt,
+        "Free must anchor after the while loop, not inside it"
+    );
+    assert!(frees_for_s[0].branch.is_none());
+}
+
+#[test]
+fn last_use_in_inline_assert_counts_as_use() {
+    // `assert(s.len() == ...)` desugars to ExprStmt(IfStmt); the read
+    // inside the desugared condition must be walked: no W0001, and the
+    // owner's single Free anchors after the desugared if — never a
+    // dead-store Free after the build loop.
+    let src = "fn main():\n\tmut s: str = \"\"\n\tfor i in range(0, 25):\n\t\ts = s + \"fox \"\n\tassert(s.len() == 100, \"len\")\n\tprint(\"ok\\n\")\n";
+    let (diags, sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
+        "assert-condition read must count as a use; got: {diags:?}"
+    );
+    let tir = &tirs[0];
+    let body = tir.body_stmts();
+    let s_init = body
+        .iter()
+        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
+        .map(|&s| tir.var_decl_view(s).initializer)
+        .expect("var_decl for s");
+    // The desugared assert: an ExprStmt whose operand is an IfStmt.
+    let assert_if = body
+        .iter()
+        .find_map(|&s| {
+            if tir.inst(s).tag != ryo_core::tir::TirTag::ExprStmt {
+                return None;
+            }
+            match tir.inst(s).data {
+                ryo_core::tir::TirData::UnOp(o)
+                    if tir.inst(o).tag == ryo_core::tir::TirTag::IfStmt =>
+                {
+                    Some(o)
+                }
+                _ => None,
+            }
+        })
+        .expect("desugared assert if");
+    let frees_for_s: Vec<_> = sidecar.functions[0]
+        .free_schedule
+        .iter()
+        .filter(|fp| fp.target == s_init)
+        .collect();
+    assert_eq!(
+        frees_for_s.len(),
+        1,
+        "exactly one Free for s's owner (no double free); got: {:?}",
+        sidecar.functions[0].free_schedule
+    );
+    assert_eq!(
+        frees_for_s[0].after, assert_if,
+        "Free must anchor after the desugared assert if"
+    );
+}
+
+#[test]
+fn cond_temp_free_anchors_after_if() {
+    // A heap temp produced in an if's main condition exists on every
+    // path through the branch — its Free must anchor after the if (so
+    // codegen emits it in the merge block), not after the consumer
+    // inside the condition, where the end-of-statement sweep fires it
+    // inside the taken arm only and leaks on every not-taken path.
+    let src = "fn main():\n\tmut p: str = \"f\"\n\tp = p + \"o\"\n\tif p + \"x\" == \"fox\":\n\t\tprint(\"y\\n\")\n\telse:\n\t\tprint(\"n\\n\")\n";
+    let (diags, sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error)
+    );
+    let tir = &tirs[0];
+    let if_stmt = tir
+        .body_stmts()
+        .iter()
+        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::IfStmt)
+        .copied()
+        .expect("if stmt");
+    // The anonymous `p + "x"` concat is the comparison's left operand.
+    let cond = tir.if_stmt_view(if_stmt).cond;
+    let concat = match tir.inst(cond).data {
+        ryo_core::tir::TirData::BinOp { lhs, .. } => lhs,
+        other => panic!("expected str_eq BinOp cond, got {:?}", other),
+    };
+    assert_eq!(tir.inst(concat).tag, ryo_core::tir::TirTag::StrConcat);
+    let frees: Vec<_> = sidecar.functions[0]
+        .free_schedule
+        .iter()
+        .filter(|fp| fp.target == concat)
+        .collect();
+    assert_eq!(
+        frees.len(),
+        1,
+        "exactly one Free for the cond temp; got: {:?}",
+        sidecar.functions[0].free_schedule
+    );
+    assert_eq!(
+        frees[0].after, if_stmt,
+        "cond temp Free must anchor after the if statement"
+    );
+}

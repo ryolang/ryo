@@ -34,6 +34,14 @@ fn asan_simple_hello() {
 }
 
 #[test]
+fn asan_cond_heap_temp_in_loop() {
+    run_asan_smoke(
+        common::find_fixture("cond_heap_temp_in_loop"),
+        "cond_heap_temp_in_loop",
+    );
+}
+
+#[test]
 fn asan_concat_chain() {
     run_asan_smoke(common::find_fixture("concat_chain"), "concat_chain");
 }

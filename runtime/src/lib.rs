@@ -146,16 +146,36 @@ pub struct RyoStrFat {
     pub cap: u64,
 }
 
-/// Read-only view into a `str` buffer (M8.4): pointer + byte length.
-/// Owns nothing; never freed.
+/// Return-value packing for the string-producing runtime functions
+/// (Phase 0 ABI modernization): `{ptr, len}` is returned as one
+/// `u128` (lo = ptr, hi = len).
 ///
-/// Load-bearing invariant: `__ryo_slice` stores a NULL ptr when
-/// `len == 0`, and every consumer guards on `len == 0` before
-/// dereferencing — so `ptr` may be null/dangling whenever `len == 0`.
-#[repr(C)]
-pub struct RyoSlice {
-    pub ptr: *const u8,
-    pub len: u64,
+/// Why packed `u128` instead of a struct: this crate is compiled by
+/// rustc, and a 24-byte `RyoStrFat` return lowers to a hidden sret
+/// pointer on every supported target, while a 16-byte `{ptr, len}`
+/// struct still srets under the MSVC x64 ABI. `u128` under the Rust
+/// ABI returns in registers everywhere (rax:rdx on x86-64 SysV and
+/// Win64, x0:x1 on aarch64) — the convention Cranelift's
+/// SystemV/WindowsFastcall/AppleAarch64 return tables match. These
+/// functions are therefore `#[unsafe(no_mangle)] pub fn` (Rust ABI),
+/// not `extern "C"`; the build.rs lockstep rebuild keeps this crate
+/// and the compiler on the same rustc, so the unstable Rust ABI
+/// cannot drift within a build.
+///
+/// `cap` is deliberately NOT in the return value: it is derivable at
+/// the call site — 0 for `ryo_str_from_literal` (the static .rodata
+/// sentinel) and `len` for every allocating producer below (none of
+/// them over-allocates; `__ryo_str_push` manages growth capacity
+/// through its unchanged slot ABI). A producer that ever needs
+/// `cap != len` must change this ABI.
+#[inline]
+fn pack_pair(ptr: *mut u8, len: u64) -> u128 {
+    ((len as u128) << 64) | (ptr as usize as u128)
+}
+
+#[cfg(test)]
+fn unpack_pair(v: u128) -> (*mut u8, u64) {
+    (v as u64 as *mut u8, (v >> 64) as u64)
 }
 
 #[unsafe(no_mangle)]
@@ -206,19 +226,16 @@ pub unsafe extern "C" fn ryo_str_realloc(ptr: *mut u8, old_cap: u64, new_cap: u6
     new_ptr
 }
 
-/// Helper for fixed-string results (nan, inf, etc.)
-///
-/// # Safety
-/// `out` must point to a valid `RyoStrFat`.
-unsafe fn write_str_result(s: &[u8], out: *mut RyoStrFat) {
+/// Helper for fixed-string results (nan, inf, etc.): heap-copy `s` and
+/// return the packed pair.
+fn str_pair_from_bytes(s: &[u8]) -> u128 {
     let ptr = ryo_str_alloc(s.len() as u64);
-    // SAFETY: both ptr and s.as_ptr() are valid for s.len() bytes, and copy_nonoverlapping is safe.
+    // SAFETY: ptr is freshly allocated for s.len() bytes; s.as_ptr() is
+    // readable for the same length; the regions do not overlap.
     unsafe {
         core::ptr::copy_nonoverlapping(s.as_ptr(), ptr, s.len());
-        (*out).ptr = ptr;
-        (*out).len = s.len() as u64;
-        (*out).cap = s.len() as u64;
     }
+    pack_pair(ptr, s.len() as u64)
 }
 
 fn oom_abort() -> ! {
@@ -229,52 +246,38 @@ fn oom_abort() -> ! {
 }
 
 /// # Safety
-/// `data` must point to `len` readable bytes. `out` must point to a valid `RyoStrFat`.
+/// `data` must point to `len` readable bytes (or be dangling when `len == 0`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ryo_str_from_literal(data: *const u8, len: u64, out: *mut RyoStrFat) {
-    // SAFETY: caller contract — out points to a valid RyoStrFat.
-    unsafe {
-        if len == 0 {
-            (*out).ptr = core::ptr::null_mut();
-            (*out).len = 0;
-            (*out).cap = 0;
-            return;
-        }
-        // Return pointer directly to rodata with cap=0 as static sentinel
-        (*out).ptr = data as *mut u8;
-        (*out).len = len;
-        (*out).cap = 0;
+pub unsafe fn ryo_str_from_literal(data: *const u8, len: u64) -> u128 {
+    if len == 0 {
+        return pack_pair(core::ptr::null_mut(), 0);
     }
+    // Point directly into rodata; the cap=0 static sentinel is derived
+    // at the call site (see `pack_pair` docs).
+    pack_pair(data as *mut u8, len)
 }
 
 /// Materialize an owned `str` copy from a `strview` (M8.4.1.2). The
-/// result owns a fresh heap buffer of exactly `len` bytes
-/// (`cap == len`); `len == 0` yields the empty `{null, 0, 0}` triple.
+/// result owns a fresh heap buffer of exactly `len` bytes; `len == 0`
+/// yields the empty `{null, 0}` pair.
 ///
 /// # Safety
 /// `ptr` must point to `len` readable bytes — or be null/dangling when
-/// `len == 0` (the `RyoSlice` invariant). `out` must point to a valid
-/// `RyoStrFat`.
+/// `len == 0`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ryo_str_from_view(ptr: *const u8, len: u64, out: *mut RyoStrFat) {
-    // SAFETY: caller contract — ptr/len describe a readable byte range
-    // (or len == 0, in which case ptr is never dereferenced) and out
-    // points to a valid RyoStrFat.
-    unsafe {
-        if len == 0 {
-            (*out).ptr = core::ptr::null_mut();
-            (*out).len = 0;
-            (*out).cap = 0;
-            return;
-        }
-        let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
-        let buf = ryo_str_alloc(len);
-        debug_assert!(!ptr.is_null());
-        core::ptr::copy_nonoverlapping(ptr, buf, n);
-        (*out).ptr = buf;
-        (*out).len = len;
-        (*out).cap = len;
+pub unsafe fn ryo_str_from_view(ptr: *const u8, len: u64) -> u128 {
+    if len == 0 {
+        return pack_pair(core::ptr::null_mut(), 0);
     }
+    let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+    let buf = ryo_str_alloc(len);
+    debug_assert!(!ptr.is_null());
+    // SAFETY: caller contract — ptr/len describe a readable byte range;
+    // buf is freshly allocated for len bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(ptr, buf, n);
+    }
+    pack_pair(buf, len)
 }
 
 fn slice_fail(msg: &str) -> ! {
@@ -303,19 +306,17 @@ unsafe fn is_char_boundary(s: *const u8, len: u64, i: u64) -> bool {
 /// and non-boundary indices panic at slice creation (final spec §3.1);
 /// panic here means stderr message + exit 101, matching `__ryo_panic`.
 ///
+/// Load-bearing invariant: the returned `ptr` is NULL when the
+/// requested range is empty *and* the base is empty, and every consumer
+/// guards on `len == 0` before dereferencing — so the packed `ptr` may
+/// be null whenever the viewed length is 0.
+///
 /// # Safety
 /// `ptr` must point to `len` readable bytes (or be null if `len == 0`).
-/// `out` must point to a valid `RyoSlice`. Panics (exit 101) when
-/// `start > end`, `end > len`, or either bound is not a UTF-8 char
-/// boundary.
+/// Panics (exit 101) when `start > end`, `end > len`, or either bound
+/// is not a UTF-8 char boundary.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __ryo_slice(
-    ptr: *const u8,
-    len: u64,
-    start: u64,
-    end: u64,
-    out: *mut RyoSlice,
-) {
+pub unsafe fn __ryo_slice(ptr: *const u8, len: u64, start: u64, end: u64) -> u128 {
     if start > end || end > len {
         slice_fail("slice index out of range");
     }
@@ -324,44 +325,38 @@ pub unsafe extern "C" fn __ryo_slice(
     if !bounds_ok {
         slice_fail("slice index is not a UTF-8 char boundary");
     }
-    // SAFETY: caller contract for `out`; `start <= end <= len` checked above.
-    unsafe {
-        (*out).ptr = if len == 0 {
+    // SAFETY: `start <= end <= len` checked above, so ptr.add(start)
+    // stays within (or one past) the base allocation.
+    let out_ptr = unsafe {
+        if len == 0 {
             core::ptr::null()
         } else {
             ptr.add(start as usize)
-        };
-        (*out).len = end - start;
-    }
+        }
+    };
+    pack_pair(out_ptr as *mut u8, end - start)
 }
 
 /// # Safety
-/// `l_ptr` must point to `l_len` readable bytes (or be null if l_len==0).
-/// Same for `r_ptr`/`r_len`. `out` must point to a valid `RyoStrFat`.
+/// `l_ptr` must point to `l_len` readable bytes (or be null/dangling if
+/// `l_len == 0`). Same for `r_ptr`/`r_len`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ryo_str_concat(
-    l_ptr: *const u8,
-    l_len: u64,
-    r_ptr: *const u8,
-    r_len: u64,
-    out: *mut RyoStrFat,
-) {
-    // SAFETY: caller contract — out points to a valid RyoStrFat and input buffers are valid for reading.
+pub unsafe fn ryo_str_concat(l_ptr: *const u8, l_len: u64, r_ptr: *const u8, r_len: u64) -> u128 {
+    let total = match l_len.checked_add(r_len) {
+        Some(t) => t,
+        None => oom_abort(),
+    };
+    if total == 0 {
+        return pack_pair(core::ptr::null_mut(), 0);
+    }
+    let l_sz: usize = l_len.try_into().unwrap_or_else(|_| oom_abort());
+    let r_sz: usize = r_len.try_into().unwrap_or_else(|_| oom_abort());
+    let _: usize = total.try_into().unwrap_or_else(|_| oom_abort());
+    let ptr = ryo_str_alloc(total);
+    // SAFETY: caller contract — the input buffers are valid for reading
+    // and ptr is freshly allocated for total bytes; the copies do not
+    // overlap the destination.
     unsafe {
-        let total = match l_len.checked_add(r_len) {
-            Some(t) => t,
-            None => oom_abort(),
-        };
-        if total == 0 {
-            (*out).ptr = core::ptr::null_mut();
-            (*out).len = 0;
-            (*out).cap = 0;
-            return;
-        }
-        let l_sz: usize = l_len.try_into().unwrap_or_else(|_| oom_abort());
-        let r_sz: usize = r_len.try_into().unwrap_or_else(|_| oom_abort());
-        let _: usize = total.try_into().unwrap_or_else(|_| oom_abort());
-        let ptr = ryo_str_alloc(total);
         if l_sz > 0 {
             debug_assert!(!l_ptr.is_null());
             core::ptr::copy_nonoverlapping(l_ptr, ptr, l_sz);
@@ -370,10 +365,8 @@ pub unsafe extern "C" fn ryo_str_concat(
             debug_assert!(!r_ptr.is_null());
             core::ptr::copy_nonoverlapping(r_ptr, ptr.add(l_sz), r_sz);
         }
-        (*out).ptr = ptr;
-        (*out).len = total;
-        (*out).cap = total;
     }
+    pack_pair(ptr, total)
 }
 
 /// Append `suffix` to the str fat-pointer at `s_ptr`, reallocating if the
@@ -470,10 +463,8 @@ pub unsafe extern "C" fn ryo_str_eq(
     if a_slice == b_slice { 1 } else { 0 }
 }
 
-/// # Safety
-/// `out` must point to a valid `RyoStrFat`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ryo_int_to_str(value: i64, out: *mut RyoStrFat) {
+pub fn ryo_int_to_str(value: i64) -> u128 {
     let mut buf = [0u8; 32];
     let negative = value < 0;
     // Work with unsigned magnitude to handle i64::MIN correctly
@@ -500,54 +491,34 @@ pub unsafe extern "C" fn ryo_int_to_str(value: i64, out: *mut RyoStrFat) {
     }
     let len = (buf.len() - pos) as u64;
     let ptr = ryo_str_alloc(len);
-    // SAFETY: ptr is newly allocated for len bytes, out is valid to write.
+    // SAFETY: ptr is newly allocated for len bytes; buf is readable from
+    // pos onward for len bytes; the regions do not overlap.
     unsafe {
         core::ptr::copy_nonoverlapping(buf.as_ptr().add(pos), ptr, len as usize);
-        (*out).ptr = ptr;
-        (*out).len = len;
-        (*out).cap = len;
     }
+    pack_pair(ptr, len)
 }
 
-/// # Safety
-/// `out` must point to a valid `RyoStrFat`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ryo_float_to_str(value: f64, out: *mut RyoStrFat) {
+pub fn ryo_float_to_str(value: f64) -> u128 {
     if value.is_nan() {
-        // SAFETY: write_str_result safely writes Nan string through out.
-        return unsafe { write_str_result(b"nan", out) };
+        return str_pair_from_bytes(b"nan");
     }
     if value.is_infinite() {
-        if value < 0.0 {
-            // SAFETY: write_str_result safely writes -inf string through out.
-            return unsafe { write_str_result(b"-inf", out) };
+        return if value < 0.0 {
+            str_pair_from_bytes(b"-inf")
         } else {
-            // SAFETY: write_str_result safely writes inf string through out.
-            return unsafe { write_str_result(b"inf", out) };
-        }
+            str_pair_from_bytes(b"inf")
+        };
     }
 
     let mut buf = ryu::Buffer::new();
-    let s = buf.format(value);
-    let bytes = s.as_bytes();
-    let len = bytes.len() as u64;
-    let ptr = ryo_str_alloc(len);
-    // SAFETY: ptr is newly allocated for len bytes, out is valid to write.
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize);
-        (*out).ptr = ptr;
-        (*out).len = len;
-        (*out).cap = len;
-    }
+    str_pair_from_bytes(buf.format(value).as_bytes())
 }
 
-/// # Safety
-/// `out` must point to a valid `RyoStrFat`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ryo_bool_to_str(value: u8, out: *mut RyoStrFat) {
-    let s: &[u8] = if value != 0 { b"true" } else { b"false" };
-    // SAFETY: write_str_result safely writes through out.
-    unsafe { write_str_result(s, out) };
+pub fn ryo_bool_to_str(value: u8) -> u128 {
+    str_pair_from_bytes(if value != 0 { b"true" } else { b"false" })
 }
 
 #[cfg(test)]
@@ -606,112 +577,88 @@ mod tests {
 
     #[test]
     fn test_from_literal_nonempty() {
-        unsafe {
-            let data = b"hello";
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_from_literal(data.as_ptr(), 5, &mut out);
-            assert_eq!(out.ptr as *const u8, data.as_ptr());
-            assert_eq!(out.len, 5);
-            assert_eq!(out.cap, 0);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"hello");
-        }
+        let data = b"hello";
+        // SAFETY: data points to 5 readable bytes.
+        let pair = unsafe { ryo_str_from_literal(data.as_ptr(), 5) };
+        let (out_ptr, out_len) = unpack_pair(pair);
+        assert_eq!(out_ptr as *const u8, data.as_ptr());
+        assert_eq!(out_len, 5);
+        // cap is 0 by ABI convention (the static sentinel never reaches
+        // the runtime).
+        // SAFETY: the pair points into the readable literal bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"hello");
     }
 
     #[test]
     fn test_from_literal_returns_static_pointer() {
-        unsafe {
-            let data = b"hello";
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_from_literal(data.as_ptr(), 5, &mut out);
-            assert_eq!(out.ptr as *const u8, data.as_ptr());
-            assert_eq!(out.len, 5);
-            assert_eq!(out.cap, 0);
-        }
+        let data = b"hello";
+        // SAFETY: data points to 5 readable bytes.
+        let pair = unsafe { ryo_str_from_literal(data.as_ptr(), 5) };
+        let (out_ptr, out_len) = unpack_pair(pair);
+        assert_eq!(out_ptr as *const u8, data.as_ptr());
+        assert_eq!(out_len, 5);
+        // cap is 0 by ABI convention (the static sentinel never reaches
+        // the runtime).
     }
 
     #[test]
     fn test_free_static_str_is_noop() {
-        unsafe {
-            let data = b"hello";
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_from_literal(data.as_ptr(), 5, &mut out);
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let data = b"hello";
+        // SAFETY: data points to 5 readable bytes.
+        let pair = unsafe { ryo_str_from_literal(data.as_ptr(), 5) };
+        let (out_ptr, _) = unpack_pair(pair);
+        // Static sentinel: cap = 0 by ABI convention, so free is a noop.
+        // SAFETY: out_ptr is a static .rodata pointer freed with cap 0.
+        unsafe { ryo_str_free(out_ptr, 0) };
     }
 
     #[test]
     fn test_from_literal_empty() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_from_literal(b"".as_ptr(), 0, &mut out);
-            assert!(out.ptr.is_null());
-            assert_eq!(out.len, 0);
-            assert_eq!(out.cap, 0);
-        }
+        // SAFETY: len == 0, so the data pointer is never dereferenced.
+        let pair = unsafe { ryo_str_from_literal(b"".as_ptr(), 0) };
+        let (out_ptr, out_len) = unpack_pair(pair);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        // cap is 0 by ABI convention (the static sentinel never reaches
+        // the runtime).
     }
 
     #[test]
     fn test_concat_two_strings() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_concat(b"Hello, ".as_ptr(), 7, b"World!".as_ptr(), 6, &mut out);
-            assert_eq!(out.len, 13);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"Hello, World!");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        // SAFETY: both input buffers are valid for reading.
+        let pair = unsafe { ryo_str_concat(b"Hello, ".as_ptr(), 7, b"World!".as_ptr(), 6) };
+        let (out_ptr, out_len) = unpack_pair(pair);
+        assert_eq!(out_len, 13);
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"Hello, World!");
+        // cap == len for allocating producers (codegen-side derivation).
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_concat_empty_left() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_concat(b"".as_ptr(), 0, b"abc".as_ptr(), 3, &mut out);
-            assert_eq!(out.len, 3);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"abc");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        // SAFETY: both input buffers are valid for reading.
+        let pair = unsafe { ryo_str_concat(b"".as_ptr(), 0, b"abc".as_ptr(), 3) };
+        let (out_ptr, out_len) = unpack_pair(pair);
+        assert_eq!(out_len, 3);
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"abc");
+        // cap == len for allocating producers (codegen-side derivation).
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_concat_both_empty() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_concat(core::ptr::null(), 0, core::ptr::null(), 0, &mut out);
-            assert!(out.ptr.is_null());
-            assert_eq!(out.len, 0);
-            assert_eq!(out.cap, 0);
-        }
+        // SAFETY: len == 0 on both sides, so neither pointer is dereferenced.
+        let pair = unsafe { ryo_str_concat(core::ptr::null(), 0, core::ptr::null(), 0) };
+        let (out_ptr, out_len) = unpack_pair(pair);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
     }
 
     #[test]
@@ -740,188 +687,128 @@ mod tests {
 
     #[test]
     fn test_int_to_str_positive() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_int_to_str(42, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"42");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_int_to_str(42));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"42");
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_int_to_str_negative() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_int_to_str(-123, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"-123");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_int_to_str(-123));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"-123");
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_int_to_str_zero() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_int_to_str(0, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"0");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_int_to_str(0));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"0");
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_int_to_str_min() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_int_to_str(i64::MIN, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"-9223372036854775808");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_int_to_str(i64::MIN));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"-9223372036854775808");
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_float_to_str_nan() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_float_to_str(f64::NAN, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"nan");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(f64::NAN));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"nan");
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_float_to_str_inf() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_float_to_str(f64::INFINITY, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"inf");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(f64::INFINITY));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"inf");
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_float_to_str_neg_inf() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_float_to_str(f64::NEG_INFINITY, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"-inf");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(f64::NEG_INFINITY));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"-inf");
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_float_to_str() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_float_to_str(2.75, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            let s = core::str::from_utf8(slice).unwrap();
-            assert!(s.starts_with("2.75"), "got: {}", s);
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(2.75));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        let s = core::str::from_utf8(slice).unwrap();
+        assert!(s.starts_with("2.75"), "got: {}", s);
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_float_to_str_large_value() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            // Value larger than u64::MAX — old code would saturate
-            ryo_float_to_str(1.8e19, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            let s = core::str::from_utf8(slice).unwrap();
-            let parsed: f64 = s.parse().unwrap();
-            assert_eq!(parsed, 1.8e19);
-            ryo_str_free(out.ptr, out.cap);
-        }
+        // Value larger than u64::MAX — old code would saturate
+        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(1.8e19));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        let s = core::str::from_utf8(slice).unwrap();
+        let parsed: f64 = s.parse().unwrap();
+        assert_eq!(parsed, 1.8e19);
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_float_to_str_precision() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_float_to_str(0.1 + 0.2, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            let s = core::str::from_utf8(slice).unwrap();
-            let parsed: f64 = s.parse().unwrap();
-            assert_eq!(parsed, 0.1 + 0.2);
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(0.1 + 0.2));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        let s = core::str::from_utf8(slice).unwrap();
+        let parsed: f64 = s.parse().unwrap();
+        assert_eq!(parsed, 0.1 + 0.2);
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_bool_to_str_true() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_bool_to_str(1, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"true");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_bool_to_str(1));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"true");
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_bool_to_str_false() {
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_bool_to_str(0, &mut out);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"false");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let (out_ptr, out_len) = unpack_pair(ryo_bool_to_str(0));
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"false");
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
@@ -948,95 +835,73 @@ mod tests {
             right_fat.len = 6;
             right_fat.cap = 6;
 
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_concat(
-                left_fat.ptr,
-                left_fat.len,
-                right_fat.ptr,
-                right_fat.len,
-                &mut out,
-            );
+            let pair = ryo_str_concat(left_fat.ptr, left_fat.len, right_fat.ptr, right_fat.len);
+            let (out_ptr, out_len) = unpack_pair(pair);
 
-            assert_eq!(out.len, 13);
-            assert!(out.cap > 0); // heap-allocated result
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            assert_eq!(out_len, 13);
+            // cap == len for allocating producers (codegen-side derivation).
+            let slice = core::slice::from_raw_parts(out_ptr, out_len as usize);
             assert_eq!(slice, b"Hello, World!");
 
             // Free: static left is safe (cap=0 → noop), heap right and result freed
             ryo_str_free(left_fat.ptr, left_fat.cap);
             ryo_str_free(right_fat.ptr, right_fat.cap);
-            ryo_str_free(out.ptr, out.cap);
+            ryo_str_free(out_ptr, out_len);
         }
     }
 
     #[test]
     fn slice_basic() {
         let s = "héllo wörld".as_bytes();
-        let mut out = RyoSlice {
-            ptr: core::ptr::null(),
-            len: 0,
-        };
         // "héllo" is 6 bytes (é = 2 bytes)
-        // SAFETY: s is readable for its byte length and out is writable;
+        // SAFETY: s is readable for its byte length;
         // the range 0..6 is in-bounds (see above).
-        unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 0, 6, &mut out) };
-        assert_eq!(out.len, 6);
-        // SAFETY: __ryo_slice returned a valid view into s for out.len bytes.
-        let got = unsafe { core::slice::from_raw_parts(out.ptr, out.len as usize) };
+        let pair = unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 0, 6) };
+        let (out_ptr, out_len) = unpack_pair(pair);
+        assert_eq!(out_len, 6);
+        // SAFETY: __ryo_slice returned a valid view into s for out_len bytes.
+        let got = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
         assert_eq!(got, "héllo".as_bytes());
     }
 
     #[test]
     fn slice_empty_at_len_is_ok() {
         let s = "abc".as_bytes();
-        let mut out = RyoSlice {
-            ptr: core::ptr::null(),
-            len: 0,
-        };
-        // SAFETY: "abc" provides three readable bytes and out is writable;
+        // SAFETY: "abc" provides three readable bytes;
         // start == end == len is the empty-at-end case the ABI allows.
-        unsafe { __ryo_slice(s.as_ptr(), 3, 3, 3, &mut out) };
-        assert_eq!(out.len, 0);
+        let pair = unsafe { __ryo_slice(s.as_ptr(), 3, 3, 3) };
+        let (_, out_len) = unpack_pair(pair);
+        assert_eq!(out_len, 0);
     }
 
     #[test]
     fn slice_nonzero_offset() {
         let s = "héllo wörld".as_bytes();
-        let mut out = RyoSlice {
-            ptr: core::ptr::null(),
-            len: 0,
-        };
         // "wörld" starts at byte 7 (h=1, é=2, "llo "=4) and is 6 bytes
         // — exercises the non-zero pointer-offset path.
-        // SAFETY: s is readable for its byte length and out is writable;
+        // SAFETY: s is readable for its byte length;
         // the range 7..13 is in-bounds (see above).
-        unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 7, 13, &mut out) };
-        assert_eq!(out.len, 6);
-        // SAFETY: __ryo_slice returned a valid view into s for out.len bytes.
-        let got = unsafe { core::slice::from_raw_parts(out.ptr, out.len as usize) };
+        let pair = unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 7, 13) };
+        let (out_ptr, out_len) = unpack_pair(pair);
+        assert_eq!(out_len, 6);
+        // SAFETY: __ryo_slice returned a valid view into s for out_len bytes.
+        let got = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
         assert_eq!(got, "wörld".as_bytes());
     }
 
     #[test]
     fn str_from_view_copies_bytes() {
-        unsafe {
-            let src = b"hello";
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_from_view(src.as_ptr(), 5, &mut out);
-            assert_eq!(out.len, 5);
-            assert_eq!(out.cap, 5, "materialized copy owns exactly len bytes");
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
-            assert_eq!(slice, b"hello");
-            ryo_str_free(out.ptr, out.cap);
-        }
+        let src = b"hello";
+        // SAFETY: src points to 5 readable bytes.
+        let pair = unsafe { ryo_str_from_view(src.as_ptr(), 5) };
+        let (out_ptr, out_len) = unpack_pair(pair);
+        assert_eq!(out_len, 5);
+        // cap == len for allocating producers (codegen-side derivation).
+        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
+        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(slice, b"hello");
+        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
@@ -1045,39 +910,30 @@ mod tests {
             // Heap-backed source: the copy must own a fresh buffer.
             let src = ryo_str_alloc(3);
             core::ptr::copy_nonoverlapping(b"abc".as_ptr(), src, 3);
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_from_view(src, 3, &mut out);
+            let pair = ryo_str_from_view(src, 3);
+            let (out_ptr, out_len) = unpack_pair(pair);
             assert!(
-                !core::ptr::eq(out.ptr, src),
+                !core::ptr::eq(out_ptr, src),
                 "copy must not alias the source"
             );
             // Overwrite and free the source; the copy is unaffected.
             core::ptr::write_bytes(src, b'x', 3);
             ryo_str_free(src, 3);
-            let slice = core::slice::from_raw_parts(out.ptr, out.len as usize);
+            let slice = core::slice::from_raw_parts(out_ptr, out_len as usize);
             assert_eq!(slice, b"abc");
-            ryo_str_free(out.ptr, out.cap);
+            // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
+            ryo_str_free(out_ptr, out_len);
         }
     }
 
     #[test]
     fn str_from_view_empty() {
-        // RyoSlice invariant: ptr may be null/dangling when len == 0.
-        unsafe {
-            let mut out = RyoStrFat {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            ryo_str_from_view(core::ptr::null(), 0, &mut out);
-            assert!(out.ptr.is_null());
-            assert_eq!(out.len, 0);
-            assert_eq!(out.cap, 0);
-        }
+        // ptr may be null/dangling when len == 0 (`ryo_str_from_view` invariant).
+        // SAFETY: len == 0, so the pointer is never dereferenced.
+        let pair = unsafe { ryo_str_from_view(core::ptr::null(), 0) };
+        let (out_ptr, out_len) = unpack_pair(pair);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
     }
 
     #[test]

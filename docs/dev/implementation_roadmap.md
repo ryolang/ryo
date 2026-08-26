@@ -1276,7 +1276,7 @@ fn main():
 - Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated, `try`-able) and `text.to_bytes() -> bytes` (owned copy)
 - `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`)
 - Buffer building via the builder idiom: `bytes.builder().u8(v).u16_be(n).bytes(b).build()` (`move self -> Self` chaining, spec §5.2.1)
-- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice mirroring the `str` ABI; memory fixtures for both JIT and AOT (ASan/Valgrind)
+- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice mirroring the **post-fix `str` ABI** — producing functions return `{ptr, len}` by value packed in one `u128` (lo = ptr, hi = len) with `cap` derived at the call site, per the Phase 0 ABI decision recorded on `pack_pair` in `runtime/src/lib.rs` and pinned by `clif_string_ops_use_packed_return_no_stack_slots` (no out-pointer stack slots); memory fixtures for both JIT and AOT (ASan/Valgrind)
 
 **Visible Progress:** Protocol/binary code reads and slices raw buffers zero-copy; text bridging is explicit and error-checked.
 
@@ -2454,6 +2454,7 @@ file ./hello
   - Comprehensive end-to-end testing of all features
   - Fix remaining bugs from GitHub issues
   - Performance optimization passes
+    - String-codegen fast paths tracked in `ISSUES.md`: inline the tiny runtime string ops (`pack_pair`/`ryo_str_from_literal`, `__ryo_slice`, short-literal `ryo_str_eq`) as Cranelift IR instead of extern calls, hoist literal materialization out of loops, skip free emission for statically-known cap=0 values, and elide overflow guards a value-range analysis proves safe. `benchmarks/string_slicing` is the tracking measure (~3.5× Rust at the 2026-08-26 checkpoint — a runtime call per scan-loop iteration, not a semantics gap).
   - Memory leak detection and fixes
 - **Package Manager:**
   - Implement `ryo new <project>`: Create new project
@@ -3305,6 +3306,7 @@ ContractViolation: precondition failed: amount > 0
 
 - Small-string optimization: inline storage for strings ≤23 bytes (zero allocation)
 - Copy-on-write: immutable strings share backing buffers, allocate on mutation
+- In-place concat-reassign: with COW refcounts and growth capacity, `s = s + suffix` on a uniquely-referenced buffer appends in place instead of allocate-copy-free — turns the loop-built-string pattern from O(n²) into amortized O(n). The ownership pass already proves the old binding dead at the concat and a reassignable binding provably has no live views, so uniqueness is compiler-known; the missing piece is the allocation policy (today every buffer is exact-size, `cap == len`). `benchmarks/string_building` is the tracking measure (~12.5× Rust `push_str` at the 2026-08-26 checkpoint).
 - Sink-parameter convention: `move T -> T` pattern for buffer-building APIs
 - Atomic COW refcounts for thread safety
 

@@ -38,11 +38,8 @@ use target_lexicon::Triple;
 mod expr;
 
 /// Fat-str triple layout (24 bytes): ptr at 0, len at 8, cap at 16.
-/// View layout (16 bytes): ptr at 0, len at 8. Derived, not re-hardcoded.
+/// Derived from `RyoStrFat`, not re-hardcoded.
 const STR_SLOT_SIZE: u32 = 24;
-const VIEW_SLOT_SIZE: u32 = 16;
-const OFF_PTR: i32 = 0;
-const OFF_LEN: i32 = 8;
 
 /// How a statement or body ended the current block, if it did.
 /// Replaces the `bool` that conflated Break/Continue with Return:
@@ -306,19 +303,51 @@ impl<M: Module> Codegen<M> {
     }
 }
 
+/// Shared Cranelift flags for the AOT object pipeline.
+///
+/// `enable_llvm_abi_extensions` is required for the packed-u128 string
+/// runtime ABI (Task-8): without it, Cranelift's x64 ABI panics on any
+/// signature containing an i128 ("i128 args/return values not supported
+/// unless LLVM ABI extensions are enabled", `isa/x64/abi.rs`). With it,
+/// an i128 is split into two i64 halves assigned as consecutive
+/// register-sized parts — rax:rdx on both SysV and WindowsFastcall,
+/// matching the Rust ABI the `#[unsafe(no_mangle)] pub fn` runtime
+/// functions use. aarch64 lowers i128 natively and ignores the flag.
+fn aot_shared_flags() -> Result<settings::Flags, String> {
+    let mut shared_builder = settings::builder();
+    shared_builder
+        .enable("is_pic")
+        .map_err(|e| format!("Error enabling is_pic: {}", e))?;
+    shared_builder
+        .set("opt_level", "speed")
+        .map_err(|e| format!("Error setting opt_level: {}", e))?;
+    shared_builder
+        .set("preserve_frame_pointers", "true")
+        .map_err(|e| format!("Error setting preserve_frame_pointers: {}", e))?;
+    shared_builder
+        .enable("enable_llvm_abi_extensions")
+        .map_err(|e| format!("Error enabling enable_llvm_abi_extensions: {}", e))?;
+    // The Cranelift verifier is a compiler-developer aid (it catches
+    // malformed IR our codegen emits); users cannot act on its
+    // failures. Keep it in debug builds and the test suite — where
+    // compiler developers run — and skip its cost in release builds
+    // (the wasmtime pattern). It accounts for ~23–27% of codegen time.
+    shared_builder
+        .set(
+            "enable_verifier",
+            if cfg!(debug_assertions) {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .map_err(|e| format!("Error setting enable_verifier: {}", e))?;
+    Ok(settings::Flags::new(shared_builder))
+}
+
 impl Codegen<ObjectModule> {
     pub fn new_aot(target_triple: Triple) -> Result<Self, String> {
-        let mut shared_builder = settings::builder();
-        shared_builder
-            .enable("is_pic")
-            .map_err(|e| format!("Error enabling is_pic: {}", e))?;
-        shared_builder
-            .set("opt_level", "speed")
-            .map_err(|e| format!("Error setting opt_level: {}", e))?;
-        shared_builder
-            .set("preserve_frame_pointers", "true")
-            .map_err(|e| format!("Error setting preserve_frame_pointers: {}", e))?;
-        let shared_flags = settings::Flags::new(shared_builder);
+        let shared_flags = aot_shared_flags()?;
 
         let isa = isa::lookup(target_triple.clone())
             .map_err(|e| format!("Unsupported target '{}': {}", target_triple, e))?
@@ -342,8 +371,28 @@ impl Codegen<ObjectModule> {
 
 impl Codegen<JITModule> {
     pub fn new_jit() -> Result<Self, String> {
-        let mut jit_builder = JITBuilder::new(cranelift_module::default_libcall_names())
-            .map_err(|e| format!("Failed to create JIT builder: {}", e))?;
+        // enable_llvm_abi_extensions: same rationale as `aot_shared_flags` —
+        // the packed-u128 string runtime ABI requires it on x64.
+        // opt_level=speed: run the egraph optimization pipeline (constant
+        // folding, algebraic simplification, GVN/LICM) like the AOT path.
+        // enable_verifier: debug builds and tests only, same rationale as
+        // `aot_shared_flags`.
+        let mut jit_builder = JITBuilder::with_flags(
+            &[
+                ("enable_llvm_abi_extensions", "true"),
+                ("opt_level", "speed"),
+                (
+                    "enable_verifier",
+                    if cfg!(debug_assertions) {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                ),
+            ],
+            cranelift_module::default_libcall_names(),
+        )
+        .map_err(|e| format!("Failed to create JIT builder: {}", e))?;
 
         // Register runtime symbols so the JIT can resolve them.
         jit_builder.symbols([
@@ -1539,5 +1588,95 @@ mod tests {
             cap: ClifValue::from_u32(3),
         };
         repr.expect_scalar();
+    }
+
+    /// The three targets CI and the toolchain support: Linux x86-64,
+    /// Windows x86-64 (MSVC ABI), macOS aarch64.
+    const SUPPORTED_TRIPLES: [&str; 3] = [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+    ];
+
+    /// Build a minimal function returning an i128 (the packed {ptr, len}
+    /// shape the string runtime ABI uses) and compile it with the given
+    /// flags. Returns the emitted machine code byte count.
+    fn compile_i128_return(flags: settings::Flags, triple: &str) -> Result<usize, String> {
+        let triple: Triple = triple
+            .parse()
+            .map_err(|e| format!("bad triple {triple}: {e}"))?;
+        let isa = isa::lookup(triple)
+            .map_err(|e| format!("isa lookup: {e}"))?
+            .finish(flags)
+            .map_err(|e| format!("isa build: {e}"))?;
+
+        let mut sig = Signature::new(isa.default_call_conv());
+        sig.returns.push(AbiParam::new(types::I128));
+        let mut func = cranelift::codegen::ir::Function::with_name_signature(
+            cranelift::codegen::ir::UserFuncName::user(0, 0),
+            sig,
+        );
+        {
+            let mut fb_ctx = FunctionBuilderContext::new();
+            let frontend_config = isa.frontend_config();
+            let mut fb = FunctionBuilder::new(&mut func, &mut fb_ctx);
+            let block = fb.create_block();
+            fb.switch_to_block(block);
+            // iconst only supports i8-i64; build the i128 via uextend.
+            let lo = fb.ins().iconst(types::I64, 42);
+            let pair = fb.ins().uextend(types::I128, lo);
+            fb.ins().return_(&[pair]);
+            fb.seal_all_blocks();
+            fb.finalize(frontend_config);
+        }
+
+        let mut ctx = cranelift::codegen::Context::for_function(func);
+        ctx.compile(
+            &*isa,
+            &mut cranelift::codegen::control::ControlPlane::default(),
+        )
+        .map_err(|e| format!("compile: {e:?}"))?;
+        let code = ctx
+            .compiled_code()
+            .ok_or_else(|| "no compiled code".to_string())?;
+        Ok(code.code_buffer().len())
+    }
+
+    #[test]
+    fn aot_i128_return_compiles_on_all_supported_targets() {
+        // The packed-u128 string ABI puts an i128 in every producing
+        // function's signature; the x64 ABI must accept it (LLVM ABI
+        // extensions) on Linux AND Windows, and aarch64 must keep working.
+        for triple in SUPPORTED_TRIPLES {
+            let flags = aot_shared_flags().expect("shared flags");
+            let len = compile_i128_return(flags, triple)
+                .unwrap_or_else(|e| panic!("i128 return must compile for {triple}: {e}"));
+            assert!(len > 0, "empty machine code for {triple}");
+        }
+    }
+
+    #[test]
+    fn x64_i128_return_panics_without_llvm_abi_extensions() {
+        // Pins the failure mode this fix addresses: without the flag, the
+        // x64 ABI rejects i128 in signatures. If this test starts failing
+        // (no panic), Cranelift changed its gating — re-audit the flag.
+        let mut b = settings::builder();
+        b.set("opt_level", "speed").expect("opt_level");
+        let flags = settings::Flags::new(b);
+        for triple in ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"] {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = compile_i128_return(flags.clone(), triple);
+            }));
+            let err = result.expect_err("i128 return must panic without llvm abi extensions");
+            let msg = err
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default();
+            assert!(
+                msg.contains("i128 args/return values not supported"),
+                "unexpected panic for {triple}: {msg}"
+            );
+        }
     }
 }

@@ -211,6 +211,18 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** The zero-divisor guard covers `x / 0` and `x % 0`, but Cranelift `sdiv`/`srem` are also UB on signed overflow: `INT_MIN / -1` (and `INT_MIN % -1`) has no representable result. x86-64 `idiv` traps (#DE); aarch64 `sdiv` silently wraps to `INT_MIN`. Sema's literal-zero check doesn't catch it either (`x / -1` is a unary-minus expression, not a literal).
 **Resolution:** Extend `emit_div_zero_guard` to also check `dividend == INT_MIN && divisor == -1`, branching to the same `ryo_panic` path with an "integer division overflow" message. Sema can reject the literal form `x / -1` only when the dividend is a known `INT_MIN` constant — likely not worth it; the runtime guard alone suffices.
 
+### I-158 — `string_slicing` JIT regressed +53% with the packed-u128 runtime ABI (AOT flat)
+
+**Files:** `ryo-backend/src/codegen/` (JIT module path), `benchmarks/string_slicing/`
+**Summary:** After the Phase 0 ABI change (commit `7d0a047`, string-producing runtime functions return `{ptr, len}` packed in `u128` instead of writing through an out-pointer stack slot), the `string_slicing` benchmark's JIT leg regressed from ~6.6 ms to ~10.1 ms (+53%, reproduced across runs) while AOT stayed flat (~4.9 → ~5.4 ms). Recorded in `benchmarks/string_slicing/README.md`. Cause not investigated — candidates: JIT code layout/instruction-count change around the view-slice call path, or extra `ireduce`/`ushr` unpack work that the JIT's lower optimization level doesn't fold.
+**Resolution:** Profile the JIT leg (e.g. Samply per `benchmarks/README.md`), compare CLIF for `count_fox` pre/post `7d0a047`, and either reclaim the delta or document it as accepted. Re-run the suite checkpoint per the manual checkpoint convention when resolved.
+
+### I-159 — W0001 dead-store false positive: method-call receiver not counted as a use
+
+**Files:** `ryo-frontend/src/ownership/walk.rs` (:296-305), `ryo-frontend/src/ownership/mod.rs` (:577-581)
+**Summary:** `t = int_to_str(i) + "!"; total += t.len()` triggers W0001 ("`t` declared but never used") — the ownership pass's dead-store tracking does not count a method-call receiver read (`t.len()`) as a use. Reproduces on `benchmarks/many_small_strings/many_small_strings.ryo` (the only suite member that hits it; sibling benchmarks are clean). User-visible false-positive warning on a shipped benchmark.
+**Resolution:** Count method-call receiver reads as uses in the dead-store/last-use walk (check how `StrLen`/`MethodCall`-shaped TIR reads propagate), then pin with an ownership test for `x = <expr>; … x.len()` staying warning-free.
+
 ---
 
 ## 🟢 Cleanup
@@ -382,6 +394,30 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** the `cargo clippy --all-targets -- -W clippy::expect_used` hit list (`ryo-frontend/src/ownership/`, `ryo-core/src/ast.rs`, `ryo-core/src/types.rs`, `ryo-core/src/uir.rs`, `ryo-core/src/tir.rs` are the dense ones)
 **Summary:** `expect_used` is the one panic-family lint still at `allow` in `[workspace.lints.clippy]` (`panic`/`todo`/`unimplemented`/`unwrap_used` are denied). 70 sites fire at last count, 56 of them outside `ryo/tests/`; many are deliberate arena-boundary guards (`from_index`, side-arena overflow checks) — legitimate invariant enforcement, not laziness.
 **Resolution:** Classify each site as keep-with-message (genuine internal invariant) vs convert-to-diagnostic (reachable from user input), then consider promoting `expect_used` to `deny`.
+
+### I-157 — Linux AOT links host glibc by accident; evaluate static musl
+
+**Files:** `ryo-backend/src/linker.rs` (:13-15, no `-target` passed to `zig cc`), `build-support/src/lib.rs` (:41, runtime archive built for the compiler's `TARGET`)
+**Summary:** On Linux, `ryo build` links natively via `zig cc` with no `-target`, so binaries are dynamically coupled to whatever glibc the build host has — a silent portability gap, not a decision. The runtime staticlib is already `no_std` (I-043), so produced binaries need almost nothing from libc, which makes fully static musl (`-target <arch>-linux-musl`) nearly free and matches where Go (no libc), Rust (musl tier-1 opt-in), and Swift (Static Linux SDK) all converged. macOS (libSystem, dynamic mandatory) and Windows (MSVC ABI + UCRT via zig) need no equivalent change.
+**Resolution:** Before applying, re-verify the drawbacks: (1) musl mallocng is slow under multithreaded allocation-heavy load — matters once Go-style concurrency and `shared[T]` refcount churn land; may force shipping our own allocator in `ryo-runtime` first; (2) no NSS, limited `getaddrinfo`, no dlopen of glibc-built libs. If accepted: pass `-target <arch>-linux-musl` in `linker.rs` and switch the `build-support` archive build to the matching `*-unknown-linux-musl` triple in the same change (the two must move together), then check what the ASan/Valgrind smoke lanes still exercise under a static link.
+
+### I-161 — Tiny runtime string ops cross the extern-call boundary per use
+
+**Files:** `ryo-backend/src/codegen/expr.rs` (`ryo_str_eq` call :282, `__ryo_slice` call :1022, `ryo_str_from_literal` call :1132), `runtime/src/lib.rs` (bodies: `ryo_str_from_literal` :251, `__ryo_slice` :319, `ryo_str_eq` :448)
+**Summary:** Codegen imports these as opaque extern calls, so every use pays a full call that Cranelift can neither inline nor hoist. The bodies are a handful of instructions: `ryo_str_from_literal` is just `pack_pair` (shift + or), `__ryo_slice` is two bounds checks, two UTF-8 boundary tests, and a `ptr.add`, and `ryo_str_eq` against a short literal is a few byte compares. In `benchmarks/string_slicing` the scan loop makes three such calls per iteration (slice + literal materialization + eq) where Rust inlines all of it to pointer arithmetic and a 3-byte memcmp — the bulk of the measured 3.5× AOT gap (CLIF verified 2026-08-26: the `str`/`strview` param variants are instruction-identical in the loop except for these calls, and a same-compiler A/B ties at 5.9 ms both ways).
+**Resolution:** Emit the tiny bodies as inline Cranelift IR at the call sites instead of extern calls (slice keeps its panic paths; eq can specialize when one side is a known short literal). Inlining `pack_pair` also turns literal materialization into hoistable loop-invariant code (I-162). Larger ops (`ryo_str_concat`, `__ryo_str_push`) stay extern.
+
+### I-162 — Literal `str` values are re-materialized at every use, including inside loops
+
+**Files:** `ryo-backend/src/codegen/expr.rs` (`ryo_str_from_literal` emission :1117-1132)
+**Summary:** Each executed occurrence of a string literal emits a fresh `ryo_str_from_literal` call, so `if text[i:i+3] == "fox":` inside a loop re-packs the same `(ptr, len)` every iteration. The value is loop-invariant and effectively side-effect-free, but as an opaque extern call no Cranelift pass can move it. Confirmed in the `string_slicing` `count_fox` CLIF: `symbol_value gv0` + `iconst 3` → call, per iteration.
+**Resolution:** Once `pack_pair` is inlined (I-161) LICM can hoist the materialization; alternatively emit each distinct literal once per function into a hoisted value. Pin with a CLIF test asserting one materialization per literal per function (same style as `clif_string_ops_use_packed_return_no_stack_slots`).
+
+### I-163 — Codegen emits `ryo_str_free` calls for known-static (cap=0) values
+
+**Files:** `ryo-backend/src/codegen/expr.rs` (free emission :562-, sweep :638-, import :784-797)
+**Summary:** `ryo_str_free(ptr, 0)` returns immediately for literal-backed strings (the cap=0 static sentinel, `runtime/src/lib.rs:199-205`), yet codegen still emits the call — with a constant-0 cap argument — for every scheduled free of a literal-derived temp. In the `string_slicing` scan loop that is one dead extern call per iteration. The ownership sidecar legitimately schedules these frees; the waste is purely at emission.
+**Resolution:** When the freed value's cap is statically known to be 0 at the emission site (literal-derived temps, empty-string values), skip the call; leave the ownership schedule untouched so non-static paths are unaffected. Pin with a CLIF test asserting no `ryo_str_free` in an all-literal-temp function.
 
 ---
 

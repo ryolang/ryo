@@ -539,6 +539,20 @@ fn analyze_function(
             // the projection's last use (e.g. `v = (a + b)[0:1]` keeps
             // the concat buffer alive through reads of `v`).
             let anchor = defer_anchor(consumer, &temp, &projections_of, &last_use, &order);
+            // A temp PRODUCED in an if's main condition exists on every
+            // path through the branch (the condition is always
+            // evaluated), so anchor its Free after the if itself: codegen
+            // then emits it in the merge block on all paths. Anchoring
+            // after the consumer lets the end-of-statement sweep fire
+            // inside the taken arm only, leaking the temp on every
+            // not-taken path. Skip when no path reaches the merge block
+            // (every arm returns or jumps out) — the anchor would never
+            // fire there; the return-epilogue / loop-exit passes own
+            // those paths.
+            let anchor = match enclosing_if_main_cond(tir, t) {
+                Some(if_stmt) if if_may_fall_through(tir, if_stmt) => if_stmt,
+                _ => anchor,
+            };
             sidecar.free_schedule.push(FreePoint {
                 after: anchor,
                 target: t,

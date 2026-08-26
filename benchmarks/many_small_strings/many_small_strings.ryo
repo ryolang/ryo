@@ -1,0 +1,7 @@
+fn main():
+	mut total = 0
+	for i in range(0, 500000):
+		t = int_to_str(i) + "!"
+		total += t.len()
+	assert(total == 3388890, "many_small_strings checksum")
+	print("assert passed, many_small_strings is correct\n")

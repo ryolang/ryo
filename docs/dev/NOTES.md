@@ -1,14 +1,13 @@
 # TODO
 
 - [cargo crap rules](https://minikin.me/blog/cargo-crap) `cargo crap --lcov lcov.info --top 5`
-- [ ] https://codspeed.io/changelog/2026-08-03-codspeed-v5-only-your-code-at-its-real-cost
 - [ ] <https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md>
 - [ ] FFI tests: sqlite(included), raylib(external)
 - [ ] [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)
 - [ ] [Go by Example](https://www.mintlify.com/mmcgrana/gobyexample/introduction)
 - [ ] Iterators
 - [ ] Define Testing
-- [ ] <https://ziglang.org/documentation/0.1.1/#case-study-printf>
+- [ ] Printf Case study <https://ziglang.org/documentation/0.1.1/#case-study-printf>
 - [ ] Debug Breakpoints <https://ziglang.org/documentation/0.1.1/#builtin-breakpoint>
 - [ ] Zen of ryo. <https://dave.cheney.net/2020/02/23/the-zen-of-go>
 - [ ] Add <https://scorecard.dev/>

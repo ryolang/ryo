@@ -3,3 +3,15 @@ benchmarks:
     exec: ./benchmarks/fibonacci/fib
   - name: eager-destruction-aot
     exec: ./benchmarks/eager_destruction/eager_destruction
+  - name: string-building-aot
+    exec: ./benchmarks/string_building/string_building
+  - name: doubling-concat-aot
+    exec: ./benchmarks/doubling_concat/doubling_concat
+  - name: many-small-strings-aot
+    exec: ./benchmarks/many_small_strings/many_small_strings
+  - name: string-slicing-aot
+    exec: ./benchmarks/string_slicing/string_slicing
+  - name: mandelbrot-aot
+    exec: ./benchmarks/mandelbrot/mandelbrot
+  - name: collatz-aot
+    exec: ./benchmarks/collatz/collatz

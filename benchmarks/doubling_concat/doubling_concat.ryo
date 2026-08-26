@@ -1,0 +1,6 @@
+fn main():
+	mut s: str = "0123456789abcdef"
+	for i in range(0, 20):
+		s = s + s
+	assert(s.len() == 16777216, "doubling_concat length check")
+	print("assert passed, doubling_concat is correct\n")

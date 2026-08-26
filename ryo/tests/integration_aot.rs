@@ -283,3 +283,58 @@ fn test_examples_parse() {
     }
     assert!(count > 10, "expected examples to exist, found {count}");
 }
+
+#[test]
+fn heap_str_last_use_in_loop_slice_comparison_aot() {
+    // AOT leg of shape (a): the slice comparison inside the loop is
+    // the final use of `s` — no read follows the loop, so the owner's
+    // buffer must stay alive until loop exit (the Free anchors at the
+    // loop, not the in-loop read).
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut s: str = \"\"\n\tfor i in range(0, 8):\n\t\tstr_push(&s, \"fox \")\n\tmut i = 0\n\tmut count = 0\n\twhile i + 3 <= s.len():\n\t\tif s[i:i+3] == \"fox\":\n\t\t\tcount += 1\n\t\ti += 1\n\tassert(count == 8, \"count must be 8\")\n\tprint(\"ok\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "loop_slice_cmp_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = exe_path(temp_dir.path(), "loop_slice_cmp_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+    assert!(
+        run_output.status.success(),
+        "compiled binary should exit 0. stderr: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+}
+
+#[test]
+fn heap_str_last_use_in_inline_assert_aot() {
+    // AOT leg of shape (b): the scan loop is followed by an inline
+    // `assert(s.len() == ...)` as the last use of `s` — the buffer must
+    // stay alive through the desugared if's condition read.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut s: str = \"\"\n\tfor i in range(0, 8):\n\t\tstr_push(&s, \"fox \")\n\tmut i = 0\n\tmut count = 0\n\twhile i + 3 <= s.len():\n\t\tif s[i:i+3] == \"fox\":\n\t\t\tcount += 1\n\t\ti += 1\n\tassert(count == 8, \"count must be 8\")\n\tassert(s.len() == 32, \"len must be 32\")\n\tprint(\"ok\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "inline_assert_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = exe_path(temp_dir.path(), "inline_assert_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+    assert!(
+        run_output.status.success(),
+        "compiled binary should exit 0. stderr: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+}
