@@ -5,7 +5,7 @@ func countFox(_ text: [UInt8]) -> Int {
 	var i = 0
 	let n = text.count
 	while i + 3 <= n {
-		if text[i] == 102 && text[i + 1] == 111 && text[i + 2] == 120 {
+		if text[i..<(i + 3)].elementsEqual([102, 111, 120]) {
 			count += 1
 		}
 		i += 1

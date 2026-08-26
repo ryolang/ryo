@@ -1121,10 +1121,10 @@ fn heap_str_last_use_in_inline_assert() {
         "inline assert on heap str should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stdout.contains("never used"),
+        !stderr.contains("W0001"),
         "assert condition read must count as a use (no W0001), got: {}",
-        stdout
+        stderr
     );
 }
