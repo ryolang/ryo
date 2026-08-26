@@ -36,6 +36,10 @@ use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
 mod expr;
+// Consumed by the guard-elision codegen tasks (Phase 1 follow-ups);
+// nothing references `ranges` yet, so silence dead-code until wired up.
+#[allow(dead_code)]
+mod ranges;
 
 /// Fat-str triple layout (24 bytes): ptr at 0, len at 8, cap at 16.
 /// Derived from `RyoStrFat`, not re-hardcoded.
