@@ -211,12 +211,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** The zero-divisor guard covers `x / 0` and `x % 0`, but Cranelift `sdiv`/`srem` are also UB on signed overflow: `INT_MIN / -1` (and `INT_MIN % -1`) has no representable result. x86-64 `idiv` traps (#DE); aarch64 `sdiv` silently wraps to `INT_MIN`. Sema's literal-zero check doesn't catch it either (`x / -1` is a unary-minus expression, not a literal).
 **Resolution:** Extend `emit_div_zero_guard` to also check `dividend == INT_MIN && divisor == -1`, branching to the same `ryo_panic` path with an "integer division overflow" message. Sema can reject the literal form `x / -1` only when the dividend is a known `INT_MIN` constant — likely not worth it; the runtime guard alone suffices.
 
-### I-160 — Heap temp consumed in a branch condition leaks on not-taken paths
-
-**Files:** `ryo-frontend/src/ownership/mod.rs` (anonymous-temporary Free pass), `ryo-backend/src/codegen/expr.rs` (`sweep_due_frees`)
-**Summary:** An anonymous heap temp whose single consumer sits inside an `if`/`elif` condition — e.g. `if s[i:i+3] == p + "x":` — is freed only on the path that reaches a statement end inside the taken arm: the consumer-anchored Free fires via the end-of-statement sweep in the first arm whose statements complete with the anchor cached, and `freed_at` then suppresses the merge-block sweep, so every not-taken path leaks the temp (per iteration when the if sits in a loop body). Verified by CLIF: the `ryo_str_concat` call is on the shared condition block, the `ryo_str_free` only in the taken arm's exit block. Literal temps are unaffected (static, cap=0 no-op free).
-**Resolution:** Anchor such a temp's Free after the INNERMOST enclosing branch instead of after the consumer — the condition is evaluated on every path through the branch, so the temp exists on every exit path. (The owner's conditional-last-use re-anchor uses the OUTERMOST branch and cannot be reused as-is: a per-iteration temp anchored after an enclosing loop would leak all but the last iteration.) Pin with an ASan leak test for `if <heap-temp comparison>:` in a loop with non-matching iterations.
-
 ### I-158 — `string_slicing` JIT regressed +53% with the packed-u128 runtime ABI (AOT flat)
 
 **Files:** `ryo-backend/src/codegen/` (JIT module path), `benchmarks/string_slicing/`

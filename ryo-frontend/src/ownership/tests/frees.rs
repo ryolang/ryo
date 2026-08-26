@@ -1572,3 +1572,48 @@ fn last_use_in_inline_assert_counts_as_use() {
         "Free must anchor after the desugared assert if"
     );
 }
+
+#[test]
+fn cond_temp_free_anchors_after_if() {
+    // A heap temp produced in an if's main condition exists on every
+    // path through the branch — its Free must anchor after the if (so
+    // codegen emits it in the merge block), not after the consumer
+    // inside the condition, where the end-of-statement sweep fires it
+    // inside the taken arm only and leaks on every not-taken path.
+    let src = "fn main():\n\tmut p: str = \"f\"\n\tp = p + \"o\"\n\tif p + \"x\" == \"fox\":\n\t\tprint(\"y\\n\")\n\telse:\n\t\tprint(\"n\\n\")\n";
+    let (diags, sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error)
+    );
+    let tir = &tirs[0];
+    let if_stmt = tir
+        .body_stmts()
+        .iter()
+        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::IfStmt)
+        .copied()
+        .expect("if stmt");
+    // The anonymous `p + "x"` concat is the comparison's left operand.
+    let cond = tir.if_stmt_view(if_stmt).cond;
+    let concat = match tir.inst(cond).data {
+        ryo_core::tir::TirData::BinOp { lhs, .. } => lhs,
+        other => panic!("expected str_eq BinOp cond, got {:?}", other),
+    };
+    assert_eq!(tir.inst(concat).tag, ryo_core::tir::TirTag::StrConcat);
+    let frees: Vec<_> = sidecar.functions[0]
+        .free_schedule
+        .iter()
+        .filter(|fp| fp.target == concat)
+        .collect();
+    assert_eq!(
+        frees.len(),
+        1,
+        "exactly one Free for the cond temp; got: {:?}",
+        sidecar.functions[0].free_schedule
+    );
+    assert_eq!(
+        frees[0].after, if_stmt,
+        "cond temp Free must anchor after the if statement"
+    );
+}

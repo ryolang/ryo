@@ -91,6 +91,29 @@ fn main():
 ",
     ),
     (
+        // A heap temp (`p + "x"`) produced in an if condition inside a
+        // loop: non-matching iterations take the not-taken path, which
+        // must still free the temp.
+        "cond_heap_temp_in_loop",
+        "\
+fn main():
+\tmut s: str = \"\"
+\tfor i in range(0, 4):
+\t\tstr_push(&s, \"fox \")
+\t\tstr_push(&s, \"bar \")
+\tmut p: str = \"f\"
+\tp = p + \"o\"
+\tmut i = 0
+\tmut count = 0
+\twhile i + 3 <= s.len():
+\t\tif s[i:i+3] == p + \"x\":
+\t\t\tcount += 1
+\t\ti += 1
+\tassert(count == 4, \"count\")
+\tprint(\"ok\\n\")
+",
+    ),
+    (
         "concat_chain",
         "\
 fn main():
