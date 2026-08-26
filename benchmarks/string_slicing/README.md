@@ -8,14 +8,14 @@
 
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-26 (post-ABI). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux). Pre-ABI rows are the same-day checkpoint recorded before commit `7d0a047`.
 
-| Candidate | Mean time | Max RSS |
-|---|---|---|
-| **Rust** | 1.7 ms ± 0.1 ms | 2.95 MB |
-| **Swift** | 2.6 ms ± 0.2 ms | 7.11 MB |
-| **Ryo (AOT)** | 5.3 ms ± 0.2 ms | 2.75 MB |
-| **Ryo (JIT)** | 10.1 ms ± 0.7 ms | 6.47 MB |
-| Ryo (AOT), pre-ABI | 4.9 ms ± 0.4 ms | 2.75 MB |
-| Ryo (JIT), pre-ABI | 6.6 ms ± 0.2 ms | 6.34 MB |
+| Candidate | Mean time | vs fastest | Max RSS |
+|---|---|---|---|
+| **Rust** | 1.7 ms ± 0.1 ms | 1.00x | 2.95 MB |
+| **Swift** | 2.6 ms ± 0.2 ms | 1.53x slower | 7.11 MB |
+| **Ryo (AOT)** | 5.3 ms ± 0.2 ms | 3.12x slower | 2.75 MB |
+| **Ryo (JIT)** | 10.1 ms ± 0.7 ms | 5.94x slower | 6.47 MB |
+| Ryo (AOT), pre-ABI | 4.9 ms ± 0.4 ms | 2.88x slower | 2.75 MB |
+| Ryo (JIT), pre-ABI | 6.6 ms ± 0.2 ms | 3.88x slower | 6.34 MB |
 
 Note: the JIT time moved from ~6.6 ms to ~10 ms with the packed-`u128` ABI while AOT stayed flat; the delta reproduced across runs on the same day. Cause not yet investigated.
 

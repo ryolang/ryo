@@ -8,12 +8,12 @@
 
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-26. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
-| Candidate | Mean time | Max RSS |
-|---|---|---|
-| **Rust** | 1.5 ms ± 0.1 ms | 1.61 MB |
-| **Swift** | 2.4 ms ± 0.1 ms | 1.81 MB |
-| **Ryo (AOT)** | 18.1 ms ± 0.8 ms | 2.27 MB |
-| **Ryo (JIT)** | 19.7 ms ± 0.8 ms | 5.52 MB |
+| Candidate | Mean time | vs fastest | Max RSS |
+|---|---|---|---|
+| **Rust** | 1.5 ms ± 0.1 ms | 1.00x | 1.61 MB |
+| **Swift** | 2.4 ms ± 0.1 ms | 1.60x slower | 1.81 MB |
+| **Ryo (AOT)** | 18.1 ms ± 0.8 ms | 12.07x slower | 2.27 MB |
+| **Ryo (JIT)** | 19.7 ms ± 0.8 ms | 13.13x slower | 5.52 MB |
 
 ## How to Run
 
