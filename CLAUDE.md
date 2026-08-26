@@ -46,6 +46,7 @@ All Ryo code examples **must** use Python-style colons and indentation, **NOT** 
 
 **Code examples:** Use fenced code blocks with language tag (````ryo`).
 **Cross-references:** Use relative paths (`[spec](docs/specification.md)`).
+**Committed artifacts are self-contained:** anything under version control (`ISSUES.md`, `benchmarks/README.md` files, code comments, commit messages) must be understandable on its own. Never reference vocabulary or context that lives only in uncommitted scratch — e.g. `docs/superpowers/` specs and plans are gitignored, so committed files must not cite their "Phase 0/1/2" naming or section numbers. Cite the concept inline instead ("the value-range guard-elision work"), optionally with a commit hash or issue ID as a historical pointer.
 
 ---
 
@@ -93,7 +94,7 @@ IMPORTANT: Never author Claude on commits nor PRs.
 
 ## Issue Tracking
 
-Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, pick the appropriate severity (Blocking / Correctness / Cleanup), and include Files, Summary, and Resolution fields.
+Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, put it on the appropriate severity block(Blocking / Correctness / Cleanup), and include Files, Summary, and Resolution fields.
 
 **Never reuse an `I-XXX` number, even after its entry is deleted.** IDs are cited in commit messages and live on in git history; a reused number silently retargets those references to a different issue. Deleted numbers stay retired — the next entry always takes the highest number ever used + 1.
 

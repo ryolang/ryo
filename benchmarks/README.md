@@ -2,7 +2,11 @@
 
 This directory contains various benchmarks used to measure, validate, and compare the performance and memory footprint of the **Ryo** programming language compiler and runtime against other languages.
 
+**Ryo's performance goal:** beat **Python** on performance and **Rust** on simplicity/ergonomics. These suites therefore serve as *regression guardrails*, not parity targets: Ryo already runs fib(40) roughly **19× faster than Python** with the lightest memory footprint of all languages tested. Chasing the remaining gap to Rust/Swift instruction-by-instruction was tried (Cranelift upgrade, string runtime ABI redesign, value-range guard elision, 2026-08) and produced ~zero walltime change — out-of-order hardware absorbs those wins, and the residual gap is structural (middle-end transforms), so micro-optimization is parked until the language is feature-complete. The durable findings live in [`docs/dev/cranelift_lessons.md`](../docs/dev/cranelift_lessons.md).
+
 We target both execution speed and memory efficiency (specifically focusing on Ryo's Ahead-Of-Time AOT compiler via Cranelift and JIT execution).
+
+**Checkpoint convention:** run the full suite before each release and after merging any change that touches generated-code shape (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption); record results in each benchmark's README so the trend is visible in git history.
 
 ---
 
