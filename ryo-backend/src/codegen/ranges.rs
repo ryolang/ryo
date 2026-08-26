@@ -43,9 +43,10 @@ impl IntRange {
     }
 
     /// Tighten with another fact that holds at the same program point.
-    /// May yield an empty range (`lo > hi`) on contradictory (dead)
-    /// paths — harmless: `checked_*` on it still returns `Some` only
-    /// for results that fit, and dead code may be compiled arbitrarily.
+    /// May yield an empty range (`lo > hi`) only from contradictory
+    /// conditions on a single path (e.g. `if x > 0:` nested in
+    /// `if x < 0:`) — harmless: `checked_*` on it still returns `Some`
+    /// only for results that fit, and such code never executes.
     pub fn intersect(self, other: Self) -> Self {
         Self {
             lo: self.lo.max(other.lo),

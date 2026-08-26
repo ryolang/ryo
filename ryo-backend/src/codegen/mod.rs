@@ -1376,7 +1376,11 @@ impl<M: Module> Codegen<M> {
             let elif_cond_block = next_blocks[i];
             builder.seal_block(elif_cond_block);
             builder.switch_to_block(elif_cond_block);
-            // Reaching this block means every earlier condition was false.
+            // Re-baseline: true-polarity seeds live only inside their
+            // own arm (emit_scoped_body's restore would resurrect them).
+            // This block is dominated by the FALSE path of every
+            // earlier condition — and by nothing else.
+            ctx.range_facts = outer_facts.clone();
             for &prev in &negated_conds {
                 Self::seed_cond_facts(ctx, prev, false);
             }
@@ -1420,6 +1424,13 @@ impl<M: Module> Codegen<M> {
         if let Some(else_stmts) = &view.else_stmts {
             builder.seal_block(else_or_merge);
             builder.switch_to_block(else_or_merge);
+            // Same re-baseline as the elif cond blocks, seeded with
+            // every condition's FALSE polarity — the else arm is
+            // dominated by the all-conditions-false path.
+            ctx.range_facts = outer_facts.clone();
+            for &cond in &negated_conds {
+                Self::seed_cond_facts(ctx, cond, false);
+            }
             let else_branch_id = branch_ids.else_branch.unwrap_or_default();
             ctx.branch_stack.push(else_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, else_branch_id)?;
@@ -1589,6 +1600,10 @@ impl<M: Module> Codegen<M> {
         } else {
             ctx.locals.remove(&view.var_name);
         }
+        // The loop variable's facts die with its scope whether or not
+        // the shadowed outer binding had one — remove unconditionally,
+        // then reinsert the outer binding's fact if there was one.
+        ctx.range_facts.remove(&view.var_name);
         if let Some(fact) = shadowed_fact {
             ctx.range_facts.insert(view.var_name, fact);
         }
