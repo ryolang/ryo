@@ -7,8 +7,20 @@ if ! command -v hyperfine &> /dev/null; then
     exit 1
 fi
 
+if ! command -v rustc &> /dev/null; then
+    echo "Error: 'rustc' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v swiftc &> /dev/null; then
+    echo "Error: 'swiftc' is not installed or not in PATH."
+    exit 1
+fi
+
 echo "Building benchmarks..."
 (cd ../.. && cargo build --release > /dev/null)
+rustc -O many_small_strings.rs -o many_small_strings_rs
+swiftc -O many_small_strings.swift -o many_small_strings_swift
 ryo_bin="../../target/release/ryo"
 $ryo_bin build many_small_strings.ryo > /dev/null
 
@@ -16,6 +28,8 @@ echo ""
 echo "-------------------"
 echo "Compiler Version"
 echo "-------------------"
+echo "Rust:     $(rustc --version | cut -d' ' -f2)"
+echo "Swift:    $(swiftc --version | head -1 | awk '{print $4}')"
 echo "Ryo:      $($ryo_bin --version 2>&1 || echo 'dev')"
 
 echo ""
@@ -52,6 +66,8 @@ measure_mem() {
 }
 
 # Run once each to collect memory usage
+measure_mem "Rust" ./many_small_strings_rs
+measure_mem "Swift" ./many_small_strings_swift
 measure_mem "Ryo (AOT)" ./many_small_strings
 measure_mem "Ryo (JIT)" $ryo_bin run many_small_strings.ryo
 
@@ -61,5 +77,7 @@ echo "Running Benchmarks (500,000 build-and-drop strings) using hyperfine"
 echo "-------------------"
 
 hyperfine --warmup 3 --shell=none \
+  './many_small_strings_rs' \
+  './many_small_strings_swift' \
   './many_small_strings' \
   "$ryo_bin run many_small_strings.ryo"
