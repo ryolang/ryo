@@ -7,8 +7,20 @@ if ! command -v hyperfine &> /dev/null; then
     exit 1
 fi
 
+if ! command -v rustc &> /dev/null; then
+    echo "Error: 'rustc' is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v swiftc &> /dev/null; then
+    echo "Error: 'swiftc' is not installed or not in PATH."
+    exit 1
+fi
+
 echo "Building benchmarks..."
 (cd ../.. && cargo build --release > /dev/null)
+rustc -O string_building.rs -o string_building_rs
+swiftc -O string_building.swift -o string_building_swift
 ryo_bin="../../target/release/ryo"
 $ryo_bin build string_building.ryo > /dev/null
 
@@ -16,6 +28,8 @@ echo ""
 echo "-------------------"
 echo "Compiler Version"
 echo "-------------------"
+echo "Rust:     $(rustc --version | cut -d' ' -f2)"
+echo "Swift:    $(swiftc --version | head -1 | awk '{print $4}')"
 echo "Ryo:      $($ryo_bin --version 2>&1 || echo 'dev')"
 
 echo ""
@@ -52,6 +66,8 @@ measure_mem() {
 }
 
 # Run once each to collect memory usage
+measure_mem "Rust" ./string_building_rs
+measure_mem "Swift" ./string_building_swift
 measure_mem "Ryo (AOT)" ./string_building
 measure_mem "Ryo (JIT)" $ryo_bin run string_building.ryo
 
@@ -61,5 +77,7 @@ echo "Running Benchmarks (50,000 concat iterations) using hyperfine"
 echo "-------------------"
 
 hyperfine --warmup 3 --shell=none \
+  './string_building_rs' \
+  './string_building_swift' \
   './string_building' \
   "$ryo_bin run string_building.ryo"
