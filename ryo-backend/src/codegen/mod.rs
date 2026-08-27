@@ -36,6 +36,7 @@ use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
 mod expr;
+mod ranges;
 
 /// Fat-str triple layout (24 bytes): ptr at 0, len at 8, cap at 16.
 /// Derived from `RyoStrFat`, not re-hardcoded.
@@ -186,6 +187,19 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     pool: &'a InternPool,
     tir: &'a Tir,
     locals: HashMap<StringId, Variable>,
+    /// Value-range facts for spec §18 guard elision: binding name →
+    /// inclusive `[lo, hi]` bounds proven by dominating comparisons
+    /// (see `codegen/ranges.rs` for the seeding rules). Scoped like
+    /// `locals`: `emit_scoped_body` saves/restores it, and any binding
+    /// assigned inside a restored scope is killed at the join via
+    /// `assigned_log`.
+    range_facts: HashMap<StringId, ranges::IntRange>,
+    /// Flat log of every binding assigned (or passed as `inout`) since
+    /// function entry. Branch/loop emitters snapshot the length before
+    /// a scoped body and kill those names from `range_facts` after the
+    /// restore, so a join whose predecessors disagree invalidates the
+    /// fact instead of resurrecting the pre-scope one.
+    assigned_log: Vec<StringId>,
     func_ids: &'a HashMap<StringId, FuncId>,
     /// `TirRef → ValueRepr` memo. Materializing the same instruction
     /// twice in one function would either duplicate side effects
@@ -478,6 +492,95 @@ impl<M: Module> Codegen<M> {
         }
     }
 
+    /// Record an assignment: the binding's range fact dies here, and
+    /// enclosing scopes learn (via `assigned_log`) to kill it at their
+    /// join. Cheap enough to call on every assignment path.
+    fn kill_fact(ctx: &mut FunctionContext<'_, M>, name: StringId) {
+        ctx.range_facts.remove(&name);
+        ctx.assigned_log.push(name);
+    }
+
+    /// Kill facts for every binding assigned since `mark` (a previous
+    /// `assigned_log.len()`). Called after a scoped body's map restore,
+    /// where in-scope kills were rolled back.
+    fn kill_assigned_since(ctx: &mut FunctionContext<'_, M>, mark: usize) {
+        for i in mark..ctx.assigned_log.len() {
+            let name = ctx.assigned_log[i];
+            ctx.range_facts.remove(&name);
+        }
+    }
+
+    /// Seed the facts a condition implies under `polarity`,
+    /// intersecting with any fact that already holds here.
+    fn seed_cond_facts(ctx: &mut FunctionContext<'_, M>, cond: TirRef, polarity: bool) {
+        for (name, range) in ranges::cond_facts(ctx.tir, cond, polarity) {
+            ctx.range_facts
+                .entry(name)
+                .and_modify(|old| *old = old.intersect(range))
+                .or_insert(range);
+        }
+    }
+
+    /// Kill facts for every binding a loop may write (see
+    /// `collect_loop_writes`): anything in the body, plus anything in
+    /// `cond` when one is passed. Back-edge rule: a fact consulted
+    /// inside a loop must hold on EVERY iteration, not just the first —
+    /// the header is a join of the entry edge and the back-edge, which
+    /// disagree once the body has run. The while-condition also
+    /// re-evaluates per iteration, so this must run before the
+    /// condition is emitted, not just before the body — and the
+    /// condition itself is scanned, since an inout call inside it
+    /// writes through its pointer on every iteration too.
+    fn kill_loop_writes(ctx: &mut FunctionContext<'_, M>, cond: Option<TirRef>, body: &[TirRef]) {
+        let mut writes = Vec::new();
+        if let Some(cond) = cond {
+            Self::collect_writes_in(ctx.tir, cond, &mut writes);
+        }
+        Self::collect_loop_writes(ctx.tir, body, &mut writes);
+        for name in writes {
+            ctx.range_facts.remove(&name);
+        }
+    }
+
+    /// Collect every binding a statement slice may write: `Assign` /
+    /// `CompoundAssign` targets and names passed as `inout` call args
+    /// (the callee may write through the pointer). Recursion drives off
+    /// `walk_operands`, so nested if/elif/else/while/for-range bodies
+    /// are covered.
+    fn collect_loop_writes(tir: &Tir, stmts: &[TirRef], out: &mut Vec<StringId>) {
+        for &stmt in stmts {
+            Self::collect_writes_in(tir, stmt, out);
+        }
+    }
+
+    fn collect_writes_in(tir: &Tir, r: TirRef, out: &mut Vec<StringId>) {
+        let inst = tir.inst(r);
+        match inst.tag {
+            TirTag::Assign => out.push(tir.assign_view(r).name),
+            TirTag::CompoundAssign => out.push(tir.compound_assign_view(r).name),
+            TirTag::Call => {
+                let view = tir.call_view(r);
+                for (&arg, &mode) in view.args.iter().zip(view.modes.iter()) {
+                    if mode != ParamMode::Inout {
+                        continue;
+                    }
+                    // The inout arg was sema-lowered to its inner
+                    // `Var(name)` ref — the same rule `local_name_of`
+                    // uses. Anything else is not a plain binding write;
+                    // ignore it conservatively.
+                    let arg_inst = tir.inst(arg);
+                    if let (TirTag::Var, TirData::Var(name)) = (arg_inst.tag, arg_inst.data) {
+                        out.push(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+        tir.walk_operands(r, &mut |_parent, child, _kind| {
+            Self::collect_writes_in(tir, child, out);
+        });
+    }
+
     pub fn compile(
         &mut self,
         tirs: &[Tir],
@@ -762,6 +865,8 @@ impl<M: Module> Codegen<M> {
                 pool,
                 tir,
                 locals,
+                range_facts: HashMap::new(),
+                assigned_log: Vec::new(),
                 func_ids,
                 inst_values: vec![None; tir.instructions.len()],
                 param_values: HashMap::new(),
@@ -905,10 +1010,12 @@ impl<M: Module> Codegen<M> {
         let saved_locals = ctx.locals.clone();
         let saved_str_locals = ctx.str_locals.clone();
         let saved_view_locals = ctx.view_locals.clone();
+        let saved_range_facts = ctx.range_facts.clone();
         let terminator = Self::emit_body(builder, ctx, stmts)?;
         ctx.locals = saved_locals;
         ctx.str_locals = saved_str_locals;
         ctx.view_locals = saved_view_locals;
+        ctx.range_facts = saved_range_facts;
         Ok(terminator)
     }
 
@@ -1016,6 +1123,10 @@ impl<M: Module> Codegen<M> {
                         }
                         _ => unreachable!("view-typed initializer should produce ValueRepr::View"),
                     }
+                    // Same defensive fact removal as the scalar path
+                    // below: a same-scope redefinition must not inherit
+                    // a stale fact from the shadowed binding.
+                    ctx.range_facts.remove(&view.name);
                     return Ok(Terminator::None);
                 }
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
@@ -1024,6 +1135,10 @@ impl<M: Module> Codegen<M> {
                 let cl_ty = cranelift_type_for(inst.ty, ctx.pool, ctx.int_type);
                 let var = builder.declare_var(cl_ty);
                 builder.def_var(var, val);
+                // Defensive: a same-scope redefinition must not inherit
+                // a stale fact from the shadowed binding. (No seeding
+                // from constant initializers — explicit non-goal.)
+                ctx.range_facts.remove(&view.name);
                 ctx.locals.insert(view.name, var);
                 Ok(Terminator::None)
             }
@@ -1124,6 +1239,7 @@ impl<M: Module> Codegen<M> {
                     builder.def_var(locals.ptr, ptr);
                     builder.def_var(locals.len, len);
                     builder.def_var(locals.cap, cap);
+                    Self::kill_fact(ctx, view.name);
                     return Ok(Terminator::None);
                 }
                 if ctx.pool.is_view(inst.ty) {
@@ -1141,9 +1257,13 @@ impl<M: Module> Codegen<M> {
                     // reseat the pair.
                     builder.def_var(locals.ptr, ptr);
                     builder.def_var(locals.len, len);
+                    Self::kill_fact(ctx, view.name);
                     return Ok(Terminator::None);
                 }
                 let val = Self::eval_inst(builder, ctx, view.value)?;
+                // Kill AFTER evaluating the RHS: `x = x + 1` must still
+                // see the old fact while its right-hand side is emitted.
+                Self::kill_fact(ctx, view.name);
                 let var = ctx.locals.get(&view.name).ok_or_else(|| {
                     format!(
                         "Undefined variable in assign: '{}'",
@@ -1168,17 +1288,37 @@ impl<M: Module> Codegen<M> {
                 let current = builder.use_var(var);
 
                 let is_float = inst.ty == ctx.pool.float();
+                let lhs_range = ctx.range_facts.get(&view.name).copied();
+                let rhs_range = ranges::int_range_of(ctx.tir, &ctx.range_facts, view.value);
                 let result = match (view.op, is_float) {
                     // Same spec §18 checked arithmetic as the binop arm.
-                    (CompoundOp::Add, false) => {
-                        Self::emit_checked_iadd(builder, ctx, current, rhs)?
-                    }
-                    (CompoundOp::Sub, false) => {
-                        Self::emit_checked_isub(builder, ctx, current, rhs)?
-                    }
-                    (CompoundOp::Mul, false) => {
-                        Self::emit_checked_imul(builder, ctx, current, rhs)?
-                    }
+                    (CompoundOp::Add, false) => Self::emit_int_binop(
+                        builder,
+                        ctx,
+                        TirTag::IAdd,
+                        lhs_range,
+                        rhs_range,
+                        current,
+                        rhs,
+                    )?,
+                    (CompoundOp::Sub, false) => Self::emit_int_binop(
+                        builder,
+                        ctx,
+                        TirTag::ISub,
+                        lhs_range,
+                        rhs_range,
+                        current,
+                        rhs,
+                    )?,
+                    (CompoundOp::Mul, false) => Self::emit_int_binop(
+                        builder,
+                        ctx,
+                        TirTag::IMul,
+                        lhs_range,
+                        rhs_range,
+                        current,
+                        rhs,
+                    )?,
                     (CompoundOp::Div, false) => {
                         Self::emit_div_zero_guard(builder, ctx, rhs, DIV_ZERO_MSG)?;
                         builder.ins().sdiv(current, rhs)
@@ -1194,6 +1334,7 @@ impl<M: Module> Codegen<M> {
                     (CompoundOp::Mod, true) => return Err("float modulo not supported".to_string()),
                 };
 
+                Self::kill_fact(ctx, view.name);
                 builder.def_var(var, result);
                 Ok(Terminator::None)
             }
@@ -1246,6 +1387,12 @@ impl<M: Module> Codegen<M> {
         r: TirRef,
     ) -> Result<Terminator, String> {
         let view = ctx.tir.if_stmt_view(r);
+        let outer_facts = ctx.range_facts.clone();
+        let scope_mark = ctx.assigned_log.len();
+        // Conditions whose FALSE path dominates each subsequent block
+        // (elif cond blocks, the else arm, and — when every written arm
+        // terminates — the merge block).
+        let mut negated_conds: Vec<TirRef> = vec![view.cond];
         let merge_block = builder.create_block();
 
         // Pull the BranchId assignments allocated by the ownership
@@ -1290,6 +1437,7 @@ impl<M: Module> Codegen<M> {
 
         builder.seal_block(then_block);
         builder.switch_to_block(then_block);
+        Self::seed_cond_facts(ctx, view.cond, true);
         // Manual push/pop (not RAII) — `?` propagation interacts
         // poorly with a scope-guard holding `&mut ctx`. We pop on
         // both Ok and Err paths by binding the result first.
@@ -1312,6 +1460,20 @@ impl<M: Module> Codegen<M> {
             let elif_cond_block = next_blocks[i];
             builder.seal_block(elif_cond_block);
             builder.switch_to_block(elif_cond_block);
+            // Re-baseline: true-polarity seeds live only inside their
+            // own arm (emit_scoped_body's restore would resurrect them).
+            // This block is dominated by the FALSE path of every
+            // earlier condition — and by nothing else.
+            ctx.range_facts = outer_facts.clone();
+            for &prev in &negated_conds {
+                Self::seed_cond_facts(ctx, prev, false);
+            }
+            // The clone above predates every earlier condition's
+            // evaluation — an inout call in one of them killed its
+            // binding's fact via the reload path, and the re-baseline
+            // (or a negation seed on the same name) would resurrect it.
+            // Re-apply every kill logged since scope_mark.
+            Self::kill_assigned_since(ctx, scope_mark);
 
             let elif_cond_val = Self::eval_inst(builder, ctx, elif.cond)?;
             let elif_body_block = builder.create_block();
@@ -1328,6 +1490,7 @@ impl<M: Module> Codegen<M> {
 
             builder.seal_block(elif_body_block);
             builder.switch_to_block(elif_body_block);
+            Self::seed_cond_facts(ctx, elif.cond, true);
             let elif_branch_id = branch_ids.elif_branches.get(i).copied().unwrap_or_default();
             ctx.branch_stack.push(elif_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, elif_branch_id)?;
@@ -1339,11 +1502,28 @@ impl<M: Module> Codegen<M> {
             }
             all_terminated = all_terminated && elif_term != Terminator::None;
             all_return = all_return && elif_term == Terminator::Return;
+            negated_conds.push(elif.cond);
         }
+
+        // Whether every written arm (then + elifs) ends the block. With
+        // no else arm, the merge is then reachable ONLY via the
+        // fall-through edge, where every condition is provably false —
+        // the `if n <= 1: return n` fibonacci shape.
+        let written_arms_terminated = all_terminated;
 
         if let Some(else_stmts) = &view.else_stmts {
             builder.seal_block(else_or_merge);
             builder.switch_to_block(else_or_merge);
+            // Same re-baseline as the elif cond blocks, seeded with
+            // every condition's FALSE polarity — the else arm is
+            // dominated by the all-conditions-false path.
+            ctx.range_facts = outer_facts.clone();
+            for &cond in &negated_conds {
+                Self::seed_cond_facts(ctx, cond, false);
+            }
+            // Same re-application of cond-eval kills as the elif cond
+            // blocks above.
+            Self::kill_assigned_since(ctx, scope_mark);
             let else_branch_id = branch_ids.else_branch.unwrap_or_default();
             ctx.branch_stack.push(else_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, else_branch_id)?;
@@ -1377,6 +1557,24 @@ impl<M: Module> Codegen<M> {
             builder.switch_to_block(merge_block);
         }
 
+        // Range-fact join. Arm-body seeds were already rolled back by
+        // emit_scoped_body; cond-block seeds are rolled back here by
+        // restoring the pre-if map. A binding assigned in ANY arm loses
+        // its fact (predecessors disagree). Only when there is no else
+        // and every written arm terminated is the merge dominated by
+        // the fall-through edge alone — seed all negations there.
+        ctx.range_facts = outer_facts;
+        if !has_else && written_arms_terminated {
+            for &cond in &negated_conds {
+                Self::seed_cond_facts(ctx, cond, false);
+            }
+        }
+        // Re-apply kills AFTER the fall-through seeding: a condition's
+        // inout call wrote through its pointer on EVERY path past it,
+        // so a negation seed from another condition must not resurrect
+        // that binding's fact here.
+        Self::kill_assigned_since(ctx, scope_mark);
+
         // The if terminates the block only when every arm does; it
         // counts as a Return for the caller only when every arm
         // actually returns. For mixed all-terminating shapes (e.g.
@@ -1406,6 +1604,15 @@ impl<M: Module> Codegen<M> {
         builder.ins().jump(header_block, &[]);
 
         builder.switch_to_block(header_block);
+        // Back-edge rule: kill facts on bindings the body writes BEFORE
+        // emitting the condition — the condition re-evaluates every
+        // iteration, so a fact it consults must hold on every one.
+        // `pre_loop_facts` is cloned after this kill, so the post-loop
+        // restore keeps these names dead (a body-written binding's
+        // pre-loop fact does not hold at the exit either). The
+        // cond-true seeds applied below stay sound: the header's brif
+        // re-establishes the condition on every iteration.
+        Self::kill_loop_writes(ctx, Some(view.cond), &view.body);
         let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
         builder
             .ins()
@@ -1414,12 +1621,23 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(body_block);
         builder.switch_to_block(body_block);
 
+        // The condition holds at every body entry (the header's brif
+        // guards it). Assignments inside the body kill facts in place;
+        // the seeds themselves must NOT survive the loop — the exit
+        // block is also reached on the zero-iteration path.
+        let pre_loop_facts = ctx.range_facts.clone();
+        let scope_mark = ctx.assigned_log.len();
+        Self::seed_cond_facts(ctx, view.cond, true);
+
         ctx.loop_stack.push(LoopContext {
             exit_block,
             continue_target: header_block,
         });
         let body_term = Self::emit_scoped_body(builder, ctx, &view.body)?;
         ctx.loop_stack.pop();
+
+        ctx.range_facts = pre_loop_facts;
+        Self::kill_assigned_since(ctx, scope_mark);
 
         if body_term == Terminator::None {
             builder.ins().jump(header_block, &[]);
@@ -1476,6 +1694,17 @@ impl<M: Module> Codegen<M> {
         // and the emit; emit_scoped_body's internal save would shadow our
         // insertion.
         let shadowed_var = ctx.locals.insert(view.var_name, counter);
+        // The loop variable is a different quantity than any shadowed
+        // outer binding — its fact must not leak onto the counter.
+        let shadowed_fact = ctx.range_facts.remove(&view.var_name);
+
+        // Back-edge rule (see generate_while_loop): the bounds were
+        // evaluated once pre-loop, so pre-loop facts were valid there —
+        // but a fact consulted inside the body must hold on every
+        // iteration. Kill every binding the body writes before
+        // emitting it. There is no post-loop map restore here, so the
+        // kills simply persist past the loop.
+        Self::kill_loop_writes(ctx, None, &view.body);
 
         let body_term = Self::emit_body(builder, ctx, &view.body)?;
 
@@ -1484,6 +1713,13 @@ impl<M: Module> Codegen<M> {
             ctx.locals.insert(view.var_name, old_var);
         } else {
             ctx.locals.remove(&view.var_name);
+        }
+        // The loop variable's facts die with its scope whether or not
+        // the shadowed outer binding had one — remove unconditionally,
+        // then reinsert the outer binding's fact if there was one.
+        ctx.range_facts.remove(&view.var_name);
+        if let Some(fact) = shadowed_fact {
+            ctx.range_facts.insert(view.var_name, fact);
         }
 
         if body_term == Terminator::None {
