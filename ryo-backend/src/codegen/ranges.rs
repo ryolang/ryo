@@ -187,14 +187,15 @@ impl<M: Module> Codegen<M> {
         value: Option<T>,
     ) {
         let raw = name.raw();
-        debug_assert!(
-            (raw as usize) < table.len(),
-            "binding name out of slot-table range"
-        );
-        if let Some(slot) = table.get_mut(raw as usize) {
-            undo.push((raw, *slot));
-            *slot = value;
-        }
+        // Invariant: every name in the TIR comes from the pool the
+        // tables were sized from (codegen never interns), so a miss
+        // here is a compiler bug — a dropped write would also
+        // desynchronize the undo log.
+        let slot = table
+            .get_mut(raw as usize)
+            .expect("binding name within slot-table range");
+        undo.push((raw, *slot));
+        *slot = value;
     }
 
     /// Restore a slot table to `mark` (a previous `undo.len()`):
