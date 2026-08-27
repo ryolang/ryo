@@ -377,12 +377,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** `declare_all_functions` builds every function's `Signature` to register the `FuncId`, then `compile_function` rebuilds the identical signature — redundant pool queries and two Vec allocations per function.
 **Resolution:** Store the `Signature` alongside the `FuncId` in `func_ids` and move/clone it into `ctx.func`.
 
-### I-151 — `collect_loop_nesting` copies the nesting stack per instruction
-
-**Files:** `ryo-frontend/src/ownership/loops.rs` (`collect_loop_nesting`)
-**Summary:** Once per function, but every instruction in a loop subtree gets its own copy of the enclosing-loop stack (`inner.clone()` / `stack.to_vec()` per subtree instruction). The per-statement scratch-`HashSet` allocations and the `HashMap<TirRef, Vec<TirRef>>` structure were fixed in the I-129 side-table conversion (the table is now a dense `Vec<Vec<TirRef>>` with one reused scratch set); the per-instruction stack copies remain.
-**Resolution:** Share nesting stacks via parent-pointer chains or a depth-indexed `Vec<Vec<TirRef>>` so subtree instructions reference a shared stack instead of owning a copy.
-
 ### I-152 — Parser builds a throwaway `Vec` per call/params node before the arena copy
 
 **Files:** `ryo-frontend/src/parser.rs` (:604-615, :650-661, :534-538, :436-446)
