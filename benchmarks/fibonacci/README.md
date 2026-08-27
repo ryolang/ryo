@@ -30,19 +30,25 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 
 | Language | Version | Mean Time | Speed vs Rust | Memory (Max Resident) |
 |----------|---------|-----------|---------------|-----------------------|
-| **Rust** | 1.98.0 | ~262.2 ms | 1.00x         | 1.45 MB               |
-| **Kotlin**| 2.4.10 (java 26.0.2) | ~268.1 ms | 1.02x slower | 44.62 MB     |
-| **Go**   | 1.26.6 | ~290.2 ms | 1.11x slower  | 4.16 MB               |
-| **Swift**| 6.3.3 | ~329.9 ms | 1.26x slower  | 1.56 MB               |
-| **Ryo (AOT)** | 0.1.0 | ~354.9 ms | 1.35x slower | **1.34 MB**           |
-| **Ryo (JIT)** | 0.1.0 | ~348.8 ms | 1.33x slower | 4.81 MB               |
-| **Bun (TS)**  | 1.3.13 | ~400.9 ms | 1.53x slower | 27.47 MB              |
-| **Julia** | 1.12.6 | ~417.5 ms | 1.59x slower | 213.56 MB             |
-| **Elixir**    | 1.20.3 | ~884.6 ms | 3.37x slower | 90.19 MB              |
-| **Python**| 3.14.4 | ~4.951 s | 18.88x slower  | 19.02 MB               |
-| **Ruby** | 4.0.6 | ~5.812 s | 22.17x slower | 18.33 MB              |
+| **Rust** | 1.98.0 | ~253.4 ms | 1.00x         | 1.45 MB               |
+| **Kotlin**| 2.4.10 (java 26.0.2) | ~270.8 ms | 1.07x slower | 44.55 MB     |
+| **Go**   | 1.26.6 | ~292.5 ms | 1.15x slower  | 4.03 MB               |
+| **Swift**| 6.3.3 | ~320.5 ms | 1.26x slower  | 1.56 MB               |
+| **Ryo (AOT)** | 0.1.0 | ~360.8 ms | 1.42x slower | **1.34 MB**           |
+| **Ryo (JIT)** | 0.1.0 | ~361.4 ms | 1.43x slower | 4.75 MB               |
+| **Bun (TS)**  | 1.3.13 | ~399.6 ms | 1.58x slower | 27.44 MB              |
+| **Julia** | 1.12.6 | ~416.5 ms | 1.64x slower | 214.08 MB             |
+| **Elixir**    | 1.20.3 | ~869.3 ms | 3.43x slower | 89.98 MB              |
+| **Python**| 3.14.4 | ~4.939 s | 19.49x slower  | 18.97 MB               |
+| **Ruby** | 4.0.6 | ~5.863 s | 23.14x slower | 18.19 MB              |
 
-*(Measured with `hyperfine` on macOS, Apple M3 Pro, 2026-08-26. Ryo is compiled using `--release`.)*
+*(Measured with `hyperfine` on macOS, Apple M3 Pro, 2026-08-26 (evening checkpoint). Ryo is compiled using `--release`.)*
+
+### Checkpoint: value-range guard elision (2026-08-26)
+
+This table is the re-measurement after the value-range guard-elision work landed (see commit `d6aee06`): codegen now seeds a per-function value-range fact map from dominating `if`/`while` comparisons against constants and skips `sadd`/`ssub`/`smul_overflow` guards whose operand bounds make overflow impossible. In the fib hot path, `if n <= 1: return n` proves `n >= 2` on the fall-through, so both `n - 1` and `n - 2` guards are now elided — the per-call hot path drops from 29 to 19 machine instructions on aarch64, matching the unguarded shape; only the outer `fibonacci(n - 1) + fibonacci(n - 2)` addition keeps its overflow guard.
+
+Outcome vs the provisional target (fib(40) AOT ≤ 1.25× Rust): **missed** — Ryo AOT measured ~1.42× Rust (~360.8 ms vs ~253.4 ms; a targeted re-run of just Rust vs Ryo confirmed 1.40×). Ryo's absolute time is roughly unchanged versus the previous same-day baseline (~354.9 ms), so on this host the elided guards — perfectly-predicted not-taken branches — were nearly free; the ratio moved mostly because Rust measured faster. The memory headline holds: Ryo AOT max resident (1.34 MB) stays below Rust's (1.45 MB), the lightest of all languages tested. The remaining checked-arithmetic gap is the surviving outer-add guard, whose unfused `cset` + `tst` + `b.ne` lowering is tracked in `ISSUES.md` (I-165).
 
 See [`../README.md`](../README.md#why-ryo-trails-rust-here-checked-arithmetic-is-intentional) for why Ryo currently trails Rust on this benchmark (spec §18 checked arithmetic) and what is planned to close the gap.
 

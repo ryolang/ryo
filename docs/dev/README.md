@@ -17,6 +17,7 @@ This directory contains implementation notes, architectural decisions, and desig
 | [copy_elision.md](copy_elision.md) | Copy elision rules: guaranteed (G1-G4), permitted (P1-P4), forbidden cases, algorithm sketch | **Implement** in compiler v0.2+ — then keep as reference |
 | [stdlib_optimizations.md](stdlib_optimizations.md) | SSO, copy-on-write, sink-parameter conventions for `str` and collections | **Implement** in stdlib v0.2+ — then keep as reference |
 | [dyn_trait.md](dyn_trait.md) | Enum dispatch workaround for v0.1 (no `dyn Trait` yet), vtable explanation | **Delete** when `dyn Trait` is implemented in v0.3+ |
+| [cranelift_lessons.md](cranelift_lessons.md) | Hard-won Cranelift findings: C ABI struct-return limits, packed-`u128` runtime ABI, unexpressible call annotations, guard flag-fusion, instruction-count≠walltime | **Keep as reference** — read before optimization work in `ryo-backend` |
 
 ### Language Comparison References
 

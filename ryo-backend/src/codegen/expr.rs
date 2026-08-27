@@ -2,7 +2,7 @@
 
 use super::{
     Codegen, DIV_ZERO_MSG, FunctionContext, MOD_ZERO_MSG, OVERFLOW_MSG, STR_SLOT_SIZE, ValueRepr,
-    cranelift_type_for, is_str_type, store_string,
+    cranelift_type_for, is_str_type, ranges, store_string,
 };
 use cranelift::codegen::ir::{
     BlockArg, FuncRef, InstructionData, MemFlagsData, Opcode, StackSlot, ValueDef,
@@ -101,10 +101,19 @@ impl<M: Module> Codegen<M> {
                     let v = Self::eval_inst(builder, ctx, operand)?;
                     // Spec §18 checked negation: `-(x)` as `0 - x` so
                     // `-(i64::MIN)` sets the overflow flag and panics.
+                    // Elide when the operand's bounds exclude i64::MIN —
+                    // the only input whose negation overflows.
                     let zero = builder.ins().iconst(ctx.int_type, 0);
-                    let (r, of) = builder.ins().ssub_overflow(zero, v);
-                    Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
-                    r
+                    if ranges::int_range_of(ctx.tir, &ctx.range_facts, operand)
+                        .and_then(|r| r.checked_neg())
+                        .is_some()
+                    {
+                        builder.ins().isub(zero, v)
+                    } else {
+                        let (r, of) = builder.ins().ssub_overflow(zero, v);
+                        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+                        r
+                    }
                 }
                 _ => unreachable!("INeg must carry TirData::UnOp"),
             },
@@ -148,9 +157,15 @@ impl<M: Module> Codegen<M> {
                     // build modes. The s*_overflow ops return the
                     // wrapped result plus an i8 overflow flag; a set
                     // flag branches to ryo_panic.
-                    TirTag::IAdd => Self::emit_checked_iadd(builder, ctx, lv, rv)?,
-                    TirTag::ISub => Self::emit_checked_isub(builder, ctx, lv, rv)?,
-                    TirTag::IMul => Self::emit_checked_imul(builder, ctx, lv, rv)?,
+                    TirTag::IAdd | TirTag::ISub | TirTag::IMul => Self::emit_int_binop(
+                        builder,
+                        ctx,
+                        inst.tag,
+                        ranges::int_range_of(ctx.tir, &ctx.range_facts, lhs),
+                        ranges::int_range_of(ctx.tir, &ctx.range_facts, rhs),
+                        lv,
+                        rv,
+                    )?,
                     TirTag::ISDiv => {
                         Self::emit_div_zero_guard(builder, ctx, rv, DIV_ZERO_MSG)?;
                         builder.ins().sdiv(lv, rv)
@@ -370,6 +385,41 @@ impl<M: Module> Codegen<M> {
                 imm,
             } => Some(imm.bits()),
             _ => None,
+        }
+    }
+
+    /// Spec §18 checked `+`/`-`/`*` with value-range elision: when both
+    /// operands' bounds prove the result fits in `i64`, emit the raw op
+    /// and skip the overflow guard entirely. Any unknown side falls
+    /// back to the checked helpers.
+    pub(crate) fn emit_int_binop(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        tag: TirTag,
+        lhs_range: Option<ranges::IntRange>,
+        rhs_range: Option<ranges::IntRange>,
+        lv: Value,
+        rv: Value,
+    ) -> Result<Value, String> {
+        // Both dispatch sites below assume IMul in their `_` arm.
+        debug_assert!(matches!(tag, TirTag::IAdd | TirTag::ISub | TirTag::IMul));
+        let fits = lhs_range.zip(rhs_range).and_then(|(a, b)| match tag {
+            TirTag::IAdd => a.checked_add(b),
+            TirTag::ISub => a.checked_sub(b),
+            TirTag::IMul => a.checked_mul(b),
+            _ => unreachable!("emit_int_binop: not an int arith tag"),
+        });
+        if fits.is_some() {
+            return Ok(match tag {
+                TirTag::IAdd => builder.ins().iadd(lv, rv),
+                TirTag::ISub => builder.ins().isub(lv, rv),
+                _ => builder.ins().imul(lv, rv),
+            });
+        }
+        match tag {
+            TirTag::IAdd => Self::emit_checked_iadd(builder, ctx, lv, rv),
+            TirTag::ISub => Self::emit_checked_isub(builder, ctx, lv, rv),
+            _ => Self::emit_checked_imul(builder, ctx, lv, rv),
         }
     }
 
@@ -1495,20 +1545,24 @@ impl<M: Module> Codegen<M> {
                 let nc = builder
                     .ins()
                     .load(types::I64, MemFlagsData::trusted(), addr, 16);
-                if let Some(name) = Self::local_name_of(ctx, *arg_ref)
-                    && let Some(sl) = ctx.str_locals.get(&name).cloned()
-                {
-                    builder.def_var(sl.ptr, np);
-                    builder.def_var(sl.len, nl);
-                    builder.def_var(sl.cap, nc);
+                if let Some(name) = Self::local_name_of(ctx, *arg_ref) {
+                    // The callee may have written anything through the
+                    // pointer — the binding's range fact dies here.
+                    Self::kill_fact(ctx, name);
+                    if let Some(sl) = ctx.str_locals.get(&name).cloned() {
+                        builder.def_var(sl.ptr, np);
+                        builder.def_var(sl.len, nl);
+                        builder.def_var(sl.cap, nc);
+                    }
                 }
             } else {
                 let cl_ty = cranelift_type_for(arg_ty, ctx.pool, ctx.int_type);
                 let updated = builder.ins().load(cl_ty, MemFlagsData::trusted(), addr, 0);
-                if let Some(name) = Self::local_name_of(ctx, *arg_ref)
-                    && let Some(var) = ctx.locals.get(&name).copied()
-                {
-                    builder.def_var(var, updated);
+                if let Some(name) = Self::local_name_of(ctx, *arg_ref) {
+                    Self::kill_fact(ctx, name);
+                    if let Some(var) = ctx.locals.get(&name).copied() {
+                        builder.def_var(var, updated);
+                    }
                 }
             }
         }
