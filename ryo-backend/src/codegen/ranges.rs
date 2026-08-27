@@ -1,6 +1,7 @@
 //! Value-range facts for spec §18 guard elision (Phase 1).
 //!
-//! A per-function map from binding name to inclusive `[lo, hi]` bounds,
+//! A per-function dense table (indexed by `StringId::raw()`) from
+//! binding name to inclusive `[lo, hi]` bounds,
 //! seeded from dominating `if`/`while` comparisons against constants and
 //! killed on assignment, `inout` passing, and joins whose predecessors
 //! disagree. When both operands of `+`/`-`/`*` (or the operand of unary
@@ -10,8 +11,6 @@
 //! Soundness rule: a missing fact (`None`) always means "keep the
 //! guard". Every range here must hold for *every* execution that
 //! reaches the program point where it is consulted.
-
-use std::collections::HashMap;
 
 use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
 use ryo_core::types::StringId;
@@ -88,15 +87,11 @@ impl IntRange {
 
 /// Bounds for a TIR expression: exact for integer constants, the
 /// recorded fact for variables, unknown (`None`) for everything else.
-pub(crate) fn int_range_of(
-    tir: &Tir,
-    facts: &HashMap<StringId, IntRange>,
-    r: TirRef,
-) -> Option<IntRange> {
+pub(crate) fn int_range_of(tir: &Tir, facts: &[Option<IntRange>], r: TirRef) -> Option<IntRange> {
     let inst = tir.inst(r);
     match (inst.tag, inst.data) {
         (TirTag::IntConst, TirData::Int(v)) => Some(IntRange::point(v)),
-        (TirTag::Var, TirData::Var(name)) => facts.get(&name).copied(),
+        (TirTag::Var, TirData::Var(name)) => facts.get(name.raw() as usize).copied().flatten(),
         _ => None,
     }
 }

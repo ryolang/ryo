@@ -512,6 +512,13 @@ impl InternPool {
 
     // ----- String interning -----
 
+    /// Number of interned strings; also the exclusive upper bound of
+    /// valid `StringId::raw()` values, so read-only consumers (e.g.
+    /// codegen) can size dense `StringId`-indexed side tables from it.
+    pub fn string_count(&self) -> usize {
+        self.strings.len()
+    }
+
     /// Look up an already-interned string without inserting.
     ///
     /// Returns `None` if `s` has never been passed to `intern_str`.
