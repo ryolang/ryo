@@ -128,7 +128,10 @@ pub(crate) fn remove_loop_deferred_views(own: &mut Ownership, loop_ref: TirRef) 
         .enumerate()
         .filter_map(|(i, slot)| {
             let &l = slot.as_ref()?;
-            (l == loop_ref).then(|| Owner::Inst(TirRef::from_raw(i as u32)))
+            (l == loop_ref).then(|| {
+                let raw = u32::try_from(i).expect("TIR arena index fits u32");
+                Owner::Inst(TirRef::from_raw(raw))
+            })
         })
         .collect();
     for view in dead {
@@ -534,7 +537,7 @@ pub(crate) fn refine_view_liveness_for_arm(
         .enumerate()
         .filter_map(|(i, slot)| {
             let &global_lu = slot.as_ref()?;
-            let vi = TirRef::from_raw(i as u32);
+            let vi = TirRef::from_raw(u32::try_from(i).expect("TIR arena index fits u32"));
             (if_subtree.contains(&global_lu)
                 && !arm_subtree.contains(&global_lu)
                 && Ownership::dense_get(&own.view_defer_loop, vi).is_none())
