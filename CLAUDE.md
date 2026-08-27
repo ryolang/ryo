@@ -94,7 +94,7 @@ IMPORTANT: Never author Claude on commits nor PRs.
 
 ## Issue Tracking
 
-Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, put it on the appropriate severity block(Blocking / Correctness / Cleanup), and include Files, Summary, and Resolution fields.
+Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, put it on the appropriate severity block (Blocking / Correctness / Cleanup), and include Files, Summary, and Resolution fields.
 
 **Never reuse an `I-XXX` number, even after its entry is deleted.** IDs are cited in commit messages and live on in git history; a reused number silently retargets those references to a different issue. Deleted numbers stay retired — the next entry always takes the highest number ever used + 1.
 
