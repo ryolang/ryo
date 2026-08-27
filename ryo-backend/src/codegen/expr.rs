@@ -88,11 +88,9 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::Var => match inst.data {
                 TirData::Var(name) => {
-                    let var = ctx
-                        .locals
-                        .get(&name)
+                    let var = Self::read_slot(&ctx.locals, name)
                         .ok_or_else(|| format!("Undefined variable: '{}'", ctx.pool.str(name)))?;
-                    builder.use_var(*var)
+                    builder.use_var(var)
                 }
                 _ => unreachable!("Var must carry TirData::Var"),
             },
@@ -724,7 +722,7 @@ impl<M: Module> Codegen<M> {
         for (idx, target) in pending {
             ctx.freed_at[idx] = true;
             let binding = Self::free_binding_name(ctx, target)
-                .and_then(|name| ctx.str_locals.get(&name).cloned());
+                .and_then(|name| Self::read_slot(&ctx.str_locals, name));
             if let Some(sl) = binding {
                 let ptr = builder.use_var(sl.ptr);
                 let cap = builder.use_var(sl.cap);
@@ -791,7 +789,7 @@ impl<M: Module> Codegen<M> {
             let Some(name) = Self::free_binding_name(ctx, drop.target) else {
                 continue;
             };
-            let Some(sl) = ctx.str_locals.get(&name).cloned() else {
+            let Some(sl) = Self::read_slot(&ctx.str_locals, name) else {
                 continue;
             };
             let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
@@ -941,7 +939,7 @@ impl<M: Module> Codegen<M> {
                     TirData::Var(name) => name,
                     _ => unreachable!(),
                 };
-                if let Some(locals) = ctx.str_locals.get(&name) {
+                if let Some(locals) = Self::read_slot(&ctx.str_locals, name) {
                     ValueRepr::Str {
                         ptr: builder.use_var(locals.ptr),
                         len: builder.use_var(locals.len),
@@ -1118,7 +1116,7 @@ impl<M: Module> Codegen<M> {
                     TirData::Var(name) => name,
                     _ => unreachable!("Var must carry TirData::Var"),
                 };
-                let locals = ctx.view_locals.get(&name).ok_or_else(|| {
+                let locals = Self::read_slot(&ctx.view_locals, name).ok_or_else(|| {
                     format!("Undefined strview variable: '{}'", ctx.pool.str(name))
                 })?;
                 ValueRepr::View {
@@ -1384,7 +1382,7 @@ impl<M: Module> Codegen<M> {
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), s_addr, 16);
             if let Some(name) = Self::local_name_of(ctx, s_ref)
-                && let Some(sl) = ctx.str_locals.get(&name).cloned()
+                && let Some(sl) = Self::read_slot(&ctx.str_locals, name)
             {
                 builder.def_var(sl.ptr, np);
                 builder.def_var(sl.len, nl);
@@ -1555,7 +1553,7 @@ impl<M: Module> Codegen<M> {
                     // The callee may have written anything through the
                     // pointer — the binding's range fact dies here.
                     Self::kill_fact(ctx, name);
-                    if let Some(sl) = ctx.str_locals.get(&name).cloned() {
+                    if let Some(sl) = Self::read_slot(&ctx.str_locals, name) {
                         builder.def_var(sl.ptr, np);
                         builder.def_var(sl.len, nl);
                         builder.def_var(sl.cap, nc);
@@ -1566,7 +1564,7 @@ impl<M: Module> Codegen<M> {
                 let updated = builder.ins().load(cl_ty, MemFlagsData::trusted(), addr, 0);
                 if let Some(name) = Self::local_name_of(ctx, *arg_ref) {
                     Self::kill_fact(ctx, name);
-                    if let Some(var) = ctx.locals.get(&name).copied() {
+                    if let Some(var) = Self::read_slot(&ctx.locals, name) {
                         builder.def_var(var, updated);
                     }
                 }

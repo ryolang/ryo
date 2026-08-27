@@ -1,7 +1,7 @@
 //! Free scheduling (last-use anchors, materialize sites) — split from `mod.rs`.
 
 use super::{
-    Owner, OwnerState, Ownership, inout_escape_owner, needs_tracking, nesting_of, owner_sort_key,
+    Owner, OwnerState, Ownership, inout_escape_owner, needs_tracking, owner_sort_key,
     projection_root,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
@@ -254,13 +254,14 @@ pub(crate) fn warn_redundant_materialize(
         // re-executes between iterations regardless of source order,
         // so it suppresses too (conservative).
         let mat_rank = rank(call);
-        let mat_loops = nesting_of(&own.loop_nesting, call);
         let defensive = own.owner_hazards.iter().any(|&(o, site)| {
             o == root
                 && (rank(site) > mat_rank
-                    || nesting_of(&own.loop_nesting, site)
-                        .iter()
-                        .any(|l| mat_loops.contains(l)))
+                    || own.loop_nesting.ancestors_innermost_first(site).any(|l| {
+                        own.loop_nesting
+                            .ancestors_innermost_first(call)
+                            .any(|m| m == l)
+                    }))
         });
         if defensive {
             continue;

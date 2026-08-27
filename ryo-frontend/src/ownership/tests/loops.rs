@@ -649,3 +649,67 @@ fn diverged_loop_writes_branch_gated_free_exactly_once() {
         "the gated Free must reference the live else BranchId; if_branches = {ids:?}"
     );
 }
+
+#[test]
+fn loop_nesting_chains_depth_three() {
+    // Depth-3 nest (the rest of the suite never exceeds depth 2):
+    //   for i in range(0, 10):
+    //       while true:
+    //           while true:
+    //               print("deep")
+    // Pins the parent-pointer tables directly: per-instruction depth,
+    // the innermost-first ancestor order, and `ancestor_at_depth`'s
+    // correspondence to the old outermost-first stack indexing
+    // (position `d` of the stack == the ancestor whose own depth is
+    // `d`).
+    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::tir::TirBuilder;
+
+    let mut pool = InternPool::new();
+    let str_ty = pool.str_();
+    let int_ty = pool.int();
+    let bool_ty = pool.bool_();
+    let void = pool.void();
+    let main = pool.intern_str("main");
+    let i = pool.intern_str("i");
+    let print = pool.intern_str("print");
+    let deep = pool.intern_str("deep");
+    let span = SimpleSpan::new((), 0..0);
+
+    let mut tb = TirBuilder::new(main, vec![], void, span);
+    let start = tb.int_const(0, int_ty, span);
+    let end = tb.int_const(10, int_ty, span);
+    let cond_w1 = tb.bool_const(true, bool_ty, span);
+    let cond_w2 = tb.bool_const(true, bool_ty, span);
+    let lit = tb.str_const(deep, str_ty, span);
+    let print_call = tb.call(print, &[lit], &all_borrow(&[lit]), void, span);
+    let wl_inner = tb.while_loop(cond_w2, &[print_call], void, span);
+    let wl_outer = tb.while_loop(cond_w1, &[wl_inner], void, span);
+    let fr = tb.for_range(i, start, end, &[wl_outer], void, span);
+    let tir = tb.finish(&[fr]);
+
+    let nesting = collect_loop_nesting(&tir);
+
+    // Depths: the loop instructions themselves sit at the ENCLOSING
+    // depth; their subtrees (bounds, conditions, bodies) sit one
+    // level deeper.
+    assert_eq!(nesting.depth_of(fr), 0);
+    assert_eq!(nesting.depth_of(start), 1, "for bounds are inside the for");
+    assert_eq!(nesting.depth_of(wl_outer), 1);
+    assert_eq!(nesting.depth_of(cond_w1), 2);
+    assert_eq!(nesting.depth_of(wl_inner), 2);
+    assert_eq!(nesting.depth_of(print_call), 3);
+    assert_eq!(nesting.depth_of(lit), 3);
+
+    // Ancestors by parent hops, innermost first.
+    let ancestors: Vec<_> = nesting.ancestors_innermost_first(print_call).collect();
+    assert_eq!(ancestors, vec![wl_inner, wl_outer, fr]);
+    assert!(nesting.ancestors_innermost_first(fr).next().is_none());
+
+    // `ancestor_at_depth(r, d)` == position `d` of the old
+    // outermost-first stack: the first loop in r's chain beyond a
+    // creation nested `d` deep.
+    assert_eq!(nesting.ancestor_at_depth(print_call, 0), fr);
+    assert_eq!(nesting.ancestor_at_depth(print_call, 1), wl_outer);
+    assert_eq!(nesting.ancestor_at_depth(print_call, 2), wl_inner);
+}

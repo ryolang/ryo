@@ -15,7 +15,8 @@
 //!    instructions (e.g. `IAdd %3, %5` materializes `%3` and `%5`
 //!    first). Cranelift always needs nested values; doing it
 //!    through `TirRef` indexing is the point.
-//! 2. The `eval_inst` memoization map (`HashMap<TirRef, ValueRepr>`)
+//! 2. The `eval_inst` memoization table (dense `Vec<Option<ValueRepr>>`
+//!    indexed by `TirRef::index()`)
 //!    so a shared sub-expression isn't re-emitted. TIR today is
 //!    tree-shaped (one parent per inst) so this is purely
 //!    defensive — but it's the right invariant before lazy sema
@@ -161,14 +162,14 @@ impl ValueRepr {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct StrLocals {
     ptr: Variable,
     len: Variable,
     cap: Variable,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct ViewLocals {
     ptr: Variable,
     len: Variable,
@@ -186,19 +187,32 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     int_type: types::Type,
     pool: &'a InternPool,
     tir: &'a Tir,
-    locals: HashMap<StringId, Variable>,
+    /// Scalar binding name → Cranelift `Variable`. Dense table indexed
+    /// by `StringId::raw()`, sized once per function from
+    /// `pool.string_count()` (codegen never interns, so every name in
+    /// the TIR is in bounds). Binding names are not unique per
+    /// function — a nested VarDecl shadows the outer slot — so every
+    /// write goes through `write_slot`, which records the previous
+    /// slot value on `locals_undo`; `emit_scoped_body` replays the log
+    /// in reverse to restore the pre-scope state.
+    locals: Vec<Option<Variable>>,
+    locals_undo: Vec<(u32, Option<Variable>)>,
     /// Value-range facts for spec §18 guard elision: binding name →
     /// inclusive `[lo, hi]` bounds proven by dominating comparisons
-    /// (see `codegen/ranges.rs` for the seeding rules). Scoped like
-    /// `locals`: `emit_scoped_body` saves/restores it, and any binding
-    /// assigned inside a restored scope is killed at the join via
-    /// `assigned_log`.
-    range_facts: HashMap<StringId, ranges::IntRange>,
+    /// (see `codegen/ranges.rs` for the seeding rules). Dense
+    /// `StringId::raw()`-indexed table with an undo log, scoped like
+    /// `locals`: `emit_scoped_body` and the if/while join handling
+    /// restore it via `restore_slots`, and any binding assigned inside
+    /// a restored scope is killed at the join via `assigned_log`.
+    range_facts: Vec<Option<ranges::IntRange>>,
+    range_facts_undo: Vec<(u32, Option<ranges::IntRange>)>,
     /// Flat log of every binding assigned (or passed as `inout`) since
     /// function entry. Branch/loop emitters snapshot the length before
     /// a scoped body and kill those names from `range_facts` after the
     /// restore, so a join whose predecessors disagree invalidates the
-    /// fact instead of resurrecting the pre-scope one.
+    /// fact instead of resurrecting the pre-scope one. Distinct from
+    /// the slot-table undo logs: those restore pre-scope slot values,
+    /// while this drives the resurrect-then-re-kill join invalidation.
     assigned_log: Vec<StringId>,
     func_ids: &'a HashMap<StringId, FuncId>,
     /// `TirRef → ValueRepr` memo. Materializing the same instruction
@@ -251,11 +265,16 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// Used to avoid O(K * S) quadratic scaling during end-of-statement sweep.
     pending_sweep: Vec<usize>,
     loop_stack: Vec<LoopContext>,
-    str_locals: HashMap<StringId, StrLocals>,
+    /// Owned-str bindings: three SSA `Variable`s (ptr, len, cap) per
+    /// binding name. Dense `StringId::raw()`-indexed table with an
+    /// undo log, same scoping discipline as `locals`.
+    str_locals: Vec<Option<StrLocals>>,
+    str_locals_undo: Vec<(u32, Option<StrLocals>)>,
     /// `strview` view bindings (M8.4): two SSA `Variable`s per binding,
     /// mirroring `str_locals`. Views are non-owning — they never
     /// appear in the free schedule.
-    view_locals: HashMap<StringId, ViewLocals>,
+    view_locals: Vec<Option<ViewLocals>>,
+    view_locals_undo: Vec<(u32, Option<ViewLocals>)>,
     /// Free-target (initializer / Assign value / str-param virtual ref)
     /// → binding-name map, built once per function by
     /// `build_free_binding_names`. `emit_frees` uses it to release a
@@ -269,13 +288,18 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// str-param sentinel refs.
     free_binding_names: Vec<Option<StringId>>,
     free_binding_param_names: Vec<Option<StringId>>,
-    /// M8.3 inout parameters: maps each inout param's name to the
+    /// M8.3 inout parameters: for each inout param's name, the
     /// caller-provided slot address (a function-entry block param)
     /// and its pointee `TypeId`. The write-back chokepoint stores each
     /// param's current `Variable` back through this pointer before
     /// every `return_`. Scalars store one field at offset 0; str
     /// pointees (M8.3a Task 9) store three fields.
-    inout_ptrs: HashMap<StringId, (Value, TypeId)>,
+    ///
+    /// Dense table indexed by `StringId::raw()`, sized once per
+    /// function from `pool.string_count()` (codegen never interns, so
+    /// every name in the TIR is in bounds). Never scoped — params are
+    /// bound at function entry — so it has no undo log.
+    inout_ptrs: Vec<Option<(Value, TypeId)>>,
     /// For str-returning functions: the hidden sret pointer (first block param)
     /// through which the callee writes the (ptr, len, cap) triple.
     sret_ptr: Option<Value>,
@@ -513,95 +537,6 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// Record an assignment: the binding's range fact dies here, and
-    /// enclosing scopes learn (via `assigned_log`) to kill it at their
-    /// join. Cheap enough to call on every assignment path.
-    fn kill_fact(ctx: &mut FunctionContext<'_, M>, name: StringId) {
-        ctx.range_facts.remove(&name);
-        ctx.assigned_log.push(name);
-    }
-
-    /// Kill facts for every binding assigned since `mark` (a previous
-    /// `assigned_log.len()`). Called after a scoped body's map restore,
-    /// where in-scope kills were rolled back.
-    fn kill_assigned_since(ctx: &mut FunctionContext<'_, M>, mark: usize) {
-        for i in mark..ctx.assigned_log.len() {
-            let name = ctx.assigned_log[i];
-            ctx.range_facts.remove(&name);
-        }
-    }
-
-    /// Seed the facts a condition implies under `polarity`,
-    /// intersecting with any fact that already holds here.
-    fn seed_cond_facts(ctx: &mut FunctionContext<'_, M>, cond: TirRef, polarity: bool) {
-        for (name, range) in ranges::cond_facts(ctx.tir, cond, polarity) {
-            ctx.range_facts
-                .entry(name)
-                .and_modify(|old| *old = old.intersect(range))
-                .or_insert(range);
-        }
-    }
-
-    /// Kill facts for every binding a loop may write (see
-    /// `collect_loop_writes`): anything in the body, plus anything in
-    /// `cond` when one is passed. Back-edge rule: a fact consulted
-    /// inside a loop must hold on EVERY iteration, not just the first —
-    /// the header is a join of the entry edge and the back-edge, which
-    /// disagree once the body has run. The while-condition also
-    /// re-evaluates per iteration, so this must run before the
-    /// condition is emitted, not just before the body — and the
-    /// condition itself is scanned, since an inout call inside it
-    /// writes through its pointer on every iteration too.
-    fn kill_loop_writes(ctx: &mut FunctionContext<'_, M>, cond: Option<TirRef>, body: &[TirRef]) {
-        let mut writes = Vec::new();
-        if let Some(cond) = cond {
-            Self::collect_writes_in(ctx.tir, cond, &mut writes);
-        }
-        Self::collect_loop_writes(ctx.tir, body, &mut writes);
-        for name in writes {
-            ctx.range_facts.remove(&name);
-        }
-    }
-
-    /// Collect every binding a statement slice may write: `Assign` /
-    /// `CompoundAssign` targets and names passed as `inout` call args
-    /// (the callee may write through the pointer). Recursion drives off
-    /// `walk_operands`, so nested if/elif/else/while/for-range bodies
-    /// are covered.
-    fn collect_loop_writes(tir: &Tir, stmts: &[TirRef], out: &mut Vec<StringId>) {
-        for &stmt in stmts {
-            Self::collect_writes_in(tir, stmt, out);
-        }
-    }
-
-    fn collect_writes_in(tir: &Tir, r: TirRef, out: &mut Vec<StringId>) {
-        let inst = tir.inst(r);
-        match inst.tag {
-            TirTag::Assign => out.push(tir.assign_view(r).name),
-            TirTag::CompoundAssign => out.push(tir.compound_assign_view(r).name),
-            TirTag::Call => {
-                let view = tir.call_view(r);
-                for (&arg, &mode) in view.args.iter().zip(view.modes.iter()) {
-                    if mode != ParamMode::Inout {
-                        continue;
-                    }
-                    // The inout arg was sema-lowered to its inner
-                    // `Var(name)` ref — the same rule `local_name_of`
-                    // uses. Anything else is not a plain binding write;
-                    // ignore it conservatively.
-                    let arg_inst = tir.inst(arg);
-                    if let (TirTag::Var, TirData::Var(name)) = (arg_inst.tag, arg_inst.data) {
-                        out.push(name);
-                    }
-                }
-            }
-            _ => {}
-        }
-        tir.walk_operands(r, &mut |_parent, child, _kind| {
-            Self::collect_writes_in(tir, child, out);
-        });
-    }
-
     pub fn compile(
         &mut self,
         tirs: &[Tir],
@@ -770,7 +705,8 @@ impl<M: Module> Codegen<M> {
             builder.seal_block(entry_block);
 
             let int_type = self.int_type;
-            let mut locals: HashMap<StringId, Variable> = HashMap::new();
+            let mut locals: Vec<Option<Variable>> = vec![None; pool.string_count()];
+            let mut locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
 
             let is_main = pool.str(tir.name) == "main";
             let returns_str = !is_main && is_str_type(tir.return_type, pool);
@@ -781,9 +717,11 @@ impl<M: Module> Codegen<M> {
                 None
             };
 
-            let mut str_param_locals: HashMap<StringId, StrLocals> = HashMap::new();
-            let mut view_param_locals: HashMap<StringId, ViewLocals> = HashMap::new();
-            let mut inout_ptrs: HashMap<StringId, (Value, TypeId)> = HashMap::new();
+            let mut str_param_locals: Vec<Option<StrLocals>> = vec![None; pool.string_count()];
+            let mut str_locals_undo: Vec<(u32, Option<StrLocals>)> = Vec::new();
+            let mut view_param_locals: Vec<Option<ViewLocals>> = vec![None; pool.string_count()];
+            let mut view_locals_undo: Vec<(u32, Option<ViewLocals>)> = Vec::new();
+            let mut inout_ptrs: Vec<Option<(Value, TypeId)>> = vec![None; pool.string_count()];
 
             for param in tir.params.iter() {
                 if param.mode == ParamMode::Inout {
@@ -814,22 +752,24 @@ impl<M: Module> Codegen<M> {
                         builder.def_var(var_ptr, p);
                         builder.def_var(var_len, l);
                         builder.def_var(var_cap, c);
-                        str_param_locals.insert(
+                        Self::write_slot(
+                            &mut str_param_locals,
+                            &mut str_locals_undo,
                             param.name,
-                            StrLocals {
+                            Some(StrLocals {
                                 ptr: var_ptr,
                                 len: var_len,
                                 cap: var_cap,
-                            },
+                            }),
                         );
                     } else {
                         let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                         let cur = builder.ins().load(cl_ty, MemFlagsData::trusted(), ptr, 0);
                         let var = builder.declare_var(cl_ty);
                         builder.def_var(var, cur);
-                        locals.insert(param.name, var);
+                        Self::write_slot(&mut locals, &mut locals_undo, param.name, Some(var));
                     }
-                    inout_ptrs.insert(param.name, (ptr, param.ty));
+                    inout_ptrs[param.name.raw() as usize] = Some((ptr, param.ty));
                     continue;
                 }
                 if is_str_type(param.ty, pool) {
@@ -839,13 +779,15 @@ impl<M: Module> Codegen<M> {
                     builder.def_var(var_ptr, builder.block_params(entry_block)[block_idx]);
                     builder.def_var(var_len, builder.block_params(entry_block)[block_idx + 1]);
                     builder.def_var(var_cap, builder.block_params(entry_block)[block_idx + 2]);
-                    str_param_locals.insert(
+                    Self::write_slot(
+                        &mut str_param_locals,
+                        &mut str_locals_undo,
                         param.name,
-                        StrLocals {
+                        Some(StrLocals {
                             ptr: var_ptr,
                             len: var_len,
                             cap: var_cap,
-                        },
+                        }),
                     );
                     block_idx += 3;
                 } else if pool.is_view(param.ty) {
@@ -855,19 +797,21 @@ impl<M: Module> Codegen<M> {
                     let var_len = builder.declare_var(types::I64);
                     builder.def_var(var_ptr, builder.block_params(entry_block)[block_idx]);
                     builder.def_var(var_len, builder.block_params(entry_block)[block_idx + 1]);
-                    view_param_locals.insert(
+                    Self::write_slot(
+                        &mut view_param_locals,
+                        &mut view_locals_undo,
                         param.name,
-                        ViewLocals {
+                        Some(ViewLocals {
                             ptr: var_ptr,
                             len: var_len,
-                        },
+                        }),
                     );
                     block_idx += 2;
                 } else {
                     let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                     let var = builder.declare_var(cl_ty);
                     builder.def_var(var, builder.block_params(entry_block)[block_idx]);
-                    locals.insert(param.name, var);
+                    Self::write_slot(&mut locals, &mut locals_undo, param.name, Some(var));
                     block_idx += 1;
                 }
             }
@@ -892,7 +836,9 @@ impl<M: Module> Codegen<M> {
                 pool,
                 tir,
                 locals,
-                range_facts: HashMap::new(),
+                locals_undo,
+                range_facts: vec![None; pool.string_count()],
+                range_facts_undo: Vec::new(),
                 assigned_log: Vec::new(),
                 func_ids,
                 inst_values: vec![None; tir.instructions.len()],
@@ -902,7 +848,9 @@ impl<M: Module> Codegen<M> {
                 pending_sweep,
                 loop_stack: Vec::new(),
                 str_locals: str_param_locals,
+                str_locals_undo,
                 view_locals: view_param_locals,
+                view_locals_undo,
                 free_binding_names,
                 free_binding_param_names,
                 inout_ptrs,
@@ -915,9 +863,7 @@ impl<M: Module> Codegen<M> {
 
             for (idx, param) in tir.params.iter().enumerate() {
                 if is_str_type(param.ty, pool) {
-                    let locals = ctx
-                        .str_locals
-                        .get(&param.name)
+                    let locals = Self::read_slot(&ctx.str_locals, param.name)
                         .expect("every str param gets StrLocals in the param preamble above");
                     let repr = ValueRepr::Str {
                         ptr: builder.use_var(locals.ptr),
@@ -926,9 +872,7 @@ impl<M: Module> Codegen<M> {
                     };
                     ctx.param_values[idx] = Some(repr);
                 } else if pool.is_view(param.ty) {
-                    let locals = ctx
-                        .view_locals
-                        .get(&param.name)
+                    let locals = Self::read_slot(&ctx.view_locals, param.name)
                         .expect("every view param gets ViewLocals in the param preamble above");
                     let repr = ValueRepr::View {
                         ptr: builder.use_var(locals.ptr),
@@ -1029,20 +973,37 @@ impl<M: Module> Codegen<M> {
         Ok(terminator)
     }
 
+    /// Emit `stmts` with the slot tables scoped: every write the body
+    /// makes to `locals` / `str_locals` / `view_locals` (and
+    /// `range_facts`) is rolled back on exit by replaying each table's
+    /// undo log down to the mark taken here. On `?` error nothing is
+    /// restored — the compile is abandoned anyway.
     fn emit_scoped_body(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         stmts: &[TirRef],
     ) -> Result<Terminator, String> {
-        let saved_locals = ctx.locals.clone();
-        let saved_str_locals = ctx.str_locals.clone();
-        let saved_view_locals = ctx.view_locals.clone();
-        let saved_range_facts = ctx.range_facts.clone();
+        let locals_mark = ctx.locals_undo.len();
+        let str_locals_mark = ctx.str_locals_undo.len();
+        let view_locals_mark = ctx.view_locals_undo.len();
+        let range_facts_mark = ctx.range_facts_undo.len();
         let terminator = Self::emit_body(builder, ctx, stmts)?;
-        ctx.locals = saved_locals;
-        ctx.str_locals = saved_str_locals;
-        ctx.view_locals = saved_view_locals;
-        ctx.range_facts = saved_range_facts;
+        Self::restore_slots(&mut ctx.locals, &mut ctx.locals_undo, locals_mark);
+        Self::restore_slots(
+            &mut ctx.str_locals,
+            &mut ctx.str_locals_undo,
+            str_locals_mark,
+        );
+        Self::restore_slots(
+            &mut ctx.view_locals,
+            &mut ctx.view_locals_undo,
+            view_locals_mark,
+        );
+        Self::restore_slots(
+            &mut ctx.range_facts,
+            &mut ctx.range_facts_undo,
+            range_facts_mark,
+        );
         Ok(terminator)
     }
 
@@ -1055,28 +1016,35 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<(), String> {
-        for (name, (ptr, ty)) in ctx.inout_ptrs.iter() {
-            if is_str_type(*ty, ctx.pool) {
+        // Iterate by index ascending: identical input must emit
+        // identical instruction order (a HashMap's iteration order is
+        // randomized per run).
+        for idx in 0..ctx.inout_ptrs.len() {
+            let Some((ptr, ty)) = ctx.inout_ptrs[idx] else {
+                continue;
+            };
+            let name = StringId::from_raw(u32::try_from(idx).expect("StringId index out of range"));
+            if is_str_type(ty, ctx.pool) {
                 // str pointee: store all three fat-pointer fields.
-                let sl = ctx.str_locals.get(name).ok_or_else(|| {
-                    format!("inout str '{}' has no StrLocals", ctx.pool.str(*name))
+                let sl = Self::read_slot(&ctx.str_locals, name).ok_or_else(|| {
+                    format!("inout str '{}' has no StrLocals", ctx.pool.str(name))
                 })?;
                 let p = builder.use_var(sl.ptr);
                 let l = builder.use_var(sl.len);
                 let c = builder.use_var(sl.cap);
-                builder.ins().store(MemFlagsData::trusted(), p, *ptr, 0);
-                builder.ins().store(MemFlagsData::trusted(), l, *ptr, 8);
-                builder.ins().store(MemFlagsData::trusted(), c, *ptr, 16);
+                builder.ins().store(MemFlagsData::trusted(), p, ptr, 0);
+                builder.ins().store(MemFlagsData::trusted(), l, ptr, 8);
+                builder.ins().store(MemFlagsData::trusted(), c, ptr, 16);
             } else {
                 // Scalar pointee: a single store at offset 0.
-                let var = ctx.locals.get(name).ok_or_else(|| {
+                let var = Self::read_slot(&ctx.locals, name).ok_or_else(|| {
                     format!(
                         "inout scalar '{}' has no local Variable",
-                        ctx.pool.str(*name)
+                        ctx.pool.str(name)
                     )
                 })?;
-                let val = builder.use_var(*var);
-                builder.ins().store(MemFlagsData::trusted(), val, *ptr, 0);
+                let val = builder.use_var(var);
+                builder.ins().store(MemFlagsData::trusted(), val, ptr, 0);
             }
         }
         Ok(())
@@ -1119,13 +1087,15 @@ impl<M: Module> Codegen<M> {
                             builder.def_var(var_ptr, ptr);
                             builder.def_var(var_len, len);
                             builder.def_var(var_cap, cap);
-                            ctx.str_locals.insert(
+                            Self::write_slot(
+                                &mut ctx.str_locals,
+                                &mut ctx.str_locals_undo,
                                 view.name,
-                                StrLocals {
+                                Some(StrLocals {
                                     ptr: var_ptr,
                                     len: var_len,
                                     cap: var_cap,
-                                },
+                                }),
                             );
                         }
                         _ => unreachable!("str-typed initializer should produce ValueRepr::Str"),
@@ -1140,12 +1110,14 @@ impl<M: Module> Codegen<M> {
                             let var_len = builder.declare_var(types::I64);
                             builder.def_var(var_ptr, ptr);
                             builder.def_var(var_len, len);
-                            ctx.view_locals.insert(
+                            Self::write_slot(
+                                &mut ctx.view_locals,
+                                &mut ctx.view_locals_undo,
                                 view.name,
-                                ViewLocals {
+                                Some(ViewLocals {
                                     ptr: var_ptr,
                                     len: var_len,
-                                },
+                                }),
                             );
                         }
                         _ => unreachable!("view-typed initializer should produce ValueRepr::View"),
@@ -1153,7 +1125,12 @@ impl<M: Module> Codegen<M> {
                     // Same defensive fact removal as the scalar path
                     // below: a same-scope redefinition must not inherit
                     // a stale fact from the shadowed binding.
-                    ctx.range_facts.remove(&view.name);
+                    Self::write_slot(
+                        &mut ctx.range_facts,
+                        &mut ctx.range_facts_undo,
+                        view.name,
+                        None,
+                    );
                     return Ok(Terminator::None);
                 }
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
@@ -1165,8 +1142,13 @@ impl<M: Module> Codegen<M> {
                 // Defensive: a same-scope redefinition must not inherit
                 // a stale fact from the shadowed binding. (No seeding
                 // from constant initializers — explicit non-goal.)
-                ctx.range_facts.remove(&view.name);
-                ctx.locals.insert(view.name, var);
+                Self::write_slot(
+                    &mut ctx.range_facts,
+                    &mut ctx.range_facts_undo,
+                    view.name,
+                    None,
+                );
+                Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, view.name, Some(var));
                 Ok(Terminator::None)
             }
             TirTag::Return => {
@@ -1235,20 +1217,16 @@ impl<M: Module> Codegen<M> {
                     let ValueRepr::Str { ptr, len, cap } = repr else {
                         unreachable!("str-typed assign should produce ValueRepr::Str");
                     };
-                    // `.clone()` releases the &ctx.str_locals borrow before the
-                    // `declare_str_free` call below needs &mut ctx.module.
-                    // StrLocals is three Cranelift `Variable` newtypes; clone is
-                    // three integer copies — cheap.
-                    let locals = ctx
-                        .str_locals
-                        .get(&view.name)
-                        .ok_or_else(|| {
-                            format!(
-                                "Undefined string variable in assign: '{}'",
-                                ctx.pool.str(view.name)
-                            )
-                        })?
-                        .clone();
+                    // `read_slot` copies the StrLocals out (three Cranelift
+                    // `Variable` newtypes), so no table borrow survives into
+                    // the `declare_str_free` call below, which needs
+                    // &mut ctx.module.
+                    let locals = Self::read_slot(&ctx.str_locals, view.name).ok_or_else(|| {
+                        format!(
+                            "Undefined string variable in assign: '{}'",
+                            ctx.pool.str(view.name)
+                        )
+                    })?;
                     // Free the old allocation before overwriting locals.
                     // sidecar.free_on_reassign[r] is set whenever the
                     // ownership pass observed a Valid old owner at this
@@ -1274,7 +1252,7 @@ impl<M: Module> Codegen<M> {
                     let ValueRepr::View { ptr, len } = repr else {
                         unreachable!("view-typed assign should produce ValueRepr::View");
                     };
-                    let locals = ctx.view_locals.get(&view.name).ok_or_else(|| {
+                    let locals = Self::read_slot(&ctx.view_locals, view.name).ok_or_else(|| {
                         format!(
                             "Undefined strview variable in assign: '{}'",
                             ctx.pool.str(view.name)
@@ -1291,22 +1269,19 @@ impl<M: Module> Codegen<M> {
                 // Kill AFTER evaluating the RHS: `x = x + 1` must still
                 // see the old fact while its right-hand side is emitted.
                 Self::kill_fact(ctx, view.name);
-                let var = ctx.locals.get(&view.name).ok_or_else(|| {
+                let var = Self::read_slot(&ctx.locals, view.name).ok_or_else(|| {
                     format!(
                         "Undefined variable in assign: '{}'",
                         ctx.pool.str(view.name)
                     )
                 })?;
-                builder.def_var(*var, val);
+                builder.def_var(var, val);
                 Ok(Terminator::None)
             }
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
                 let rhs = Self::eval_inst(builder, ctx, view.value)?;
-                // Copy the Variable handle out: the zero-divisor guard
-                // below needs &mut ctx, which an outstanding borrow of
-                // ctx.locals would block.
-                let var = *ctx.locals.get(&view.name).ok_or_else(|| {
+                let var = Self::read_slot(&ctx.locals, view.name).ok_or_else(|| {
                     format!(
                         "Undefined variable in compound assign: '{}'",
                         ctx.pool.str(view.name)
@@ -1315,7 +1290,7 @@ impl<M: Module> Codegen<M> {
                 let current = builder.use_var(var);
 
                 let is_float = inst.ty == ctx.pool.float();
-                let lhs_range = ctx.range_facts.get(&view.name).copied();
+                let lhs_range = Self::read_slot(&ctx.range_facts, view.name);
                 let rhs_range = ranges::int_range_of(ctx.tir, &ctx.range_facts, view.value);
                 let result = match (view.op, is_float) {
                     // Same spec §18 checked arithmetic as the binop arm.
@@ -1414,7 +1389,7 @@ impl<M: Module> Codegen<M> {
         r: TirRef,
     ) -> Result<Terminator, String> {
         let view = ctx.tir.if_stmt_view(r);
-        let outer_facts = ctx.range_facts.clone();
+        let outer_facts_mark = ctx.range_facts_undo.len();
         let scope_mark = ctx.assigned_log.len();
         // Conditions whose FALSE path dominates each subsequent block
         // (elif cond blocks, the else arm, and — when every written arm
@@ -1493,11 +1468,15 @@ impl<M: Module> Codegen<M> {
             // own arm (emit_scoped_body's restore would resurrect them).
             // This block is dominated by the FALSE path of every
             // earlier condition — and by nothing else.
-            ctx.range_facts = outer_facts.clone();
+            Self::restore_slots(
+                &mut ctx.range_facts,
+                &mut ctx.range_facts_undo,
+                outer_facts_mark,
+            );
             for &prev in &negated_conds {
                 Self::seed_cond_facts(ctx, prev, false);
             }
-            // The clone above predates every earlier condition's
+            // The restore above predates every earlier condition's
             // evaluation — an inout call in one of them killed its
             // binding's fact via the reload path, and the re-baseline
             // (or a negation seed on the same name) would resurrect it.
@@ -1546,7 +1525,11 @@ impl<M: Module> Codegen<M> {
             // Same re-baseline as the elif cond blocks, seeded with
             // every condition's FALSE polarity — the else arm is
             // dominated by the all-conditions-false path.
-            ctx.range_facts = outer_facts.clone();
+            Self::restore_slots(
+                &mut ctx.range_facts,
+                &mut ctx.range_facts_undo,
+                outer_facts_mark,
+            );
             for &cond in &negated_conds {
                 Self::seed_cond_facts(ctx, cond, false);
             }
@@ -1588,11 +1571,15 @@ impl<M: Module> Codegen<M> {
 
         // Range-fact join. Arm-body seeds were already rolled back by
         // emit_scoped_body; cond-block seeds are rolled back here by
-        // restoring the pre-if map. A binding assigned in ANY arm loses
+        // restoring the pre-if facts. A binding assigned in ANY arm loses
         // its fact (predecessors disagree). Only when there is no else
         // and every written arm terminated is the merge dominated by
         // the fall-through edge alone — seed all negations there.
-        ctx.range_facts = outer_facts;
+        Self::restore_slots(
+            &mut ctx.range_facts,
+            &mut ctx.range_facts_undo,
+            outer_facts_mark,
+        );
         if !has_else && written_arms_terminated {
             for &cond in &negated_conds {
                 Self::seed_cond_facts(ctx, cond, false);
@@ -1636,7 +1623,7 @@ impl<M: Module> Codegen<M> {
         // Back-edge rule: kill facts on bindings the body writes BEFORE
         // emitting the condition — the condition re-evaluates every
         // iteration, so a fact it consults must hold on every one.
-        // `pre_loop_facts` is cloned after this kill, so the post-loop
+        // The undo-log mark is taken after this kill, so the post-loop
         // restore keeps these names dead (a body-written binding's
         // pre-loop fact does not hold at the exit either). The
         // cond-true seeds applied below stay sound: the header's brif
@@ -1654,7 +1641,7 @@ impl<M: Module> Codegen<M> {
         // guards it). Assignments inside the body kill facts in place;
         // the seeds themselves must NOT survive the loop — the exit
         // block is also reached on the zero-iteration path.
-        let pre_loop_facts = ctx.range_facts.clone();
+        let pre_loop_facts_mark = ctx.range_facts_undo.len();
         let scope_mark = ctx.assigned_log.len();
         Self::seed_cond_facts(ctx, view.cond, true);
 
@@ -1665,7 +1652,11 @@ impl<M: Module> Codegen<M> {
         let body_term = Self::emit_scoped_body(builder, ctx, &view.body)?;
         ctx.loop_stack.pop();
 
-        ctx.range_facts = pre_loop_facts;
+        Self::restore_slots(
+            &mut ctx.range_facts,
+            &mut ctx.range_facts_undo,
+            pre_loop_facts_mark,
+        );
         Self::kill_assigned_since(ctx, scope_mark);
 
         if body_term == Terminator::None {
@@ -1717,39 +1708,57 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(body_block);
         builder.switch_to_block(body_block);
 
-        // Scope the loop variable: map var_name to the counter Variable.
+        // Scope the loop variable: bind var_name to the counter Variable.
         // We deliberately use emit_body rather than emit_scoped_body here
         // because we need to insert the counter binding between the save
         // and the emit; emit_scoped_body's internal save would shadow our
-        // insertion.
-        let shadowed_var = ctx.locals.insert(view.var_name, counter);
+        // insertion. The undo log is NOT replayed at loop exit — only
+        // this one slot is restored by hand below, so body writes to
+        // other bindings persist past the loop exactly as before.
+        let shadowed_var = Self::read_slot(&ctx.locals, view.var_name);
+        Self::write_slot(
+            &mut ctx.locals,
+            &mut ctx.locals_undo,
+            view.var_name,
+            Some(counter),
+        );
         // The loop variable is a different quantity than any shadowed
         // outer binding — its fact must not leak onto the counter.
-        let shadowed_fact = ctx.range_facts.remove(&view.var_name);
+        let shadowed_fact = Self::read_slot(&ctx.range_facts, view.var_name);
+        Self::write_slot(
+            &mut ctx.range_facts,
+            &mut ctx.range_facts_undo,
+            view.var_name,
+            None,
+        );
 
         // Back-edge rule (see generate_while_loop): the bounds were
         // evaluated once pre-loop, so pre-loop facts were valid there —
         // but a fact consulted inside the body must hold on every
         // iteration. Kill every binding the body writes before
-        // emitting it. There is no post-loop map restore here, so the
+        // emitting it. There is no post-loop restore here, so the
         // kills simply persist past the loop.
         Self::kill_loop_writes(ctx, None, &view.body);
 
         let body_term = Self::emit_body(builder, ctx, &view.body)?;
 
         // Restore locals (loop variable goes out of scope)
-        if let Some(old_var) = shadowed_var {
-            ctx.locals.insert(view.var_name, old_var);
-        } else {
-            ctx.locals.remove(&view.var_name);
-        }
+        Self::write_slot(
+            &mut ctx.locals,
+            &mut ctx.locals_undo,
+            view.var_name,
+            shadowed_var,
+        );
         // The loop variable's facts die with its scope whether or not
-        // the shadowed outer binding had one — remove unconditionally,
-        // then reinsert the outer binding's fact if there was one.
-        ctx.range_facts.remove(&view.var_name);
-        if let Some(fact) = shadowed_fact {
-            ctx.range_facts.insert(view.var_name, fact);
-        }
+        // the shadowed outer binding had one — write the saved slot back
+        // unconditionally (None clears it), discarding whatever the body
+        // left on this slot.
+        Self::write_slot(
+            &mut ctx.range_facts,
+            &mut ctx.range_facts_undo,
+            view.var_name,
+            shadowed_fact,
+        );
 
         if body_term == Terminator::None {
             builder.ins().jump(increment_block, &[]);

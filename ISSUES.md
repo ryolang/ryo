@@ -311,12 +311,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** R7 targets functions under 50 lines so a human reviewer can hold each one in their head. Sixteen functions sit between ~150 and ~410 lines, almost all of them giant per-tag dispatch `match`es in the hottest passes. These are the files every milestone touches; review cost and merge-conflict surface scale with their length. (Distinct from I-094, which tracks a *content* problem inside one of these functions, not size.)
 **Resolution:** Split the entry points into one helper per tag/arm family (`lower_match_expr`-style naming per R7), keeping the dispatch match as a thin table. Do it opportunistically when a function is next touched for a feature — starting with `visit_expr` and `analyze_stmt`, the two worst — rather than as one big-bang refactor. `clippy::too_many_lines` is denied workspace-wide with `too-many-lines-threshold = 360` as a ratchet; lower the threshold towards 50 as functions split.
 
-### I-129 — Codegen `locals` family kept in `HashMap`s keyed by dense `StringId`
-
-**Files:** `ryo-backend/src/codegen/mod.rs` (`locals`/`str_locals`/`view_locals`/`range_facts`/`inout_ptrs` keyed by dense `StringId`; whole-map clones in `emit_scoped_body`)
-**Summary:** R18's rule: side tables keyed by a dense arena index belong in a `Vec` indexed by that index; hash maps are for sparse/string-keyed/unbounded data only. The `TirRef`/`InstRef`-keyed tables this entry originally covered (ownership per-inst tables, `program_order`, sema `call_arg_refs`, codegen `freed_at`/`param_values`/`free_binding_names`/`free_by_after`, sidecar `free_on_reassign`/`if_branches`) were converted to dense `Vec` side tables on branch `fix/i-129-dense-index-side-tables`. What remains is the codegen `locals` family: `StringId` is a dense interned index, but these tables are semantically string-keyed (binding names), and `emit_scoped_body` whole-map-clones them around every if/while/for body — program-wide-sized Vecs would make each scope clone O(total interned strings), a regression without a scoped-restore redesign.
-**Resolution:** Only convert together with an undo-log scoped save/restore (record `(StringId, old slot)` per write, replay on scope exit — the `assigned_log` pattern) replacing the whole-map clones; requires a public `InternPool::string_count()` and benchmark validation. Overlaps the clone-elimination territory of I-136.
-
 ### I-135 — Rule-7 call-arg partition duplicates the view look-through logic
 
 **Files:** `ryo-frontend/src/ownership/walk.rs` (:934-936 — owner partition, :1029-1030 — E0031 span search)
@@ -382,12 +376,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-backend/src/codegen/mod.rs` (`build_signature` called at :490 and :590)
 **Summary:** `declare_all_functions` builds every function's `Signature` to register the `FuncId`, then `compile_function` rebuilds the identical signature — redundant pool queries and two Vec allocations per function.
 **Resolution:** Store the `Signature` alongside the `FuncId` in `func_ids` and move/clone it into `ctx.func`.
-
-### I-151 — `collect_loop_nesting` copies the nesting stack per instruction
-
-**Files:** `ryo-frontend/src/ownership/loops.rs` (`collect_loop_nesting`)
-**Summary:** Once per function, but every instruction in a loop subtree gets its own copy of the enclosing-loop stack (`inner.clone()` / `stack.to_vec()` per subtree instruction). The per-statement scratch-`HashSet` allocations and the `HashMap<TirRef, Vec<TirRef>>` structure were fixed in the I-129 side-table conversion (the table is now a dense `Vec<Vec<TirRef>>` with one reused scratch set); the per-instruction stack copies remain.
-**Resolution:** Share nesting stacks via parent-pointer chains or a depth-indexed `Vec<Vec<TirRef>>` so subtree instructions reference a shared stack instead of owning a copy.
 
 ### I-152 — Parser builds a throwaway `Vec` per call/params node before the arena copy
 

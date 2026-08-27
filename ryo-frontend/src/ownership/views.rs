@@ -1,7 +1,7 @@
 //! M8.4 slice projections and view liveness — split from `mod.rs`.
 
 use super::{
-    Owner, OwnerState, Ownership, format_binding, needs_tracking, nesting_of, underlying_owner,
+    LoopNesting, Owner, OwnerState, Ownership, format_binding, needs_tracking, underlying_owner,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
@@ -261,7 +261,7 @@ pub(crate) struct ViewLiveness {
 pub(crate) fn collect_view_liveness(
     tir: &Tir,
     pool: &InternPool,
-    nesting: &[Vec<TirRef>],
+    nesting: &LoopNesting,
 ) -> ViewLiveness {
     let mut bindings: HashMap<StringId, TirRef> = HashMap::new();
     let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
@@ -277,14 +277,16 @@ pub(crate) fn collect_view_liveness(
     );
     let mut defer_to_loop = vec![None; tir.instructions.len()];
     for (view, read) in &last_use {
-        let created_in = nesting_of(nesting, *view);
-        let read_in = nesting_of(nesting, *read);
-        // Scope rules guarantee `created_in` is a prefix of `read_in`
-        // (a view's reads cannot escape its binding's scope). A
-        // strictly deeper read re-executes on later iterations of the
-        // first loop beyond the creation's nesting.
-        if created_in.len() < read_in.len() {
-            defer_to_loop[view.index()] = Some(read_in[created_in.len()]);
+        let created_depth = nesting.depth_of(*view);
+        let read_depth = nesting.depth_of(*read);
+        // Scope rules guarantee the creation's nesting chain is a
+        // prefix of the read's (a view's reads cannot escape its
+        // binding's scope). A strictly deeper read re-executes on
+        // later iterations of the first loop beyond the creation's
+        // nesting — the enclosing loop whose own depth is
+        // `created_depth`.
+        if created_depth < read_depth {
+            defer_to_loop[view.index()] = Some(nesting.ancestor_at_depth(*read, created_depth));
         }
     }
     let mut last_use_dense = vec![None; tir.instructions.len()];
@@ -554,10 +556,9 @@ pub(crate) fn refine_view_liveness_for_arm(
             Some(lu) => {
                 // P4 deferral, per candidate: `view_defer_loop` covers
                 // only the global max read, so re-apply the pre-pass's
-                // `created_in < read_in` test to the arm-local read the
+                // `created_depth < read_depth` test to the arm-local read the
                 // override would install.
-                if nesting_of(&own.loop_nesting, vi).len() < nesting_of(&own.loop_nesting, lu).len()
-                {
+                if own.loop_nesting.depth_of(vi) < own.loop_nesting.depth_of(lu) {
                     continue;
                 }
                 saved.push((vi, global_lu));

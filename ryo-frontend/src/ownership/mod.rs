@@ -235,16 +235,16 @@ pub(crate) struct Ownership {
     /// Dense per-instruction table, sized like `origin`.
     pub view_defer_loop: Vec<Option<TirRef>>,
 
-    /// Walk-constant pre-pass structure: instruction → the
-    /// `WhileLoop`/`ForRange` instructions whose body, condition, or
-    /// bounds contain it, outermost first. Computed in one traversal
-    /// before the walk so the liveness passes and the
-    /// redundant-materialize pass look nesting up instead of
-    /// re-walking the body per query. Constant per function, so
-    /// branch merges need no per-field rule for it. Dense
-    /// per-instruction table, sized like `origin`; the empty `Vec`
-    /// means "not nested" (empty `Vec`s don't heap-allocate).
-    pub loop_nesting: Vec<Vec<TirRef>>,
+    /// Walk-constant pre-pass structure: per-instruction loop nesting
+    /// as parent-pointer chains (`inst` → innermost enclosing
+    /// `WhileLoop`/`ForRange`, plus the enclosing-loop count).
+    /// Computed in one traversal before the walk so the liveness
+    /// passes and the redundant-materialize pass look nesting up
+    /// instead of re-walking the body per query. Constant per
+    /// function, so branch merges need no per-field rule for it.
+    /// Dense per-instruction tables, sized like `origin`; `None` /
+    /// depth 0 means "not nested".
+    pub loop_nesting: LoopNesting,
 
     /// Views whose projection ends at the current statement's end
     /// (P4). Drained by `analyze_stmt` after every statement, so a
