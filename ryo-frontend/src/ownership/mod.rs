@@ -116,7 +116,12 @@ impl Owner {
 pub(crate) struct Ownership {
     pub states: HashMap<Owner, OwnerState>,
     pub current_owner: HashMap<StringId, Owner>,
-    pub origin: HashMap<TirRef, Option<Owner>>,
+    /// Dense per-instruction table indexed by `TirRef::index()`, sized
+    /// to `tir.instructions.len()` in `analyze_function` (slot 0, the
+    /// reserved sentinel, stays empty). Outer `None` = no entry; the
+    /// inner `None` is the meaningful "rebound / fresh allocation"
+    /// value written by `rebind_to_init` and the producer arms.
+    pub origin: Vec<Option<Option<Owner>>>,
     /// Param name → index into `tir.params`, built once per function
     /// in `analyze_function`. Resolving a `Param` owner to its virtual
     /// `TirRef`, type, or span happens inside per-owner loops, so a
@@ -151,7 +156,8 @@ pub(crate) struct Ownership {
     /// state — which would misroute reads that precede a `mut`
     /// reassignment to the post-rebind owner. For Move-typed reads
     /// this anchors the last-use Free to the correct allocation.
-    pub owner_at_read: HashMap<TirRef, Owner>,
+    /// Dense per-instruction table, sized like `origin`.
+    pub owner_at_read: Vec<Option<Owner>>,
 
     /// Monotonic `BranchId` allocator. Bumped each time
     /// `analyze_if_stmt` enters an arm (then / each elif / else) so
@@ -211,8 +217,9 @@ pub(crate) struct Ownership {
     /// function (computed before the walk), so branch merges need no
     /// per-field rule for it. `analyze_if_stmt` temporarily refines
     /// entries per arm (see `if_arm_last_reads`) and restores them at
-    /// each arm's end.
-    pub view_last_use: HashMap<TirRef, TirRef>,
+    /// each arm's end. Dense per-instruction table, sized like
+    /// `origin`.
+    pub view_last_use: Vec<Option<TirRef>>,
 
     /// Walk-constant pre-pass liveness (P4 per-arm refinement): if
     /// stmt → per-arm (view instruction → its last read within that
@@ -225,7 +232,8 @@ pub(crate) struct Ownership {
     /// loop at whose exit the projection dies. A view whose last read
     /// sits inside a loop its creation is outside of re-executes on
     /// later iterations, so it stays live through the whole loop.
-    pub view_defer_loop: HashMap<TirRef, TirRef>,
+    /// Dense per-instruction table, sized like `origin`.
+    pub view_defer_loop: Vec<Option<TirRef>>,
 
     /// Walk-constant pre-pass structure: instruction → the
     /// `WhileLoop`/`ForRange` instructions whose body, condition, or
@@ -233,8 +241,10 @@ pub(crate) struct Ownership {
     /// before the walk so the liveness passes and the
     /// redundant-materialize pass look nesting up instead of
     /// re-walking the body per query. Constant per function, so
-    /// branch merges need no per-field rule for it.
-    pub loop_nesting: HashMap<TirRef, Vec<TirRef>>,
+    /// branch merges need no per-field rule for it. Dense
+    /// per-instruction table, sized like `origin`; the empty `Vec`
+    /// means "not nested" (empty `Vec`s don't heap-allocate).
+    pub loop_nesting: Vec<Vec<TirRef>>,
 
     /// Views whose projection ends at the current statement's end
     /// (P4). Drained by `analyze_stmt` after every statement, so a
@@ -251,6 +261,23 @@ pub(crate) struct Ownership {
     /// the post-walk redundant-materialize pass to classify escapes of
     /// the copy and defensive-copy hazards on the view's root owner.
     pub owner_hazards: Vec<(Owner, TirRef)>,
+}
+
+impl Ownership {
+    /// Read a dense per-instruction slot. Refs outside the arena read
+    /// as no entry; param sentinels never key these tables (the
+    /// `debug_assert!` pins that invariant).
+    pub(crate) fn dense_get<V: Copy>(table: &[Option<V>], r: TirRef) -> Option<V> {
+        debug_assert!(!r.is_param());
+        table.get(r.index()).copied().flatten()
+    }
+
+    /// Write a dense per-instruction slot (overwriting, matching the
+    /// old `HashMap::insert` semantics).
+    pub(crate) fn dense_set<V: Copy>(table: &mut [Option<V>], r: TirRef, v: V) {
+        debug_assert!(!r.is_param());
+        table[r.index()] = Some(v);
+    }
 }
 
 /// One conditional-reseat observation, recorded by
@@ -276,7 +303,7 @@ pub(crate) struct ReseatDrop {
 pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipSidecar {
     let mut sidecar = OwnershipSidecar::default();
     for tir in tirs {
-        let mut func_sidecar = FunctionSidecar::new(tir.name);
+        let mut func_sidecar = FunctionSidecar::new(tir.name, tir.instructions.len());
         analyze_function(tir, pool, sink, &mut func_sidecar);
         sidecar.functions.push(func_sidecar);
     }
@@ -299,6 +326,12 @@ fn analyze_function(
             .enumerate()
             .map(|(i, p)| (p.name, i))
             .collect(),
+        // Dense per-instruction tables, sized to the arena (slot 0 is
+        // the reserved sentinel and stays empty). `loop_nesting` /
+        // `view_last_use` / `view_defer_loop` are initialized by the
+        // pre-pass assignments below instead.
+        origin: vec![None; tir.instructions.len()],
+        owner_at_read: vec![None; tir.instructions.len()],
         ..Ownership::default()
     };
 
@@ -358,6 +391,8 @@ fn analyze_function(
     }
     // P5 (final spec §3.2): root owner → every view that ever
     // projected it (sorted for deterministic iteration).
+    // Program-order ranks, built once per function and shared by the
+    // P5 deferral (`defer_anchor`) and the redundant-materialize pass.
     let order = program_order(tir);
     let mut projections_of: HashMap<Owner, Vec<TirRef>> = HashMap::new();
     for (view, root) in &own.root_owner {
@@ -384,7 +419,8 @@ fn analyze_function(
     // current `StrLocals`, which is the path-correct buffer.
     let reassign_targets: HashSet<Owner> = sidecar
         .free_on_reassign
-        .values()
+        .iter()
+        .flatten()
         .map(|t| Owner::Inst(*t))
         .collect();
     let live_binding_owners: HashSet<Owner> = own.current_owner.values().copied().collect();
@@ -647,7 +683,7 @@ fn analyze_function(
     // W0003 case B (M8.4.1.2): redundant bound materializations. Runs
     // after the walk so the escape classification it reuses — final
     // lattice states plus the hazard log — is complete.
-    warn_redundant_materialize(tir, pool, &own, sink);
+    warn_redundant_materialize(tir, pool, &own, &order, sink);
 
     // Convert honored reseat records into arm-gated
     // `ConditionalDeadDrop`s. A record is honored when a pending entry

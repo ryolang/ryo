@@ -626,14 +626,13 @@ fn diverged_loop_writes_branch_gated_free_exactly_once() {
     // Exactly ONE branch-gated Free for the if's else arm,
     // gated on the BranchId `if_branches` actually records.
     assert_eq!(
-        sc.if_branches.len(),
+        sc.if_branches.iter().flatten().count(),
         1,
         "one if → one entry set; got {:?}",
         sc.if_branches
     );
-    let ids = sc
-        .if_branches
-        .get(&if_inst)
+    let ids = sc.if_branches[if_inst.index()]
+        .as_ref()
         .expect("if_branches entry for the loop-body if");
     let gated: Vec<_> = sc
         .free_schedule

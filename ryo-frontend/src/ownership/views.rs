@@ -125,8 +125,11 @@ pub(crate) fn remove_loop_deferred_views(own: &mut Ownership, loop_ref: TirRef) 
     let dead: Vec<Owner> = own
         .view_defer_loop
         .iter()
-        .filter(|(_, l)| **l == loop_ref)
-        .map(|(v, _)| Owner::Inst(*v))
+        .enumerate()
+        .filter_map(|(i, slot)| {
+            let &l = slot.as_ref()?;
+            (l == loop_ref).then(|| Owner::Inst(TirRef::from_raw(i as u32)))
+        })
         .collect();
     for view in dead {
         remove_projection(own, view);
@@ -159,12 +162,10 @@ pub(crate) fn prune_branch_dead_projections(tir: &Tir, own: &mut Ownership, if_r
                 return false;
             };
             // P2/P4: loop-deferred views die at loop exit, not here.
-            if own.view_defer_loop.contains_key(&vi) {
+            if Ownership::dense_get(&own.view_defer_loop, vi).is_some() {
                 return false;
             }
-            own.view_last_use
-                .get(&vi)
-                .is_some_and(|lu| subtree.contains(lu))
+            Ownership::dense_get(&own.view_last_use, vi).is_some_and(|lu| subtree.contains(&lu))
         })
         .copied()
         .collect();
@@ -207,8 +208,8 @@ pub(crate) fn check_source_projected(
     // Registration order is walk order, so projections[0] is a
     // deterministic choice for the note's span.
     let (note_span, note_msg) = match projections[0].inst_tirref() {
-        Some(vi) => match own.view_last_use.get(&vi) {
-            Some(&lu) => (tir.span(lu), "last slice use here"),
+        Some(vi) => match Ownership::dense_get(&own.view_last_use, vi) {
+            Some(lu) => (tir.span(lu), "last slice use here"),
             None => (tir.span(vi), "slice created here"),
         },
         None => (span, "slice projection live here"),
@@ -230,13 +231,16 @@ pub(crate) fn check_source_projected(
 }
 
 /// Pre-walk liveness for bound views (P4, final spec §3.2). See
-/// [`collect_view_liveness`].
+/// [`collect_view_liveness`]. `last_use` / `defer_to_loop` are dense
+/// per-instruction tables sized to `tir.instructions.len()` (slot 0,
+/// the reserved sentinel, stays empty) — the walk writes them into
+/// `Ownership` wholesale.
 pub(crate) struct ViewLiveness {
     /// Bound view instruction → its last reading instruction.
-    pub(crate) last_use: HashMap<TirRef, TirRef>,
+    pub(crate) last_use: Vec<Option<TirRef>>,
     /// View instruction → the loop at whose exit the projection dies
     /// (its last read sits inside a loop the creation is outside of).
-    pub(crate) defer_to_loop: HashMap<TirRef, TirRef>,
+    pub(crate) defer_to_loop: Vec<Option<TirRef>>,
     /// Per-`if` arm-local reads (P4 per-arm refinement): if stmt →
     /// per-arm (view instruction → its last read within that arm's
     /// subtree), in walk order [then, elif..., else]. Consulted by
@@ -254,7 +258,7 @@ pub(crate) struct ViewLiveness {
 pub(crate) fn collect_view_liveness(
     tir: &Tir,
     pool: &InternPool,
-    nesting: &HashMap<TirRef, Vec<TirRef>>,
+    nesting: &[Vec<TirRef>],
 ) -> ViewLiveness {
     let mut bindings: HashMap<StringId, TirRef> = HashMap::new();
     let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
@@ -268,7 +272,7 @@ pub(crate) fn collect_view_liveness(
         &mut last_use,
         &mut arm_last_reads,
     );
-    let mut defer_to_loop = HashMap::new();
+    let mut defer_to_loop = vec![None; tir.instructions.len()];
     for (view, read) in &last_use {
         let created_in = nesting_of(nesting, *view);
         let read_in = nesting_of(nesting, *read);
@@ -277,11 +281,15 @@ pub(crate) fn collect_view_liveness(
         // strictly deeper read re-executes on later iterations of the
         // first loop beyond the creation's nesting.
         if created_in.len() < read_in.len() {
-            defer_to_loop.insert(*view, read_in[created_in.len()]);
+            defer_to_loop[view.index()] = Some(read_in[created_in.len()]);
         }
     }
+    let mut last_use_dense = vec![None; tir.instructions.len()];
+    for (view, read) in last_use {
+        last_use_dense[view.index()] = Some(read);
+    }
     ViewLiveness {
-        last_use,
+        last_use: last_use_dense,
         defer_to_loop,
         arm_last_reads,
     }
@@ -523,17 +531,18 @@ pub(crate) fn refine_view_liveness_for_arm(
     let actions: Vec<(TirRef, Option<TirRef>, TirRef)> = own
         .view_last_use
         .iter()
-        .filter(|(vi, global_lu)| {
-            if_subtree.contains(*global_lu)
-                && !arm_subtree.contains(*global_lu)
-                && !own.view_defer_loop.contains_key(*vi)
-        })
-        .map(|(vi, global_lu)| {
-            (
-                *vi,
-                arm_reads.and_then(|reads| reads.get(vi)).copied(),
-                *global_lu,
-            )
+        .enumerate()
+        .filter_map(|(i, slot)| {
+            let &global_lu = slot.as_ref()?;
+            let vi = TirRef::from_raw(i as u32);
+            (if_subtree.contains(&global_lu)
+                && !arm_subtree.contains(&global_lu)
+                && Ownership::dense_get(&own.view_defer_loop, vi).is_none())
+            .then_some((
+                vi,
+                arm_reads.and_then(|reads| reads.get(&vi)).copied(),
+                global_lu,
+            ))
         })
         .collect();
     let mut saved = Vec::new();
@@ -549,7 +558,7 @@ pub(crate) fn refine_view_liveness_for_arm(
                     continue;
                 }
                 saved.push((vi, global_lu));
-                own.view_last_use.insert(vi, lu);
+                Ownership::dense_set(&mut own.view_last_use, vi, lu);
             }
             None => remove_projection(own, Owner::Inst(vi)),
         }
@@ -562,6 +571,6 @@ pub(crate) fn refine_view_liveness_for_arm(
 /// for the join-time `prune_branch_dead_projections`.
 pub(crate) fn restore_view_last_use(own: &mut Ownership, saved: Vec<(TirRef, TirRef)>) {
     for (vi, global_lu) in saved {
-        own.view_last_use.insert(vi, global_lu);
+        Ownership::dense_set(&mut own.view_last_use, vi, global_lu);
     }
 }

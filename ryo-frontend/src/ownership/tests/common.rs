@@ -18,7 +18,11 @@ pub(super) fn take_function_sidecar(
     index: usize,
 ) -> FunctionSidecar {
     let name = sidecar.functions[index].name;
-    std::mem::replace(&mut sidecar.functions[index], FunctionSidecar::new(name))
+    let arena_len = sidecar.functions[index].free_on_reassign.len();
+    std::mem::replace(
+        &mut sidecar.functions[index],
+        FunctionSidecar::new(name, arena_len),
+    )
 }
 
 /// Lex + parse + astgen + sema + ownership on a source snippet —
