@@ -974,6 +974,78 @@ Two Pony imports adopted as runtime design principles:
 
 ---
 
+## Gleam/BEAM cross-reference (added 2026-08)
+
+Gleam is a statically-typed language whose **compiler** is written in Rust,
+but it does not implement lightweight processes itself — it compiles to
+BEAM bytecode, and processes are ERTS primitives (C). Gleam's contribution
+is a *type-safe API layer* over the BEAM's existing machinery: typed
+`Subject(message)` addresses into a process mailbox, a composable
+`Selector(payload)` for multi-subject receive, `process.call` with a
+**mandatory timeout**, actors (typed `gen_server`), supervisors, and
+`spawn` that **links by default** (`spawn_unlinked` is the explicit escape).
+BEAM internals worth benchmarking against: preemptive scheduling via
+reduction counting (~4000 reductions between preemptions), one scheduler
+thread per core with per-scheduler run queues, per-process stack/heap/
+mailbox isolation with per-process copying GC, and **dirty schedulers** —
+separate pools (dirty-CPU / dirty-IO) for long or blocking NIFs, which is
+the same split as §3.4 `#[blocking]` + §3.5 system coroutine, ~15 years
+earlier.
+
+Lessons, mapped onto this plan:
+
+1. **Colorlessness validated.** Gleam's docs stress exactly Ryo's core
+   constraint: no `async`/`await`, async code reads as synchronous code.
+   BEAM and Go both converged here independently.
+2. **Preemption is the biggest divergence — and a known risk.** The plan
+   rejects preemptive scheduling (cooperative + fairness counter +
+   `task.yield_now`, §5.3). BEAM shows preemption's payoff: no task —
+   including an accidental infinite loop — can starve a worker. Reduction
+   counting also shows preemption need not be signal-based: it is a cheap
+   counter check at call boundaries, which Cranelift could insert. Not a
+   v0.4 change, but the rejection deserves a risk-register entry.
+3. **Linked-by-default ≈ `task.scope` as recommended default (§4.2).**
+   Both make the safe thing the easy thing; keep it that way in API naming.
+4. **`Selector` vs `select`.** Gleam's selector is a first-class,
+   composable value (mergeable, mappable, monitor-aware); Ryo's §4.3
+   `select` is a one-shot syntax form. The Gleam shape is strictly more
+   expressive for library authors — consider whether `select` should lower
+   to a selector-like runtime value. The waker-deregistration machinery is
+   identical either way.
+5. **Isolation is what makes BEAM simple.** BEAM has no yield-while-locked
+   problem because there are no locks. Ryo's `shared[mutex[T]]` choice buys
+   Go-style sharing at the cost of the entire Phase 6.2 inferred-effect
+   analysis. Deliberate trade — but Gleam/BEAM is the reference for the
+   other branch (unbounded mailboxes, message copying, no shared reads).
+6. **Backpressure: Ryo is ahead.** BEAM mailboxes are unbounded; `send`
+   never blocks, and slow-consumer mailbox growth is a famous production
+   failure mode with no built-in answer. Ryo's four channel modes (§4.1)
+   are explicit backpressure tools Gleam can only imitate with
+   protocol-level acks.
+7. **Dirty schedulers validate §3.4/§3.5.** Ryo's ~200 ns coroutine
+   handoff is the cheaper mechanism; BEAM pays a full scheduler handoff
+   for dirty NIFs.
+8. **Mandatory call timeout.** `process.call` forces a timeout and crashes
+   the caller on expiry. Ryo's `.await` has no such forcing function
+   (`task.timeout` is opt-in, §2.4). For channel-based request/reply,
+   consider a loudly-defaulted timeout.
+9. **Monitors as messages compose with `select` for free.** A BEAM `Down`
+   notification is a mailbox message, so "data arrived OR worker died" is
+   one select. Ryo's `select` can await a future (§4.3 example), but a
+   *panicked detached* task's only surface is stderr logging (§1.6) — a
+   monitor-like signal would close that gap.
+10. **The JS-target cautionary tale.** Gleam's JavaScript target has no
+    processes at all — the platform doesn't provide them. Evidence for
+    Ryo owning its runtime rather than assuming a host supplies one.
+
+One-line summary: Gleam shows the ceiling of the borrowed-runtime path;
+Ryo cannot borrow ERTS, so the real takeaways are the API-layer lessons
+(typed subjects, composable selectors, linked-by-default spawns, mandatory
+call timeouts) and the scheduling warning that cooperative-only dispatch
+is the one place Ryo chooses to be weaker than BEAM.
+
+---
+
 ## Dependency Summary
 
 | Crate | Purpose | Alternatives considered |
