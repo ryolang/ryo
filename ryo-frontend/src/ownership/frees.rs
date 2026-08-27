@@ -11,20 +11,25 @@ use std::collections::{HashMap, HashSet};
 
 /// Assign every instruction in the function a monotonic rank in
 /// forward walk order (the same traversal `collect_last_uses` uses),
-/// so two last-use anchors can be compared for "later" (P5).
-pub(crate) fn program_order(tir: &Tir) -> HashMap<TirRef, u32> {
-    fn assign(tir: &Tir, r: TirRef, order: &mut HashMap<TirRef, u32>, next: &mut u32) {
-        if order.contains_key(&r) {
+/// so two last-use anchors can be compared for "later" (P5). Dense
+/// per-instruction table indexed by `TirRef::index()`; rank 0 means
+/// "unranked" (matching the old `unwrap_or(0)` fallback), so
+/// assignment starts at 1 — a uniform shift that leaves every
+/// rank-vs-rank comparison unchanged.
+pub(crate) fn program_order(tir: &Tir) -> Vec<u32> {
+    fn assign(tir: &Tir, r: TirRef, order: &mut [u32], next: &mut u32) {
+        debug_assert!(!r.is_param());
+        if order[r.index()] != 0 {
             return;
         }
-        order.insert(r, *next);
+        order[r.index()] = *next;
         *next += 1;
         tir.walk_operands(r, &mut |_parent, child, _kind| {
             assign(tir, child, order, next);
         });
     }
-    let mut order = HashMap::new();
-    let mut next = 0u32;
+    let mut order = vec![0; tir.instructions.len()];
+    let mut next = 1u32;
     for &stmt in &tir.body_stmts() {
         assign(tir, stmt, &mut order, &mut next);
     }
@@ -41,9 +46,9 @@ pub(crate) fn defer_anchor(
     owner: &Owner,
     projections_of: &HashMap<Owner, Vec<TirRef>>,
     last_use: &HashMap<TirRef, TirRef>,
-    order: &HashMap<TirRef, u32>,
+    order: &[u32],
 ) -> TirRef {
-    let rank = |r: TirRef| order.get(&r).copied().unwrap_or(0);
+    let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
     let mut best = anchor;
     if let Some(views) = projections_of.get(owner) {
         for &view in views {
@@ -198,10 +203,14 @@ pub(crate) fn collect_materialize_sites(
 ///  - conditionally-executed escapes: a move/mutation on ANY branch
 ///    counts (the merged lattice and the monotone hazard log are
 ///    path-insensitive), so a maybe-escape suppresses the warning.
+///
+/// `order` is the per-function [`program_order`] table, built once in
+/// `analyze_function` and shared with the P5 deferral.
 pub(crate) fn warn_redundant_materialize(
     tir: &Tir,
     pool: &InternPool,
     own: &Ownership,
+    order: &[u32],
     sink: &mut DiagSink,
 ) {
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
@@ -209,8 +218,7 @@ pub(crate) fn warn_redundant_materialize(
     if sites.is_empty() {
         return;
     }
-    let order = program_order(tir);
-    let rank = |r: TirRef| order.get(&r).copied().unwrap_or(0);
+    let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
     for (decl, call) in sites {
         let copy = Owner::Inst(call);
         // Escape check: the copy was consumed (returned, move-passed,
@@ -313,7 +321,7 @@ pub(crate) fn collect_last_uses(
     if let TirTag::Var = inst.tag
         && let TirData::Var(_) = inst.data
         && (needs_tracking(inst.ty, pool) || pool.is_view(inst.ty))
-        && let Some(&owner) = own.owner_at_read.get(&r)
+        && let Some(owner) = Ownership::dense_get(&own.owner_at_read, r)
     {
         // Overwriting insert: latest forward-order read wins =
         // last source-order read. `Owner::tirref` keys a `Param`

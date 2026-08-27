@@ -164,9 +164,7 @@ pub(crate) fn analyze_assign(
                 // `tirref` (not `inst_tirref`): an inout param's old owner
                 // is a `Param`, resolved here to its virtual ref — codegen
                 // caches that ref's repr at the prologue.
-                sidecar
-                    .free_on_reassign
-                    .insert(r, old_owner.tirref(&own.param_index));
+                sidecar.free_on_reassign[r.index()] = Some(old_owner.tirref(&own.param_index));
                 // W0003 case-B support: reassignment mutates the binding's
                 // owner — a defensive-copy hazard on it.
                 own.owner_hazards.push((old_owner, r));
@@ -281,7 +279,7 @@ pub(crate) fn analyze_return(
 /// tripping over the just-moved underlying. We do this by severing
 /// `init`'s `origin` link (if any) and stamping it `Valid`.
 pub(crate) fn rebind_to_init(own: &mut Ownership, name: StringId, init: TirRef) {
-    own.origin.insert(init, None);
+    Ownership::dense_set(&mut own.origin, init, None);
     own.states.insert(Owner::Inst(init), OwnerState::Valid);
     own.current_owner.insert(name, Owner::Inst(init));
 }
@@ -309,7 +307,7 @@ pub(crate) fn register_pending_dead_store(
 /// `origin` for `Var` reads; for fresh producers (`StrConst`,
 /// `StrConcat`, `Call`) `init` is itself the owner.
 pub(crate) fn underlying_owner(own: &Ownership, init: TirRef) -> Owner {
-    match own.origin.get(&init).copied() {
+    match Ownership::dense_get(&own.origin, init) {
         Some(Some(owner)) => owner,
         _ => Owner::Inst(init),
     }
@@ -544,14 +542,11 @@ pub(crate) fn analyze_if_stmt(
         own.next_branch_id += 1;
         Some(id)
     };
-    sidecar.if_branches.insert(
-        r,
-        IfBranchIds {
-            then_branch,
-            elif_branches: elif_branches.clone(),
-            else_branch,
-        },
-    );
+    sidecar.if_branches[r.index()] = Some(IfBranchIds {
+        then_branch,
+        elif_branches: elif_branches.clone(),
+        else_branch,
+    });
 
     let snap_states = own.states.clone();
     let snap_current_owner = own.current_owner.clone();
@@ -797,14 +792,14 @@ pub(crate) fn visit_expr(
         TirTag::StrConst => {
             if needs_tracking(inst.ty, pool) {
                 own.states.insert(Owner::Inst(r), OwnerState::Valid);
-                own.origin.insert(r, None);
+                Ownership::dense_set(&mut own.origin, r, None);
                 own.temp_owners.insert(Owner::Inst(r));
             }
         }
         TirTag::StrConcat => {
             if needs_tracking(inst.ty, pool) {
                 own.states.insert(Owner::Inst(r), OwnerState::Valid);
-                own.origin.insert(r, None);
+                Ownership::dense_set(&mut own.origin, r, None);
                 own.temp_owners.insert(Owner::Inst(r));
             }
             if let TirData::BinOp { lhs, rhs } = inst.data {
@@ -821,7 +816,7 @@ pub(crate) fn visit_expr(
             // A str-returning call (e.g. `int_to_str`) is a producer.
             if needs_tracking(inst.ty, pool) {
                 own.states.insert(Owner::Inst(r), OwnerState::Valid);
-                own.origin.insert(r, None);
+                Ownership::dense_set(&mut own.origin, r, None);
                 own.temp_owners.insert(Owner::Inst(r));
             }
             let view = tir.call_view(r);
@@ -1181,23 +1176,23 @@ pub(crate) fn visit_expr(
                     // under a branch-local owner key while the binding
                     // itself is provably read afterwards.
                     own.pending_dead_store.retain(|_, (n, _, _)| *n != name);
-                    own.origin.insert(r, Some(owner));
+                    Ownership::dense_set(&mut own.origin, r, Some(owner));
                     // Snapshot owner-at-read so the post-walk
                     // `collect_last_uses` anchors the last-use Free to the
                     // owner that was live *at this read*, not whatever
                     // `current_owner[name]` happens to be at function exit
                     // (which would route pre-rebind reads to the post-
                     // rebind owner — wrong target, double-free).
-                    own.owner_at_read.insert(r, owner);
+                    Ownership::dense_set(&mut own.owner_at_read, r, owner);
                 } else if pool.is_view(inst.ty) {
                     // P4 lift (final spec §3.2): record the read for
                     // `collect_last_uses`; when it is the projection's
                     // precomputed last use (and not loop-deferred), the
                     // projection dies at the end of this statement.
-                    own.owner_at_read.insert(r, owner);
+                    Ownership::dense_set(&mut own.owner_at_read, r, owner);
                     if let Owner::Inst(vi) = owner
-                        && !own.view_defer_loop.contains_key(&vi)
-                        && own.view_last_use.get(&vi) == Some(&r)
+                        && Ownership::dense_get(&own.view_defer_loop, vi).is_none()
+                        && Ownership::dense_get(&own.view_last_use, vi) == Some(r)
                     {
                         own.pending_dying.push(owner);
                     }

@@ -242,8 +242,8 @@ fn inout_str_param_reassign_escapes_no_dead_store_no_free() {
     );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert_eq!(
-        sc.free_on_reassign.get(&asg),
-        Some(&TirRef::param(0)),
+        sc.free_on_reassign[asg.index()],
+        Some(TirRef::param(0)),
         "reassigning an inout str param must drop the incoming buffer at the reassign; free_on_reassign = {:?}",
         sc.free_on_reassign
     );
@@ -296,7 +296,7 @@ fn inout_str_param_reassign_inside_if_escapes() {
     );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sc.free_on_reassign.contains_key(&asg),
+        sc.free_on_reassign[asg.index()].is_some(),
         "the taken arm must drop the incoming buffer; free_on_reassign = {:?}",
         sc.free_on_reassign
     );

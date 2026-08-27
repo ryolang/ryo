@@ -32,7 +32,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use ryo_core::ast::CompoundOp;
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use target_lexicon::Triple;
 
 mod expr;
@@ -229,23 +229,24 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// memo MUST be re-scoped per-block or reads will hit Cranelift
     /// dominator errors.
     inst_values: Vec<Option<ValueRepr>>,
-    /// Memo entries keyed by param sentinel refs (`TirRef::param`),
-    /// which cannot index `inst_values`. Only str/view params ever
-    /// land here — two inserts per function at most — so a tiny map
-    /// is fine.
-    param_values: HashMap<TirRef, ValueRepr>,
-    /// Indices into `sidecar.free_schedule` whose Frees have already
-    /// been emitted in codegen. A given anchor TirRef can be reached
-    /// through both `eval_inst` and `eval_inst_str` (e.g. a `Var`
-    /// materialized once as scalar and once as fat-pointer), and the
-    /// end-of-stmt sweep can also see anchors that an earlier
-    /// per-eval hook already fired. Without this guard each path
-    /// would emit the Free, double-freeing the allocation.
-    freed_at: HashSet<usize>,
+    /// Memo entries for param sentinel refs (`TirRef::param`), which
+    /// cannot index `inst_values`. Dense table indexed by
+    /// `TirRef::as_param_index()`, sized once per function from
+    /// `tir.params.len()`. Only str/view params ever land here.
+    param_values: Vec<Option<ValueRepr>>,
+    /// Dense flag per `sidecar.free_schedule` index: true once that
+    /// entry's Free has been emitted in codegen. A given anchor TirRef
+    /// can be reached through both `eval_inst` and `eval_inst_str`
+    /// (e.g. a `Var` materialized once as scalar and once as
+    /// fat-pointer), and the end-of-stmt sweep can also see anchors
+    /// that an earlier per-eval hook already fired. Without this guard
+    /// each path would emit the Free, double-freeing the allocation.
+    freed_at: Vec<bool>,
     /// Maps an anchor `TirRef` (`after`) to the indices of `sidecar.free_schedule`
-    /// that are anchored on it. Used for O(1) free-lookup at statement-level and
-    /// instruction-level emission.
-    free_by_after: HashMap<TirRef, Vec<usize>>,
+    /// that are anchored on it. Dense table indexed by `TirRef::index()`
+    /// (slot 0 unused — refs are 1-based); an empty Vec means no frees
+    /// anchor there. Anchors are never param sentinel refs.
+    free_by_after: Vec<Vec<usize>>,
     /// Unfired indices in `sidecar.free_schedule` that still need to be swept.
     /// Used to avoid O(K * S) quadratic scaling during end-of-statement sweep.
     pending_sweep: Vec<usize>,
@@ -260,7 +261,14 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// `build_free_binding_names`. `emit_frees` uses it to release a
     /// named binding's CURRENT `StrLocals` rather than the producing
     /// init's possibly-stale cached repr.
-    free_binding_names: HashMap<TirRef, StringId>,
+    ///
+    /// Split into two dense tables dispatched on `TirRef::is_param()`
+    /// (same shape as `cached_repr`): `free_binding_names` is indexed
+    /// by `TirRef::index()` for real instruction refs (slot 0 unused),
+    /// `free_binding_param_names` by `TirRef::as_param_index()` for
+    /// str-param sentinel refs.
+    free_binding_names: Vec<Option<StringId>>,
+    free_binding_param_names: Vec<Option<StringId>>,
     /// M8.3 inout parameters: maps each inout param's name to the
     /// caller-provided slot address (a function-entry block param)
     /// and its pointee `TypeId`. The write-back chokepoint stores each
@@ -474,10 +482,11 @@ impl<M: Module> Codegen<M> {
 
     /// Read the `TirRef → ValueRepr` memo. Param sentinel refs
     /// (`TirRef::param`) are not valid arena indices, so they are
-    /// served from the `param_values` side map.
+    /// served from the `param_values` table indexed by
+    /// `TirRef::as_param_index()`.
     fn cached_repr(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<ValueRepr> {
-        if r.is_param() {
-            ctx.param_values.get(&r).copied()
+        if let Some(idx) = r.as_param_index() {
+            ctx.param_values[idx as usize]
         } else {
             ctx.inst_values.get(r.index()).copied().flatten()
         }
@@ -485,10 +494,22 @@ impl<M: Module> Codegen<M> {
 
     /// Write the `TirRef → ValueRepr` memo; see `cached_repr`.
     fn cache_repr(ctx: &mut FunctionContext<'_, M>, r: TirRef, repr: ValueRepr) {
-        if r.is_param() {
-            ctx.param_values.insert(r, repr);
+        if let Some(idx) = r.as_param_index() {
+            ctx.param_values[idx as usize] = Some(repr);
         } else {
             ctx.inst_values[r.index()] = Some(repr);
+        }
+    }
+
+    /// Read the free-target → binding-name map. Param sentinel refs
+    /// are served from `free_binding_param_names`; real instruction
+    /// refs from `free_binding_names`. Same dispatch shape as
+    /// `cached_repr`.
+    fn free_binding_name(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
+        if let Some(idx) = r.as_param_index() {
+            ctx.free_binding_param_names[idx as usize]
+        } else {
+            ctx.free_binding_names.get(r.index()).copied().flatten()
         }
     }
 
@@ -851,11 +872,17 @@ impl<M: Module> Codegen<M> {
                 }
             }
 
-            let mut free_by_after: HashMap<TirRef, Vec<usize>> = HashMap::new();
+            let mut free_by_after: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
             for (idx, fp) in func_sidecar.free_schedule.iter().enumerate() {
-                free_by_after.entry(fp.after).or_default().push(idx);
+                debug_assert!(
+                    !fp.after.is_param(),
+                    "free anchors are never param sentinel refs"
+                );
+                free_by_after[fp.after.index()].push(idx);
             }
             let pending_sweep: Vec<usize> = (0..func_sidecar.free_schedule.len()).collect();
+            let (free_binding_names, free_binding_param_names) =
+                Self::build_free_binding_names(tir, pool);
 
             let mut ctx: FunctionContext<'_, M> = FunctionContext {
                 module: &mut self.module,
@@ -869,14 +896,15 @@ impl<M: Module> Codegen<M> {
                 assigned_log: Vec::new(),
                 func_ids,
                 inst_values: vec![None; tir.instructions.len()],
-                param_values: HashMap::new(),
-                freed_at: HashSet::new(),
+                param_values: vec![None; tir.params.len()],
+                freed_at: vec![false; func_sidecar.free_schedule.len()],
                 free_by_after,
                 pending_sweep,
                 loop_stack: Vec::new(),
                 str_locals: str_param_locals,
                 view_locals: view_param_locals,
-                free_binding_names: Self::build_free_binding_names(tir, pool),
+                free_binding_names,
+                free_binding_param_names,
                 inout_ptrs,
                 sret_ptr,
                 sidecar: func_sidecar,
@@ -891,24 +919,22 @@ impl<M: Module> Codegen<M> {
                         .str_locals
                         .get(&param.name)
                         .expect("every str param gets StrLocals in the param preamble above");
-                    let virtual_ref = TirRef::param(idx);
                     let repr = ValueRepr::Str {
                         ptr: builder.use_var(locals.ptr),
                         len: builder.use_var(locals.len),
                         cap: builder.use_var(locals.cap),
                     };
-                    ctx.param_values.insert(virtual_ref, repr);
+                    ctx.param_values[idx] = Some(repr);
                 } else if pool.is_view(param.ty) {
                     let locals = ctx
                         .view_locals
                         .get(&param.name)
                         .expect("every view param gets ViewLocals in the param preamble above");
-                    let virtual_ref = TirRef::param(idx);
                     let repr = ValueRepr::View {
                         ptr: builder.use_var(locals.ptr),
                         len: builder.use_var(locals.len),
                     };
-                    ctx.param_values.insert(virtual_ref, repr);
+                    ctx.param_values[idx] = Some(repr);
                 }
             }
 
@@ -951,7 +977,8 @@ impl<M: Module> Codegen<M> {
                     let target = ctx.sidecar.free_schedule[idx].target;
                     ctx.freed_at
                         .iter()
-                        .any(|&fired| ctx.sidecar.free_schedule[fired].target == target)
+                        .enumerate()
+                        .any(|(fired, &b)| b && ctx.sidecar.free_schedule[fired].target == target)
                 }),
                 "frees anchored to unmaterialized instructions were dropped: {:?}",
                 ctx.pending_sweep
@@ -1230,7 +1257,7 @@ impl<M: Module> Codegen<M> {
                     // which holds the StrConst's original (ptr, cap) at
                     // the literal's emission point and may be stale
                     // across reassigns.
-                    if ctx.sidecar.free_on_reassign.contains_key(&r) {
+                    if ctx.sidecar.free_on_reassign[r.index()].is_some() {
                         let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
                         let old_ptr = builder.use_var(locals.ptr);
                         let old_cap = builder.use_var(locals.cap);
@@ -1400,7 +1427,9 @@ impl<M: Module> Codegen<M> {
         // (e.g. an if with no Move-typed bindings live across it):
         // unconditional Frees still fire because their `branch` is
         // `None`, and there are no branch-gated entries to gate.
-        let branch_ids = ctx.sidecar.if_branches.get(&r).cloned().unwrap_or_default();
+        let branch_ids = ctx.sidecar.if_branches[r.index()]
+            .clone()
+            .unwrap_or_default();
 
         let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
         let then_block = builder.create_block();

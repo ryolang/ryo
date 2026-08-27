@@ -193,8 +193,8 @@ fn reassignment_records_free_on_old_owner() {
 
     // Reassign frees l1 (old owner) keyed on the Assign inst.
     assert_eq!(
-        sidecar.free_on_reassign.get(&assign),
-        Some(&l1),
+        sidecar.free_on_reassign[assign.index()],
+        Some(l1),
         "expected free_on_reassign[assign] = l1"
     );
 
@@ -296,8 +296,8 @@ fn last_use_uses_pre_rebind_owner_not_post() {
     // NOT from last-use scheduling. Last-use should target "Bob"
     // (anchored after read2), not "Alice".
     assert_eq!(
-        sidecar.free_on_reassign.get(&assign),
-        Some(&alice_lit),
+        sidecar.free_on_reassign[assign.index()],
+        Some(alice_lit),
         "expected free_on_reassign[assign] = alice_lit"
     );
     // free_schedule must not contain a FreePoint with target=alice_lit
@@ -634,8 +634,8 @@ fn rebind_then_reassign_does_not_double_free() {
     // free_on_reassign (mirrors `reassignment_records_free_on_old_owner`).
     // Without this the test would pass on a leak (temp_a never freed).
     assert_eq!(
-        sc.free_on_reassign.get(&assign),
-        Some(&lit_a),
+        sc.free_on_reassign[assign.index()],
+        Some(lit_a),
         "temp_a must be freed once via free_on_reassign (not leaked); got {sc:?}",
     );
     // lit_b is never read, so it is a dead store and is freed exactly
@@ -783,7 +783,7 @@ fn reassign_inside_if_still_frees_binding_at_last_use() {
     );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sc.free_on_reassign.contains_key(&asg),
+        sc.free_on_reassign[asg.index()].is_some(),
         "the taken arm must drop the pre-reassign buffer; free_on_reassign = {:?}",
         sc.free_on_reassign
     );
@@ -1299,9 +1299,8 @@ fn conditional_dead_reassign_gated_on_real_else() {
     let mut sink = DiagSink::new();
     let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
     let sc = take_function_sidecar(&mut sidecar, 0);
-    let else_id = sc
-        .if_branches
-        .get(&if_s)
+    let else_id = sc.if_branches[if_s.index()]
+        .as_ref()
         .and_then(|ids| ids.else_branch)
         .expect("else branch id");
     let drops: Vec<_> = sc

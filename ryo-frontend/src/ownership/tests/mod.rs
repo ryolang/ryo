@@ -218,7 +218,7 @@ fn three_arm_if_with_conditional_move_and_loop_rebind() {
 
     // (a) Assert no next_branch_id collision in sidecar.if_branches
     let mut ids = HashSet::new();
-    for ib in sidecar.if_branches.values() {
+    for ib in sidecar.if_branches.iter().flatten() {
         assert!(
             ids.insert(ib.then_branch.0),
             "duplicate branch id {}",

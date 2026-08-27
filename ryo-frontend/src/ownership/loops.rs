@@ -531,16 +531,23 @@ pub(crate) fn owner_binding_name(tir: &Tir, owner: TirRef) -> Option<StringId> {
 /// loops overwrite their own subtrees with deeper stacks — the TIR is
 /// tree-shaped, so each instruction's final entry is the one written
 /// by its unique outermost-in path.
-pub(crate) fn collect_loop_nesting(tir: &Tir) -> HashMap<TirRef, Vec<TirRef>> {
+///
+/// Returns a dense per-instruction table indexed by `TirRef::index()`,
+/// sized to `tir.instructions.len()` (slot 0, the reserved sentinel,
+/// stays empty); the empty `Vec` means "not nested". One scratch
+/// `HashSet` is reused (cleared) across statements instead of
+/// allocating a fresh subtree set per statement.
+pub(crate) fn collect_loop_nesting(tir: &Tir) -> Vec<Vec<TirRef>> {
     fn walk(
         tir: &Tir,
         stmts: &[TirRef],
         stack: &[TirRef],
-        nesting: &mut HashMap<TirRef, Vec<TirRef>>,
+        nesting: &mut [Vec<TirRef>],
+        sub: &mut HashSet<TirRef>,
     ) {
         for &r in stmts {
-            let mut sub: HashSet<TirRef> = HashSet::new();
-            tir.collect_reachable(r, &mut sub);
+            sub.clear();
+            tir.collect_reachable(r, sub);
             match tir.inst(r).tag {
                 TirTag::WhileLoop | TirTag::ForRange => {
                     // Everything the loop evaluates re-executes per
@@ -548,48 +555,49 @@ pub(crate) fn collect_loop_nesting(tir: &Tir) -> HashMap<TirRef, Vec<TirRef>> {
                     let mut inner = stack.to_vec();
                     inner.push(r);
                     sub.remove(&r);
-                    for x in sub {
-                        nesting.insert(x, inner.clone());
+                    for &x in sub.iter() {
+                        nesting[x.index()] = inner.clone();
                     }
                     // The loop instruction itself sits at the
                     // enclosing nesting.
-                    nesting.insert(r, stack.to_vec());
+                    nesting[r.index()] = stack.to_vec();
                     if let Some(body) = tir.loop_body(r) {
-                        walk(tir, &body, &inner, nesting);
+                        walk(tir, &body, &inner, nesting, sub);
                     }
                 }
                 _ => {
                     // Plain statements and ifs (condition included)
                     // keep the enclosing nesting.
-                    for x in sub {
-                        nesting.insert(x, stack.to_vec());
+                    for &x in sub.iter() {
+                        nesting[x.index()] = stack.to_vec();
                     }
                     if tir.inst(r).tag == TirTag::IfStmt {
                         let view = tir.if_stmt_view(r);
-                        walk(tir, &view.then_stmts, stack, nesting);
+                        walk(tir, &view.then_stmts, stack, nesting, sub);
                         for elif in &view.elif_branches {
-                            walk(tir, &elif.body, stack, nesting);
+                            walk(tir, &elif.body, stack, nesting, sub);
                         }
                         if let Some(else_stmts) = &view.else_stmts {
-                            walk(tir, else_stmts, stack, nesting);
+                            walk(tir, else_stmts, stack, nesting, sub);
                         }
                     }
                 }
             }
         }
     }
-    let mut nesting = HashMap::new();
-    walk(tir, &tir.body_stmts(), &[], &mut nesting);
+    let mut nesting = vec![Vec::new(); tir.instructions.len()];
+    let mut sub = HashSet::new();
+    walk(tir, &tir.body_stmts(), &[], &mut nesting, &mut sub);
     nesting
 }
 
-/// `target`'s pre-computed nesting stack. The map covers every
+/// `target`'s pre-computed nesting stack. The table covers every
 /// instruction reachable from the body — all callers query body
 /// instructions (views, reads, materialize calls, hazard sites) — and
 /// a ref outside the body nests in no loop anyway, so a missing entry
 /// means the empty stack, exactly what a fresh body walk would find.
-pub(crate) fn nesting_of(nesting: &HashMap<TirRef, Vec<TirRef>>, target: TirRef) -> &[TirRef] {
-    nesting.get(&target).map_or(&[], Vec::as_slice)
+pub(crate) fn nesting_of(nesting: &[Vec<TirRef>], target: TirRef) -> &[TirRef] {
+    nesting.get(target.index()).map_or(&[], Vec::as_slice)
 }
 
 /// Shared loop-body fixed-point, in two phases. Caller has already
