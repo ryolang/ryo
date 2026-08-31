@@ -157,7 +157,7 @@ pub(crate) fn emit_builtin_call(
             // mutable-lvalue checks are replayed here against arg 0.
             // M8.4: the suffix is a view — an owned `str` passes as
             // today (codegen reads its ptr+len), a slice passes
-            // directly. No `ViewOfStr` wrap here: builtins bypass
+            // directly. No `ToView` wrap here: builtins bypass
             // check_call's §3.4 conversion, and wrapping an owned
             // `str` would leave an inst codegen can't lower yet
             // (Task 7) in previously-valid programs.

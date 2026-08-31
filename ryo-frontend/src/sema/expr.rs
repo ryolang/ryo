@@ -447,18 +447,18 @@ pub(crate) fn check_binary_op(
     span: Span,
 ) -> TirRef {
     // M8.4 §3.3/§3.4: mixed `str`/`strview` equality — wrap the owned
-    // side in an explicit `ViewOfStr` conversion so the comparison
+    // side in an explicit `ToView` conversion so the comparison
     // runs view-vs-view. This must happen before the generic
     // `compatible` check below, which rightly rejects `str` ≠ `strview`
     // for every other operator.
     let (lhs, rhs, lhs_ty, rhs_ty) = if matches!(tag, InstTag::Eq | InstTag::NotEq) {
         match (sema.pool.kind(lhs_ty), sema.pool.kind(rhs_ty)) {
             (TypeKind::Str, TypeKind::View(ViewKind::Str)) => {
-                let v = fcx.builder.view_of_str(lhs, sema.pool.str_view(), span);
+                let v = fcx.builder.to_view(lhs, sema.pool.str_view(), span);
                 (v, rhs, sema.pool.str_view(), rhs_ty)
             }
             (TypeKind::View(ViewKind::Str), TypeKind::Str) => {
-                let v = fcx.builder.view_of_str(rhs, sema.pool.str_view(), span);
+                let v = fcx.builder.to_view(rhs, sema.pool.str_view(), span);
                 (lhs, v, lhs_ty, sema.pool.str_view())
             }
             _ => (lhs, rhs, lhs_ty, rhs_ty),

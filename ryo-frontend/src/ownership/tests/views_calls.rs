@@ -1,9 +1,9 @@
 use super::*;
 
 #[test]
-fn viewofstr_arg_counts_as_borrow_rule7() {
+fn toview_arg_counts_as_borrow_rule7() {
     // T5/T7 carry-forward: fn two(inout a: str, b: strview) called as
-    // two(&s, s) — sema wraps the second arg in ViewOfStr; the
+    // two(&s, s) — sema wraps the second arg in ToView; the
     // Rule-7 borrow partition must look through the conversion and
     // diagnose the aliasing (E0032).
     use chumsky::span::{SimpleSpan, Span as _};
@@ -24,7 +24,7 @@ fn viewofstr_arg_counts_as_borrow_rule7() {
     let decl = tb.var_decl(s, false, str_ty, lit, span);
     let inout_arg = tb.var(s, str_ty, span);
     let view_base = tb.var(s, str_ty, span);
-    let view_arg = tb.view_of_str(view_base, view_ty, span);
+    let view_arg = tb.to_view(view_base, view_ty, span);
     let call = tb.call(
         two,
         &[inout_arg, view_arg],
@@ -56,8 +56,8 @@ fn viewofstr_arg_counts_as_borrow_rule7() {
 }
 
 #[test]
-fn viewofstr_read_counts_as_use_dead_store() {
-    // T5/T7 carry-forward: an owned `str` used ONLY via a ViewOfStr
+fn toview_read_counts_as_use_dead_store() {
+    // T5/T7 carry-forward: an owned `str` used ONLY via a ToView
     // conversion must count as used — no W0001. Here s's sole read
     // is the owned side of the mixed `str == strview` comparison:
     //   s: str = "hi"; other: str = "yo"; if s == other[0:1]: print("x")
@@ -86,7 +86,7 @@ fn viewofstr_read_counts_as_use_dead_store() {
     let i1 = tb.int_const(1, int_ty, span);
     let sl = tb.slice(obase, Some(i0), Some(i1), view_ty, span);
     let sread = tb.var(s, str_ty, span);
-    let vos = tb.view_of_str(sread, view_ty, span);
+    let vos = tb.to_view(sread, view_ty, span);
     let eq = tb.binary(TirTag::StrCmpEq, bool_ty, vos, sl, span);
     let xlit = tb.str_const(pool.intern_str("x"), str_ty, span);
     let pcall = tb.call(print, &[xlit], &all_borrow(&[xlit]), void, span);
@@ -98,16 +98,16 @@ fn viewofstr_read_counts_as_use_dead_store() {
     check(std::slice::from_ref(&tir), &pool, &mut sink);
     assert!(
         sink.is_empty(),
-        "expected no diagnostics — the ViewOfStr read must count as a use of s"
+        "expected no diagnostics — the ToView read must count as a use of s"
     );
 }
 
 #[test]
-fn viewasstr_arg_counts_as_borrow_rule7() {
+fn viewasowner_arg_counts_as_borrow_rule7() {
     // P6' carry-forward: fn two(inout a: str, b: str) called as
-    // two(&s, s[0:1]) — sema wraps the second arg in ViewAsStr; the
+    // two(&s, s[0:1]) — sema wraps the second arg in ViewAsOwner; the
     // Rule-7 borrow partition must look through the conversion and
-    // diagnose the aliasing (E0032), same as the ViewOfStr case.
+    // diagnose the aliasing (E0032), same as the ToView case.
     use chumsky::span::{SimpleSpan, Span as _};
     use ryo_core::tir::TirBuilder;
 
@@ -130,7 +130,7 @@ fn viewasstr_arg_counts_as_borrow_rule7() {
     let zero = tb.int_const(0, int_ty, span);
     let one = tb.int_const(1, int_ty, span);
     let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
-    let reborrow = tb.view_as_str(slice, str_ty, span);
+    let reborrow = tb.view_as_owner(slice, str_ty, span);
     let call = tb.call(
         two,
         &[inout_arg, reborrow],
@@ -162,7 +162,7 @@ fn viewasstr_arg_counts_as_borrow_rule7() {
 }
 
 #[test]
-fn viewasstr_reborrow_is_call_scoped() {
+fn viewasowner_reborrow_is_call_scoped() {
     // P6': the re-borrow lives only for the call's duration — the
     // root owner can still be moved afterwards (no freeze, no
     // aliasing), unlike a bound slice projection.
@@ -188,7 +188,7 @@ fn viewasstr_reborrow_is_call_scoped() {
     let zero = tb.int_const(0, int_ty, span);
     let one = tb.int_const(1, int_ty, span);
     let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
-    let reborrow = tb.view_as_str(slice, str_ty, span);
+    let reborrow = tb.view_as_owner(slice, str_ty, span);
     let show_call = tb.call(show, &[reborrow], &[ParamMode::Borrow], void, span);
     let show_stmt = tb.unary(TirTag::ExprStmt, void, show_call, span);
     // `s` moved later in the caller — fine: the re-borrow ended
@@ -256,7 +256,7 @@ fn str_materialize_arg_counts_as_borrow_rule7() {
     // buffer at call time, so it counts as an immutable borrow of
     // `s` for the call's duration (E4): the Rule-7 partition must
     // look through `__ryo_str_from_view` to the view's root, exactly
-    // like the ViewAsStr case (viewasstr_arg_counts_as_borrow_rule7).
+    // like the ViewAsOwner case (viewasowner_arg_counts_as_borrow_rule7).
     use chumsky::span::{SimpleSpan, Span as _};
     use ryo_core::tir::TirBuilder;
 

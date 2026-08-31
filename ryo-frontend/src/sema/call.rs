@@ -147,7 +147,7 @@ pub(crate) fn check_call(
                 // `inout` param is rejected by the `&` check below.
                 let v = fcx
                     .builder
-                    .view_as_str(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
+                    .view_as_owner(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
                 converted[idx] = v;
                 v
             } else if sema.pool.owner_view(actual) == Some(exp_ty) {
@@ -157,7 +157,7 @@ pub(crate) fn check_call(
                 // pool's owner → view table, not a bare kind comparison.
                 let v = fcx
                     .builder
-                    .view_of_str(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
+                    .to_view(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
                 converted[idx] = v;
                 v
             } else {

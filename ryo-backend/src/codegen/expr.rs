@@ -285,7 +285,7 @@ impl<M: Module> Codegen<M> {
                 };
                 // M8.4 §3.3: operands may be owned str triples or strview
                 // view pairs (mixed equality wraps the owned side in
-                // ViewOfStr); ryo_str_eq only needs (ptr, len).
+                // ToView); ryo_str_eq only needs (ptr, len).
                 let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
                 let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
 
@@ -1030,16 +1030,16 @@ impl<M: Module> Codegen<M> {
                     CapRule::LenIsCap,
                 )?
             }
-            TirTag::ViewAsStr => {
+            TirTag::ViewAsOwner => {
                 let operand = match inst.data {
                     TirData::UnOp(o) => o,
-                    _ => unreachable!("ViewAsStr must carry TirData::UnOp"),
+                    _ => unreachable!("ViewAsOwner must carry TirData::UnOp"),
                 };
                 // Re-borrow into the fat triple: cap=0 static sentinel,
                 // identical to string literals. No allocation.
                 let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, operand)?
                 else {
-                    unreachable!("ViewAsStr operand must produce ValueRepr::View")
+                    unreachable!("ViewAsOwner operand must produce ValueRepr::View")
                 };
                 let cap = builder.ins().iconst(types::I64, 0);
                 ValueRepr::Str { ptr, len, cap }
@@ -1099,15 +1099,15 @@ impl<M: Module> Codegen<M> {
                 )?;
                 ValueRepr::View { ptr, len }
             }
-            TirTag::ViewOfStr => {
+            TirTag::ToView => {
                 let operand = match inst.data {
                     TirData::UnOp(o) => o,
-                    _ => unreachable!("ViewOfStr must carry TirData::UnOp"),
+                    _ => unreachable!("ToView must carry TirData::UnOp"),
                 };
                 // Representation conversion only: drop the cap word.
                 let ValueRepr::Str { ptr, len, .. } = Self::eval_inst_str(builder, ctx, operand)?
                 else {
-                    unreachable!("ViewOfStr operand must produce ValueRepr::Str")
+                    unreachable!("ToView operand must produce ValueRepr::Str")
                 };
                 ValueRepr::View { ptr, len }
             }
@@ -1360,7 +1360,7 @@ impl<M: Module> Codegen<M> {
                 .store(MemFlagsData::trusted(), cap, s_addr, 16);
             // M8.4: the suffix may be either repr — an owned `str`
             // passes its ptr+len, a slice/view passes directly (no
-            // ViewOfStr wrap: builtins bypass check_call's §3.4
+            // ToView wrap: builtins bypass check_call's §3.4
             // conversion, so sema accepts `Str | View(_)` here).
             let (suf_ptr, suf_len) = Self::eval_str_or_view_parts(builder, ctx, suffix_ref)?;
             let func_ref = Self::declare_runtime_fn(
@@ -1454,7 +1454,7 @@ impl<M: Module> Codegen<M> {
             } else if ctx.pool.is_view(arg_ty) {
                 // `strview` arg → 2-word ABI (ptr, len), matching the
                 // callee's build_signature. Sema has already inserted
-                // ViewOfStr for owned-str actuals (§3.4).
+                // ToView for owned-str actuals (§3.4).
                 let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg)?;
                 arg_values.push(ptr);
                 arg_values.push(len);

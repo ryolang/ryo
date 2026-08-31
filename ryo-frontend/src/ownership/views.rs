@@ -47,7 +47,7 @@ pub(crate) fn projection_root(
     // `needs_tracking` arm below would resolve the conversion inst
     // itself as a bogus fresh owner), but ownership-wise it IS the
     // view's borrow, call-scoped — resolve the operand's root.
-    if inst.tag == TirTag::ViewAsStr
+    if inst.tag == TirTag::ViewAsOwner
         && let TirData::UnOp(inner) = inst.data
     {
         return projection_root(own, tir, pool, inner);
@@ -72,7 +72,7 @@ pub(crate) fn projection_root(
             }
             projection_root(own, tir, pool, base)
         }
-        TirData::UnOp(inner) if inst.tag == TirTag::ViewOfStr => {
+        TirData::UnOp(inner) if inst.tag == TirTag::ToView => {
             projection_root(own, tir, pool, inner)
         }
         _ => None,
@@ -482,9 +482,9 @@ pub(crate) fn view_binding_target(
     match tir.inst(init).data {
         TirData::Var(name) => bindings.get(&name).copied(),
         TirData::Slice { .. } => Some(init),
-        // A bound ViewOfStr (`u: strview = s`) projects the operand's
+        // A bound ToView (`u: strview = s`) projects the operand's
         // owner full-range; the conversion inst stands in as the view.
-        _ if tir.inst(init).tag == TirTag::ViewOfStr => Some(init),
+        _ if tir.inst(init).tag == TirTag::ToView => Some(init),
         _ => None,
     }
 }

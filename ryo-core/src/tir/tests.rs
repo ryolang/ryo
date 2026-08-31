@@ -268,7 +268,7 @@ fn unreachable_inst_carries_error_type() {
 }
 
 #[test]
-fn slice_and_view_of_str_round_trip_and_dump() {
+fn slice_and_to_view_round_trip_and_dump() {
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
     let view_ty = pool.str_view();
@@ -284,7 +284,7 @@ fn slice_and_view_of_str_round_trip_and_dump() {
     // read: each use of a binding emits its own `Var` instruction,
     // so the body stays tree-shaped.
     let base2 = b.var(s, str_ty, sp());
-    let view = b.view_of_str(base2, view_ty, sp());
+    let view = b.to_view(base2, view_ty, sp());
     let tir = b.finish(&[slice, view]);
 
     assert_eq!(tir.inst(slice).ty, view_ty);
@@ -300,10 +300,10 @@ fn slice_and_view_of_str_round_trip_and_dump() {
         }
         other => panic!("expected TirData::Slice, got {:?}", other),
     }
-    assert!(matches!(tir.inst(view).tag, TirTag::ViewOfStr));
+    assert!(matches!(tir.inst(view).tag, TirTag::ToView));
     assert_eq!(tir.inst(view).ty, view_ty);
 
     let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));
     assert!(out.contains("= slice %1, %2.._"), "got:\n{}", out);
-    assert!(out.contains("= view_of_str %4"), "got:\n{}", out);
+    assert!(out.contains("= to_view %4"), "got:\n{}", out);
 }

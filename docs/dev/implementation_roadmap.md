@@ -1194,7 +1194,7 @@ fn main():
 **What was implemented:**
 
 - The view type is spelled `strview` (final spec Q5 — RESOLVED); `bytesview` / `slice[T]` follow the same word family. `&` remains exclusively the `inout` call-site marker; legacy `&str` in type position is a targeted migration error: "`&str` was renamed to `strview` (final spec Q5)".
-- Views pass to ordinary `str` parameters via a `cap=0` re-borrow (`TirTag::ViewAsStr`): no allocation, call-scoped — exactly like a string literal (final spec §3.2, P6'). The binding form `x: str = view` stays an error (E0012), and `move str` parameters still reject views.
+- Views pass to ordinary `str` parameters via a `cap=0` re-borrow (`TirTag::ViewAsOwner`): no allocation, call-scoped — exactly like a string literal (final spec §3.2, P6'). The binding form `x: str = view` stays an error (E0012), and `move str` parameters still reject views.
 - Docs migrated to the new spelling: final spec (Q5, §3), base spec (§4.4), this roadmap, the landing reference, and `examples/string_slices.ryo`.
 
 **Visible Progress:** read-only helpers keep plain `s: str` signatures and accept owned strings and views alike with zero copies; code still spelling the view type `&str` fails with a diagnostic that names the fix.
@@ -1222,7 +1222,7 @@ fn main():
 
 **Implementation Notes:**
 
-- The re-borrow manufactures a temporary `str` header with `cap=0` over the view's bytes (`TirTag::ViewAsStr`) — no allocation, valid for the duration of the call only.
+- The re-borrow manufactures a temporary `str` header with `cap=0` over the view's bytes (`TirTag::ViewAsOwner`) — no allocation, valid for the duration of the call only.
 - Dependencies: Milestone 8.4 (view type, projection machinery)
 
 ### Milestone 8.4.1.2: View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE
@@ -1274,7 +1274,7 @@ fn main():
 - `bytes` as a new fundamental type: fat pointer `{ ptr, len, cap }`, move semantics, mutability by binding; parameters borrow by default; `inout`/`move` as usual (ownership rules identical to `str`)
 - Bytes literal `b"\x00\x01"`: ASCII content plus the string-literal escape set and `\xNN` (exactly two hex digits, bytes-literal-only); raw non-ASCII source bytes are a lex diagnostic. Static data + `cap=0` header, no allocation (string-literal lowering)
 - Slicing `raw[start:end]` yields `bytesview` — a projection governed by the D1 rules (P1–P6, E1–E4) with **no** UTF-8 boundary check (bytes are not text); bounds check at creation, panics
-- `bytesview` activates `TypeKind::View(ViewKind::Bytes)` (slot reserved since M8.4's Task 10.1); generalize `TirTag::ViewOfStr` → owner→view conversion per the `owner_view` table
+- `bytesview` activates `TypeKind::View(ViewKind::Bytes)` (slot reserved since M8.4's Task 10.1); generalize `TirTag::ToView` → owner→view conversion per the `owner_view` table
 - Scalar indexing `b[i]` on `bytes` and `bytesview`, bounds-checked, panics — **interim: yields `int`** (0–255); becomes `u8` with Milestone 17.1 (`u8` without coercion rules is unusable — no implicit numeric conversions means `b[i] == 0x02` would not compile). Read-only: no `b[i] = v`
 - Bridging: `text.to_bytes() -> bytes` (owned copy, never fails) and `raw.to_str() -> str` — **interim: panics on invalid UTF-8**; becomes `Utf8Error!str` with Milestone 13 (error unions), call sites switch to `catch`/match handling
 - `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`); W0003 extends to both shapes

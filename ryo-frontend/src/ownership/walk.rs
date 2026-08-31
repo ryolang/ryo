@@ -887,7 +887,7 @@ pub(crate) fn visit_expr(
                     if mode == ParamMode::Borrow && pool.is_view(arg_ty) {
                         // A view arg borrows its root owner for the
                         // call's duration (E4). `projection_root` looks
-                        // through ViewOfStr conversions (the implicit
+                        // through ToView conversions (the implicit
                         // str → strview coercion) to the underlying owner
                         // — without this, `two(&s, s)` with an
                         // (inout, strview) signature would escape the
@@ -928,18 +928,18 @@ pub(crate) fn visit_expr(
                         continue;
                     }
                 }
-                // P6': a view re-borrowed into a `str` arg (ViewAsStr)
+                // P6': a view re-borrowed into a `str` arg (ViewAsOwner)
                 // borrows the view's ROOT owner for the call's duration
                 // — look through the conversion exactly like the
                 // str → strview direction above, or `two(&s, s[0:1])`
                 // would escape the Rule-7 partition.
-                let owner = if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::ViewAsStr
-                {
-                    projection_root(own, tir, pool, *arg)
-                        .unwrap_or_else(|| underlying_owner(own, *arg))
-                } else {
-                    underlying_owner(own, *arg)
-                };
+                let owner =
+                    if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::ViewAsOwner {
+                        projection_root(own, tir, pool, *arg)
+                            .unwrap_or_else(|| underlying_owner(own, *arg))
+                    } else {
+                        underlying_owner(own, *arg)
+                    };
                 if mode == ParamMode::Borrow {
                     check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
                     push_unique(&mut borrowed, owner);
@@ -1024,11 +1024,11 @@ pub(crate) fn visit_expr(
                     }
                     let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
                     // P6' (mirrors the Rule-7 partition above): a
-                    // view re-borrowed into a `str` arg via ViewAsStr
+                    // view re-borrowed into a `str` arg via ViewAsOwner
                     // borrows the view's ROOT owner — look through the
                     // conversion or the "borrowed here" note is lost.
                     let arg_owner =
-                        if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::ViewAsStr {
+                        if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::ViewAsOwner {
                             projection_root(own, tir, pool, *arg)
                                 .unwrap_or_else(|| underlying_owner(own, *arg))
                         } else {

@@ -234,15 +234,17 @@ pub enum TirTag {
 
     /// Slice projection `base[start:end]` → `strview` (M8.4).
     Slice,
-    /// Explicit `str → strview` representation conversion (drops `cap`),
-    /// inserted by sema at view-parameter call sites and mixed-str
-    /// equality operands. Operand in `data.un_op`.
-    ViewOfStr,
-    /// `strview → str` re-borrow (final spec P6'): materializes the
-    /// cap=0 fat triple — no allocation, call-scoped. Inserted by sema
-    /// when a view is passed to an owned `str` borrow parameter.
-    /// Operand in `data.un_op`.
-    ViewAsStr,
+    /// Explicit owner → view representation conversion (drops `cap`),
+    /// inserted by sema at view-parameter call sites and mixed
+    /// owner/view equality operands. Operand in `data.un_op`. Owner
+    /// pairs come from the pool's `owner_view` table: `str → strview`
+    /// (M8.4), `bytes → bytesview` (M8.4.2).
+    ToView,
+    /// View → owner re-borrow (final spec P6'): materializes the cap=0
+    /// fat triple — no allocation, call-scoped. Inserted by sema when a
+    /// view is passed to an owned borrow parameter. Operand in
+    /// `data.un_op`.
+    ViewAsOwner,
 
     /// `return <expr>`. Operand in `TirData::UnOp`.
     Return,
@@ -687,20 +689,20 @@ impl TirBuilder {
         )
     }
 
-    /// Explicit `str → strview` representation conversion (final spec
+    /// Explicit owner → view representation conversion (final spec
     /// §3.4): drops the `cap` word. Inserted by sema at view-parameter
-    /// call sites and on the owned side of mixed `str`/`strview`
-    /// equality. `view_ty` is the pool's `str_view()`.
-    pub fn view_of_str(&mut self, inner: TirRef, view_ty: TypeId, span: Span) -> TirRef {
-        self.push(TirTag::ViewOfStr, view_ty, TirData::UnOp(inner), span)
+    /// call sites and on the owned side of mixed owner/view equality.
+    /// `view_ty` comes from the pool's `owner_view` table.
+    pub fn to_view(&mut self, inner: TirRef, view_ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::ToView, view_ty, TirData::UnOp(inner), span)
     }
 
-    /// `strview → str` re-borrow (final spec P6'): materializes the
-    /// cap=0 fat triple at the call site — no allocation, call-scoped.
-    /// Inserted by sema when a view is passed to an owned `str` borrow
-    /// parameter. `ty` is the pool's `str_()`.
-    pub fn view_as_str(&mut self, inner: TirRef, ty: TypeId, span: Span) -> TirRef {
-        self.push(TirTag::ViewAsStr, ty, TirData::UnOp(inner), span)
+    /// View → owner re-borrow (final spec P6'): materializes the cap=0
+    /// fat triple at the call site — no allocation, call-scoped.
+    /// Inserted by sema when a view is passed to an owned borrow
+    /// parameter. `ty` is the pool's owner type for the view.
+    pub fn view_as_owner(&mut self, inner: TirRef, ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::ViewAsOwner, ty, TirData::UnOp(inner), span)
     }
 
     fn extra_offset(&self) -> u32 {
@@ -1702,8 +1704,8 @@ fn un_op_name(t: TirTag) -> &'static str {
         TirTag::Return => "ret",
         TirTag::ExprStmt => "expr_stmt",
         TirTag::StrLen => "str_len",
-        TirTag::ViewOfStr => "view_of_str",
-        TirTag::ViewAsStr => "view_as_str",
+        TirTag::ToView => "to_view",
+        TirTag::ViewAsOwner => "view_as_owner",
         _ => "?un",
     }
 }

@@ -1616,8 +1616,8 @@ fn view_param_accepts_owned_str_via_conversion() {
     assert!(diags.is_empty(), "got {:?}", diags);
     let main = tir_named(&tirs, &pool, "main");
     assert!(
-        main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr),
-        "owned str → strview param must insert a ViewOfStr conversion (§3.4)"
+        main.instructions.iter().any(|i| i.tag == TirTag::ToView),
+        "owned str → strview param must insert a ToView conversion (§3.4)"
     );
 }
 
@@ -1630,15 +1630,15 @@ fn view_param_accepts_view_arg_directly() {
     assert!(diags.is_empty(), "got {:?}", diags);
     let main = tir_named(&tirs, &pool, "main");
     assert!(
-        !main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr),
-        "view → view must not insert ViewOfStr"
+        !main.instructions.iter().any(|i| i.tag == TirTag::ToView),
+        "view → view must not insert ToView"
     );
 }
 
 #[test]
 fn view_passes_to_owned_str_param_via_reborrow() {
     // P6': a view passed to an owned `str` parameter re-borrows —
-    // sema inserts a ViewAsStr conversion (cap=0 triple at codegen,
+    // sema inserts a ViewAsOwner conversion (cap=0 triple at codegen,
     // no allocation, call-scoped).
     let (tirs, diags, pool) = run_with_errors(
         "fn show(s: str):\n\tprint(s)\n\nfn main():\n\ts: str = \"hi\"\n\tshow(s[0:1])\n",
@@ -1646,8 +1646,10 @@ fn view_passes_to_owned_str_param_via_reborrow() {
     assert!(diags.is_empty(), "got {:?}", diags);
     let main = tir_named(&tirs, &pool, "main");
     assert!(
-        main.instructions.iter().any(|i| i.tag == TirTag::ViewAsStr),
-        "strview → str param must insert a ViewAsStr re-borrow (P6')"
+        main.instructions
+            .iter()
+            .any(|i| i.tag == TirTag::ViewAsOwner),
+        "strview → str param must insert a ViewAsOwner re-borrow (P6')"
     );
 }
 
@@ -1754,7 +1756,7 @@ fn mixed_equality_wraps_str_side_in_view() {
     let (tirs, diags, pool) = run_with_errors("fn main():\n\ts: str = \"he\"\n\tx = s == s[0:2]\n");
     assert!(diags.is_empty(), "got {:?}", diags);
     let main = tir_named(&tirs, &pool, "main");
-    assert!(main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr));
+    assert!(main.instructions.iter().any(|i| i.tag == TirTag::ToView));
     assert!(main.instructions.iter().any(|i| i.tag == TirTag::StrCmpEq));
 }
 
@@ -1767,7 +1769,7 @@ fn view_view_equality_accepted() {
     let main = tir_named(&tirs, &pool, "main");
     assert!(main.instructions.iter().any(|i| i.tag == TirTag::StrCmpNe));
     assert!(
-        !main.instructions.iter().any(|i| i.tag == TirTag::ViewOfStr),
+        !main.instructions.iter().any(|i| i.tag == TirTag::ToView),
         "view vs view needs no conversion"
     );
 }
