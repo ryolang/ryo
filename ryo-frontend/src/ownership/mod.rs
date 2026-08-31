@@ -51,10 +51,11 @@ use std::collections::{HashMap, HashSet};
 // ---------- Classification ----------
 
 /// True for types whose values transfer ownership on `=` and must be
-/// tracked through the function body. Today: `str` only. Future heap
-/// types (`List[T]`, `Dict[K, V]`) will join this set.
+/// tracked through the function body. Today: `str` and `bytes`
+/// (M8.4.2). Future heap types (`List[T]`, `Dict[K, V]`) will join
+/// this set.
 pub(crate) fn is_move_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(pool.kind(ty), TypeKind::Str)
+    matches!(pool.kind(ty), TypeKind::Str | TypeKind::Bytes)
 }
 
 /// Predicate the ownership walk uses to decide whether a `TirRef`

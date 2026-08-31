@@ -831,7 +831,9 @@ impl<M: Module> Codegen<M> {
     /// untouched arm, where the binding's `FatLocals` still hold the
     /// pre-if value. Resolves `target` through `free_binding_names` (the
     /// init→name map), so the freed buffer is the binding's
-    /// current triple at that program point.
+    /// current triple at that program point. The free is
+    /// family-appropriate (`ryo_str_free` / `ryo_bytes_free`, selected
+    /// per target via `free_target_is_bytes`).
     pub(crate) fn emit_conditional_dead_drops(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -848,7 +850,11 @@ impl<M: Module> Codegen<M> {
             let Some(sl) = Self::read_slot(&ctx.fat_locals, name) else {
                 continue;
             };
-            let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
+            let free_ref = if Self::free_target_is_bytes(ctx, drop.target) {
+                Self::declare_bytes_free(ctx.module, builder, ctx.int_type)?
+            } else {
+                Self::declare_str_free(ctx.module, builder, ctx.int_type)?
+            };
             let ptr = builder.use_var(sl.ptr);
             let cap = builder.use_var(sl.cap);
             builder.ins().call(free_ref, &[ptr, cap]);

@@ -5,6 +5,7 @@ mod loops;
 mod merge;
 mod views_basics;
 mod views_branches;
+mod views_bytes;
 mod views_calls;
 
 use super::*;
@@ -23,8 +24,11 @@ fn copy_types_classified() {
 fn move_types_classified() {
     let pool = InternPool::new();
     assert!(is_move_type(pool.str_(), &pool));
+    assert!(is_move_type(pool.bytes(), &pool));
     assert!(!is_move_type(pool.int(), &pool));
     assert!(!is_move_type(pool.bool_(), &pool));
+    assert!(!is_move_type(pool.str_view(), &pool));
+    assert!(!is_move_type(pool.bytes_view(), &pool));
 }
 
 #[test]

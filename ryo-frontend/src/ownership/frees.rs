@@ -123,16 +123,17 @@ pub(crate) fn collect_named_inits_rec(tir: &Tir, r: TirRef, set: &mut HashSet<Ti
     }
 }
 
-/// True when `r` is a call to the synthesized `__ryo_str_from_view`
-/// materialize callee (M8.4.1.2) with a single view-typed argument.
-/// The callee name is unshadowable (`__ryo_` is reserved), so a name
-/// match is unambiguous.
+/// True when `r` is a call to a synthesized materialize callee
+/// (`__ryo_str_from_view`, M8.4.1.2; `__ryo_bytes_from_view`, M8.4.2)
+/// with a single view-typed argument. The callee names are
+/// unshadowable (`__ryo_` is reserved), so a name match is unambiguous.
 pub(crate) fn is_materialize_call(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
     if tir.inst(r).tag != TirTag::Call {
         return false;
     }
     let view = tir.call_view(r);
-    pool.str(view.name) == "__ryo_str_from_view"
+    let name = pool.str(view.name);
+    (name == "__ryo_str_from_view" || name == "__ryo_bytes_from_view")
         && view.args.len() == 1
         && pool.is_view(tir.inst(view.args[0]).ty)
 }
@@ -184,9 +185,10 @@ pub(crate) fn collect_materialize_sites(
     }
 }
 
-/// W0003 case B (M8.4.1.2): a bound `x = str(view)` whose copy never
-/// escapes and whose source is never mutated after the copy is a
-/// redundant allocation — the view could have been used directly.
+/// W0003 case B (M8.4.1.2; generalized to bytes in M8.4.2): a bound
+/// `x = str(view)` / `x = bytes(view)` whose copy never escapes and
+/// whose source is never mutated after the copy is a redundant
+/// allocation — the view could have been used directly.
 ///
 /// Heuristic, warning-only. The escape classification REUSES the
 /// walk's results instead of inventing a second escape analysis: the
@@ -266,10 +268,18 @@ pub(crate) fn warn_redundant_materialize(
         if defensive {
             continue;
         }
+        let callee = pool.str(tir.call_view(call).name);
+        let type_name = if callee == "__ryo_bytes_from_view" {
+            "bytes"
+        } else {
+            "str"
+        };
         sink.emit(Diag::warning(
             tir.span(call),
             DiagCode::RedundantMaterialize,
-            "`str(...)` copy never escapes and its source is never mutated — the view can be used directly, without the allocation",
+            format!(
+                "`{type_name}(...)` copy never escapes and its source is never mutated — the view can be used directly, without the allocation"
+            ),
         ));
     }
 }

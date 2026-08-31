@@ -785,18 +785,18 @@ pub(crate) fn visit_expr(
     let inst = *tir.inst(r);
     match inst.tag {
         // ---- Allocating instructions ----
-        // `StrConst` materializes a fresh heap string at runtime;
-        // `StrConcat` produces a brand-new allocation from its two
-        // operands. Both enter the lattice as `Valid` with no
-        // upstream origin.
-        TirTag::StrConst => {
+        // `StrConst`/`BytesConst` materialize a fresh heap string/bytes
+        // at runtime; `StrConcat`/`BytesConcat` produce a brand-new
+        // allocation from their two operands. All four enter the
+        // lattice as `Valid` with no upstream origin.
+        TirTag::StrConst | TirTag::BytesConst => {
             if needs_tracking(inst.ty, pool) {
                 own.states.insert(Owner::Inst(r), OwnerState::Valid);
                 Ownership::dense_set(&mut own.origin, r, None);
                 own.temp_owners.insert(Owner::Inst(r));
             }
         }
-        TirTag::StrConcat => {
+        TirTag::StrConcat | TirTag::BytesConcat => {
             if needs_tracking(inst.ty, pool) {
                 own.states.insert(Owner::Inst(r), OwnerState::Valid);
                 Ownership::dense_set(&mut own.origin, r, None);

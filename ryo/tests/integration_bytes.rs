@@ -198,3 +198,19 @@ fn test_bytes_index_negative_panics() {
     let output = run_ryo_command(&["run", "bytes_index_neg.ryo"], &test_file).expect("run ryo");
     assert_eq!(output.status.code(), Some(101));
 }
+
+#[test]
+fn test_bytes_conditional_reassign_dead_drop() {
+    // Conditional dead-drop for a bytes owner (M8.4.2): a bytes
+    // binding reassigned on one arm and never read afterwards gets its
+    // pre-if heap buffer freed on the untouched path by
+    // `emit_conditional_dead_drops`, which must select `ryo_bytes_free`
+    // (not `ryo_str_free`). Heap-backed via `.to_bytes()` so the free
+    // is a real deallocation — a rodata bytes literal would be cap=0,
+    // a runtime no-op. (The dead reassign warns W0001; warnings do not
+    // fail the run.)
+    assert_ryo_runs(
+        "bytes_dead_drop.ryo",
+        "fn main():\n\tmut b = \"AB\".to_bytes()\n\tflag = false\n\tif flag:\n\t\tb = \"CD\".to_bytes()\n",
+    );
+}
