@@ -299,3 +299,76 @@ fn user_defined_fn_bytes_shadows_intercept() {
     // as the str intercept).
     run("fn bytes(x: int):\n\treturn\n\nfn main():\n\tbytes(1)\n").expect("sema ok");
 }
+
+#[test]
+fn to_str_types_on_bytes_and_bytesview() {
+    let (tirs, pool) =
+        run("fn main():\n\tb = b\"\\x61\"\n\ts = b.to_str()\n\tv = b[0:1]\n\tt = v.to_str()\n")
+            .expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    let callee = pool
+        .find_str("__ryo_bytes_to_str")
+        .expect("callee interned");
+    let calls = (1..main.instructions.len())
+        .filter(|&idx| {
+            let r = TirRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
+            main.inst(r).tag == TirTag::Call
+                && main.inst(r).ty == pool.str_()
+                && main.call_view(r).name == callee
+        })
+        .count();
+    assert_eq!(
+        calls, 2,
+        "both to_str() calls must lower to __ryo_bytes_to_str"
+    );
+}
+
+#[test]
+fn to_bytes_types_on_str_and_strview() {
+    let (tirs, pool) =
+        run("fn main():\n\ts = \"ab\"\n\tb = s.to_bytes()\n\tv = s[0:1]\n\tc = v.to_bytes()\n")
+            .expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    let callee = pool.find_str("ryo_str_to_bytes").expect("callee interned");
+    let calls = (1..main.instructions.len())
+        .filter(|&idx| {
+            let r = TirRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
+            main.inst(r).tag == TirTag::Call
+                && main.inst(r).ty == pool.bytes()
+                && main.call_view(r).name == callee
+        })
+        .count();
+    assert_eq!(
+        calls, 2,
+        "both to_bytes() calls must lower to ryo_str_to_bytes"
+    );
+}
+
+#[test]
+fn to_str_on_str_keeps_no_method_diagnostic() {
+    // Same diagnostic shape as before M8.4.2 for wrong-family methods.
+    let (_, diags, _) = run_with_errors("fn main():\n\ts = \"ab\"\n\tx = s.to_str()\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::UndefinedFunction
+            && d.message.contains("str has no method 'to_str'")),
+        "got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn to_bytes_on_bytes_keeps_no_method_diagnostic() {
+    let (_, diags, _) = run_with_errors("fn main():\n\tb = b\"\\x61\"\n\tx = b.to_bytes()\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::UndefinedFunction
+            && d.message.contains("bytes has no method 'to_bytes'")),
+        "got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn bridging_methods_take_no_arguments() {
+    let (_, diags, _) = run_with_errors("fn main():\n\tb = b\"\\x61\"\n\ts = b.to_str(1)\n");
+    assert!(any_code(&diags, DiagCode::ArityMismatch));
+}

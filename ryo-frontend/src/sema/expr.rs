@@ -2,7 +2,7 @@
 
 use super::{FuncCtx, Scope, Sema, check_call};
 use ryo_core::diag::{Diag, DiagCode};
-use ryo_core::tir::{TirData, TirRef, TirTag};
+use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{TypeId, TypeKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag, Span, Uir};
 
@@ -285,6 +285,15 @@ pub(crate) fn analyze_expr_allow_never(
                     fcx.builder
                         .binary(TirTag::ICmpEq, sema.pool.bool_(), len_tir, zero, span)
                 }
+                "to_str" | "to_bytes" => bridge_method_call(
+                    sema,
+                    fcx,
+                    &method_name,
+                    view.args.is_empty(),
+                    receiver_tir,
+                    receiver_ty,
+                    span,
+                ),
                 _ => {
                     sema.sink.emit(Diag::error(
                         span,
@@ -376,6 +385,73 @@ pub(crate) fn analyze_expr_allow_never(
 
     fcx.inst_map[r.index()] = Some(emitted);
     emitted
+}
+
+/// M8.4.2 bridging methods: `bytes`/`bytesview`.to_str() lowers to
+/// `__ryo_bytes_to_str` (a stopgap that panics at runtime on invalid
+/// UTF-8; becomes `Utf8Error!str` at M13), `str`/`strview`.to_bytes()
+/// lowers to `ryo_str_to_bytes`. Wrong-family receivers keep the
+/// generalized "X has no method 'Y'" diagnostic. Only called for the
+/// `to_str` / `to_bytes` names.
+fn bridge_method_call(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    method_name: &str,
+    args_empty: bool,
+    receiver_tir: TirRef,
+    receiver_ty: TypeId,
+    span: Span,
+) -> TirRef {
+    debug_assert!(matches!(method_name, "to_str" | "to_bytes"));
+    if !args_empty {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            format!("{method_name}() takes no arguments"),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let (callee_name, ret_ty) = match method_name {
+        "to_str" => {
+            if !matches!(
+                sema.pool.kind(receiver_ty),
+                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes)
+            ) {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedFunction,
+                    format!(
+                        "{} has no method '{}'",
+                        sema.pool.display(receiver_ty),
+                        method_name
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            ("__ryo_bytes_to_str", sema.pool.str_())
+        }
+        _ => {
+            if !matches!(
+                sema.pool.kind(receiver_ty),
+                TypeKind::Str | TypeKind::View(ViewKind::Str)
+            ) {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedFunction,
+                    format!(
+                        "{} has no method '{}'",
+                        sema.pool.display(receiver_ty),
+                        method_name
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            ("ryo_str_to_bytes", sema.pool.bytes())
+        }
+    };
+    let callee = sema.pool.intern_str(callee_name);
+    fcx.builder
+        .call(callee, &[receiver_tir], &[ParamMode::Borrow], ret_ty, span)
 }
 
 /// Type-check one slice bound (`start` / `end`): §3.1 requires
