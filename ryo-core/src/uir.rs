@@ -142,6 +142,8 @@ pub enum InstTag {
     IntLiteral,
     FloatLiteral,
     StrLiteral,
+    /// `b"..."` payload; data is `InstData::Str` (StringId of the decoded bytes). (M8.4.2)
+    BytesLiteral,
     BoolLiteral,
 
     /// Identifier reference, unresolved. Sema turns this into either
@@ -500,6 +502,10 @@ impl UirBuilder {
 
     pub fn str_literal(&mut self, value: StringId, span: Span) -> InstRef {
         self.push(InstTag::StrLiteral, InstData::Str(value), span)
+    }
+
+    pub fn bytes_literal(&mut self, value: StringId, span: Span) -> InstRef {
+        self.push(InstTag::BytesLiteral, InstData::Str(value), span)
     }
 
     pub fn bool_literal(&mut self, value: bool, span: Span) -> InstRef {
@@ -1132,6 +1138,9 @@ fn write_inst(
         (InstTag::IntLiteral, InstData::Int(v)) => writeln!(f, "int {}", v),
         (InstTag::FloatLiteral, InstData::Float(v)) => writeln!(f, "float {}", v),
         (InstTag::StrLiteral, InstData::Str(s)) => writeln!(f, "str {:?}", pool.str(s)),
+        (InstTag::BytesLiteral, InstData::Str(s)) => {
+            writeln!(f, "bytes \"{}\"", pool.bytes_payload(s).escape_ascii())
+        }
         (InstTag::BoolLiteral, InstData::Bool(b)) => writeln!(f, "bool {}", b),
         (InstTag::Var, InstData::Var(s)) => writeln!(f, "var {}", pool.str(s)),
         (op, InstData::BinOp { lhs, rhs }) => {

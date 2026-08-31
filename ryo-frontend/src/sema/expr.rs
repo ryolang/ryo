@@ -63,6 +63,9 @@ pub(crate) fn analyze_expr_allow_never(
             InstData::Float(v) => fcx.builder.float_const(v, sema.pool.float(), span),
             _ => unreachable!("FloatLiteral must carry InstData::Float"),
         },
+        // Sema typing for `b"..."` literals lands in the follow-up
+        // M8.4.2 sema task; reaching this arm panics until then.
+        InstTag::BytesLiteral => unreachable!("sema for b\"...\" literals"),
         InstTag::Var => {
             let name = match inst.data {
                 InstData::Var(s) => s,

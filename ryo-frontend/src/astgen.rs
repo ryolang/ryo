@@ -42,6 +42,8 @@ struct Primitives {
     int: StringId,
     str_: StringId,
     strview: StringId,
+    bytes: StringId,
+    bytesview: StringId,
     bool_: StringId,
     float: StringId,
 }
@@ -52,6 +54,8 @@ impl Primitives {
             int: pool.intern_str("int"),
             str_: pool.intern_str("str"),
             strview: pool.intern_str("strview"),
+            bytes: pool.intern_str("bytes"),
+            bytesview: pool.intern_str("bytesview"),
             bool_: pool.intern_str("bool"),
             float: pool.intern_str("float"),
         }
@@ -142,6 +146,10 @@ fn resolve_type(
         pool.str_()
     } else if name == prims.strview {
         pool.str_view()
+    } else if name == prims.bytes {
+        pool.bytes()
+    } else if name == prims.bytesview {
+        pool.bytes_view()
     } else if name == prims.bool_ {
         pool.bool_()
     } else if name == prims.float {
@@ -391,9 +399,7 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
             ast::Literal::Str(id) => b.str_literal(id, span),
             ast::Literal::Bool(v) => b.bool_literal(v, span),
             ast::Literal::Float(v) => b.float_literal(v, span),
-            // Bytes lowering lands in the follow-up astgen task; reaching this
-            // arm with a real `b"..."` literal panics until then.
-            ast::Literal::Bytes(_) => unreachable!("astgen for b\"...\" literals"),
+            ast::Literal::Bytes(id) => b.bytes_literal(id, span),
         },
         ast::ExprKind::Ident(name) => b.var_ref(name, span),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
@@ -853,5 +859,30 @@ mod tests {
         // fallthrough to `int`.
         let diags = parse_and_lower("fn f(x: &int):\n\tprint(\"\")\n").unwrap_err();
         assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
+    }
+
+    #[test]
+    fn bytes_literal_lowers_to_uir() {
+        let (uir, pool) = parse_and_lower("b = b\"A\\x00\"\n").expect("lower ok");
+        let body = body_named(&uir, &pool, "main");
+        let _ = body;
+        let mut found = false;
+        for idx in 1..uir.instructions.len() {
+            let r = InstRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
+            let inst = uir.inst(r);
+            if inst.tag == InstTag::BytesLiteral {
+                let InstData::Str(id) = inst.data else {
+                    panic!("BytesLiteral must carry InstData::Str");
+                };
+                assert_eq!(pool.bytes_payload(id), b"A\x00");
+                found = true;
+            }
+        }
+        assert!(found, "no BytesLiteral instruction emitted");
+    }
+
+    #[test]
+    fn bytes_annotations_resolve() {
+        parse_and_lower("fn f(b: bytes, v: bytesview):\n\treturn\n").expect("lower ok");
     }
 }
