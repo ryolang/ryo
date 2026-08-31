@@ -63,9 +63,10 @@ pub(crate) fn analyze_expr_allow_never(
             InstData::Float(v) => fcx.builder.float_const(v, sema.pool.float(), span),
             _ => unreachable!("FloatLiteral must carry InstData::Float"),
         },
-        // Sema typing for `b"..."` literals lands in the follow-up
-        // M8.4.2 sema task; reaching this arm panics until then.
-        InstTag::BytesLiteral => unreachable!("sema for b\"...\" literals"),
+        InstTag::BytesLiteral => match inst.data {
+            InstData::Str(s) => fcx.builder.bytes_const(s, sema.pool.bytes(), span),
+            _ => unreachable!("BytesLiteral must carry InstData::Str"),
+        },
         InstTag::Var => {
             let name = match inst.data {
                 InstData::Var(s) => s,
@@ -226,10 +227,11 @@ pub(crate) fn analyze_expr_allow_never(
                 analyze_expr(sema, fcx, scope, arg);
             }
 
-            // Only `str` and `strview` views have methods (M8.4).
+            // `str`/`strview` (M8.4) and `bytes`/`bytesview` (M8.4.2)
+            // have methods.
             if !matches!(
                 sema.pool.kind(receiver_ty),
-                TypeKind::Str | TypeKind::View(_)
+                TypeKind::Str | TypeKind::Bytes | TypeKind::View(_)
             ) {
                 if !sema.pool.is_error(receiver_ty) {
                     sema.sink.emit(Diag::error(
@@ -247,7 +249,10 @@ pub(crate) fn analyze_expr_allow_never(
                         sema.sink.emit(Diag::error(
                             span,
                             DiagCode::ArityMismatch,
-                            "str.len() takes no arguments".to_string(),
+                            format!(
+                                "{}.len() takes no arguments",
+                                sema.pool.display(receiver_ty)
+                            ),
                         ));
                         return fcx.builder.unreachable(sema.pool.error_type(), span);
                     }
@@ -263,7 +268,10 @@ pub(crate) fn analyze_expr_allow_never(
                         sema.sink.emit(Diag::error(
                             span,
                             DiagCode::ArityMismatch,
-                            "str.is_empty() takes no arguments".to_string(),
+                            format!(
+                                "{}.is_empty() takes no arguments",
+                                sema.pool.display(receiver_ty)
+                            ),
                         ));
                         return fcx.builder.unreachable(sema.pool.error_type(), span);
                     }
@@ -281,7 +289,11 @@ pub(crate) fn analyze_expr_allow_never(
                     sema.sink.emit(Diag::error(
                         span,
                         DiagCode::UndefinedFunction,
-                        format!("str has no method '{}'", method_name),
+                        format!(
+                            "{} has no method '{}'",
+                            sema.pool.display(receiver_ty),
+                            method_name
+                        ),
                     ));
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }

@@ -7,16 +7,16 @@ use chumsky::input::Input;
 use chumsky::span::{SimpleSpan, Span as _};
 use ryo_core::tir::{Tir, TirData, TirTag};
 
-fn sp() -> Span {
+pub(super) fn sp() -> Span {
     SimpleSpan::new((), 0..0)
 }
 
-type RunOk = (Vec<Tir>, InternPool);
+pub(super) type RunOk = (Vec<Tir>, InternPool);
 
 /// Lex + parse + astgen + sema. Returns either the typed TIR
 /// (alongside the pool) or the diagnostics that stopped one of
 /// those stages.
-fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
+pub(super) fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
     let mut pool = InternPool::new();
     let mut lex_sink = DiagSink::new();
     let tokens = lex(input, &mut pool, &mut lex_sink);
@@ -46,7 +46,7 @@ fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
 
 /// Variant that returns TIR even when sema reported errors —
 /// used to assert the "Unreachable + diag" invariant from §4.5.
-fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
+pub(super) fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
     let mut pool = InternPool::new();
     let mut lex_sink = DiagSink::new();
     let tokens = lex(input, &mut pool, &mut lex_sink);
@@ -68,26 +68,26 @@ fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
     (tirs, sink.into_diags(), pool)
 }
 
-fn first_msg(diags: &[Diag]) -> &str {
+pub(super) fn first_msg(diags: &[Diag]) -> &str {
     &diags[0].message
 }
 
-fn any_code(diags: &[Diag], code: DiagCode) -> bool {
+pub(super) fn any_code(diags: &[Diag], code: DiagCode) -> bool {
     diags.iter().any(|d| d.code == code)
 }
 
-fn count_code(diags: &[Diag], code: DiagCode) -> usize {
+pub(super) fn count_code(diags: &[Diag], code: DiagCode) -> usize {
     diags.iter().filter(|d| d.code == code).count()
 }
 
-fn tir_named<'a>(tirs: &'a [Tir], pool: &InternPool, name: &str) -> &'a Tir {
+pub(super) fn tir_named<'a>(tirs: &'a [Tir], pool: &InternPool, name: &str) -> &'a Tir {
     let id = pool.find_str(name).expect("name should be interned");
     tirs.iter()
         .find(|t| t.name == id)
         .unwrap_or_else(|| panic!("no function named {:?}", name))
 }
 
-fn stmt_at(tir: &Tir, i: usize) -> TirRef {
+pub(super) fn stmt_at(tir: &Tir, i: usize) -> TirRef {
     tir.body_stmts()[i]
 }
 

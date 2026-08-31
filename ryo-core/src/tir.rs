@@ -167,6 +167,8 @@ pub enum TirTag {
     FloatConst,
     BoolConst,
     StrConst,
+    /// `b"..."` literal (M8.4.2). Payload in `TirData::Str`.
+    BytesConst,
 
     /// Read of a local (parameter or `let`-bound). Resolved to a
     /// `StringId` so codegen's `HashMap<StringId, Variable>` lookup
@@ -600,6 +602,10 @@ impl TirBuilder {
 
     pub fn str_const(&mut self, value: StringId, ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::StrConst, ty, TirData::Str(value), span)
+    }
+
+    pub fn bytes_const(&mut self, value: StringId, ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::BytesConst, ty, TirData::Str(value), span)
     }
 
     pub fn var(&mut self, name: StringId, ty: TypeId, span: Span) -> TirRef {
@@ -1564,6 +1570,13 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
         (TirTag::FloatConst, TirData::Float(v)) => writeln!(f, "fconst {}", v),
         (TirTag::BoolConst, TirData::Bool(b)) => writeln!(f, "bconst {}", b),
         (TirTag::StrConst, TirData::Str(s)) => writeln!(f, "sconst {:?}", pool.str(s)),
+        (TirTag::BytesConst, TirData::Str(s)) => {
+            writeln!(
+                f,
+                "bytes_const \"{}\"",
+                pool.bytes_payload(s).escape_ascii()
+            )
+        }
         (TirTag::Var, TirData::Var(s)) => writeln!(f, "var {}", pool.str(s)),
         (TirTag::Slice, TirData::Slice { base, start, end }) => {
             let bound = |b: Option<TirRef>| match b {

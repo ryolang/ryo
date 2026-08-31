@@ -3,7 +3,7 @@
 use super::{FuncCtx, Scope, Sema, borrow_target_reason};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{ParamMode, TirRef, TirTag};
-use ryo_core::types::{StringId, TypeKind};
+use ryo_core::types::{StringId, TypeKind, ViewKind};
 use ryo_core::uir::{CallView, InstData, InstRef, InstTag, Span};
 
 /// Front-end validation for builtin calls.
@@ -54,10 +54,33 @@ pub(crate) fn emit_builtin_call(
             if !check_print_args(sema, fcx, view, arg_tirs, span) {
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
+            // M8.4.2: print(bytes/bytesview) renders the escaped repr —
+            // rewrite to `print(__ryo_bytes_repr(arg))` at the TIR level
+            // so the repr temp is a normal ownership-tracked str
+            // producer (a codegen-synthesized temp would never be freed).
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            let owned_args;
+            let effective: &[TirRef] = if matches!(
+                sema.pool.kind(arg_ty),
+                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes)
+            ) {
+                let callee = sema.pool.intern_str("__ryo_bytes_repr");
+                let repr = fcx.builder.call(
+                    callee,
+                    &[arg_tirs[0]],
+                    &[ParamMode::Borrow],
+                    sema.pool.str_(),
+                    span,
+                );
+                owned_args = vec![repr];
+                &owned_args
+            } else {
+                arg_tirs
+            };
             // W0003 case A: `print` takes `strview` directly.
-            warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], "print");
+            warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], effective[0], "print");
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder.call(view.name, effective, &modes, ret_ty, span)
         }
         "panic" => emit_panic(sema, fcx, view, span),
         "assert" => emit_assert(sema, fcx, view, arg_tirs, span),
@@ -468,12 +491,15 @@ pub(crate) fn check_print_args(
     if sema.pool.is_error(arg_ty) {
         return false;
     }
-    if !matches!(sema.pool.kind(arg_ty), TypeKind::Str | TypeKind::View(_)) {
+    if !matches!(
+        sema.pool.kind(arg_ty),
+        TypeKind::Str | TypeKind::Bytes | TypeKind::View(_)
+    ) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
             format!(
-                "print() argument must be str or strview, got {}",
+                "print() argument must be str, strview, bytes, or bytesview, got {}",
                 sema.pool.display(arg_ty)
             ),
         ));

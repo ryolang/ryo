@@ -532,3 +532,5 @@ pub(crate) struct FuncCtx {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_bytes;
