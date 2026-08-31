@@ -1,6 +1,5 @@
 use crate::tir::{Span, TirRef};
 use crate::types::StringId;
-use std::collections::HashMap;
 
 /// Identifies a specific arm of an `IfStmt` (and, future, `Match`).
 /// Assigned by the ownership pass; codegen maps each `BranchId` to a
@@ -80,14 +79,21 @@ pub struct FunctionSidecar {
     pub name: StringId,
     /// Frees anchored after specific instructions.
     pub free_schedule: Vec<FreePoint>,
-    /// Reassignment Frees. Key: the `Assign` instruction's `TirRef`.
-    /// Value: the `TirRef` whose buffer must be freed *before* the new
-    /// fat-pointer triple is stored into the binding's `StrLocals`.
-    pub free_on_reassign: HashMap<TirRef, TirRef>,
-    /// `BranchId` assignments per `IfStmt`. Codegen consults this when
-    /// lowering if/elif/else to know which `BranchId` to push onto
-    /// `branch_stack` for each arm.
-    pub if_branches: HashMap<TirRef /* IfStmt inst */, IfBranchIds>,
+    /// Reassignment Frees. Dense side table indexed by the `Assign`
+    /// instruction's `TirRef::index()` (slot 0 unused — refs are
+    /// 1-based), sized to the owning function's TIR arena length.
+    /// `Some(target)` at slot `r` means: the buffer of `target` must be
+    /// freed *before* the new fat-pointer triple is stored into the
+    /// binding's `StrLocals`. Keys are always real instruction refs
+    /// (never param sentinels); `target` itself may be a param sentinel
+    /// ref for `inout` params.
+    pub free_on_reassign: Vec<Option<TirRef>>,
+    /// `BranchId` assignments per `IfStmt`. Dense side table indexed by
+    /// the `IfStmt` instruction's `TirRef::index()` (slot 0 unused),
+    /// sized to the owning function's TIR arena length. Codegen
+    /// consults this when lowering if/elif/else to know which
+    /// `BranchId` to push onto `branch_stack` for each arm.
+    pub if_branches: Vec<Option<IfBranchIds>>,
     /// Conditional drops of pre-branch buffers for dead conditional
     /// reassignments. Codegen fires each entry at the start of
     /// the arms it names (including a synthetic fall-through block for
@@ -96,16 +102,17 @@ pub struct FunctionSidecar {
 }
 
 impl FunctionSidecar {
-    /// Empty sidecar for the function named `name`. `Default` is
-    /// deliberately not derived: a sidecar without a recorded name
-    /// would defeat the codegen alignment assert documented on
-    /// [`Self::name`].
-    pub fn new(name: StringId) -> Self {
+    /// Empty sidecar for the function named `name`, with the dense
+    /// `TirRef`-indexed tables sized to the function's TIR arena
+    /// length (`tir.instructions.len()`). `Default` is deliberately
+    /// not derived: a sidecar without a recorded name would defeat the
+    /// codegen alignment assert documented on [`Self::name`].
+    pub fn new(name: StringId, arena_len: usize) -> Self {
         FunctionSidecar {
             name,
             free_schedule: Vec::new(),
-            free_on_reassign: HashMap::new(),
-            if_branches: HashMap::new(),
+            free_on_reassign: vec![None; arena_len],
+            if_branches: vec![None; arena_len],
             conditional_dead_drops: Vec::new(),
         }
     }

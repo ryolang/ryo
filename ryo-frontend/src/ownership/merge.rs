@@ -62,23 +62,30 @@ impl Ownership {
             merge_states_any_moved_wins(&mut self.states, &b.states);
         }
         // Union the remaining branch-local fields. `current_owner` /
-        // `origin` use first-wins via `or_insert`. `temp_owners` is
+        // `origin` use first-wins (a filled dst slot is kept).
+        // `temp_owners` is
         // unioned so entries introduced inside a branch (or loop body)
         // survive the merge — without this a `StrConst`/`StrConcat`/Call
         // inside a `while` body is silently dropped from `temp_owners`
         // when the merged state starts from the pre-loop entry.
         // `owner_at_read`
-        // keys are unique per TirRef (instructions aren't shared across
-        // blocks), so each key appears in at most one branch and
-        // `or_insert` is correct.
+        // slots are unique per TirRef (instructions aren't shared across
+        // blocks), so each slot is filled in at most one branch and
+        // first-wins is correct.
         for b in branches {
             merge_current_owner_first_wins(&mut self.current_owner, &b.current_owner);
-            for (k, v) in &b.origin {
-                self.origin.entry(*k).or_insert(*v);
+            debug_assert_eq!(self.origin.len(), b.origin.len());
+            for (i, v) in b.origin.iter().enumerate() {
+                if self.origin[i].is_none() {
+                    self.origin[i] = *v;
+                }
             }
             self.temp_owners.extend(b.temp_owners.iter().copied());
-            for (&read, &owner) in &b.owner_at_read {
-                self.owner_at_read.entry(read).or_insert(owner);
+            debug_assert_eq!(self.owner_at_read.len(), b.owner_at_read.len());
+            for (i, v) in b.owner_at_read.iter().enumerate() {
+                if self.owner_at_read[i].is_none() {
+                    self.owner_at_read[i] = *v;
+                }
             }
             // P3 root mapping: first-wins, mirroring `origin`.
             for (k, v) in &b.root_owner {

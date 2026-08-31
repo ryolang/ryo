@@ -11,7 +11,7 @@ use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, Linkage, Module};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Cap derivation for the packed-u128 runtime string ABI (Phase 0):
 /// string-producing runtime functions return `{ptr, len}` packed in
@@ -88,11 +88,9 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::Var => match inst.data {
                 TirData::Var(name) => {
-                    let var = ctx
-                        .locals
-                        .get(&name)
+                    let var = Self::read_slot(&ctx.locals, name)
                         .ok_or_else(|| format!("Undefined variable: '{}'", ctx.pool.str(name)))?;
-                    builder.use_var(*var)
+                    builder.use_var(var)
                 }
                 _ => unreachable!("Var must carry TirData::Var"),
             },
@@ -622,7 +620,7 @@ impl<M: Module> Codegen<M> {
     /// pass excludes such args from `temp_owners`. If a
     /// `Scalar` target is observed here, this function returns `Err`.
     ///
-    /// `freed_at` (a set of `free_schedule` indices) guards against
+    /// `freed_at` (a per-`free_schedule`-index flag table) guards against
     /// double-emission across the eval-end hooks and the end-of-stmt
     /// sweep.
     pub(crate) fn emit_due_frees(
@@ -633,7 +631,7 @@ impl<M: Module> Codegen<M> {
         if ctx.sidecar.free_schedule.is_empty() {
             return Ok(());
         }
-        let Some(indices) = ctx.free_by_after.get(&tir_ref) else {
+        let Some(indices) = ctx.free_by_after.get(tir_ref.index()) else {
             return Ok(());
         };
         let pending: Vec<(usize, TirRef)> = indices
@@ -641,7 +639,7 @@ impl<M: Module> Codegen<M> {
             .copied()
             .filter(|&idx| {
                 let fp = &ctx.sidecar.free_schedule[idx];
-                Self::branch_active(fp.branch, &ctx.branch_stack) && !ctx.freed_at.contains(&idx)
+                Self::branch_active(fp.branch, &ctx.branch_stack) && !ctx.freed_at[idx]
             })
             .map(|idx| (idx, ctx.sidecar.free_schedule[idx].target))
             .collect();
@@ -722,11 +720,9 @@ impl<M: Module> Codegen<M> {
         }
         let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
         for (idx, target) in pending {
-            ctx.freed_at.insert(idx);
-            let binding = ctx
-                .free_binding_names
-                .get(&target)
-                .and_then(|name| ctx.str_locals.get(name).cloned());
+            ctx.freed_at[idx] = true;
+            let binding = Self::free_binding_name(ctx, target)
+                .and_then(|name| Self::read_slot(&ctx.str_locals, name));
             if let Some(sl) = binding {
                 let ptr = builder.use_var(sl.ptr);
                 let cap = builder.use_var(sl.cap);
@@ -769,7 +765,7 @@ impl<M: Module> Codegen<M> {
                 }
             }
         }
-        ctx.pending_sweep.retain(|idx| !ctx.freed_at.contains(idx));
+        ctx.pending_sweep.retain(|&idx| !ctx.freed_at[idx]);
         Ok(())
     }
 
@@ -790,10 +786,10 @@ impl<M: Module> Codegen<M> {
             if drop.if_stmt != if_stmt || !drop.arms.contains(&arm) {
                 continue;
             }
-            let Some(name) = ctx.free_binding_names.get(&drop.target).copied() else {
+            let Some(name) = Self::free_binding_name(ctx, drop.target) else {
                 continue;
             };
-            let Some(sl) = ctx.str_locals.get(&name).cloned() else {
+            let Some(sl) = Self::read_slot(&ctx.str_locals, name) else {
                 continue;
             };
             let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
@@ -808,20 +804,25 @@ impl<M: Module> Codegen<M> {
     /// initializers, Assign values, and str params' virtual refs. Built
     /// once per function; `emit_frees` consults it to free a binding's
     /// current `StrLocals` rather than a stale cached repr.
+    ///
+    /// Returns two dense tables: the first indexed by `TirRef::index()`
+    /// for real instruction refs (slot 0 unused), the second indexed by
+    /// param position for str-param sentinel refs — queried together via
+    /// `Codegen::free_binding_name`.
     pub(crate) fn build_free_binding_names(
         tir: &Tir,
         pool: &InternPool,
-    ) -> HashMap<TirRef, StringId> {
-        fn walk(tir: &Tir, stmts: &[TirRef], map: &mut HashMap<TirRef, StringId>) {
+    ) -> (Vec<Option<StringId>>, Vec<Option<StringId>>) {
+        fn walk(tir: &Tir, stmts: &[TirRef], map: &mut [Option<StringId>]) {
             for &r in stmts {
                 match tir.inst(r).tag {
                     TirTag::VarDecl => {
                         let view = tir.var_decl_view(r);
-                        map.insert(view.initializer, view.name);
+                        map[view.initializer.index()] = Some(view.name);
                     }
                     TirTag::Assign => {
                         let view = tir.assign_view(r);
-                        map.insert(view.value, view.name);
+                        map[view.value.index()] = Some(view.name);
                     }
                     TirTag::IfStmt => {
                         let view = tir.if_stmt_view(r);
@@ -839,14 +840,15 @@ impl<M: Module> Codegen<M> {
                 }
             }
         }
-        let mut map = HashMap::new();
+        let mut param_names = vec![None; tir.params.len()];
         for (idx, param) in tir.params.iter().enumerate() {
             if is_str_type(param.ty, pool) {
-                map.insert(TirRef::param(idx), param.name);
+                param_names[idx] = Some(param.name);
             }
         }
-        walk(tir, &tir.body_stmts(), &mut map);
-        map
+        let mut inst_names = vec![None; tir.instructions.len()];
+        walk(tir, &tir.body_stmts(), &mut inst_names);
+        (inst_names, param_names)
     }
 
     /// Declare `extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64)` for
@@ -937,7 +939,7 @@ impl<M: Module> Codegen<M> {
                     TirData::Var(name) => name,
                     _ => unreachable!(),
                 };
-                if let Some(locals) = ctx.str_locals.get(&name) {
+                if let Some(locals) = Self::read_slot(&ctx.str_locals, name) {
                     ValueRepr::Str {
                         ptr: builder.use_var(locals.ptr),
                         len: builder.use_var(locals.len),
@@ -1114,7 +1116,7 @@ impl<M: Module> Codegen<M> {
                     TirData::Var(name) => name,
                     _ => unreachable!("Var must carry TirData::Var"),
                 };
-                let locals = ctx.view_locals.get(&name).ok_or_else(|| {
+                let locals = Self::read_slot(&ctx.view_locals, name).ok_or_else(|| {
                     format!("Undefined strview variable: '{}'", ctx.pool.str(name))
                 })?;
                 ValueRepr::View {
@@ -1201,7 +1203,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<(), String> {
-        let mut panic_args: HashSet<usize> = HashSet::new();
+        let mut panic_args = vec![false; ctx.tir.instructions.len()];
         for idx in 1..ctx.tir.instructions.len() {
             if ctx.tir.instructions[idx].tag != TirTag::Call {
                 continue;
@@ -1209,13 +1211,15 @@ impl<M: Module> Codegen<M> {
             let r = TirRef::from_raw(u32::try_from(idx).expect("TirRef index out of range"));
             let view = ctx.tir.call_view(r);
             if ctx.pool.str(view.name) == "__ryo_panic" {
-                panic_args.extend(view.args.iter().map(|a| a.index()));
+                for a in &view.args {
+                    panic_args[a.index()] = true;
+                }
             }
         }
         let mut hoisted: HashMap<StringId, ValueRepr> = HashMap::new();
-        for idx in 1..ctx.tir.instructions.len() {
-            let inst = &ctx.tir.instructions[idx];
-            if inst.tag != TirTag::StrConst || panic_args.contains(&idx) {
+        let tir = ctx.tir;
+        for (idx, inst) in tir.instructions.iter().enumerate().skip(1) {
+            if inst.tag != TirTag::StrConst || panic_args[idx] {
                 continue;
             }
             let TirData::Str(id) = inst.data else {
@@ -1378,7 +1382,7 @@ impl<M: Module> Codegen<M> {
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), s_addr, 16);
             if let Some(name) = Self::local_name_of(ctx, s_ref)
-                && let Some(sl) = ctx.str_locals.get(&name).cloned()
+                && let Some(sl) = Self::read_slot(&ctx.str_locals, name)
             {
                 builder.def_var(sl.ptr, np);
                 builder.def_var(sl.len, nl);
@@ -1549,7 +1553,7 @@ impl<M: Module> Codegen<M> {
                     // The callee may have written anything through the
                     // pointer — the binding's range fact dies here.
                     Self::kill_fact(ctx, name);
-                    if let Some(sl) = ctx.str_locals.get(&name).cloned() {
+                    if let Some(sl) = Self::read_slot(&ctx.str_locals, name) {
                         builder.def_var(sl.ptr, np);
                         builder.def_var(sl.len, nl);
                         builder.def_var(sl.cap, nc);
@@ -1560,7 +1564,7 @@ impl<M: Module> Codegen<M> {
                 let updated = builder.ins().load(cl_ty, MemFlagsData::trusted(), addr, 0);
                 if let Some(name) = Self::local_name_of(ctx, *arg_ref) {
                     Self::kill_fact(ctx, name);
-                    if let Some(var) = ctx.locals.get(&name).copied() {
+                    if let Some(var) = Self::read_slot(&ctx.locals, name) {
                         builder.def_var(var, updated);
                     }
                 }

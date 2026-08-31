@@ -326,7 +326,7 @@ pub(crate) fn analyze_expr_allow_never(
             // TirRef. Codegen decides pass-by-pointer from the callee's
             // `ParamMode::Inout`. (&/inout agreement + lvalue validation
             // are enforced in `check_call`, not here.)
-            if !sema.call_arg_refs.contains(&r) {
+            if !sema.call_arg_refs[r.index()] {
                 // A `&` that is not a direct call argument marks
                 // no mutation at all — reject it instead of silently
                 // discarding it.

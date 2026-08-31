@@ -49,7 +49,7 @@ use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirParam, TirRef};
 use ryo_core::types::{InternPool, StringId, TypeId};
 use ryo_core::uir::{FuncBody, InstRef, InstTag, Span, Uir};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 mod builtins;
@@ -201,20 +201,29 @@ pub struct Sema<'a> {
     /// `analyze_expr` rejects any `Borrow` inst outside this set. UIR
     /// insts are unique per use, so a program-wide set is precise — a
     /// `Borrow` that is a call arg in one function can never be a stray
-    /// `&` in another.
-    call_arg_refs: HashSet<InstRef>,
+    /// `&` in another. Dense side table indexed by `InstRef::index()`;
+    /// slot 0 is the unused sentinel and stays `false`.
+    call_arg_refs: Vec<bool>,
 }
 
 /// Every direct call-argument `InstRef` in the program. Scans
 /// `Call` and `MethodCall` instructions (method-call args count; the
 /// receiver does not — `(&x).len()` is not a valid borrow position).
-fn collect_call_arg_refs(uir: &Uir) -> HashSet<InstRef> {
-    let mut set = HashSet::new();
+fn collect_call_arg_refs(uir: &Uir) -> Vec<bool> {
+    let mut set = vec![false; uir.instructions.len()];
     for (i, inst) in uir.instructions.iter().enumerate().skip(1) {
         let r = InstRef::from_raw(i as u32);
         match inst.tag {
-            InstTag::Call => set.extend(uir.call_view(r).args),
-            InstTag::MethodCall => set.extend(uir.method_call_view(r).args),
+            InstTag::Call => {
+                for arg in uir.call_view(r).args {
+                    set[arg.index()] = true;
+                }
+            }
+            InstTag::MethodCall => {
+                for arg in uir.method_call_view(r).args {
+                    set[arg.index()] = true;
+                }
+            }
             _ => {}
         }
     }

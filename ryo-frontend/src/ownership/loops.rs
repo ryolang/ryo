@@ -517,79 +517,143 @@ pub(crate) fn owner_binding_name(tir: &Tir, owner: TirRef) -> Option<StringId> {
 
 // ---------- M8.4: slice projections (final spec §3.2/§3.3) ----------
 
-/// Compute every instruction's loop-nesting stack — the
+/// Per-instruction loop-nesting as parent-pointer chains instead of
+/// per-instruction stack copies: each instruction stores only its
+/// INNERMOST enclosing `WhileLoop`/`ForRange` and its enclosing-loop
+/// count; the full ancestor stack is recovered by walking parent hops
+/// (a loop instruction's `innermost` slot is its own enclosing loop).
+/// Dense tables indexed by `TirRef::index()`, sized to
+/// `tir.instructions.len()` (slot 0, the reserved sentinel, stays
+/// `None`/0); `None`/depth 0 means "not nested".
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LoopNesting {
+    /// inst → innermost enclosing `WhileLoop`/`ForRange`, `None` at
+    /// top level. The parent-hop table.
+    innermost: Vec<Option<TirRef>>,
+    /// inst → number of enclosing loops.
+    depth: Vec<u32>,
+}
+
+impl LoopNesting {
+    /// Number of loops enclosing `r` (0 at top level). The tables
+    /// cover every instruction reachable from the body — all callers
+    /// query body instructions (views, reads, materialize calls,
+    /// hazard sites) — and a ref outside the body nests in no loop
+    /// anyway, so a missing entry reads as depth 0, exactly what a
+    /// fresh body walk would find.
+    pub(crate) fn depth_of(&self, r: TirRef) -> u32 {
+        self.depth.get(r.index()).copied().unwrap_or(0)
+    }
+
+    /// `r`'s enclosing loops, innermost first, by parent hops: for a
+    /// loop instruction `l`, `innermost[l]` IS `l`'s enclosing loop,
+    /// so each hop moves one level out.
+    pub(crate) fn ancestors_innermost_first(&self, r: TirRef) -> impl Iterator<Item = TirRef> + '_ {
+        let mut cur = self.innermost.get(r.index()).copied().flatten();
+        std::iter::from_fn(move || {
+            let l = cur?;
+            cur = self.innermost[l.index()];
+            Some(l)
+        })
+    }
+
+    /// The enclosing loop whose OWN depth is `d` — i.e. the loop at
+    /// position `d` of the old outermost-first stack (`d` <
+    /// `depth_of(r)` must hold). Innermost-first, that ancestor is
+    /// `depth_of(r) - d - 1` parent hops away. The debug_asserts pin
+    /// the prefix invariant the old stack-slice indexing relied on.
+    pub(crate) fn ancestor_at_depth(&self, r: TirRef, d: u32) -> TirRef {
+        let depth = self.depth_of(r);
+        debug_assert!(
+            d < depth,
+            "no ancestor at depth {d} (nesting depth {depth})"
+        );
+        let hops = depth - d - 1;
+        let ancestor = self
+            .ancestors_innermost_first(r)
+            .nth(hops as usize)
+            .expect("d < depth_of(r) guarantees the ancestor exists");
+        debug_assert_eq!(self.depth_of(ancestor), d);
+        ancestor
+    }
+}
+
+/// Compute every instruction's loop nesting — the
 /// `WhileLoop`/`ForRange` instructions whose bodies (or conditions,
-/// which re-evaluate per iteration) contain it, outermost first — in
-/// a single traversal. Replaces per-query body walks: the stack is
-/// walk-constant, so the liveness passes and the
-/// redundant-materialize pass look it up instead (P4, final spec
-/// §3.2).
+/// which re-evaluate per iteration) contain it — in a single
+/// traversal, as [`LoopNesting`] parent-pointer chains. Replaces
+/// per-query body walks: the nesting is walk-constant, so the
+/// liveness passes and the redundant-materialize pass look it up
+/// instead (P4, final spec §3.2).
 ///
 /// A loop's whole subtree (condition, bounds, body) counts as inside
 /// the loop; an if's subtree keeps the if's own nesting. Recording a
 /// loop's full subtree before recursing into its body lets nested
-/// loops overwrite their own subtrees with deeper stacks — the TIR is
+/// loops overwrite their own subtrees with deeper chains — the TIR is
 /// tree-shaped, so each instruction's final entry is the one written
 /// by its unique outermost-in path.
-pub(crate) fn collect_loop_nesting(tir: &Tir) -> HashMap<TirRef, Vec<TirRef>> {
+///
+/// Two scalar writes per instruction (no per-instruction heap
+/// clones). One scratch `HashSet` is reused (cleared) across
+/// statements instead of allocating a fresh subtree set per
+/// statement.
+pub(crate) fn collect_loop_nesting(tir: &Tir) -> LoopNesting {
     fn walk(
         tir: &Tir,
         stmts: &[TirRef],
-        stack: &[TirRef],
-        nesting: &mut HashMap<TirRef, Vec<TirRef>>,
+        innermost: Option<TirRef>,
+        depth: u32,
+        nesting: &mut LoopNesting,
+        sub: &mut HashSet<TirRef>,
     ) {
         for &r in stmts {
-            let mut sub: HashSet<TirRef> = HashSet::new();
-            tir.collect_reachable(r, &mut sub);
+            sub.clear();
+            tir.collect_reachable(r, sub);
             match tir.inst(r).tag {
                 TirTag::WhileLoop | TirTag::ForRange => {
                     // Everything the loop evaluates re-executes per
                     // iteration, so it all counts as inside the loop.
-                    let mut inner = stack.to_vec();
-                    inner.push(r);
                     sub.remove(&r);
-                    for x in sub {
-                        nesting.insert(x, inner.clone());
+                    for &x in sub.iter() {
+                        nesting.innermost[x.index()] = Some(r);
+                        nesting.depth[x.index()] = depth + 1;
                     }
                     // The loop instruction itself sits at the
                     // enclosing nesting.
-                    nesting.insert(r, stack.to_vec());
+                    nesting.innermost[r.index()] = innermost;
+                    nesting.depth[r.index()] = depth;
                     if let Some(body) = tir.loop_body(r) {
-                        walk(tir, &body, &inner, nesting);
+                        walk(tir, &body, Some(r), depth + 1, nesting, sub);
                     }
                 }
                 _ => {
                     // Plain statements and ifs (condition included)
                     // keep the enclosing nesting.
-                    for x in sub {
-                        nesting.insert(x, stack.to_vec());
+                    for &x in sub.iter() {
+                        nesting.innermost[x.index()] = innermost;
+                        nesting.depth[x.index()] = depth;
                     }
                     if tir.inst(r).tag == TirTag::IfStmt {
                         let view = tir.if_stmt_view(r);
-                        walk(tir, &view.then_stmts, stack, nesting);
+                        walk(tir, &view.then_stmts, innermost, depth, nesting, sub);
                         for elif in &view.elif_branches {
-                            walk(tir, &elif.body, stack, nesting);
+                            walk(tir, &elif.body, innermost, depth, nesting, sub);
                         }
                         if let Some(else_stmts) = &view.else_stmts {
-                            walk(tir, else_stmts, stack, nesting);
+                            walk(tir, else_stmts, innermost, depth, nesting, sub);
                         }
                     }
                 }
             }
         }
     }
-    let mut nesting = HashMap::new();
-    walk(tir, &tir.body_stmts(), &[], &mut nesting);
+    let mut nesting = LoopNesting {
+        innermost: vec![None; tir.instructions.len()],
+        depth: vec![0; tir.instructions.len()],
+    };
+    let mut sub = HashSet::new();
+    walk(tir, &tir.body_stmts(), None, 0, &mut nesting, &mut sub);
     nesting
-}
-
-/// `target`'s pre-computed nesting stack. The map covers every
-/// instruction reachable from the body — all callers query body
-/// instructions (views, reads, materialize calls, hazard sites) — and
-/// a ref outside the body nests in no loop anyway, so a missing entry
-/// means the empty stack, exactly what a fresh body walk would find.
-pub(crate) fn nesting_of(nesting: &HashMap<TirRef, Vec<TirRef>>, target: TirRef) -> &[TirRef] {
-    nesting.get(&target).map_or(&[], Vec::as_slice)
 }
 
 /// Shared loop-body fixed-point, in two phases. Caller has already

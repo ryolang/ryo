@@ -311,12 +311,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** R7 targets functions under 50 lines so a human reviewer can hold each one in their head. Sixteen functions sit between ~150 and ~410 lines, almost all of them giant per-tag dispatch `match`es in the hottest passes. These are the files every milestone touches; review cost and merge-conflict surface scale with their length. (Distinct from I-094, which tracks a *content* problem inside one of these functions, not size.)
 **Resolution:** Split the entry points into one helper per tag/arm family (`lower_match_expr`-style naming per R7), keeping the dispatch match as a thin table. Do it opportunistically when a function is next touched for a feature — starting with `visit_expr` and `analyze_stmt`, the two worst — rather than as one big-bang refactor. `clippy::too_many_lines` is denied workspace-wide with `too-many-lines-threshold = 360` as a ratchet; lower the threshold towards 50 as functions split.
 
-### I-129 — Dense-index state kept in `HashMap`s where R18 wants `Vec` side tables
-
-**Files:** `ryo-frontend/src/ownership/mod.rs` (`origin` :119, `param_index` :127, `owner_at_read` :154, `view_last_use` :215, `view_defer_loop` :228, `loop_nesting` :237), `ryo-frontend/src/sema/mod.rs` (`call_arg_refs: HashSet<InstRef>` :205, built :211, installed :286), `ryo-backend/src/codegen/mod.rs` (`freed_at: HashSet<usize>` :233, `locals`/`str_locals`/`view_locals` keyed by dense `StringId`, sidecar maps `free_on_reassign`/`if_branches` from `ryo-core/src/ownership.rs`), plus the `collect_loop_nesting` map (`ownership/loops.rs:376`)
-**Summary:** R18's rule: side tables keyed by a dense arena index belong in a `Vec` indexed by that index; hash maps are for sparse/string-keyed/unbounded data only. The ownership pass keeps five per-inst `HashMap<TirRef, _>` tables on the hot per-expression path, builds a whole-body `HashMap<TirRef, u32>` program-order map twice per function, and sema keeps a whole-program `HashSet<InstRef>` queried per `Borrow` inst — all keyed by dense `u32` arena indices. Codegen has the same class: per-statement `HashSet`/`HashMap` side tables keyed by `TirRef` or `StringId` (the `inst_values` memo was the worst of these and was converted to a `Vec` side table in the 2026-08 perf pass). This entry covers *structure* (hash map vs. dense `Vec`); the related *recomputation* problems (per-jump reachability sets, linear param/nesting lookups) were already fixed in the 2026-08 perf pass.
-**Resolution:** Convert to `Vec<Option<…>>`/`Vec<bool>` side tables sized from the arena length (`TirRef::index()`/`InstRef::index()`), built once per function (per program for `call_arg_refs`). Same refactor shape as the param-index `Vec` conversion already done in the ownership pass.
-
 ### I-135 — Rule-7 call-arg partition duplicates the view look-through logic
 
 **Files:** `ryo-frontend/src/ownership/walk.rs` (:934-936 — owner partition, :1029-1030 — E0031 span search)
@@ -382,12 +376,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-backend/src/codegen/mod.rs` (`build_signature` called at :490 and :590)
 **Summary:** `declare_all_functions` builds every function's `Signature` to register the `FuncId`, then `compile_function` rebuilds the identical signature — redundant pool queries and two Vec allocations per function.
 **Resolution:** Store the `Signature` alongside the `FuncId` in `func_ids` and move/clone it into `ctx.func`.
-
-### I-151 — `collect_loop_nesting` allocates per statement and per instruction
-
-**Files:** `ryo-frontend/src/ownership/loops.rs` (`collect_loop_nesting` :376; `inner.clone()` :394)
-**Summary:** Once per function, but O(body²) worst case: a fresh `HashSet` + `collect_reachable` per body statement, then `inner.clone()` (:394) / `stack.to_vec()` per subtree instruction into a `HashMap<TirRef, Vec<TirRef>>`. Dense-index keyed — same R18 class as I-129 (listed there); the per-statement set allocations are the extra cost.
-**Resolution:** Reuse one scratch set (clear between statements); share nesting stacks via parent-pointer chains or a `Vec<Vec<TirRef>>` indexed by depth; fold into the I-129 side-table conversion.
 
 ### I-152 — Parser builds a throwaway `Vec` per call/params node before the arena copy
 
