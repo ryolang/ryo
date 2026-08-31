@@ -198,6 +198,14 @@ pub enum TirTag {
     StrCmpEq,
     StrCmpNe,
 
+    /// `bytes + bytes` concatenation (M8.4.2). Payload in `TirData::BinOp`.
+    BytesConcat,
+
+    /// `bytes`/`bytesview` equality (M8.4.2). Payload in `TirData::BinOp`.
+    BytesCmpEq,
+    /// `bytes`/`bytesview` inequality (M8.4.2). Payload in `TirData::BinOp`.
+    BytesCmpNe,
+
     /// Read the `len` field of a str fat pointer. Operand in `TirData::UnOp`.
     StrLen,
 
@@ -644,6 +652,9 @@ impl TirBuilder {
                 | TirTag::StrConcat
                 | TirTag::StrCmpEq
                 | TirTag::StrCmpNe
+                | TirTag::BytesConcat
+                | TirTag::BytesCmpEq
+                | TirTag::BytesCmpNe
                 | TirTag::FAdd
                 | TirTag::FSub
                 | TirTag::FMul
@@ -1704,6 +1715,9 @@ fn bin_op_name(t: TirTag) -> &'static str {
         TirTag::StrConcat => "str_concat",
         TirTag::StrCmpEq => "str_eq",
         TirTag::StrCmpNe => "str_ne",
+        TirTag::BytesConcat => "bytes_concat",
+        TirTag::BytesCmpEq => "bytes_eq",
+        TirTag::BytesCmpNe => "bytes_ne",
         TirTag::BoolAnd => "bool_and",
         TirTag::BoolOr => "bool_or",
         _ => "?bin",

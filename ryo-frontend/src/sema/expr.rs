@@ -307,10 +307,16 @@ pub(crate) fn analyze_expr_allow_never(
             let base_tir = analyze_expr(sema, fcx, scope, base_uir);
             let base_ty = fcx.builder.ty_of(base_tir);
             let base_kind = sema.pool.kind(base_ty);
-            // §3.2 P1: a slice projects a `str` (or re-projects an
-            // existing `strview`, P3); anything else is not sliceable.
-            if !matches!(base_kind, TypeKind::Str | TypeKind::View(ViewKind::Str))
-                && !sema.pool.is_error(base_ty)
+            // §3.2 P1: a slice projects an owner (`str`/`bytes`) or
+            // re-projects an existing view (P3); anything else is not
+            // sliceable.
+            if !matches!(
+                base_kind,
+                TypeKind::Str
+                    | TypeKind::View(ViewKind::Str)
+                    | TypeKind::Bytes
+                    | TypeKind::View(ViewKind::Bytes)
+            ) && !sema.pool.is_error(base_ty)
             {
                 sema.sink.emit(Diag::error(
                     span,
@@ -321,6 +327,11 @@ pub(crate) fn analyze_expr_allow_never(
             }
             let start_tir = start_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
             let end_tir = end_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
+            let view_ty = match base_kind {
+                TypeKind::Str | TypeKind::View(ViewKind::Str) => sema.pool.str_view(),
+                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => sema.pool.bytes_view(),
+                _ => sema.pool.error_type(),
+            };
             fcx.builder.push_typed(
                 TirTag::Slice,
                 TirData::Slice {
@@ -328,7 +339,7 @@ pub(crate) fn analyze_expr_allow_never(
                     start: start_tir,
                     end: end_tir,
                 },
-                sema.pool.str_view(),
+                view_ty,
                 span,
             )
         }
@@ -461,22 +472,21 @@ pub(crate) fn check_binary_op(
     rhs: TirRef,
     span: Span,
 ) -> TirRef {
-    // M8.4 §3.3/§3.4: mixed `str`/`strview` equality — wrap the owned
-    // side in an explicit `ToView` conversion so the comparison
-    // runs view-vs-view. This must happen before the generic
-    // `compatible` check below, which rightly rejects `str` ≠ `strview`
-    // for every other operator.
+    // M8.4 §3.3/§3.4, generalized M8.4.2: mixed owner/view equality —
+    // wrap the owned side in an explicit `ToView` conversion so the
+    // comparison runs view-vs-view. This must happen before the
+    // generic `compatible` check below, which rightly rejects owner ≠
+    // view for every other operator. Driven by the pool's `owner_view`
+    // table (`str`/`strview`, `bytes`/`bytesview`).
     let (lhs, rhs, lhs_ty, rhs_ty) = if matches!(tag, InstTag::Eq | InstTag::NotEq) {
-        match (sema.pool.kind(lhs_ty), sema.pool.kind(rhs_ty)) {
-            (TypeKind::Str, TypeKind::View(ViewKind::Str)) => {
-                let v = fcx.builder.to_view(lhs, sema.pool.str_view(), span);
-                (v, rhs, sema.pool.str_view(), rhs_ty)
-            }
-            (TypeKind::View(ViewKind::Str), TypeKind::Str) => {
-                let v = fcx.builder.to_view(rhs, sema.pool.str_view(), span);
-                (lhs, v, lhs_ty, sema.pool.str_view())
-            }
-            _ => (lhs, rhs, lhs_ty, rhs_ty),
+        if sema.pool.owner_view(lhs_ty) == Some(rhs_ty) {
+            let v = fcx.builder.to_view(lhs, rhs_ty, span);
+            (v, rhs, rhs_ty, rhs_ty)
+        } else if sema.pool.owner_view(rhs_ty) == Some(lhs_ty) {
+            let v = fcx.builder.to_view(rhs, lhs_ty, span);
+            (lhs, v, lhs_ty, lhs_ty)
+        } else {
+            (lhs, rhs, lhs_ty, rhs_ty)
         }
     } else {
         (lhs, rhs, lhs_ty, rhs_ty)
@@ -563,9 +573,19 @@ pub(crate) fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
+            TypeKind::Bytes => {
+                let tir_tag = match tag {
+                    InstTag::Eq => TirTag::BytesCmpEq,
+                    InstTag::NotEq => TirTag::BytesCmpNe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+            }
             // M8.4 §3.3: view equality compares viewed contents. Same
-            // `StrCmpEq`/`StrCmpNe` tags — operands are `{ptr, len}`
-            // pairs instead of full fat pointers (Task 7 codegen).
+            // `StrCmpEq`/`StrCmpNe` (or M8.4.2 `BytesCmpEq`/`BytesCmpNe`)
+            // tags — operands are `{ptr, len}` pairs instead of full fat
+            // pointers (codegen Task 13).
             TypeKind::View(ViewKind::Str) => {
                 let tir_tag = match tag {
                     InstTag::Eq => TirTag::StrCmpEq,
@@ -575,11 +595,16 @@ pub(crate) fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
-            TypeKind::Void
-            | TypeKind::Never
-            | TypeKind::Tuple
-            | TypeKind::Bytes
-            | TypeKind::View(_) => {
+            TypeKind::View(ViewKind::Bytes) => {
+                let tir_tag = match tag {
+                    InstTag::Eq => TirTag::BytesCmpEq,
+                    InstTag::NotEq => TirTag::BytesCmpNe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+            }
+            TypeKind::Void | TypeKind::Never | TypeKind::Tuple | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -703,6 +728,21 @@ pub(crate) fn check_binary_op(
                 }
                 fcx.builder
                     .binary(TirTag::StrConcat, sema.pool.str_(), lhs, rhs, span)
+            }
+            TypeKind::Bytes => {
+                if tag != InstTag::Add {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::UnsupportedOperator,
+                        format!(
+                            "arithmetic operator '{}' not supported for type 'bytes'",
+                            bin_op_symbol(tag),
+                        ),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+                fcx.builder
+                    .binary(TirTag::BytesConcat, sema.pool.bytes(), lhs, rhs, span)
             }
             TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             _ => {

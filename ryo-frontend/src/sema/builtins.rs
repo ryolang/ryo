@@ -22,11 +22,11 @@ pub(crate) fn emit_builtin_call(
     let modes = vec![ParamMode::Borrow; arg_tirs.len()];
     // --- M8.3: `&`/`inout` agreement for builtin calls (builtins
     // bypass `check_call`, so the check is replayed here). `&` is only
-    // valid on an `inout` parameter — today only str_push's first
-    // argument — everywhere else it is rejected, exactly like
-    // user-function calls. str_push's own arm additionally validates
+    // valid on an `inout` parameter — today only the first argument of
+    // str_push/bytes_push — everywhere else it is rejected, exactly
+    // like user-function calls. The push arms additionally validate
     // the mutable lvalue of that first argument.
-    let builtin_modes: Vec<ParamMode> = if name == "str_push" {
+    let builtin_modes: Vec<ParamMode> = if name == "str_push" || name == "bytes_push" {
         vec![ParamMode::Inout, ParamMode::Borrow]
     } else {
         modes.clone()
@@ -238,6 +238,60 @@ pub(crate) fn emit_builtin_call(
                 arg_tirs[1],
                 "str_push",
             );
+            let modes = vec![ParamMode::Inout, ParamMode::Borrow];
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
+        "bytes_push" => {
+            // bytes_push(b: inout bytes, x: int) -> void (M8.4.2
+            // stopgap: the byte is an `int` range-checked 0-255 at
+            // runtime; becomes `u8` at M17.1). Mirrors the str_push
+            // arm's inout/lvalue machinery; appends a SINGLE byte.
+            if view.args.len() != 2 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "bytes_push() takes exactly 2 arguments, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let a0 = view.args[0];
+            let t0 = fcx.builder.ty_of(arg_tirs[0]);
+            let t1 = fcx.builder.ty_of(arg_tirs[1]);
+            if !matches!(sema.pool.kind(t0), TypeKind::Bytes)
+                || !matches!(sema.pool.kind(t1), TypeKind::Int)
+            {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(a0),
+                    DiagCode::TypeMismatch,
+                    "bytes_push(b: inout bytes, x: int): first argument must be bytes, second must be int".to_string(),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            // arg 0 must be `&<mut bytes>`: a Borrow whose target is an
+            // assignable lvalue.
+            let inner = match sema.uir.inst(a0).data {
+                InstData::Borrow(i) => i,
+                _ => {
+                    sema.sink.emit(Diag::error(
+                        sema.uir.span(a0),
+                        DiagCode::BorrowMismatch,
+                        "bytes_push's first argument is `inout bytes` and requires `&`".to_string(),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+            };
+            if let Some(reason) = borrow_target_reason(sema, scope, inner) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(a0),
+                    DiagCode::BorrowMismatch,
+                    format!("cannot borrow this expression as mutable: {}", reason),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
             let modes = vec![ParamMode::Inout, ParamMode::Borrow];
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
