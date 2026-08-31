@@ -19,12 +19,14 @@
 //!   lets later phases drop `&'a str` slices from `Token` and
 //!   shrink HIR's `String` count.
 //!
-//! Primitive types live at fixed item indices (0..=7), populated by
+//! Primitive types live at fixed item indices (0..=9), populated by
 //! `new()`. The slot order is `void, bool, int, str, float, error,
-//! never, view` — slot 7 is the `strview` singleton, `View(ViewKind::Str)`
-//! (final spec §3.1). The `const fn` accessors (`void`, `bool_`,
-//! `int`, ...) return those indices without consulting the dedup
-//! table — hot paths never hash.
+//! never, view, bytes, view` — slot 7 is the `strview` singleton,
+//! `View(ViewKind::Str)` (final spec §3.1), slot 8 is `bytes` and
+//! slot 9 the `bytesview` singleton, `View(ViewKind::Bytes)` (M8.4.2).
+//! The `const fn` accessors (`void`, `bool_`, `int`, ...) return
+//! those indices without consulting the dedup table — hot paths
+//! never hash.
 //!
 //! `TypeId` stays a plain `Copy` newtype rather than an `enum(u32)`
 //! with named primitive variants. The doc's risk register flagged
@@ -40,9 +42,10 @@ use std::hash::{BuildHasher, Hasher};
 
 /// A compact, copyable handle to an interned type.
 ///
-/// Primitive ids are stable: `TypeId(0..=7)` are `void`, `bool`,
-/// `int`, `str`, `float`, `error`, `never`, `view(strview)` (in that
-/// order; the constants `ID_VOID`..`ID_STRVIEW` below are the
+/// Primitive ids are stable: `TypeId(0..=9)` are `void`, `bool`,
+/// `int`, `str`, `float`, `error`, `never`, `view(strview)`,
+/// `bytes`, `view(bytesview)` (in that order; the constants
+/// `ID_VOID`..`ID_BYTESVIEW` below are the
 /// source of truth). Use the `const fn` accessors on `InternPool`
 /// instead of constructing these directly.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -92,11 +95,12 @@ enum Tag {
     Bool,
     Int,
     Str,
+    Bytes,
     Float,
     Error,
     Never,
     /// Read-only `{ptr, len}` projection (final spec §3.1, D1). `data`:
-    /// 0 = Str, 1 = Bytes (uninhabited until 8.5), >= 2: index + 2 into
+    /// 0 = Str, 1 = Bytes (M8.4.2), >= 2: index + 2 into
     /// `extra`, where `extra[idx]` is the element TypeId of a Slice view
     /// (uninhabited until M21 — no parametric interning yet).
     View,
@@ -126,6 +130,8 @@ const ID_FLOAT: u32 = 4;
 const ID_ERROR: u32 = 5;
 const ID_NEVER: u32 = 6;
 const ID_STRVIEW: u32 = 7;
+const ID_BYTES: u32 = 8;
+const ID_BYTESVIEW: u32 = 9;
 
 // ---------- Public TypeKind facade ----------
 
@@ -143,6 +149,9 @@ pub enum TypeKind {
     Int,
     /// Placeholder; the slice ABI is a separate change.
     Str,
+    /// Owned, heap-allocated byte buffer (M8.4.2): `{ptr, len, cap}`
+    /// fat pointer, same ownership rules as `Str`.
+    Bytes,
     /// Non-owning, non-escaping view (final spec §3.1): `{ptr, len}`,
     /// 16 bytes. The ONLY projection variant — P1–P6 / E1–E4 apply to
     /// all inhabitants uniformly.
@@ -168,14 +177,14 @@ pub enum TypeKind {
 /// Never parameterize `View` over an arbitrary type — a
 /// `View(TypeId)` meaning "view of any T" would reintroduce the
 /// general borrow type Ownership Lite rejects (M8.3): `&int`,
-/// `&User` must stay unrepresentable. `Bytes` and `Slice` have NO
-/// constructors at M8.4 (uninhabited arms; `Bytes` lands with D2 in
-/// 8.5, `Slice` with `[T]` arrays in M21).
+/// `&User` must stay unrepresentable. `Bytes` is inhabited since
+/// M8.4.2 (D2); `Slice` still has NO constructor (`Slice` lands with
+/// `[T]` arrays in M21).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ViewKind {
     /// `strview` — owner: `str`; element: UTF-8 unit.
     Str,
-    /// `bytesview` — owners: `bytes` | `sbytes`; element: `u8`. (D2, 8.5.)
+    /// `bytesview` — owner: `bytes` (`sbytes` is v0.2+); element: `u8` (M17.1; indexing yields `int` until then). (D2, M8.4.2.)
     Bytes,
     /// `slice[T]` — owners: `[T]` | `list[T]` | `[T; N]`; element: `T`. (M21.)
     Slice(TypeId),
@@ -289,7 +298,7 @@ fn str_hash(
 impl InternPool {
     pub fn new() -> Self {
         let mut pool = Self {
-            items: Vec::with_capacity(8),
+            items: Vec::with_capacity(10),
             extra: Vec::new(),
             type_dedup: HashTable::new(),
             string_bytes: Vec::new(),
@@ -330,7 +339,15 @@ impl InternPool {
             tag: Tag::View,
             data: 0,
         });
-        debug_assert!(pool.items.len() == (ID_STRVIEW + 1) as usize);
+        pool.items.push(Item {
+            tag: Tag::Bytes,
+            data: 0,
+        });
+        pool.items.push(Item {
+            tag: Tag::View,
+            data: 1,
+        });
+        debug_assert!(pool.items.len() == (ID_BYTESVIEW + 1) as usize);
         pool
     }
 
@@ -343,15 +360,17 @@ impl InternPool {
             Tag::Bool => TypeKind::Bool,
             Tag::Int => TypeKind::Int,
             Tag::Str => TypeKind::Str,
+            Tag::Bytes => TypeKind::Bytes,
             Tag::Float => TypeKind::Float,
             Tag::Error => TypeKind::Error,
             Tag::Never => TypeKind::Never,
             Tag::View => match item.data {
                 0 => TypeKind::View(ViewKind::Str),
-                // Trusted-producer invariant: no Bytes/Slice
-                // constructor exists at M8.4, so the pool can never
-                // hold a `data == 1` or `data >= 2` payload.
-                _ => unreachable!("no Bytes/Slice constructor exists"),
+                1 => TypeKind::View(ViewKind::Bytes),
+                // Trusted-producer invariant: no Slice constructor
+                // exists until M21, so the pool can never hold a
+                // `data >= 2` payload.
+                _ => unreachable!("no Slice constructor exists"),
             },
             Tag::Tuple => TypeKind::Tuple,
         }
@@ -371,6 +390,12 @@ impl InternPool {
     }
     pub const fn str_view(&self) -> TypeId {
         TypeId(ID_STRVIEW)
+    }
+    pub const fn bytes(&self) -> TypeId {
+        TypeId(ID_BYTES)
+    }
+    pub const fn bytes_view(&self) -> TypeId {
+        TypeId(ID_BYTESVIEW)
     }
     pub const fn float(&self) -> TypeId {
         TypeId(ID_FLOAT)
@@ -394,7 +419,8 @@ impl InternPool {
     /// True for types whose values are duplicated on `=` without
     /// invalidating the source. Mirrors Mojo's `Copyable` trait for
     /// the scalar primitives Ryo currently has: `int`, `float`,
-    /// `bool`, plus the non-owning views (`strview`, M8.4) — copying a
+    /// `bool`, plus the non-owning views (`strview`, M8.4;
+    /// `bytesview`, M8.4.2) — copying a
     /// view aliases the buffer but owns nothing. Used by sema (to
     /// flag redundant `move` annotations) and by the ownership pass
     /// (to short-circuit liveness on these values — they never
@@ -423,16 +449,34 @@ impl InternPool {
     pub fn view_elem(&self, t: TypeId) -> Option<TypeId> {
         match self.kind(t) {
             TypeKind::View(ViewKind::Str) => None,
+            // `bytesview`'s element type is `u8`, which does not exist
+            // until M17.1 — not representable until then.
+            TypeKind::View(ViewKind::Bytes) => None,
             TypeKind::View(ViewKind::Slice(elem)) => Some(elem),
             _ => None,
         }
     }
 
     /// Implicit view conversion table (§3.4): owner → view. Lookup, not
-    /// scattered conditionals. Only `str → strview` exists at M8.4.
+    /// scattered conditionals. `str → strview` (M8.4), `bytes → bytesview`
+    /// (M8.4.2).
     pub fn owner_view(&self, owner: TypeId) -> Option<TypeId> {
         if owner == self.str_() {
             Some(self.str_view())
+        } else if owner == self.bytes() {
+            Some(self.bytes_view())
+        } else {
+            None
+        }
+    }
+
+    /// Inverse of [`InternPool::owner_view`]: view → owner. Drives the
+    /// P6' re-borrow (view passed to an owned borrow parameter).
+    pub fn view_owner(&self, view: TypeId) -> Option<TypeId> {
+        if view == self.str_view() {
+            Some(self.str_())
+        } else if view == self.bytes_view() {
+            Some(self.bytes())
         } else {
             None
         }
@@ -535,14 +579,24 @@ impl InternPool {
     }
 
     pub fn intern_str(&mut self, s: &str) -> StringId {
-        let hash = hash_bytes(&self.hasher, s.as_bytes());
+        self.intern_bytes(s.as_bytes())
+    }
+
+    /// Intern raw bytes (M8.4.2): `b"..."` literal payloads are not
+    /// necessarily valid UTF-8. Shares the string arena and dedup table
+    /// with `intern_str` — same bytes, same `StringId`. Ids interned
+    /// here must be read back through [`InternPool::bytes_payload`];
+    /// calling `str()` on one is only sound when the bytes are valid
+    /// UTF-8.
+    pub fn intern_bytes(&mut self, s: &[u8]) -> StringId {
+        let hash = hash_bytes(&self.hasher, s);
 
         // Probe path: hash `s` directly and compare against each
-        // candidate's bytes in `string_bytes`. No String alloc.
+        // candidate's bytes in `string_bytes`. No allocation.
         let strings = &self.strings;
         let string_bytes = &self.string_bytes;
         if let Some(&id) = self.string_dedup.find(hash, |&candidate| {
-            str_eq(strings, string_bytes, candidate, s.as_bytes())
+            str_eq(strings, string_bytes, candidate, s)
         }) {
             return id;
         }
@@ -551,7 +605,7 @@ impl InternPool {
         let offset = u32::try_from(self.string_bytes.len())
             .expect("string arena overflow: more than u32::MAX bytes");
         let len = u32::try_from(s.len()).expect("string too large: more than u32::MAX bytes");
-        self.string_bytes.extend_from_slice(s.as_bytes());
+        self.string_bytes.extend_from_slice(s);
         let id = StringId(
             u32::try_from(self.strings.len())
                 .expect("string table overflow: more than u32::MAX strings interned"),
@@ -567,11 +621,23 @@ impl InternPool {
         id
     }
 
+    /// Raw bytes behind a `StringId` (M8.4.2). Unlike
+    /// [`InternPool::str`] this makes no UTF-8 assumption — the only
+    /// correct reader for `intern_bytes` payloads. (Named
+    /// `bytes_payload`, not `bytes`: `bytes()` is the `TypeId`
+    /// accessor and Rust has no overloading.)
+    pub fn bytes_payload(&self, id: StringId) -> &[u8] {
+        str_bytes(&self.strings, &self.string_bytes, id)
+    }
+
     pub fn str(&self, id: StringId) -> &str {
         let (offset, len) = self.strings[id.0 as usize];
         let bytes = &self.string_bytes[offset as usize..(offset + len) as usize];
         // SAFETY (R5 exception): `intern_str` only ever pushes valid
         // UTF-8 from `&str::as_bytes`, and the arena is append-only.
+        // Callers must not pass ids minted by `intern_bytes` unless
+        // the payload is known to be valid UTF-8 (read those back
+        // through `bytes_payload` instead).
         #[allow(unsafe_code)]
         unsafe {
             std::str::from_utf8_unchecked(bytes)
@@ -602,9 +668,9 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::Bool => write!(f, "bool"),
             TypeKind::Int => write!(f, "int"),
             TypeKind::Str => write!(f, "str"),
+            TypeKind::Bytes => write!(f, "bytes"),
             TypeKind::View(ViewKind::Str) => write!(f, "strview"),
-            // Bytes/Slice are uninhabited at M8.4 — pure decode arms
-            // that keep the match honest for D2 (8.5) / M21.
+            // Inhabited since M8.4.2.
             TypeKind::View(ViewKind::Bytes) => write!(f, "bytesview"),
             TypeKind::View(ViewKind::Slice(elem)) => {
                 write!(f, "slice[{}]", self.pool.display(elem))
@@ -895,5 +961,53 @@ mod tests {
         assert!(pool.compatible(pool.error_type(), n));
         assert!(pool.compatible(pool.int(), n));
         assert!(pool.compatible(n, n));
+    }
+
+    #[test]
+    fn bytes_and_bytesview_are_interned_at_fixed_ids() {
+        let pool = InternPool::new();
+        assert_eq!(pool.kind(pool.bytes()), TypeKind::Bytes);
+        assert_eq!(
+            pool.kind(pool.bytes_view()),
+            TypeKind::View(ViewKind::Bytes)
+        );
+        // Stable singletons across calls.
+        assert_eq!(pool.bytes(), pool.bytes());
+        assert_eq!(pool.bytes_view(), pool.bytes_view());
+    }
+
+    #[test]
+    fn owner_view_table_covers_str_and_bytes() {
+        let pool = InternPool::new();
+        assert_eq!(pool.owner_view(pool.str_()), Some(pool.str_view()));
+        assert_eq!(pool.owner_view(pool.bytes()), Some(pool.bytes_view()));
+        assert_eq!(pool.owner_view(pool.int()), None);
+        // Inverse table.
+        assert_eq!(pool.view_owner(pool.str_view()), Some(pool.str_()));
+        assert_eq!(pool.view_owner(pool.bytes_view()), Some(pool.bytes()));
+        assert_eq!(pool.view_owner(pool.str_()), None);
+    }
+
+    #[test]
+    fn bytes_display_and_copy_classification() {
+        let pool = InternPool::new();
+        assert_eq!(format!("{}", pool.display(pool.bytes())), "bytes");
+        assert_eq!(format!("{}", pool.display(pool.bytes_view())), "bytesview");
+        // bytes is an owner (move type); bytesview is a Copy projection.
+        assert!(!pool.is_copy(pool.bytes()));
+        assert!(pool.is_copy(pool.bytes_view()));
+        assert!(pool.is_view(pool.bytes_view()));
+        assert_eq!(pool.view_elem(pool.bytes_view()), None); // u8 lands at M17.1
+    }
+
+    #[test]
+    fn intern_bytes_round_trips_non_utf8() {
+        let mut pool = InternPool::new();
+        let id = pool.intern_bytes(&[0x41, 0x00, 0xff]);
+        assert_eq!(pool.bytes_payload(id), &[0x41, 0x00, 0xff]);
+        // Dedups on content.
+        assert_eq!(pool.intern_bytes(&[0x41, 0x00, 0xff]), id);
+        // Same bytes interned as a str share the id (same byte content).
+        assert_eq!(pool.intern_str("A"), pool.intern_bytes(b"A"));
     }
 }

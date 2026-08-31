@@ -78,6 +78,12 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
         TypeKind::Str => {
             unreachable!("cranelift_type_for: str is multi-value; use is_str_type gate")
         }
+        TypeKind::Bytes => {
+            // Same fat-pointer shape as `str` ({ptr, len, cap}). No
+            // bytes codegen exists yet (M8.4.2 lands it in later
+            // tasks), so a Bytes TypeId cannot reach here.
+            unreachable!("cranelift_type_for: bytes is multi-value; no codegen yet")
+        }
         TypeKind::View(_) => {
             unreachable!("cranelift_type_for: strview is two-word; use pool.is_view() gate")
         }

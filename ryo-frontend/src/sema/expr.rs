@@ -560,7 +560,11 @@ pub(crate) fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
-            TypeKind::Void | TypeKind::Never | TypeKind::Tuple | TypeKind::View(_) => {
+            TypeKind::Void
+            | TypeKind::Never
+            | TypeKind::Tuple
+            | TypeKind::Bytes
+            | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -612,6 +616,7 @@ pub(crate) fn check_binary_op(
             | TypeKind::Void
             | TypeKind::Never
             | TypeKind::Tuple
+            | TypeKind::Bytes
             | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
