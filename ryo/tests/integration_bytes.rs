@@ -200,6 +200,51 @@ fn test_bytes_index_negative_panics() {
 }
 
 #[test]
+fn test_bytes_aot_build_and_run() {
+    // AOT leg: bytes_push growth + to_str bridging through the Zig
+    // linker path. `print` is a raw write (no trailing newline), so the
+    // built binary's stdout is exactly "AB".
+    let temp_dir = TempDir::new().expect("temp dir");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bytes_aot.ryo",
+        "fn main():\n\tmut b = b\"\\x41\"\n\tbytes_push(&b, 66)\n\tprint(b.to_str())\n",
+    );
+    let build = run_ryo_command(&["build", "bytes_aot.ryo"], &test_file).expect("ryo build");
+    assert!(
+        build.status.success(),
+        "build stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let exe = exe_path(temp_dir.path(), "bytes_aot");
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run built binary");
+    assert!(
+        run.status.success(),
+        "built binary failed. stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "AB");
+}
+
+#[test]
+fn test_bytes_type_errors_surface() {
+    // Mixed bytes + str is a compile error (E0012) — the diagnostic
+    // must surface through the driver, not an ICE or silent miscompile.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bytes_err.ryo",
+        "fn main():\n\tb = b\"\\x01\"\n\tx = b + \"s\"\n",
+    );
+    let output = run_ryo_command(&["run", "bytes_err.ryo"], &test_file).expect("run ryo");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("type mismatch"), "missing E0012: {stderr}");
+}
+
+#[test]
 fn test_bytes_conditional_reassign_dead_drop() {
     // Conditional dead-drop for a bytes owner (M8.4.2): a bytes
     // binding reassigned on one arm and never read afterwards gets its
