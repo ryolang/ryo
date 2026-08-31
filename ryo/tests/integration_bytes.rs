@@ -9,8 +9,12 @@ use tempfile::TempDir;
 // codes, stderr/stdout text, and E-codes — never compiler internals.
 // ---------------------------------------------------------------------------
 
-/// Compile-and-run asserting exact stdout (the `print` path).
-#[allow(dead_code)] // First print-path consumer lands in the next codegen task.
+/// Compile-and-run asserting the program's exact stdout (the `print`
+/// path). JIT `run` wraps program output in `[Input Source]` / `[AST]`
+/// / `[Codegen]` dumps and a trailing `[Result] => 0` line, and `print`
+/// is a raw write (no trailing newline), so the program output is
+/// extracted between the markers — the same pattern as
+/// `integration_views.rs::test_str_materialize_escape_and_independence`.
 fn assert_ryo_prints(test_name: &str, code: &str, expected_stdout: &str) {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), test_name, code);
@@ -22,7 +26,13 @@ fn assert_ryo_prints(test_name: &str, code: &str, expected_stdout: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout, expected_stdout, "stdout mismatch");
+    let program_out = stdout
+        .split("[Codegen]")
+        .nth(1)
+        .and_then(|s| s.split("[Result]").next())
+        .expect("run output must carry [Codegen] and [Result] markers")
+        .trim();
+    assert_eq!(program_out, expected_stdout, "stdout mismatch");
 }
 
 #[test]
@@ -30,5 +40,121 @@ fn test_bytes_literal_and_len() {
     assert_ryo_runs(
         "bytes_len.ryo",
         "fn main():\n\tb = b\"\\x01\\x02\\x03\"\n\tassert(b.len() == 3, \"len\")\n\tassert(not b.is_empty(), \"empty\")\n\te = b\"\"\n\tassert(e.is_empty(), \"empty literal\")\n",
+    );
+}
+
+#[test]
+fn test_bytes_annotation_round_trip() {
+    assert_ryo_runs(
+        "bytes_ann.ryo",
+        "fn takes(b: bytes, v: bytesview):\n\tassert(b.len() == 2, \"b\")\n\tassert(v.len() == 1, \"v\")\n\nfn main():\n\traw = b\"AB\"\n\ttakes(raw, raw[0:1])\n",
+    );
+}
+
+#[test]
+fn test_bytes_concat_and_print_repr() {
+    assert_ryo_prints(
+        "bytes_concat.ryo",
+        "fn main():\n\tmut buf = b\"\\x00\"\n\tbytes_push(&buf, 255)\n\tbuf = buf + b\"\\x01\\x02\\x03\"\n\tprint(buf)\n",
+        "b\"\\0\\xff\\x01\\x02\\x03\"",
+    );
+}
+
+#[test]
+fn test_bytes_print_escapes() {
+    assert_ryo_prints(
+        "bytes_repr.ryo",
+        "fn main():\n\tprint(b\"A\\x00\\xff\\n\")\n\tprint(b\"\")\n",
+        // print is a raw write: the two reprs concatenate with no
+        // separating newline.
+        "b\"A\\0\\xff\\n\"b\"\"",
+    );
+}
+
+#[test]
+fn test_bytes_equality() {
+    assert_ryo_runs(
+        "bytes_eq.ryo",
+        "fn main():\n\tb = b\"\\x01\\x02\"\n\tv = b[0:2]\n\tassert(b == b\"\\x01\\x02\", \"eq\")\n\tassert(b != b\"\\x03\", \"ne\")\n\tassert(v == b[0:2], \"view eq\")\n\tassert(b == v, \"cross eq\")\n\tassert(v == b, \"cross eq 2\")\n",
+    );
+}
+
+#[test]
+fn test_bytes_slice_no_utf8_boundary_check() {
+    // Slicing "héllo" mid-codepoint is an error for str but fine for
+    // bytes (the one behavioral divergence from strview).
+    assert_ryo_prints(
+        "bytes_slice.ryo",
+        "fn main():\n\tb = \"héllo\".to_bytes()\n\tprint(b[1:3])\n",
+        "b\"\\xc3\\xa9\"",
+    );
+}
+
+#[test]
+fn test_bridging_round_trip() {
+    // Non-ASCII content via \xNN escapes: bytes literals must be ASCII
+    // (E0102); é is \xc3\xa9 in UTF-8.
+    assert_ryo_runs(
+        "bytes_bridge.ryo",
+        "fn main():\n\traw = b\"h\\xc3\\xa9llo\"\n\ttext = raw.to_str()\n\traw2 = text.to_bytes()\n\tassert(raw == raw2, \"round trip\")\n\tv = raw[0:1]\n\tt2 = v.to_str()\n\tprint(t2)\n",
+    );
+}
+
+#[test]
+fn test_bytes_materialize() {
+    assert_ryo_runs(
+        "bytes_mat.ryo",
+        "fn main():\n\traw = b\"\\x01\\x02\"\n\tv = raw[0:1]\n\tc = bytes(v)\n\tassert(c.len() == 1, \"len\")\n\tassert(c == v, \"contents\")\n",
+    );
+}
+
+#[test]
+fn test_bytes_push_range_panics() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bytes_push_oob.ryo",
+        "fn main():\n\tmut b = b\"\\x00\"\n\tbytes_push(&b, 256)\n",
+    );
+    let output = run_ryo_command(&["run", "bytes_push_oob.ryo"], &test_file).expect("run ryo");
+    assert_eq!(output.status.code(), Some(101));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bytes_push value out of range (0-255)"),
+        "missing panic message: {stderr}"
+    );
+}
+
+#[test]
+fn test_bytes_to_str_invalid_utf8_panics() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bytes_to_str_bad.ryo",
+        "fn main():\n\tb = b\"\\xff\"\n\tprint(b.to_str())\n",
+    );
+    let output = run_ryo_command(&["run", "bytes_to_str_bad.ryo"], &test_file).expect("run ryo");
+    assert_eq!(output.status.code(), Some(101));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bytes are not valid UTF-8"),
+        "missing panic message: {stderr}"
+    );
+}
+
+#[test]
+fn test_bytes_slice_out_of_range_panics() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bytes_slice_oob.ryo",
+        "fn main():\n\tb = b\"\\x01\\x02\\x03\"\n\tprint(b[0:9])\n",
+    );
+    let output = run_ryo_command(&["run", "bytes_slice_oob.ryo"], &test_file).expect("run ryo");
+    assert_eq!(output.status.code(), Some(101));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("slice index out of range"),
+        "missing panic message: {stderr}"
     );
 }

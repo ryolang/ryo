@@ -260,7 +260,8 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// Memo entries for param sentinel refs (`TirRef::param`), which
     /// cannot index `inst_values`. Dense table indexed by
     /// `TirRef::as_param_index()`, sized once per function from
-    /// `tir.params.len()`. Only str/view params ever land here.
+    /// `tir.params.len()`. Only fat (str/bytes) and view params ever
+    /// land here.
     param_values: Vec<Option<ValueRepr>>,
     /// Dense flag per `sidecar.free_schedule` index: true once that
     /// entry's Free has been emitted in codegen. A given anchor TirRef

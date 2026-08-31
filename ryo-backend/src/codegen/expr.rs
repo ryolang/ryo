@@ -11,7 +11,7 @@ use cranelift::codegen::ir::{
 use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, Linkage, Module};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId, TypeKind};
+use ryo_core::types::{InternPool, StringId, TypeKind, ViewKind};
 use std::collections::HashMap;
 
 /// Cap derivation for the packed-u128 runtime string/bytes ABI (Phase 0):
@@ -308,6 +308,13 @@ impl<M: Module> Codegen<M> {
                 } else {
                     result
                 }
+            }
+            TirTag::BytesCmpEq | TirTag::BytesCmpNe => {
+                let (lhs, rhs) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!(),
+                };
+                Self::emit_bytes_eq(builder, ctx, inst.tag, lhs, rhs)?
             }
             TirTag::StrConcat => {
                 return Err("StrConcat must be materialized through eval_inst_fat".to_string());
@@ -613,14 +620,16 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// Emit `ryo_str_free(ptr, cap)` for any scheduled Free whose
+    /// Emit the family-appropriate free (`ryo_str_free` /
+    /// `ryo_bytes_free`, selected per target via `free_target_is_bytes`)
+    /// for any scheduled Free whose
     /// anchor is `tir_ref` and whose `branch` tag is active on the
     /// current `branch_stack`. Called at the end of each
     /// materialisation (`eval_inst` / `eval_inst_fat`) so that Task
     /// 4's anonymous-temporary Frees, anchored on the consuming
     /// `Call`, fire after the consumer has emitted its IR.
     ///
-    /// Scheduled Frees only target `Str`-cached owners. A
+    /// Scheduled Frees only target `Str`-/`Bytes`-cached owners. A
     /// `Scalar`-cached target is an ownership-pass bug — the
     /// borrowed-scalar ABI never owns its argument and the ownership
     /// pass excludes such args from `temp_owners`. If a
@@ -1014,6 +1023,56 @@ impl<M: Module> Codegen<M> {
                         &[(ctx.int_type, v_ptr), (types::I64, v_len)],
                         CapRule::LenIsCap,
                     )?
+                } else if name_str == "__ryo_bytes_from_view" {
+                    // M8.4.2 `bytes(bview)` materialization: the
+                    // argument is a view pair via `eval_inst_view`.
+                    let ValueRepr::View {
+                        ptr: v_ptr,
+                        len: v_len,
+                    } = Self::eval_inst_view(builder, ctx, view.args[0])?
+                    else {
+                        unreachable!("__ryo_bytes_from_view argument must produce ValueRepr::View")
+                    };
+                    Self::emit_rv_bytes_call(
+                        builder,
+                        ctx,
+                        "ryo_bytes_from_view",
+                        &[(ctx.int_type, v_ptr), (types::I64, v_len)],
+                        CapRule::LenIsCap,
+                    )?
+                } else if name_str == "ryo_str_to_bytes" {
+                    // `str.to_bytes()` / `strview.to_bytes()` — only
+                    // (ptr, len) is read.
+                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+                    Self::emit_rv_bytes_call(
+                        builder,
+                        ctx,
+                        "ryo_str_to_bytes",
+                        &[(ctx.int_type, p), (types::I64, l)],
+                        CapRule::LenIsCap,
+                    )?
+                } else if name_str == "__ryo_bytes_to_str" {
+                    // `bytes.to_str()` / `bytesview.to_str()` — returns
+                    // an owned str (validated copy; panics on bad UTF-8).
+                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+                    Self::emit_rv_str_call(
+                        builder,
+                        ctx,
+                        "__ryo_bytes_to_str",
+                        &[(ctx.int_type, p), (types::I64, l)],
+                        CapRule::LenIsCap,
+                    )?
+                } else if name_str == "__ryo_bytes_repr" {
+                    // print(bytes) rewrite (sema, M8.4.2) — returns the
+                    // escaped-repr str.
+                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+                    Self::emit_rv_str_call(
+                        builder,
+                        ctx,
+                        "__ryo_bytes_repr",
+                        &[(ctx.int_type, p), (types::I64, l)],
+                        CapRule::LenIsCap,
+                    )?
                 } else if name_str == "int_to_str"
                     || name_str == "float_to_str"
                     || name_str == "bool_to_str"
@@ -1066,6 +1125,35 @@ impl<M: Module> Codegen<M> {
                     builder,
                     ctx,
                     "ryo_str_concat",
+                    &[
+                        (ctx.int_type, l_ptr),
+                        (types::I64, l_len),
+                        (ctx.int_type, r_ptr),
+                        (types::I64, r_len),
+                    ],
+                    CapRule::LenIsCap,
+                )?
+            }
+            TirTag::BytesConcat => {
+                let (lhs, rhs) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!(),
+                };
+                let l_repr = Self::eval_inst_fat(builder, ctx, lhs)?;
+                let r_repr = Self::eval_inst_fat(builder, ctx, rhs)?;
+                let (l_ptr, l_len) = match l_repr {
+                    ValueRepr::Bytes { ptr, len, .. } => (ptr, len),
+                    _ => unreachable!(),
+                };
+                let (r_ptr, r_len) = match r_repr {
+                    ValueRepr::Bytes { ptr, len, .. } => (ptr, len),
+                    _ => unreachable!(),
+                };
+
+                Self::emit_rv_bytes_call(
+                    builder,
+                    ctx,
+                    "ryo_bytes_concat",
                     &[
                         (ctx.int_type, l_ptr),
                         (types::I64, l_len),
@@ -1135,10 +1223,18 @@ impl<M: Module> Codegen<M> {
                     Some(e) => Self::eval_inst(builder, ctx, e)?,
                     None => base_len,
                 };
+                // M8.4.2: bytes slices skip the UTF-8 boundary check —
+                // select the family callee from the result view type.
+                let is_bytes = matches!(ctx.pool.kind(inst.ty), TypeKind::View(ViewKind::Bytes));
+                let callee = if is_bytes {
+                    "__ryo_bytes_slice"
+                } else {
+                    "__ryo_slice"
+                };
                 let (ptr, len) = Self::emit_rv_pair_call(
                     builder,
                     ctx,
-                    "__ryo_slice",
+                    callee,
                     &[
                         (ctx.int_type, base_ptr),
                         (types::I64, base_len),
@@ -1198,10 +1294,12 @@ impl<M: Module> Codegen<M> {
     /// Evaluate a `str`/`bytes`/`strview`/`bytesview`-typed operand and
     /// hand back its `(ptr, len)` words regardless of representation —
     /// owned triple or borrowed view pair (M8.4/M8.4.2). Consumers that
-    /// only need the viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`, the
-    /// `__ryo_str_push` suffix, the `__ryo_slice` base) use this;
-    /// anything needing the cap must stay on `eval_inst_fat`.
-    fn eval_str_or_view_parts(
+    /// only need the viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`,
+    /// `BytesCmpEq/Ne`, the `__ryo_str_push` suffix, the
+    /// `__ryo_slice`/`__ryo_bytes_slice` base, the bytes conversion
+    /// calls) use this; anything needing the cap must stay on
+    /// `eval_inst_fat`.
+    pub(crate) fn eval_str_or_view_parts(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
@@ -1223,8 +1321,9 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// The `len` word of a `str`/`strview`-typed operand, from either
-    /// representation (M8.4). Backs the `StrLen` arm.
+    /// The `len` word of a `str`/`bytes`/`strview`/`bytesview`-typed
+    /// operand, from either representation (M8.4/M8.4.2). Backs the
+    /// `StrLen` arm.
     fn eval_str_or_view_len(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1447,6 +1546,58 @@ impl<M: Module> Codegen<M> {
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), s_addr, 16);
             if let Some(name) = Self::local_name_of(ctx, s_ref)
+                && let Some(sl) = Self::read_slot(&ctx.fat_locals, name)
+            {
+                builder.def_var(sl.ptr, np);
+                builder.def_var(sl.len, nl);
+                builder.def_var(sl.cap, nc);
+            }
+            return Ok(builder.ins().iconst(ctx.int_type, 0));
+        }
+
+        if name_str == "bytes_push" {
+            // bytes_push(&b, x): spill b's fat pointer to a 24-byte
+            // slot, call __ryo_bytes_push(slot_addr, x), then reload
+            // the mutated triple back into b's FatLocals. arg 0 is
+            // `&b` (lowered to Var(b)); arg 1 is the int byte value.
+            // The 0-255 range check is runtime-side (M8.4.2 stopgap).
+            let b_ref = view.args[0];
+            let x_ref = view.args[1];
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                STR_SLOT_SIZE,
+                3,
+            ));
+            let b_addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            let b_repr = Self::eval_inst_fat(builder, ctx, b_ref)?;
+            let ValueRepr::Bytes { ptr, len, cap } = b_repr else {
+                unreachable!("bytes_push target must be bytes");
+            };
+            builder.ins().store(MemFlagsData::trusted(), ptr, b_addr, 0);
+            builder.ins().store(MemFlagsData::trusted(), len, b_addr, 8);
+            builder
+                .ins()
+                .store(MemFlagsData::trusted(), cap, b_addr, 16);
+            let x_val = Self::eval_inst(builder, ctx, x_ref)?;
+            let func_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                "__ryo_bytes_push",
+                &[ctx.int_type, types::I64],
+                &[],
+            )?;
+            builder.ins().call(func_ref, &[b_addr, x_val]);
+            // Reload the mutated fat pointer back into the caller's FatLocals.
+            let np = builder
+                .ins()
+                .load(ctx.int_type, MemFlagsData::trusted(), b_addr, 0);
+            let nl = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), b_addr, 8);
+            let nc = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), b_addr, 16);
+            if let Some(name) = Self::local_name_of(ctx, b_ref)
                 && let Some(sl) = Self::read_slot(&ctx.fat_locals, name)
             {
                 builder.def_var(sl.ptr, np);

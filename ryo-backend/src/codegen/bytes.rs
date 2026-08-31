@@ -89,6 +89,37 @@ impl<M: Module> Codegen<M> {
         };
         matches!(ctx.pool.kind(ty), TypeKind::Bytes)
     }
+
+    /// `bytes`/`bytesview` equality via `ryo_bytes_eq` (M8.4.2).
+    /// Operands may be owned triples or view pairs; only (ptr, len) is
+    /// read. `BytesCmpNe` inverts the I8 result, mirroring `StrCmpNe`.
+    pub(crate) fn emit_bytes_eq(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        tag: TirTag,
+        lhs: TirRef,
+        rhs: TirRef,
+    ) -> Result<Value, String> {
+        let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
+        let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
+
+        let eq_ref = Self::declare_runtime_fn(
+            ctx.module,
+            builder,
+            "ryo_bytes_eq",
+            &[ctx.int_type, types::I64, ctx.int_type, types::I64],
+            &[types::I8],
+        )?;
+        let call = builder.ins().call(eq_ref, &[l_ptr, l_len, r_ptr, r_len]);
+        let result = builder.inst_results(call)[0];
+
+        if tag == TirTag::BytesCmpNe {
+            let one = builder.ins().iconst(types::I8, 1);
+            Ok(builder.ins().bxor(result, one))
+        } else {
+            Ok(result)
+        }
+    }
 }
 
 /// Define a string literal's content as a read-only `.rodata` object,
