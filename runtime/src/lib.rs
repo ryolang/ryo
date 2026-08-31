@@ -689,6 +689,128 @@ pub unsafe extern "C" fn __ryo_bytes_index(ptr: *const u8, len: u64, idx: u64) -
     unsafe { *ptr.add(idx as usize) as u64 }
 }
 
+/// `bytes.to_str()` backing (M8.4.2 stopgap): validates UTF-8 and
+/// returns an owned `str` copy; panics (exit 101) on invalid input
+/// until M13 turns the signature into `Utf8Error!str`.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes (or be null/dangling when
+/// `len == 0`).
+#[unsafe(no_mangle)]
+pub unsafe fn __ryo_bytes_to_str(ptr: *const u8, len: u64) -> u128 {
+    if len == 0 {
+        return pack_pair(core::ptr::null_mut(), 0);
+    }
+    debug_assert!(!ptr.is_null());
+    // SAFETY: caller contract — ptr/len describe a readable byte range.
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
+    if core::str::from_utf8(bytes).is_err() {
+        slice_fail("bytes are not valid UTF-8");
+    }
+    let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+    let buf = ryo_str_alloc(len);
+    // SAFETY: buf is freshly allocated for len bytes; regions disjoint.
+    unsafe {
+        core::ptr::copy_nonoverlapping(ptr, buf, n);
+    }
+    pack_pair(buf, len)
+}
+
+/// `str.to_bytes()` backing (M8.4.2): owned copy of the UTF-8 bytes.
+/// Never fails.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes (or be null/dangling when
+/// `len == 0`).
+#[unsafe(no_mangle)]
+pub unsafe fn ryo_str_to_bytes(ptr: *const u8, len: u64) -> u128 {
+    if len == 0 {
+        return pack_pair(core::ptr::null_mut(), 0);
+    }
+    let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+    let buf = ryo_bytes_alloc(len);
+    debug_assert!(!ptr.is_null());
+    // SAFETY: caller contract; buf is freshly allocated for len bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(ptr, buf, n);
+    }
+    pack_pair(buf, len)
+}
+
+/// `print(bytes)` backing (M8.4.2): render the escaped repr as a fresh
+/// owned `str`. Printable ASCII (0x20..=0x7E except `\` and `"`) is
+/// shown literally; the short escapes `\n \t \r \0 \\ \"` are used
+/// where they exist; every other byte renders as `\xNN` (lowercase
+/// hex); the result is wrapped in `b"..."`.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes (or be null/dangling when
+/// `len == 0`).
+#[unsafe(no_mangle)]
+pub unsafe fn __ryo_bytes_repr(ptr: *const u8, len: u64) -> u128 {
+    let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+    // Worst case: 3 fixed bytes (`b"`, `"`) + 4 per input byte (`\xNN`).
+    let cap = match len.checked_mul(4).and_then(|m| m.checked_add(3)) {
+        Some(c) => c,
+        None => oom_abort(),
+    };
+    let buf = ryo_str_alloc(cap);
+    let mut w = 0usize;
+    // SAFETY: every write stays within `cap` (≤ 4 per byte + 3 fixed),
+    // and reads cover the caller-guaranteed `len` bytes.
+    unsafe {
+        let push = |buf: *mut u8, w: &mut usize, b: u8| {
+            *buf.add(*w) = b;
+            *w += 1;
+        };
+        push(buf, &mut w, b'b');
+        push(buf, &mut w, b'"');
+        for i in 0..n {
+            debug_assert!(!ptr.is_null());
+            let byte = *ptr.add(i);
+            match byte {
+                b'\n' => {
+                    push(buf, &mut w, b'\\');
+                    push(buf, &mut w, b'n');
+                }
+                b'\t' => {
+                    push(buf, &mut w, b'\\');
+                    push(buf, &mut w, b't');
+                }
+                b'\r' => {
+                    push(buf, &mut w, b'\\');
+                    push(buf, &mut w, b'r');
+                }
+                0 => {
+                    push(buf, &mut w, b'\\');
+                    push(buf, &mut w, b'0');
+                }
+                b'\\' => {
+                    push(buf, &mut w, b'\\');
+                    push(buf, &mut w, b'\\');
+                }
+                b'"' => {
+                    push(buf, &mut w, b'\\');
+                    push(buf, &mut w, b'"');
+                }
+                0x20..=0x7e => push(buf, &mut w, byte),
+                _ => {
+                    const HEX: &[u8; 16] = b"0123456789abcdef";
+                    push(buf, &mut w, b'\\');
+                    push(buf, &mut w, b'x');
+                    push(buf, &mut w, HEX[(byte >> 4) as usize]);
+                    push(buf, &mut w, HEX[(byte & 0xf) as usize]);
+                }
+            }
+        }
+        push(buf, &mut w, b'"');
+    }
+    // `cap` is derived at the call site as `len` (LenIsCap); the actual
+    // allocation is larger, which is harmless — `ryo_str_free` only
+    // reads `cap == 0` as the static sentinel.
+    pack_pair(buf, w as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,5 +1325,45 @@ mod tests {
             unsafe { ryo_bytes_eq(core::ptr::null(), 0, core::ptr::null(), 0) },
             1
         );
+    }
+
+    #[test]
+    fn bytes_to_str_copies_valid_utf8() {
+        let src = "héllo".as_bytes();
+        let v = unsafe { __ryo_bytes_to_str(src.as_ptr(), src.len() as u64) };
+        let (p, l) = unpack_pair(v);
+        let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
+        assert_eq!(s, "héllo".as_bytes());
+        unsafe { ryo_str_free(p, l) };
+    }
+
+    #[test]
+    fn str_to_bytes_copies() {
+        let src = "héllo".as_bytes();
+        let v = unsafe { ryo_str_to_bytes(src.as_ptr(), src.len() as u64) };
+        let (p, l) = unpack_pair(v);
+        let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
+        assert_eq!(s, "héllo".as_bytes());
+        unsafe { ryo_bytes_free(p, l) };
+    }
+
+    #[test]
+    fn bytes_repr_escapes() {
+        // A, NUL, 0xff, newline, '"', '\', '~' (0x7e printable), ESC (0x1b)
+        let input = [b'A', 0x00, 0xff, b'\n', b'"', b'\\', 0x7e, 0x1b];
+        let v = unsafe { __ryo_bytes_repr(input.as_ptr(), input.len() as u64) };
+        let (p, l) = unpack_pair(v);
+        let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
+        assert_eq!(s, b"b\"A\\0\\xff\\n\\\"\\\\~\\x1b\"");
+        unsafe { ryo_str_free(p, l) };
+    }
+
+    #[test]
+    fn bytes_repr_empty() {
+        let v = unsafe { __ryo_bytes_repr(core::ptr::null(), 0) };
+        let (p, l) = unpack_pair(v);
+        let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
+        assert_eq!(s, b"b\"\"");
+        unsafe { ryo_str_free(p, l) };
     }
 }
