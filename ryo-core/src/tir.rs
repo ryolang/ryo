@@ -205,6 +205,9 @@ pub enum TirTag {
     BytesCmpEq,
     /// `bytes`/`bytesview` inequality (M8.4.2). Payload in `TirData::BinOp`.
     BytesCmpNe,
+    /// `bytes`/`bytesview` scalar indexing (M8.4.2): bounds-checked byte
+    /// load → `int` (`u8` at M17.1). Payload in `TirData::BinOp`.
+    BytesIndex,
 
     /// Read the `len` field of a str fat pointer. Operand in `TirData::UnOp`.
     StrLen,
@@ -655,6 +658,7 @@ impl TirBuilder {
                 | TirTag::BytesConcat
                 | TirTag::BytesCmpEq
                 | TirTag::BytesCmpNe
+                | TirTag::BytesIndex
                 | TirTag::FAdd
                 | TirTag::FSub
                 | TirTag::FMul
@@ -1718,6 +1722,7 @@ fn bin_op_name(t: TirTag) -> &'static str {
         TirTag::BytesConcat => "bytes_concat",
         TirTag::BytesCmpEq => "bytes_eq",
         TirTag::BytesCmpNe => "bytes_ne",
+        TirTag::BytesIndex => "bytes_index",
         TirTag::BoolAnd => "bool_and",
         TirTag::BoolOr => "bool_or",
         _ => "?bin",

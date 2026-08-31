@@ -187,6 +187,13 @@ pub enum ExprKind {
         start: Option<ExprId>,
         end: Option<ExprId>,
     },
+    /// Scalar indexing `base[index]` (M8.4.2: `bytes`/`bytesview` only,
+    /// yields `int` until M17.1 makes it `u8`). Grammatically distinct
+    /// from `Slice` — the colon is what makes a bracket a slice.
+    Index {
+        base: ExprId,
+        index: ExprId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -703,6 +710,11 @@ impl Ast {
         self.push_expr(ExprKind::Slice { base, start, end }, span)
     }
 
+    /// Scalar indexing `base[index]` (M8.4.2).
+    pub fn index(&mut self, base: ExprId, index: ExprId, span: SimpleSpan) -> ExprId {
+        self.push_expr(ExprKind::Index { base, index }, span)
+    }
+
     /// `return <expr>`, or bare `return` when `value` is `None`.
     pub fn return_stmt(&mut self, value: Option<ExprId>, span: SimpleSpan) -> StmtId {
         self.push_stmt(StmtKind::Return(value), span)
@@ -1064,5 +1076,26 @@ mod tests {
             ref other => panic!("expected Literal::Bytes, got {:?}", other),
         }
         assert_eq!(ast.expr_span(e), span);
+    }
+
+    #[test]
+    fn index_expr_round_trip() {
+        let mut ast = Ast::new();
+        let mut pool = InternPool::new();
+        let b = pool.intern_str("b");
+        let span = SimpleSpan::new((), 0..4);
+        let base = ast.ident(b, span);
+        let idx = ast.literal_int(0, span);
+        let e = ast.index(base, idx, span);
+        match ast.expr(e).kind {
+            ExprKind::Index {
+                base: bb,
+                index: ii,
+            } => {
+                assert_eq!(bb, base);
+                assert_eq!(ii, idx);
+            }
+            ref other => panic!("expected Index, got {:?}", other),
+        }
     }
 }

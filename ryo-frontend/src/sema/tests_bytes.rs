@@ -372,3 +372,48 @@ fn bridging_methods_take_no_arguments() {
     let (_, diags, _) = run_with_errors("fn main():\n\tb = b\"\\x61\"\n\ts = b.to_str(1)\n");
     assert!(any_code(&diags, DiagCode::ArityMismatch));
 }
+
+#[test]
+fn bytes_index_yields_int() {
+    let (tirs, pool) = run("fn main():\n\tb = b\"\\x01\"\n\tx = b[0]\n\tv = b[0:1]\n\ty = v[0]\n")
+        .expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    let indexed = main
+        .instructions
+        .iter()
+        .filter(|i| i.tag == TirTag::BytesIndex && i.ty == pool.int())
+        .count();
+    assert_eq!(indexed, 2, "b[0] and v[0] must type as int");
+}
+
+#[test]
+fn str_indexing_stays_forbidden() {
+    let (_, diags, _) = run_with_errors("fn main():\n\ts = \"ab\"\n\tx = s[0]\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::TypeMismatch
+            && d.message.contains("str does not support indexing")),
+        "got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn index_requires_int_and_indexable_base() {
+    let (_, diags, _) = run_with_errors("fn main():\n\tb = b\"\\x01\"\n\tx = b[\"a\"]\n");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::TypeMismatch && d.message.contains("index must be int")),
+        "got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    let (_, diags, _) = run_with_errors("fn main():\n\tx = 1\n\ty = x[0]\n");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::TypeMismatch
+                && d.message.contains("cannot index type 'int'")),
+        "got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}

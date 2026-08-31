@@ -352,6 +352,55 @@ pub(crate) fn analyze_expr_allow_never(
                 span,
             )
         }
+        InstTag::Index => {
+            let (base_uir, index_uir) = match inst.data {
+                InstData::BinOp { lhs, rhs } => (lhs, rhs),
+                _ => unreachable!("Index must carry InstData::BinOp"),
+            };
+            let base_tir = analyze_expr(sema, fcx, scope, base_uir);
+            let base_ty = fcx.builder.ty_of(base_tir);
+            let base_kind = sema.pool.kind(base_ty);
+            // M8.4.2 stopgap: scalar indexing exists for bytes/bytesview
+            // only and yields `int` (0-255) until M17.1 makes it `u8`.
+            // `str` indexing stays forbidden (§4.7).
+            match base_kind {
+                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => {}
+                TypeKind::Str | TypeKind::View(ViewKind::Str) => {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::TypeMismatch,
+                        "str does not support indexing — slice instead (s[i:i+1])".to_string(),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+                _ => {
+                    if !sema.pool.is_error(base_ty) {
+                        sema.sink.emit(Diag::error(
+                            span,
+                            DiagCode::TypeMismatch,
+                            format!("cannot index type '{}'", sema.pool.display(base_ty)),
+                        ));
+                    }
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+            }
+            let index_tir = analyze_expr(sema, fcx, scope, index_uir);
+            let index_ty = fcx.builder.ty_of(index_tir);
+            if sema.pool.kind(index_ty) != TypeKind::Int && !sema.pool.is_error(index_ty) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(index_uir),
+                    DiagCode::TypeMismatch,
+                    format!("index must be int, got '{}'", sema.pool.display(index_ty)),
+                ));
+            }
+            fcx.builder.binary(
+                TirTag::BytesIndex,
+                sema.pool.int(),
+                base_tir,
+                index_tir,
+                span,
+            )
+        }
         InstTag::Borrow => {
             let inner = match inst.data {
                 InstData::Borrow(inner) => inner,

@@ -650,6 +650,7 @@ where
         enum PostfixOp {
             Method(StringId, Vec<ExprId>, SimpleSpan),
             Slice(Option<ExprId>, Option<ExprId>, SimpleSpan),
+            Index(ExprId, SimpleSpan),
         }
 
         let method_op = just(Token::Dot)
@@ -672,9 +673,16 @@ where
             .then_ignore(just(Token::RBracket))
             .map_with(|(start, end), e: &mut Mx<'a, '_, I>| PostfixOp::Slice(start, end, e.span()));
 
+        // `slice_op` precedes `index_op` because both start with `[`;
+        // the colon disambiguates — each input parses exactly one way.
+        let index_op = just(Token::LBracket)
+            .ignore_then(expr.clone())
+            .then_ignore(just(Token::RBracket))
+            .map_with(|index, e: &mut Mx<'a, '_, I>| PostfixOp::Index(index, e.span()));
+
         let postfix = atom
             .foldl_with(
-                choice((method_op, slice_op)).repeated(),
+                choice((method_op, slice_op, index_op)).repeated(),
                 |receiver, op, e: &mut Mx<'a, '_, I>| {
                     let start = e.state().expr_span(receiver).start;
                     match op {
@@ -687,6 +695,10 @@ where
                         PostfixOp::Slice(lo, hi, span) => {
                             e.state()
                                 .slice(receiver, lo, hi, SimpleSpan::new((), start..span.end))
+                        }
+                        PostfixOp::Index(index, span) => {
+                            e.state()
+                                .index(receiver, index, SimpleSpan::new((), start..span.end))
                         }
                     }
                 },
@@ -1933,6 +1945,10 @@ mod tests {
                         if let Some(end) = end {
                             expr_work.push(end);
                         }
+                    }
+                    ExprKind::Index { base, index } => {
+                        expr_work.push(base);
+                        expr_work.push(index);
                     }
                 }
             }

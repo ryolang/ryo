@@ -158,3 +158,43 @@ fn test_bytes_slice_out_of_range_panics() {
         "missing panic message: {stderr}"
     );
 }
+
+#[test]
+fn test_bytes_index_reads() {
+    assert_ryo_prints(
+        "bytes_index.ryo",
+        "fn main():\n\traw = b\"\\x01\\x02\\x03\"\n\theader = raw[0:2]\n\tprint(int_to_str(header[0]))\n\tprint(int_to_str(raw[2]))\n",
+        // print is a raw write: the two ints concatenate with no
+        // separating newline.
+        "13",
+    );
+}
+
+#[test]
+fn test_bytes_index_out_of_range_panics() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bytes_index_oob.ryo",
+        "fn main():\n\tb = b\"\\x01\"\n\tprint(int_to_str(b[5]))\n",
+    );
+    let output = run_ryo_command(&["run", "bytes_index_oob.ryo"], &test_file).expect("run ryo");
+    assert_eq!(output.status.code(), Some(101));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("index out of range"),
+        "missing panic message: {stderr}"
+    );
+}
+
+#[test]
+fn test_bytes_index_negative_panics() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bytes_index_neg.ryo",
+        "fn main():\n\tb = b\"\\x01\"\n\tprint(int_to_str(b[0 - 1]))\n",
+    );
+    let output = run_ryo_command(&["run", "bytes_index_neg.ryo"], &test_file).expect("run ryo");
+    assert_eq!(output.status.code(), Some(101));
+}

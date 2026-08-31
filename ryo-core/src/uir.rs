@@ -227,6 +227,10 @@ pub enum InstTag {
     /// Bounds optional; see [`InstData::Slice`]. Type-checks to `strview`
     /// in sema.
     Slice,
+
+    /// Scalar indexing `base[index]`; `InstData::BinOp` (lhs=base,
+    /// rhs=index). Sema gates to bytes/bytesview (M8.4.2).
+    Index,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -542,6 +546,19 @@ impl UirBuilder {
         span: Span,
     ) -> InstRef {
         self.push(InstTag::Slice, InstData::Slice { base, start, end }, span)
+    }
+
+    /// Emit a scalar indexing `base[index]` (M8.4.2). Sema gates the
+    /// base to bytes/bytesview and the index to `int`.
+    pub fn index(&mut self, base: InstRef, index: InstRef, span: Span) -> InstRef {
+        self.push(
+            InstTag::Index,
+            InstData::BinOp {
+                lhs: base,
+                rhs: index,
+            },
+            span,
+        )
     }
 
     pub fn binary(&mut self, tag: InstTag, lhs: InstRef, rhs: InstRef, span: Span) -> InstRef {
@@ -1291,6 +1308,7 @@ fn bin_op_name(t: InstTag) -> &'static str {
         InstTag::GtEq => "icmp_ge",
         InstTag::And => "bool_and",
         InstTag::Or => "bool_or",
+        InstTag::Index => "index",
         _ => "?bin",
     }
 }

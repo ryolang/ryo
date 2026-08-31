@@ -316,6 +316,25 @@ impl<M: Module> Codegen<M> {
                 };
                 Self::emit_bytes_eq(builder, ctx, inst.tag, lhs, rhs)?
             }
+            TirTag::BytesIndex => {
+                let (base, index) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!("BytesIndex must carry TirData::BinOp"),
+                };
+                // Bounds check + panic are runtime-side, mirroring
+                // `__ryo_slice` — no Cranelift branch needed.
+                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, base)?;
+                let idx = Self::eval_inst(builder, ctx, index)?;
+                let index_ref = Self::declare_runtime_fn(
+                    ctx.module,
+                    builder,
+                    "__ryo_bytes_index",
+                    &[ctx.int_type, types::I64, types::I64],
+                    &[types::I64],
+                )?;
+                let call = builder.ins().call(index_ref, &[ptr, len, idx]);
+                builder.inst_results(call)[0]
+            }
             TirTag::StrConcat => {
                 return Err("StrConcat must be materialized through eval_inst_fat".to_string());
             }

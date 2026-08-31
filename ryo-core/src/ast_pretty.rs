@@ -321,6 +321,7 @@ fn write_expr(
         }
         ExprKind::Borrow(_) => Cow::Borrowed("Borrow"),
         ExprKind::Slice { .. } => Cow::Borrowed("Slice"),
+        ExprKind::Index { .. } => Cow::Borrowed("Index"),
     };
 
     writeln!(
@@ -363,6 +364,10 @@ fn write_expr(
             write_expr(out, ast, base, &new_prefix, false, "base: ", pool)?;
             write_optional_bound(out, ast, start, &new_prefix, false, "start: ", pool)?;
             write_optional_bound(out, ast, end, &new_prefix, true, "end: ", pool)
+        }
+        ExprKind::Index { base, index } => {
+            write_expr(out, ast, base, &new_prefix, false, "base: ", pool)?;
+            write_expr(out, ast, index, &new_prefix, true, "index: ", pool)
         }
     }
 }
