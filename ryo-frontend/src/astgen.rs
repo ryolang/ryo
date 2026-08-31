@@ -391,6 +391,9 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
             ast::Literal::Str(id) => b.str_literal(id, span),
             ast::Literal::Bool(v) => b.bool_literal(v, span),
             ast::Literal::Float(v) => b.float_literal(v, span),
+            // Bytes lowering lands in the follow-up astgen task; reaching this
+            // arm with a real `b"..."` literal panics until then.
+            ast::Literal::Bytes(_) => unreachable!("astgen for b\"...\" literals"),
         },
         ast::ExprKind::Ident(name) => b.var_ref(name, span),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {

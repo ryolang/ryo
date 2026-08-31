@@ -308,6 +308,7 @@ fn write_expr(
         ExprKind::Literal(lit) => match lit {
             Literal::Int(n) => Cow::Owned(format!("Literal(Int({}))", n)),
             Literal::Str(s) => Cow::Owned(format!("Literal(Str({:?}))", pool.str(s))),
+            Literal::Bytes(s) => Cow::Owned(format!("Literal(Bytes({:?}))", pool.bytes_payload(s))),
             Literal::Bool(b) => Cow::Owned(format!("Literal(Bool({}))", b)),
             Literal::Float(v) => Cow::Owned(format!("Literal(Float({}))", v)),
         },

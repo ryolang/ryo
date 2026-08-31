@@ -597,6 +597,7 @@ where
                 Token::IntLit(n) => Literal::Int(n),
                 Token::FloatLit(bits) => Literal::Float(f64::from_bits(bits)),
                 Token::StrLit(id) => Literal::Str(id),
+                Token::BytesLit(id) => Literal::Bytes(id),
                 Token::True => Literal::Bool(true),
                 Token::False => Literal::Bool(false),
             }

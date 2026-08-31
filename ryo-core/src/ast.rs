@@ -193,6 +193,9 @@ pub enum ExprKind {
 pub enum Literal {
     Int(i64),
     Str(StringId),
+    /// `b"..."` byte-string literal (M8.4.2). Read the payload with
+    /// `InternPool::bytes_payload` — not necessarily valid UTF-8.
+    Bytes(StringId),
     Bool(bool),
     Float(f64),
 }
@@ -638,6 +641,10 @@ impl Ast {
         self.literal(Literal::Str(value), span)
     }
 
+    pub fn literal_bytes(&mut self, value: StringId, span: SimpleSpan) -> ExprId {
+        self.literal(Literal::Bytes(value), span)
+    }
+
     pub fn ident(&mut self, name: StringId, span: SimpleSpan) -> ExprId {
         self.push_expr(ExprKind::Ident(name), span)
     }
@@ -1043,5 +1050,19 @@ mod tests {
             }
             other => panic!("expected IfStmt, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn literal_bytes_round_trip() {
+        let mut ast = Ast::new();
+        let mut pool = InternPool::new();
+        let id = pool.intern_bytes(b"\x01\x02");
+        let span = SimpleSpan::new((), 0..8);
+        let e = ast.literal_bytes(id, span);
+        match ast.expr(e).kind {
+            ExprKind::Literal(Literal::Bytes(got)) => assert_eq!(got, id),
+            ref other => panic!("expected Literal::Bytes, got {:?}", other),
+        }
+        assert_eq!(ast.expr_span(e), span);
     }
 }
