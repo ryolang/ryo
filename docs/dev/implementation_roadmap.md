@@ -29,7 +29,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.4 — String Slices (`strview`) [alpha] ✅ COMPLETE](#milestone-84-string-slices-strview-alpha--complete)
 - [x] [Milestone 8.4.1 — `strview` Spelling & View→`str` Re-borrow [alpha] ✅ COMPLETE](#milestone-841-strview-spelling--viewstr-re-borrow-alpha--complete)
 - [x] [Milestone 8.4.1.2 — View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE](#milestone-8412-view-materialization-strview--w0003-alpha--complete)
-- [ ] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha]](#milestone-842-bytes-type--bytesview-alpha)
+- [x] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha] ✅ COMPLETE](#milestone-842-bytes-type--bytesview-alpha--complete)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
 - [ ] [Milestone 8.7 — Literal Completeness (Hex/Octal/Binary Ints, Escapes)](#milestone-87-literal-completeness-hexoctalbinary-ints-escapes)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
@@ -1263,11 +1263,11 @@ fn main():
 - Out of scope (deferred): `bytes(bview)` (ships with M8.4.2), `slice[T]` materialization (M21), the `Clone` trait and the trait-forward resolution hook (trait milestone — `str(view)` will resolve through a converting-initializer protocol, call sites unchanged), and a machine-applicable E0034 suggestion (needs Diag suggestion-payload machinery that doesn't exist — belongs with the agent-interface milestone).
 - Dependencies: Milestone 8.4.1 (re-borrow, view machinery)
 
-### Milestone 8.4.2: `bytes` Type & `bytesview` [alpha]
+### Milestone 8.4.2: `bytes` Type & `bytesview` [alpha] ✅ COMPLETE
 
 **Goal:** An owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` — plus its read-only projection, filling the gap where `list[u8]` is the only (awkward) option. Per the final slicing spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md`, D2).
 
-**Status:** ⏳ Planned
+**Status:** ✅ COMPLETE (2026-08-31)
 
 **Tasks:**
 
