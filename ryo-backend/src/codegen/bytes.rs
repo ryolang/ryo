@@ -133,23 +133,13 @@ pub(crate) fn store_string<M: Module>(
     data_ctx: &mut DataDescription,
     string_data: &mut HashMap<StringId, DataId>,
 ) -> Result<DataId, String> {
-    if let Some(&data_id) = string_data.get(&content_id) {
-        return Ok(data_id);
-    }
-
-    let data_id = module
-        .declare_anonymous_data(false, false)
-        .map_err(|e| format!("Failed to declare string data: {}", e))?;
-
-    data_ctx.clear();
-    data_ctx.define(content.as_bytes().into());
-
-    module
-        .define_data(data_id, data_ctx)
-        .map_err(|e| format!("Failed to define string data: {}", e))?;
-
-    string_data.insert(content_id, data_id);
-    Ok(data_id)
+    store_bytes(
+        content_id,
+        content.as_bytes(),
+        module,
+        data_ctx,
+        string_data,
+    )
 }
 
 /// `store_string` for raw bytes (M8.4.2 `b"..."` payloads, which need
