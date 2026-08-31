@@ -303,24 +303,31 @@ pub(crate) fn emit_builtin_call(
     }
 }
 
-/// W0003 case A (M8.4.1.2): is this UIR argument syntactically a
-/// `str(view)` materialize call? Mirrors the intercept condition in
-/// `check_call` — a call-form `str` with no user declaration carrying
-/// the name (a user-defined `fn str` shadows the intercept, so its
-/// calls never warn). Callers pair this with a `ty_of == str` check on
-/// the argument's TIR so error paths stay warning-free.
-pub(crate) fn is_str_materialize_arg(sema: &Sema<'_>, arg_uir: InstRef) -> bool {
+/// W0003 case A (M8.4.1.2, generalized M8.4.2): is this UIR argument
+/// syntactically a `str(view)` / `bytes(bview)` materialize call?
+/// Returns the type name when so. Mirrors the intercept condition in
+/// `check_call` — a call-form type name with no user declaration
+/// carrying it (a user-defined `fn str`/`fn bytes` shadows the
+/// intercept, so its calls never warn).
+pub(crate) fn materialize_name(sema: &Sema<'_>, arg_uir: InstRef) -> Option<&'static str> {
     if sema.uir.inst(arg_uir).tag != InstTag::Call {
-        return false;
+        return None;
     }
     let name = sema.uir.call_view(arg_uir).name;
-    sema.pool.str(name) == "str" && !sema.name_to_decl.contains_key(&name)
+    let s = sema.pool.str(name);
+    if s != "str" && s != "bytes" {
+        return None;
+    }
+    if sema.name_to_decl.contains_key(&name) {
+        return None;
+    }
+    Some(if s == "str" { "str" } else { "bytes" })
 }
 
-/// W0003 case A for view-accepting builtins (M8.4.1.2): `print` and
-/// str_push's suffix take `strview` arguments directly, so a
-/// `str(view)` materialize call in that position is a redundant
-/// allocation.
+/// W0003 case A for view-accepting builtins (M8.4.1.2, generalized
+/// M8.4.2): `print` and the push suffixes take view arguments directly,
+/// so a `str(view)` / `bytes(bview)` materialize call in that position
+/// is a redundant allocation.
 pub(crate) fn warn_redundant_materialize_builtin_arg(
     sema: &mut Sema<'_>,
     fcx: &FuncCtx,
@@ -328,12 +335,19 @@ pub(crate) fn warn_redundant_materialize_builtin_arg(
     arg_tir: TirRef,
     builtin: &str,
 ) {
-    if fcx.builder.ty_of(arg_tir) == sema.pool.str_() && is_str_materialize_arg(sema, arg_uir) {
+    let Some(owner_name) = materialize_name(sema, arg_uir) else {
+        return;
+    };
+    let (owner_ty, view_name) = match owner_name {
+        "str" => (sema.pool.str_(), "strview"),
+        _ => (sema.pool.bytes(), "bytesview"),
+    };
+    if fcx.builder.ty_of(arg_tir) == owner_ty {
         sema.sink.emit(Diag::warning(
             sema.uir.span(arg_uir),
             DiagCode::RedundantMaterialize,
             format!(
-                "redundant `str(...)` — `{builtin}` accepts `strview` arguments directly, with no allocation (drop the `str(...)` call)"
+                "redundant `{owner_name}(...)` — `{builtin}` accepts `{view_name}` arguments directly, with no allocation (drop the `{owner_name}(...)` call)"
             ),
         ));
     }
@@ -399,6 +413,67 @@ pub(crate) fn emit_str_materialize(
         arg_tirs,
         &[ParamMode::Borrow],
         sema.pool.str_(),
+        span,
+    )
+}
+
+/// M8.4.2 `bytes(bview)` materialization: validate the single
+/// `bytesview` argument and emit the bytes-returning call to the
+/// synthesized `__ryo_bytes_from_view` runtime callee (mirrors
+/// [`emit_str_materialize`]). The ownership pass seeds the
+/// bytes-returning Call as a fresh owner by construction; codegen
+/// lowers it via the packed-u128 producer ABI.
+pub(crate) fn emit_bytes_materialize(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+) -> TirRef {
+    if view.args.len() != 1 {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            format!("bytes() takes exactly 1 argument, got {}", view.args.len()),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    // Builtins never take `inout`: `&` is rejected exactly like the
+    // table builtins.
+    if matches!(sema.uir.inst(view.args[0]).tag, InstTag::Borrow) {
+        sema.sink.emit(
+            Diag::error(
+                sema.uir.span(view.args[0]),
+                DiagCode::BorrowMismatch,
+                "argument 1 is passed by `&` but parameter is not `inout`".to_string(),
+            )
+            .with_help("remove the `&`, or declare the parameter `inout`"),
+        );
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+    if sema.pool.is_error(arg_ty) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if !matches!(sema.pool.kind(arg_ty), TypeKind::View(ViewKind::Bytes)) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.args[0]),
+            DiagCode::TypeMismatch,
+            format!(
+                "bytes() argument must be bytesview, got {}",
+                sema.pool.display(arg_ty)
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    // The synthesized callee name is unshadowable — user code cannot
+    // declare `__ryo_`-prefixed identifiers (ReservedIdentifier).
+    let callee = sema.pool.intern_str("__ryo_bytes_from_view");
+    fcx.builder.call(
+        callee,
+        arg_tirs,
+        &[ParamMode::Borrow],
+        sema.pool.bytes(),
         span,
     )
 }

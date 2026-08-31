@@ -183,3 +183,119 @@ fn bytesview_signature_rejections() {
     let (_, diags, _) = run_with_errors("fn f(move v: bytesview):\n\treturn\n");
     assert!(!diags.is_empty(), "move bytesview param must be rejected");
 }
+
+#[test]
+fn bytes_materialize_types_and_lowers() {
+    let (tirs, pool) =
+        run("fn main():\n\tb = b\"\\x01\\x02\"\n\tv = b[0:1]\n\tc = bytes(v)\n").expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    let callee = pool
+        .find_str("__ryo_bytes_from_view")
+        .expect("callee interned");
+    let found = (1..main.instructions.len()).any(|idx| {
+        let r = TirRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
+        main.inst(r).tag == TirTag::Call
+            && main.inst(r).ty == pool.bytes()
+            && main.call_view(r).name == callee
+    });
+    assert!(found, "bytes(v) must lower to __ryo_bytes_from_view");
+}
+
+#[test]
+fn bytes_materialize_rejects_non_bytesview() {
+    // strview argument.
+    let (_, diags, _) = run_with_errors("fn main():\n\ts = \"ab\"\n\tc = bytes(s[0:1])\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::TypeMismatch
+            && d.message.contains("bytes() argument must be bytesview")),
+        "got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    // Owned bytes argument (already an owner).
+    let (_, diags, _) = run_with_errors("fn main():\n\tb = b\"\\x01\"\n\tc = bytes(b)\n");
+    assert!(any_code(&diags, DiagCode::TypeMismatch));
+    // Arity.
+    let (_, diags, _) = run_with_errors("fn main():\n\tc = bytes()\n");
+    assert!(any_code(&diags, DiagCode::ArityMismatch));
+}
+
+#[test]
+fn bytesview_reborrows_into_bytes_param() {
+    // P6': a bytesview passed to a `bytes` borrow parameter is a
+    // call-scoped cap=0 re-borrow — no materialization, no error.
+    let (tirs, pool) = run(
+        "fn takes(b: bytes):\n\tprint(int_to_str(b.len()))\n\nfn main():\n\traw = b\"\\x01\\x02\"\n\ttakes(raw[0:1])\n",
+    )
+    .expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    assert!(
+        any_inst(main, |tag, ty| tag == TirTag::ViewAsOwner
+            && ty == pool.bytes()),
+        "expected a ViewAsOwner re-borrow to bytes"
+    );
+}
+
+#[test]
+fn binding_bytesview_to_bytes_is_type_error() {
+    // Only call parameters get the re-borrow; binding stays E0012.
+    let (_, diags, _) = run_with_errors("fn main():\n\traw = b\"\\x01\"\n\tv: bytes = raw[0:1]\n");
+    assert!(any_code(&diags, DiagCode::TypeMismatch));
+}
+
+#[test]
+fn move_bytes_param_rejects_bytesview() {
+    let (_, diags, _) = run_with_errors(
+        "fn takes(move b: bytes):\n\treturn\n\nfn main():\n\traw = b\"\\x01\"\n\ttakes(raw[0:1])\n",
+    );
+    assert!(any_code(&diags, DiagCode::TypeMismatch));
+}
+
+#[test]
+fn w0003_case_a_warns_for_bytes_in_param_position() {
+    // f(bytes(v)) where f takes a borrowed bytes — the re-borrow
+    // already serves it.
+    let (_, diags, _) = run_with_errors(
+        "fn takes(b: bytes):\n\treturn\n\nfn main():\n\traw = b\"\\x01\"\n\ttakes(bytes(raw[0:1]))\n",
+    );
+    let warnings = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::RedundantMaterialize)
+        .count();
+    assert_eq!(
+        warnings,
+        1,
+        "got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::RedundantMaterialize
+                && d.message.contains("redundant `bytes(...)`")),
+        "message must name bytes(...): {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn w0003_str_messages_unchanged() {
+    // The generalization must not reword the str warnings.
+    let (_, diags, _) = run_with_errors(
+        "fn takes(s: str):\n\treturn\n\nfn main():\n\traw = \"ab\"\n\ttakes(str(raw[0:1]))\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::RedundantMaterialize
+                && d.message.contains("redundant `str(...)`")),
+        "got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn user_defined_fn_bytes_shadows_intercept() {
+    // Type names are not reserved: a user `fn bytes` wins (same rule
+    // as the str intercept).
+    run("fn bytes(x: int):\n\treturn\n\nfn main():\n\tbytes(1)\n").expect("sema ok");
+}
