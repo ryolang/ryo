@@ -1,8 +1,9 @@
 //! Expression evaluation and call emission — split from `mod.rs`; see module docs there.
 
+use super::bytes::store_string;
 use super::{
     Codegen, DIV_ZERO_MSG, FunctionContext, MOD_ZERO_MSG, OVERFLOW_MSG, STR_SLOT_SIZE, ValueRepr,
-    cranelift_type_for, is_str_type, ranges, store_string,
+    cranelift_type_for, is_fat_type, ranges,
 };
 use cranelift::codegen::ir::{
     BlockArg, FuncRef, InstructionData, MemFlagsData, Opcode, StackSlot, ValueDef,
@@ -13,18 +14,18 @@ use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind};
 use std::collections::HashMap;
 
-/// Cap derivation for the packed-u128 runtime string ABI (Phase 0):
+/// Cap derivation for the packed-u128 runtime string/bytes ABI (Phase 0):
 /// string-producing runtime functions return `{ptr, len}` packed in
 /// one u128 (lo = ptr, hi = len) — a true register return on every
 /// supported target (see `pack_pair` in `runtime/src/lib.rs` for why
 /// not a struct). The `cap` word is a codegen-side derivation:
 /// `Static` (cap = 0, the .rodata sentinel) for
-/// `ryo_str_from_literal`, `LenIsCap` (cap = len) for every
-/// allocating producer — the runtime never over-allocates, and
-/// `__ryo_str_push` manages growth capacity through its unchanged
-/// slot ABI.
+/// `ryo_str_from_literal` / `ryo_bytes_from_literal`, `LenIsCap`
+/// (cap = len) for every allocating producer — the runtime never
+/// over-allocates, and `__ryo_str_push` / `__ryo_bytes_push` manage
+/// growth capacity through their unchanged slot ABI.
 #[derive(Clone, Copy)]
-enum CapRule {
+pub(crate) enum CapRule {
     Static,
     LenIsCap,
 }
@@ -41,26 +42,28 @@ impl<M: Module> Codegen<M> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return match repr {
                 ValueRepr::Scalar(v) => Ok(v),
-                // Str/view-typed values have no scalar stand-in.
+                // Fat/view-typed values have no scalar stand-in.
                 // A multi-word repr reaching the scalar entry point
-                // means a consumer forgot to gate through eval_inst_str
+                // means a consumer forgot to gate through eval_inst_fat
                 // / eval_inst_view — reject loudly instead of silently
                 // handing out the data pointer.
-                ValueRepr::Str { .. } | ValueRepr::View { .. } => Err(format!(
-                    "eval_inst: str/view-typed inst %{} reached the scalar entry point; use eval_inst_str / eval_inst_view",
-                    r.index()
-                )),
+                ValueRepr::Str { .. } | ValueRepr::Bytes { .. } | ValueRepr::View { .. } => {
+                    Err(format!(
+                        "eval_inst: fat/view-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view",
+                        r.index()
+                    ))
+                }
             };
         }
         let inst = ctx.tir.inst(r);
-        // Str- and view-typed insts are multi-word and have no
+        // Fat- and view-typed insts are multi-word and have no
         // business on the scalar path. Calls are checked separately in
-        // the Call arm below (bare-statement str calls route through
-        // emit_call / eval_inst_str instead).
-        if inst.tag != TirTag::Call && (is_str_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty))
+        // the Call arm below (bare-statement fat calls route through
+        // emit_call / eval_inst_fat instead).
+        if inst.tag != TirTag::Call && (is_fat_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty))
         {
             return Err(format!(
-                "eval_inst: str/view-typed inst %{} reached the scalar entry point; use eval_inst_str / eval_inst_view",
+                "eval_inst: fat/view-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view",
                 r.index()
             ));
         }
@@ -256,12 +259,12 @@ impl<M: Module> Codegen<M> {
                 builder.block_params(merge_block)[0]
             }
             TirTag::Call => {
-                // Str/view-returning calls are multi-word — they
-                // must come through eval_inst_str / eval_inst_view,
+                // Fat/view-returning calls are multi-word — they
+                // must come through eval_inst_fat / eval_inst_view,
                 // never the scalar path.
-                if is_str_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty) {
+                if is_fat_type(inst.ty, ctx.pool) || ctx.pool.is_view(inst.ty) {
                     return Err(format!(
-                        "eval_inst: str/view-returning call %{} reached the scalar entry point; use eval_inst_str",
+                        "eval_inst: fat/view-returning call %{} reached the scalar entry point; use eval_inst_fat",
                         r.index()
                     ));
                 }
@@ -307,7 +310,10 @@ impl<M: Module> Codegen<M> {
                 }
             }
             TirTag::StrConcat => {
-                return Err("StrConcat must be materialized through eval_inst_str".to_string());
+                return Err("StrConcat must be materialized through eval_inst_fat".to_string());
+            }
+            TirTag::BytesConcat => {
+                return Err("BytesConcat must be materialized through eval_inst_fat".to_string());
             }
             TirTag::Unreachable => {
                 return Err(
@@ -322,7 +328,7 @@ impl<M: Module> Codegen<M> {
                 ));
             }
         };
-        // Scalar-only entry point: str/view-typed insts are
+        // Scalar-only entry point: fat/view-typed insts are
         // rejected above, so no path here can have cached a non-scalar
         // repr for `r` mid-evaluation.
         Self::cache_repr(ctx, r, ValueRepr::Scalar(value));
@@ -570,7 +576,7 @@ impl<M: Module> Codegen<M> {
 
     /// Declare an external runtime function by name and return a
     /// `FuncRef` usable in the current function being built.
-    fn declare_runtime_fn(
+    pub(crate) fn declare_runtime_fn(
         module: &mut M,
         builder: &mut FunctionBuilder,
         name: &str,
@@ -610,7 +616,7 @@ impl<M: Module> Codegen<M> {
     /// Emit `ryo_str_free(ptr, cap)` for any scheduled Free whose
     /// anchor is `tir_ref` and whose `branch` tag is active on the
     /// current `branch_stack`. Called at the end of each
-    /// materialisation (`eval_inst` / `eval_inst_str`) so that Task
+    /// materialisation (`eval_inst` / `eval_inst_fat`) so that Task
     /// 4's anonymous-temporary Frees, anchored on the consuming
     /// `Call`, fire after the consumer has emitted its IR.
     ///
@@ -652,7 +658,7 @@ impl<M: Module> Codegen<M> {
     /// `after` is a sub-expression `Var` read — by the time the
     /// statement finishes, the consumer has already issued its IR,
     /// so a Free here lands after the consumer's use of the buffer.
-    /// Eager firing during the inner `eval_inst_str(Var)` would have
+    /// Eager firing during the inner `eval_inst_fat(Var)` would have
     /// dropped the allocation before the consumer (e.g. `print`'s
     /// `write` syscall) finished reading from it.
     ///
@@ -697,15 +703,17 @@ impl<M: Module> Codegen<M> {
 
     /// Shared emission body for `emit_due_frees` / `sweep_due_frees`.
     /// Given the already-filtered `(free_schedule index, target)`
-    /// pairs, declare `ryo_str_free` and emit one call per pair, marking
-    /// each index as fired in `ctx.freed_at`. A `Scalar`-cached target
+    /// pairs, declare the family-appropriate free (`ryo_str_free` /
+    /// `ryo_bytes_free`, selected per target via `free_target_is_bytes`)
+    /// and emit one call per pair, marking each index as fired in
+    /// `ctx.freed_at`. A `Scalar`-cached target
     /// (borrowed-scalar ABI, never heap-owned) returns an error and aborts
     /// code generation — the ABI registry is supposed to keep such args out
     /// of `temp_owners`.
     ///
-    /// When the target is a named binding's initializer/value (or a str
+    /// When the target is a named binding's initializer/value (or a fat
     /// param's virtual ref), the Free is emitted from the binding's
-    /// CURRENT `StrLocals` instead of the producing inst's cached repr:
+    /// CURRENT `FatLocals` instead of the producing inst's cached repr:
     /// after a reassign, a branch merge, or an `inout` write-back the
     /// cached triple may be stale (freed/replaced), while the binding's
     /// `Variable`s are SSA-correct at every program point (the
@@ -718,11 +726,31 @@ impl<M: Module> Codegen<M> {
         if pending.is_empty() {
             return Ok(());
         }
-        let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
+        let mut str_free_ref: Option<FuncRef> = None;
+        let mut bytes_free_ref: Option<FuncRef> = None;
         for (idx, target) in pending {
             ctx.freed_at[idx] = true;
+            let free_ref = if Self::free_target_is_bytes(ctx, target) {
+                match bytes_free_ref {
+                    Some(f) => f,
+                    None => {
+                        let f = Self::declare_bytes_free(ctx.module, builder, ctx.int_type)?;
+                        bytes_free_ref = Some(f);
+                        f
+                    }
+                }
+            } else {
+                match str_free_ref {
+                    Some(f) => f,
+                    None => {
+                        let f = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
+                        str_free_ref = Some(f);
+                        f
+                    }
+                }
+            };
             let binding = Self::free_binding_name(ctx, target)
-                .and_then(|name| Self::read_slot(&ctx.str_locals, name));
+                .and_then(|name| Self::read_slot(&ctx.fat_locals, name));
             if let Some(sl) = binding {
                 let ptr = builder.use_var(sl.ptr);
                 let cap = builder.use_var(sl.cap);
@@ -746,7 +774,7 @@ impl<M: Module> Codegen<M> {
                 target.index()
             );
             match repr {
-                ValueRepr::Str { ptr, cap, .. } => {
+                ValueRepr::Str { ptr, cap, .. } | ValueRepr::Bytes { ptr, cap, .. } => {
                     if !Self::is_static_cap_zero(builder.func, cap) {
                         builder.ins().call(free_ref, &[ptr, cap]);
                     }
@@ -772,7 +800,7 @@ impl<M: Module> Codegen<M> {
     /// Emit conditional DeadDrops for (`if_stmt`, `arm`): frees of
     /// the pre-if buffer of a conditionally-reassigned binding on the
     /// paths where the reassign did NOT happen. Fired at the START of an
-    /// untouched arm, where the binding's `StrLocals` still hold the
+    /// untouched arm, where the binding's `FatLocals` still hold the
     /// pre-if value. Resolves `target` through `free_binding_names` (the
     /// init→name map), so the freed buffer is the binding's
     /// current triple at that program point.
@@ -789,7 +817,7 @@ impl<M: Module> Codegen<M> {
             let Some(name) = Self::free_binding_name(ctx, drop.target) else {
                 continue;
             };
-            let Some(sl) = Self::read_slot(&ctx.str_locals, name) else {
+            let Some(sl) = Self::read_slot(&ctx.fat_locals, name) else {
                 continue;
             };
             let free_ref = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
@@ -800,14 +828,15 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// Map every str-producing named initializer to its binding: VarDecl
-    /// initializers, Assign values, and str params' virtual refs. Built
+    /// Map every fat-producing named initializer to its binding: VarDecl
+    /// initializers, Assign values, and fat (str/bytes) params' virtual
+    /// refs. Built
     /// once per function; `emit_frees` consults it to free a binding's
-    /// current `StrLocals` rather than a stale cached repr.
+    /// current `FatLocals` rather than a stale cached repr.
     ///
     /// Returns two dense tables: the first indexed by `TirRef::index()`
     /// for real instruction refs (slot 0 unused), the second indexed by
-    /// param position for str-param sentinel refs — queried together via
+    /// param position for fat-param sentinel refs — queried together via
     /// `Codegen::free_binding_name`.
     pub(crate) fn build_free_binding_names(
         tir: &Tir,
@@ -842,7 +871,7 @@ impl<M: Module> Codegen<M> {
         }
         let mut param_names = vec![None; tir.params.len()];
         for (idx, param) in tir.params.iter().enumerate() {
-            if is_str_type(param.ty, pool) {
+            if is_fat_type(param.ty, pool) {
                 param_names[idx] = Some(param.name);
             }
         }
@@ -870,15 +899,12 @@ impl<M: Module> Codegen<M> {
         )
     }
 
-    /// Materialize a str-typed TIR instruction, returning a
-    /// `ValueRepr::Str` triple. Falls back to scalar `eval_inst`
-    /// for non-str instructions.
     /// Emit a call to a runtime function that returns a (ptr, len) pair
     /// packed as `u128` (lo = ptr, hi = len), and unpack both halves
     /// into SSA values — no stack slot, no out-pointer, no reload at
     /// the call site. `ushr`'s shift amount is any integer type
     /// (masked to the value width), so a plain i64 constant works.
-    fn emit_rv_pair_call(
+    pub(crate) fn emit_rv_pair_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         fn_name: &str,
@@ -902,7 +928,7 @@ impl<M: Module> Codegen<M> {
     /// Shared by every str-producing runtime call site so they cannot
     /// drift. Does NOT touch `ctx.inst_values` — caching is the
     /// caller's job.
-    fn emit_rv_str_call(
+    pub(crate) fn emit_rv_str_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         fn_name: &str,
@@ -917,7 +943,11 @@ impl<M: Module> Codegen<M> {
         Ok(ValueRepr::Str { ptr, len, cap })
     }
 
-    pub(crate) fn eval_inst_str(
+    /// Materialize a fat-typed (`str` or `bytes`, M8.4.2) TIR
+    /// instruction, returning the `ValueRepr::Str` / `ValueRepr::Bytes`
+    /// triple matching the inst's type. Falls back to scalar
+    /// `eval_inst` for non-fat instructions.
+    pub(crate) fn eval_inst_fat(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
@@ -930,23 +960,36 @@ impl<M: Module> Codegen<M> {
             TirTag::StrConst => {
                 let id = match inst.data {
                     TirData::Str(id) => id,
-                    _ => unreachable!(),
+                    _ => unreachable!("StrConst must carry TirData::Str"),
                 };
                 Self::emit_str_literal_fat(builder, ctx, id)?
+            }
+            TirTag::BytesConst => {
+                let id = match inst.data {
+                    TirData::Str(id) => id,
+                    _ => unreachable!("BytesConst must carry TirData::Str"),
+                };
+                Self::emit_bytes_literal_fat(builder, ctx, id)?
             }
             TirTag::Var => {
                 let name = match inst.data {
                     TirData::Var(name) => name,
                     _ => unreachable!(),
                 };
-                if let Some(locals) = Self::read_slot(&ctx.str_locals, name) {
-                    ValueRepr::Str {
-                        ptr: builder.use_var(locals.ptr),
-                        len: builder.use_var(locals.len),
-                        cap: builder.use_var(locals.cap),
+                if let Some(locals) = Self::read_slot(&ctx.fat_locals, name) {
+                    let ptr = builder.use_var(locals.ptr);
+                    let len = builder.use_var(locals.len);
+                    let cap = builder.use_var(locals.cap);
+                    // The slot table is family-agnostic; the TIR type
+                    // picks the repr so downstream type-keyed dispatch
+                    // (frees, call ABI) sees the right variant.
+                    if matches!(ctx.pool.kind(inst.ty), TypeKind::Bytes) {
+                        ValueRepr::Bytes { ptr, len, cap }
+                    } else {
+                        ValueRepr::Str { ptr, len, cap }
                     }
                 } else {
-                    // Not a str local — fall through to scalar
+                    // Not a fat local — fall through to scalar
                     let val = Self::eval_inst(builder, ctx, r)?;
                     return Ok(ValueRepr::Scalar(val));
                 }
@@ -990,15 +1033,17 @@ impl<M: Module> Codegen<M> {
                         CapRule::LenIsCap,
                     )?
                 } else {
-                    // User call — emit_call handles sret for str-returning
-                    // calls and caches ValueRepr::Str. Called directly
+                    // User call — emit_call handles sret for fat-returning
+                    // calls and caches the triple. Called directly
                     // (not via eval_inst): the scalar path rejects
-                    // str-returning calls.
+                    // fat-returning calls.
                     Self::emit_call(builder, ctx, r)?;
                     if let Some(repr) = Self::cached_repr(ctx, r) {
                         return Ok(repr);
                     }
-                    unreachable!("str-returning user call must cache ValueRepr::Str via emit_call");
+                    unreachable!(
+                        "fat-returning user call must cache a fat ValueRepr via emit_call"
+                    );
                 }
             }
             TirTag::StrConcat => {
@@ -1006,8 +1051,8 @@ impl<M: Module> Codegen<M> {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                let l_repr = Self::eval_inst_str(builder, ctx, lhs)?;
-                let r_repr = Self::eval_inst_str(builder, ctx, rhs)?;
+                let l_repr = Self::eval_inst_fat(builder, ctx, lhs)?;
+                let r_repr = Self::eval_inst_fat(builder, ctx, rhs)?;
                 let (l_ptr, l_len) = match l_repr {
                     ValueRepr::Str { ptr, len, .. } => (ptr, len),
                     _ => unreachable!(),
@@ -1036,16 +1081,20 @@ impl<M: Module> Codegen<M> {
                     _ => unreachable!("ViewAsOwner must carry TirData::UnOp"),
                 };
                 // Re-borrow into the fat triple: cap=0 static sentinel,
-                // identical to string literals. No allocation.
+                // identical to literals. No allocation.
                 let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, operand)?
                 else {
                     unreachable!("ViewAsOwner operand must produce ValueRepr::View")
                 };
                 let cap = builder.ins().iconst(types::I64, 0);
-                ValueRepr::Str { ptr, len, cap }
+                if matches!(ctx.pool.kind(inst.ty), TypeKind::Bytes) {
+                    ValueRepr::Bytes { ptr, len, cap }
+                } else {
+                    ValueRepr::Str { ptr, len, cap }
+                }
             }
             _ => {
-                // Delegate to scalar eval_inst for non-str instructions
+                // Delegate to scalar eval_inst for non-fat instructions
                 let val = Self::eval_inst(builder, ctx, r)?;
                 return Ok(ValueRepr::Scalar(val));
             }
@@ -1105,9 +1154,11 @@ impl<M: Module> Codegen<M> {
                     _ => unreachable!("ToView must carry TirData::UnOp"),
                 };
                 // Representation conversion only: drop the cap word.
-                let ValueRepr::Str { ptr, len, .. } = Self::eval_inst_str(builder, ctx, operand)?
-                else {
-                    unreachable!("ToView operand must produce ValueRepr::Str")
+                let (ptr, len) = match Self::eval_inst_fat(builder, ctx, operand)? {
+                    ValueRepr::Str { ptr, len, .. } | ValueRepr::Bytes { ptr, len, .. } => {
+                        (ptr, len)
+                    }
+                    _ => unreachable!("ToView operand must produce a fat repr"),
                 };
                 ValueRepr::View { ptr, len }
             }
@@ -1144,12 +1195,12 @@ impl<M: Module> Codegen<M> {
         Ok(repr)
     }
 
-    /// Evaluate a `str`/`strview`-typed operand and hand back its
-    /// `(ptr, len)` words regardless of representation — owned triple
-    /// or borrowed view pair (M8.4). Consumers that only need the
-    /// viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`, the
+    /// Evaluate a `str`/`bytes`/`strview`/`bytesview`-typed operand and
+    /// hand back its `(ptr, len)` words regardless of representation —
+    /// owned triple or borrowed view pair (M8.4/M8.4.2). Consumers that
+    /// only need the viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`, the
     /// `__ryo_str_push` suffix, the `__ryo_slice` base) use this;
-    /// anything needing the cap must stay on `eval_inst_str`.
+    /// anything needing the cap must stay on `eval_inst_fat`.
     fn eval_str_or_view_parts(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1162,11 +1213,11 @@ impl<M: Module> Codegen<M> {
             };
             return Ok((ptr, len));
         }
-        match Self::eval_inst_str(builder, ctx, r)? {
-            ValueRepr::Str { ptr, len, .. } => Ok((ptr, len)),
+        match Self::eval_inst_fat(builder, ctx, r)? {
+            ValueRepr::Str { ptr, len, .. } | ValueRepr::Bytes { ptr, len, .. } => Ok((ptr, len)),
             ValueRepr::View { ptr, len } => Ok((ptr, len)),
             ValueRepr::Scalar(_) => Err(format!(
-                "eval_str_or_view_parts: instruction at %{} is not a str/strview value",
+                "eval_str_or_view_parts: instruction at %{} is not a fat/view value",
                 r.index()
             )),
         }
@@ -1183,13 +1234,18 @@ impl<M: Module> Codegen<M> {
         Ok(len)
     }
 
-    /// Materialize every distinct string literal exactly once, in the
-    /// entry block, and pre-seed the `TirRef → ValueRepr` memo so each
+    /// Materialize every distinct string/bytes literal exactly once, in
+    /// the entry block, and pre-seed the `TirRef → ValueRepr` memo so each
     /// use reads the hoisted triple. A literal is pure .rodata packing
     /// (`symbol_value` + `iconst` + the side-effect-free
-    /// `ryo_str_from_literal` call), so entry-block materialization is
-    /// sound — the entry block dominates every use — and keeps loop
-    /// bodies from re-packing the same (ptr, len) per iteration.
+    /// `ryo_str_from_literal` / `ryo_bytes_from_literal` call), so
+    /// entry-block materialization is sound — the entry block dominates
+    /// every use — and keeps loop bodies from re-packing the same
+    /// (ptr, len) per iteration.
+    ///
+    /// The memo is keyed by `(is_bytes, StringId)`: a `str` `"A"` and a
+    /// `bytes` `b"A"` share one `StringId` (same byte content, Task 1
+    /// dedup) but need different `ValueRepr` variants.
     ///
     /// `StrConst` args of `__ryo_panic` are excluded: `emit_call`
     /// consumes them through the raw (ptr, len) path and never touches
@@ -1216,20 +1272,29 @@ impl<M: Module> Codegen<M> {
                 }
             }
         }
-        let mut hoisted: HashMap<StringId, ValueRepr> = HashMap::new();
+        let mut hoisted: HashMap<(bool, StringId), ValueRepr> = HashMap::new();
         let tir = ctx.tir;
         for (idx, inst) in tir.instructions.iter().enumerate().skip(1) {
-            if inst.tag != TirTag::StrConst || panic_args[idx] {
+            let is_bytes = match inst.tag {
+                TirTag::StrConst => false,
+                TirTag::BytesConst => true,
+                _ => continue,
+            };
+            if panic_args[idx] {
                 continue;
             }
             let TirData::Str(id) = inst.data else {
                 continue;
             };
-            let repr = match hoisted.get(&id) {
+            let repr = match hoisted.get(&(is_bytes, id)) {
                 Some(repr) => *repr,
                 None => {
-                    let repr = Self::emit_str_literal_fat(builder, ctx, id)?;
-                    hoisted.insert(id, repr);
+                    let repr = if is_bytes {
+                        Self::emit_bytes_literal_fat(builder, ctx, id)?
+                    } else {
+                        Self::emit_str_literal_fat(builder, ctx, id)?
+                    };
+                    hoisted.insert((is_bytes, id), repr);
                     repr
                 }
             };
@@ -1339,7 +1404,7 @@ impl<M: Module> Codegen<M> {
         if name_str == "str_push" {
             // str_push(&s, suffix): spill s's fat pointer to a 24-byte
             // slot, call __ryo_str_push(slot_addr, suffix_ptr, suffix_len),
-            // then reload the mutated triple back into s's StrLocals.
+            // then reload the mutated triple back into s's FatLocals.
             // arg 0 is `&s` (lowered to Var(s)); arg 1 is the suffix str.
             let s_ref = view.args[0];
             let suffix_ref = view.args[1];
@@ -1349,7 +1414,7 @@ impl<M: Module> Codegen<M> {
                 3,
             ));
             let s_addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-            let s_repr = Self::eval_inst_str(builder, ctx, s_ref)?;
+            let s_repr = Self::eval_inst_fat(builder, ctx, s_ref)?;
             let ValueRepr::Str { ptr, len, cap } = s_repr else {
                 unreachable!("str_push target must be a str");
             };
@@ -1371,7 +1436,7 @@ impl<M: Module> Codegen<M> {
                 &[],
             )?;
             builder.ins().call(func_ref, &[s_addr, suf_ptr, suf_len]);
-            // Reload the mutated fat pointer back into the caller's StrLocals.
+            // Reload the mutated fat pointer back into the caller's FatLocals.
             let np = builder
                 .ins()
                 .load(ctx.int_type, MemFlagsData::trusted(), s_addr, 0);
@@ -1382,7 +1447,7 @@ impl<M: Module> Codegen<M> {
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), s_addr, 16);
             if let Some(name) = Self::local_name_of(ctx, s_ref)
-                && let Some(sl) = Self::read_slot(&ctx.str_locals, name)
+                && let Some(sl) = Self::read_slot(&ctx.fat_locals, name)
             {
                 builder.def_var(sl.ptr, np);
                 builder.def_var(sl.len, nl);
@@ -1399,7 +1464,7 @@ impl<M: Module> Codegen<M> {
         let mut arg_values = Vec::with_capacity(view.args.len() * 3 + 1);
         // inout args: spill the current value to a stack slot, pass the
         // slot address, then reload after the call. Scalar spills one
-        // field; str spills the fat-pointer triple.
+        // field; fat owners spill the fat-pointer triple.
         let mut inout_reloads: Vec<(TirRef, StackSlot)> = Vec::new();
         for (i, arg) in view.args.iter().enumerate() {
             let mode = view.modes.get(i).copied().ok_or_else(|| {
@@ -1411,16 +1476,19 @@ impl<M: Module> Codegen<M> {
             })?;
             let arg_ty = ctx.tir.inst(*arg).ty;
             if mode == ParamMode::Inout {
-                if is_str_type(arg_ty, ctx.pool) {
+                if is_fat_type(arg_ty, ctx.pool) {
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
                         STR_SLOT_SIZE,
                         3,
                     ));
                     let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-                    let repr = Self::eval_inst_str(builder, ctx, *arg)?;
-                    let ValueRepr::Str { ptr, len, cap } = repr else {
-                        unreachable!("inout str arg must produce ValueRepr::Str");
+                    let repr = Self::eval_inst_fat(builder, ctx, *arg)?;
+                    let (ptr, len, cap) = match repr {
+                        ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
+                            (ptr, len, cap)
+                        }
+                        _ => unreachable!("inout fat arg must produce a fat ValueRepr"),
                     };
                     builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
                     builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
@@ -1441,15 +1509,15 @@ impl<M: Module> Codegen<M> {
                     arg_values.push(addr);
                     inout_reloads.push((*arg, slot));
                 }
-            } else if is_str_type(arg_ty, ctx.pool) {
-                let repr = Self::eval_inst_str(builder, ctx, *arg)?;
+            } else if is_fat_type(arg_ty, ctx.pool) {
+                let repr = Self::eval_inst_fat(builder, ctx, *arg)?;
                 match repr {
-                    ValueRepr::Str { ptr, len, cap } => {
+                    ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                         arg_values.push(ptr);
                         arg_values.push(len);
                         arg_values.push(cap);
                     }
-                    _ => unreachable!("str-typed arg must produce ValueRepr::Str"),
+                    _ => unreachable!("fat-typed arg must produce a fat ValueRepr"),
                 }
             } else if ctx.pool.is_view(arg_ty) {
                 // `strview` arg → 2-word ABI (ptr, len), matching the
@@ -1485,7 +1553,7 @@ impl<M: Module> Codegen<M> {
             return Ok(builder.ins().iconst(dummy_ty, 0));
         }
 
-        if is_str_type(ret_ty, ctx.pool) {
+        if is_fat_type(ret_ty, ctx.pool) {
             // sret: allocate 24-byte slot, prepend pointer to args
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
@@ -1510,8 +1578,13 @@ impl<M: Module> Codegen<M> {
             let cap = builder
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), out, 16);
-            Self::cache_repr(ctx, r, ValueRepr::Str { ptr, len, cap });
-            return Ok(ptr); // dummy scalar — consumers use eval_inst_str
+            let repr = if matches!(ctx.pool.kind(ret_ty), TypeKind::Bytes) {
+                ValueRepr::Bytes { ptr, len, cap }
+            } else {
+                ValueRepr::Str { ptr, len, cap }
+            };
+            Self::cache_repr(ctx, r, repr);
+            return Ok(ptr); // dummy scalar — consumers use eval_inst_fat
         }
 
         let call = builder.ins().call(callee_ref, &arg_values);
@@ -1529,8 +1602,8 @@ impl<M: Module> Codegen<M> {
     /// back into the caller's local. The inout arg was sema-lowered to
     /// its inner `Var(name)` ref, so `*arg_ref` is that `Var` inst —
     /// read its binding name to find the local. Scalar args reload one
-    /// field into `locals`; str args reload the fat-pointer triple into
-    /// `str_locals`.
+    /// field into `locals`; fat args reload the fat-pointer triple into
+    /// `fat_locals`.
     fn reload_inout_args(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1539,7 +1612,7 @@ impl<M: Module> Codegen<M> {
         for (arg_ref, slot) in reloads {
             let addr = builder.ins().stack_addr(ctx.int_type, *slot, 0);
             let arg_ty = ctx.tir.inst(*arg_ref).ty;
-            if is_str_type(arg_ty, ctx.pool) {
+            if is_fat_type(arg_ty, ctx.pool) {
                 let np = builder
                     .ins()
                     .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
@@ -1553,7 +1626,7 @@ impl<M: Module> Codegen<M> {
                     // The callee may have written anything through the
                     // pointer — the binding's range fact dies here.
                     Self::kill_fact(ctx, name);
-                    if let Some(sl) = Self::read_slot(&ctx.str_locals, name) {
+                    if let Some(sl) = Self::read_slot(&ctx.fat_locals, name) {
                         builder.def_var(sl.ptr, np);
                         builder.def_var(sl.len, nl);
                         builder.def_var(sl.cap, nc);
