@@ -1145,3 +1145,15 @@ fn successful_parses_leave_no_orphan_nodes() {
     }
     assert!(checked > 5, "expected to check several example files");
 }
+
+#[test]
+fn scalar_indexing_parse_leaves_no_orphan_nodes() {
+    // Direct pin for the `b[i]` speculative-parse orphan leak (fixed in
+    // e088c2e by parsing brackets in one pass) — previously the only
+    // coverage was the examples sweep above happening to parse
+    // `examples/bytes.ryo`.
+    let (ast, _) = lex_and_parse("b = b\"\\x01\"\nx = b[0]\n").expect("parse ok");
+    let (exprs, stmts) = reachable_node_counts(&ast);
+    assert_eq!(exprs + 1, ast.expr_count(), "orphan expressions");
+    assert_eq!(stmts + 1, ast.stmt_count(), "orphan statements");
+}

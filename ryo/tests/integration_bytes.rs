@@ -241,7 +241,21 @@ fn test_bytes_type_errors_surface() {
     let output = run_ryo_command(&["run", "bytes_err.ryo"], &test_file).expect("run ryo");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("type mismatch"), "missing E0012: {stderr}");
+    assert!(stderr.contains("[E0012]"), "missing E0012: {stderr}");
+}
+
+#[test]
+fn test_user_fn_ryo_str_to_bytes_not_hijacked() {
+    // The synthesized `str.to_bytes()` callee is `__ryo_str_to_bytes`
+    // (a `__ryo_`-prefixed name user code cannot declare —
+    // ReservedIdentifier), so a user function named `ryo_str_to_bytes`
+    // is an ordinary function and must NOT be swallowed by codegen's
+    // callee name-intercept.
+    assert_ryo_prints(
+        "user_ryo_str_to_bytes.ryo",
+        "fn ryo_str_to_bytes(x: int) -> int:\n\treturn x + 1\n\nfn main():\n\tprint(int_to_str(ryo_str_to_bytes(41)))\n",
+        "42",
+    );
 }
 
 #[test]

@@ -77,8 +77,12 @@ pub(crate) fn emit_builtin_call(
             } else {
                 arg_tirs
             };
-            // W0003 case A: `print` takes `strview` directly.
-            warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], effective[0], "print");
+            // W0003 case A: `print` takes `strview`/`bytesview`
+            // directly. Warn on the pre-rewrite argument: for str
+            // `effective == arg_tirs` anyway, and for bytes the
+            // rewritten repr call is str-typed, which would never
+            // match the `bytes` owner type.
+            warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], "print");
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, effective, &modes, ret_ty, span)
         }
@@ -391,7 +395,10 @@ pub(crate) fn emit_str_materialize(
     if sema.pool.is_error(arg_ty) {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    if !sema.pool.is_view(arg_ty) {
+    // The gate must be `strview` specifically: a `bytesview` argument
+    // would lower to a copy WITHOUT UTF-8 validation, breaking "str is
+    // valid UTF-8 by construction".
+    if !matches!(sema.pool.kind(arg_ty), TypeKind::View(ViewKind::Str)) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,

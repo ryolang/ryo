@@ -510,8 +510,8 @@ impl Codegen<JITModule> {
                 ryo_runtime::__ryo_bytes_to_str as *const u8,
             ),
             (
-                "ryo_str_to_bytes",
-                ryo_runtime::ryo_str_to_bytes as *const u8,
+                "__ryo_str_to_bytes",
+                ryo_runtime::__ryo_str_to_bytes as *const u8,
             ),
             (
                 "__ryo_bytes_repr",

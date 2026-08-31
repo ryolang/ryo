@@ -723,7 +723,7 @@ pub unsafe fn __ryo_bytes_to_str(ptr: *const u8, len: u64) -> u128 {
 /// `ptr` must point to `len` readable bytes (or be null/dangling when
 /// `len == 0`).
 #[unsafe(no_mangle)]
-pub unsafe fn ryo_str_to_bytes(ptr: *const u8, len: u64) -> u128 {
+pub unsafe fn __ryo_str_to_bytes(ptr: *const u8, len: u64) -> u128 {
     if len == 0 {
         return pack_pair(core::ptr::null_mut(), 0);
     }
@@ -1340,7 +1340,7 @@ mod tests {
     #[test]
     fn str_to_bytes_copies() {
         let src = "héllo".as_bytes();
-        let v = unsafe { ryo_str_to_bytes(src.as_ptr(), src.len() as u64) };
+        let v = unsafe { __ryo_str_to_bytes(src.as_ptr(), src.len() as u64) };
         let (p, l) = unpack_pair(v);
         let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
         assert_eq!(s, "héllo".as_bytes());

@@ -1065,14 +1065,14 @@ impl<M: Module> Codegen<M> {
                         &[(ctx.int_type, v_ptr), (types::I64, v_len)],
                         CapRule::LenIsCap,
                     )?
-                } else if name_str == "ryo_str_to_bytes" {
+                } else if name_str == "__ryo_str_to_bytes" {
                     // `str.to_bytes()` / `strview.to_bytes()` — only
                     // (ptr, len) is read.
                     let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
                     Self::emit_rv_bytes_call(
                         builder,
                         ctx,
-                        "ryo_str_to_bytes",
+                        "__ryo_str_to_bytes",
                         &[(ctx.int_type, p), (types::I64, l)],
                         CapRule::LenIsCap,
                     )?
@@ -1324,7 +1324,7 @@ impl<M: Module> Codegen<M> {
     /// `__ryo_slice`/`__ryo_bytes_slice` base, the bytes conversion
     /// calls) use this; anything needing the cap must stay on
     /// `eval_inst_fat`.
-    pub(crate) fn eval_str_or_view_parts(
+    pub(super) fn eval_str_or_view_parts(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,

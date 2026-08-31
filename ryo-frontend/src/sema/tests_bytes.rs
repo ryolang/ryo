@@ -294,6 +294,53 @@ fn w0003_str_messages_unchanged() {
 }
 
 #[test]
+fn str_materialize_rejects_bytesview_arg() {
+    // The `str()` gate must require `strview` specifically: admitting
+    // a `bytesview` would lower to a copy WITHOUT UTF-8 validation,
+    // breaking "str is valid UTF-8 by construction".
+    let (_, diags, _) = run_with_errors("fn main():\n\tb = b\"\\xff\"\n\ts = str(b[0:1])\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::TypeMismatch
+            && d.message.contains("str() argument must be strview")),
+        "got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn w0003_materialize_bytes_arg_to_print_warns() {
+    // `print` accepts `bytesview` directly — materializing first is a
+    // redundant allocation, same as the str shape.
+    let (_, diags, _) = run_with_errors("fn main():\n\tb = b\"\\x01\"\n\tprint(bytes(b[0:1]))\n");
+    assert_eq!(
+        count_code(&diags, DiagCode::RedundantMaterialize),
+        1,
+        "expected exactly one W0003; got {:?}",
+        diags
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::RedundantMaterialize
+                && d.message.contains("redundant `bytes(...)`")),
+        "message must name bytes(...): {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn w0003_materialize_str_arg_to_print_still_warns_once() {
+    // The bytes fix must not disturb the str shape: exactly one W0003.
+    let (_, diags, _) = run_with_errors("fn main():\n\ts: str = \"hi\"\n\tprint(str(s[0:1]))\n");
+    assert_eq!(
+        count_code(&diags, DiagCode::RedundantMaterialize),
+        1,
+        "expected exactly one W0003; got {:?}",
+        diags
+    );
+}
+
+#[test]
 fn user_defined_fn_bytes_shadows_intercept() {
     // Type names are not reserved: a user `fn bytes` wins (same rule
     // as the str intercept).
@@ -329,7 +376,9 @@ fn to_bytes_types_on_str_and_strview() {
         run("fn main():\n\ts = \"ab\"\n\tb = s.to_bytes()\n\tv = s[0:1]\n\tc = v.to_bytes()\n")
             .expect("sema ok");
     let main = tir_named(&tirs, &pool, "main");
-    let callee = pool.find_str("ryo_str_to_bytes").expect("callee interned");
+    let callee = pool
+        .find_str("__ryo_str_to_bytes")
+        .expect("callee interned");
     let calls = (1..main.instructions.len())
         .filter(|&idx| {
             let r = TirRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
@@ -340,7 +389,7 @@ fn to_bytes_types_on_str_and_strview() {
         .count();
     assert_eq!(
         calls, 2,
-        "both to_bytes() calls must lower to ryo_str_to_bytes"
+        "both to_bytes() calls must lower to __ryo_str_to_bytes"
     );
 }
 

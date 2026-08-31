@@ -17,7 +17,7 @@ pub struct BuiltinFunction {
     /// borrow alongside the outer call's `inout` args. `__ryo_str_from_view`
     /// (param 0) borrows a view (M8.4.1.2); the M8.4.2 bytes callees
     /// (`__ryo_bytes_repr`, `__ryo_bytes_from_view`, `__ryo_bytes_to_str`,
-    /// `ryo_str_to_bytes`) borrow their view argument's root owner the
+    /// `__ryo_str_to_bytes`) borrow their view argument's root owner the
     /// same way.
     pub view_borrow_params: &'static [usize],
 }
@@ -137,7 +137,7 @@ const ABI_CALLEES: &[BuiltinFunction] = &[
         view_borrow_params: &[0],
     },
     BuiltinFunction {
-        name: "ryo_str_to_bytes",
+        name: "__ryo_str_to_bytes",
         return_ty: BuiltinReturn::Bytes,
         borrowed_scalar_params: &[],
         view_borrow_params: &[0],
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(from_view.return_type(&pool), pool.bytes());
         let to_str = abi_callee("__ryo_bytes_to_str").expect("ABI entry");
         assert_eq!(to_str.return_type(&pool), pool.str_());
-        let to_bytes = abi_callee("ryo_str_to_bytes").expect("ABI entry");
+        let to_bytes = abi_callee("__ryo_str_to_bytes").expect("ABI entry");
         assert_eq!(to_bytes.return_type(&pool), pool.bytes());
         // All four borrow their view argument's root owner (E4). The names
         // are not interned until sema synthesizes them, so intern here.
@@ -289,7 +289,7 @@ mod tests {
             "__ryo_bytes_repr",
             "__ryo_bytes_from_view",
             "__ryo_bytes_to_str",
-            "ryo_str_to_bytes",
+            "__ryo_str_to_bytes",
         ] {
             let id = pool.intern_str(name);
             assert_eq!(view_borrow_params(id, &pool), &[0], "{name}");

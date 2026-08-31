@@ -439,7 +439,7 @@ pub(crate) fn analyze_expr_allow_never(
 /// M8.4.2 bridging methods: `bytes`/`bytesview`.to_str() lowers to
 /// `__ryo_bytes_to_str` (a stopgap that panics at runtime on invalid
 /// UTF-8; becomes `Utf8Error!str` at M13), `str`/`strview`.to_bytes()
-/// lowers to `ryo_str_to_bytes`. Wrong-family receivers keep the
+/// lowers to `__ryo_str_to_bytes`. Wrong-family receivers keep the
 /// generalized "X has no method 'Y'" diagnostic. Only called for the
 /// `to_str` / `to_bytes` names.
 fn bridge_method_call(
@@ -495,7 +495,7 @@ fn bridge_method_call(
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
-            ("ryo_str_to_bytes", sema.pool.bytes())
+            ("__ryo_str_to_bytes", sema.pool.bytes())
         }
     };
     let callee = sema.pool.intern_str(callee_name);
