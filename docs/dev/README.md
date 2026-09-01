@@ -23,11 +23,11 @@ This directory contains implementation notes, architectural decisions, and desig
 
 | File | Content | Next Action |
 |---|---|---|
-| [zig_reference.md](zig_reference.md) | Zig compiler/toolchain snapshot — the pipeline (lexer→ZIR→AIR) Ryo's middle-end is modelled on | **Keep** while the compiler tracks Zig's shape |
-| [mojo_reference.md](mojo_reference.md) | Mojo language snapshot — inspiration for the ownership pass (borrow-by-default, eager destruction) | **Keep** while the ownership pass tracks Mojo |
-| [rust_reference.md](rust_reference.md) | Rust borrowck/`Arc` comparison — the bar for Ryo's ownership pass and `shared[T]` | **Keep** as comparison reference |
-| [go_reference.md](go_reference.md) | Go language/toolchain snapshot — inspiration for the concurrency model | **Keep** while the concurrency model tracks Go |
-| [memory_model_comparison.md](memory_model_comparison.md) | Side-by-side memory-model comparison of Rust, Mojo, Swift, and Ryo | **Keep** as comparison reference |
+| [pl_references/zig.md](pl_references/zig.md) | Zig compiler/toolchain snapshot — the pipeline (lexer→ZIR→AIR) Ryo's middle-end is modelled on | **Keep** while the compiler tracks Zig's shape |
+| [pl_references/mojo.md](pl_references/mojo.md) | Mojo language snapshot — inspiration for the ownership pass (borrow-by-default, eager destruction) | **Keep** while the ownership pass tracks Mojo |
+| [pl_references/rust.md](pl_references/rust.md) | Rust borrowck/`Arc` comparison — the bar for Ryo's ownership pass and `shared[T]` | **Keep** as comparison reference |
+| [pl_references/go.md](pl_references/go.md) | Go language/toolchain snapshot — inspiration for the concurrency model | **Keep** while the concurrency model tracks Go |
+| [pl_references/memory_model_comparison.md](pl_references/memory_model_comparison.md) | Side-by-side memory-model comparison of Rust, Mojo, Swift, and Ryo | **Keep** as comparison reference |
 
 ### Architecture & Design Decisions
 

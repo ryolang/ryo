@@ -64,7 +64,7 @@ normative specification. Ryo remains colorless: no `async`/`await`, no
 | Dispatcher worker budget | `4 × RYOMAXPROCS` | Total `workers` across all custom dispatchers (§4.5). |
 | Timer wheel resolution | `1 ms` | Sufficient for scripting workloads. |
 
-> **Sibling reference docs:** [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`proposals/wasm_target.md`](proposals/wasm_target.md).
+> **Sibling reference docs:** [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`arc_optimizer.md`](arc_optimizer.md), [`proposals/wasm_target.md`](proposals/wasm_target.md).
 
 ---
 
@@ -1289,7 +1289,7 @@ browser target is a stated product priority.
 - Historical note: this document began as two drafts — an initial plan and
   the `concurrency_loom_kt.md` Loom/Kotlin alternative. The alternative was
   adopted and merged here.
-- Sibling design docs: [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`go_reference.md`](go_reference.md) (inspiration), [`proposals/wasm_target.md`](proposals/wasm_target.md)
+- Sibling design docs: [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`arc_optimizer.md`](arc_optimizer.md), [`go.md`](pl_references/go.md) (inspiration), [`proposals/wasm_target.md`](proposals/wasm_target.md)
 - Upstream prior art:
   - [JEP 444: Virtual Threads (Java 21 GA)](https://openjdk.org/jeps/444) — Loom (inspiration for the FFI ergonomics goal).
   - [Loom OpenJDK wiki](https://wiki.openjdk.org/display/loom/Main).

@@ -24,7 +24,7 @@
 //!
 //! ## Mojo reference
 //!
-//! See `docs/dev/mojo_reference.md`.
+//! See `docs/dev/pl_references/mojo.md`.
 
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 

@@ -4,7 +4,7 @@
 
 A focused comparison of Ryo's M8.1 ownership pass against Rust's MIR borrowck. Rust is the obvious reference point — its borrow checker is the most influential one in production — so understanding where Ryo deliberately echoes it and where it diverges is a design-record worth keeping.
 
-This file mirrors the role of [`mojo_reference.md`](mojo_reference.md): part external-ecosystem overview, part Ryo-specific decision log. Mojo is the primary algorithmic inspiration for `ryo-frontend/src/ownership.rs` and `ryo-core/src/ownership.rs`; Rust is the bar for diagnostic UX and the well-trodden reference for "what a borrow checker does."
+This file mirrors the role of [`mojo.md`](mojo.md): part external-ecosystem overview, part Ryo-specific decision log. Mojo is the primary algorithmic inspiration for `ryo-frontend/src/ownership.rs` and `ryo-core/src/ownership.rs`; Rust is the bar for diagnostic UX and the well-trodden reference for "what a borrow checker does."
 
 [View rustc on GitHub](https://github.com/rust-lang/rust) — Rust's compiler is fully open source; the borrow-check sources live in `compiler/rustc_borrowck/` and `compiler/rustc_mir_dataflow/`.
 
@@ -64,7 +64,7 @@ This inverts Rust's default. The rationale (spec 5.1 "Borrow-by-Default for Func
 
 This is where Ryo trades expressiveness for simplicity most aggressively. It's *less* powerful than Rust, deliberately. Rust patterns that need long-lived borrows (e.g., self-referential iterators, parent-child references in trees) become `shared[T]` or owned-with-an-ID in Ryo (spec 5.6).
 
-Ryo's `shared[T]` is modeled on **Swift's class reference semantics**, not Rust's manual `Arc<T>`: refcount ops are implicit on assignment (no `.clone()` in user code), the compiler elides redundant retain/release pairs aggressively, and stdlib collections implement copy-on-write. Reach-for-it cost is closer to Swift than to Rust-with-`Arc`. See [arc_optimizer.md](arc_optimizer.md) for the elision-pass design that makes this performance model real.
+Ryo's `shared[T]` is modeled on **Swift's class reference semantics**, not Rust's manual `Arc<T>`: refcount ops are implicit on assignment (no `.clone()` in user code), the compiler elides redundant retain/release pairs aggressively, and stdlib collections implement copy-on-write. Reach-for-it cost is closer to Swift than to Rust-with-`Arc`. See [arc_optimizer.md](../arc_optimizer.md) for the elision-pass design that makes this performance model real.
 
 ### 5. Analysis algorithm
 
@@ -107,7 +107,7 @@ The M8.1 design explicitly chose Rust's diagnostic surface as the bar, even whil
 - **Polonius / Datalog** — overkill without regions
 - **Stacked Borrows / Tree Borrows** (memory model) — Ryo doesn't have `unsafe` for everyday code, so the operational-semantics complexity is mostly avoided
 - **`Pin` / self-referential structs** — not addressed; no plans
-- **Auto traits (`Send` / `Sync`)** — Ryo's concurrency model is different (see [concurrency.md](concurrency.md))
+- **Auto traits (`Send` / `Sync`)** — Ryo's concurrency model is different (see [concurrency.md](../concurrency.md))
 
 ## What Ryo does take from Rust
 
@@ -140,8 +140,8 @@ The cost vs Rust is honest: Ryo is **less expressive**. You can't write some Rus
 ## References
 
 - Spec: `docs/specification.md` Section 5 (Memory Management)
-- Dev: `docs/dev/mojo_reference.md` (primary algorithmic inspiration for the ownership pass)
+- Dev: `docs/dev/pl_references/mojo.md` (primary algorithmic inspiration for the ownership pass)
 - Dev: `ryo-frontend/src/ownership.rs` (the shipped ownership pass)
-- Dev: `docs/dev/zig_reference.md` (still applies for everything except the ownership pass)
+- Dev: `docs/dev/pl_references/zig.md` (still applies for everything except the ownership pass)
 - Milestone: `docs/dev/implementation_roadmap.md` Milestone 8.1
 - Upstream: <https://github.com/rust-lang/rust>, `compiler/rustc_borrowck/`, `compiler/rustc_mir_dataflow/`

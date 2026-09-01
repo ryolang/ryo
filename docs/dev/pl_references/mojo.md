@@ -322,5 +322,5 @@ Ryo's spec Rules 5 and 6 (no returning borrows, no struct fields holding referen
 - Spec: `docs/specification.md` Section 5 (Memory Management)
 - Dev: `ryo-frontend/src/ownership.rs` (the shipped ownership pass); Spec: `docs/specification.md` §5 (Memory Management)
 - Milestone: `docs/dev/implementation_roadmap.md` Milestone 8.1
-- Sibling refs: `docs/dev/zig_reference.md`, `docs/dev/go_reference.md`
+- Sibling refs: `docs/dev/pl_references/zig.md`, `docs/dev/pl_references/go.md`
 - Upstream: <https://github.com/modular/modular/tree/main/mojo>, `mojo/CLAUDE.md`, `mojo/proposals/`

@@ -22,7 +22,7 @@ Infrastructure-only test hooks for these already exist, `cfg(any())`-gated, in `
 
 The Zig alignment was a starting point, not a constraint. The pipeline is expected to diverge where Ryo's own features demand a different shape, and to grow stages Zig doesn't have:
 
-- **Already diverged: the Ownership pass** (post-sema, pre-codegen — `ryo-frontend/src/ownership.rs`). Zig has no ownership or borrow analysis; Ryo's move semantics and eager-destruction guarantees require a dedicated flow pass over TIR. See `mojo_reference.md`.
+- **Already diverged: the Ownership pass** (post-sema, pre-codegen — `ryo-frontend/src/ownership.rs`). Zig has no ownership or borrow analysis; Ryo's move semantics and eager-destruction guarantees require a dedicated flow pass over TIR. See `pl_references/mojo.md`.
 - **Optimization steps before codegen.** New passes slot in as TIR→TIR transforms between ownership and codegen. The planned `shared[T]` ARC optimizer (retain/release elision, stack promotion, copy-on-write — see `arc_optimizer.md`) is the first of these; the performance promise of `shared[T]` depends on it.
 - Future divergences should be recorded in their own dev docs rather than forced back into the Zig mould.
 
@@ -45,7 +45,7 @@ These remain roadmap or future considerations, not part of any shipped phase:
 
 ## References
 
-- Dev: root `CLAUDE.md` — authoritative map of the shipped pipeline. `mojo_reference.md` (ownership pass), `arc_optimizer.md` (planned pre-codegen optimization), `zig_reference.md` (upstream design borrowed from).
+- Dev: root `CLAUDE.md` — authoritative map of the shipped pipeline. `pl_references/mojo.md` (ownership pass), `arc_optimizer.md` (planned pre-codegen optimization), `pl_references/zig.md` (upstream design borrowed from).
 - Milestone/Roadmap: *Compile-time Execution (comptime)* and *Full Generics System* — [implementation_roadmap.md](implementation_roadmap.md) (Phase 5, v0.2+).
 - Issues: [../../ISSUES.md](../../ISSUES.md) — I-018 (`TypeId` enum re-attempt).
 - Inspiration: Zig's `src/InternPool.zig` (sidecar `extra` array, single pool for types/strings/values), `src/AstGen.zig` → `src/Sema.zig` separation, `src/Zir.zig` / `src/Air.zig` shapes, `src/Module.zig`'s decl worklist.

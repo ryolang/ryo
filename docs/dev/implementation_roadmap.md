@@ -992,7 +992,7 @@ Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching,
 - Add stdlib helpers for non-string formatting: `int_to_str(x)`, `float_to_str(x)`, `bool_to_str(b)`
 - **F-strings (`f"Value: {x}"`) are deferred to v0.2** — see Phase 5: F-strings & String Interpolation. v0.1 uses `+` concatenation with the `*_to_str` helpers above.
 - Parser/AST: accept the **`move` keyword** as a prefix on parameter declarations (`fn consume(move s: str)`). Without `move`, parameters borrow. Sema records the convention on the function signature (type-only; ownership lives elsewhere).
-- Add a **new pipeline stage `ryo-frontend/src/ownership.rs`** between Sema and Codegen — modeled on Mojo's MLIR-based lifetime/ASAP-destruction passes (Zig stops being a useful compiler reference for the borrow checker; see [mojo_reference.md](mojo_reference.md)). The pass mutates each `Tir` in place: inserts `TirTag::Free`, tracks per-`TirRef` ownership state, and reports diagnostics.
+- Add a **new pipeline stage `ryo-frontend/src/ownership.rs`** between Sema and Codegen — modeled on Mojo's MLIR-based lifetime/ASAP-destruction passes (Zig stops being a useful compiler reference for the borrow checker; see [pl_references/mojo.md](pl_references/mojo.md)). The pass mutates each `Tir` in place: inserts `TirTag::Free`, tracks per-`TirRef` ownership state, and reports diagnostics.
   - Per-`TirRef` (SSA value) state lattice: `NotTracked` / `Valid` / `Borrowed` / `Moved { moved_at, kind }`
   - `current_owner: HashMap<StringId, TirRef>` shadow table for named bindings (resolves binding-read sites and feeds diagnostics)
   - Implicit immutable borrow for function parameters (Rule 2); `move` opts into ownership transfer (Rule 4)
@@ -1040,7 +1040,7 @@ fn main():
 
 **Implementation Notes:**
 
-- **Pipeline pivot.** Up through M8c the compiler followed Zig's pipeline. M8.1 introduces a new `Ownership` stage between Sema and Codegen, modeled on Mojo (see [mojo_reference.md](mojo_reference.md)). Sema becomes type-only; ownership is its own pass. Ryo's surface design, syntax, and types are unchanged.
+- **Pipeline pivot.** Up through M8c the compiler followed Zig's pipeline. M8.1 introduces a new `Ownership` stage between Sema and Codegen, modeled on Mojo (see [pl_references/mojo.md](pl_references/mojo.md)). Sema becomes type-only; ownership is its own pass. Ryo's surface design, syntax, and types are unchanged.
 - Move tracking covers **named bindings and anonymous owned temporaries** in this milestone. Explicit `&T` / `inout T` borrow syntax arrives in M8.2 / M8.3; field-by-field move tracking (partial moves out of structs/tuples) follows naturally because the same dataflow analysis is reused.
 - `str` deallocation follows hybrid eager destruction (spec Section 5.4) — `Free` is inserted after the binding's last use, after the old buffer when a `mut` binding is reassigned over a `Valid` slot, and at the end of the enclosing statement for anonymous owned temporaries. Lexical scope-exit RAII would be too late and would leak intermediate buffers in concat chains. User-extensible cleanup via the `drop` method lands in M23.
 - Allocator failure surfaces as a panic in v0.1; allocation-fallible APIs ship alongside error unions (M13).
