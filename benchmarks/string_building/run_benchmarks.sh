@@ -17,6 +17,11 @@ if ! command -v swiftc &> /dev/null; then
     exit 1
 fi
 
+if ! command -v python3 &> /dev/null; then
+    echo "Error: 'python3' is not installed or not in PATH."
+    exit 1
+fi
+
 echo "Building benchmarks..."
 (cd ../.. && cargo build --release > /dev/null)
 rustc -O string_building.rs -o string_building_rs
@@ -31,6 +36,7 @@ echo "-------------------"
 echo "Rust:     $(rustc --version | cut -d' ' -f2)"
 echo "Swift:    $(swiftc --version | head -1 | awk '{for (i = 1; i < NF; i++) if ($i == "Swift" && $(i+1) == "version") { print $(i+2); exit }}')"
 echo "Ryo:      $($ryo_bin --version 2>&1 || echo 'dev')"
+echo "Python:   $(python3 --version | cut -d' ' -f2)"
 
 echo ""
 echo "-------------------"
@@ -70,6 +76,7 @@ measure_mem "Rust" ./string_building_rs
 measure_mem "Swift" ./string_building_swift
 measure_mem "Ryo (AOT)" ./string_building
 measure_mem "Ryo (JIT)" $ryo_bin run string_building.ryo
+measure_mem "Python" python3 string_building.py
 
 echo ""
 echo "-------------------"
@@ -80,4 +87,5 @@ hyperfine --warmup 3 --shell=none \
   './string_building_rs' \
   './string_building_swift' \
   './string_building' \
-  "$ryo_bin run string_building.ryo"
+  "$ryo_bin run string_building.ryo" \
+  'python3 string_building.py'
