@@ -2,6 +2,10 @@
 # /// script
 # requires-python = ">=3.9"
 # ///
+#
+# NOTE: Rewrite this script in Ryo once the language supports everything it
+# needs: reading files from disk, regular expressions (or equivalent string
+# scanning), CLI argument parsing, and process exit codes.
 """Print an issue entry (or the latest issue id) from ISSUES.md.
 
 Usage:
