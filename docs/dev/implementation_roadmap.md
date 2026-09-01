@@ -2437,16 +2437,18 @@ Test result: ok. 2 passed; 0 failed
    - Binary signing and checksums
 
 2. **Installation Scripts:**
-   - Write `install.sh` for Unix-like systems:
+   - `install.sh` for Unix-like systems: ✅ Done (repo root)
      - OS/Architecture detection (Linux/Darwin, AMD64/ARM64)
-     - Download latest `ryo` binary to `~/.ryo/bin/`
-     - PATH setup (append to `.zshrc` or `.bashrc`)
+     - Downloads latest `ryo` binary to `~/.ryo/bin/`
+     - Prints the PATH export line for the user to add to their shell config (does not edit rc files)
+     - Supports `--prefix`, `--force`, `--dry-run`, and `RYO_RELEASE=<tag>` for pinned versions
    - Write `install.ps1` for Windows:
      - Same logic as shell script
      - Modify User PATH in Registry
      - Install to `%USERPROFILE%\.ryo\`
+     - Handle PowerShell execution policy
 
-3. **Zig Dependency Management:** ✅ Implemented in `src/toolchain.rs`
+3. **Zig Dependency Management:** ✅ Implemented in `ryo-backend/src/toolchain.rs`
    - Auto-downloads pinned Zig version on first use to `~/.ryo/toolchain/zig-{version}/`
    - No system Zig dependency — fully managed by the compiler
 
@@ -2455,10 +2457,12 @@ Test result: ok. 2 passed; 0 failed
    - Check latest release from GitHub/CDN
    - Download and replace binary in `~/.ryo/bin/`
    - Version pinning support (future): `ryo upgrade v0.2.0`
+   - Scope: only manages binaries installed by `install.sh` into `~/.ryo/bin/`; package-manager installs (brew/winget) upgrade via their package manager
+   - Windows caveat: a running `.exe` cannot replace itself — needs a swap/helper strategy
 
 5. **Landing Page:**
    - Simple static page at `ryolang.org`
-   - Prominent install command: `curl -fsSL https://ryolang.org/install.sh | sh`
+   - Prominent install command: `curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh`
    - Platform-specific instructions
    - Quick start guide
 
@@ -2468,13 +2472,26 @@ Test result: ok. 2 passed; 0 failed
    - Test Zig auto-download
    - Test PATH setup
 
+7. **Checksum Verification:**
+   - `install.sh` verifies the release `.sha256` before installing
+   - Zig tarball verification is tracked in `ISSUES.md` (supply-chain entry for `toolchain.rs`) — extend the same discipline to release assets
+
+8. **Uninstall:**
+   - Document clean uninstall: `rm -rf ~/.ryo` plus removing the PATH line from the shell config
+   - Consider `ryo uninstall`
+
+9. **Package-Manager Distribution (post-v0.1):**
+   - Homebrew tap `ryolang/ryo` (formula carries no Zig dependency — managed by the compiler)
+   - Winget manifest
+   - Official Docker image `ryolang/ryo` for CI/CD
+
 **Visible Progress:** Users can install Ryo with a single command on any platform
 
 **Example:**
 
 ```bash
 # Install Ryo
-curl -fsSL https://ryolang.org/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh
 
 # Verify installation
 ryo --version
@@ -2487,8 +2504,10 @@ ryo upgrade
 
 - Installation must be **instant, dependency-free, and isolated**
 - Zig dependency managed automatically (users don't need to install it)
+- Layout: everything under `~/.ryo/` — `bin/ryo`, `toolchain/zig-{version}/`; `registry/` and `config.toml` are planned (no package manager / config system yet)
 - All files in `~/.ryo/` directory for clean uninstall
 - Windows is a first-class citizen (PowerShell script works seamlessly)
+- `x86_64-apple-darwin` (Intel Mac) is intentionally excluded; `release.yml` currently ships linux-x64, linux-arm64, macos-arm64 (glibc) — static musl artifacts stay gated on the musl evaluation in `ISSUES.md`, and the `x86_64-pc-windows-msvc` target is still open
 - Dependencies: Milestone 27 prep work (this enables distribution)
 
 ### Milestone 26.6: Cross-Compilation (64-bit) [alpha]

@@ -51,7 +51,6 @@ This directory contains implementation notes, architectural decisions, and desig
 
 | File | Content | Next Action |
 |---|---|---|
-| [installation.md](installation.md) | Installation UX: one-line script, `~/.ryo/`, zig auto-download, `ryo upgrade` | **Implement** the installer (missing windows) — then move user-facing parts to `docs/installation.md` and delete |
 | [pkg_manager.md](pkg_manager.md) | Package manager design (Cargo + Go Modules hybrid) | **Implement** at the package-manager milestone — then delete |
 | [official_pkg.md](official_pkg.md) | Recommended official packages for v0.2 (cli, postgres, dotenv, image) | **Implement** the packages — then delete (packages document themselves) |
 | [testing.md](testing.md) | Testing framework gaps: fixtures, mocking, RAII patterns, benchmarks | **Move to spec** testing section or implement — then delete |
