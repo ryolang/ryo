@@ -26,12 +26,15 @@ use chumsky::{
 
 use crate::lexer::Token;
 use ryo_core::ast::*;
+use ryo_core::diag::ParseDiag;
 use ryo_core::tir::ParamMode;
 use ryo_core::types::StringId;
 
-/// Parser extra: `Rich` errors, the [`Ast`] arena as state, no
-/// context. Every grammar rule below is parameterized over it.
-type PExtra<'a> = extra::Full<Rich<'a, Token>, Ast, ()>;
+/// Parser extra: `Rich` errors carrying a typed [`ParseDiag`] payload
+/// (chumsky 0.13's `RichReason::Custom(C)` parameter), the [`Ast`]
+/// arena as state, no context. Every grammar rule below is
+/// parameterized over it.
+type PExtra<'a> = extra::Full<Rich<'a, Token, SimpleSpan, ParseDiag>, Ast, ()>;
 
 /// `MapExtra` with our extra config. Annotating `map_with` closure
 /// parameters with it pins the `E` type parameter that `e.state()`
@@ -373,10 +376,7 @@ where
                 if args.len() != 2 {
                     return Err(Rich::custom(
                         e.span(),
-                        format!(
-                            "range() requires two arguments: range(start, end), got {}",
-                            args.len()
-                        ),
+                        ParseDiag::RangeArity { found: args.len() },
                     ));
                 }
                 let mut args = args.into_iter();
@@ -687,10 +687,7 @@ where
                     (Some(index), None) => Ok(PostfixOp::Index(index, span)),
                     // `s[]` is rejected — the colon is mandatory for a
                     // slice, the expression for an index.
-                    (None, None) => Err(Rich::custom(
-                        span,
-                        "empty brackets: use s[i] to index or s[start:end] to slice",
-                    )),
+                    (None, None) => Err(Rich::custom(span, ParseDiag::EmptyBrackets)),
                 }
             });
 
@@ -797,40 +794,71 @@ where
 
         let additive = additive.boxed();
 
+        // Non-associative levels (ordering, equality) share one
+        // shape: `foldl_with` over a bare `repeated` — the same
+        // zero-allocation shape as the additive/term levels. The
+        // accumulator carries a `seen` flag: a second operator at the
+        // same level is a chained comparison (`a < b < c`), soft-
+        // rejected with a secondary error via `MapExtra::emit`
+        // pointing at the extra operator (span captured with
+        // `spanned`); its operand is dropped so the AST keeps only
+        // the well-formed first comparison and sema sees a clean
+        // tree. The emitted error still fails the parse overall.
+        // (Earlier shapes were slower: two speculative stages —
+        // `or_not` + `repeated` — regressed parse benches ~15%, and a
+        // `repeated().collect::<Vec<_>>()` stage ~5%. Detecting the
+        // chain from the left node's operator instead of a flag
+        // mis-fires on parenthesized comparisons like `(a < b) < c`,
+        // which must keep parsing and fail in sema as before.)
+        fn fold_non_assoc<'a, I>(
+            (left, seen): (ExprId, bool),
+            (op, right): (chumsky::span::Spanned<BinaryOperator>, ExprId),
+            e: &mut Mx<'a, '_, I>,
+        ) -> (ExprId, bool)
+        where
+            I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+        {
+            if seen {
+                e.emit(Rich::custom(op.span, ParseDiag::ChainedComparison));
+                return (left, true);
+            }
+            (fold_binary(left, (op.inner, right), e), true)
+        }
+
         // Ordering (non-associative) sits between additive and equality.
+        let ordering_op = choice((
+            just(Token::LtEq).to(BinaryOperator::LtEq),
+            just(Token::GtEq).to(BinaryOperator::GtEq),
+            just(Token::Lt).to(BinaryOperator::Lt),
+            just(Token::Gt).to(BinaryOperator::Gt),
+        ))
+        .spanned();
+
         let ordering = additive
             .clone()
-            .then(
-                choice((
-                    just(Token::LtEq).to(BinaryOperator::LtEq),
-                    just(Token::GtEq).to(BinaryOperator::GtEq),
-                    just(Token::Lt).to(BinaryOperator::Lt),
-                    just(Token::Gt).to(BinaryOperator::Gt),
-                ))
-                .then(additive)
-                .or_not(),
+            .map(|left| (left, false))
+            .foldl_with(
+                ordering_op.then(additive).repeated(),
+                |acc, op_right, e: &mut Mx<'a, '_, I>| fold_non_assoc(acc, op_right, e),
             )
-            .map_with(|(left, maybe_rhs), e: &mut Mx<'a, '_, I>| match maybe_rhs {
-                None => left,
-                Some((op, right)) => fold_binary(left, (op, right), e),
-            })
+            .map(|(left, _)| left)
             .boxed();
 
         // Equality is non-associative.
+        let equality_op = choice((
+            just(Token::EqEq).to(BinaryOperator::Eq),
+            just(Token::NotEq).to(BinaryOperator::NotEq),
+        ))
+        .spanned();
+
         let equality = ordering
             .clone()
-            .then(
-                choice((
-                    just(Token::EqEq).to(BinaryOperator::Eq),
-                    just(Token::NotEq).to(BinaryOperator::NotEq),
-                ))
-                .then(ordering)
-                .or_not(),
+            .map(|left| (left, false))
+            .foldl_with(
+                equality_op.then(ordering).repeated(),
+                |acc, op_right, e: &mut Mx<'a, '_, I>| fold_non_assoc(acc, op_right, e),
             )
-            .map_with(|(left, maybe_rhs), e: &mut Mx<'a, '_, I>| match maybe_rhs {
-                None => left,
-                Some((op, right)) => fold_binary(left, (op, right), e),
-            })
+            .map(|(left, _)| left)
             .boxed();
 
         // Logical AND binds tighter than OR, below equality.

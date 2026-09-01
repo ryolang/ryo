@@ -1,10 +1,14 @@
 use super::*;
 use crate::lexer::lex;
 use chumsky::Parser;
+use chumsky::error::RichReason;
 use chumsky::input::Input;
 use ryo_core::types::InternPool;
 
-fn lex_and_parse(input: &str) -> Result<(Ast, InternPool), Vec<Rich<'static, Token>>> {
+/// Owned parser error as threaded through the test helpers.
+type TestErr = Rich<'static, Token, SimpleSpan, ParseDiag>;
+
+fn lex_and_parse(input: &str) -> Result<(Ast, InternPool), Vec<TestErr>> {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lex(input, &mut pool, &mut sink);
@@ -12,7 +16,7 @@ fn lex_and_parse(input: &str) -> Result<(Ast, InternPool), Vec<Rich<'static, Tok
         return Err(sink
             .into_diags()
             .into_iter()
-            .map(|d| Rich::custom(d.span, d.message))
+            .map(|d| Rich::custom(d.span, ParseDiag::Message(d.message)))
             .collect());
     }
     let token_stream = tokens[..].split_token_span((0..input.len()).into());
@@ -346,14 +350,53 @@ fn parse_equality_below_ordering_precedence() {
     assert_eq!(bin_op(&ast, rhs).1, BinaryOperator::Lt);
 }
 
-#[test]
-fn parse_chained_ordering_is_rejected() {
-    assert!(lex_and_parse("x = a < b < c").is_err());
+/// Assert a chained comparison soft-rejects: the parse recovers
+/// (partial program produced), the secondary diagnostic is the
+/// structured `ChainedComparison` payload pointing at the second
+/// operator, and the AST keeps only the well-formed first comparison.
+fn assert_chained_comparison_soft_rejected(
+    src: &str,
+    expected_op: BinaryOperator,
+    expected_op_span: std::ops::Range<usize>,
+) {
+    let (ok, ast, errs, _pool) = lex_and_parse_recovering(src);
+    assert!(ok, "chained comparison should recover to a partial program");
+    assert_eq!(errs.len(), 1);
+    assert_eq!(
+        errs[0].reason(),
+        &RichReason::Custom(ParseDiag::ChainedComparison)
+    );
+    assert_eq!(
+        errs[0].span().into_range(),
+        expected_op_span,
+        "diagnostic must point at the second operator"
+    );
+    let (_, op, _) = bin_op(&ast, decl_init(&ast));
+    assert_eq!(op, expected_op);
 }
 
 #[test]
-fn parse_chained_equality_is_rejected() {
-    assert!(lex_and_parse("x = a == b == c").is_err());
+fn parse_chained_ordering_is_soft_rejected() {
+    assert_chained_comparison_soft_rejected("x = a < b < c", BinaryOperator::Lt, 10..11);
+}
+
+#[test]
+fn parse_chained_equality_is_soft_rejected() {
+    assert_chained_comparison_soft_rejected("x = a == b == c", BinaryOperator::Eq, 11..13);
+}
+
+#[test]
+fn parse_parenthesized_comparison_is_not_a_chain() {
+    // Parens make the inner comparison an atom, so `(a < b) < c`
+    // parses without a chain diagnostic (sema rejects the
+    // bool-vs-int comparison instead) — same behavior as before the
+    // soft-rejection work.
+    let (ok, ast, errs, _pool) = lex_and_parse_recovering("x = (a < b) < c");
+    assert!(ok);
+    assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+    let (lhs, op, _) = bin_op(&ast, decl_init(&ast));
+    assert_eq!(op, BinaryOperator::Lt);
+    assert_eq!(bin_op(&ast, lhs).1, BinaryOperator::Lt);
 }
 
 /// Helper for the escape-table tests: parse a single
@@ -816,7 +859,7 @@ fn parse_view_param_annotation() {
 /// Recovery-aware variant of `lex_and_parse`: returns whether a
 /// (possibly partial) program could be produced, the arena it was
 /// built into, every parse error, and the pool.
-fn lex_and_parse_recovering(input: &str) -> (bool, Ast, Vec<Rich<'static, Token>>, InternPool) {
+fn lex_and_parse_recovering(input: &str) -> (bool, Ast, Vec<TestErr>, InternPool) {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lex(input, &mut pool, &mut sink);
