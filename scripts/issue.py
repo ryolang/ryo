@@ -11,12 +11,13 @@
 Usage:
     uv run scripts/issue.py I-032        # full text of issue I-032
     uv run scripts/issue.py 32           # same (bare numbers ok)
-    uv run scripts/issue.py --latest     # highest-numbered issue id present
+    uv run scripts/issue.py --next       # next issue id to use (highest ever + 1)
     uv run scripts/issue.py --list       # all issue ids with titles
 """
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -60,10 +61,31 @@ def normalize_id(raw):
     return f"I-{int(m.group(1)):03d}"
 
 
+def max_id_ever(entries, issues_file):
+    """Highest issue number in the live file AND its git history.
+
+    Resolved entries are deleted from ISSUES.md but their ids stay retired, so
+    the file alone can under-report. Scan added/removed entry headings in the
+    file's history; fall back to the live file (with a warning) if git fails.
+    """
+    highest = max(int(e[0][2:]) for e in entries)
+    try:
+        log = subprocess.run(
+            ["git", "log", "-p", "--format=", "--", str(issues_file)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"warning: cannot read git history ({exc}); using live file only", file=sys.stderr)
+        return highest
+    for m in re.finditer(r"^[+-]###\s+I-(\d+)", log, re.MULTILINE):
+        highest = max(highest, int(m.group(1)))
+    return highest
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("issue", nargs="?", help="Issue id, e.g. I-032 or 32")
-    ap.add_argument("--latest", action="store_true", help="Print the highest-numbered issue id")
+    ap.add_argument("--next", action="store_true", help="Print the next issue id to use (highest ever + 1)")
     ap.add_argument("--list", action="store_true", help="List all issue ids and titles")
     ap.add_argument("--file", default="ISSUES.md", type=Path, help="Path to ISSUES.md (default: ./ISSUES.md)")
     args = ap.parse_args()
@@ -75,8 +97,8 @@ def main():
     if not entries:
         sys.exit(f"error: no issue entries found in {args.file}")
 
-    if args.latest:
-        print(max(entries, key=lambda e: int(e[0][2:]))[0])
+    if args.next:
+        print(f"I-{max_id_ever(entries, args.file) + 1:03d}")
         return
 
     if args.list:
@@ -85,7 +107,7 @@ def main():
         return
 
     if not args.issue:
-        ap.error("give an issue id, or use --latest / --list")
+        ap.error("give an issue id, or use --next / --list")
 
     issue_id = normalize_id(args.issue)
     if issue_id is None:

@@ -106,7 +106,7 @@ Do **not** cite issue IDs (`I-XXX`) in code or doc comments. Resolved entries ar
 
 ```bash
 uv run scripts/issue.py I-032     # full entry text, prefixed with its line range
-uv run scripts/issue.py --latest  # highest-numbered issue id present
+uv run scripts/issue.py --next    # next issue id to use (highest ever, from the file + git history, + 1)
 uv run scripts/issue.py --list    # all ids, line ranges, and titles
 ```
 
