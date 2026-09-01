@@ -4,7 +4,7 @@
 
 A dimension-by-dimension comparison of the four languages' memory models. Useful as a quick lookup when explaining Ryo's choices to someone familiar with one of the others, or when evaluating whether to adopt a particular pattern from a sibling language.
 
-Companion to [`rust.md`](rust.md), [`mojo.md`](mojo.md), and [`arc_optimizer.md`](../arc_optimizer.md). Those go deeper on individual axes; this file is the cross-cutting summary.
+Companion to [`rust.md`](rust.md), [`mojo.md`](mojo.md), [`swift.md`](swift.md), and [`arc_optimizer.md`](../arc_optimizer.md). Those go deeper on individual axes; this file is the cross-cutting summary.
 
 ## 1. Default value semantics
 
