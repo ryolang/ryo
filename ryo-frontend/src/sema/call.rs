@@ -1,7 +1,8 @@
 //! Call analysis and reserved-builtin checks — split from `mod.rs`.
 
 use super::{
-    FuncCtx, Scope, Sema, emit_builtin_call, emit_str_materialize, is_str_materialize_arg,
+    FuncCtx, Scope, Sema, emit_builtin_call, emit_bytes_materialize, emit_str_materialize,
+    materialize_name,
 };
 use crate::builtins;
 use ryo_core::diag::{Diag, DiagCode};
@@ -25,6 +26,12 @@ pub(crate) fn check_call(
     // surprise): it fires only when no user declaration carries the name.
     if sema.pool.str(name_id) == "str" && !sema.name_to_decl.contains_key(&name_id) {
         return emit_str_materialize(sema, fcx, view, arg_tirs, span);
+    }
+
+    // M8.4.2: `bytes(bview)` materialization — same call-form
+    // intercept rule as `str(view)`: a user-defined `fn bytes` wins.
+    if sema.pool.str(name_id) == "bytes" && !sema.name_to_decl.contains_key(&name_id) {
+        return emit_bytes_materialize(sema, fcx, view, arg_tirs, span);
     }
 
     // Builtins short-circuit: they're not in `signatures` /
@@ -116,38 +123,45 @@ pub(crate) fn check_call(
             .zip(expected.iter())
             .enumerate()
         {
-            // W0003 case A (M8.4.1.2): a `str(view)` materialize call
-            // sitting directly in a borrowed `str` parameter's argument
+            // W0003 case A (M8.4.1.2, generalized M8.4.2): a
+            // `str(view)` / `bytes(bview)` materialize call sitting
+            // directly in a borrowed owner parameter's argument
             // position is redundant — the view would pass via the P6'
             // re-borrow below (cap=0, no allocation). Borrow-mode only:
-            // `move`/`inout` params cannot be served by the re-borrow,
-            // so the copy is legitimate there. The `ty_of == str` guard
-            // keeps error paths (a failed intercept yields an
-            // error-typed Unreachable) warning-free.
-            if exp_ty == sema.pool.str_()
-                && modes[idx] == ParamMode::Borrow
-                && fcx.builder.ty_of(*arg_tir) == sema.pool.str_()
-                && is_str_materialize_arg(sema, *arg_uir)
+            // `move`/`inout` params cannot be served by the re-borrow.
+            // The `ty_of == exp_ty` guard keeps error paths
+            // warning-free.
+            if modes[idx] == ParamMode::Borrow
+                && fcx.builder.ty_of(*arg_tir) == exp_ty
+                && let Some(owner_name) = materialize_name(sema, *arg_uir)
             {
-                sema.sink.emit(Diag::warning(
-                    sema.uir.span(*arg_uir),
-                    DiagCode::RedundantMaterialize,
-                    "redundant `str(...)` — views pass to `str` parameters via the re-borrow with no allocation (drop the `str(...)` call)",
-                ));
+                let owner_ty = match owner_name {
+                    "str" => sema.pool.str_(),
+                    _ => sema.pool.bytes(),
+                };
+                if exp_ty == owner_ty {
+                    sema.sink.emit(Diag::warning(
+                        sema.uir.span(*arg_uir),
+                        DiagCode::RedundantMaterialize,
+                        format!(
+                            "redundant `{owner_name}(...)` — views pass to `{owner_name}` parameters via the re-borrow with no allocation (drop the `{owner_name}(...)` call)"
+                        ),
+                    ));
+                }
             }
             let actual = fcx.builder.ty_of(*arg_tir);
             let arg_tir = if sema.pool.is_view(actual)
-                && exp_ty == sema.pool.str_()
+                && sema.pool.view_owner(actual) == Some(exp_ty)
                 && modes[idx] == ParamMode::Borrow
             {
-                // P6': view → str param re-borrows (cap=0, no copy),
-                // call-scoped — same shape as the str → strview
+                // P6': view → owner param re-borrows (cap=0, no copy),
+                // call-scoped — same shape as the owner → view
                 // conversion below. Borrow-mode only: a `move` param
                 // would let the view escape the call (E2), and an
                 // `inout` param is rejected by the `&` check below.
                 let v = fcx
                     .builder
-                    .view_as_str(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
+                    .view_as_owner(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
                 converted[idx] = v;
                 v
             } else if sema.pool.owner_view(actual) == Some(exp_ty) {
@@ -157,7 +171,7 @@ pub(crate) fn check_call(
                 // pool's owner → view table, not a bare kind comparison.
                 let v = fcx
                     .builder
-                    .view_of_str(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
+                    .to_view(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
                 converted[idx] = v;
                 v
             } else {

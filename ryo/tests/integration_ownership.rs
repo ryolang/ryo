@@ -890,7 +890,7 @@ fn str_concat_runs_clean_after_free() {
 fn mut_str_reassign_runs_clean() {
     // Milestone 8.1c Task 8: a `mut` str binding reassigned with a
     // new literal must free the old allocation before overwriting
-    // the StrLocals triple. If the Free is missing, ASan (Task 11)
+    // the FatLocals triple. If the Free is missing, ASan (Task 11)
     // catches the leak; if it fires too late or reads from stale
     // inst_values, stdout is corrupted or the run aborts.
     let temp_dir = TempDir::new().expect("Failed to create temp directory");

@@ -46,6 +46,7 @@ All Ryo code examples **must** use Python-style colons and indentation, **NOT** 
 
 **Code examples:** Use fenced code blocks with language tag (````ryo`).
 **Cross-references:** Use relative paths (`[spec](docs/specification.md)`).
+**Milestone completion:** When a milestone ships, update `landing/reference/index.html` if the language surface changed (types, literals, builtins, diagnostics) — and remove any "planned" callout the milestone fulfills.
 **Committed artifacts are self-contained:** anything under version control (`ISSUES.md`, `benchmarks/README.md` files, code comments, commit messages) must be understandable on its own. Never reference vocabulary or context that lives only in uncommitted scratch — e.g. `docs/superpowers/` specs and plans are gitignored, so committed files must not cite their "Phase 0/1/2" naming or section numbers. Cite the concept inline instead ("the value-range guard-elision work"), optionally with a commit hash or issue ID as a historical pointer.
 
 ---
@@ -101,6 +102,14 @@ Non-immediate issues that affect architecture, correctness, or long-term code he
 Do **not** create issues for things you're fixing right now — just fix them. Do **not** use GitHub Issues for these; `ISSUES.md` is the single source of truth.
 
 Do **not** cite issue IDs (`I-XXX`) in code or doc comments. Resolved entries are deleted from `ISSUES.md`, so the comment becomes a dangling pointer to context that no longer exists — comments must stand on their own. Put the ID in the commit message instead, where it survives in git history.
+
+**Reading issues:** use `scripts/issue.py` (zero-dependency, runs via `uv run`) instead of grepping `ISSUES.md` by hand:
+
+```bash
+uv run scripts/issue.py I-032     # full entry text, prefixed with its line range
+uv run scripts/issue.py --next    # next issue id to use (highest ever, from the file + git history, + 1)
+uv run scripts/issue.py --list    # all ids, line ranges, and titles
+```
 
 ---
 

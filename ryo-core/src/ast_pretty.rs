@@ -308,6 +308,7 @@ fn write_expr(
         ExprKind::Literal(lit) => match lit {
             Literal::Int(n) => Cow::Owned(format!("Literal(Int({}))", n)),
             Literal::Str(s) => Cow::Owned(format!("Literal(Str({:?}))", pool.str(s))),
+            Literal::Bytes(s) => Cow::Owned(format!("Literal(Bytes({:?}))", pool.bytes_payload(s))),
             Literal::Bool(b) => Cow::Owned(format!("Literal(Bool({}))", b)),
             Literal::Float(v) => Cow::Owned(format!("Literal(Float({}))", v)),
         },
@@ -320,6 +321,7 @@ fn write_expr(
         }
         ExprKind::Borrow(_) => Cow::Borrowed("Borrow"),
         ExprKind::Slice { .. } => Cow::Borrowed("Slice"),
+        ExprKind::Index { .. } => Cow::Borrowed("Index"),
     };
 
     writeln!(
@@ -362,6 +364,10 @@ fn write_expr(
             write_expr(out, ast, base, &new_prefix, false, "base: ", pool)?;
             write_optional_bound(out, ast, start, &new_prefix, false, "start: ", pool)?;
             write_optional_bound(out, ast, end, &new_prefix, true, "end: ", pool)
+        }
+        ExprKind::Index { base, index } => {
+            write_expr(out, ast, base, &new_prefix, false, "base: ", pool)?;
+            write_expr(out, ast, index, &new_prefix, true, "index: ", pool)
         }
     }
 }

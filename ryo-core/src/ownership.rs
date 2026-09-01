@@ -36,7 +36,7 @@ pub struct IfBranchIds {
 /// covers it: codegen emits `ryo_str_free` at the START of each arm in
 /// `arms` (the binding's value there is still the pre-if one).
 /// `target` is the pre-branch owner's `TirRef`, resolved to the
-/// binding's current `StrLocals` via `free_binding_names`.
+/// binding's current `FatLocals` via `free_binding_names`.
 #[derive(Clone, Debug)]
 pub struct ConditionalDeadDrop {
     pub if_stmt: TirRef,
@@ -84,7 +84,7 @@ pub struct FunctionSidecar {
     /// 1-based), sized to the owning function's TIR arena length.
     /// `Some(target)` at slot `r` means: the buffer of `target` must be
     /// freed *before* the new fat-pointer triple is stored into the
-    /// binding's `StrLocals`. Keys are always real instruction refs
+    /// binding's `FatLocals`. Keys are always real instruction refs
     /// (never param sentinels); `target` itself may be a param sentinel
     /// ref for `inout` params.
     pub free_on_reassign: Vec<Option<TirRef>>,

@@ -42,6 +42,8 @@ struct Primitives {
     int: StringId,
     str_: StringId,
     strview: StringId,
+    bytes: StringId,
+    bytesview: StringId,
     bool_: StringId,
     float: StringId,
 }
@@ -52,6 +54,8 @@ impl Primitives {
             int: pool.intern_str("int"),
             str_: pool.intern_str("str"),
             strview: pool.intern_str("strview"),
+            bytes: pool.intern_str("bytes"),
+            bytesview: pool.intern_str("bytesview"),
             bool_: pool.intern_str("bool"),
             float: pool.intern_str("float"),
         }
@@ -142,6 +146,10 @@ fn resolve_type(
         pool.str_()
     } else if name == prims.strview {
         pool.str_view()
+    } else if name == prims.bytes {
+        pool.bytes()
+    } else if name == prims.bytesview {
+        pool.bytes_view()
     } else if name == prims.bool_ {
         pool.bool_()
     } else if name == prims.float {
@@ -391,6 +399,7 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
             ast::Literal::Str(id) => b.str_literal(id, span),
             ast::Literal::Bool(v) => b.bool_literal(v, span),
             ast::Literal::Float(v) => b.float_literal(v, span),
+            ast::Literal::Bytes(id) => b.bytes_literal(id, span),
         },
         ast::ExprKind::Ident(name) => b.var_ref(name, span),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
@@ -454,6 +463,13 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
             let start_ref = start.map(|e| gen_expr(b, ast, e));
             let end_ref = end.map(|e| gen_expr(b, ast, e));
             b.slice(base_ref, start_ref, end_ref, span)
+        }
+        ast::ExprKind::Index { base, index } => {
+            // Scalar indexing `base[index]` (M8.4.2). Sema gates the
+            // base to bytes/bytesview.
+            let base_ref = gen_expr(b, ast, base);
+            let index_ref = gen_expr(b, ast, index);
+            b.index(base_ref, index_ref, span)
         }
     }
 }
@@ -850,5 +866,53 @@ mod tests {
         // fallthrough to `int`.
         let diags = parse_and_lower("fn f(x: &int):\n\tprint(\"\")\n").unwrap_err();
         assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
+    }
+
+    #[test]
+    fn bytes_literal_lowers_to_uir() {
+        let (uir, pool) = parse_and_lower("b = b\"A\\x00\"\n").expect("lower ok");
+        let body = body_named(&uir, &pool, "main");
+        let _ = body;
+        let mut found = false;
+        for idx in 1..uir.instructions.len() {
+            let r = InstRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
+            let inst = uir.inst(r);
+            if inst.tag == InstTag::BytesLiteral {
+                let InstData::Str(id) = inst.data else {
+                    panic!("BytesLiteral must carry InstData::Str");
+                };
+                assert_eq!(pool.bytes_payload(id), b"A\x00");
+                found = true;
+            }
+        }
+        assert!(found, "no BytesLiteral instruction emitted");
+    }
+
+    #[test]
+    fn bytes_annotations_resolve() {
+        parse_and_lower("fn f(b: bytes, v: bytesview):\n\treturn\n").expect("lower ok");
+    }
+
+    #[test]
+    fn bytes_index_lowers_to_uir() {
+        let (uir, _pool) = parse_and_lower("b = b\"\\x01\"\nx = b[0]\n").expect("lower ok");
+        let mut found = false;
+        for idx in 1..uir.instructions.len() {
+            let r = InstRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
+            if uir.inst(r).tag == InstTag::Index {
+                found = true;
+            }
+        }
+        assert!(found, "no Index instruction emitted");
+        // Slice form must still parse as Slice (grammar disambiguation).
+        let (uir2, _p2) = parse_and_lower("b = b\"\\x01\"\nv = b[0:1]\n").expect("lower ok");
+        let mut slices = 0;
+        for idx in 1..uir2.instructions.len() {
+            let r = InstRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
+            if uir2.inst(r).tag == InstTag::Slice {
+                slices += 1;
+            }
+        }
+        assert_eq!(slices, 1, "b[0:1] must stay a Slice");
     }
 }

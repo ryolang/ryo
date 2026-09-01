@@ -543,7 +543,8 @@ Mobile note: iOS and Android are **`hosted` environments** under D9 — the full
 | `strview`, slice expressions, P1–P6, E1–E4, implicit view conversion | 8.4 | Ownership-pass extensions (§3.5.3); spec wording edits (§3.5) |
 | `str(view)` materialization, W0003 RedundantMaterialize (§3.4.1) | 8.4.1.2 | M8.4.1 re-borrow |
 | Anonymous structs, tuple sugar, `Name{...}` construction (D11) | M9–M10 | Parser grammar (§10.2); base-spec edits (§10.5); zero implementation cost pre-alpha |
-| `bytes` type, `bytesview`, builder API | 8.4.2 | D1 |
+| `bytes` type, `bytesview` | 8.4.2 | D1 |
+| `bytes.builder()` buffer builder API | post-M17 | Method implementations (chained `move self -> Self`) |
 | Conformance edits to spec §4.4/§5.7 | 8.4 | — (ship with the feature) |
 | `slice[T]` over fixed arrays `[T]` | 21 | `[T]` array type |
 | `for x in slice` iteration | 22 | for-over-iterable |

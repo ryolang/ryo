@@ -441,6 +441,23 @@ fn main():
 ",
     ),
     (
+        // M8.4.2: bytes owner + view + materialize. bytes_push grows
+        // the buffer in place (realloc); v is a non-owning view into
+        // it; c is a fresh owning copy. The owner frees once at its
+        // last use, the view frees nothing, and the copy frees at its
+        // own last use — no leak, no double-free.
+        "bytes_ops",
+        "\
+fn main():
+\tmut b = b\"\\x01\\x02\"
+\tbytes_push(&b, 3)
+\tv = b[0:2]
+\tc = bytes(v)
+\tprint(int_to_str(c.len()))
+\tprint(b)
+",
+    ),
+    (
         // M8.4.1.2: str(view) materialization frees. The bound copy x
         // is a defensive copy (the source is mutated after the
         // materialize point, so W0003 stays silent) freed at its last

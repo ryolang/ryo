@@ -457,6 +457,45 @@ fn clif_string_ops_use_packed_return_no_stack_slots() {
 }
 
 #[test]
+fn clif_bytes_ops_use_packed_return_no_stack_slots() {
+    // M8.4.2 rides the Phase 0 runtime ABI: bytes-producing runtime
+    // calls return {ptr, len} packed in one u128 — no per-call-site
+    // stack slots, no out-pointer, no reload (same pin as the str twin
+    // above; the bytes_push slot ABI is not exercised by this program).
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "clif_bytes.ryo",
+        "fn main():\n\tb: bytes = b\"\\x01\" + b\"\\x02\"\n\tc: bytes = bytes(b[0:1])\n\tprint(int_to_str(b.len() + c.len()))\n",
+    );
+
+    let output = run_ryo_command(&["ir", "--emit=clif", "clif_bytes.ryo"], &test_file)
+        .expect("Failed to run ryo ir --emit=clif");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("-> i128"),
+        "runtime bytes calls must return the packed u128 pair: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("explicit_slot"),
+        "bytes call paths must not allocate stack slots: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("stack_addr"),
+        "bytes call paths must not take stack-slot addresses: {}",
+        stdout
+    );
+}
+
+#[test]
 fn clif_user_str_return_keeps_sret() {
     // Copy-elision boundary (docs/dev/copy_elision.md G1/G2): user
     // functions returning `str` keep the hidden sret destination-slot

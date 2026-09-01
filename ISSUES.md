@@ -100,19 +100,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** `Literal::Float(f64)` cannot derive `Eq` (NaN ≠ NaN), and `Eq` derivation propagates up the containment chain, so every AST struct that transitively holds a `Literal` had to drop the `Eq` derive. No consumer hashes or `Eq`-compares AST nodes today, so the change is currently invisible.
 **Resolution:** If a future pass needs `HashMap<Expression, _>` or similar, introduce a `FloatBits(u64)` newtype that derives `Eq + Hash` on the bit pattern and *also* implements `PartialEq` with IEEE semantics. Wrap `f64` inside `Literal::Float` with it. Until then, leave the derives off.
 
-### I-030 — Unused chumsky 0.12 ergonomics worth revisiting
-
-**Files:** `ryo-frontend/src/parser.rs`, `ryo-driver/src/pipeline.rs`
-**Summary:** chumsky 0.12 (released 2025-12-15) shipped several quality-of-life features. The 0.11 → 0.12 bump only adopted `Input::split_token_span` (replacing the `Stream::from_iter(...).map(eoi, |(t, s)| (t, s))` boilerplate at the lex/parse boundary). The remaining features are not currently a fit, but each becomes interesting as the parser grows:
-
-- **`MapExtra::emit` / `InputRef::emit`** — emit *secondary* errors during mapping or in custom parsers without aborting the parse. Useful for soft-rejecting chained non-associative operators like `a < b < c` and `a == b == c` with a structured diagnostic, instead of the current "unexpected token" produced by the trailing operator falling off `or_not()`. Becomes attractive once parser diagnostics get their own `DiagCode` taxonomy (the lexer already reports through `DiagSink`; the parser is the holdout).
-- **`spanned` combinator** — wraps a parser's output in `(O, Span)`. Today every `select! { ... }.map_with(|x, e| Foo::new(x, e.span()))` site builds the typed AST node directly, which is already one line; `spanned` would force an extra destructure. Worth reconsidering if/when the AST grows a uniform `Spanned<T>` wrapper instead of per-node `span` fields.
-- **`labelled_with`** — label parsers without requiring `Clone` on the label value. Only relevant once the parser starts attaching labels for error-message quality; not used today.
-- **`Parser::debug` (experimental)** — parser-level debugging utilities. Useful when triaging surprise grammar conflicts; pull in ad-hoc when needed, no permanent wiring required.
-- **`IterParser::parse_iter` (experimental)**, **`nested_in` flexibility**, **`Input::split_spanned`** — no current call sites. `split_spanned` in particular is the `WrappingSpan`-flavoured sibling of `split_token_span`; we use plain `(Token, SimpleSpan)` tuples so the latter is the right fit.
-
-**Resolution:** No action today. Revisit `MapExtra::emit` first when the parser gains structured diagnostics — the lexer already surfaces errors through `DiagSink`, so this would let parse and lex errors co-surface through the same sink. Revisit `spanned` if the AST representation of spans is ever unified.
-
 ### I-034 — Builtin name comparison uses string compare instead of interned ID
 
 **Files:** `ryo-frontend/src/sema/call.rs` (`check_call`), `ryo-frontend/src/sema/builtins.rs` (`emit_builtin_call`)
@@ -314,7 +301,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-135 — Rule-7 call-arg partition duplicates the view look-through logic
 
 **Files:** `ryo-frontend/src/ownership/walk.rs` (:934-936 — owner partition, :1029-1030 — E0031 span search)
-**Summary:** The `mode == Borrow && tag == ViewAsStr → projection_root else underlying_owner` look-through is written out twice, near-verbatim, in two helpers that must agree for the P6'/E4 rules to stay coherent. A change to one side (e.g. a new look-through case) silently desynchronizes the diagnostic span search from the ownership partition.
+**Summary:** The `mode == Borrow && tag == ViewAsOwner → projection_root else underlying_owner` look-through is written out twice, near-verbatim, in two helpers that must agree for the P6'/E4 rules to stay coherent. A change to one side (e.g. a new look-through case) silently desynchronizes the diagnostic span search from the ownership partition.
 **Resolution:** Extract one `fn call_arg_owner(own, tir, pool, mode, arg) -> Owner` helper used by both sites.
 
 ### I-136 — Ownership pass clones whole state maps on hot paths

@@ -62,9 +62,9 @@ fn param_slice_read_defers_free_to_projection_last_use() {
 }
 
 #[test]
-fn move_and_viewasstr_borrow_of_one_owner_reports_borrow_note() {
+fn move_and_viewasowner_borrow_of_one_owner_reports_borrow_note() {
     // `two(move s, s[0:1])` against a `(move, str)` signature — the
-    // P6'-converted ViewAsStr arg borrows the view's ROOT owner, so
+    // P6'-converted ViewAsOwner arg borrows the view's ROOT owner, so
     // E0031 must carry the "borrowed here" note (look through the
     // conversion, like the Rule-7 partition does).
     use chumsky::span::{SimpleSpan, Span as _};
@@ -90,7 +90,7 @@ fn move_and_viewasstr_borrow_of_one_owner_reports_borrow_note() {
     let zero = tb.int_const(0, int_ty, reborrow_span);
     let one = tb.int_const(1, int_ty, reborrow_span);
     let sl = tb.slice(sv2, Some(zero), Some(one), view_ty, reborrow_span);
-    let reborrow = tb.view_as_str(sl, str_ty, reborrow_span);
+    let reborrow = tb.view_as_owner(sl, str_ty, reborrow_span);
     let modes = vec![ParamMode::Move, ParamMode::Borrow];
     let call = tb.call(two, &[sv1, reborrow], &modes, void, span);
     let tir = tb.finish(&[decl, call]);
@@ -108,7 +108,7 @@ fn move_and_viewasstr_borrow_of_one_owner_reports_borrow_note() {
         .find(|n| n.message == "borrowed here")
         .unwrap_or_else(|| {
             panic!(
-                "E0031 must carry the 'borrowed here' note through ViewAsStr; got {:?}",
+                "E0031 must carry the 'borrowed here' note through ViewAsOwner; got {:?}",
                 e0031[0].notes
             )
         });

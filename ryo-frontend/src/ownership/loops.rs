@@ -70,7 +70,7 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
 /// True if `name` is declared by a `VarDecl` anywhere before `stop` in
 /// program order (any nesting depth). Guards the dead-store re-anchor: only
 /// bindings that exist BEFORE their outermost reseating loop may move
-/// their Free to the loop anchor — a loop-local value's `StrLocals`
+/// their Free to the loop anchor — a loop-local value's `FatLocals`
 /// don't exist on the zero-iteration path.
 pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> bool {
     fn walk(

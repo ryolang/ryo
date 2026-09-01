@@ -51,10 +51,11 @@ use std::collections::{HashMap, HashSet};
 // ---------- Classification ----------
 
 /// True for types whose values transfer ownership on `=` and must be
-/// tracked through the function body. Today: `str` only. Future heap
-/// types (`List[T]`, `Dict[K, V]`) will join this set.
+/// tracked through the function body. Today: `str` and `bytes`
+/// (M8.4.2). Future heap types (`List[T]`, `Dict[K, V]`) will join
+/// this set.
 pub(crate) fn is_move_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(pool.kind(ty), TypeKind::Str)
+    matches!(pool.kind(ty), TypeKind::Str | TypeKind::Bytes)
 }
 
 /// Predicate the ownership walk uses to decide whether a `TirRef`
@@ -416,7 +417,7 @@ fn analyze_function(
     // pre-branch owner (a reseat inside one arm does not survive the
     // join), so on the not-taken path the binding still owns the
     // pre-reassign allocation. Codegen emits the Free from the binding's
-    // current `StrLocals`, which is the path-correct buffer.
+    // current `FatLocals`, which is the path-correct buffer.
     let reassign_targets: HashSet<Owner> = sidecar
         .free_on_reassign
         .iter()
@@ -639,7 +640,7 @@ fn analyze_function(
         // rather than after the in-loop assign. The in-loop anchor
         // fires only when the body executes — the zero-iteration path
         // leaks the pre-loop buffer. The after-loop anchor emits the
-        // binding's CURRENT StrLocals (the init→name map): the final iteration's
+        // binding's CURRENT FatLocals (the init→name map): the final iteration's
         // value on taken paths, the pre-loop value on zero iterations.
         // When the body may `return`, keep the in-loop Free too — the
         // after-loop anchor is unreachable on the return path.
