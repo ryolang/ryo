@@ -160,6 +160,17 @@ pub enum DiagCode {
     // --- parser ---
     ParseError,
 
+    /// Chained non-associative comparison (`a < b < c`, `a == b == c`).
+    /// The span points at the extra operator; the parser recovers with
+    /// a partial program (the AST keeps the well-formed first
+    /// comparison).
+    ChainedComparison,
+    /// `range()` called with an argument count other than two.
+    RangeArity,
+    /// Empty brackets `s[]`: the colon is mandatory for a slice, the
+    /// expression for an index.
+    EmptyBrackets,
+
     /// Emitted by `DiagSink::into_diags` when the sink dropped
     /// diagnostics past `MAX_DIAGS`. Distinct from `ParseError` so
     /// renderers / tests / future LSP code can identify the
@@ -291,6 +302,58 @@ impl DiagSink {
             });
         }
         self.diags
+    }
+}
+
+/// Structured payload for parser-emitted custom errors, carried as
+/// `RichReason::Custom(ParseDiag)` in the parser's `Rich` error type.
+/// Keeping the payload typed (instead of a pre-formatted `String`)
+/// lets the pipeline map each failure mode to its own `DiagCode`
+/// without scraping message text; the structured variants are inline
+/// data with no heap allocation. `Display` produces the user-facing
+/// message (chumsky requires `C: Display` on the payload).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParseDiag {
+    /// `a < b < c` / `a == b == c`; the `Rich` span points at the
+    /// extra operator.
+    ChainedComparison,
+    /// `range()` called with the wrong argument count.
+    RangeArity { found: usize },
+    /// Empty brackets `s[]`.
+    EmptyBrackets,
+    /// Escape hatch for one-off messages (e.g. lexer diagnostics
+    /// re-wrapped as parser errors in tests).
+    Message(String),
+}
+
+impl ParseDiag {
+    pub fn code(&self) -> DiagCode {
+        match self {
+            ParseDiag::ChainedComparison => DiagCode::ChainedComparison,
+            ParseDiag::RangeArity { .. } => DiagCode::RangeArity,
+            ParseDiag::EmptyBrackets => DiagCode::EmptyBrackets,
+            ParseDiag::Message(_) => DiagCode::ParseError,
+        }
+    }
+}
+
+impl std::fmt::Display for ParseDiag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseDiag::ChainedComparison => write!(
+                f,
+                "comparison operators are non-associative; \
+                 split chained comparisons with `and` (e.g. `a < b and b < c`)"
+            ),
+            ParseDiag::RangeArity { found } => write!(
+                f,
+                "range() requires two arguments: range(start, end), got {found}"
+            ),
+            ParseDiag::EmptyBrackets => {
+                f.write_str("empty brackets: use s[i] to index or s[start:end] to slice")
+            }
+            ParseDiag::Message(msg) => f.write_str(msg),
+        }
     }
 }
 

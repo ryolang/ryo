@@ -18,7 +18,7 @@ use ryo_backend::codegen;
 use ryo_backend::linker;
 use ryo_backend::runtime_lib;
 use ryo_core::ast;
-use ryo_core::diag::{Diag, DiagCode, DiagSink, Severity};
+use ryo_core::diag::{Diag, DiagCode, DiagSink, ParseDiag, Severity};
 use ryo_core::errors::CompilerError;
 use ryo_core::tir::{self, Tir};
 use ryo_core::types::InternPool;
@@ -145,11 +145,17 @@ fn parse_source(
         .parse_with_state(token_stream, &mut ast)
         .into_output_errors();
     for e in &errs {
-        sink.emit(Diag::error(
-            chumsky::span::SimpleSpan::new((), e.span().start..e.span().end),
-            DiagCode::ParseError,
-            rich_error_message(e, pool),
-        ));
+        let span = chumsky::span::SimpleSpan::new((), e.span().start..e.span().end);
+        match e.reason() {
+            // Parser-emitted custom errors carry their own `DiagCode`
+            // and a self-contained message — no pool rendering needed.
+            RichReason::Custom(pd) => sink.emit(Diag::error(span, pd.code(), pd.to_string())),
+            RichReason::ExpectedFound { .. } => sink.emit(Diag::error(
+                span,
+                DiagCode::ParseError,
+                rich_error_message(e, pool),
+            )),
+        }
     }
     match out {
         Some(()) => Ok((ast, sink.into_diags())),
@@ -175,10 +181,14 @@ fn render_token_with_pool(tok: &Token, pool: &InternPool) -> String {
 /// string-literal payloads resolved through the pool. Mirrors
 /// chumsky's own phrasing ("found 'X' expected A, B, or C") so the
 /// text stays familiar, but a parse error on `x = foo(` shows `foo`
-/// instead of the opaque `<id#0>` handle.
-fn rich_error_message(e: &Rich<'_, Token>, pool: &InternPool) -> String {
+/// instead of the opaque `<id#0>` handle. Only called for
+/// `ExpectedFound` errors — `Custom` payloads carry their own code
+/// and self-contained message, converted by the caller.
+fn rich_error_message(e: &Rich<'_, Token, SimpleSpan, ParseDiag>, pool: &InternPool) -> String {
     match e.reason() {
-        RichReason::Custom(msg) => msg.clone(),
+        RichReason::Custom(_) => {
+            unreachable!("custom parse errors are converted by the caller")
+        }
         RichReason::ExpectedFound { .. } => {
             let found = match e.found() {
                 Some(tok) => format!("found '{}'", render_token_with_pool(tok, pool)),
@@ -329,6 +339,9 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::MissingReturn => "E0036",
         DiagCode::DivisionByZero => "E0037",
         DiagCode::ParseError => "E0100",
+        DiagCode::ChainedComparison => "E0104",
+        DiagCode::RangeArity => "E0105",
+        DiagCode::EmptyBrackets => "E0106",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -683,6 +696,9 @@ mod tests {
             (DiagCode::TooManyDiagnostics, "E0101"),
             (DiagCode::InvalidCharacter, "E0102"),
             (DiagCode::UnknownEscape, "E0103"),
+            (DiagCode::ChainedComparison, "E0104"),
+            (DiagCode::RangeArity, "E0105"),
+            (DiagCode::EmptyBrackets, "E0106"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -740,6 +756,9 @@ mod tests {
                 | DiagCode::DivisionByZero
                 | DiagCode::CycleInResolution
                 | DiagCode::ParseError
+                | DiagCode::ChainedComparison
+                | DiagCode::RangeArity
+                | DiagCode::EmptyBrackets
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape

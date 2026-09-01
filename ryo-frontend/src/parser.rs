@@ -26,12 +26,15 @@ use chumsky::{
 
 use crate::lexer::Token;
 use ryo_core::ast::*;
+use ryo_core::diag::ParseDiag;
 use ryo_core::tir::ParamMode;
 use ryo_core::types::StringId;
 
-/// Parser extra: `Rich` errors, the [`Ast`] arena as state, no
-/// context. Every grammar rule below is parameterized over it.
-type PExtra<'a> = extra::Full<Rich<'a, Token>, Ast, ()>;
+/// Parser extra: `Rich` errors carrying a typed [`ParseDiag`] payload
+/// (chumsky 0.13's `RichReason::Custom(C)` parameter), the [`Ast`]
+/// arena as state, no context. Every grammar rule below is
+/// parameterized over it.
+type PExtra<'a> = extra::Full<Rich<'a, Token, SimpleSpan, ParseDiag>, Ast, ()>;
 
 /// `MapExtra` with our extra config. Annotating `map_with` closure
 /// parameters with it pins the `E` type parameter that `e.state()`
@@ -373,10 +376,7 @@ where
                 if args.len() != 2 {
                     return Err(Rich::custom(
                         e.span(),
-                        format!(
-                            "range() requires two arguments: range(start, end), got {}",
-                            args.len()
-                        ),
+                        ParseDiag::RangeArity { found: args.len() },
                     ));
                 }
                 let mut args = args.into_iter();
@@ -687,10 +687,7 @@ where
                     (Some(index), None) => Ok(PostfixOp::Index(index, span)),
                     // `s[]` is rejected — the colon is mandatory for a
                     // slice, the expression for an index.
-                    (None, None) => Err(Rich::custom(
-                        span,
-                        "empty brackets: use s[i] to index or s[start:end] to slice",
-                    )),
+                    (None, None) => Err(Rich::custom(span, ParseDiag::EmptyBrackets)),
                 }
             });
 
@@ -821,12 +818,7 @@ where
                 Some((op, right)) => fold_binary(left, (op.inner, right), e),
             };
             for (op, _) in chained {
-                e.emit(Rich::custom(
-                    op.span,
-                    "comparison operators are non-associative; \
-                     split chained comparisons with `and` (e.g. `a < b and b < c`)"
-                        .to_string(),
-                ));
+                e.emit(Rich::custom(op.span, ParseDiag::ChainedComparison));
             }
             left
         }
