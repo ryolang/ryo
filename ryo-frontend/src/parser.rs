@@ -795,32 +795,34 @@ where
         let additive = additive.boxed();
 
         // Non-associative levels (ordering, equality) share one
-        // shape: one optional `op operand`, then any further chained
-        // `op operand`s are consumed and soft-rejected — each emits a
-        // secondary error via `MapExtra::emit` pointing at the
-        // operator itself (span captured with `spanned`), instead of
-        // the old trailing "unexpected token" produced when the extra
-        // operator fell off `or_not()`. The chained operand is
-        // dropped from the AST so sema sees only the well-formed
-        // first comparison; the emitted error still fails the parse
-        // overall.
+        // shape: `foldl_with` over a bare `repeated` — the same
+        // zero-allocation shape as the additive/term levels. The
+        // accumulator carries a `seen` flag: a second operator at the
+        // same level is a chained comparison (`a < b < c`), soft-
+        // rejected with a secondary error via `MapExtra::emit`
+        // pointing at the extra operator (span captured with
+        // `spanned`); its operand is dropped so the AST keeps only
+        // the well-formed first comparison and sema sees a clean
+        // tree. The emitted error still fails the parse overall.
+        // (Earlier shapes were slower: two speculative stages —
+        // `or_not` + `repeated` — regressed parse benches ~15%, and a
+        // `repeated().collect::<Vec<_>>()` stage ~5%. Detecting the
+        // chain from the left node's operator instead of a flag
+        // mis-fires on parenthesized comparisons like `(a < b) < c`,
+        // which must keep parsing and fail in sema as before.)
         fn fold_non_assoc<'a, I>(
-            left: ExprId,
-            first: Option<(chumsky::span::Spanned<BinaryOperator>, ExprId)>,
-            chained: Vec<(chumsky::span::Spanned<BinaryOperator>, ExprId)>,
+            (left, seen): (ExprId, bool),
+            (op, right): (chumsky::span::Spanned<BinaryOperator>, ExprId),
             e: &mut Mx<'a, '_, I>,
-        ) -> ExprId
+        ) -> (ExprId, bool)
         where
             I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
         {
-            let left = match first {
-                None => left,
-                Some((op, right)) => fold_binary(left, (op.inner, right), e),
-            };
-            for (op, _) in chained {
+            if seen {
                 e.emit(Rich::custom(op.span, ParseDiag::ChainedComparison));
+                return (left, true);
             }
-            left
+            (fold_binary(left, (op.inner, right), e), true)
         }
 
         // Ordering (non-associative) sits between additive and equality.
@@ -834,11 +836,12 @@ where
 
         let ordering = additive
             .clone()
-            .then(ordering_op.then(additive.clone()).or_not())
-            .then(ordering_op.then(additive).repeated().collect::<Vec<_>>())
-            .map_with(|((left, first), chained), e: &mut Mx<'a, '_, I>| {
-                fold_non_assoc(left, first, chained, e)
-            })
+            .map(|left| (left, false))
+            .foldl_with(
+                ordering_op.then(additive).repeated(),
+                |acc, op_right, e: &mut Mx<'a, '_, I>| fold_non_assoc(acc, op_right, e),
+            )
+            .map(|(left, _)| left)
             .boxed();
 
         // Equality is non-associative.
@@ -850,11 +853,12 @@ where
 
         let equality = ordering
             .clone()
-            .then(equality_op.then(ordering.clone()).or_not())
-            .then(equality_op.then(ordering).repeated().collect::<Vec<_>>())
-            .map_with(|((left, first), chained), e: &mut Mx<'a, '_, I>| {
-                fold_non_assoc(left, first, chained, e)
-            })
+            .map(|left| (left, false))
+            .foldl_with(
+                equality_op.then(ordering).repeated(),
+                |acc, op_right, e: &mut Mx<'a, '_, I>| fold_non_assoc(acc, op_right, e),
+            )
+            .map(|(left, _)| left)
             .boxed();
 
         // Logical AND binds tighter than OR, below equality.

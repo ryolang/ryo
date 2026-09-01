@@ -385,6 +385,20 @@ fn parse_chained_equality_is_soft_rejected() {
     assert_chained_comparison_soft_rejected("x = a == b == c", BinaryOperator::Eq, 11..13);
 }
 
+#[test]
+fn parse_parenthesized_comparison_is_not_a_chain() {
+    // Parens make the inner comparison an atom, so `(a < b) < c`
+    // parses without a chain diagnostic (sema rejects the
+    // bool-vs-int comparison instead) — same behavior as before the
+    // soft-rejection work.
+    let (ok, ast, errs, _pool) = lex_and_parse_recovering("x = (a < b) < c");
+    assert!(ok);
+    assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+    let (lhs, op, _) = bin_op(&ast, decl_init(&ast));
+    assert_eq!(op, BinaryOperator::Lt);
+    assert_eq!(bin_op(&ast, lhs).1, BinaryOperator::Lt);
+}
+
 /// Helper for the escape-table tests: parse a single
 /// `x = "..."` declaration and return the interned bytes of
 /// its string literal.
