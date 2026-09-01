@@ -39,7 +39,7 @@ This directory contains implementation notes, architectural decisions, and desig
 | [std.md](std.md) | Rust runtime + Ryo wrapper strategy for stdlib (`std.sys` hidden layer + `std.io` public API) | **Move to spec** §14 (Standard Library) — then delete |
 | [std_ext.md](std_ext.md) | Curated Rust crates to wrap for stdlib (serde_json, ureq, regex, chrono, rand) | **Move to spec** §14 or a dedicated stdlib contributor guide — then delete |
 | [unsafe.md](unsafe.md) | `kind = "system"` gatekeeper pattern for unsafe blocks in `ryo.toml` | **Move to spec** §17 (FFI & unsafe) — then delete |
-| [ryo-view-materialization.md](ryo-view-materialization.md) | View materialization decision record: `str(view)` spelling (with the `str.from` trade-off), division of labor with the re-borrow, W0003, trait-forward hook | **Implemented** (M8.4.1.2) — keep as decision reference |
+| [ryo-view-materialization.md](ryo-view-materialization.md) | View materialization: `str(view)`/`bytes(bview)` shipped (M8.4.1.2/M8.4.2); remaining work — `slice[T]` materialization, `From`/`Materialize` + `Clone` traits, `bytes.copy_into`, E0034 machine-applicable suggestion | **Partially implemented** — tracks pending items only; delete once the pending items ship |
 
 ### Concurrency
 

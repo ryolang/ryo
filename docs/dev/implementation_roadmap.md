@@ -63,13 +63,14 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 
 Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Try/Catch, F-strings, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, etc.).
 
-**From the final slicing & memory-model spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md` §14) and the gap register (`docs/dev/ryo-missing-features-and-gaps.md`):**
+**From the final slicing & memory-model spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md` §14), the gap register (`docs/dev/ryo-missing-features-and-gaps.md`), and the view-materialization record (`docs/dev/ryo-view-materialization.md`):**
 
 | Item | Target | Notes |
 | ------ | -------- | ------- |
 | `sbytes` (ARC buffer, slicing, COW warnings) | v0.2–v0.3 | D3; needs `shared[T]` atomic-refcount runtime |
 | Runtime profile split (`core`/`hosted`, `--profile=core`) | v0.2 | D9; stdlib layering, no backend changes |
-| `bytes.copy_into(bview, &buf)` (no-alloc view materialization) | v0.2 | needed by the `core` no-alloc profile and the FFI buffer idiom (`cstr.from`) — land with/before FFI; destination is a fixed-capacity `[N]u8` (fixed arrays land with M21); design in `ryo-view-materialization.md` §2.3 |
+| `bytes.copy_into(bview, &buf)` (no-alloc view materialization) | v0.2 | needed by the `core` no-alloc profile and the FFI buffer idiom (`cstr.from`) — land with/before FFI; destination is a fixed-capacity `[N]u8` (fixed arrays land with M21); design in `ryo-view-materialization.md` §3 |
+| Machine-applicable diagnostic suggestions (E0034 ViewEscape → `str(view)` materialize fix) | v0.2 | needs Diag suggestion-payload machinery that doesn't exist yet; design in `docs/experimental/ryo-agent-interface-proposal.md` and `ryo-view-materialization.md` §4 |
 | Bounded operator overloading (`Add`… traits) | v0.2–v0.3 | D10; concrete types first, generic traits with user generics |
 | `unsafe` policy implementation (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | D4; lands with FFI/unsafe work |
 | Volatile MMIO intrinsics | v0.2 | GAP-3; `core` profile intrinsic package |
@@ -1268,7 +1269,7 @@ fn main():
 
 **Goal:** An owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` — plus its read-only projection, filling the gap where `list[u8]` is the only (awkward) option. Per the final slicing spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md`, D2).
 
-**Status:** ✅ COMPLETE (2026-08-31)
+**Status:** ✅ COMPLETE (2026-09-01)
 
 **Tasks:**
 
@@ -1942,6 +1943,7 @@ fn main():
 - Codegen:
   - Slice representation (pointer + length, fat pointer)
   - Bounds checking at runtime (panic on out-of-range)
+- `slice[T]` materialization into an owning container, with the bit-copy check in sema: `T` must be trivially copyable (uses the Copy-type classification from the ownership-pass side tables). Views of owning values (`slice[str]`, `slice[Node]`) are materialized by explicit iteration or, once traits land, user `Clone` impls — never by memcpy (`ryo-view-materialization.md` §1)
 - Write tests for array slices
 
 **Visible Progress:** Efficient array sub-range iteration without copying.
@@ -3005,6 +3007,7 @@ fn main():
 - `fn drop(inout self)` (compiler-known method) → `impl Drop for T` (no source change to method body)
 - `Copy` (compiler marker) → user-derivable `#[derive(Copy)]`
 - `.message()` (compiler-known error accessor) → `impl Error for T` with explicit `fn message(&self) -> str`
+- `str(view)` / `bytes(bview)` (sema-intercepted materialize builtins, M8.4.1.2/M8.4.2) → resolve through a converting-initializer protocol (Swift `init(_:)`-style, or a `From`/`Materialize` trait with call syntax — name TBD at this milestone), call sites unchanged; plus a user-facing `Clone` trait for same-type `T → T` duplication (Go `slices.Clone` vocabulary) — `ryo-view-materialization.md` §2
 
 **Features:**
 
