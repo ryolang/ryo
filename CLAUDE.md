@@ -102,6 +102,14 @@ Do **not** create issues for things you're fixing right now — just fix them. D
 
 Do **not** cite issue IDs (`I-XXX`) in code or doc comments. Resolved entries are deleted from `ISSUES.md`, so the comment becomes a dangling pointer to context that no longer exists — comments must stand on their own. Put the ID in the commit message instead, where it survives in git history.
 
+**Reading issues:** use `scripts/issue.py` (zero-dependency, runs via `uv run`) instead of grepping `ISSUES.md` by hand:
+
+```bash
+uv run scripts/issue.py I-032     # full entry text, prefixed with its line range
+uv run scripts/issue.py --next    # next issue id to use (highest ever, from the file + git history, + 1)
+uv run scripts/issue.py --list    # all ids, line ranges, and titles
+```
+
 ---
 
 ## Design Change Escalation
