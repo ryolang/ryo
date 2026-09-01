@@ -125,6 +125,8 @@ pub struct Codegen<M: Module> {
 /// slice-failure messages).
 const DIV_ZERO_MSG: &str = "integer division by zero\n";
 const MOD_ZERO_MSG: &str = "integer modulo by zero\n";
+const DIV_OVERFLOW_MSG: &str = "integer division overflow\n";
+const MOD_OVERFLOW_MSG: &str = "integer modulo overflow\n";
 /// Overflow guard message for the spec §18 checked-arithmetic traps.
 const OVERFLOW_MSG: &str = "integer overflow\n";
 
@@ -1390,11 +1392,27 @@ impl<M: Module> Codegen<M> {
                         rhs,
                     )?,
                     (CompoundOp::Div, false) => {
-                        Self::emit_div_zero_guard(builder, ctx, rhs, DIV_ZERO_MSG)?;
+                        Self::emit_div_guard(
+                            builder,
+                            ctx,
+                            current,
+                            lhs_range,
+                            rhs,
+                            DIV_ZERO_MSG,
+                            DIV_OVERFLOW_MSG,
+                        )?;
                         builder.ins().sdiv(current, rhs)
                     }
                     (CompoundOp::Mod, false) => {
-                        Self::emit_div_zero_guard(builder, ctx, rhs, MOD_ZERO_MSG)?;
+                        Self::emit_div_guard(
+                            builder,
+                            ctx,
+                            current,
+                            lhs_range,
+                            rhs,
+                            MOD_ZERO_MSG,
+                            MOD_OVERFLOW_MSG,
+                        )?;
                         builder.ins().srem(current, rhs)
                     }
                     (CompoundOp::Add, true) => builder.ins().fadd(current, rhs),

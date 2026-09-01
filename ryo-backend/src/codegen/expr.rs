@@ -2,8 +2,8 @@
 
 use super::bytes::store_string;
 use super::{
-    Codegen, DIV_ZERO_MSG, FunctionContext, MOD_ZERO_MSG, OVERFLOW_MSG, STR_SLOT_SIZE, ValueRepr,
-    cranelift_type_for, is_fat_type, ranges,
+    Codegen, DIV_OVERFLOW_MSG, DIV_ZERO_MSG, FunctionContext, MOD_OVERFLOW_MSG, MOD_ZERO_MSG,
+    OVERFLOW_MSG, STR_SLOT_SIZE, ValueRepr, cranelift_type_for, is_fat_type, ranges,
 };
 use cranelift::codegen::ir::{
     BlockArg, FuncRef, InstructionData, MemFlagsData, Opcode, StackSlot, ValueDef,
@@ -168,11 +168,27 @@ impl<M: Module> Codegen<M> {
                         rv,
                     )?,
                     TirTag::ISDiv => {
-                        Self::emit_div_zero_guard(builder, ctx, rv, DIV_ZERO_MSG)?;
+                        Self::emit_div_guard(
+                            builder,
+                            ctx,
+                            lv,
+                            ranges::int_range_of(ctx.tir, &ctx.range_facts, lhs),
+                            rv,
+                            DIV_ZERO_MSG,
+                            DIV_OVERFLOW_MSG,
+                        )?;
                         builder.ins().sdiv(lv, rv)
                     }
                     TirTag::IMod => {
-                        Self::emit_div_zero_guard(builder, ctx, rv, MOD_ZERO_MSG)?;
+                        Self::emit_div_guard(
+                            builder,
+                            ctx,
+                            lv,
+                            ranges::int_range_of(ctx.tir, &ctx.range_facts, lhs),
+                            rv,
+                            MOD_ZERO_MSG,
+                            MOD_OVERFLOW_MSG,
+                        )?;
                         builder.ins().srem(lv, rv)
                     }
                     TirTag::ICmpEq => builder.ins().icmp(IntCC::Equal, lv, rv),
@@ -510,25 +526,47 @@ impl<M: Module> Codegen<M> {
         Ok(prod)
     }
 
-    /// Zero-divisor guard for `sdiv`/`srem`, which are UB in Cranelift
-    /// when the divisor is zero (`idiv` traps on x86-64; `sdiv`
-    /// silently returns garbage on aarch64). Only the divisor is
-    /// checked: `INT_MIN / -1` overflow remains UB (out of scope).
-    pub(crate) fn emit_div_zero_guard(
+    /// Guards for `sdiv`/`srem`, which are UB in Cranelift when the
+    /// divisor is zero (`idiv` traps on x86-64; `sdiv` silently
+    /// returns garbage on aarch64) and on signed overflow:
+    /// `INT_MIN / -1` (and `% -1`) has no representable result.
+    /// `dividend_range` lets a dividend proven not to be `i64::MIN`
+    /// skip the overflow check.
+    pub(crate) fn emit_div_guard(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
+        dividend: Value,
+        dividend_range: Option<ranges::IntRange>,
         divisor: Value,
-        msg: &'static str,
+        zero_msg: &'static str,
+        overflow_msg: &'static str,
     ) -> Result<(), String> {
-        // A non-zero constant divisor can never trip the guard. The
-        // zero constant keeps it: sema rejects the literal forms, so
-        // anything reaching here must still panic at runtime.
-        if Self::const_int(builder, divisor).is_some_and(|c| c != 0) {
+        // A constant divisor outside {0, -1} can trip neither guard.
+        // The zero constant keeps its guard: sema rejects the literal
+        // forms, so anything reaching here must still panic at runtime.
+        let divisor_const = Self::const_int(builder, divisor);
+        if divisor_const.is_some_and(|c| c != 0 && c != -1) {
             return Ok(());
         }
-        let zero = builder.ins().iconst(ctx.int_type, 0);
-        let is_zero = builder.ins().icmp(IntCC::Equal, divisor, zero);
-        Self::emit_panic_guard(builder, ctx, is_zero, msg)
+        if divisor_const != Some(-1) {
+            let zero = builder.ins().iconst(ctx.int_type, 0);
+            let is_zero = builder.ins().icmp(IntCC::Equal, divisor, zero);
+            Self::emit_panic_guard(builder, ctx, is_zero, zero_msg)?;
+        }
+        // Overflow needs dividend == i64::MIN and divisor == -1; a
+        // constant or range-bounded dividend that excludes i64::MIN
+        // makes the check unreachable.
+        let dividend_safe = Self::const_int(builder, dividend).is_some_and(|c| c != i64::MIN)
+            || dividend_range.is_some_and(|r| r.lo > i64::MIN);
+        if !dividend_safe {
+            let min = builder.ins().iconst(ctx.int_type, i64::MIN);
+            let neg_one = builder.ins().iconst(ctx.int_type, -1);
+            let d_is_min = builder.ins().icmp(IntCC::Equal, dividend, min);
+            let r_is_neg_one = builder.ins().icmp(IntCC::Equal, divisor, neg_one);
+            let overflow = builder.ins().band(d_is_min, r_is_neg_one);
+            Self::emit_panic_guard(builder, ctx, overflow, overflow_msg)?;
+        }
+        Ok(())
     }
 
     /// Branch to a shared cold block that calls `ryo_panic` — stderr

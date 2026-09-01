@@ -192,12 +192,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Two robustness gaps at the C-ABI boundary. (a) `oom_abort` is the handler for three distinct failure modes — genuine allocation failure, `u64 → usize` narrowing (32-bit-only), and `checked_add` capacity overflow — so all three abort identically with an OOM message. (b) `ryo_print` / `ryo_panic` / the slice path guard their pointer args with `debug_assert!(!ptr.is_null())` only; a release build passes a null pointer to `write`/`memcpy` unchecked when `len > 0`.
 **Resolution:** Split `oom_abort` into distinct abort paths (or a reason-code parameter) so overflow/narrowing is distinguishable from OOM in the message; downgrade the null checks to real `if ptr.is_null() { abort }` guards at the FFI entry points — they cost one branch on a cold path.
 
-### I-138 — `INT_MIN / -1` (and `% -1`) signed-overflow is UB at codegen
-
-**Files:** `ryo-backend/src/codegen/expr.rs` (`emit_div_zero_guard` :419-434 and its `TirTag::ISDiv`/`TirTag::IMod` call sites), `ryo-backend/src/codegen/mod.rs` (compound-assign arms)
-**Summary:** The zero-divisor guard covers `x / 0` and `x % 0`, but Cranelift `sdiv`/`srem` are also UB on signed overflow: `INT_MIN / -1` (and `INT_MIN % -1`) has no representable result. x86-64 `idiv` traps (#DE); aarch64 `sdiv` silently wraps to `INT_MIN`. Sema's literal-zero check doesn't catch it either (`x / -1` is a unary-minus expression, not a literal).
-**Resolution:** Extend `emit_div_zero_guard` to also check `dividend == INT_MIN && divisor == -1`, branching to the same `ryo_panic` path with an "integer division overflow" message. Sema can reject the literal form `x / -1` only when the dividend is a known `INT_MIN` constant — likely not worth it; the runtime guard alone suffices.
-
 ### I-158 — `string_slicing` JIT regressed +53% with the packed-u128 runtime ABI (AOT flat)
 
 **Files:** `ryo-backend/src/codegen/` (JIT module path), `benchmarks/string_slicing/`
