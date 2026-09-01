@@ -1,6 +1,7 @@
 use super::*;
 use crate::lexer::lex;
 use chumsky::Parser;
+use chumsky::error::RichReason;
 use chumsky::input::Input;
 use ryo_core::types::InternPool;
 
@@ -346,14 +347,40 @@ fn parse_equality_below_ordering_precedence() {
     assert_eq!(bin_op(&ast, rhs).1, BinaryOperator::Lt);
 }
 
-#[test]
-fn parse_chained_ordering_is_rejected() {
-    assert!(lex_and_parse("x = a < b < c").is_err());
+/// Assert a chained comparison soft-rejects: the parse recovers
+/// (partial program produced), the secondary diagnostic names
+/// non-associativity and points at the second operator, and the
+/// AST keeps only the well-formed first comparison.
+fn assert_chained_comparison_soft_rejected(
+    src: &str,
+    expected_op: BinaryOperator,
+    expected_op_span: std::ops::Range<usize>,
+) {
+    let (ok, ast, errs, _pool) = lex_and_parse_recovering(src);
+    assert!(ok, "chained comparison should recover to a partial program");
+    assert_eq!(errs.len(), 1);
+    let msg = match errs[0].reason() {
+        RichReason::Custom(msg) => msg,
+        other => panic!("expected custom error, got {other:?}"),
+    };
+    assert!(msg.contains("non-associative"), "unexpected message: {msg}");
+    assert_eq!(
+        errs[0].span().into_range(),
+        expected_op_span,
+        "diagnostic must point at the second operator"
+    );
+    let (_, op, _) = bin_op(&ast, decl_init(&ast));
+    assert_eq!(op, expected_op);
 }
 
 #[test]
-fn parse_chained_equality_is_rejected() {
-    assert!(lex_and_parse("x = a == b == c").is_err());
+fn parse_chained_ordering_is_soft_rejected() {
+    assert_chained_comparison_soft_rejected("x = a < b < c", BinaryOperator::Lt, 10..11);
+}
+
+#[test]
+fn parse_chained_equality_is_soft_rejected() {
+    assert_chained_comparison_soft_rejected("x = a == b == c", BinaryOperator::Eq, 11..13);
 }
 
 /// Helper for the escape-table tests: parse a single

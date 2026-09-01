@@ -797,39 +797,71 @@ where
 
         let additive = additive.boxed();
 
+        // Non-associative levels (ordering, equality) share one
+        // shape: one optional `op operand`, then any further chained
+        // `op operand`s are consumed and soft-rejected — each emits a
+        // secondary error via `MapExtra::emit` pointing at the
+        // operator itself (span captured with `spanned`), instead of
+        // the old trailing "unexpected token" produced when the extra
+        // operator fell off `or_not()`. The chained operand is
+        // dropped from the AST so sema sees only the well-formed
+        // first comparison; the emitted error still fails the parse
+        // overall.
+        fn fold_non_assoc<'a, I>(
+            left: ExprId,
+            first: Option<(chumsky::span::Spanned<BinaryOperator>, ExprId)>,
+            chained: Vec<(chumsky::span::Spanned<BinaryOperator>, ExprId)>,
+            e: &mut Mx<'a, '_, I>,
+        ) -> ExprId
+        where
+            I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+        {
+            let left = match first {
+                None => left,
+                Some((op, right)) => fold_binary(left, (op.inner, right), e),
+            };
+            for (op, _) in chained {
+                e.emit(Rich::custom(
+                    op.span,
+                    "comparison operators are non-associative; \
+                     split chained comparisons with `and` (e.g. `a < b and b < c`)"
+                        .to_string(),
+                ));
+            }
+            left
+        }
+
         // Ordering (non-associative) sits between additive and equality.
+        let ordering_op = choice((
+            just(Token::LtEq).to(BinaryOperator::LtEq),
+            just(Token::GtEq).to(BinaryOperator::GtEq),
+            just(Token::Lt).to(BinaryOperator::Lt),
+            just(Token::Gt).to(BinaryOperator::Gt),
+        ))
+        .spanned();
+
         let ordering = additive
             .clone()
-            .then(
-                choice((
-                    just(Token::LtEq).to(BinaryOperator::LtEq),
-                    just(Token::GtEq).to(BinaryOperator::GtEq),
-                    just(Token::Lt).to(BinaryOperator::Lt),
-                    just(Token::Gt).to(BinaryOperator::Gt),
-                ))
-                .then(additive)
-                .or_not(),
-            )
-            .map_with(|(left, maybe_rhs), e: &mut Mx<'a, '_, I>| match maybe_rhs {
-                None => left,
-                Some((op, right)) => fold_binary(left, (op, right), e),
+            .then(ordering_op.then(additive.clone()).or_not())
+            .then(ordering_op.then(additive).repeated().collect::<Vec<_>>())
+            .map_with(|((left, first), chained), e: &mut Mx<'a, '_, I>| {
+                fold_non_assoc(left, first, chained, e)
             })
             .boxed();
 
         // Equality is non-associative.
+        let equality_op = choice((
+            just(Token::EqEq).to(BinaryOperator::Eq),
+            just(Token::NotEq).to(BinaryOperator::NotEq),
+        ))
+        .spanned();
+
         let equality = ordering
             .clone()
-            .then(
-                choice((
-                    just(Token::EqEq).to(BinaryOperator::Eq),
-                    just(Token::NotEq).to(BinaryOperator::NotEq),
-                ))
-                .then(ordering)
-                .or_not(),
-            )
-            .map_with(|(left, maybe_rhs), e: &mut Mx<'a, '_, I>| match maybe_rhs {
-                None => left,
-                Some((op, right)) => fold_binary(left, (op, right), e),
+            .then(equality_op.then(ordering.clone()).or_not())
+            .then(equality_op.then(ordering).repeated().collect::<Vec<_>>())
+            .map_with(|((left, first), chained), e: &mut Mx<'a, '_, I>| {
+                fold_non_assoc(left, first, chained, e)
             })
             .boxed();
 
