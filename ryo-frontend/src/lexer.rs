@@ -50,6 +50,10 @@ pub enum Token {
     /// downstream consumers (parser/astgen).
     FloatLit(u64),
     StrLit(StringId),
+    /// `b"..."` byte-string literal (M8.4.2). Payload is the DECODED
+    /// byte content, interned via `InternPool::intern_bytes` — not
+    /// necessarily valid UTF-8, so read it back with `pool.bytes_payload`.
+    BytesLit(StringId),
 
     // Keywords.
     Fn,
@@ -131,6 +135,7 @@ impl fmt::Display for Token {
             Self::IntLitMin => write!(f, "9223372036854775808"),
             Self::FloatLit(bits) => write!(f, "{}", f64::from_bits(*bits)),
             Self::StrLit(id) => write!(f, "<str#{}>", id.raw()),
+            Self::BytesLit(id) => write!(f, "<bytes#{}>", id.raw()),
             Self::Fn => write!(f, "fn"),
             Self::If => write!(f, "if"),
             Self::Elif => write!(f, "elif"),
@@ -204,6 +209,9 @@ pub(crate) enum RawToken<'a> {
     Int(&'a str),
     #[regex(r#""([^"\\]|\\.)*""#)]
     Str(&'a str),
+    // `b"..."` beats `Ident` by longest match.
+    #[regex(r#"b"([^"\\]|\\.)*""#)]
+    Bytes(&'a str),
 
     #[token("fn")]
     Fn,
@@ -412,25 +420,28 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
     out
 }
 
-/// Decode standard escape sequences in a string-literal body.
+/// Decode standard escape sequences in a string/bytes-literal body.
 ///
 /// Unknown escape sequences (e.g. `\q`) are preserved verbatim — the
 /// backslash and the following character are kept as-is — and reported
 /// through `sink` as an `UnknownEscape` error pointing at exactly the
-/// two bytes of the escape.
+/// bytes of the escape.
 ///
-/// `token_span` is the span of the whole quoted literal; the escape's
-/// byte span is derived from it (the body starts one byte past the
-/// opening quote).
-fn unescape(inner: &str, token_span: Span, sink: &mut DiagSink) -> String {
-    let mut out = String::with_capacity(inner.len());
+/// `hex_escapes` enables `\xNN` (exactly two hex digits, M8.4.2) —
+/// accepted in bytes literals only; in string literals `\xNN` stays an
+/// `UnknownEscape` until M8.7 (Literal Completeness).
+///
+/// `body_span` is the span of the unquoted body (the caller computes
+/// it: 1 byte past the opening quote for `"..."`, 2 for `b"..."`).
+fn unescape(inner: &str, body_span: Span, sink: &mut DiagSink, hex_escapes: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(inner.len());
     // Byte offset within `inner`; tracked manually (rather than
-    // `char_indices`) because consuming an escape advances past two
-    // chars at once.
+    // `char_indices`) because consuming an escape advances past
+    // several chars at once.
     let mut i = 0;
     while i < inner.len() {
         // `i` only ever advances by a full char (`len_utf8`) or a
-        // two-byte ASCII escape, so it is always a char boundary.
+        // whole ASCII escape, so it is always a char boundary.
         debug_assert!(inner.is_char_boundary(i));
         let ch = inner[i..]
             .chars()
@@ -439,54 +450,79 @@ fn unescape(inner: &str, token_span: Span, sink: &mut DiagSink) -> String {
         if ch == '\\' {
             match inner[i + 1..].chars().next() {
                 Some('n') => {
-                    out.push('\n');
+                    out.push(b'\n');
                     i += 2;
                 }
                 Some('t') => {
-                    out.push('\t');
+                    out.push(b'\t');
                     i += 2;
                 }
                 Some('r') => {
-                    out.push('\r');
+                    out.push(b'\r');
                     i += 2;
                 }
                 Some('\\') => {
-                    out.push('\\');
+                    out.push(b'\\');
                     i += 2;
                 }
                 Some('"') => {
-                    out.push('"');
+                    out.push(b'"');
                     i += 2;
                 }
                 Some('0') => {
-                    out.push('\0');
+                    out.push(0);
                     i += 2;
+                }
+                Some('x') if hex_escapes => {
+                    // `\xNN` — exactly two hex digits.
+                    let digits = inner.get(i + 2..i + 4);
+                    match digits.and_then(|d| u8::from_str_radix(d, 16).ok()) {
+                        Some(byte) => {
+                            out.push(byte);
+                            i += 4;
+                        }
+                        None => {
+                            let start = body_span.start.saturating_add(i);
+                            let end = start.saturating_add(2);
+                            sink.emit(Diag::error(
+                                SimpleSpan::new((), start..end),
+                                DiagCode::UnknownEscape,
+                                "invalid '\\xNN' escape: exactly two hex digits required"
+                                    .to_string(),
+                            ));
+                            out.push(b'\\');
+                            out.push(b'x');
+                            i += 2;
+                        }
+                    }
                 }
                 Some(c) => {
                     // Unknown escape: report it, then preserve the
                     // backslash and the following character verbatim.
                     // Saturating adds: the span is derived from
-                    // `token_span` and in-bounds offsets, so it cannot
+                    // `body_span` and in-bounds offsets, so it cannot
                     // overflow in practice, but a diagnostic span must
                     // never panic the reporter.
-                    let start = token_span.start.saturating_add(1).saturating_add(i);
+                    let start = body_span.start.saturating_add(i);
                     let end = start.saturating_add(1).saturating_add(c.len_utf8());
                     sink.emit(Diag::error(
                         SimpleSpan::new((), start..end),
                         DiagCode::UnknownEscape,
                         format!("unknown escape sequence '\\{}'", c),
                     ));
-                    out.push('\\');
-                    out.push(c);
+                    out.push(b'\\');
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
                     i += 1 + c.len_utf8();
                 }
                 None => {
-                    out.push('\\');
+                    out.push(b'\\');
                     i += 1;
                 }
             }
         } else {
-            out.push(ch);
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
             i += ch.len_utf8();
         }
     }
@@ -542,8 +578,33 @@ fn intern_token(
             // the parser sees a single `StrLit(StringId)` token
             // pointing at the user-visible bytes.
             let inner = &s[1..s.len() - 1];
-            let decoded = unescape(inner, span, sink);
+            let body_span =
+                SimpleSpan::new((), span.start.saturating_add(1)..span.end.saturating_sub(1));
+            let decoded = unescape(inner, body_span, sink, false);
+            // `inner` is UTF-8 source text and every escape above
+            // decodes to ASCII or re-encodes a `char`, so the decoded
+            // body is always valid UTF-8.
+            let decoded =
+                String::from_utf8(decoded).expect("string literal body decodes to valid UTF-8");
             Token::StrLit(pool.intern_str(&decoded))
+        }
+        RawToken::Bytes(s) => {
+            // Strip the `b"` prefix and closing quote. Raw non-ASCII
+            // source bytes are rejected (M8.4.2): the text/binary
+            // distinction stays visible in source — use `\xNN`.
+            let inner = &s[2..s.len() - 1];
+            if !inner.is_ascii() {
+                sink.emit(Diag::error(
+                    span,
+                    DiagCode::InvalidCharacter,
+                    "bytes literal must be ASCII; use \\xNN escapes for non-ASCII bytes"
+                        .to_string(),
+                ));
+            }
+            let body_span =
+                SimpleSpan::new((), span.start.saturating_add(2)..span.end.saturating_sub(1));
+            let decoded = unescape(inner, body_span, sink, true);
+            Token::BytesLit(pool.intern_bytes(&decoded))
         }
         RawToken::Ident(s) => Token::Ident(pool.intern_str(s)),
 
@@ -1010,5 +1071,77 @@ mod tests {
         assert_eq!(toks[1], Token::LBracket);
         assert_eq!(toks[2], Token::Colon);
         assert_eq!(toks[3], Token::RBracket);
+    }
+
+    #[test]
+    fn bytes_literal_lexes_and_decodes() {
+        // toks: [Ident(x), Assign, BytesLit]
+        let (toks, pool) = lex_strings(r#"x = b"A\x00\xff""#);
+        match toks[2] {
+            Token::BytesLit(id) => assert_eq!(pool.bytes_payload(id), b"A\x00\xff"),
+            ref t => panic!("expected BytesLit at index 2, got {:?}", t),
+        }
+    }
+
+    #[test]
+    fn bytes_literal_decodes_string_escape_subset() {
+        let (toks, pool) = lex_strings(r#"x = b"\n\t\r\\\"\0""#);
+        match toks[2] {
+            Token::BytesLit(id) => assert_eq!(pool.bytes_payload(id), b"\n\t\r\\\"\0"),
+            ref t => panic!("expected BytesLit at index 2, got {:?}", t),
+        }
+    }
+
+    #[test]
+    fn bytes_literal_rejects_raw_non_ascii() {
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let _ = lex("x = b\"é\"", &mut pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::InvalidCharacter),
+            "expected InvalidCharacter, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn bytes_literal_rejects_malformed_hex_escape() {
+        // `\x` must be followed by exactly two hex digits.
+        for src in [r#"x = b"\x""#, r#"x = b"\x1""#, r#"x = b"\xg1""#] {
+            let mut pool = InternPool::new();
+            let mut sink = DiagSink::new();
+            let _ = lex(src, &mut pool, &mut sink);
+            let diags = sink.into_diags();
+            assert!(
+                diags.iter().any(|d| d.code == DiagCode::UnknownEscape),
+                "expected UnknownEscape for {src}, got {:?}",
+                diags
+            );
+        }
+    }
+
+    #[test]
+    fn string_literal_still_rejects_hex_escape() {
+        // `\xNN` is bytes-literal-only at M8.4.2; string escapes grow at M8.7.
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let _ = lex(r#"x = "\x41""#, &mut pool, &mut sink);
+        let diags = sink.into_diags();
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::UnknownEscape),
+            "expected UnknownEscape, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn b_ident_still_lexes_as_identifier() {
+        // Longest-match: `b` alone is an Ident, `b"..."` is a BytesLit.
+        let (toks, _) = lex_strings("bx = 1");
+        match toks[0] {
+            Token::Ident(_) => {}
+            ref t => panic!("expected Ident at index 0, got {:?}", t),
+        }
     }
 }

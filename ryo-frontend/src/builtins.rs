@@ -14,8 +14,11 @@ pub struct BuiltinFunction {
     /// borrows for its duration (E4). Read by the ownership pass's Rule-7
     /// partition: when a call to this callee appears as a borrow-mode
     /// argument of an outer call, the view's root counts as an immutable
-    /// borrow alongside the outer call's `inout` args. Today only
-    /// `__ryo_str_from_view` (param 0) borrows a view. See M8.4.1.2.
+    /// borrow alongside the outer call's `inout` args. `__ryo_str_from_view`
+    /// (param 0) borrows a view (M8.4.1.2); the M8.4.2 bytes callees
+    /// (`__ryo_bytes_repr`, `__ryo_bytes_from_view`, `__ryo_bytes_to_str`,
+    /// `__ryo_str_to_bytes`) borrow their view argument's root owner the
+    /// same way.
     pub view_borrow_params: &'static [usize],
 }
 
@@ -24,6 +27,7 @@ enum BuiltinReturn {
     Void,
     Never,
     Str,
+    Bytes,
 }
 
 impl BuiltinFunction {
@@ -32,6 +36,7 @@ impl BuiltinFunction {
             BuiltinReturn::Void => pool.void(),
             BuiltinReturn::Never => pool.never(),
             BuiltinReturn::Str => pool.str_(),
+            BuiltinReturn::Bytes => pool.bytes(),
         }
     }
 }
@@ -79,6 +84,12 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         borrowed_scalar_params: &[],
         view_borrow_params: &[],
     },
+    BuiltinFunction {
+        name: "bytes_push",
+        return_ty: BuiltinReturn::Void,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[],
+    },
 ];
 
 /// Synthesized (non-user-facing) runtime callees with ABI metadata the
@@ -104,6 +115,30 @@ const ABI_CALLEES: &[BuiltinFunction] = &[
     BuiltinFunction {
         name: "__ryo_str_from_view",
         return_ty: BuiltinReturn::Str,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[0],
+    },
+    BuiltinFunction {
+        name: "__ryo_bytes_repr",
+        return_ty: BuiltinReturn::Str,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[0],
+    },
+    BuiltinFunction {
+        name: "__ryo_bytes_from_view",
+        return_ty: BuiltinReturn::Bytes,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[0],
+    },
+    BuiltinFunction {
+        name: "__ryo_bytes_to_str",
+        return_ty: BuiltinReturn::Str,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[0],
+    },
+    BuiltinFunction {
+        name: "__ryo_str_to_bytes",
+        return_ty: BuiltinReturn::Bytes,
         borrowed_scalar_params: &[],
         view_borrow_params: &[0],
     },
@@ -229,5 +264,35 @@ mod tests {
         assert!(view_borrow_params(print, &pool).is_empty());
         let unknown = pool.intern_str("not_a_builtin");
         assert!(view_borrow_params(unknown, &pool).is_empty());
+    }
+
+    #[test]
+    fn bytes_builtins_and_callees_registered() {
+        let mut pool = InternPool::new();
+        // User-facing.
+        assert_eq!(
+            lookup("bytes_push").unwrap().return_type(&pool),
+            pool.void()
+        );
+        // Synthesized callees.
+        let repr = abi_callee("__ryo_bytes_repr").expect("ABI entry");
+        assert_eq!(repr.return_type(&pool), pool.str_());
+        let from_view = abi_callee("__ryo_bytes_from_view").expect("ABI entry");
+        assert_eq!(from_view.return_type(&pool), pool.bytes());
+        let to_str = abi_callee("__ryo_bytes_to_str").expect("ABI entry");
+        assert_eq!(to_str.return_type(&pool), pool.str_());
+        let to_bytes = abi_callee("__ryo_str_to_bytes").expect("ABI entry");
+        assert_eq!(to_bytes.return_type(&pool), pool.bytes());
+        // All four borrow their view argument's root owner (E4). The names
+        // are not interned until sema synthesizes them, so intern here.
+        for name in [
+            "__ryo_bytes_repr",
+            "__ryo_bytes_from_view",
+            "__ryo_bytes_to_str",
+            "__ryo_str_to_bytes",
+        ] {
+            let id = pool.intern_str(name);
+            assert_eq!(view_borrow_params(id, &pool), &[0], "{name}");
+        }
     }
 }

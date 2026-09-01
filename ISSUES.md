@@ -314,7 +314,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-135 — Rule-7 call-arg partition duplicates the view look-through logic
 
 **Files:** `ryo-frontend/src/ownership/walk.rs` (:934-936 — owner partition, :1029-1030 — E0031 span search)
-**Summary:** The `mode == Borrow && tag == ViewAsStr → projection_root else underlying_owner` look-through is written out twice, near-verbatim, in two helpers that must agree for the P6'/E4 rules to stay coherent. A change to one side (e.g. a new look-through case) silently desynchronizes the diagnostic span search from the ownership partition.
+**Summary:** The `mode == Borrow && tag == ViewAsOwner → projection_root else underlying_owner` look-through is written out twice, near-verbatim, in two helpers that must agree for the P6'/E4 rules to stay coherent. A change to one side (e.g. a new look-through case) silently desynchronizes the diagnostic span search from the ownership partition.
 **Resolution:** Extract one `fn call_arg_owner(own, tir, pool, mode, arg) -> Owner` helper used by both sites.
 
 ### I-136 — Ownership pass clones whole state maps on hot paths

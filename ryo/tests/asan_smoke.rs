@@ -227,3 +227,8 @@ fn asan_slice_across_blocks() {
         "slice_across_blocks",
     );
 }
+
+#[test]
+fn asan_bytes_ops() {
+    run_asan_smoke(common::find_fixture("bytes_ops"), "bytes_ops");
+}

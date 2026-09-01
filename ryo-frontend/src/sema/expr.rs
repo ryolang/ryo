@@ -2,7 +2,7 @@
 
 use super::{FuncCtx, Scope, Sema, check_call};
 use ryo_core::diag::{Diag, DiagCode};
-use ryo_core::tir::{TirData, TirRef, TirTag};
+use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{TypeId, TypeKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag, Span, Uir};
 
@@ -62,6 +62,10 @@ pub(crate) fn analyze_expr_allow_never(
         InstTag::FloatLiteral => match inst.data {
             InstData::Float(v) => fcx.builder.float_const(v, sema.pool.float(), span),
             _ => unreachable!("FloatLiteral must carry InstData::Float"),
+        },
+        InstTag::BytesLiteral => match inst.data {
+            InstData::Str(s) => fcx.builder.bytes_const(s, sema.pool.bytes(), span),
+            _ => unreachable!("BytesLiteral must carry InstData::Str"),
         },
         InstTag::Var => {
             let name = match inst.data {
@@ -223,10 +227,11 @@ pub(crate) fn analyze_expr_allow_never(
                 analyze_expr(sema, fcx, scope, arg);
             }
 
-            // Only `str` and `strview` views have methods (M8.4).
+            // `str`/`strview` (M8.4) and `bytes`/`bytesview` (M8.4.2)
+            // have methods.
             if !matches!(
                 sema.pool.kind(receiver_ty),
-                TypeKind::Str | TypeKind::View(_)
+                TypeKind::Str | TypeKind::Bytes | TypeKind::View(_)
             ) {
                 if !sema.pool.is_error(receiver_ty) {
                     sema.sink.emit(Diag::error(
@@ -244,7 +249,10 @@ pub(crate) fn analyze_expr_allow_never(
                         sema.sink.emit(Diag::error(
                             span,
                             DiagCode::ArityMismatch,
-                            "str.len() takes no arguments".to_string(),
+                            format!(
+                                "{}.len() takes no arguments",
+                                sema.pool.display(receiver_ty)
+                            ),
                         ));
                         return fcx.builder.unreachable(sema.pool.error_type(), span);
                     }
@@ -260,7 +268,10 @@ pub(crate) fn analyze_expr_allow_never(
                         sema.sink.emit(Diag::error(
                             span,
                             DiagCode::ArityMismatch,
-                            "str.is_empty() takes no arguments".to_string(),
+                            format!(
+                                "{}.is_empty() takes no arguments",
+                                sema.pool.display(receiver_ty)
+                            ),
                         ));
                         return fcx.builder.unreachable(sema.pool.error_type(), span);
                     }
@@ -274,11 +285,24 @@ pub(crate) fn analyze_expr_allow_never(
                     fcx.builder
                         .binary(TirTag::ICmpEq, sema.pool.bool_(), len_tir, zero, span)
                 }
+                "to_str" | "to_bytes" => bridge_method_call(
+                    sema,
+                    fcx,
+                    &method_name,
+                    view.args.is_empty(),
+                    receiver_tir,
+                    receiver_ty,
+                    span,
+                ),
                 _ => {
                     sema.sink.emit(Diag::error(
                         span,
                         DiagCode::UndefinedFunction,
-                        format!("str has no method '{}'", method_name),
+                        format!(
+                            "{} has no method '{}'",
+                            sema.pool.display(receiver_ty),
+                            method_name
+                        ),
                     ));
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
@@ -292,10 +316,16 @@ pub(crate) fn analyze_expr_allow_never(
             let base_tir = analyze_expr(sema, fcx, scope, base_uir);
             let base_ty = fcx.builder.ty_of(base_tir);
             let base_kind = sema.pool.kind(base_ty);
-            // §3.2 P1: a slice projects a `str` (or re-projects an
-            // existing `strview`, P3); anything else is not sliceable.
-            if !matches!(base_kind, TypeKind::Str | TypeKind::View(ViewKind::Str))
-                && !sema.pool.is_error(base_ty)
+            // §3.2 P1: a slice projects an owner (`str`/`bytes`) or
+            // re-projects an existing view (P3); anything else is not
+            // sliceable.
+            if !matches!(
+                base_kind,
+                TypeKind::Str
+                    | TypeKind::View(ViewKind::Str)
+                    | TypeKind::Bytes
+                    | TypeKind::View(ViewKind::Bytes)
+            ) && !sema.pool.is_error(base_ty)
             {
                 sema.sink.emit(Diag::error(
                     span,
@@ -306,6 +336,11 @@ pub(crate) fn analyze_expr_allow_never(
             }
             let start_tir = start_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
             let end_tir = end_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
+            let view_ty = match base_kind {
+                TypeKind::Str | TypeKind::View(ViewKind::Str) => sema.pool.str_view(),
+                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => sema.pool.bytes_view(),
+                _ => sema.pool.error_type(),
+            };
             fcx.builder.push_typed(
                 TirTag::Slice,
                 TirData::Slice {
@@ -313,7 +348,56 @@ pub(crate) fn analyze_expr_allow_never(
                     start: start_tir,
                     end: end_tir,
                 },
-                sema.pool.str_view(),
+                view_ty,
+                span,
+            )
+        }
+        InstTag::Index => {
+            let (base_uir, index_uir) = match inst.data {
+                InstData::BinOp { lhs, rhs } => (lhs, rhs),
+                _ => unreachable!("Index must carry InstData::BinOp"),
+            };
+            let base_tir = analyze_expr(sema, fcx, scope, base_uir);
+            let base_ty = fcx.builder.ty_of(base_tir);
+            let base_kind = sema.pool.kind(base_ty);
+            // M8.4.2 stopgap: scalar indexing exists for bytes/bytesview
+            // only and yields `int` (0-255) until M17.1 makes it `u8`.
+            // `str` indexing stays forbidden (§4.7).
+            match base_kind {
+                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => {}
+                TypeKind::Str | TypeKind::View(ViewKind::Str) => {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::TypeMismatch,
+                        "str does not support indexing — slice instead (s[i:i+1])".to_string(),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+                _ => {
+                    if !sema.pool.is_error(base_ty) {
+                        sema.sink.emit(Diag::error(
+                            span,
+                            DiagCode::TypeMismatch,
+                            format!("cannot index type '{}'", sema.pool.display(base_ty)),
+                        ));
+                    }
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+            }
+            let index_tir = analyze_expr(sema, fcx, scope, index_uir);
+            let index_ty = fcx.builder.ty_of(index_tir);
+            if sema.pool.kind(index_ty) != TypeKind::Int && !sema.pool.is_error(index_ty) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(index_uir),
+                    DiagCode::TypeMismatch,
+                    format!("index must be int, got '{}'", sema.pool.display(index_ty)),
+                ));
+            }
+            fcx.builder.binary(
+                TirTag::BytesIndex,
+                sema.pool.int(),
+                base_tir,
+                index_tir,
                 span,
             )
         }
@@ -350,6 +434,73 @@ pub(crate) fn analyze_expr_allow_never(
 
     fcx.inst_map[r.index()] = Some(emitted);
     emitted
+}
+
+/// M8.4.2 bridging methods: `bytes`/`bytesview`.to_str() lowers to
+/// `__ryo_bytes_to_str` (a stopgap that panics at runtime on invalid
+/// UTF-8; becomes `Utf8Error!str` at M13), `str`/`strview`.to_bytes()
+/// lowers to `__ryo_str_to_bytes`. Wrong-family receivers keep the
+/// generalized "X has no method 'Y'" diagnostic. Only called for the
+/// `to_str` / `to_bytes` names.
+fn bridge_method_call(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    method_name: &str,
+    args_empty: bool,
+    receiver_tir: TirRef,
+    receiver_ty: TypeId,
+    span: Span,
+) -> TirRef {
+    debug_assert!(matches!(method_name, "to_str" | "to_bytes"));
+    if !args_empty {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            format!("{method_name}() takes no arguments"),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let (callee_name, ret_ty) = match method_name {
+        "to_str" => {
+            if !matches!(
+                sema.pool.kind(receiver_ty),
+                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes)
+            ) {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedFunction,
+                    format!(
+                        "{} has no method '{}'",
+                        sema.pool.display(receiver_ty),
+                        method_name
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            ("__ryo_bytes_to_str", sema.pool.str_())
+        }
+        _ => {
+            if !matches!(
+                sema.pool.kind(receiver_ty),
+                TypeKind::Str | TypeKind::View(ViewKind::Str)
+            ) {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedFunction,
+                    format!(
+                        "{} has no method '{}'",
+                        sema.pool.display(receiver_ty),
+                        method_name
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            ("__ryo_str_to_bytes", sema.pool.bytes())
+        }
+    };
+    let callee = sema.pool.intern_str(callee_name);
+    fcx.builder
+        .call(callee, &[receiver_tir], &[ParamMode::Borrow], ret_ty, span)
 }
 
 /// Type-check one slice bound (`start` / `end`): §3.1 requires
@@ -446,22 +597,21 @@ pub(crate) fn check_binary_op(
     rhs: TirRef,
     span: Span,
 ) -> TirRef {
-    // M8.4 §3.3/§3.4: mixed `str`/`strview` equality — wrap the owned
-    // side in an explicit `ViewOfStr` conversion so the comparison
-    // runs view-vs-view. This must happen before the generic
-    // `compatible` check below, which rightly rejects `str` ≠ `strview`
-    // for every other operator.
+    // M8.4 §3.3/§3.4, generalized M8.4.2: mixed owner/view equality —
+    // wrap the owned side in an explicit `ToView` conversion so the
+    // comparison runs view-vs-view. This must happen before the
+    // generic `compatible` check below, which rightly rejects owner ≠
+    // view for every other operator. Driven by the pool's `owner_view`
+    // table (`str`/`strview`, `bytes`/`bytesview`).
     let (lhs, rhs, lhs_ty, rhs_ty) = if matches!(tag, InstTag::Eq | InstTag::NotEq) {
-        match (sema.pool.kind(lhs_ty), sema.pool.kind(rhs_ty)) {
-            (TypeKind::Str, TypeKind::View(ViewKind::Str)) => {
-                let v = fcx.builder.view_of_str(lhs, sema.pool.str_view(), span);
-                (v, rhs, sema.pool.str_view(), rhs_ty)
-            }
-            (TypeKind::View(ViewKind::Str), TypeKind::Str) => {
-                let v = fcx.builder.view_of_str(rhs, sema.pool.str_view(), span);
-                (lhs, v, lhs_ty, sema.pool.str_view())
-            }
-            _ => (lhs, rhs, lhs_ty, rhs_ty),
+        if sema.pool.owner_view(lhs_ty) == Some(rhs_ty) {
+            let v = fcx.builder.to_view(lhs, rhs_ty, span);
+            (v, rhs, rhs_ty, rhs_ty)
+        } else if sema.pool.owner_view(rhs_ty) == Some(lhs_ty) {
+            let v = fcx.builder.to_view(rhs, lhs_ty, span);
+            (lhs, v, lhs_ty, lhs_ty)
+        } else {
+            (lhs, rhs, lhs_ty, rhs_ty)
         }
     } else {
         (lhs, rhs, lhs_ty, rhs_ty)
@@ -548,13 +698,32 @@ pub(crate) fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
+            TypeKind::Bytes => {
+                let tir_tag = match tag {
+                    InstTag::Eq => TirTag::BytesCmpEq,
+                    InstTag::NotEq => TirTag::BytesCmpNe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+            }
             // M8.4 §3.3: view equality compares viewed contents. Same
-            // `StrCmpEq`/`StrCmpNe` tags — operands are `{ptr, len}`
-            // pairs instead of full fat pointers (Task 7 codegen).
+            // `StrCmpEq`/`StrCmpNe` (or M8.4.2 `BytesCmpEq`/`BytesCmpNe`)
+            // tags — operands are `{ptr, len}` pairs instead of full fat
+            // pointers (codegen Task 13).
             TypeKind::View(ViewKind::Str) => {
                 let tir_tag = match tag {
                     InstTag::Eq => TirTag::StrCmpEq,
                     InstTag::NotEq => TirTag::StrCmpNe,
+                    _ => unreachable!(),
+                };
+                fcx.builder
+                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+            }
+            TypeKind::View(ViewKind::Bytes) => {
+                let tir_tag = match tag {
+                    InstTag::Eq => TirTag::BytesCmpEq,
+                    InstTag::NotEq => TirTag::BytesCmpNe,
                     _ => unreachable!(),
                 };
                 fcx.builder
@@ -612,6 +781,7 @@ pub(crate) fn check_binary_op(
             | TypeKind::Void
             | TypeKind::Never
             | TypeKind::Tuple
+            | TypeKind::Bytes
             | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
@@ -683,6 +853,21 @@ pub(crate) fn check_binary_op(
                 }
                 fcx.builder
                     .binary(TirTag::StrConcat, sema.pool.str_(), lhs, rhs, span)
+            }
+            TypeKind::Bytes => {
+                if tag != InstTag::Add {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::UnsupportedOperator,
+                        format!(
+                            "arithmetic operator '{}' not supported for type 'bytes'",
+                            bin_op_symbol(tag),
+                        ),
+                    ));
+                    return fcx.builder.unreachable(sema.pool.error_type(), span);
+                }
+                fcx.builder
+                    .binary(TirTag::BytesConcat, sema.pool.bytes(), lhs, rhs, span)
             }
             TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
             _ => {

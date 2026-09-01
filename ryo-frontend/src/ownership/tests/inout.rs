@@ -401,7 +401,7 @@ fn inout_call_keeps_owner_and_frees_current_buffer() {
     // call is a pure borrow of the slot: the binding KEEPS its
     // pre-call owner (no reseat, no Moved, no dead-store churn), and
     // the freshness of the freed buffer is codegen's job — it emits
-    // the Free from the binding's current `StrLocals` (which hold the
+    // the Free from the binding's current `FatLocals` (which hold the
     // write-back triple after the reload), never the stale pre-call
     // repr. Assert the lattice invariants: owner unchanged, exactly
     // one Free for it, no diagnostics.
@@ -439,7 +439,7 @@ fn inout_call_keeps_owner_and_frees_current_buffer() {
     assert_eq!(
         frees.len(),
         1,
-        "exactly one Free for the binding's owner; codegen emits it from the current StrLocals; schedule = {:?}",
+        "exactly one Free for the binding's owner; codegen emits it from the current FatLocals; schedule = {:?}",
         sc.free_schedule
     );
 }

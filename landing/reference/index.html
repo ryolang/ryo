@@ -330,6 +330,14 @@
                     </td>
                   </tr>
                   <tr>
+                    <td><code>bytes</code></td>
+                    <td>
+                      Owned, heap-allocated byte buffer. Grows and shrinks when
+                      bound to a <code>mut</code> variable; slicing yields a
+                      zero-copy <code>bytesview</code>.
+                    </td>
+                  </tr>
+                  <tr>
                     <td><code>void</code></td>
                     <td>
                       Unit type. The implicit return of functions that produce
@@ -380,6 +388,32 @@
               <code>0o</code>, <code>0b</code> prefixes. Division between two
               integers truncates toward zero, like Python's <code>//</code>.
             </p>
+
+            <div class="callout callout--warn">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path
+                  d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+                ></path>
+                <line x1="12" y1="9" x2="12" y2="13"></line>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+              </svg>
+              <div>
+                <p class="callout-title">Prefixed literals are planned</p>
+                <p>
+                  Underscore separators and the <code>0x</code> /
+                  <code>0o</code> / <code>0b</code> prefixes are specified but
+                  not yet implemented. Writing <code>1_000</code> or
+                  <code>0xFF</code> today is a lex error — use plain decimal.
+                </p>
+              </div>
+            </div>
 
             <div class="code-block">
               <div class="code-block-head">
@@ -535,10 +569,6 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
                     <td>Double quote</td>
                   </tr>
                   <tr>
-                    <td><code>\'</code></td>
-                    <td>Single quote</td>
-                  </tr>
-                  <tr>
                     <td><code>\0</code></td>
                     <td>Null byte</td>
                   </tr>
@@ -634,6 +664,65 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
                   Interpolated strings like <code>f"{name}"</code> are not yet
                   implemented. Build strings today with <code>+</code> and
                   <code>int_to_str()</code>.
+                </p>
+              </div>
+            </div>
+
+            <h3>Bytes</h3>
+            <p>
+              <code>bytes</code> is the binary sibling of
+              <code>str</code>: an owned, heap-allocated, contiguous byte
+              buffer. Literals use the <code>b"..."</code> prefix and accept
+              the full <code>\xNN</code> escape range. Slicing yields a
+              <code>bytesview</code> — the same zero-copy, non-escaping
+              projection as <code>strview</code>, but with no UTF-8 boundary
+              rule, so scalar indexing (<code>b[i]</code>) is allowed.
+              Bridging to text is explicit: <code>raw.to_str()</code>
+              validates UTF-8; <code>text.to_bytes()</code> makes an owned
+              copy. Concatenate with <code>+</code>, append a byte with
+              <code>bytes_push(&amp;b, x)</code>; printing renders the escaped
+              <code>b"..."</code> form.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">bytes.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn main():
+	raw = b"\x01\x02\x03"
+	header = raw[0:2]             # bytesview — a view, no copy
+	print(int_to_str(header[0]))  # 1
+
+	mut buf = b"\x00"
+	bytes_push(&buf, 255)
+	buf = buf + raw
+	print(buf)                    # b"\0\xff\x01\x02\x03"</code></pre>
+            </div>
+
+            <div class="callout callout--warn">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path
+                  d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+                ></path>
+                <line x1="12" y1="9" x2="12" y2="13"></line>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+              </svg>
+              <div>
+                <p class="callout-title">Two interim simplifications</p>
+                <p>
+                  <code>b[i]</code> currently yields <code>int</code>
+                  (0–255) — it becomes <code>u8</code> when explicit
+                  sizes land — and <code>to_str()</code> panics on invalid
+                  UTF-8 until error unions land (final signature:
+                  <code>Utf8Error!str</code>).
                 </p>
               </div>
             </div>
@@ -862,6 +951,13 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
                     <td>Convert an integer to its decimal string form.</td>
                   </tr>
                   <tr>
+                    <td><code>bytes_push(inout b: bytes, x: int)</code></td>
+                    <td>
+                      Append byte <code>x</code> (0–255, panics out of
+                      range) to <code>b</code> in place.
+                    </td>
+                  </tr>
+                  <tr>
                     <td><code>range(start: int, end: int)</code></td>
                     <td>Half-open integer range for <code>for</code> loops.</td>
                   </tr>
@@ -884,7 +980,8 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
               </svg>
               <div>
                 <p class="callout-title">
-                  <code>print()</code> is <code>str</code>-only
+                  <code>print()</code> prints <code>str</code> and
+                  <code>bytes</code>
                 </p>
                 <p>
                   Passing an <code>int</code>, <code>float</code>, or

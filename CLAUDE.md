@@ -46,6 +46,7 @@ All Ryo code examples **must** use Python-style colons and indentation, **NOT** 
 
 **Code examples:** Use fenced code blocks with language tag (````ryo`).
 **Cross-references:** Use relative paths (`[spec](docs/specification.md)`).
+**Milestone completion:** When a milestone ships, update `landing/reference/index.html` if the language surface changed (types, literals, builtins, diagnostics) — and remove any "planned" callout the milestone fulfills.
 **Committed artifacts are self-contained:** anything under version control (`ISSUES.md`, `benchmarks/README.md` files, code comments, commit messages) must be understandable on its own. Never reference vocabulary or context that lives only in uncommitted scratch — e.g. `docs/superpowers/` specs and plans are gitignored, so committed files must not cite their "Phase 0/1/2" naming or section numbers. Cite the concept inline instead ("the value-range guard-elision work"), optionally with a commit hash or issue ID as a historical pointer.
 
 ---

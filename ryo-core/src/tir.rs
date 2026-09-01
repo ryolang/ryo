@@ -167,6 +167,8 @@ pub enum TirTag {
     FloatConst,
     BoolConst,
     StrConst,
+    /// `b"..."` literal (M8.4.2). Payload in `TirData::Str`.
+    BytesConst,
 
     /// Read of a local (parameter or `let`-bound). Resolved to a
     /// `StringId` so codegen's `HashMap<StringId, Variable>` lookup
@@ -195,6 +197,17 @@ pub enum TirTag {
     // String equality.
     StrCmpEq,
     StrCmpNe,
+
+    /// `bytes + bytes` concatenation (M8.4.2). Payload in `TirData::BinOp`.
+    BytesConcat,
+
+    /// `bytes`/`bytesview` equality (M8.4.2). Payload in `TirData::BinOp`.
+    BytesCmpEq,
+    /// `bytes`/`bytesview` inequality (M8.4.2). Payload in `TirData::BinOp`.
+    BytesCmpNe,
+    /// `bytes`/`bytesview` scalar indexing (M8.4.2): bounds-checked byte
+    /// load → `int` (`u8` at M17.1). Payload in `TirData::BinOp`.
+    BytesIndex,
 
     /// Read the `len` field of a str fat pointer. Operand in `TirData::UnOp`.
     StrLen,
@@ -234,15 +247,17 @@ pub enum TirTag {
 
     /// Slice projection `base[start:end]` → `strview` (M8.4).
     Slice,
-    /// Explicit `str → strview` representation conversion (drops `cap`),
-    /// inserted by sema at view-parameter call sites and mixed-str
-    /// equality operands. Operand in `data.un_op`.
-    ViewOfStr,
-    /// `strview → str` re-borrow (final spec P6'): materializes the
-    /// cap=0 fat triple — no allocation, call-scoped. Inserted by sema
-    /// when a view is passed to an owned `str` borrow parameter.
-    /// Operand in `data.un_op`.
-    ViewAsStr,
+    /// Explicit owner → view representation conversion (drops `cap`),
+    /// inserted by sema at view-parameter call sites and mixed
+    /// owner/view equality operands. Operand in `data.un_op`. Owner
+    /// pairs come from the pool's `owner_view` table: `str → strview`
+    /// (M8.4), `bytes → bytesview` (M8.4.2).
+    ToView,
+    /// View → owner re-borrow (final spec P6'): materializes the cap=0
+    /// fat triple — no allocation, call-scoped. Inserted by sema when a
+    /// view is passed to an owned borrow parameter. Operand in
+    /// `data.un_op`.
+    ViewAsOwner,
 
     /// `return <expr>`. Operand in `TirData::UnOp`.
     Return,
@@ -600,6 +615,10 @@ impl TirBuilder {
         self.push(TirTag::StrConst, ty, TirData::Str(value), span)
     }
 
+    pub fn bytes_const(&mut self, value: StringId, ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::BytesConst, ty, TirData::Str(value), span)
+    }
+
     pub fn var(&mut self, name: StringId, ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::Var, ty, TirData::Var(name), span)
     }
@@ -636,6 +655,10 @@ impl TirBuilder {
                 | TirTag::StrConcat
                 | TirTag::StrCmpEq
                 | TirTag::StrCmpNe
+                | TirTag::BytesConcat
+                | TirTag::BytesCmpEq
+                | TirTag::BytesCmpNe
+                | TirTag::BytesIndex
                 | TirTag::FAdd
                 | TirTag::FSub
                 | TirTag::FMul
@@ -687,20 +710,20 @@ impl TirBuilder {
         )
     }
 
-    /// Explicit `str → strview` representation conversion (final spec
+    /// Explicit owner → view representation conversion (final spec
     /// §3.4): drops the `cap` word. Inserted by sema at view-parameter
-    /// call sites and on the owned side of mixed `str`/`strview`
-    /// equality. `view_ty` is the pool's `str_view()`.
-    pub fn view_of_str(&mut self, inner: TirRef, view_ty: TypeId, span: Span) -> TirRef {
-        self.push(TirTag::ViewOfStr, view_ty, TirData::UnOp(inner), span)
+    /// call sites and on the owned side of mixed owner/view equality.
+    /// `view_ty` comes from the pool's `owner_view` table.
+    pub fn to_view(&mut self, inner: TirRef, view_ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::ToView, view_ty, TirData::UnOp(inner), span)
     }
 
-    /// `strview → str` re-borrow (final spec P6'): materializes the
-    /// cap=0 fat triple at the call site — no allocation, call-scoped.
-    /// Inserted by sema when a view is passed to an owned `str` borrow
-    /// parameter. `ty` is the pool's `str_()`.
-    pub fn view_as_str(&mut self, inner: TirRef, ty: TypeId, span: Span) -> TirRef {
-        self.push(TirTag::ViewAsStr, ty, TirData::UnOp(inner), span)
+    /// View → owner re-borrow (final spec P6'): materializes the cap=0
+    /// fat triple at the call site — no allocation, call-scoped.
+    /// Inserted by sema when a view is passed to an owned borrow
+    /// parameter. `ty` is the pool's owner type for the view.
+    pub fn view_as_owner(&mut self, inner: TirRef, ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::ViewAsOwner, ty, TirData::UnOp(inner), span)
     }
 
     fn extra_offset(&self) -> u32 {
@@ -1562,6 +1585,13 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
         (TirTag::FloatConst, TirData::Float(v)) => writeln!(f, "fconst {}", v),
         (TirTag::BoolConst, TirData::Bool(b)) => writeln!(f, "bconst {}", b),
         (TirTag::StrConst, TirData::Str(s)) => writeln!(f, "sconst {:?}", pool.str(s)),
+        (TirTag::BytesConst, TirData::Str(s)) => {
+            writeln!(
+                f,
+                "bytes_const \"{}\"",
+                pool.bytes_payload(s).escape_ascii()
+            )
+        }
         (TirTag::Var, TirData::Var(s)) => writeln!(f, "var {}", pool.str(s)),
         (TirTag::Slice, TirData::Slice { base, start, end }) => {
             let bound = |b: Option<TirRef>| match b {
@@ -1689,6 +1719,10 @@ fn bin_op_name(t: TirTag) -> &'static str {
         TirTag::StrConcat => "str_concat",
         TirTag::StrCmpEq => "str_eq",
         TirTag::StrCmpNe => "str_ne",
+        TirTag::BytesConcat => "bytes_concat",
+        TirTag::BytesCmpEq => "bytes_eq",
+        TirTag::BytesCmpNe => "bytes_ne",
+        TirTag::BytesIndex => "bytes_index",
         TirTag::BoolAnd => "bool_and",
         TirTag::BoolOr => "bool_or",
         _ => "?bin",
@@ -1702,8 +1736,8 @@ fn un_op_name(t: TirTag) -> &'static str {
         TirTag::Return => "ret",
         TirTag::ExprStmt => "expr_stmt",
         TirTag::StrLen => "str_len",
-        TirTag::ViewOfStr => "view_of_str",
-        TirTag::ViewAsStr => "view_as_str",
+        TirTag::ToView => "to_view",
+        TirTag::ViewAsOwner => "view_as_owner",
         _ => "?un",
     }
 }

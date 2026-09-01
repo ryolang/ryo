@@ -187,12 +187,22 @@ pub enum ExprKind {
         start: Option<ExprId>,
         end: Option<ExprId>,
     },
+    /// Scalar indexing `base[index]` (M8.4.2: `bytes`/`bytesview` only,
+    /// yields `int` until M17.1 makes it `u8`). Grammatically distinct
+    /// from `Slice` — the colon is what makes a bracket a slice.
+    Index {
+        base: ExprId,
+        index: ExprId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Literal {
     Int(i64),
     Str(StringId),
+    /// `b"..."` byte-string literal (M8.4.2). Read the payload with
+    /// `InternPool::bytes_payload` — not necessarily valid UTF-8.
+    Bytes(StringId),
     Bool(bool),
     Float(f64),
 }
@@ -638,6 +648,10 @@ impl Ast {
         self.literal(Literal::Str(value), span)
     }
 
+    pub fn literal_bytes(&mut self, value: StringId, span: SimpleSpan) -> ExprId {
+        self.literal(Literal::Bytes(value), span)
+    }
+
     pub fn ident(&mut self, name: StringId, span: SimpleSpan) -> ExprId {
         self.push_expr(ExprKind::Ident(name), span)
     }
@@ -694,6 +708,11 @@ impl Ast {
         span: SimpleSpan,
     ) -> ExprId {
         self.push_expr(ExprKind::Slice { base, start, end }, span)
+    }
+
+    /// Scalar indexing `base[index]` (M8.4.2).
+    pub fn index(&mut self, base: ExprId, index: ExprId, span: SimpleSpan) -> ExprId {
+        self.push_expr(ExprKind::Index { base, index }, span)
     }
 
     /// `return <expr>`, or bare `return` when `value` is `None`.
@@ -1042,6 +1061,41 @@ mod tests {
                 );
             }
             other => panic!("expected IfStmt, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn literal_bytes_round_trip() {
+        let mut ast = Ast::new();
+        let mut pool = InternPool::new();
+        let id = pool.intern_bytes(b"\x01\x02");
+        let span = SimpleSpan::new((), 0..8);
+        let e = ast.literal_bytes(id, span);
+        match ast.expr(e).kind {
+            ExprKind::Literal(Literal::Bytes(got)) => assert_eq!(got, id),
+            ref other => panic!("expected Literal::Bytes, got {:?}", other),
+        }
+        assert_eq!(ast.expr_span(e), span);
+    }
+
+    #[test]
+    fn index_expr_round_trip() {
+        let mut ast = Ast::new();
+        let mut pool = InternPool::new();
+        let b = pool.intern_str("b");
+        let span = SimpleSpan::new((), 0..4);
+        let base = ast.ident(b, span);
+        let idx = ast.literal_int(0, span);
+        let e = ast.index(base, idx, span);
+        match ast.expr(e).kind {
+            ExprKind::Index {
+                base: bb,
+                index: ii,
+            } => {
+                assert_eq!(bb, base);
+                assert_eq!(ii, idx);
+            }
+            ref other => panic!("expected Index, got {:?}", other),
         }
     }
 }

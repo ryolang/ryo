@@ -142,6 +142,8 @@ pub enum InstTag {
     IntLiteral,
     FloatLiteral,
     StrLiteral,
+    /// `b"..."` payload; data is `InstData::Str` (StringId of the decoded bytes). (M8.4.2)
+    BytesLiteral,
     BoolLiteral,
 
     /// Identifier reference, unresolved. Sema turns this into either
@@ -225,6 +227,10 @@ pub enum InstTag {
     /// Bounds optional; see [`InstData::Slice`]. Type-checks to `strview`
     /// in sema.
     Slice,
+
+    /// Scalar indexing `base[index]`; `InstData::BinOp` (lhs=base,
+    /// rhs=index). Sema gates to bytes/bytesview (M8.4.2).
+    Index,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -502,6 +508,10 @@ impl UirBuilder {
         self.push(InstTag::StrLiteral, InstData::Str(value), span)
     }
 
+    pub fn bytes_literal(&mut self, value: StringId, span: Span) -> InstRef {
+        self.push(InstTag::BytesLiteral, InstData::Str(value), span)
+    }
+
     pub fn bool_literal(&mut self, value: bool, span: Span) -> InstRef {
         self.push(InstTag::BoolLiteral, InstData::Bool(value), span)
     }
@@ -536,6 +546,19 @@ impl UirBuilder {
         span: Span,
     ) -> InstRef {
         self.push(InstTag::Slice, InstData::Slice { base, start, end }, span)
+    }
+
+    /// Emit a scalar indexing `base[index]` (M8.4.2). Sema gates the
+    /// base to bytes/bytesview and the index to `int`.
+    pub fn index(&mut self, base: InstRef, index: InstRef, span: Span) -> InstRef {
+        self.push(
+            InstTag::Index,
+            InstData::BinOp {
+                lhs: base,
+                rhs: index,
+            },
+            span,
+        )
     }
 
     pub fn binary(&mut self, tag: InstTag, lhs: InstRef, rhs: InstRef, span: Span) -> InstRef {
@@ -1132,6 +1155,9 @@ fn write_inst(
         (InstTag::IntLiteral, InstData::Int(v)) => writeln!(f, "int {}", v),
         (InstTag::FloatLiteral, InstData::Float(v)) => writeln!(f, "float {}", v),
         (InstTag::StrLiteral, InstData::Str(s)) => writeln!(f, "str {:?}", pool.str(s)),
+        (InstTag::BytesLiteral, InstData::Str(s)) => {
+            writeln!(f, "bytes \"{}\"", pool.bytes_payload(s).escape_ascii())
+        }
         (InstTag::BoolLiteral, InstData::Bool(b)) => writeln!(f, "bool {}", b),
         (InstTag::Var, InstData::Var(s)) => writeln!(f, "var {}", pool.str(s)),
         (op, InstData::BinOp { lhs, rhs }) => {
@@ -1282,6 +1308,7 @@ fn bin_op_name(t: InstTag) -> &'static str {
         InstTag::GtEq => "icmp_ge",
         InstTag::And => "bool_and",
         InstTag::Or => "bool_or",
+        InstTag::Index => "index",
         _ => "?bin",
     }
 }

@@ -29,8 +29,9 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.4 — String Slices (`strview`) [alpha] ✅ COMPLETE](#milestone-84-string-slices-strview-alpha--complete)
 - [x] [Milestone 8.4.1 — `strview` Spelling & View→`str` Re-borrow [alpha] ✅ COMPLETE](#milestone-841-strview-spelling--viewstr-re-borrow-alpha--complete)
 - [x] [Milestone 8.4.1.2 — View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE](#milestone-8412-view-materialization-strview--w0003-alpha--complete)
-- [ ] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha]](#milestone-842-bytes-type--bytesview-alpha)
+- [x] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha] ✅ COMPLETE](#milestone-842-bytes-type--bytesview-alpha--complete)
 - [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
+- [ ] [Milestone 8.7 — Literal Completeness (Hex/Octal/Binary Ints, Escapes)](#milestone-87-literal-completeness-hexoctalbinary-ints-escapes)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
 - [ ] [Milestone 9.1 — Synthesized Eq & Debug for Structs](#milestone-91-synthesized-eq--debug-for-structs)
 - [ ] [Milestone 10 — Tuples](#milestone-10-tuples)
@@ -42,6 +43,8 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 
 - [ ] [Milestone 16 — Optional Types (`?T`) [alpha]](#milestone-16-optional-types-t-alpha)
 - [ ] [Milestone 17 — Method Implementations](#milestone-17-method-implementations)
+- [ ] [Milestone 17.1 — Explicit Sizes (`i8`–`i64`, `u8`–`u64`, `usize`, `float32`)](#milestone-171-explicit-sizes-i8i64-u8u64-usize-float32)
+- [ ] [Milestone 17.2 — `char` Type](#milestone-172-char-type)
 - [ ] [Milestone 21 — Array Slices (`slice[T]`)](#milestone-21-array-slices-slicet)
 - [ ] [Milestone 22 — Collections (List, Map)](#milestone-22-collections-list-map)
 - [ ] [Milestone 23 — RAII & Drop (Compiler Intrinsic)](#milestone-23-raii--drop-compiler-intrinsic)
@@ -66,6 +69,7 @@ Deferred features tracked separately — see Phase 5 section for the full list (
 | ------ | -------- | ------- |
 | `sbytes` (ARC buffer, slicing, COW warnings) | v0.2–v0.3 | D3; needs `shared[T]` atomic-refcount runtime |
 | Runtime profile split (`core`/`hosted`, `--profile=core`) | v0.2 | D9; stdlib layering, no backend changes |
+| `bytes.copy_into(bview, &buf)` (no-alloc view materialization) | v0.2 | needed by the `core` no-alloc profile and the FFI buffer idiom (`cstr.from`) — land with/before FFI; destination is a fixed-capacity `[N]u8` (fixed arrays land with M21); design in `ryo-view-materialization.md` §2.3 |
 | Bounded operator overloading (`Add`… traits) | v0.2–v0.3 | D10; concrete types first, generic traits with user generics |
 | `unsafe` policy implementation (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | D4; lands with FFI/unsafe work |
 | Volatile MMIO intrinsics | v0.2 | GAP-3; `core` profile intrinsic package |
@@ -1191,7 +1195,7 @@ fn main():
 **What was implemented:**
 
 - The view type is spelled `strview` (final spec Q5 — RESOLVED); `bytesview` / `slice[T]` follow the same word family. `&` remains exclusively the `inout` call-site marker; legacy `&str` in type position is a targeted migration error: "`&str` was renamed to `strview` (final spec Q5)".
-- Views pass to ordinary `str` parameters via a `cap=0` re-borrow (`TirTag::ViewAsStr`): no allocation, call-scoped — exactly like a string literal (final spec §3.2, P6'). The binding form `x: str = view` stays an error (E0012), and `move str` parameters still reject views.
+- Views pass to ordinary `str` parameters via a `cap=0` re-borrow (`TirTag::ViewAsOwner`): no allocation, call-scoped — exactly like a string literal (final spec §3.2, P6'). The binding form `x: str = view` stays an error (E0012), and `move str` parameters still reject views.
 - Docs migrated to the new spelling: final spec (Q5, §3), base spec (§4.4), this roadmap, the landing reference, and `examples/string_slices.ryo`.
 
 **Visible Progress:** read-only helpers keep plain `s: str` signatures and accept owned strings and views alike with zero copies; code still spelling the view type `&str` fails with a diagnostic that names the fix.
@@ -1219,7 +1223,7 @@ fn main():
 
 **Implementation Notes:**
 
-- The re-borrow manufactures a temporary `str` header with `cap=0` over the view's bytes (`TirTag::ViewAsStr`) — no allocation, valid for the duration of the call only.
+- The re-borrow manufactures a temporary `str` header with `cap=0` over the view's bytes (`TirTag::ViewAsOwner`) — no allocation, valid for the duration of the call only.
 - Dependencies: Milestone 8.4 (view type, projection machinery)
 
 ### Milestone 8.4.1.2: View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE
@@ -1260,41 +1264,48 @@ fn main():
 - Out of scope (deferred): `bytes(bview)` (ships with M8.4.2), `slice[T]` materialization (M21), the `Clone` trait and the trait-forward resolution hook (trait milestone — `str(view)` will resolve through a converting-initializer protocol, call sites unchanged), and a machine-applicable E0034 suggestion (needs Diag suggestion-payload machinery that doesn't exist — belongs with the agent-interface milestone).
 - Dependencies: Milestone 8.4.1 (re-borrow, view machinery)
 
-### Milestone 8.4.2: `bytes` Type & `bytesview` [alpha]
+### Milestone 8.4.2: `bytes` Type & `bytesview` [alpha] ✅ COMPLETE
 
 **Goal:** An owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` — plus its read-only projection, filling the gap where `list[u8]` is the only (awkward) option. Per the final slicing spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md`, D2).
 
-**Status:** ⏳ Planned
+**Status:** ✅ COMPLETE (2026-08-31)
 
 **Tasks:**
 
 - `bytes` as a new fundamental type: fat pointer `{ ptr, len, cap }`, move semantics, mutability by binding; parameters borrow by default; `inout`/`move` as usual (ownership rules identical to `str`)
-- Bytes literal `b"\x00\x01"`; `bytes.from_list([0x01, 0x02, 0x03])` construction
+- Bytes literal `b"\x00\x01"`: ASCII content plus the string-literal escape set and `\xNN` (exactly two hex digits, bytes-literal-only); raw non-ASCII source bytes are a lex diagnostic. Static data + `cap=0` header, no allocation (string-literal lowering)
 - Slicing `raw[start:end]` yields `bytesview` — a projection governed by the D1 rules (P1–P6, E1–E4) with **no** UTF-8 boundary check (bytes are not text); bounds check at creation, panics
-- `bytesview` activates `TypeKind::View(ViewKind::Bytes)` (slot reserved since M8.4's Task 10.1); generalize `TirTag::ViewOfStr` → owner→view conversion per the `owner_view` table
-- Scalar indexing `b[i]` **is** allowed on `bytes` (unlike `str` — no UTF-8 hazard), yielding `u8`
-- Bridging: `raw.to_str() -> Utf8Error!str` (UTF-8 validated, `try`-able) and `text.to_bytes() -> bytes` (owned copy)
-- `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`)
-- Buffer building via the builder idiom: `bytes.builder().u8(v).u16_be(n).bytes(b).build()` (`move self -> Self` chaining, spec §5.2.1)
-- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice mirroring the **post-fix `str` ABI** — producing functions return `{ptr, len}` by value packed in one `u128` (lo = ptr, hi = len) with `cap` derived at the call site, per the Phase 0 ABI decision recorded on `pack_pair` in `runtime/src/lib.rs` and pinned by `clif_string_ops_use_packed_return_no_stack_slots` (no out-pointer stack slots); memory fixtures for both JIT and AOT (ASan/Valgrind)
+- `bytesview` activates `TypeKind::View(ViewKind::Bytes)` (slot reserved since M8.4's Task 10.1); generalize `TirTag::ToView` → owner→view conversion per the `owner_view` table
+- Scalar indexing `b[i]` on `bytes` and `bytesview`, bounds-checked, panics — **interim: yields `int`** (0–255); becomes `u8` with Milestone 17.1 (`u8` without coercion rules is unusable — no implicit numeric conversions means `b[i] == 0x02` would not compile). Read-only: no `b[i] = v`
+- Bridging: `text.to_bytes() -> bytes` (owned copy, never fails) and `raw.to_str() -> str` — **interim: panics on invalid UTF-8**; becomes `Utf8Error!str` with Milestone 13 (error unions), call sites switch to `catch`/match handling
+- `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`); W0003 extends to both shapes
+- Buffer building (the builder idiom is deferred — it needs M17 methods): `a + b` owned concatenation (mirrors `StrConcat`; view operands rejected as with `str`) and `bytes_push(&b, x)` single-byte append (`inout` first arg mirroring `str_push`; `x: int` range-checked 0–255, panics)
+- `print` accepts `bytes`/`bytesview` with an escaped repr (`b"\x01\x02A"`: printable ASCII literal, short escapes where they exist, else `\xNN`); `==`/`!=` on both types incl. cross-comparison via the implicit owner→view conversion; `.len()`/`.is_empty()`
+- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice/from_view/push/eq/repr/to_bytes/to_str mirroring the **post-fix `str` ABI** — producing functions return `{ptr, len}` by value packed in one `u128` (lo = ptr, hi = len) with `cap` derived at the call site, per the Phase 0 ABI decision recorded on `pack_pair` in `runtime/src/lib.rs` and pinned by `clif_string_ops_use_packed_return_no_stack_slots` (no out-pointer stack slots); memory fixtures for both JIT and AOT (ASan/Valgrind)
 
-**Visible Progress:** Protocol/binary code reads and slices raw buffers zero-copy; text bridging is explicit and error-checked.
+**Visible Progress:** Protocol/binary code reads and slices raw buffers zero-copy; text bridging is explicit and checked (panic interim).
 
 **Example:**
 
 ```ryo
 fn main():
-	raw = bytes.from_list([0x01, 0x02, 0x03])
+	raw = b"\x01\x02\x03"
 	header = raw[0:2]             # bytesview — projection, no copy
-	print(int_to_str(header[0]))  # 1
+	print(int_to_str(header[0]))  # 1 — b[i] yields int (interim)
 
-	text = try raw.to_str()       # Utf8Error!str — UTF-8 validated
+	text = raw.to_str()           # panics on invalid UTF-8 (interim)
 	raw2 = text.to_bytes()        # owned copy
+
+	mut buf = b"\x00"
+	bytes_push(&buf, 255)         # hex literals land in Milestone 8.7
+	buf = buf + raw
+	print(buf)                    # b"\x00\xff\x01\x02\x03"
 ```
 
 **Implementation Notes:**
 
 - The projection machinery is shared with `strview` (M8.4): same root-owner side tables, P2 freeze, P5 deferral; only the UTF-8 boundary check is `strview`-specific
+- Deferred out of this milestone (dependencies missing at this point in the sequence): `u8` element type and indexed stores → Milestone 17.1; `Utf8Error!str` spelling → Milestone 13; `bytes.builder()` → after Milestone 17; `bytes.from_list([...])` → Milestone 22 era (no list type exists to pass)
 - `sbytes` (shared-backed, escaping) is **not** part of this milestone — it ships with `shared[T]` machinery (v0.2–v0.3, final spec §5)
 - `str` indexing remains forbidden (spec §4.7); `b[i]` applies to `bytes` only
 - Mutable view types remain rejected (final spec §12); mutable sub-ranges use `inout` + range parameters (Q4)
@@ -1393,6 +1404,26 @@ print("hello", "")          # compile error — end is keyword-only
 **Unlocks:** Milestone 9 struct literals share `name=value` parsing infrastructure. Future `print(_ text: str, end: str = "\n")` API.
 
 > **Note:** Closures and lambda expressions were originally planned as Milestone 8.6 but have been **deferred to v0.2** (see Phase 5: Closures & Lambda Expressions). Closures are not strictly required for the v0.1.0 core language; named functions plus the standard library cover every v0.1 use case, and deferring capture analysis (originally M15.5) lets the v0.1 borrow checker stay focused on let/struct/method bindings.
+
+### Milestone 8.7: Literal Completeness (Hex/Octal/Binary Ints, Escapes)
+
+**Goal:** Implement the literal forms spec §3 documents but the lexer never got: non-decimal integer literals and the full escape set.
+
+**Status:** ⏳ Planned
+
+**Tasks:**
+
+- Integer literals: hex `0xFF`, octal `0o77`, binary `0b11`, underscore separators `1_000` (and `1_000.0` for floats) — all produce the existing `int`/`float`; same i64 range rules and `IntLitMin` handling as decimal
+- String escapes: `\xHH` and `\u{HHHH}`. Both are Unicode-scalar semantics (Python-style): `\xFF` in a `"..."` literal means U+00FF, UTF-8 encoded — two bytes, not one. Bytes literals are the raw-byte form and keep their M8.4.2 rule: `\xNN` accepts the full 0x00–0xFF range there
+- Tests: all bases, separators, escape ranges, rejection cases (bad digits, `\x` with fewer than two hex digits, `\u{}` surrogates / above U+10FFFF)
+
+**Visible Progress:** Byte-oriented code reads naturally (`bytes_push(&b, 0xFF)`); string literals accept the full spec §3 escape set.
+
+**Implementation Notes:**
+
+- Lexer-scoped change: the raw int token gains prefixed forms; conversion to `i64` happens at lex time like decimal today
+- `\u{HHHH}` encodes the scalar as UTF-8 into the decoded literal — no `char` type required (that is Milestone 17.2)
+- Dependencies: none
 
 ### Milestone 9: Structs
 
@@ -1711,6 +1742,7 @@ fn main():
 - `.message() -> str` is exposed via a compiler-known interface (the user-facing `trait` keyword is v0.2/v0.3 — see Phase 5: Traits & Generics)
 - The `try` *propagation* operator and the bare `catch:` shortcut are deferred to v0.2 (see Phase 5: Try/Catch Operators); v0.1 handles errors with `expr catch as e:` (spec §7.4) and propagates with explicit `match`/`return`
 - Dependencies: Milestone 11 (enums), Milestone 12 (pattern matching for handling)
+- Converts the M8.4.2 interim: `bytes.to_str()` / `bytesview.to_str()` gain their final `Utf8Error!str` signature (the panicking stopgap is replaced; call sites switch to `catch`/match handling)
 - **Error return traces** (Zig-inspired): instrument every error-return site to record the return address into a per-error trace buffer, giving users the full propagation path from creation to handler. Compiler inserts instrumentation at `match` error-forwarding sites (`Err(e): return e`); the trace buffer is a fixed-size array carried alongside the error union value. Zero cost when errors don't fire. Unlike panic stack traces (I-039, which walk frame pointers at crash time), error traces capture the *propagation chain* at each return site — showing every function that forwarded the error, not just where it was created. Requires DWARF `.debug_line` for source mapping (shared prerequisite with I-039).
 
 > **Note:** The `try` *propagation* operator (originally Milestone 14) is **deferred to v0.2** — see Phase 5: Try/Catch Operators. Error-union *types*, the `.message()` accessor, and `expr catch as e:` *handling* all ship in v0.1 (spec §7.4); v0.1 propagates errors with explicit `match`/`return`, which is verbose but fully expressive.
@@ -1839,12 +1871,61 @@ fn main():
 - Method call syntax: `obj.method()` desugars to `Type::method(obj)`
 - No method overloading (one method per name per type)
 - Dependencies: Milestone 8.1 (ownership/move tracking for `self`), Milestone 8.2/8.3 (borrows for `&self` / `inout self`)
+- Unblocks the `bytes.builder()` buffer-builder design (deferred from M8.4.2): chained `move self -> Self` methods (`u8(v).u16_be(n).bytes(b).build()`, spec §5.2.1) on an opaque builder type
 
 > **Note:** Milestone 18 (Traits) has been **deferred to v0.2/v0.3** and folded into the Phase 5 "Traits & Generics" track. Without generics, traits are largely cosmetic — you cannot write `fn max[T: Comparable](...)` — so shipping them together preserves design coherence. A handful of trait-shaped concepts the v0.1 language depends on (`.message()` on errors, `Copy` marker, `Drop` cleanup) are implemented as **compiler-known interfaces** rather than user-extensible traits in v0.1. Methods on user types still work via `impl` blocks (Milestone 17); only the `trait` keyword and trait bounds are deferred.
 
 > **Note:** Milestone 19 (Immutable Borrows) has been **moved to Milestone 8.2** — see Phase 2.
 
 > **Note:** Milestone 20 (Mutable Borrows) has been **moved to Milestone 8.3** — see Phase 2.
+
+### Milestone 17.1: Explicit Sizes (`i8`–`i64`, `u8`–`u64`, `usize`, `float32`)
+
+**Goal:** Make the spec §4.2 "Explicit Sizes" line real — sized integer and float types with deliberate conversion rules.
+
+**Status:** ⏳ Planned
+
+**Design questions this milestone owns:**
+
+- Literal coercion: when does an `int` literal type as `u8` (contextual typing), and what are the comparison/arithmetic rules between sized types and `int`? Ryo has no implicit numeric conversions today (the `bool` philosophy, §4.2) — without an answer, `b[i] == 0x02` does not compile
+- Conversion spelling: explicit `int` ↔ sized-type conversions and their checked/narrowing behavior
+- Overflow semantics per sized type (GAP-2 froze traps-in-all-build-modes for `int`, spec §18; sized types follow)
+
+**Tasks:**
+
+- Pool tags + `TypeKind` entries for `i8`/`i16`/`i32`/`u8`/`u16`/`u32`/`u64`/`usize`/`float32`; annotation resolution; display
+- Cranelift lowering (`I8`–`I64`, `F32`) with explicit extend/reduce at conversions; no implicit widening
+- Resolves the M8.4.2 interim: `b[i]` yields `u8`, `bytes_push` takes `u8` (pre-alpha breaking change, pre-announced in the M8.4.2 notes)
+- Indexed stores `b[i] = v` on `mut bytes` bindings (bounds-checked, panics) — deferred from M8.4.2 alongside the element type
+- Benchmark: add `benchmarks/byte_sieve/` (Sieve of Eratosthenes over a `mut bytes` buffer) as the tracking measure for byte-index codegen — expressible only once indexed stores land here
+- Tests: per-type arithmetic/comparison/conversion, overflow traps, the `bytes` element-type transition and indexed stores
+
+**Visible Progress:** `if raw[0] == 0x02:` compiles and does the obvious thing.
+
+**Implementation Notes:**
+
+- Dependencies: none beyond the current pipeline — schedulable freely, but delay widens the body of `int`-typed byte code that must migrate
+
+### Milestone 17.2: `char` Type
+
+**Goal:** The spec §4.2 `char` primitive (Unicode Scalar Value, literal `'a'`) — M22's string-iteration story (`.chars()` yields `char`) already assumes it exists.
+
+**Status:** ⏳ Planned
+
+**Tasks:**
+
+- Pool tag + `TypeKind::Char`; annotation resolution; display
+- Char literals `'a'`, `'\u{1F600}'` — exactly one scalar value per literal; empty and multi-scalar literals are lex diagnostics
+- Representation: 32-bit scalar, validated at literal time (no surrogates, nothing above U+10FFFF); Cranelift `I32`
+- `==`/`!=`, `print` (renders the single char), checked `char` ↔ `int` conversion (code point)
+- Tests: literals, escapes, validation rejections
+
+**Visible Progress:** `c: char = 'a'` compiles; the type M22's `.chars()` iterator yields now exists.
+
+**Implementation Notes:**
+
+- `.chars()` / `.char_count()` themselves land with M22 (iterator machinery); this milestone ships only the type
+- Dependencies: Milestone 8.7 recommended (shares the `\u{HHHH}` escape decoder)
 
 ### Milestone 21: Array Slices (`slice[T]`)
 
@@ -1946,7 +2027,8 @@ fn main():
 - **Copy-on-write at the buffer level** — `list[T]`, `map[K, V]`, and `str` are class-backed but present value semantics to the user. A mutating method checks the backing buffer's refcount; if > 1, it clones the buffer first. This is the Swift collection model (`Array`, `Dictionary`, `String`) and is the prerequisite for `shared[T]`'s performance story (spec 5.6).
 - **ARC optimizer pass** ([arc_optimizer.md](arc_optimizer.md)) must land alongside or shortly after this milestone. Without retain/release elision, every collection access in shared-state code pays atomic refcount cost. Sequencing: design and prototype the pass during this milestone; commit it before any benchmark publication.
 - Dependencies: Milestone 8.3 (`inout` for append/remove), Milestone 21 (array slices for iteration)
-- **String iteration (sequencing, with spec §4.7):** `char` (§4.2, Unicode scalar value) lands first; `.chars()` is a decoding iterator over it; `.char_count()` is the explicit-O(n) convenience — `.len()` stays byte length, so no linear scan hides behind constant-looking syntax. `s.chars().collect() -> list[char]` is the decode-once-then-index escape hatch (explicit allocation).
+- `bytes.from_list([...])` becomes expressible here (deferred from M8.4.2 — it needs list literals to exist)
+- **String iteration (sequencing, with spec §4.7):** `char` (§4.2, Unicode scalar value — Milestone 17.2) lands first; `.chars()` is a decoding iterator over it; `.char_count()` is the explicit-O(n) convenience — `.len()` stays byte length, so no linear scan hides behind constant-looking syntax. `s.chars().collect() -> list[char]` is the decode-once-then-index escape hatch (explicit allocation).
 - **String `for` shape:** `for (offset, c) in text.chars():` — each step yields the byte offset (aligned with slice bounds, for `text[start:i]`-style scanning) and the decoded `char` (for classification). No silent U+FFFD: `str` is valid UTF-8 by construction, so decoding is total — the Go ergonomics without the Go error-swallowing.
 
 ### Milestone 23: RAII & Drop (Compiler Intrinsic)
@@ -3514,11 +3596,11 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Realistic Estimates (2-4 weeks per milestone)
 
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
-**Phase 2 (M4-M13):** 14 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (strview); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~42 weeks (~10 months)
-**Phase 3 (M16, M17, M21, M22, M23):** 5 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~15 weeks (~4 months)
+**Phase 2 (M4-M13):** 15 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (strview), M8.7 (literal forms); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~45 weeks (~11 months)
+**Phase 3 (M16, M17, M17.1, M17.2, M21, M22, M23):** 7 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~21 weeks (~5 months)
 **Phase 4 (M24-M27):** 6 milestones (includes M26.5 Distribution & Installer and M26.6 Cross-Compilation) × 4 weeks avg = ~24 weeks (~6 months)
 
-**Total Estimated Time:** 89 weeks (~22 months) from Phase 2 start to v0.1.0
+**Total Estimated Time:** 98 weeks (~24 months) from Phase 2 start to v0.1.0
 
 ### Development Approach
 
@@ -3529,9 +3611,9 @@ This foundation enables building **synchronous applications** including CLI tool
 
 ### Milestones by Complexity
 
-**Simple (2 weeks):** M4, M5, M7, M10, M8.4
-**Medium (3 weeks):** M6, M8, M8.1, M8.2, M8.3, M8.5, M9, M11, M12, M13, M16, M17, M21, M22, M24, M25, M26, M26.5
-**Complex (4-5 weeks):** M20, M23, M27
+**Simple (2 weeks):** M4, M5, M7, M10, M8.4, M8.7
+**Medium (3 weeks):** M6, M8, M8.1, M8.2, M8.3, M8.5, M9, M11, M12, M13, M16, M17, M17.2, M21, M22, M24, M25, M26, M26.5
+**Complex (4-5 weeks):** M17.1, M20, M23, M27
 
 This timeline is **realistic** based on compiler development best practices. Each milestone includes implementation, testing, documentation, and examples.
 

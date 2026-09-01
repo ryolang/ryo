@@ -168,11 +168,11 @@ agent-interface milestone.
 | Milestone | Deliverable | Rationale |
 |---|---|---|
 | **M8.4.1.2 ✅ COMPLETE (2026-08-02)** | `str(view)` + W0003 RedundantMaterialize | Shipped. The materialize API is the escape hatch that makes the escape rules livable; W0003 guards the overlap with the M8.4.1 re-borrow (§2.5). The E0034 suggestion stayed out (§3). |
-| M8.4.2 (bytes) | `bytes(bview)` + `bytes.copy_into(bview, &buf)` | Ships with the `bytes` type itself; `bytes(bview)` mirrors `str(view)`. `copy_into` here because `bytes` is the core-profile string surrogate. |
+| **M8.4.2 ✅ COMPLETE (2026-09-01)** | `bytes(bview)` | Shipped with the `bytes` type; mirrors `str(view)`. `bytes.copy_into` was split out — its destination is a fixed-capacity `[N]u8`, so it rides the core-profile row below. |
 | M21 (slice views `slice[T]`) | `slice[T]` materialization with the bit-copy check in sema | Lands with the slice-view machinery; sema enforces trivially-copyable `T` (needs the Copy-type classification from the ownership pass side tables). |
 | Trait milestone (post-D10, v0.3 line) | `From`/`Materialize` + `Clone` traits; `str(view)` resolves through the converting-initializer protocol | Call sites unchanged. GAP entry already records the trait pair; remove it from open questions when scheduled. |
 | Agent-interface milestone | E0034 machine-applicable suggestion (§3) | Needs Diag suggestion-payload machinery that doesn't exist yet. |
-| Core-profile milestone | `copy_into` generalized to fixed-capacity containers | Blocked on fixed-capacity container types (Odin `[dynamic; N]T` candidate). |
+| Core-profile split (roadmap Phase 5 deferred table, v0.2) | `bytes.copy_into(bview, &buf)`; `copy_into` generalized to fixed-capacity containers | Blocked on fixed-capacity container types (Odin `[dynamic; N]T` candidate). Split out of M8.4.2. |
 
 **History note.** This section previously drafted a "Task 10.2" for insertion
 into the M8.4 milestone file (`str.from(&str)` + E0034 suggestion wiring, with

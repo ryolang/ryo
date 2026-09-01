@@ -287,3 +287,8 @@ fn valgrind_str_materialize_copy() {
         "str_materialize_copy",
     );
 }
+
+#[test]
+fn valgrind_bytes_ops() {
+    run_valgrind_smoke(common::find_fixture("bytes_ops"), "bytes_ops");
+}
