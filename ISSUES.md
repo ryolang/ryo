@@ -388,11 +388,23 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Codegen imports these as opaque extern calls, so every use pays a full call that Cranelift can neither inline nor hoist. The bodies are a handful of instructions: `ryo_str_from_literal` is just `pack_pair` (shift + or), `__ryo_slice` is two bounds checks, two UTF-8 boundary tests, and a `ptr.add`, and `ryo_str_eq` against a short literal is a few byte compares. In `benchmarks/string_slicing` the scan loop makes three such calls per iteration (slice + literal materialization + eq) where Rust inlines all of it to pointer arithmetic and a 3-byte memcmp — the bulk of the measured 3.5× AOT gap (CLIF verified 2026-08-26: the `str`/`strview` param variants are instruction-identical in the loop except for these calls, and a same-compiler A/B ties at 5.9 ms both ways).
 **Resolution:** Emit the tiny bodies as inline Cranelift IR at the call sites instead of extern calls (slice keeps its panic paths; eq can specialize when one side is a known short literal). Literal re-materialization is already handled (each distinct literal is emitted once per function in the entry block); inlining `pack_pair` would remove the remaining extern call from that one materialization. Larger ops (`ryo_str_concat`, `__ryo_str_push`) stay extern.
 
+### I-166 — Sema does not reject constant `INT_MIN / -1` at compile time
+
+**Files:** `ryo-frontend/src/sema.rs` (the literal-zero division check), `ryo-backend/src/codegen/expr.rs` (`emit_div_zero_guard`)
+**Summary:** The codegen division guard panics at runtime on `x / 0` and `x % 0`, with `INT_MIN / -1` and `INT_MIN % -1` covered by the signed-overflow guard fix; but sema only rejects the literal-zero-divisor form at compile time. The constant case `INT_MIN / -1` (dividend a known `i64::MIN` constant, divisor the literal expression `-1` — a unary minus, not a literal) still compiles and only fails when executed. Deferred from the runtime-guard fix as likely not worth it: the shape is rare and the runtime guard covers correctness.
+**Resolution:** In sema's division checks, when the divisor expression is a unary-minus of literal `1` and the dividend's constant value (or range) is exactly `i64::MIN`, emit a compile-time diagnostic pointing at the division. Skip if constant/range info is not already in scope at that site — do not plumb new machinery for this edge case.
+
+### I-167 — Systematic audit of the runtime FFI boundary beyond the known gaps
+
+**Files:** `runtime/src/lib.rs` (all `#[unsafe(no_mangle)]` entry points)
+**Summary:** Two robustness gaps at the C-ABI boundary were fixed directly (conflated abort modes for OOM vs capacity overflow, and debug-only null checks on `ryo_print` / `ryo_panic` / the slice path), but they were found by inspection, not by a systematic pass. Other entry points may have similar under-checked inputs: untrusted `len`/`cap` values that flow into `write_all`/`memcpy`/allocation size arithmetic, raw pointers beyond the three known sites, and panic/abort paths whose exit codes or messages are load-bearing for codegen assumptions.
+**Resolution:** One audit pass over every `#[unsafe(no_mangle)]` function in `runtime/src/lib.rs`: for each, enumerate the caller contract (which args are trusted vs attacker/bad-codegen-controlled), confirm each unsafe dereference is guarded or documented, and confirm each abort path reports a distinct, accurate message. Fix what's found in the same pass; it's a small file.
+
 ---
 
 ## Cross-References
 
-- Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md), refreshed at [docs/dev/architecture_analysis_2026_08_20.md](docs/dev/architecture_analysis_2026_08_20.md) and [docs/dev/architecture_analysis_2026_08_24.md](docs/dev/architecture_analysis_2026_08_24.md) — dated snapshots; several current entries originated there, and their `I-xxx` citations reflect what was open at the time.
+- Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
