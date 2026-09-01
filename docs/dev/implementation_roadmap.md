@@ -1896,7 +1896,9 @@ fn main():
 - Pool tags + `TypeKind` entries for `i8`/`i16`/`i32`/`u8`/`u16`/`u32`/`u64`/`usize`/`float32`; annotation resolution; display
 - Cranelift lowering (`I8`–`I64`, `F32`) with explicit extend/reduce at conversions; no implicit widening
 - Resolves the M8.4.2 interim: `b[i]` yields `u8`, `bytes_push` takes `u8` (pre-alpha breaking change, pre-announced in the M8.4.2 notes)
-- Tests: per-type arithmetic/comparison/conversion, overflow traps, the `bytes` element-type transition
+- Indexed stores `b[i] = v` on `mut bytes` bindings (bounds-checked, panics) — deferred from M8.4.2 alongside the element type
+- Benchmark: add `benchmarks/byte_sieve/` (Sieve of Eratosthenes over a `mut bytes` buffer) as the tracking measure for byte-index codegen — expressible only once indexed stores land here
+- Tests: per-type arithmetic/comparison/conversion, overflow traps, the `bytes` element-type transition and indexed stores
 
 **Visible Progress:** `if raw[0] == 0x02:` compiles and does the obvious thing.
 
