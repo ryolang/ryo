@@ -10,7 +10,7 @@ This directory contains implementation notes, architectural decisions, and desig
 
 | File | Content | Next Action |
 |---|---|---|
-| [pipeline_alignment.md](pipeline_alignment.md) | The UIR/TIR split, deeper InternPool, structured diagnostics — Phases 1–4 shipped (design rationale for the current middle-end + Zig mapping); Phase 5 (lazy Sema) pending | **Keep as reference** for Phases 1–4; **implement** Phase 5 for comptime/generics |
+| [pipeline_alignment.md](pipeline_alignment.md) | Zig-alignment plan — all phases shipped (UIR/TIR split, InternPool, diagnostics, lazy Sema); tracks pending comptime/generics substrate work, Zig divergence notes, and future considerations | **Implement** the pending features as their own roadmap milestones; **delete** once comptime/generics land |
 | [architecture_analysis.md](architecture_analysis.md) | Verified snapshot of the full compiler architecture (data structures per stage, ranked weaknesses) + tiered improvement roadmap; source of a tranche of [ISSUES.md](../../ISSUES.md) entries | **Keep as reference**; implement roadmap tiers per ISSUES.md — refresh or delete when stale |
 | [closure_representation.md](closure_representation.md) | Closure memory layout, capture, and calling-convention/ABI design | **Implement** when closures land (v0.2+) — then keep as reference |
 | [arc_optimizer.md](arc_optimizer.md) | Swift-style ARC retain/release-elision pass design for `shared[T]` | **Implement** post-M11 alongside `shared[T]` — then keep as reference |

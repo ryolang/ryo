@@ -175,7 +175,7 @@ Ryo does not produce or consume Zig's ZIR/AIR — these are upstream design refe
 
 **Niche-filled refs.** `InstRef` (UIR) and `TirRef` (TIR) wrap `NonZeroU32`, so `Option<InstRef>` / `Option<TirRef>` fit in a single 32-bit slot. Slot 0 of each `instructions` arena is a reserved sentinel that is never emitted — do not hand out `InstRef(0)` / `TirRef(0)`, and do not assume index 0 is a real instruction when iterating.
 
-See `docs/dev/pipeline_alignment.md` for the full design rationale (motivation, phase plan, comptime/generics implications).
+See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan (pending features, divergence notes, future considerations); the shipped phase plan lives in git history.
 
 **Crate and Module Map** (distributed in workspace packages):
 
@@ -302,7 +302,7 @@ cargo test -- --nocapture       # Show output
 
 ## Related Documentation
 
-- `docs/dev/pipeline_alignment.md` — detailed UIR/TIR pipeline design and Zig alignment rationale
+- `docs/dev/pipeline_alignment.md` — UIR/TIR pipeline: remaining work (comptime/generics substrate), Zig divergence notes, future considerations
 - `docs/dev/implementation_roadmap.md` — feature roadmap
 - `docs/dev/ryo-compiler-llm-instructions.md` — **normative contributor rules (R1–R21)** for compiler work: data-oriented design, Rust discipline, diagnostics, Cranelift discipline, testing
 - `docs/dev/ryo-slicing-and-memory-model-final-spec.md` — slicing/views/memory-model decisions (D1–D11); amends the base spec

@@ -239,10 +239,9 @@ pub enum InstTag {
 
 /// Per-instruction inline payload.
 ///
-/// Kept as a safe `enum` rather than Zig's `extern union` (per the
-/// pipeline_alignment.md risk register: avoid `unsafe`). The
-/// discriminant costs a few bytes per `Inst`; that's fine for now —
-/// Cranelift, not UIR, dominates compile-time memory.
+/// Kept as a safe `enum` rather than Zig's `extern union` to avoid
+/// `unsafe`. The discriminant costs a few bytes per `Inst`; that's
+/// fine for now — Cranelift, not UIR, dominates compile-time memory.
 #[derive(Debug, Clone, Copy)]
 pub enum InstData {
     /// No operands (used by [`InstTag::ReturnVoid`]).
