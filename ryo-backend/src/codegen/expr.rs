@@ -746,6 +746,34 @@ impl<M: Module> Codegen<M> {
     /// cached triple may be stale (freed/replaced), while the binding's
     /// `Variable`s are SSA-correct at every program point (the
     /// same reasoning the `free_on_reassign` path documents).
+    /// Lazily declare and cache the family-appropriate free `FuncRef`
+    /// (`ryo_bytes_free` when `is_bytes`, else `ryo_str_free`).
+    /// Resolved only at call sites that survive the cap==0 elision, so
+    /// an all-static schedule never declares an unused import.
+    fn free_ref_for(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        str_free_ref: &mut Option<FuncRef>,
+        bytes_free_ref: &mut Option<FuncRef>,
+        is_bytes: bool,
+    ) -> Result<FuncRef, String> {
+        let slot = if is_bytes {
+            bytes_free_ref
+        } else {
+            str_free_ref
+        };
+        if let Some(f) = slot {
+            return Ok(*f);
+        }
+        let f = if is_bytes {
+            Self::declare_bytes_free(ctx.module, builder, ctx.int_type)?
+        } else {
+            Self::declare_str_free(ctx.module, builder, ctx.int_type)?
+        };
+        *slot = Some(f);
+        Ok(f)
+    }
+
     fn emit_frees(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -758,31 +786,20 @@ impl<M: Module> Codegen<M> {
         let mut bytes_free_ref: Option<FuncRef> = None;
         for (idx, target) in pending {
             ctx.freed_at[idx] = true;
-            let free_ref = if Self::free_target_is_bytes(ctx, target) {
-                match bytes_free_ref {
-                    Some(f) => f,
-                    None => {
-                        let f = Self::declare_bytes_free(ctx.module, builder, ctx.int_type)?;
-                        bytes_free_ref = Some(f);
-                        f
-                    }
-                }
-            } else {
-                match str_free_ref {
-                    Some(f) => f,
-                    None => {
-                        let f = Self::declare_str_free(ctx.module, builder, ctx.int_type)?;
-                        str_free_ref = Some(f);
-                        f
-                    }
-                }
-            };
+            let is_bytes = Self::free_target_is_bytes(ctx, target);
             let binding = Self::free_binding_name(ctx, target)
                 .and_then(|name| Self::read_slot(&ctx.fat_locals, name));
             if let Some(sl) = binding {
                 let ptr = builder.use_var(sl.ptr);
                 let cap = builder.use_var(sl.cap);
                 if !Self::is_static_cap_zero(builder.func, cap) {
+                    let free_ref = Self::free_ref_for(
+                        builder,
+                        ctx,
+                        &mut str_free_ref,
+                        &mut bytes_free_ref,
+                        is_bytes,
+                    )?;
                     builder.ins().call(free_ref, &[ptr, cap]);
                 }
                 continue;
@@ -804,6 +821,13 @@ impl<M: Module> Codegen<M> {
             match repr {
                 ValueRepr::Str { ptr, cap, .. } | ValueRepr::Bytes { ptr, cap, .. } => {
                     if !Self::is_static_cap_zero(builder.func, cap) {
+                        let free_ref = Self::free_ref_for(
+                            builder,
+                            ctx,
+                            &mut str_free_ref,
+                            &mut bytes_free_ref,
+                            is_bytes,
+                        )?;
                         builder.ins().call(free_ref, &[ptr, cap]);
                     }
                 }

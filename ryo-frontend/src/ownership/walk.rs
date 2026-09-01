@@ -1151,7 +1151,7 @@ pub(crate) fn visit_expr(
             // borrows the slot, and the binding keeps its pre-call owner.
             // The stale-triple hazard (callee realloc'd/replaced the
             // buffer) is handled in CODEGEN, where named-binding Frees
-            // emit the binding's CURRENT `StrLocals` instead of the
+            // emit the binding's CURRENT `FatLocals` instead of the
             // producing inst's cached repr — the same pattern
             // `free_on_reassign` already used.
         }

@@ -753,7 +753,7 @@ fn reassign_inside_if_still_frees_binding_at_last_use() {
     // s = "b"; print(s)`. The merge keeps the pre-branch owner, so the
     // reassign-target guard must not skip its last-use Free — on the
     // not-taken path the binding still owns `lit_a`. Codegen emits the
-    // Free from the binding's current StrLocals (path-correct buffer).
+    // Free from the binding's current FatLocals (path-correct buffer).
     use chumsky::span::{SimpleSpan, Span as _};
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
@@ -798,7 +798,7 @@ fn reassign_inside_if_still_frees_binding_at_last_use() {
     );
     assert!(
         !sc.free_schedule.iter().any(|fp| fp.target == lit_b),
-        "lit_b's buffer is freed through the binding's current StrLocals (same buffer as lit_a's Free on the taken path) — a second Free would double-free; schedule = {:?}",
+        "lit_b's buffer is freed through the binding's current FatLocals (same buffer as lit_a's Free on the taken path) — a second Free would double-free; schedule = {:?}",
         sc.free_schedule
     );
 }
@@ -887,7 +887,7 @@ fn loop_dead_reassign_anchors_after_loop() {
     // after. The dead-store Free must anchor AFTER THE LOOP (not
     // after the in-loop assign): the in-loop anchor never fires on
     // the zero-iteration path, leaking the pre-loop buffer. The
-    // after-loop anchor emits the binding's current StrLocals —
+    // after-loop anchor emits the binding's current FatLocals —
     // final value on taken paths, pre-loop value on zero iterations.
     use chumsky::span::{SimpleSpan, Span as _};
     use ryo_core::tir::TirBuilder;
@@ -971,7 +971,7 @@ fn loop_dead_reassign_with_return_keeps_in_body_free() {
 fn loop_local_dead_value_keeps_in_body_anchor() {
     // Guard: a value DECLARED inside the loop body is not a
     // pre-loop binding — its Free must stay anchored in the body
-    // (the binding's StrLocals don't exist on the zero-iteration
+    // (the binding's FatLocals don't exist on the zero-iteration
     // path).
     use chumsky::span::{SimpleSpan, Span as _};
     use ryo_core::tir::TirBuilder;
