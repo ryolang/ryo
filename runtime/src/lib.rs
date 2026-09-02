@@ -102,7 +102,9 @@ pub unsafe extern "C" fn ryo_print(ptr: *const u8, len: u64) {
     if len == 0 {
         return;
     }
-    debug_assert!(!ptr.is_null());
+    if ptr.is_null() {
+        null_abort();
+    }
     write_all(STDOUT_FD, ptr, len as usize);
 }
 
@@ -114,7 +116,9 @@ pub unsafe extern "C" fn ryo_print(ptr: *const u8, len: u64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_panic(ptr: *const u8, len: u64) -> ! {
     if len > 0 {
-        debug_assert!(!ptr.is_null());
+        if ptr.is_null() {
+            null_abort();
+        }
         write_all(STDERR_FD, ptr, len as usize);
     }
     // SAFETY: exit never returns.
@@ -183,7 +187,7 @@ pub extern "C" fn ryo_str_alloc(cap: u64) -> *mut u8 {
     if cap == 0 {
         return core::ptr::null_mut();
     }
-    let size: usize = cap.try_into().unwrap_or_else(|_| oom_abort());
+    let size: usize = cap.try_into().unwrap_or_else(|_| overflow_abort());
     // SAFETY: malloc is called with a nonzero size.
     let ptr = unsafe { c_malloc(size) as *mut u8 };
     if ptr.is_null() {
@@ -217,7 +221,7 @@ pub unsafe extern "C" fn ryo_str_realloc(ptr: *mut u8, old_cap: u64, new_cap: u6
         unsafe { ryo_str_free(ptr, old_cap) };
         return core::ptr::null_mut();
     }
-    let new_size: usize = new_cap.try_into().unwrap_or_else(|_| oom_abort());
+    let new_size: usize = new_cap.try_into().unwrap_or_else(|_| overflow_abort());
     // SAFETY: ptr came from a prior alloc per our # Safety doc; new_size > 0 checked above.
     let new_ptr = unsafe { c_realloc(ptr as *mut c_void, new_size) as *mut u8 };
     if new_ptr.is_null() {
@@ -240,6 +244,22 @@ fn str_pair_from_bytes(s: &[u8]) -> u128 {
 
 fn oom_abort() -> ! {
     let msg = b"ryo: out of memory\n";
+    write_all(STDERR_FD, msg.as_ptr(), msg.len());
+    // SAFETY: abort never returns.
+    unsafe { abort() }
+}
+
+#[cold]
+fn overflow_abort() -> ! {
+    let msg = b"ryo: capacity overflow\n";
+    write_all(STDERR_FD, msg.as_ptr(), msg.len());
+    // SAFETY: abort never returns.
+    unsafe { abort() }
+}
+
+#[cold]
+fn null_abort() -> ! {
+    let msg = b"ryo: null pointer passed to runtime\n";
     write_all(STDERR_FD, msg.as_ptr(), msg.len());
     // SAFETY: abort never returns.
     unsafe { abort() }
@@ -269,9 +289,11 @@ pub unsafe fn ryo_str_from_view(ptr: *const u8, len: u64) -> u128 {
     if len == 0 {
         return pack_pair(core::ptr::null_mut(), 0);
     }
-    let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+    let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
     let buf = ryo_str_alloc(len);
-    debug_assert!(!ptr.is_null());
+    if ptr.is_null() {
+        null_abort();
+    }
     // SAFETY: caller contract — ptr/len describe a readable byte range;
     // buf is freshly allocated for len bytes.
     unsafe {
@@ -344,14 +366,14 @@ pub unsafe fn __ryo_slice(ptr: *const u8, len: u64, start: u64, end: u64) -> u12
 pub unsafe fn ryo_str_concat(l_ptr: *const u8, l_len: u64, r_ptr: *const u8, r_len: u64) -> u128 {
     let total = match l_len.checked_add(r_len) {
         Some(t) => t,
-        None => oom_abort(),
+        None => overflow_abort(),
     };
     if total == 0 {
         return pack_pair(core::ptr::null_mut(), 0);
     }
-    let l_sz: usize = l_len.try_into().unwrap_or_else(|_| oom_abort());
-    let r_sz: usize = r_len.try_into().unwrap_or_else(|_| oom_abort());
-    let _: usize = total.try_into().unwrap_or_else(|_| oom_abort());
+    let l_sz: usize = l_len.try_into().unwrap_or_else(|_| overflow_abort());
+    let r_sz: usize = r_len.try_into().unwrap_or_else(|_| overflow_abort());
+    let _: usize = total.try_into().unwrap_or_else(|_| overflow_abort());
     let ptr = ryo_str_alloc(total);
     // SAFETY: caller contract — the input buffers are valid for reading
     // and ptr is freshly allocated for total bytes; the copies do not
@@ -394,7 +416,7 @@ pub unsafe extern "C" fn __ryo_str_push(
         let add: u64 = suffix_len;
         let new_len = match cur_len.checked_add(add) {
             Some(l) => l,
-            None => oom_abort(),
+            None => overflow_abort(),
         };
 
         // Reuse the current buffer when it already fits; otherwise grow.
@@ -416,7 +438,7 @@ pub unsafe extern "C" fn __ryo_str_push(
                 // `cur_len` bytes explicitly.
                 let nb = ryo_str_alloc(new_cap);
                 if cur_len > 0 {
-                    let n: usize = cur_len.try_into().unwrap_or_else(|_| oom_abort());
+                    let n: usize = cur_len.try_into().unwrap_or_else(|_| overflow_abort());
                     debug_assert!(!cur_ptr.is_null());
                     core::ptr::copy_nonoverlapping(cur_ptr, nb, n);
                 }
@@ -430,8 +452,8 @@ pub unsafe extern "C" fn __ryo_str_push(
         };
 
         if add > 0 {
-            let dst_off: usize = cur_len.try_into().unwrap_or_else(|_| oom_abort());
-            let n: usize = add.try_into().unwrap_or_else(|_| oom_abort());
+            let dst_off: usize = cur_len.try_into().unwrap_or_else(|_| overflow_abort());
+            let n: usize = add.try_into().unwrap_or_else(|_| overflow_abort());
             debug_assert!(!suffix_ptr.is_null());
             core::ptr::copy_nonoverlapping(suffix_ptr, buf.add(dst_off), n);
         }
@@ -576,7 +598,7 @@ pub unsafe fn ryo_bytes_from_view(ptr: *const u8, len: u64) -> u128 {
     if len == 0 {
         return pack_pair(core::ptr::null_mut(), 0);
     }
-    let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+    let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
     let buf = ryo_bytes_alloc(len);
     debug_assert!(!ptr.is_null());
     // SAFETY: caller contract — ptr/len describe a readable byte range;
@@ -594,14 +616,14 @@ pub unsafe fn ryo_bytes_from_view(ptr: *const u8, len: u64) -> u128 {
 pub unsafe fn ryo_bytes_concat(l_ptr: *const u8, l_len: u64, r_ptr: *const u8, r_len: u64) -> u128 {
     let total = match l_len.checked_add(r_len) {
         Some(t) => t,
-        None => oom_abort(),
+        None => overflow_abort(),
     };
     if total == 0 {
         return pack_pair(core::ptr::null_mut(), 0);
     }
-    let l_sz: usize = l_len.try_into().unwrap_or_else(|_| oom_abort());
-    let r_sz: usize = r_len.try_into().unwrap_or_else(|_| oom_abort());
-    let _: usize = total.try_into().unwrap_or_else(|_| oom_abort());
+    let l_sz: usize = l_len.try_into().unwrap_or_else(|_| overflow_abort());
+    let r_sz: usize = r_len.try_into().unwrap_or_else(|_| overflow_abort());
+    let _: usize = total.try_into().unwrap_or_else(|_| overflow_abort());
     let ptr = ryo_bytes_alloc(total);
     // SAFETY: caller contract — the input buffers are valid for reading
     // and ptr is freshly allocated for total bytes; the copies do not
@@ -707,7 +729,7 @@ pub unsafe fn __ryo_bytes_to_str(ptr: *const u8, len: u64) -> u128 {
     if core::str::from_utf8(bytes).is_err() {
         slice_fail("bytes are not valid UTF-8");
     }
-    let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+    let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
     let buf = ryo_str_alloc(len);
     // SAFETY: buf is freshly allocated for len bytes; regions disjoint.
     unsafe {
@@ -727,7 +749,7 @@ pub unsafe fn __ryo_str_to_bytes(ptr: *const u8, len: u64) -> u128 {
     if len == 0 {
         return pack_pair(core::ptr::null_mut(), 0);
     }
-    let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+    let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
     let buf = ryo_bytes_alloc(len);
     debug_assert!(!ptr.is_null());
     // SAFETY: caller contract; buf is freshly allocated for len bytes.
@@ -748,11 +770,11 @@ pub unsafe fn __ryo_str_to_bytes(ptr: *const u8, len: u64) -> u128 {
 /// `len == 0`).
 #[unsafe(no_mangle)]
 pub unsafe fn __ryo_bytes_repr(ptr: *const u8, len: u64) -> u128 {
-    let n: usize = len.try_into().unwrap_or_else(|_| oom_abort());
+    let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
     // Worst case: 3 fixed bytes (`b"`, `"`) + 4 per input byte (`\xNN`).
     let cap = match len.checked_mul(4).and_then(|m| m.checked_add(3)) {
         Some(c) => c,
-        None => oom_abort(),
+        None => overflow_abort(),
     };
     let buf = ryo_str_alloc(cap);
     let mut w = 0usize;

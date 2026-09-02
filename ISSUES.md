@@ -186,12 +186,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** The ownership pass `expect("param exists")`s on its param-index map in four places — compiler panics on internal-invariant violation, invisible to the R9 diagnostics pipeline. (The sema `analyze_stmt`/`analyze_expr` fallthrough `panic!`s originally tracked here were folded into the documented UIR trusted-producer contract as `unreachable!` — resolution option (b) for the sema half.)
 **Resolution:** Either route through the sink as internal-error diagnostics (R9), or convert to `unreachable!` with a comment folding them into the documented trusted-producer contract so the next audit covers them.
 
-### I-132 — Runtime FFI boundary conflates failure modes and under-checks inputs
-
-**Files:** `runtime/src/lib.rs` (`oom_abort` call sites :166, :170, :200, :204, :270, :353, :361-363, :404, :426, :440-441; null checks :105, :117, :272)
-**Summary:** Two robustness gaps at the C-ABI boundary. (a) `oom_abort` is the handler for three distinct failure modes — genuine allocation failure, `u64 → usize` narrowing (32-bit-only), and `checked_add` capacity overflow — so all three abort identically with an OOM message. (b) `ryo_print` / `ryo_panic` / the slice path guard their pointer args with `debug_assert!(!ptr.is_null())` only; a release build passes a null pointer to `write`/`memcpy` unchecked when `len > 0`.
-**Resolution:** Split `oom_abort` into distinct abort paths (or a reason-code parameter) so overflow/narrowing is distinguishable from OOM in the message; downgrade the null checks to real `if ptr.is_null() { abort }` guards at the FFI entry points — they cost one branch on a cold path.
-
 ### I-158 — `string_slicing` JIT regressed +53% with the packed-u128 runtime ABI (AOT flat)
 
 **Files:** `ryo-backend/src/codegen/` (JIT module path), `benchmarks/string_slicing/`
