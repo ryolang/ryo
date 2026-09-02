@@ -173,13 +173,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
 
-### I-127 — In-tree `unsafe` sites don't meet the R5 bar
-
-**Files:** `ryo-backend/src/codegen/mod.rs` (`Codegen<JITModule>::execute` :377), `ryo-core/src/types.rs` (:568 — `InternPool::str`)
-**Summary:** R5 permits forced `unsafe` in tree code only with a `// SAFETY:` comment proving the invariant, a linked issue, and human sign-off. The only two compiler-side sites fall short: (a) `Codegen<JITModule>::execute` transmutes a finalized code pointer to `fn() -> isize` and calls `module.free_memory()` with no SAFETY comment and no linked issue at all; (b) `InternPool::str` uses `str::from_utf8_unchecked` with a SAFETY comment (append-only arena, only valid UTF-8 pushed) but no linked issue. Both unsafe blocks themselves are justified (cranelift-jit API / airtight interner invariant) — the gap is process, and R5 exists precisely so the set of in-tree unsafe stays audited.
-**Resolution:** Add the `// SAFETY:` comment at the JIT site (function was finalized by cranelift-jit for this module; signature matches the compiled entry point; memory freed after execution), link this issue from both sites, and record the sign-off here. No code-semantics change.
-**Status (2026-08-03):** SAFETY comments + linked issue are in place at both sites, and `unsafe_code = "deny"` now guards the rest of the tree via `[workspace.lints]` (compiler crates opt in; `runtime/` is the curated boundary). Remaining: human sign-off in review.
-
 ### I-155 — Ownership param-map `expect("param exists")` sites
 
 **Files:** `ryo-frontend/src/ownership/` (`mod.rs:102, :456`, `walk.rs:675, :695` — `expect("param exists")`)
