@@ -375,6 +375,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Two robustness gaps at the C-ABI boundary were fixed directly (conflated abort modes for OOM vs capacity overflow, and debug-only null checks on `ryo_print` / `ryo_panic` / the slice path), but they were found by inspection, not by a systematic pass. Other entry points may have similar under-checked inputs: untrusted `len`/`cap` values that flow into `write_all`/`memcpy`/allocation size arithmetic, raw pointers beyond the three known sites, and panic/abort paths whose exit codes or messages are load-bearing for codegen assumptions.
 **Resolution:** One audit pass over every `#[unsafe(no_mangle)]` function in `runtime/src/lib.rs`: for each, enumerate the caller contract (which args are trusted vs attacker/bad-codegen-controlled), confirm each unsafe dereference is guarded or documented, and confirm each abort path reports a distinct, accurate message. Fix what's found in the same pass; it's a small file.
 
+### I-168 — Hyphenated `ryo-*.md` doc names violate the lowercase-underscore convention
+
+**Files:** `docs/dev/` (`ryo-incremental-compilation.md`, `ryo-context-and-otel-proposal.md`, `ryo-std-data-proposal.md`, `ryo-proposal-review-issues.md`, `ryo-missing-features-and-gaps.md`, `ryo-view-materialization.md`, `ryo-slicing-and-memory-model-final-spec.md`, `ryo-compiler-llm-instructions.md`), plus every doc that links to them
+**Summary:** The repo convention is lowercase with underscores for docs (special files like `README.md` excepted). The eight `ryo-*-*.md` files under `docs/dev/` use hyphens instead. `NOTES.md` was renamed to `notes.md` as the cheap half of this cleanup; the hyphenated set was scoped out because each rename must also update every inbound link (`CLAUDE.md`, `ISSUES.md`, the roadmap, and the docs/dev README index at minimum).
+**Resolution:** One sweep: `git mv` each `ryo-*.md` to its underscore form, then repo-wide grep for each old basename to update links. Verify no residual references with a final grep for `ryo-.*\.md` across tracked markdown.
+
 ---
 
 ## Cross-References

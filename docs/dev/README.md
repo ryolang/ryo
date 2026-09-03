@@ -2,7 +2,7 @@
 
 This directory contains implementation notes, architectural decisions, and design explorations for the Ryo compiler and runtime. These are **working documents for contributors** — not user-facing documentation.
 
-**Lifecycle:** Every file here should eventually be either absorbed into the [specification](../specification.md), implemented in code, or deleted. This directory should be empty by v1.0.
+**Lifecycle:** Every file here should eventually be either absorbed into the [specification](../specification.md), implemented in code, or deleted. This directory should be empty by v1.0. The one permanent exception is the [Scratch](#scratch) section below — `notes.md` is owner-maintained scratch and exempt from this lifecycle.
 
 ## File Index
 
@@ -80,4 +80,4 @@ This directory contains implementation notes, architectural decisions, and desig
 
 | File | Content | Next Action |
 |---|---|---|
-| [NOTES.md](NOTES.md) | Personal scratch TODO and link collection (tool ideas, design resources, concurrency runtime links) | **Keep** — owner-maintained scratch; exempt from the absorb/implement/delete lifecycle |
+| [notes.md](notes.md) | Personal scratch TODO and link collection (tool ideas, design resources, concurrency runtime links) | **Keep** — owner-maintained scratch; exempt from the absorb/implement/delete lifecycle |
