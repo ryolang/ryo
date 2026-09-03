@@ -72,7 +72,7 @@ Much of the newer pass logic lives in `SwiftCompilerSources/` (Swift code operat
 
 ### Mandatory vs. Optimization Passes
 
-SIL passes split into two pipelines: **mandatory** passes (definite initialization, ownership verification, `deinit` insertion, diagnostics like capture-of-escaping) that must run even at `-Onone` because they establish correctness and source-level diagnostics, and **optimization** passes (ARC elision, inlining, specialization) that are perf-only and never change program meaning. This mirrors Ryo's split between the soundness ownership pass (`ryo-frontend/src/ownership.rs`) and the planned perf-only ARC optimizer.
+SIL passes split into two pipelines: **mandatory** passes (definite initialization, ownership verification, `deinit` insertion, diagnostics like capture-of-escaping) that must run even at `-Onone` because they establish correctness and source-level diagnostics, and **optimization** passes (ARC elision, inlining, specialization) that are perf-only and never change program meaning. This mirrors Ryo's split between the soundness ownership pass (`ryo-frontend/src/ownership/mod.rs`) and the planned perf-only ARC optimizer.
 
 ## Ownership and Memory Model
 

@@ -4,7 +4,7 @@
 
 A focused comparison of Ryo's M8.1 ownership pass against Rust's MIR borrowck. Rust is the obvious reference point — its borrow checker is the most influential one in production — so understanding where Ryo deliberately echoes it and where it diverges is a design-record worth keeping.
 
-This file mirrors the role of [`mojo.md`](mojo.md): part external-ecosystem overview, part Ryo-specific decision log. Mojo is the primary algorithmic inspiration for `ryo-frontend/src/ownership.rs` and `ryo-core/src/ownership.rs`; Rust is the bar for diagnostic UX and the well-trodden reference for "what a borrow checker does."
+This file mirrors the role of [`mojo.md`](mojo.md): part external-ecosystem overview, part Ryo-specific decision log. Mojo is the primary algorithmic inspiration for `ryo-frontend/src/ownership/mod.rs` and `ryo-core/src/ownership.rs`; Rust is the bar for diagnostic UX and the well-trodden reference for "what a borrow checker does."
 
 [View rustc on GitHub](https://github.com/rust-lang/rust) — Rust's compiler is fully open source; the borrow-check sources live in `compiler/rustc_borrowck/` and `compiler/rustc_mir_dataflow/`.
 
@@ -141,7 +141,7 @@ The cost vs Rust is honest: Ryo is **less expressive**. You can't write some Rus
 
 - Spec: `docs/specification.md` Section 5 (Memory Management)
 - Dev: `docs/dev/pl_references/mojo.md` (primary algorithmic inspiration for the ownership pass)
-- Dev: `ryo-frontend/src/ownership.rs` (the shipped ownership pass)
+- Dev: `ryo-frontend/src/ownership/mod.rs` (the shipped ownership pass)
 - Dev: `docs/dev/pl_references/zig.md` (still applies for everything except the ownership pass)
 - Milestone: `docs/dev/implementation_roadmap.md` Milestone 8.1
 - Upstream: <https://github.com/rust-lang/rust>, `compiler/rustc_borrowck/`, `compiler/rustc_mir_dataflow/`

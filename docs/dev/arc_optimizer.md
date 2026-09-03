@@ -6,11 +6,11 @@
 
 This pass is the compiler-engineering investment that makes `shared[T]`'s performance story (spec 5.6) credible. Without it, every implicit retain/release on assignment fires an atomic op, and `shared[T]` overhead dominates application code. With it, retain/release pairs that bracket regions where the value cannot be deallocated are elided before codegen, matching the Swift model the spec commits to.
 
-The pass is conceptually distinct from the ownership pass (`ryo-frontend/src/ownership.rs`):
+The pass is conceptually distinct from the ownership pass (`ryo-frontend/src/ownership/mod.rs`):
 
 | Pass | Concern | Soundness vs perf |
 |---|---|---|
-| `ryo-frontend/src/ownership.rs` (M8.1) | Move semantics, use-after-move, `Free` insertion for owned types like `str` | Soundness: rejects programs |
+| `ryo-frontend/src/ownership/mod.rs` (M8.1) | Move semantics, use-after-move, `Free` insertion for owned types like `str` | Soundness: rejects programs |
 | `ryo-driver/src/arc_optimizer.rs` or `ryo-frontend/src/arc_optimizer.rs` (this doc) | Elide redundant retain/release on `shared[T]` values | Perf only: never changes program meaning |
 
 Both passes run on TIR (post-sema, pre-codegen). The ownership pass must run first because its inserted `Free` instructions are inputs to the ARC pass's "what's the last use of this value?" analysis.
@@ -206,7 +206,7 @@ The pass is not needed until refcounted values exist as language features. Seque
 ## References
 
 - Spec: `docs/specification.md` Section 5.6 (Shared Ownership)
-- Dev: `ryo-frontend/src/ownership.rs` (ownership-pass infrastructure this pass extends)
+- Dev: `ryo-frontend/src/ownership/mod.rs` (ownership-pass infrastructure this pass extends)
 - Dev: `docs/dev/pl_references/mojo.md` (ownership-pass inspiration)
 - Dev: `docs/dev/pl_references/rust.md` (comparison against Rust's `Arc<T>` model)
 - Dev: `docs/dev/pl_references/swift.md` (Swift compiler snapshot — `lib/SILOptimizer/ARC/` structure)

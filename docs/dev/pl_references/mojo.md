@@ -283,7 +283,7 @@ The ownership pass:
 3. Inserts destructor calls (`__del__`) at last-use points (ASAP destruction).
 4. Reports diagnostics if a value is used after being moved or if an `inout` borrow conflicts.
 
-Ryo's analog: `Sema → TIR → ryo-frontend/src/ownership.rs → Codegen`. The ownership pass mutates the per-function `Tir` in place, inserting `TirTag::Free` instructions and reporting diagnostics through the existing `DiagSink`.
+Ryo's analog: `Sema → TIR → ryo-frontend/src/ownership/mod.rs → Codegen`. The ownership pass mutates the per-function `Tir` in place, inserting `TirTag::Free` instructions and reporting diagnostics through the existing `DiagSink`.
 
 ### Argument Conventions
 
@@ -320,7 +320,7 @@ Ryo's spec Rules 5 and 6 (no returning borrows, no struct fields holding referen
 ## References
 
 - Spec: `docs/specification.md` Section 5 (Memory Management)
-- Dev: `ryo-frontend/src/ownership.rs` (the shipped ownership pass); Spec: `docs/specification.md` §5 (Memory Management)
+- Dev: `ryo-frontend/src/ownership/mod.rs` (the shipped ownership pass); Spec: `docs/specification.md` §5 (Memory Management)
 - Milestone: `docs/dev/implementation_roadmap.md` Milestone 8.1
 - Sibling refs: `docs/dev/pl_references/zig.md`, `docs/dev/pl_references/go.md`
 - Upstream: <https://github.com/modular/modular/tree/main/mojo>, `mojo/CLAUDE.md`, `mojo/proposals/`

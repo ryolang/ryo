@@ -22,7 +22,7 @@ Infrastructure-only test hooks for these already exist, `cfg(any())`-gated, in `
 
 The Zig alignment was a starting point, not a constraint. The pipeline is expected to diverge where Ryo's own features demand a different shape, and to grow stages Zig doesn't have:
 
-- **Already diverged: the Ownership pass** (post-sema, pre-codegen — `ryo-frontend/src/ownership.rs`). Zig has no ownership or borrow analysis; Ryo's move semantics and eager-destruction guarantees require a dedicated flow pass over TIR. See `pl_references/mojo.md`.
+- **Already diverged: the Ownership pass** (post-sema, pre-codegen — `ryo-frontend/src/ownership/mod.rs`). Zig has no ownership or borrow analysis; Ryo's move semantics and eager-destruction guarantees require a dedicated flow pass over TIR. See `pl_references/mojo.md`.
 - **Optimization steps before codegen.** New passes slot in as TIR→TIR transforms between ownership and codegen. The planned `shared[T]` ARC optimizer (retain/release elision, stack promotion, copy-on-write — see `arc_optimizer.md`) is the first of these; the performance promise of `shared[T]` depends on it.
 - Future divergences should be recorded in their own dev docs rather than forced back into the Zig mould.
 
