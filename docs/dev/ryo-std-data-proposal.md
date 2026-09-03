@@ -19,6 +19,8 @@ std.cache         # in-process cache (LRU/TTL) — pure library type
 std.redis         # remote cache client (RESP protocol) — pure Ryo
 ```
 
+> **Open decision (deferred to the data-layer milestone, v0.2+):** whether the database drivers live in `std.db` / `std.db.sqlite` / `std.db.postgres` as proposed here, or ship as official `pkg:` registry packages per `official_pkg.md`. Both documents stay in tree until that milestone resolves the placement; the API designs below apply to either home.
+
 Profile mapping (D9):
 
 | Component | `core` | `hosted` | Reason |

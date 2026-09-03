@@ -44,16 +44,6 @@ Dev docs are referenced FROM the roadmap, not FROM the spec (see docs/CLAUDE.md 
 
 ---
 
-## Milestone Dependencies
-
-Known sequencing constraints (named per the current roadmap):
-- M8.3 (`inout` / mutable borrows) precedes M22 (collections) and M23 (Drop)
-- Closure capture analysis (roadmap Phase 5) follows the ownership milestones
-
-The roadmap owns sequencing and milestone numbering — verify proposals against `implementation_roadmap.md`, not this list.
-
----
-
 ## Draft Marking
 
 Speculative or pre-approval content is marked `(Draft — vX)` in the heading. Final content is not. Once approved, remove the draft marker.
@@ -72,7 +62,7 @@ Include a status header at the top:
 
 ## Lifecycle
 
-Per docs/dev/README.md, every file here should eventually be absorbed into the spec, implemented in code, or deleted. This directory should be empty by v1.0.
+Per docs/dev/README.md, every file here should eventually be absorbed into the spec, implemented in code, or deleted. This directory should be empty by v1.0 — except `notes.md`, which is owner-maintained scratch permanently exempt from this lifecycle.
 
 ---
 
