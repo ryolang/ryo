@@ -553,10 +553,10 @@ fn div_overflow_panics_jit() {
     let output = run_ryo_command(&["run", "div_overflow.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
-        Some(0),
-        "INT_MIN / -1 should exit nonzero. stdout: {}",
+        Some(101),
+        "INT_MIN / -1 should exit 101. stdout: {}",
         String::from_utf8_lossy(&output.stdout),
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -576,10 +576,10 @@ fn mod_overflow_panics_jit() {
     let output = run_ryo_command(&["run", "mod_overflow.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
-        Some(0),
-        "INT_MIN % -1 should exit nonzero. stdout: {}",
+        Some(101),
+        "INT_MIN % -1 should exit 101. stdout: {}",
         String::from_utf8_lossy(&output.stdout),
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -599,10 +599,10 @@ fn compound_div_overflow_panics_jit() {
     let output = run_ryo_command(&["run", "compound_div_overflow.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
-        Some(0),
-        "INT_MIN /= -1 should exit nonzero. stdout: {}",
+        Some(101),
+        "INT_MIN /= -1 should exit 101. stdout: {}",
         String::from_utf8_lossy(&output.stdout),
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -622,10 +622,10 @@ fn compound_mod_overflow_panics_jit() {
     let output = run_ryo_command(&["run", "compound_mod_overflow.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
-        Some(0),
-        "INT_MIN %= -1 should exit nonzero. stdout: {}",
+        Some(101),
+        "INT_MIN %= -1 should exit 101. stdout: {}",
         String::from_utf8_lossy(&output.stdout),
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
