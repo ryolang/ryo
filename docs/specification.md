@@ -26,7 +26,7 @@
 > - Concurrency model (Green Threads/Task/Future/Channel)
 > - Module system with three-tier visibility
 > - Standard library architecture
-> - Tooling approach (Cranelift backend, Zig linker)
+> - Tooling approach (native toolchain)
 >
 > ⏳ **Acknowledged Gaps** (see Section 19):
 >
@@ -71,7 +71,7 @@
   - **Python-like Ergonomics:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
   - **Rust-like Safety (Simplified):** Memory safe by default via ownership and borrowing, without GC. Compile-time checks prevent dangling pointers, data races, use-after-free. Simplified borrowing model compared to Rust (no manual lifetimes).
   - **Go-Inspired Simplicity:** Minimal keyword set, straightforward core concepts, avoid unnecessary feature creep. Focus on providing essential, orthogonal features. Simpler than Rust, more expressive than Go — the right trade-off for Ryo's target audience.
-  - **Native Performance:** Compiled to native code (or Wasm) via **Cranelift**. No GC pauses. Deterministic resource management. Performance comparable to Go — faster than Python, Node.js, or Ruby. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
+  - **Native Performance:** Compiled to native code. No GC pauses. Deterministic resource management. Performance comparable to Go — faster than Python, Node.js, or Ruby. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
   - **Effective Concurrency:** Simple and safe concurrency using Task/Future/Channel patterns with a concurrent runtime.
   - **Compile-Time Power:** Integrated compile-time function execution (`comptime`) for metaprogramming, configuration, and optimization.
     *.  **Excellent Tooling:** Provide a seamless experience out-of-the-box, including a fast compiler, integrated package manager, REPL, and testing framework.
@@ -1433,6 +1433,8 @@ The Move/Borrow model handles tree-shaped data well, but some patterns need shar
 - `weak[T]` — nilable on drop; the holder must check before use. Suitable for parent-pointers in trees, observer subscribers, and any reference that may legitimately outlive its referent.
 - `unowned[T]` — traps on use-after-drop. Suitable for "I know this lives at least as long as I do" relationships where a check would be noise.
 
+**Guidance:** reach for `weak[T]` by default when breaking a cycle — the nil check is the honest price of a reference that may outlive its referent. Reserve `unowned[T]` for relationships where the referent *provably* outlives the holder (for example, child-to-parent links inside a structure that is always torn down as a unit). A mistaken `unowned[T]` assumption is a runtime trap, not a compile error, so it is never the right tool for avoiding a check that is merely inconvenient.
+
 Cycles between `shared[T]` values that do not include at least one `weak[T]` or `unowned[T]` link will leak memory — the runtime does not perform cycle collection.
 
 ```ryo
@@ -1455,7 +1457,7 @@ fn setup_server():
 - `shared[T]` is **explicit opt-in** — the developer chooses shared ownership at the type level, and the type signature tells a reviewer "this data is shared."
 - `shared[T]` is a **normal owned type** — it can be stored in struct fields, returned from functions, and moved between scopes. The inner `T` is accessed through the container.
 - Assignment retains, drop releases; the user never writes `.clone()`. Most retain/release pairs are elided by the compiler before codegen.
-- **Sharing freezes.** Access through `shared[T]` is **read-only**: constructing `shared(x)` consumes the (possibly `mut`-built) owned value and ends all mutation of it — the moment Pony spells `trn → val`. Shared mutation is possible only through interior-mutability wrappers: `shared[mutex[T]]` or `shared[rwlock[T]]` (§9.2.4). This makes a plain `shared[T]` deeply immutable and therefore — provided `T` is composed of safe Ryo types (the `unsafe` and FFI exceptions of §14.5.6 aside) — trivially safe to send across tasks: no receiver can mutate it, views of it are immutable by the P-rules (§4.4), and there is no hidden interior mutability.
+- **Freezing.** Sharing a value *freezes* it: access through `shared[T]` is **read-only**. Constructing `shared(x)` consumes the (possibly `mut`-built) owned value and ends all mutation of it — the moment Pony spells `trn → val`. Shared mutation is possible only through interior-mutability wrappers: `shared[mutex[T]]` or `shared[rwlock[T]]` (§9.2.4). This makes a plain `shared[T]` deeply immutable and therefore — provided `T` is composed of safe Ryo types (the `unsafe` and FFI exceptions of §14.5.6 aside) — trivially safe to send across tasks: no receiver can mutate it, views of it are immutable by the P-rules (§4.4), and there is no hidden interior mutability.
 
 *(Rationale: In Ryo's target domains, `shared[T]` is common in server code — shared DB pools, shared configuration, shared caches. It is not an "escape hatch" to be avoided; it is the idiomatic tool for shared state. Swift's model is the closest published precedent for "refcounting that's actually fast in application code," and it pairs naturally with Ryo's no-explicit-lifetimes design.)*
 
@@ -1531,12 +1533,17 @@ are the tools in order of preference.
 1. **Return value optimization.** When a function returns a locally
    constructed owned value, the compiler writes that value directly
    into the caller's destination slot. No copy, no temporary.
-   *(See `dev/copy_elision.md` for the exact rules.)*
 
 2. **Move semantics cost a pointer move, not a data copy.** Owned
    types like `str` and `list[T]` are fat pointers (pointer + length
    - capacity). Moving them between scopes is a register-to-register
    transfer.
+
+3. **Tail move-return chains pass the value straight through.** A
+   function that takes `move x: T` and returns it —
+   `fn f(move x: T) -> T: return x` — compiles to a direct
+   pass-through with no intermediate storage. A chain of such calls
+   moves the value end-to-end with no copies.
 
 #### Idiomatic techniques
 
@@ -1580,12 +1587,12 @@ language features, but they affect real-world copy behavior:
 
 1. **Small-string optimization.** `str` values below a threshold are
    stored inline in the fat pointer, eliminating heap allocation
-   entirely for short strings. *(See `dev/stdlib_optimizations.md`.)*
+   entirely for short strings. Capacity introspection reports
+   uniformly whether a `str` is stored inline or on the heap.
 
 2. **Copy-on-write for immutable strings.** When a copy is required
    for an immutable `str`, the backing buffer is shared via refcount
    rather than duplicated, deferring allocation until mutation.
-   *(See `dev/stdlib_optimizations.md`.)*
 
 #### When to accept a clone
 
@@ -2262,7 +2269,7 @@ note: Set RYOLANG_BACKTRACE=full for more verbose output
 **Default behavior (DX-optimized):**
 
 - Stack traces automatically captured for all panics
-- Debug symbols included (DWARF format via Cranelift)
+- Debug symbols included (DWARF format)
 - Binary size impact: +20-30%
 
 **Configuration options:**
@@ -2464,7 +2471,7 @@ fn main():
 
 #### **Debug Symbols and Build Information**
 
-- **Debug symbols always included by default** - DWARF format generated via Cranelift
+- **Debug symbols always included by default** - DWARF format
 - **Binary size impact** - Approximately 20-30% larger due to debug information
 - **`--strip` compiler flag** - Remove debug symbols from production binaries if size is critical
 - **Trade-off confirmed** - Size cost justified by debugging capability
@@ -2842,6 +2849,19 @@ Channels are the idiomatic, memory-safe way to communicate and synchronize betwe
 | **Send** | `tx.send(value)` | Sends `value`. `value` is **moved**. Suspends task if buffer full. |
 | **Receive** | `rx.recv()` | **Suspends task** until message available. Returns received value. |
 
+**Channel Modes:** All modes produce a `(sender[T], receiver[T])` pair on the same infrastructure:
+
+| Constructor | Semantics |
+| :--- | :--- |
+| `channel.create[T]()` | **Unbounded (default).** The sender never suspends; memory usage is unbounded. |
+| `channel.bounded[T](capacity)` | The sender suspends when the buffer reaches `capacity`. |
+| `channel.rendezvous[T]()` | Capacity zero. The sender suspends until a receiver picks up the value — a synchronous handoff. |
+| `channel.conflated[T]()` | Buffer of one. A new send **overwrites** an unreceived value. Opt-in, for "latest state" patterns (UI updates, sensor readings). |
+
+**Non-blocking Variants:** `tx.try_send(value)` never suspends; it returns a `Full` error if the buffer is full. `rx.try_recv()` never suspends; it returns an `Empty` error if no message is available.
+
+**Handles and Closing:** `sender[T]` and `receiver[T]` are MPMC (multi-producer, multi-consumer) handles. `clone()` produces another handle to the same end; a side of the channel closes when its **last** handle is dropped. Closing the send side delivers a `Closed` error to subsequent receivers *after* the buffer drains — buffered messages are never lost. Closing the receive side delivers `Closed` to subsequent senders immediately.
+
 #### 9.2.4 Shared State
 
 For shared mutable state, Ryo uses the `shared[mutex[T]]` pattern:
@@ -2852,8 +2872,8 @@ For shared mutable state, Ryo uses the `shared[mutex[T]]` pattern:
 ```ryo
 state = shared(mutex(0))
 worker = task.run:
-	lock = state.lock()
-	*lock += 1
+	with state.lock() as lock:
+		*lock += 1
 result = worker.await
 ```
 
@@ -2934,6 +2954,10 @@ worker = task.run:
 
 This guarantee is essential: without it, cancellation would leak file handles, database connections, and mutex locks. The ownership model (Rules 5-6) ensures cleanup is always deterministic.
 
+**Async Destructors:**
+
+Destructors may yield: a `Drop` implementation runs on the task's stack like any other code and may call `.await`, `recv`, or `send` — this is necessary for clean network teardown, buffered-writer flushing, and similar cases. A destructor running because of cancellation cannot itself be cancelled: once unwinding starts, further cancel requests are deferred until the unwind completes. A destructor that yields for longer than `unwind_deadline` (default 5 s, configurable per scope) is logged and the task is force-terminated, leaking that destructor's resources — the lesser evil compared to wedging a `task.scope` indefinitely.
+
 **Cancellation Sources:**
 
 | Source | When | Error Delivered |
@@ -2942,7 +2966,7 @@ This guarantee is essential: without it, cancellation would leak file handles, d
 | `task.scope` exit | Any task in scope panics or scope exits | `Canceled` to all remaining tasks |
 | `select` | A different `case` wins | `Canceled` to losing operations |
 | `task.timeout(duration, fut)` | Duration expires | `Timeout` to the timed-out task |
-| `fut.cancel()` | Explicit cancellation call | `Canceled` at next suspension |
+| `fut.cancel()` | Explicit cancellation call | `Canceled` at next suspension; the returned future resolves when the task has fully unwound |
 
 **Handling Cancellation:**
 
@@ -2963,6 +2987,17 @@ result = worker.await catch as e:
 ```
 
 *(Rationale: Cancellation must integrate with Ryo's existing error union system — no special control flow, no new keywords. `Canceled` and `Timeout` are plain error types that compose with `try`/`catch`/`match`. Cooperative cancellation respects RAII cleanup, preventing resource leaks. This approach is simpler than Zig 0.16's three-strategy model (propagate/recancel/swapCancelProtection) while covering 99% of use cases for Ryo's target audience.)*
+
+#### 9.2.6 Memory Model
+
+Once tasks share state across worker OS threads, the language defines which orderings concurrent code may rely on. Ryo commits to these happens-before guarantees:
+
+- A successful `tx.send(v)` happens-before the matching `rx.recv()` returning `v`.
+- A task spawn happens-before the first instruction of the spawned task.
+- A task's last instruction happens-before its future's `.await` returning.
+- Acquiring a `mutex[T]` or `rwlock[T]` happens-before subsequent acquisitions of the same lock.
+
+Plain reads/writes of `shared[T]` without synchronization are a data race and therefore **undefined behavior**. Correct code synchronizes through channels, `mutex[T]`, `rwlock[T]`, or `atomic[T]`.
 
 ### 9.3 Concurrency Control Flow and Utilities
 
@@ -2998,7 +3033,8 @@ select:
 | **Any** | `task.any([f1, f2])` | `fn(list[future[T]]) -> future[T]` | Waits for the **first** future to complete. |
 | **Delay** | `task.delay(duration)` | `fn(duration) -> future[void]` | **Suspends the current task** for the specified duration. |
 | **Timeout** | `task.timeout(duration, fut)` | `fn(duration, future[!T]) -> future[!T]` | Fails with a `Timeout` error if the future does not complete in time. |
-| **Cancel** | `fut.cancel()` | `fn(future[T]) -> void` | Attempts to stop the associated task. |
+| **Cancel** | `fut.cancel()` | `fn(future[T]) -> future[void]` | Requests cancellation; the returned future resolves when the cancelled task has fully unwound (destructors included). |
+| **Cancel Now** | `fut.cancel_now()` | `fn(future[T]) -> void` | Fire-and-forget cancellation for callers that do not need to await the unwind. |
 
 ### 9.4 Examples
 
@@ -3628,7 +3664,7 @@ fn main():
 - **`fn main()`:** Required in entry point. Takes no parameters, returns the unit type `void`. Use `try/catch` for error handling within main.
 - **Compiler Enforcement:** `fn main()` only allowed in the designated entry point file for executable compilation. *(Rationale: Clear convention without needing `package main` keyword).*
 
-## 13. Package Manager (`ryopkg`)
+## 13. Package Manager (`ryo`)
 
 - **Manifest:** `ryo.toml`. Defines metadata, dependencies.
 - **Registry:** `ryopkgs.io` (hypothetical).
@@ -3640,11 +3676,11 @@ fn main():
 
 - **Philosophy:** Modular packages, practical, ergonomic, safe.
 - **Hybrid Architecture:** The Standard Library is a **hybrid** of:
-  - **Rust Runtime (`libryo_runtime`):** Low-level primitives (allocator, scheduler, I/O loop) written in Rust for performance and stability.
+  - **Low-level runtime library:** Low-level primitives (allocator, scheduler, I/O loop) implemented natively for performance and stability.
   - **Ryo Standard Library (`std`):** High-level APIs written in Ryo, wrapping the runtime via internal FFI.
 - **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
 - **Core Packages (Initial):**
-  - `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `panic`, `assert`, `range`), error and optional type support. **`print` accepts exactly one value argument plus an optional keyword-only `end` (default `"\n"`)** — there are no variadic forms (see Section 6.1.2). For non-string values, use an f-string: `print(f"x = {x}")`.
+  - `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `panic`, `assert`, `range`), error and optional type support. **`print` accepts exactly one value argument plus an optional keyword-only `end` (default `"\n"`)** — there are no variadic forms (see Section 6.1.2). The value argument is a `str` (or `strview` via re-borrow) or binary data (`bytes` / `bytesview`, printed as an escaped repr mirroring the literal syntax). For other non-string values, use an f-string: `print(f"x = {x}")`.
   - `template`: Native support for parsing and evaluating `t"..."` strings. Includes builder traits and HTML/SQL sanitization utilities (similar to Dave Peck's `tdom` concept for Python) to safely construct DOM trees or queries from Template types.
     - Includes `template.include("path")`: A compiler-backed function that reads an external file (like `.html` or `.sql`) at compile-time and treats it as an inline `t-string`. This allows designers to edit plain HTML files without logic, while the Ryo compiler statically checks and interpolates variables into the Template object at compile-time with zero runtime parsing cost. Control flow (loops/conditionals) must be handled in Ryo via component composition (joining multiple Templates) to maintain strict MVC separation.
   - `io`: Console (`readln`), Files (`File`), Buffering (functions return `IoError!T`), implements `Drop`.
@@ -3656,7 +3692,7 @@ fn main():
   - `net.http`: Client/Server primitives (`Request`, `Response`, handlers, functions return `HttpError!T`).
   - `task`: Task execution primitives (`task.run`, `task.scope`, `task.spawn_detached`, `task.join`, `task.gather`, `task.any`, `task.delay`, `task.timeout`), `future[T]` type.
   - `channel`: Channel communication primitives (`channel.create[T]`, `sender[T]`, `receiver[T]`), ownership-based message passing.
-  - `os`: Env, args, basic filesystem ops (functions return `OsError!T`).
+  - `os`: Env, args, basic filesystem ops (functions return `OsError!T`). Filesystem paths are plain `str` (UTF-8): a path that is not valid UTF-8 **cannot be opened** — conversion to the OS encoding fails at the syscall boundary with an `OsError`.
   - `testing`: `#[test]` attribute, `assert()`, `assert_eq()`.
   - `sync`: `shared[T]`/`weak[T]` types for optional shared ownership, `mutex[T]` and `rwlock[T]` for thread-safe interior mutability.
   - `mem`: Basic memory utilities, `Drop` trait definition.
@@ -3782,15 +3818,17 @@ While channels are preferred for communication ("share memory by communicating")
 
 **Mutex (Exclusive Lock):**
 
+Synchronization guards — the values returned by `mutex[T].lock()`, `rwlock[T].read_lock()`, and `rwlock[T].write_lock()` — cannot be bound by plain assignment; they must be consumed by a `with` block, so the critical section is always lexically explicit.
+
 ```ryo
 import std.sync
 
 cache = shared(mutex(map[str, int]()))
 
 fn worker(cache: shared[mutex[map[str, int]]]):
-	mut m = cache.lock()  # Blocks until lock acquired
-	m.insert("key", 100)
-	# Lock released automatically when 'm' goes out of scope (RAII)
+	with cache.lock() as m:  # Blocks until lock acquired
+		m.insert("key", 100)
+	# Lock released automatically when the 'with' block exits
 ```
 
 **RwLock (Reader-Writer Lock):**
@@ -3799,12 +3837,12 @@ fn worker(cache: shared[mutex[map[str, int]]]):
 data = shared(rwlock(config))
 
 fn reader(data: shared[rwlock[Config]]):
-	r = data.read_lock()   # Multiple readers allowed
-	print(r.port)
+	with data.read_lock() as r:   # Multiple readers allowed
+		print(r.port)
 
 fn writer(data: shared[rwlock[Config]]):
-	mut w = data.write_lock()  # Exclusive write access
-	w.port = 8080
+	with data.write_lock() as w:  # Exclusive write access
+		w.port = 8080
 ```
 
 *Available Primitives:*
@@ -3919,14 +3957,14 @@ result = worker.await catch as e:
 
 *Requirement:* Memory allocator must handle concurrent allocations from multiple threads.
 
-*Implementation:* Ryo runtime uses **mimalloc** or **jemalloc** (configurable) instead of system `malloc`.
+*Implementation:* The runtime provides a thread-safe allocator (configurable); it is not required to be the system `malloc`.
 
 **6. Send Constraint (Explicit Predicate)**
 
 *Policy:* In safe code outside a `task.scope` body, a value may cross a task boundary in exactly three ways:
 
 1. **Owned move** — an owned `T` moves into the task closure or channel; the sender loses access, so uniqueness is preserved (Pony's `iso`).
-2. **`shared[T]` handle** — read-only by the sharing-freezes rule (§5.6), or internally synchronized (`shared[mutex[T]]`, `shared[rwlock[T]]`); the ARC refcount is atomic (Pony's `val`).
+2. **`shared[T]` handle** — read-only by the freezing rule (§5.6), or internally synchronized (`shared[mutex[T]]`, `shared[rwlock[T]]`); the ARC refcount is atomic (Pony's `val`).
 3. **`handle[T]`** — identity-only; grants no access to task state at all (Pony's `tag`, §9.2.1).
 
 Views (`strview`, `slice[T]`, `bytesview`) may cross only inside a `task.scope` body, where the scope join provably outlives them (§9.2.1). In safe Ryo code nothing else crosses: there are no raw pointers, and borrows never survive a call (Rule 7).
@@ -4001,7 +4039,7 @@ Ryo includes a first-class testing framework.
 
 - **Linker/Driver:** **Zig (`zig cc`)** is the mandatory linker and driver.
   - *Rationale:* Enables easy cross-compilation (e.g., `ryo build --target x86_64-linux-musl`) and seamless C interop.
-- **Compiler Backend:** **Cranelift**. Supports AOT and JIT. *(Rationale: Good balance of performance and compile speed; provides both AOT and JIT from a single backend.)* A WebAssembly target is a future possibility but is not provided by Cranelift; it would require a parallel backend — see [§19](#19-missing-elements--future-work).
+- **Compiler Backend:** Supports AOT and JIT from a single backend. A WebAssembly target is a future possibility; it would require a parallel backend — see [§19](#19-missing-elements--future-work).
 - **Tools:** `ryo` package manager integrated, `ryo-bindgen` for automatic C FFI binding generation, `ryo` REPL (using JIT), Integrated Testing (`ryo test`). LSP future goal.
 
 ## 17. FFI & `unsafe`
@@ -4019,6 +4057,12 @@ However, the underlying mechanisms involve `unsafe` code and `extern "C"` blocks
 	allow_unsafe = true        # required, or unsafe blocks are compile errors
     ```
 - **Visibility:** the capability is stated in the manifest, printed by `ryo audit` (dependency-tree report), and surfaced by tooling. Consumers can build with `--deny-unsafe=deps` to reject any dependency that uses it.
+- **Unsafe operation set:** the following operations are legal only inside an `unsafe` block (reachable only in packages with `allow_unsafe = true`):
+  - Raw-pointer dereference and pointer arithmetic.
+  - Calling an `extern "C"` / FFI function.
+  - Calling another `unsafe fn`.
+  - Accessing `static mut` variables.
+  - `unsafe` trait implementations.
 - **Mandatory safety documentation:** every `unsafe` block must be preceded by a `#: SAFETY:` doc comment explaining why its invariants hold; a missing or empty `SAFETY:` comment is a compile error.
 - **Safe-API norm (lint):** `pub` functions whose bodies contain `unsafe` trigger a pedantic lint unless documented as safe abstractions. Raw pointers (`*T`) remain confined to `unsafe` blocks; they never appear in safe signatures.
 - *Rationale:* memory safety stays the default, but the boundary becomes **auditable** rather than **prohibitive** — the ecosystem can build safe abstractions (containers, FFI wrappers, concurrency primitives) that the language team didn't anticipate. The primary way to interact with C code remains the automated `ryo-bindgen` workflow.

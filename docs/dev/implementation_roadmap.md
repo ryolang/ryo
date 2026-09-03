@@ -68,11 +68,12 @@ Deferred features tracked separately — see Phase 5 section for the full list (
 | Item | Target | Notes |
 | ------ | -------- | ------- |
 | `sbytes` (ARC buffer, slicing, COW warnings) | v0.2–v0.3 | D3; needs `shared[T]` atomic-refcount runtime |
+| Debug-mode `shared[T]` cycle detector (runtime tooling) | v0.2–v0.3 | reports reference cycles in debug builds instead of leaking silently; semantics unchanged — no cycle collection (spec §5.6) |
 | Runtime profile split (`core`/`hosted`, `--profile=core`) | v0.2 | D9; stdlib layering, no backend changes |
 | `bytes.copy_into(bview, &buf)` (no-alloc view materialization) | v0.2 | needed by the `core` no-alloc profile and the FFI buffer idiom (`cstr.from`) — land with/before FFI; destination is a fixed-capacity `[N]u8` (fixed arrays land with M21); design in `ryo-view-materialization.md` §3 |
 | Machine-applicable diagnostic suggestions (E0034 ViewEscape → `str(view)` materialize fix) | v0.2 | needs Diag suggestion-payload machinery that doesn't exist yet; design in `docs/experimental/ryo-agent-interface-proposal.md` and `ryo-view-materialization.md` §4 |
 | Bounded operator overloading (`Add`… traits) | v0.2–v0.3 | D10; concrete types first, generic traits with user generics |
-| `unsafe` policy implementation (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | D4; lands with FFI/unsafe work |
+| `unsafe` policy implementation (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | D4; lands with FFI/unsafe work; binding-author reference detail in `unsafe.md` |
 | Volatile MMIO intrinsics | v0.2 | GAP-3; `core` profile intrinsic package |
 | `#[repr(packed)]` | v0.2 | GAP-4; rides with FFI |
 | Scoped task borrows + stdlib `par_*` | v0.4 | D5; concurrency runtime |
@@ -1141,7 +1142,7 @@ fn main():
 
 - Aliasing exclusion is enforced at compile time (no runtime overhead)
 - No deref operator: an `inout` parameter is mutated by name, like Swift/Mojo `inout` and unlike C/Rust `&mut`. Rule 3 keeps mutable borrows a parameter convention, not a first-class reference type, so there is nothing to dereference.
-- Rule 7 exclusion builds on M8.2's intra-call borrowed/moved partition (`ryo-frontend/src/ownership.rs`); edge cases to be documented in the M8.3 design doc
+- Rule 7 exclusion builds on M8.2's intra-call borrowed/moved partition (`ryo-frontend/src/ownership/mod.rs`); edge cases to be documented in the M8.3 design doc
 - Dependencies: Milestone 8.2 (intra-call borrowed/moved partition and `ParamMode` plumbing that `inout` extends)
 
 ### Milestone 8.4: String Slices (`strview`) [alpha] ✅ COMPLETE
@@ -2027,7 +2028,7 @@ fn main():
 - Collections own their data (RAII cleanup in M23)
 - Iteration uses immutable borrows
 - **Copy-on-write at the buffer level** — `list[T]`, `map[K, V]`, and `str` are class-backed but present value semantics to the user. A mutating method checks the backing buffer's refcount; if > 1, it clones the buffer first. This is the Swift collection model (`Array`, `Dictionary`, `String`) and is the prerequisite for `shared[T]`'s performance story (spec 5.6).
-- **ARC optimizer pass** ([arc_optimizer.md](arc_optimizer.md)) must land alongside or shortly after this milestone. Without retain/release elision, every collection access in shared-state code pays atomic refcount cost. Sequencing: design and prototype the pass during this milestone; commit it before any benchmark publication.
+- **ARC optimizer pass** ([arc_optimizer.md](arc_optimizer.md)) is a **hard gate** for user-visible `shared[T]`: the pass must be committed before `shared[T]` ships in the stdlib or appears in any published benchmark. Without retain/release elision, every collection access in shared-state code pays atomic refcount cost, and first impressions of the feature would be set by unoptimized microbenchmarks. Sequencing: design and prototype the pass during this milestone.
 - Dependencies: Milestone 8.3 (`inout` for append/remove), Milestone 21 (array slices for iteration)
 - `bytes.from_list([...])` becomes expressible here (deferred from M8.4.2 — it needs list literals to exist)
 - **String iteration (sequencing, with spec §4.7):** `char` (§4.2, Unicode scalar value — Milestone 17.2) lands first; `.chars()` is a decoding iterator over it; `.char_count()` is the explicit-O(n) convenience — `.len()` stays byte length, so no linear scan hides behind constant-looking syntax. `s.chars().collect() -> list[char]` is the decode-once-then-index escape hatch (explicit allocation).
@@ -2462,7 +2463,7 @@ Test result: ok. 2 passed; 0 failed
 
 5. **Landing Page:**
    - Simple static page at `ryolang.org`
-   - Prominent install command: `curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh`
+   - Prominent install command: `curl -fsSL https://github.com/ryolang/ryo/releases/latest/download/install.sh | sh` (served from immutable release assets, never the mutable `main` branch)
    - Platform-specific instructions
    - Quick start guide
 
@@ -2491,7 +2492,7 @@ Test result: ok. 2 passed; 0 failed
 
 ```bash
 # Install Ryo
-curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh
+curl -fsSL https://github.com/ryolang/ryo/releases/latest/download/install.sh | sh
 
 # Verify installation
 ryo --version
@@ -2507,7 +2508,7 @@ ryo upgrade
 - Layout: everything under `~/.ryo/` — `bin/ryo`, `toolchain/zig-{version}/`; `registry/` and `config.toml` are planned (no package manager / config system yet)
 - All files in `~/.ryo/` directory for clean uninstall
 - Windows is a first-class citizen (PowerShell script works seamlessly)
-- `x86_64-apple-darwin` (Intel Mac) is intentionally excluded; `release.yml` currently ships linux-x64, linux-arm64, macos-arm64 (glibc) — static musl artifacts stay gated on the musl evaluation in `ISSUES.md`, and the `x86_64-pc-windows-msvc` target is still open
+- `x86_64-apple-darwin` (Intel Mac) is intentionally excluded; `release.yml` currently ships linux-x64 and linux-arm64 (both glibc) plus macos-arm64 (libSystem) — static musl artifacts stay gated on the musl evaluation in `ISSUES.md`, and the `x86_64-pc-windows-msvc` target is still open
 - Dependencies: Milestone 27 prep work (this enables distribution)
 
 ### Milestone 26.6: Cross-Compilation (64-bit) [alpha]
@@ -2804,6 +2805,7 @@ Adding M:N threading has **specification impacts** that require changes to earli
 - **Change in Milestone 23 (RAII & Drop)**: `Shared[T]` uses atomic CPU instructions
 - **Performance cost:** ~5-10 CPU cycles per clone/drop for thread safety
 - **Rationale:** Prevents data races when multiple threads share ownership
+- **Gate:** `shared[T]` does not ship user-facing until the ARC optimizer pass ([arc_optimizer.md](arc_optimizer.md), gated in M22) is committed — unelided atomic retain/release on every assignment would otherwise dominate shared-state code and set the feature's benchmark reputation
 
 **B. Global Mutable State Rules**
 
@@ -3762,5 +3764,5 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 o
 ## References
 
 - Spec: [specification.md](../specification.md) — canonical language specification; this roadmap schedules its delivery
-- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [architecture_analysis.md](architecture_analysis.md), [architecture_analysis_2026_08_20.md](architecture_analysis_2026_08_20.md), [cranelift_lessons.md](cranelift_lessons.md) — implementation plans linked from milestones; architecture_analysis.md holds the verified codebase snapshot + improvement roadmap, refreshed by the dated 2026-08-20 analysis; cranelift_lessons.md records the 2026-08 Cranelift/codegen findings (ABI limits, packed-`u128` runtime ABI, guard flag-fusion, measurement lessons) — read before optimization work in `ryo-backend`
+- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [architecture_analysis.md](architecture_analysis.md), [cranelift_lessons.md](cranelift_lessons.md) — implementation plans linked from milestones; architecture_analysis.md holds the latest verified codebase snapshot + improvement roadmap (2026-08-24; older snapshots live in git history); cranelift_lessons.md records the 2026-08 Cranelift/codegen findings (ABI limits, packed-`u128` runtime ABI, guard flag-fusion, measurement lessons) — read before optimization work in `ryo-backend`
 - Milestone: alpha milestones tagged `[alpha]` inline; see [alpha_scope.md](alpha_scope.md) for the alpha delivery slice
