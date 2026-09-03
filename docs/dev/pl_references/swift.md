@@ -120,7 +120,7 @@ Per the [release announcement](https://swift.org/blog/swift-6.3-released/) (2026
 
 ## References
 
-- Spec: `docs/specification.md` Section 5.6 (Shared Ownership)
+- Spec: [specification.md](../../specification.md) Section 5.6 (Shared Ownership)
 - Dev: `docs/dev/arc_optimizer.md` (the planned pass modeled on `lib/SILOptimizer/ARC/`)
 - Dev: `docs/dev/pl_references/memory_model_comparison.md` (cross-language memory-model table)
 - Dev: `docs/dev/pl_references/rust.md` (comparison against Rust's manual `Arc<T>`)
