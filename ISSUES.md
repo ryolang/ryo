@@ -173,12 +173,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
 
-### I-155 — Ownership param-map `expect("param exists")` sites
-
-**Files:** `ryo-frontend/src/ownership/` (`mod.rs:102, :456`, `walk.rs:675, :695` — `expect("param exists")`)
-**Summary:** The ownership pass `expect("param exists")`s on its param-index map in four places — compiler panics on internal-invariant violation, invisible to the R9 diagnostics pipeline. (The sema `analyze_stmt`/`analyze_expr` fallthrough `panic!`s originally tracked here were folded into the documented UIR trusted-producer contract as `unreachable!` — resolution option (b) for the sema half.)
-**Resolution:** Either route through the sink as internal-error diagnostics (R9), or convert to `unreachable!` with a comment folding them into the documented trusted-producer contract so the next audit covers them.
-
 ### I-158 — `string_slicing` JIT regressed +53% with the packed-u128 runtime ABI (AOT flat)
 
 **Files:** `ryo-backend/src/codegen/` (JIT module path), `benchmarks/string_slicing/`

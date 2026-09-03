@@ -100,8 +100,19 @@ impl Owner {
     pub(crate) fn tirref(self, param_index: &HashMap<StringId, usize>) -> TirRef {
         match self {
             Owner::Inst(r) => r,
-            Owner::Param(name) => TirRef::param(*param_index.get(&name).expect("param exists")),
+            Owner::Param(name) => TirRef::param(param_idx(param_index, name)),
         }
+    }
+}
+
+/// Look up a param's index in `param_index`. TIR trusted-producer
+/// contract (see the `tir.rs` module header): sema is the only TIR
+/// producer, so a `Param` owner missing from `param_index` is a
+/// compiler bug, not user input.
+pub(crate) fn param_idx(param_index: &HashMap<StringId, usize>, name: StringId) -> usize {
+    match param_index.get(&name) {
+        Some(idx) => *idx,
+        None => unreachable!("param {:?} missing from param_index", name),
     }
 }
 
@@ -490,7 +501,7 @@ fn analyze_function(
                 if own.inout_str_params.contains(name) {
                     continue;
                 }
-                let idx = *own.param_index.get(name).expect("param exists");
+                let idx = param_idx(&own.param_index, *name);
                 // Anchor the Free after the param's last read — the
                 // same policy locals get — so later statements that
                 // never touch the param don't keep its buffer alive.
