@@ -30,6 +30,7 @@ use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use expr::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MSG};
 use ryo_core::ast::CompoundOp;
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
@@ -120,13 +121,6 @@ pub struct Codegen<M: Module> {
     guard_msg_data: HashMap<&'static str, DataId>,
 }
 
-/// Zero-divisor guard messages, written verbatim by `ryo_panic`
-/// (raw bytes, trailing newline — same convention as the runtime's
-/// slice-failure messages).
-const DIV_ZERO_MSG: &str = "integer division by zero\n";
-const MOD_ZERO_MSG: &str = "integer modulo by zero\n";
-const DIV_OVERFLOW_MSG: &str = "integer division overflow\n";
-const MOD_OVERFLOW_MSG: &str = "integer modulo overflow\n";
 /// Overflow guard message for the spec §18 checked-arithmetic traps.
 const OVERFLOW_MSG: &str = "integer overflow\n";
 

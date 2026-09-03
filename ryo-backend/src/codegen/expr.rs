@@ -2,8 +2,8 @@
 
 use super::bytes::store_string;
 use super::{
-    Codegen, DIV_OVERFLOW_MSG, DIV_ZERO_MSG, FunctionContext, MOD_OVERFLOW_MSG, MOD_ZERO_MSG,
-    OVERFLOW_MSG, STR_SLOT_SIZE, ValueRepr, cranelift_type_for, is_fat_type, ranges,
+    Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, ValueRepr, cranelift_type_for,
+    is_fat_type, ranges,
 };
 use cranelift::codegen::ir::{
     BlockArg, FuncRef, InstructionData, MemFlagsData, Opcode, StackSlot, ValueDef,
@@ -13,6 +13,14 @@ use cranelift_module::{DataDescription, DataId, Linkage, Module};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind, ViewKind};
 use std::collections::HashMap;
+
+/// Zero-divisor guard messages, written verbatim by `ryo_panic`
+/// (raw bytes, trailing newline — same convention as the runtime's
+/// slice-failure messages).
+pub(crate) const DIV_ZERO_MSG: &str = "integer division by zero\n";
+pub(crate) const MOD_ZERO_MSG: &str = "integer modulo by zero\n";
+pub(crate) const DIV_OVERFLOW_MSG: &str = "integer division overflow\n";
+pub(crate) const MOD_OVERFLOW_MSG: &str = "integer modulo overflow\n";
 
 /// Cap derivation for the packed-u128 runtime string/bytes ABI (Phase 0):
 /// string-producing runtime functions return `{ptr, len}` packed in
