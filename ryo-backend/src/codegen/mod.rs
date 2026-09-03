@@ -116,8 +116,9 @@ pub struct Codegen<M: Module> {
     /// same `.rodata` blob without an extra hash on the bytes.
     string_data: HashMap<StringId, DataId>,
     /// Cache of `DataId` per compiler-generated guard message
-    /// (zero-divisor checks). These strings never pass through the
-    /// `InternPool`, so they are keyed on the static text itself.
+    /// (division and checked-arithmetic guards). These strings never
+    /// pass through the `InternPool`, so they are keyed on the static
+    /// text itself.
     guard_msg_data: HashMap<&'static str, DataId>,
 }
 
