@@ -3,7 +3,7 @@
 use super::{
     Owner, OwnerState, Ownership, ReseatDrop, analyze_for_range, analyze_while_loop,
     check_source_projected, consumed_binding_name, drain_dying_views, format_binding,
-    needs_tracking, owner_name_for_diag, owner_sort_key, projection_root,
+    needs_tracking, owner_name_for_diag, owner_sort_key, param_idx, projection_root,
     prune_branch_dead_projections, push_unique, record_return_epilogue,
     refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
     rule7_owner_name,
@@ -667,7 +667,7 @@ pub(crate) fn analyze_if_stmt(
         let is_tracked = match owner {
             Owner::Inst(_) => true,
             Owner::Param(name) => {
-                let idx = *own.param_index.get(&name).expect("param exists");
+                let idx = param_idx(&own.param_index, name);
                 needs_tracking(tir.params[idx].ty, pool)
             }
         };
@@ -687,7 +687,7 @@ pub(crate) fn analyze_if_stmt(
                 let span = match owner {
                     Owner::Inst(r) => tir.span(r),
                     Owner::Param(name) => {
-                        let idx = *own.param_index.get(&name).expect("param exists");
+                        let idx = param_idx(&own.param_index, name);
                         tir.params[idx].span
                     }
                 };

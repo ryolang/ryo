@@ -1,4 +1,7 @@
-**Status:** Design (v0.4)
+**Status:** Design (v0.4). Observable semantics moved to the spec — channels
+§9.2.2, cancellation and async destructors §9.2.5, memory model §9.2.6,
+`cancel`/`cancel_now` §9.3.2, mandatory `with` for synchronization guards
+§14.5.4. This document retains implementation and proposal-only material.
 
 # Ryo v0.4 Concurrency Implementation Plan
 > Task / Future / Channel / Dispatcher — Green Thread M:N Runtime with System-Coroutine FFI
@@ -64,7 +67,7 @@ normative specification. Ryo remains colorless: no `async`/`await`, no
 | Dispatcher worker budget | `4 × RYOMAXPROCS` | Total `workers` across all custom dispatchers (§4.5). |
 | Timer wheel resolution | `1 ms` | Sufficient for scripting workloads. |
 
-> **Sibling reference docs:** [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`proposals/wasm_target.md`](proposals/wasm_target.md).
+> **Sibling reference docs:** [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`arc_optimizer.md`](arc_optimizer.md), [`proposals/wasm_target.md`](proposals/wasm_target.md).
 
 ---
 
@@ -362,23 +365,10 @@ unless explicitly overridden.
 
 ### 3.7 Memory Model
 
-Once tasks share state across worker OS threads, users need visibility
-guarantees. Ryo adopts a **happens-before model close to Go's**:
-
-- A successful `tx.send(v)` happens-before the matching `rx.recv()` returning
-  `v`
-- `mutex.lock()` acquires happen-before subsequent acquires of the same mutex
-- A task spawn happens-before the first instruction of the spawned task
-- A task's last instruction happens-before its future's `.await` returning
-
-Plain reads/writes of `shared[T]` without synchronization are a data race
-and undefined behavior. The Phase 6 enforcements catch the most common
-locking mistakes; the memory model defines what "correct" code is allowed
-to assume.
-
-A dedicated concurrency memory-model document will spell this out
-precisely when the concurrency milestone is designed. This phase only
-commits to the high-level shape.
+The happens-before guarantees and the `shared[T]` data-race rule are
+normative in spec §9.2.6. The Phase 6 enforcements catch the most common
+locking mistakes on top of that model; the memory model defines what
+"correct" code is allowed to assume.
 
 ### 3.8 Test Strategy
 
@@ -412,37 +402,10 @@ the proposal-only additions (dispatchers, `task.supervise`).
 
 ### 4.1 Channels
 
-Four modes on the same infrastructure:
-
-```
-std.channel.create[T]() -> (sender[T], receiver[T])      # unbounded (default)
-std.channel.bounded[T](capacity) -> (sender[T], receiver[T])
-std.channel.rendezvous[T]() -> (sender[T], receiver[T])
-std.channel.conflated[T]() -> (sender[T], receiver[T])
-```
-
-- **MPMC by default.** `sender[T]` and `receiver[T]` are reference-counted
-  handles; `clone()` produces another handle to the same end. The channel
-  closes on that side when the **last** clone is dropped.
-- `channel.unbounded[T]()` (= `create[T]()`) — sender never blocks; memory
-  unbounded. This is the default mode.
-- `channel.bounded[T](capacity)` — sender blocks at capacity.
-- `channel.rendezvous[T]()` — capacity 0. Sender blocks until the receiver
-  picks up. Synchronous handoff. (Equivalent to `bounded[T](0)` but named
-  for clarity.)
-- `channel.conflated[T]()` — buffer of 1; new sends overwrite the unreceived
-  value. Useful for "latest state" patterns (UI updates, sensor readings).
-  Opt-in. The overwrite-vs-receive happens-before rule is **draft** — see
-  the data-plane section.
-- `tx.send(value)` — moves value into channel, suspends if buffer full
-- `tx.try_send(value)` — non-yielding; returns `Full` error if buffer full
-  (lock-safe; see Phase 6)
-- `rx.recv()` — suspends until message available, returns value
-- `rx.try_recv()` — non-yielding; returns `Empty` error if no message
-  (lock-safe)
-- Closing a channel delivers `Closed` error to all subsequent receivers
-  *after* the buffer drains; closing the receive side delivers `Closed` to
-  subsequent senders immediately
+The channel taxonomy (four modes on the same infrastructure), MPMC handle
+and close semantics, and the `try_send`/`try_recv` non-blocking variants
+are normative in spec §9.2.2. The overwrite-vs-receive happens-before rule
+for `conflated` remains **draft** — see the data-plane section.
 
 Internal implementation:
 - `VecDeque<T>` as the ring buffer (the two new modes are ~20 LOC each on
@@ -583,34 +546,19 @@ See the appendix for a full workload example (bounded DB concurrency).
 
 ### 4.6 Cancellation Sources
 
-| Source | Mechanism | Sync or async? |
-|---|---|---|
-| `drop(future)` | Sets cancel flag, wakes task | Sync request, async observation |
-| `task.scope` exit | Cancels all child futures, awaits unwind | Async — scope blocks until done |
-| `select` losing case | Cancels non-winning operations | Async — `select` blocks until cancelled siblings settle |
-| `task.timeout` expiry | Delivers `Timeout` at next suspension | Async |
-| `fut.cancel()` | Explicit cancel call | **Async** — returns a future that resolves when the cancelled task has fully unwound. `fut.cancel_now()` is the fire-and-forget variant for cases where the caller does not need to await unwind. |
+The cancellation-source table and the `fut.cancel()` / `fut.cancel_now()`
+contract are normative in spec §9.2.5 and §9.3.2. Runtime mechanics worth
+keeping here: every source is a sync request with async observation —
+cancellation sets a flag and wakes the task, and `task.scope` / `select`
+block until the cancelled siblings have settled.
 
 ### 4.7 Async Drop / Destructor-Yield Semantics
 
-This is the design call most likely to bite later if left ambiguous. Ryo's
-position for v0.4:
-
-**Destructors may yield.** They run on the task's stack like any other code,
-and may call `.await`, `recv`, or `send`. This is necessary for clean
-network teardown, buffered-writer flushing, etc.
-
-**A destructor running because of cancellation cannot itself be cancelled.**
-Once unwind starts, further cancel requests are deferred until unwind
-completes. This prevents "cancellation of cancellation" pathologies.
-
-**Destructors have a soft deadline.** A destructor that yields for longer
-than `unwind_deadline` (default 5 s, configurable per scope) is logged and
-the task is force-terminated, leaking that destructor's resources. This is
-the lesser evil compared to wedging a `task.scope` indefinitely.
-
-This is the same shape as Trio's "shielded cleanup" and Kotlin's
-`NonCancellable` context. We borrow the semantics, not the names.
+Semantics now in spec §9.2.5: destructors may yield; a destructor running
+because of cancellation cannot itself be cancelled; `unwind_deadline`
+(default 5 s, configurable per scope) bounds a yielding destructor before
+the task is force-terminated. Same shape as Trio's "shielded cleanup" and
+Kotlin's `NonCancellable` context — we borrow the semantics, not the names.
 
 ### 4.8 Test Strategy
 
@@ -725,21 +673,10 @@ Ryo's whole-program AOT compilation.
 
 ### 6.1 Mandating `with` Blocks for Synchronization Guards
 
-- **Problem:** Because Ryo drops variables at scope exit in reverse-declaration
-  order, assigning lock guards to variables (`mut m = cache.lock()`) can
-  lead to holding locks longer than intended or risking read-write deadlocks.
-- **Implementation:** Types returning synchronization guards (e.g.,
-  `mutex[T].lock()`, `rwlock[T].read_lock()`) **cannot be bound using
-  standard variable assignment**. They must be consumed by a `with` block.
-- **Outcome:** Creates a strict, visually obvious critical section.
-  ```ryo
-  # ❌ Compile Error: Guard must be scoped using a 'with' block
-  mut m = CACHE.lock()
-
-  # ✅ Allowed
-  with CACHE.lock() as m:
-      m.insert(key, val)
-  ```
+Rule now normative in spec §14.5.4: synchronization guards
+(`mutex[T].lock()`, `rwlock[T].read_lock()` / `.write_lock()`) cannot be
+bound by plain assignment; they must be consumed by a `with` block. This
+phase implements the compile-time enforcement.
 
 ### 6.2 Yield-While-Locked Static Analysis
 
@@ -917,7 +854,7 @@ plan-specific rules further below — conflated-channel ordering, FFI callback
 captures, dispatcher-local state — are **draft/open**, pending formalization,
 and nothing in this section should be read as committing them:
 
-- **Sharing freezes (spec §5.6).** Access through `shared[T]` is read-only;
+- **Freezing (spec §5.6).** Access through `shared[T]` is read-only;
   shared mutation requires `shared[mutex[T]]` / `shared[rwlock[T]]`. The
   `shared[SqliteDb]` examples in this doc assume `SqliteDb` is internally
   synchronized; a plain mutable `SqliteDb` would need the `mutex` wrapper.
@@ -1285,11 +1222,16 @@ browser target is a stated product priority.
 
 ## References
 
-- Spec: [`docs/specification.md`](../specification.md) §9 (Concurrency)
+- Spec: [`docs/specification.md`](../specification.md) §9 (Concurrency) — in
+  particular §9.2.2 (channel modes, `try_send`/`try_recv`, close semantics),
+  §9.2.5 (cancellation sources, async destructors, `unwind_deadline`),
+  §9.2.6 (happens-before memory model, `shared[T]` data-race UB),
+  §9.3.2 (`fut.cancel()` / `fut.cancel_now()` contract), and §14.5.4
+  (mandatory `with` for synchronization guards)
 - Historical note: this document began as two drafts — an initial plan and
   the `concurrency_loom_kt.md` Loom/Kotlin alternative. The alternative was
   adopted and merged here.
-- Sibling design docs: [`memory_model_comparison.md`](memory_model_comparison.md), [`rust_reference.md`](rust_reference.md), [`mojo_reference.md`](mojo_reference.md), [`arc_optimizer.md`](arc_optimizer.md), [`go_reference.md`](go_reference.md) (inspiration), [`proposals/wasm_target.md`](proposals/wasm_target.md)
+- Sibling design docs: [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`arc_optimizer.md`](arc_optimizer.md), [`go.md`](pl_references/go.md) (inspiration), [`proposals/wasm_target.md`](proposals/wasm_target.md)
 - Upstream prior art:
   - [JEP 444: Virtual Threads (Java 21 GA)](https://openjdk.org/jeps/444) — Loom (inspiration for the FFI ergonomics goal).
   - [Loom OpenJDK wiki](https://wiki.openjdk.org/display/loom/Main).

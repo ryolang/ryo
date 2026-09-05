@@ -43,7 +43,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-018 — `TypeId` is a newtype, not a typed enum
 
 **Files:** `ryo-core/src/types.rs` (`TypeId`)
-**Summary:** Phase 2 §2.2 of `docs/dev/pipeline_alignment.md` originally called for `TypeId` to become an `enum { Void = 0, Bool = 1, ..., Error = 4, Dynamic(NonZeroU32) }` so primitive matches are exhaustive at compile time and the `pool.int()` accessor disappears. The risk register allowed a fallback to a plain `Copy` newtype if the enum encoding fights the borrow checker, which is what we shipped. Cost: the `TypeKind::Tuple` arm we added in `cranelift_type_for` and a couple of sema sites are not statically guaranteed to be covered when a new primitive lands.
+**Summary:** The UIR/TIR pipeline redesign originally called for `TypeId` to become an `enum { Void = 0, Bool = 1, ..., Error = 4, Dynamic(NonZeroU32) }` so primitive matches are exhaustive at compile time and the `pool.int()` accessor disappears. The design allowed a fallback to a plain `Copy` newtype if the enum encoding fights the borrow checker, which is what we shipped. Cost: the `TypeKind::Tuple` arm we added in `cranelift_type_for` and a couple of sema sites are not statically guaranteed to be covered when a new primitive lands.
 **Resolution:** Re-attempt the enum encoding using `repr(u32)` + `Dynamic(NonZeroU32)` once the borrow-checker pain points (mostly around `pool.kind` returning a value that contains a `TypeId`) are characterised. Low priority — the matches we have today still go through `TypeKind`, which *is* exhaustive, so the gap is small.
 
 ### I-019 — `tuple_elements_vec` allocates a `Vec` per call
@@ -173,31 +173,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
 
-### I-127 — In-tree `unsafe` sites don't meet the R5 bar
-
-**Files:** `ryo-backend/src/codegen/mod.rs` (`Codegen<JITModule>::execute` :377), `ryo-core/src/types.rs` (:568 — `InternPool::str`)
-**Summary:** R5 permits forced `unsafe` in tree code only with a `// SAFETY:` comment proving the invariant, a linked issue, and human sign-off. The only two compiler-side sites fall short: (a) `Codegen<JITModule>::execute` transmutes a finalized code pointer to `fn() -> isize` and calls `module.free_memory()` with no SAFETY comment and no linked issue at all; (b) `InternPool::str` uses `str::from_utf8_unchecked` with a SAFETY comment (append-only arena, only valid UTF-8 pushed) but no linked issue. Both unsafe blocks themselves are justified (cranelift-jit API / airtight interner invariant) — the gap is process, and R5 exists precisely so the set of in-tree unsafe stays audited.
-**Resolution:** Add the `// SAFETY:` comment at the JIT site (function was finalized by cranelift-jit for this module; signature matches the compiled entry point; memory freed after execution), link this issue from both sites, and record the sign-off here. No code-semantics change.
-**Status (2026-08-03):** SAFETY comments + linked issue are in place at both sites, and `unsafe_code = "deny"` now guards the rest of the tree via `[workspace.lints]` (compiler crates opt in; `runtime/` is the curated boundary). Remaining: human sign-off in review.
-
-### I-155 — Ownership param-map `expect("param exists")` sites
-
-**Files:** `ryo-frontend/src/ownership/` (`mod.rs:102, :456`, `walk.rs:675, :695` — `expect("param exists")`)
-**Summary:** The ownership pass `expect("param exists")`s on its param-index map in four places — compiler panics on internal-invariant violation, invisible to the R9 diagnostics pipeline. (The sema `analyze_stmt`/`analyze_expr` fallthrough `panic!`s originally tracked here were folded into the documented UIR trusted-producer contract as `unreachable!` — resolution option (b) for the sema half.)
-**Resolution:** Either route through the sink as internal-error diagnostics (R9), or convert to `unreachable!` with a comment folding them into the documented trusted-producer contract so the next audit covers them.
-
-### I-132 — Runtime FFI boundary conflates failure modes and under-checks inputs
-
-**Files:** `runtime/src/lib.rs` (`oom_abort` call sites :166, :170, :200, :204, :270, :353, :361-363, :404, :426, :440-441; null checks :105, :117, :272)
-**Summary:** Two robustness gaps at the C-ABI boundary. (a) `oom_abort` is the handler for three distinct failure modes — genuine allocation failure, `u64 → usize` narrowing (32-bit-only), and `checked_add` capacity overflow — so all three abort identically with an OOM message. (b) `ryo_print` / `ryo_panic` / the slice path guard their pointer args with `debug_assert!(!ptr.is_null())` only; a release build passes a null pointer to `write`/`memcpy` unchecked when `len > 0`.
-**Resolution:** Split `oom_abort` into distinct abort paths (or a reason-code parameter) so overflow/narrowing is distinguishable from OOM in the message; downgrade the null checks to real `if ptr.is_null() { abort }` guards at the FFI entry points — they cost one branch on a cold path.
-
-### I-138 — `INT_MIN / -1` (and `% -1`) signed-overflow is UB at codegen
-
-**Files:** `ryo-backend/src/codegen/expr.rs` (`emit_div_zero_guard` :419-434 and its `TirTag::ISDiv`/`TirTag::IMod` call sites), `ryo-backend/src/codegen/mod.rs` (compound-assign arms)
-**Summary:** The zero-divisor guard covers `x / 0` and `x % 0`, but Cranelift `sdiv`/`srem` are also UB on signed overflow: `INT_MIN / -1` (and `INT_MIN % -1`) has no representable result. x86-64 `idiv` traps (#DE); aarch64 `sdiv` silently wraps to `INT_MIN`. Sema's literal-zero check doesn't catch it either (`x / -1` is a unary-minus expression, not a literal).
-**Resolution:** Extend `emit_div_zero_guard` to also check `dividend == INT_MIN && divisor == -1`, branching to the same `ryo_panic` path with an "integer division overflow" message. Sema can reject the literal form `x / -1` only when the dividend is a known `INT_MIN` constant — likely not worth it; the runtime guard alone suffices.
-
 ### I-158 — `string_slicing` JIT regressed +53% with the packed-u128 runtime ABI (AOT flat)
 
 **Files:** `ryo-backend/src/codegen/` (JIT module path), `benchmarks/string_slicing/`
@@ -312,8 +287,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ### I-164 — Guard-elision extensions deferred from the value-range work
 
-**Files:** `ryo-backend/src/codegen/expr.rs` (checked-op helpers, `emit_div_zero_guard`), `ryo-backend/src/codegen/mod.rs` (if/while emission)
-**Summary:** The value-range fact map behind the landed overflow-guard elision (I-142, commit `d6aee06`) deliberately scopes to guards on `+`/`-`/`*`/unary `-` seeded from bare `var <cmp> const` conditions. Four cheap extensions were identified during that work and deferred, each independent and small once the fact map exists: (a) div/mod zero-guard elision — when the divisor's range excludes 0, the `emit_div_zero_guard` branch is provably unreachable; (b) `BoolAnd`/`BoolOr` decomposition — `x > 0 && y > 0` can seed both sides on the true path (De Morgan on the false path); (c) `VarDecl` constant seeding — `x = 5` records a point fact, useful once real programs (not just fib) are the yardstick; (d) loop-exit facts — a `while` condition's false path holds at the exit block, but only for condition variables never reassigned in the body.
+**Files:** `ryo-backend/src/codegen/expr.rs` (checked-op helpers, `emit_div_guard`), `ryo-backend/src/codegen/mod.rs` (if/while emission)
+**Summary:** The value-range fact map behind the landed overflow-guard elision (I-142, commit `d6aee06`) deliberately scopes to guards on `+`/`-`/`*`/unary `-` seeded from bare `var <cmp> const` conditions. Four cheap extensions were identified during that work and deferred, each independent and small once the fact map exists: (a) div/mod zero-guard elision — when the divisor's range excludes 0, the `emit_div_guard` branch is provably unreachable; (b) `BoolAnd`/`BoolOr` decomposition — `x > 0 && y > 0` can seed both sides on the true path (De Morgan on the false path); (c) `VarDecl` constant seeding — `x = 5` records a point fact, useful once real programs (not just fib) are the yardstick; (d) loop-exit facts — a `while` condition's false path holds at the exit block, but only for condition variables never reassigned in the body.
 **Resolution:** Revisit when benchmark headroom justifies it — note that the fibonacci checkpoint (2026-08-26, `benchmarks/fibonacci/README.md`) showed the landed elision produced no walltime change on out-of-order hardware, so these extensions are expected to be equally cheap-but-invisible there; their value is on in-order/constrained targets. Each item follows the same discipline as the landed elision work: boundary-value pinning tests per elision class, since a wrong elision silently drops a mandated trap.
 
 ### I-165 — Surviving overflow guards lower to unfused `cset`+`tst`+`b.ne` instead of a single flag branch
@@ -388,11 +363,29 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Codegen imports these as opaque extern calls, so every use pays a full call that Cranelift can neither inline nor hoist. The bodies are a handful of instructions: `ryo_str_from_literal` is just `pack_pair` (shift + or), `__ryo_slice` is two bounds checks, two UTF-8 boundary tests, and a `ptr.add`, and `ryo_str_eq` against a short literal is a few byte compares. In `benchmarks/string_slicing` the scan loop makes three such calls per iteration (slice + literal materialization + eq) where Rust inlines all of it to pointer arithmetic and a 3-byte memcmp — the bulk of the measured 3.5× AOT gap (CLIF verified 2026-08-26: the `str`/`strview` param variants are instruction-identical in the loop except for these calls, and a same-compiler A/B ties at 5.9 ms both ways).
 **Resolution:** Emit the tiny bodies as inline Cranelift IR at the call sites instead of extern calls (slice keeps its panic paths; eq can specialize when one side is a known short literal). Literal re-materialization is already handled (each distinct literal is emitted once per function in the entry block); inlining `pack_pair` would remove the remaining extern call from that one materialization. Larger ops (`ryo_str_concat`, `__ryo_str_push`) stay extern.
 
+### I-166 — Sema does not reject constant `INT_MIN / -1` at compile time
+
+**Files:** `ryo-frontend/src/sema.rs` (the literal-zero division check), `ryo-backend/src/codegen/expr.rs` (`emit_div_guard`)
+**Summary:** The codegen division guard panics at runtime on `x / 0` and `x % 0`, with `INT_MIN / -1` and `INT_MIN % -1` covered by the signed-overflow guard fix; but sema only rejects the literal-zero-divisor form at compile time. The constant case `INT_MIN / -1` (dividend a known `i64::MIN` constant, divisor the literal expression `-1` — a unary minus, not a literal) still compiles and only fails when executed. Deferred from the runtime-guard fix as likely not worth it: the shape is rare and the runtime guard covers correctness.
+**Resolution:** In sema's division checks, when the divisor expression is a unary-minus of literal `1` and the dividend's constant value (or range) is exactly `i64::MIN`, emit a compile-time diagnostic pointing at the division. Skip if constant/range info is not already in scope at that site — do not plumb new machinery for this edge case.
+
+### I-167 — Systematic audit of the runtime FFI boundary beyond the known gaps
+
+**Files:** `runtime/src/lib.rs` (all `#[unsafe(no_mangle)]` entry points)
+**Summary:** Two robustness gaps at the C-ABI boundary were fixed directly (conflated abort modes for OOM vs capacity overflow, and debug-only null checks on `ryo_print` / `ryo_panic` / the slice path), but they were found by inspection, not by a systematic pass. Other entry points may have similar under-checked inputs: untrusted `len`/`cap` values that flow into `write_all`/`memcpy`/allocation size arithmetic, raw pointers beyond the three known sites, and panic/abort paths whose exit codes or messages are load-bearing for codegen assumptions.
+**Resolution:** One audit pass over every `#[unsafe(no_mangle)]` function in `runtime/src/lib.rs`: for each, enumerate the caller contract (which args are trusted vs attacker/bad-codegen-controlled), confirm each unsafe dereference is guarded or documented, and confirm each abort path reports a distinct, accurate message. Fix what's found in the same pass; it's a small file.
+
+### I-168 — Hyphenated `ryo-*.md` doc names violate the lowercase-underscore convention
+
+**Files:** `docs/dev/` (`ryo-incremental-compilation.md`, `ryo-context-and-otel-proposal.md`, `ryo-std-data-proposal.md`, `ryo-proposal-review-issues.md`, `ryo-missing-features-and-gaps.md`, `ryo-view-materialization.md`, `ryo-slicing-and-memory-model-final-spec.md`, `ryo-compiler-llm-instructions.md`), plus every doc that links to them
+**Summary:** The repo convention is lowercase with underscores for docs (special files like `README.md` excepted). The eight `ryo-*-*.md` files under `docs/dev/` use hyphens instead. `NOTES.md` was renamed to `notes.md` as the cheap half of this cleanup; the hyphenated set was scoped out because each rename must also update every inbound link (`CLAUDE.md`, `ISSUES.md`, the roadmap, and the docs/dev README index at minimum).
+**Resolution:** One sweep: `git mv` each `ryo-*.md` to its underscore form, then repo-wide grep for each old basename to update links. Verify no residual references with a final grep for `ryo-.*\.md` across tracked markdown.
+
 ---
 
 ## Cross-References
 
-- Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md), refreshed at [docs/dev/architecture_analysis_2026_08_20.md](docs/dev/architecture_analysis_2026_08_20.md) and [docs/dev/architecture_analysis_2026_08_24.md](docs/dev/architecture_analysis_2026_08_24.md) — dated snapshots; several current entries originated there, and their `I-xxx` citations reflect what was open at the time.
+- Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)

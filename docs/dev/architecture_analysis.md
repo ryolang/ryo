@@ -1,8 +1,12 @@
-**Status:** Complete (codebase snapshot 2026-07-18, branch `feat/milestone-8.3-inout` @ `64b740a`)
+**Status:** Complete (codebase snapshot 2026-08-24, branch `fix/file-length-gate` @ `333dbca`)
 
-# Architecture Analysis & Improvement Roadmap
+# Architecture Analysis — 2026-08-24
 
-Exhaustive review of the Ryo compiler (~22k lines of Rust, 6 workspace crates, 542 `#[test]` across 19 files). Every module was read in full; all claims were then re-verified against the working tree by ten independent review passes. Issue references (`I-xxx`) point to [ISSUES.md](../../ISSUES.md) — entries I-068 through I-111 were filed from this analysis.
+Refresh of the 2026-08-20 snapshot (`c24a224`, branch `fix/i-089-param-mode-decode`; previous snapshots were deleted — see git history). Every module was re-verified at HEAD; claims from the previous analysis are marked **fixed**, **open**, or **stale**. Issue references (`I-xxx`) point to [ISSUES.md](../../ISSUES.md) — resolved entries are removed from that file.
+
+The delta splits in two: `main` landed #114 (strict `ParamMode` decode), #115 (integer div/mod-by-zero guards, I-023), #116 (parser-recovery block-header fix, I-130), #117 (AST flattened into a typed arena, I-126), and #118 (hot-path bookkeeping removal + lint-policy tightening); the snapshot branch then executed the §4 file-length plan from the previous analysis almost verbatim (I-137): `ownership.rs`/`sema.rs`/`codegen.rs` became module directories, `integration_tests.rs` became six per-area test binaries, and a file-length gate now runs locally (`scripts/check_file_length.sh`) and in CI (`tidy` job) with **no allowlist** — initially 3000 lines, tightened to **2000** the same day after the views-test split and `tir.rs` test extraction.
+
+Scale: ~36.5k lines of Rust source across 7 workspace crates, ~860 `#[test]` (previous snapshot: ~29k lines, 811 tests). A macOS `cargo test --workspace` run at HEAD: **828 passed, 0 failed** (valgrind smoke suite skips without valgrind installed).
 
 ---
 
@@ -11,10 +15,11 @@ Exhaustive review of the Ryo compiler (~22k lines of Rust, 6 workspace crates, 5
 ```mermaid
 flowchart LR
     subgraph FE[ryo-frontend]
-        LEX[lexer.rs] --> PAR[parser.rs] --> AG[astgen.rs] --> SEMA[sema.rs] --> OWN[ownership.rs]
+        LEX[lexer.rs] --> IND[indent.rs] --> PAR[parser.rs with recovery] --> AG[astgen.rs] --> SEMA[sema/ dir] --> OWN[ownership/ dir]
     end
     subgraph CORE[ryo-core]
-        AST[(ast.rs Box tree)]
+        AST[(ast.rs typed arena)]
+        PRT[ast_pretty.rs renderer]
         UIR[(uir.rs flat arena)]
         TIR[(tir.rs per-fn arenas)]
         POOL[(types.rs InternPool)]
@@ -22,174 +27,179 @@ flowchart LR
         DIAG[(diag.rs Diag and DiagSink)]
     end
     subgraph BE[ryo-backend]
-        CG[codegen.rs Cranelift JIT/AOT] --> LK[linker.rs zig cc] --> TC[toolchain.rs pinned zig]
+        CG[codegen/ dir Cranelift JIT/AOT] --> LK[linker.rs zig cc] --> TC[toolchain.rs pinned zig]
     end
     RT[runtime staticlib + rlib]
+    BS[build-support build-dep]
     LEX --> AST --> AG --> UIR --> SEMA --> TIR --> OWN --> SIDE --> CG
+    PRT -.-> AST
     POOL -.-> LEX
     POOL -.-> SEMA
     POOL -.-> CG
     CG --> RT
+    BS -.-> BE
 ```
 
-Dependency direction is acyclic: `ryo` (CLI, clap) → `ryo-driver` (orchestration, diag rendering) → `ryo-frontend` + `ryo-backend` → `ryo-core` (IRs, types, diagnostics). `ryo-core` depends on nothing internal. The middle end is explicitly modeled on Zig: UIR ≈ ZIR, TIR ≈ AIR (`pipeline_alignment.md`). Ownership analysis types live in `ryo-core` (so codegen can consume them) while the pass lives in `ryo-frontend`.
+Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-frontend` + `ryo-backend` → `ryo-core`. The pipeline keeps the full M8.1+ shape (ownership between sema and codegen, positional sidecar). Structural change since the snapshot: the three largest compiler files are now module directories, and the AST is a typed arena (#117), not a Box tree.
 
 | Crate | Files (lines) | Role |
 |---|---|---|
-| `ryo-core` | uir 1470, tir 1383, types 774, ast 546, diag 308, ownership 71 | IRs, InternPool, diagnostics |
-| `ryo-frontend` | ownership 3723, sema 3025, parser 1506, astgen 756, lexer 701, indent 213, builtins 171 | source → TIR + ownership |
-| `ryo-backend` | codegen 2237, toolchain 139, runtime_lib 40, linker 36 | TIR → object/binary |
-| `ryo-driver` | pipeline 526 | staging, ariadne rendering |
-| `ryo` | main 102 + integration tests | CLI |
-| `ryo-runtime` | lib 746 | string runtime, staticlib+rlib |
+| `ryo-core` | tir 1712 (+ tir/tests 309), uir 1529, ast 1047, types 892, ast_pretty 503, diag 347, ownership 112, errors 69 | IRs, AST arena, InternPool, diagnostics, sidecar types |
+| `ryo-frontend` | parser 1982, lexer 1014, astgen 854, indent 287, builtins 233; **sema/** = tests 1945, expr 721, mod 525, stmt 521, builtins 501, call 272; **ownership/** = walk 1263, loops 877, mod 717, views 567, frees 351, merge 346, diag_fmt 55, tests 5444 (9 files) | source → TIR + ownership |
+| `ryo-backend` | **codegen/** = mod 1537, expr 1490; toolchain 269, runtime_lib 66, linker 27 | TIR → object/binary |
+| `ryo-driver` | pipeline 834 | staging, ariadne rendering |
+| `ryo` | main 133 + six integration binaries (218 tests) + asan/valgrind smoke (27/28) | CLI |
+| `ryo-runtime` | lib 1091 | string/slice runtime, staticlib+rlib |
+| `build-support` | lib 111 | shared build-script runtime-archive build |
 
 ---
 
 ## 2. Data-Structure Inventory (per stage)
 
-### 2.1 Lexer (`lexer.rs`, `indent.rs`)
+### 2.1 Lexer (`lexer.rs` 1014, `indent.rs` 287)
 
-- Two token types: `RawToken<'a>` (logos-derived, borrows source) → `Token` (`Copy`; payloads `StringId` / `i64` / `u64` f64-bits). Interning happens **at lex time** — nothing downstream touches source text for identifiers.
-- `indent.rs` is a CPython-style indent stack (tabs-only; any leading space is an error) injecting `Newline`/`Indent`/`Dedent`. The `Newline` regex (`\n[ \t]*`) swallows the next line's leading whitespace, which is why the two-stage RawToken form exists.
-- Costs: 4 touch points per token variant (I-111); first-error `Result<LexError>` (I-014); indent errors carry fabricated spans (I-016); invalid characters become `Token::Error` and surface later as *parse* errors (I-077); `Token`'s `Display` leaks `<id#N>` into parse diagnostics (I-078); narrow float regex (I-027); `i64::MIN` unspellable (I-017).
+- Two-token-type design unchanged: borrowed `RawToken<'a>` (logos) → `Copy` `Token` with `StringId`/`i64`/f64-bits payloads; interning at lex time; sink-based recovery (`lex` takes a `DiagSink`) intact.
+- **Open (refreshed):** I-111 (4 touch points per variant: `Token :36`, `Display :119`, `RawToken :196`, `intern_token :496`); I-027 (float regex still `[0-9]+\.[0-9]+`, `:201` — now also cited by I-154, no spelling for inf/NaN).
+- **New / open:** I-149 — `unescape` (`:425`, called `:545`) returns an owned `String` per string literal even when no escapes are present.
 
-### 2.2 AST (`ast.rs`, 546 lines)
+### 2.2 AST (`ast.rs` 1047, was 351 + `ast_pretty.rs` 503)
 
-- Conventional **Box-tree** — the only non-arena IR. Nodes carry `StringId`s and `SimpleSpan`s.
-- `pretty_print` methods are baked into nodes and call `print!` directly to stdout (I-012) — coupled not just to presentation but to process-global I/O; the printer is also incomplete (`IfStmt` prints no children).
-- `Eq` absent on anything transitively holding `Literal::Float(f64)` (I-029).
-- The `x = 42` decl-vs-assign ambiguity is baked in as `StmtKind::AssignOrDecl` and propagated into UIR before sema resolves it (`sema.rs:550-613`): unknown name → fresh **immutable** binding (a typo silently declares a variable), existing immutable → E0028, existing `mut` → assign.
-- Parser (chumsky 0.12): clean precedence ladder (postfix method-call → unary → term → additive → non-assoc ordering → non-assoc equality → `and` → `or`); **zero recovery combinators** — first `Rich` error aborts; chained `a < b < c` is unparseable by construction.
+- **Fixed (landed as #117):** I-126 — the `Box<Expression>` tree is gone. `Ast` (`ast.rs:445-456`) is a pair of typed arenas (`exprs: Vec<Expr>`, `stmts: Vec<Stmt>`) plus side arenas `expr_lists`/`stmt_lists`/`elifs`, `top_level: Vec<StmtId>`, and a program span. `ExprId`/`StmtId` wrap `NonZeroU32` (`:67,:90`) with the slot-0 sentinel (`:465-485`); both invariants are test-pinned (`:919-935`). Variable-length lists are `{offset, len}` u32 ranges with checked `u32::try_from` (`:585-607`); `FunctionDef::params` stays an inline `Vec<Param>` deliberately (`:274-282`). The parser builds directly into the arenas with `Ast` as the chumsky state object; the `Inspector` impl (`:830-868`) is a deliberate no-op — failed-speculation nodes become harmless unreachable orphans (snapshot/truncate was measured at ~20% of parse time and rejected).
+- `TypeExpr` still pinned at 24 bytes (`:912-916`); `TypeExpr.is_view` still explicitly legacy (`:323-326`).
+- **Open:** the `AssignOrDecl` ambiguity survives the arena (unknown name → fresh **immutable** binding): chain `ast.rs:220-223` → `astgen.rs:303` → `sema/stmt.rs:146-210`; pin test at `sema/tests.rs:1241`. I-029 (`Literal::Float(f64)`, `:197` — `PartialEq` only).
+- `ast_pretty` now walks the arenas (`render_program(&Ast, &InternPool)` `ast_pretty.rs:24`); the hardcoded `├── ` params/`returns:` smell persists (`:188,:196`, cosmetic).
+- **New / open:** I-152 — the parser builds a throwaway `Vec` per call/params node (`parser.rs:235,367,440,541,613,660,720,862`) before the `Ast` builders copy into the side arena.
 
-### 2.3 UIR (`uir.rs`, 1470 lines)
+### 2.3 UIR (`uir.rs`, 1529 — byte-identical line count to the snapshot)
 
-- **One program-wide flat arena**: `instructions: Vec<Inst>`, `extra: Vec<u32>`, parallel `spans`, plus `func_bodies` (`ExtraRange` of top-level stmts). `InstRef(NonZeroU32)` — niche-filled, slot 0 sentinel (locked by a size test). `Inst { tag: InstTag (repr u8), data: InstData }` = 24 bytes; spans out-of-band.
-- Variadic payloads live in `extra` as `(start, len)` ranges. `ExtraRange.len` is effectively write-only — decoders re-derive counts from inline `argc` words (two sources of truth).
-- **Read API allocates**: every View decoder (`call_view`, `if_stmt_view`, …) collects a fresh `Vec<InstRef>` per call; `body_stmts()` collects a slice that is already contiguous (I-091).
-- No instruction→function reverse mapping (I-109). Decode paths `unreachable!` on tag mismatch (I-106). `#![allow(dead_code)]` at module top. `ExtraRange` duplicated with tir.rs (I-080).
+- Invariants intact: slot-0 sentinel, niche-filled `InstRef`, `Inst ≤ 24` bytes pinned by `inst_stays_small`, checked u32 conversions on arena pushes.
+- **Open (refreshed):** I-091 (allocating view decoders — `call_view :870-886`, `if_stmt_view :1004-1046`, `body_stmts :344`, `while_loop_view :942`, `for_range_view :956`, `method_call_view :981`); I-109 (`func_bodies :307`, no reverse map); I-080 (`ExtraRange` duplicated with tir.rs, `:119` vs `tir.rs:138`); I-047 (`UirParam.mode: ParamMode :285` still a pass-through).
+- **Fixed (I-134, `8ec3494`):** the `:1-6` header no longer claims `--emit=uir` is "still TODO" — it is wired (`pipeline.rs` `ir_command :357-424`); `#![allow(dead_code)]` remains at `:6`.
 
-### 2.4 Types (`types.rs`, 774 lines) — best structure in the tree
+### 2.4 Types (`types.rs`, 892) — unchanged, still the best structure in the tree
 
-- `InternPool`: two hashbrown `HashTable`s keyed **only by handle ids**; string bytes live once in a `string_bytes` arena with `(offset, len)` sidecar; probing hashes the query slice directly — zero key allocation. Primitives at fixed ids 0–6 (`void, bool, int, str, float, error, never`; header docs at :22-23 and :42 still say 0..=5 — stale).
-- `compatible()` absorbs `Error`/`Never` (cascade suppression); `is_copy()` = `Int|Float|Bool` (Mojo-`Copyable` analogue; notably excludes `error`/`never`).
-- One `unsafe from_utf8_unchecked`, soundly argued. Handles carry no pool identity — cross-pool use silently mis-indexes (standard interner trade-off, undocumented).
-- Open design points: `TypeId` newtype vs enum (I-018), name-based annotation resolution in astgen (`resolve_type` = `StringId` equality against 4 pre-interned primitives) — will not scale to user types.
+- `InternPool` design unchanged; primitive slots `0..=7` with `strview` at 7; closed `ViewKind` with the documented never-parameterize rationale; `is_copy()` includes views.
+- **Open (unchanged anchors):** I-018 (deliberate, `:29-33`); I-019 (`tuple_elements_vec :502`); I-127 (the one `unsafe from_utf8_unchecked`, `:568-571` — SAFETY comment and `#[allow(unsafe_code)]` in place, human sign-off still pending).
 
-### 2.5 Sema (`sema.rs`, 3229 lines, ~2050 code)
+### 2.5 Sema (`sema/` — mod 525, stmt 521, expr 721, call 272, builtins 501, tests 1945; 190 tests)
 
-- `Sema { uir, pool, sink, source, file_path, decl_state, queue, name_to_decl, signatures, results }` — worklist driver, `Unresolved → InProgress → Resolved`. Signatures resolve eagerly → recursion works. `CycleInResolution` is a dormant `DiagCode`: `require_decl` is `#[allow(dead_code)]`, deliberately never called from `check_call` (`:1344-1346`) — comptime-era scaffolding.
-- Scopes: parent-chained `HashMap`s. `FuncCtx.inst_map: Vec<Option<TirRef>>` sized to the **program-wide UIR length** per function (I-092).
-- Error recovery: every failure emits `Unreachable` with `error_type` and analysis continues; the driver prints partial TIR under `--emit=tir` (§4.5 exit criterion of pipeline_alignment.md).
-- Stringly dispatch: builtin validation is hand-coded per builtin with triplicated ~30-line blocks (root cause: `BuiltinFunction` carries no param metadata); method dispatch allocates a `String` per call site to match `"len"`/`"is_empty"` (I-092); `builtins::lookup` linear-scans per call (I-034).
-- `source`/`file_path` are held **only** so `build_panic_call` can bake `file:line:col` into a unique interned string per call site (I-037), via an O(offset) `char_indices` scan each time.
-- Holes: no missing-return check (I-071); duplicate function definitions first-wins silently (I-075); unary `-` Int-only (I-079); `assert` desugars in sema (not astgen) and `panic`/`assert` require string *literals*; `__ryo_panic` calls bypass the signatures table entirely (invisible cross-phase contract via `ABI_CALLEES`).
+- New layout (contents): `mod.rs` — module docs, `DeclId`/`DeclState`/`FunctionSig`/`Binding`/`Scope` (`:64-120`), `analyze` façade (`:161`), worklist driver (`:227`), `Sema::new` with the `__ryo_` prefix check (`:300`), `analyze_function`, `FuncCtx`. `stmt.rs` — `analyze_stmt :14`, `analyze_block :413` (now delegates to `analyze_block_seeded :425` with a no-op seed, `a5ff8c0`), `check_condition_bool :444`, `resolve_var_decl_type :464`. `expr.rs` — `analyze_expr_allow_never :37`, `Neg` arm `:143`, method dispatch `:220`, `check_slice_bound :359`, `check_binary_op :439`. `call.rs` — `check_call :12`, `borrow_target_reason :232`. `builtins.rs` — `emit_builtin_call :10`, `str(view)` materialize intercept `:240`, `emit_panic`/`emit_assert`/`build_panic_call` (`:329,:359,:418`), `byte_offset_to_line_col :486`.
+- **Fixed:** the `analyze_expr` fallthrough `panic!` is now a documented `unreachable!` (`expr.rs:344-348`, trusted-producer rationale `:341-343`) — the sema half of I-131 (#118; the ownership half is re-filed as I-155).
+- **Open (refreshed):** I-028/I-034 — string compares at `call.rs:26`, `builtins.rs:240` (`== "str"`), `mod.rs:300` (`starts_with("__ryo_")`), `astgen.rs:234` (`find_str("main")`), `astgen.rs:355` (`!= "range"`); `BuiltinFunction` still lacks arity/type descriptors. I-092 — `inst_map` sized to the program-wide UIR per function (`mod.rs:480`); `check_call` clones (`call.rs:82,89,97`); method-dispatch `to_string()` (`expr.rs:220`). I-037 — `byte_offset_to_line_col` O(offset) (`builtins.rs:486`). I-079 — unary `-` int-only (`expr.rs:143-177`).
+- **New / open:** I-147 — `vec![ParamMode::Borrow; arg_tirs.len()]` per builtin call (`builtins.rs:22`; same pattern for view calls at `call.rs:91`).
+- I-128 note: the file split did not shrink entry points — `analyze_stmt` (`stmt.rs:14`) sits at exactly **360** code-lines, at the ratchet; `analyze_expr_allow_never` ~322 raw, `check_binary_op` ~265, `emit_builtin_call` ~225.
 
-### 2.6 TIR (`tir.rs`, 1383 lines)
+### 2.6 TIR (`tir.rs` 1712 + `tir/tests.rs` 309)
 
-- **Per-function arenas** (each `Tir` owns `instructions`/`extra`/`spans`) — the clone-friendly shape for future monomorphization (`:283-289`); nothing clones a `Tir` yet.
-- `TypedInst { tag, ty: TypeId, data: TirData }`; `TirRef(NonZeroU32)` slot-0 sentinel (a bogus-typed `Unreachable` placeholder).
-- `TirRef::param(idx)` = `u32::MAX - idx` encodes params as refs — **no `is_param()` predicate exists**; `Tir::inst()` on one panics OOB (I-072). Consumers (ownership `:90`, codegen `:575`) use them as map keys only.
-- Call payload packs per-arg `ParamMode{Borrow,Move,Inout}` as a trailing modes section — writer (`TirBuilder::call`) and reader (`call_view`) must change in lockstep. `ParamMode::from_u32` coerces unknown → `Borrow` (I-089).
-- Name-based variable resolution (`Var(StringId)`); `LocalSlot(u32)` explicitly deferred (`:121-125`). `spans.len() == instructions.len()` invariant unchecked in `finish()`.
+- **Fixed:** the dangling `I-106` citation is gone, replaced by a generic trusted-producer paragraph (`~:46-54`). The `:1-6` header no longer claims `--emit=tir` is TODO (I-134 swept, `8ec3494`). The inline test module now lives in the child module `tir/tests.rs` (`#[cfg(test)] mod tests;` — private access preserved via `use super::*`).
+- Anchors refreshed: param sentinel band `is_param :121`/`as_param_index :126`; strict `ParamMode::from_u32 -> Option` (`:305`); tree-shape validation via `finish :922` → `validate_tree_shape :939`.
+- **New since the snapshot:** #118 replaced per-statement `HashSet` reachability scans with allocation-free `Tir::contains_reachable` (`:1353`), consumed by ownership's loop/branch predicates.
+- **Open:** I-091 (allocating view decoders); I-080 (`ExtraRange` duplication).
 
-### 2.7 Ownership pass (`ryo-frontend/src/ownership.rs`, 5666 lines = ~2900 code + ~2900 tests)
+### 2.7 Ownership — sidecar (`ryo-core/src/ownership.rs`, 112, unchanged) + pass (`ownership/`: mod 717, walk 1263, loops 877, views 567, frees 351, merge 346, diag_fmt 55; tests/ 5444 in 9 files, 108 tests)
 
-- **Sidecar architecture (strength)**: TIR never mutated — index stability is load-bearing for codegen's memoizer. Result: `OwnershipSidecar { functions: HashMap<StringId, FunctionSidecar> }` with `free_schedule: Vec<FreePoint{after, target, span, branch}>`, `free_on_reassign`, `if_branches`, `conditional_dead_drops` (I-117's arm-gated pre-branch drops). Keyed by function *name* (I-088).
-- State: per-`Owner{Param(StringId), Inst(TirRef)}` lattice `NotTracked | Valid | Borrowed | Moved{moved_at}` across 6 HashMaps + 2 HashSets + 2 Vecs (`reseat_drops`, `return_epilogue`). `Borrowed` seeded only at param init — now including `inout` params (I-053); `inout str` params get an escape model (I-112): their bound value leaves via the write-back, so no callee-side Free/W0001, no move-out — but reassignment drops the old pointee.
-- Forward walk; if/else by snapshotting the **3 non-monotone fields** per arm (`states`, `current_owner`, `pending_dead_store`) — monotone fields deliberately flow through (I-061) — then `merge_branches` (any-Moved-wins). A second near-verbatim 2-way merge exists (`merge_non_monotone`, I-090).
-- Loops: 2-pass fixed point with a **scratch DiagSink**; diverged pass-1 diagnostics are discarded wholesale, and speculative sidecar writes are never rolled back (I-069, benign today only by BranchId uniqueness). Convergence compares only Moved-ness (I-087).
-- Post passes: last-use frees (with conditional-last-use re-anchor — a last read inside a branch moves the Free to the branch exit, the earliest all-paths death point), anon-temp frees, dead-store W0001 (with loop-body re-anchor, I-118), conditional-dead-drop conversion for dead conditional reseats (I-117), loop-exit jump frees, and a **return epilogue** (still-`Valid` owners at each `Return`/`ReturnVoid` are destroyed on that exit path, path-deduped). Double-free exclusion is maintained by **cross-pass guards** scattered as comments. `free_schedule` order is **nondeterministic** (HashMap/HashSet iteration → unreproducible binaries, I-068). O(N²) jump scheduling (I-064/065); shape re-encoding in 3+ helpers (I-066 — set: `collect_jump_path`, `collect_named_inits_rec`, `schedule_loop_exit_frees_in`, plus the newer `outermost_loop_of`/`outermost_branch_of`/`ancestor_branches_of`/`owner_binding_name`/`declared_before_stmt`/`body_may_return` walkers).
-- Call-arg algorithm is a careful multi-phase: materialize → three-way partition borrowed/moved/inout → Rule 7 aliasing checks (E0032 dual-inout / inout∩borrowed / inout∩moved) + E0031 with dual notes → commit moves → (`inout` needs no transition; codegen owns freshness).
+- The §4.1 split plan from the previous analysis landed almost exactly as proposed. Refreshed anchors: `check()` `mod.rs:276`; `analyze_function :286`; pre-passes `collect_loop_nesting` (`loops.rs:376`) + `collect_view_liveness` (`views.rs:254`); forward walk `analyze_stmt` (`walk.rs:18`), `analyze_if_stmt :507`, `visit_expr :782`, `recurse_operands :1208`; merges in `merge.rs` (`merge_branches :36` — now `pub(super)`; `MergeSide` now private); loop fixed-point `analyze_loop_body` (`loops.rs:468`, `MAX_PROPAGATE_PASSES = 2 :498`).
+- **State grew 15 → 19 fields** (`mod.rs:116-254`); the non-monotone snapshot set is still **4** fields (`walk.rs:556-563`).
+- **#118 changes:** `outermost_branch_of`/`ancestor_branches_of` now use allocation-free `Tir::contains_reachable` (`loops.rs:207,:268`); the `visit_expr` Call arm's per-call `HashSet`s became small `Vec`s with prefix scans (`walk.rs:836-845`).
+- **Open (refreshed):** I-128 (`visit_expr` `walk.rs:782` = 298 code-lines / ~424 raw — the largest function in the tree; `analyze_if_stmt :507` = 210); I-129 (dense-keyed HashMaps remain: `origin :119`, `param_index :127`, `owner_at_read :154`, `view_last_use :215`, `view_defer_loop :228`, `loop_nesting :237`); I-136 (per-arm `own.clone()` `walk.rs:571`; propagate-pass map + sidecar clones `loops.rs:480-537`); I-135 (Rule-7 look-through guard still duplicated: `walk.rs:934-936` vs `:1029-1030`); I-145 (full-states snapshot per break/continue, `loops.rs:546,:753`); I-146 (`bindings.clone()` per if/arm/loop in `collect_view_liveness`, `views.rs:344,:430`); I-155 (4 `expect("param exists")` sites: `mod.rs:102,:456`, `walk.rs:675,:695`).
+- **New / open:** I-148 (per-arg callee-name string scans: `is_borrowed_scalar_param` per call-arg at `walk.rs:847`, `view_borrow_params` at `:917`, linear scans `builtins.rs:128,:142`); I-151 (`collect_loop_nesting` per-statement/per-instruction allocs, `loops.rs:376,:394`).
+- **Fixed (I-134, `8ec3494`):** the "Today no `free_on_reassign` entries exist" comment at `ownership/mod.rs:556-557` was reworded to current behavior — the field is populated and test-covered.
 
-### 2.8 Codegen (`codegen.rs`, 2367 lines)
+### 2.8 Builtins (`builtins.rs`, 233 — unchanged)
 
-- `Codegen<M: Module>` generic over Cranelift `Module` — JIT/AOT share all lowering; only construction/teardown differs. JIT `execute` transmutes `main` to `fn() -> isize` with no signature check.
-- **ABI**: `ValueRepr { Scalar(Value) | Str { ptr, len, cap } }` — str is a 24-byte fat triple; bool = I8 (I-021), int = pointer-sized, float = F64. Str args pass as 3 machine args; str returns via hidden sret slot (`AbiParam::special(..., StructReturn)` at `:422-425`); `inout` spills to a slot pre-call and reloads post-call; callee-side write-back fires through the **single `emit_return` chokepoint** (write-back + `return_`, the only `return_` in the file). The whole layout is **hardcoded to 64-bit** (I-076).
-- `FunctionContext` — 20 fields: value state (`locals`, `str_locals` = 3 Variables per str local, `inst_values` memo), free scheduling (`sidecar`, `freed_at`, `free_by_after`, `pending_sweep`, `branch_stack`, `free_binding_names`), control flow (`loop_stack`, `inout_ptrs`, `sret_ptr`), plus module/data/pool/tir. Frees fire through 3 cooperating paths (per-materialization `emit_due_frees`, end-of-statement `sweep_due_frees`, pre-terminator for Break/Continue/Return). **`free_binding_names` (init→binding-name) is the freshness rule**: a Free whose target is a named binding's initializer emits the binding's CURRENT `StrLocals` (SSA-correct across reassigns, branch merges, and inout write-backs) instead of the producing inst's cached — possibly stale — repr (I-112).
-- Fragilities: `sweep_due_frees` silently drops frees anchored to unmaterialized insts (I-070); `eval_inst` returns a str's `ptr` as a dummy scalar (I-083); `break`/`continue` conflated with `return` in terminator tracking (I-081); `never`-call path skips inout reload (I-082); runtime fns re-declared per **use site** (I-093); unconditional CLIF `format!` per function (I-094); per-block locals-map clones (I-095); two duplicated builtin dispatch tables keyed by string compare (`:1601-1619` and `:1797-1812`, I-034); `print` special-cased to an imported `write(1,…)` (I-006); `__ryo_panic` synthesized (write fd 2 + `exit(101)` + trap).
-- Errors: `Result<_, String>` throughout plus ~20 `unreachable!`/`unimplemented!` arms — the real contract is "String or panic" (I-106).
+- `BUILTINS :39` (7 entries) with ABI metadata (`borrowed_scalar_params`, `view_borrow_params`); `ABI_CALLEES :97`; `RESERVED_NAMES :151`; linear `lookup :112-114`.
+- **Open:** I-034; now also cited by I-148 (`:128-148`).
 
-### 2.9 Runtime (`runtime/src/lib.rs`, ~1090 lines) & toolchain
+### 2.9 Codegen (`codegen/` — mod 1537, expr 1490; was `codegen.rs` 2711)
 
-- `#[repr(C)] RyoStrFat { ptr, len: u64, cap: u64 }`; **`cap == 0` = rodata/empty sentinel**, so freeing literals is a no-op. `__ryo_str_push`: doubling growth with a static-source special case (realloc with `old_cap == 0` allocates *without copying*). OOM → `oom_abort` (also fires on `Layout` errors, conflating bug with OOM). All ABI lengths are `u64` (`suffix_len` was migrated off `i64` in M8.4). The staticlib is `#![no_std]` (feature = `staticlib`, I-043 resolved): allocation goes through the C heap (malloc/free/realloc), and denied `std_instead_of_*` clippy lints guard the discipline in the rlib/test configurations.
-- **Dual packaging**: JIT links the runtime as an rlib (symbols registered at `codegen.rs:244-260`); AOT embeds a **~17 MB** staticlib archive via `include_bytes!` (bundles all of core's precompiled objects — std is gone since I-043, and with it the `-lunwind` workaround). Same source, two artifacts (I-097).
-- Toolchain: pinned zig 0.16.0 downloaded to `~/.ryo/toolchain` with **no integrity check** and a fixed temp path that races concurrent installs (I-073); `zig cc` used as linker driver (no cross-compile yet). Runtime cache in `~/.ryo/cache` never evicted — 42 archives / 556 MB observed (I-096). Build scripts duplicated verbatim (`TODO(dedup)` at `ryo-backend/build.rs:5-12`) — the **stale-archive hazard is fixed** (both always invoke `cargo build -p ryo-runtime`, cargo no-ops when fresh); the duplication remains.
+- Split along the §4.4 watch-list seam: `mod.rs` — `Codegen<M>` + JIT/AOT constructors, `ValueRepr`, `Terminator`, `FunctionContext`, signature/declaration/`compile_function`, statement scaffolding and control flow, inout write-back + `emit_return` (sole `return_` chokepoint, `:895-903`). `expr.rs` — `eval_inst`/`eval_inst_str`/`eval_inst_view`, the guard family, the free machinery, `emit_call` + sret/inout helpers.
+- **Fixed by #118:** the `inst_values` memo `HashMap<TirRef, ValueRepr>` is now a dense `Vec<Option<ValueRepr>>` side table indexed by `TirRef::index()`, with param sentinels in a small side map behind `cached_repr`/`cache_repr` (`mod.rs:196-225,415-430`) — the I-129 worst case.
+- **New since the snapshot (#115, I-023 resolved):** integer div/mod-by-zero is guarded — `emit_div_zero_guard` (`expr.rs:419-434`) emits `icmp` → `brif` to a shared cold `panic_blocks` block calling `ryo_panic(ptr, len)` (stderr message + exit 101, same contract as `panic()`); literal zero divisors are rejected earlier by sema with the new `DivisionByZero` E0037 (`sema/expr.rs:123`, `stmt.rs:300`, 8 tests). Overflow guards (`emit_checked_iadd/isub/imul`, `expr.rs:362-413`) elide only on provably-safe constant operands (`:345-356`). Residuals filed: I-138 (`INT_MIN / -1` still UB — explicitly out of scope at `expr.rs:418`), I-142 (no value-range analysis; measured +29–33% on fibonacci), I-141 (adopt upstream cold-block/trap-fold improvements after the Cranelift upgrade).
+- **Open (refreshed):** I-093 (`declare_runtime_fn` re-imports per site, `expr.rs:507-525`; dead `ryo_str_alloc` JIT registration `mod.rs:354`); I-094 (unconditional `format!("{}", self.ctx.func)` `mod.rs:800`, discarded `:445` — **not** touched by #118); I-095 (three map clones per scoped block, `mod.rs:845-847`); I-034 (`== "main"` at `mod.rs:492,531,602,997`); I-076 (slot constants `mod.rs:40-45` — the "Derived, not re-hardcoded" comment overstates; I64 len/cap throughout `expr.rs:1155-1170`); sret dummy `Ok(ptr)` still at `expr.rs:1420`. `Result<_, String>` everywhere (41 sites) + 42 `unreachable!`.
+- **New / open:** I-144 (`if_branches.get(...).cloned().unwrap_or_default()` `mod.rs:1196`; per-arm full-Vec dead-drop scan `expr.rs:703-719`); I-150 (`build_signature` twice per function, `mod.rs:490,:590`).
 
-### 2.10 Diagnostics & driver (`diag.rs`, `errors.rs`, `pipeline.rs`)
+### 2.10 Toolchain / runtime_lib / linker / build scripts
 
-- `Diag { severity, span, code, message, notes }`; 38 `DiagCode`s mapped to stable `E0001..E0202`/`W0001..3` strings in `diag_code_str` (`pipeline.rs:219-257`; E0200–E0202 reserved for comptime). `DiagSink` caps at 100 with a `TooManyDiagnostics` marker; `error_count` survives truncation. Single ariadne render path; `finalize_diags` tail-block renders once, errs iff any error.
-- Fragmentation at the edges: lexer/parser first-error `Result`s converted at the boundary (I-014, I-054); codegen `Result<_, String>`; hand-rolled `CompilerError` with 4 stringly variants (I-011); E-code ↔ roadmap conflict and no stability test (I-086); message printed twice + `Termination` second line (I-103).
-- `run_file` echoes source + AST + section headers on every run — **load-bearing**: ~63 integration-test assertions key on it (I-099). `ryo build` writes artifacts to the CWD (I-084).
+- `toolchain.rs` (269): pinned zig 0.16.0 (`:6`); Windows zip path with zip-slip guard intact. **Open:** I-073 — still no sha256/signature verification (`download_zig :67-155`), fixed temp dir (`:76-81`), `remove_dir_all(desired)` before rename (`:144`).
+- `runtime_lib.rs` (66): **Open:** I-096 — no eviction; `~/.ryo/cache` now holds **79 archives** (78 at snapshot). I-097's ISSUES.md text is **stale** (still quotes ~17 MB; measured 6.06 MB debug / 5.81 MB release since the `no_std` migration).
+- `linker.rs` (27): unchanged, shells `zig cc`.
+- `build-support` (111): runtime-archive build dedup holding. Remaining duplication: the sha256-of-archive block is still byte-similar in both `build.rs` files (`ryo/build.rs:41-52` ≡ `ryo-backend/build.rs:27-38`); `resolve_git_ref` still doesn't watch detached HEADs (`ryo/build.rs:58-63`).
 
----
+### 2.11 Driver (`pipeline.rs`, 834)
 
-## 3. Cross-Cutting Strengths (keep these)
+- `EmitKind { Ast, Uir, Tir, Clif }` staging intact (`:1-11,357-424`); `parse_with_state` now produces the #117 arena `ast::Ast` (`:143-146`).
+- `DiagCode` grew 41 → **42** (39 E + 3 W): #115 added `DivisionByZero` (E0037, `diag.rs:119`). The E-code stability test pins all 42 (`:647-751`).
+- **Open:** I-099 — `run_file` still echoes `[Input Source]`/`[AST]`/`[Codegen]` (`:558-566`); the integration binaries key on **54 `[Result]`** + **29 `[Codegen]`** assertions. I-013 (`lex`/`parse`/`ir` still separate subcommands).
+- **Fixed:** I-130 — #116 makes recovery swallow a broken block header's indented body instead of mis-nesting it.
 
-1. **InternPool** — handle-keyed probing, zero alloc on lookup, single string arena.
-2. **Arena IRs with niche-filled refs** — tight layouts, spans out-of-band, sentinel slot 0, size tests locking the invariants.
-3. **Sidecar-not-mutation** for analysis results — the right pattern; reuse it for return-flow/CFG (§5 Tier 3).
-4. **Single diagnostics taxonomy + render path** — one `diag_code_str`, one ariadne path, `finalize_diags` consolidation.
-5. **Per-function TIR arenas** — forward-compatible with monomorphization.
-6. **Self-contained toolchain** — pinned zig + embedded runtime = `ryo build` works on a bare machine.
-7. **Test surface** — ~600 tests incl. ASan/valgrind smoke suites and a frontend bench; ownership invariants pinned by ~2900 lines of `TirBuilder` fixtures.
+### 2.12 CLI (`main.rs`, 133) & tests (`ryo/tests/`)
 
----
+- 32 MiB spawned-thread CLI intact (`:72-84`).
+- **Fixed (this branch):** the §4.3 plan landed — `integration_tests.rs` (4002, 198 tests) is now six binaries sharing `common/mod.rs` (565): `integration_driver` (616, 24 tests), `integration_basics` (1364, 81), `integration_assert_panic` (639, 41), `integration_aot` (285, 8), `integration_ownership` (1092, 47), `integration_views` (312, 17) — **218 tests** total, now parallel across binaries. The harness runs `env!("CARGO_BIN_EXE_ryo")` (`common/mod.rs:455-463`); zero `cargo run --` spawns remain — **I-098 is fixed in code** (integration suite 32s → 4s), though its ISSUES.md entry still describes the pre-split world (stale, should be removed). `common/mod.rs` carries `#![allow(dead_code)]` (`:6`) because each binary uses a different helper subset under `-Dwarnings`.
+- `asan_smoke.rs` (27) / `valgrind_smoke.rs` (28): unchanged. **Open:** I-102 (`zig_path()` still shells `ryo toolchain status --path` per build, `common/mod.rs:16-28`; asan suite still runs twice on ubuntu).
 
-## 4. Weaknesses, Ranked by Architectural Significance
+### 2.13 Runtime (`runtime/src/lib.rs`, 1091 — unchanged since the snapshot)
 
-| # | Weakness | Issues |
-|---|---|---|
-| 1 | Copy-heavy IR read API (Vec per decode, hot in sema/codegen) | I-091 |
-| 2 | Ownership pass algorithmics (scratch-sink fixed point, O(N²) jumps, duplicated merges, nondeterministic output) | I-045, I-064–066, I-068, I-069, I-087, I-090 |
-| 3 | Stringly builtin/method dispatch across 4 layers; print/panic hard-wired | I-006, I-028, I-034, I-037, I-092 |
-| 4 | Error-handling fragmentation (DiagSink / Result / String / panics; no parse recovery) | I-011, I-014, I-016, I-054, I-077, I-078, I-106 |
-| 5 | Sema holes & scaling (missing-return, dup defs, inst_map, alloc churn) | I-071, I-075, I-079, I-092 |
-| 6 | Codegen god-context (19 fields) + ABI hardcoding + special cases | I-020, I-070, I-076, I-081–083, I-093–095 |
-| 7 | Build/toolchain robustness (zig integrity/race, cache growth, 17 MB embed, build-script dedup) | I-073, I-096, I-097 |
-| 8 | AST is the odd IR out (Box-tree, stdout printer, no Eq, deferred ambiguity) | I-012, I-029 |
-| 9 | Test/CI integrity (subprocess-per-test, silent valgrind skip, hollow lanes, unexercised examples) | I-085, I-098–102 |
-| 10 | Language-semantics gaps (return-flow, statement-if, numeric tower, div-by-zero) | I-017, I-023–027, I-031, I-032 |
-| 11 | Latent-until-feature invariants (param encoding, name-keyed sidecar, tree-TIR, bool FFI, 32-bit) | I-021, I-072, I-088, I-109, I-110, I-076 |
+- `no_std` staticlib, `RyoStrFat`/`RyoSlice` ABIs, 13 JIT-registered symbols — all as before.
+- **Open:** I-132 — `oom_abort` (`:224`) still conflates OOM/narrowing/overflow at 11 sites; FFI null checks still `debug_assert!` only (`:105,:117,:272,:366,:370,:427,:442`).
 
 ---
 
-## 5. Improvement Roadmap
+## 3. Delta Since the Previous Snapshot
 
-Sequencing respects the milestone dependencies in `docs/dev/CLAUDE.md`. Each tier is independently shippable.
+**Resolved (removed from ISSUES.md, verified in code):** I-023 (#115 div/mod-by-zero guards), I-126 (#117 AST arena), I-130 (#116 parser recovery), I-131 (sema half #118; ownership half re-filed as I-155), I-137 (this branch — splits + file-length gate), I-098 (harness switch to `CARGO_BIN_EXE_ryo`, this branch), I-134 (comment sweep, `8ec3494`).
 
-### Tier 1 — cheap, high leverage (days)
+**New architecture:** typed-arena AST (`Ast`, `ExprId`/`StmtId`, side arenas, parser builds in-arena with a no-op `Inspector`); compile-time + runtime integer div/mod-by-zero guarding with shared cold panic blocks (`DIV_ZERO_MSG`/`MOD_ZERO_MSG`/`OVERFLOW_MSG`, `guard_msg_data` cache, `panic_blocks` deferred to end-of-function); checked `INeg` and compound-assign; dense `Vec` codegen memo replacing the `inst_values` HashMap; allocation-free `Tir::contains_reachable`; module-directory layout for sema/ownership/codegen; six-binary integration layout with the `CARGO_BIN_EXE_ryo` harness; `scripts/check_file_length.sh` + CI `tidy` job; backend CodSpeed benchmarks (`ryo-backend/benches/backend.rs` + `backend-benchmarks` job); lint ratchet — `too-many-lines-threshold = 360`, `panic`/`todo`/`unimplemented`/`unwrap_used` at **deny** (`expect_used` stays allow pending the I-153 audit, ~70 sites).
 
-1. **Deterministic `free_schedule`** (I-068). Sort owners by `TirRef`/`StringId` before each post-pass scheduling sweep (or ordered maps). Add a compile-twice-compare-bytes determinism test. *Files: `ownership.rs` post passes.*
-2. **Borrowed IR views** (I-091). Views return `&[InstRef]`/iterators over `extra`; `body_stmts` → slice iter; same for TIR `call_view`; codegen consumes slices. Add `assert_eq!(size_of::<Inst>(), 24)` first. *Files: `uir.rs`, `tir.rs`, `sema.rs`, `codegen.rs` call sites.*
-3. **Test harness → `CARGO_BIN_EXE_ryo`** (I-098). Pattern already proven in `ryo/tests/common/mod.rs:11,38`. Keep one `cargo run` smoke test. Largest single test-time win (~149 cargo spawns eliminated).
-4. **Build-script dedup** (staleness fixed 2026-07 — both scripts now always invoke `cargo build -p ryo-runtime`, a cheap no-op when fresh). Remaining: extract the byte-identical block into a `build-support` crate (TODO already written at `ryo-backend/build.rs:5-12`).
-5. **Zig download hardening** (I-073). Hardcode 3 pinned sha256s, verify before extract; pid-suffixed temp dir; stage-then-rename instead of `remove_dir_all(desired)`.
-6. **Runtime cache eviction** (I-096). Keep-last-N by mtime; sweep stale `.tmp.*`; rename `extract_runtime_to_temp`/`cleanup_runtime_temp` to cache semantics.
-7. **Quick hygiene**: dead JIT symbol + module-level import cache (I-093); skip CLIF render when not requested (I-094); `ParamMode::from_u32` strictness (I-089); `TirRef::is_param()` + `debug_assert` in `Tir::inst()` (I-072 interim); `diag_code_str` stability test + roadmap E-code fix (I-086); types.rs doc drift (`0..=5` → `0..=6`); remove `#![allow(dead_code)]` where CI `-Dwarnings` allows.
+**New issues filed since the snapshot:** I-138 (`INT_MIN / -1` UB), I-140/I-141 (Cranelift 0.131.1 → 0.135.x upgrade ladder + follow-on guard-codegen review), I-142 (value-range guard elision), I-144 (per-if clone + dead-drop scans), I-145 (per-jump states snapshot), I-146 (view-liveness bindings clones), I-147 (builtin mode-Vec allocs), I-148 (per-arg callee-name lookups), I-149 (per-literal unescape String), I-150 (signature built twice), I-151 (loop-nesting allocs), I-152 (throwaway parser Vecs), I-153 (`expect_used` audit), I-154 (no inf/NaN spelling), I-155 (ownership `expect("param exists")`).
 
-### Tier 2 — structural cleanups (1–2 weeks each)
+**ISSUES.md hygiene:** the staleness found during verification (I-098's pre-split text, I-097's pre-`no_std` 17 MB numbers, monolithic-path `Files:` refs, I-134's comments) was swept in `8ec3494`: I-098/I-134 removed, I-097 corrected to 6.06 MB debug / 5.81 MB release, and `Files:` anchors across 35 entries refreshed to the post-split layout.
 
-8. **`BuiltinId` end-to-end** (I-006, I-028, I-034, I-037; enables I-092c). Enum resolved once in sema, carried in UIR/TIR payloads; `BuiltinFunction` gains param descriptors (arity, `TypeKind`s, `ParamMode`s — `str_push` needs modes, not just types); sema validation becomes table-driven (kills ~150 lines of triplication at `sema.rs:1506-1641`); codegen keeps **one** dispatch table keyed by id (kills both `:1601` and `:1797` copies); `print` moves to the runtime crate; panic `file:line:col` moves to a span-keyed side table so `Sema` drops `source`/`file_path` and the O(n) line/col scans.
-9. **Ownership pass algorithmics** (I-045, I-064, I-065, I-066, I-069, I-087, I-090). Propagate-only fixed point + single check pass at the converged lattice (removes scratch sink *and* defines sidecar-rollback semantics for I-069); per-loop precomputed `inside_loop`/`has_any`/ref→enclosing-stmt map; promote reachability primitives to `ryo-core/src/tir.rs` per I-066 (note the *actual* re-encoder set: `collect_jump_path`, `collect_named_inits_rec`, `schedule_loop_exit_frees_in`); unify the two merge implementations.
-10. **Error-handling unification** (I-011, I-014, I-015, I-016, I-054, I-077, I-078). `thiserror` for `CompilerError`; thread `DiagSink` through the lexer (Token::Error sites emit structured diags, unknown escapes diagnosed, indent errors carry real spans); generalize `finalize_diags` to `Vec<Diag>`; pool-aware parse-error rendering (kills `<id#N>`).
-11. **Sema correctness + churn** (I-071, I-075, I-079, I-092). Missing-return check (pair with I-031's `block_definitely_returns`); `DuplicateDeclaration` for functions; `FNeg`; `inst_map` → `HashMap<InstRef,TirRef>` (or per-function UIR slice); borrow instead of clone in `check_call`; interned-id method dispatch.
-12. **Codegen context split + ABI centralization** (I-070, I-076, I-081, I-082, I-083, I-095, I-020). Split `FunctionContext` into value-state / free-scheduling / control-flow; one fat-pointer layout definition computed from `pointer_type()` (prerequisite for I-021 and any 32-bit target); terminator enum instead of bool; `reload_inout_args` on the `never` path; end-of-function assert that `pending_sweep` is empty (I-070); undo-log instead of map clones in `emit_scoped_body`.
-13. **Test/CI integrity** (I-085, I-099, I-100, I-101, I-102, I-103, I-084). Valgrind skip → loud failure or env-gated opt-out; gate `run_file` chatter behind `--verbose` *after* migrating tests to exit-code assertions; instrument or delete the hollow CodSpeed AOT lanes + add an automated eager-destruction regression bench; CI parse-check over `examples/`; dedupe smoke fixtures and the double asan run; fix `emit_one` double message + `Termination` line; outputs next to source, not CWD.
+---
 
-### Tier 3 — language/architecture moves (longer)
+## 4. File-Length Gate (2K-line limit) — landed
 
-14. **Parser error recovery** (I-030). chumsky `recover_with` at statement boundaries + `MapExtra::emit` for soft errors — the DiagSink/render machinery already supports multi-error; only the parser starves it. Do after/with Tier 2 item 10 so lex+parse co-surface.
-15. **Return-flow analysis + expression-if** (I-031, I-032, I-071). Light CFG over TIR as a **sidecar** (the established pattern — never mutate TIR); prerequisite for `match` exhaustiveness later. Also resolves the I-020 memoizer-scoping precondition.
-16. **Numeric tower** (I-017, I-023, I-024, I-025, I-026, I-027). One coordinated design: literal grammar, `i64::MIN`, div-by-zero checks, conversions, float widths. Don't piecemeal.
-17. **Type-system foundations before user types** (I-018, I-088, I-109, I-110, I-111). `TypeId` enum retry; sidecar keyed by `DeclId`; inst→function map; document/assert tree-TIR; lexer macro table. Phase 5 (lazy Sema) per pipeline_alignment.md is the gating milestone for comptime/generics — per-function TIR arenas are already positioned.
-18. **ABI/FFI readiness** (I-021, I-043, I-076, I-105). After Tier 2 item 12 centralizes layouts: bool widening at boundaries, `no_std` runtime (also shrinks I-097's archive), uniform `u64` lengths.
-19. **Post-M11 memory work** — per docs/dev/README.md: `arc_optimizer.md`, `copy_elision.md`, `stdlib_optimizations.md` (SSO/CoW/sink params). Runtime comment at `runtime/src/lib.rs:176-177` already defers ARC/CoW policy here.
+**Rule:** no Rust source file in the workspace should exceed **2000 lines**, tests included. I-137 resolved on this branch (`8c08abf`): `scripts/check_file_length.sh` runs the gate locally, and CI runs it as the `tidy` job (ubuntu, `actions/checkout@v6` with `persist-credentials: false`). There is deliberately **no allowlist** — the splits are the fix. It was kept out of `scripts/run_linux_tests.sh`, which stays scoped to the ASan/Valgrind container run. The gate landed at 3000 and was tightened to 2000 the same day (`333dbca`) once the two remaining >2K files were split.
+
+Largest files at HEAD, verified with `wc -l`:
+
+| File | Lines |
+|---|---|
+| `ryo-frontend/src/parser.rs` | 1982 |
+| `ryo-frontend/src/sema/tests.rs` | 1945 |
+| `ryo-core/src/tir.rs` | 1712 |
+| `ryo-backend/src/codegen/mod.rs` | 1537 |
+| `ryo-backend/src/codegen/expr.rs` | 1490 |
+| `ryo-frontend/src/ownership/tests/frees.rs` | 1479 |
+
+### 4.1 What landed
+
+- `ownership.rs` (9504) → `ownership/`: mod 717 + walk 1263 + loops 877 + views 567 + frees 351 + merge 346 + diag_fmt 55, tests split into `tests/{mod,frees,inout,loops,merge}.rs` + `tests/common.rs` (108 tests, moved verbatim).
+- `sema.rs` (4168) → `sema/`: mod 525 + stmt 521 + expr 721 + call 272 + builtins 501 + tests 1945 (190 tests).
+- `codegen.rs` (3010) → `codegen/`: mod 1537 + expr 1490 (the §4.4 watch-list item, split pre-emptively).
+- `integration_tests.rs` (4002) → six per-area binaries (§2.12); harness moved to `CARGO_BIN_EXE_ryo` in the same pass.
+- Gate-tightening splits (`d613074`, `333d409`): `ownership/tests/views.rs` (2098) → `views_basics.rs` (426, projection/freeze basics) + `views_branches.rs` (1065, per-arm liveness) + `views_calls.rs` (610, Rule-7 call args / materialize); `tir.rs` inline tests → `tir/tests.rs` (309) as a `#[cfg(test)]` child module, keeping `tir.rs` a plain file.
+
+### 4.2 Split discipline (as executed)
+
+- Pure moves, zero logic changes; one module per commit, `cargo test` green after each. Moves were verified line-multiset-identical against the originals.
+- Module header docs kept on `mod.rs`; child modules carry a one-line `//!` pointing back.
+- Re-exports through `mod.rs` (`pub(crate) use`) left all `pipeline.rs` call sites untouched; sibling modules import explicitly (`use super::{…}`), globs only in test modules.
+- Test extraction to a child-module file (`tir/tests.rs`) is preferred over converting a file to a `mod.rs` directory — no path churn, private access preserved.
+- Shared test fixtures live in `tests/common.rs` (ownership) and `ryo/tests/common/` (integration).
+
+### 4.3 Watch list (under 2K, tight by design)
+
+- `ryo-frontend/src/parser.rs` — **1982**, 18 lines of headroom. The next feature touching it forces the split: statement vs expression parsers.
+- `ryo-frontend/src/sema/tests.rs` — **1945**, 55 lines of headroom; splits by feature area when it crosses.
+- `ryo-core/src/tir.rs` (1712), `ryo-backend/src/codegen/mod.rs` (1537) — healthy.
+- `ryo-core/src/ast.rs` grew 351 → **1047** with the arena (#117) — healthy.
 
 ---
 
 ## References
 
-- Issues: [ISSUES.md](../../ISSUES.md) (I-068–I-111 filed from this analysis)
-- Dev: [pipeline_alignment.md](pipeline_alignment.md) (UIR/TIR design, §4.5 error recovery), [design_issues.md](design_issues.md) (language-design tracker), [implementation_roadmap.md](implementation_roadmap.md) (milestone sequencing)
-- Spec: [specification.md](../specification.md) — Section 5 (ownership & borrowing)
-- Milestone: M8.4 string-slice family (current branch) — see implementation_roadmap.md
+- Previous snapshots (deleted; see git history): 2026-08-20 (`c24a224`), 2026-07-18 (`64b740a`)
+- Issues: [ISSUES.md](../../ISSUES.md)
+- Dev: [pipeline_alignment.md](pipeline_alignment.md), [implementation_roadmap.md](implementation_roadmap.md)
+- Spec: [specification.md](../specification.md); slicing/views/memory model: [ryo-slicing-and-memory-model-final-spec.md](ryo-slicing-and-memory-model-final-spec.md) (D1–D11)

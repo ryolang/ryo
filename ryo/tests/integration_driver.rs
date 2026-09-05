@@ -313,7 +313,6 @@ fn test_run_negation_operator() {
 
 // ---------- ryo ir --emit=... ----------
 //
-// Exit-criteria coverage for pipeline_alignment.md §3.6 / §4.5:
 // `Uir::dump` and `Tir::dump` reachable from the CLI, distinct
 // listings, deterministic ordering.
 

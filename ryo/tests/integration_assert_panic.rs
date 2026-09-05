@@ -541,6 +541,149 @@ fn div_by_zero_aot_run_exits_101() {
     );
 }
 
+#[test]
+fn div_overflow_panics_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    // INT_MIN as an expression: the literal 9223372036854775808
+    // overflows i64, so build it arithmetically. The divisor stays a
+    // variable so sema cannot const-fold or reject the division.
+    let code = "fn main():\n\tmin = -9223372036854775807 - 1\n\tneg = 0 - 1\n\ty = min / neg\n";
+    let test_file = create_test_file(temp_dir.path(), "div_overflow.ryo", code);
+
+    let output = run_ryo_command(&["run", "div_overflow.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "INT_MIN / -1 should exit 101. stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("integer division overflow"),
+        "stderr should contain division-overflow message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn mod_overflow_panics_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmin = -9223372036854775807 - 1\n\tneg = 0 - 1\n\ty = min % neg\n";
+    let test_file = create_test_file(temp_dir.path(), "mod_overflow.ryo", code);
+
+    let output = run_ryo_command(&["run", "mod_overflow.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "INT_MIN % -1 should exit 101. stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("integer modulo overflow"),
+        "stderr should contain modulo-overflow message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn compound_div_overflow_panics_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut min = -9223372036854775807 - 1\n\tneg = 0 - 1\n\tmin /= neg\n";
+    let test_file = create_test_file(temp_dir.path(), "compound_div_overflow.ryo", code);
+
+    let output = run_ryo_command(&["run", "compound_div_overflow.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "INT_MIN /= -1 should exit 101. stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("integer division overflow"),
+        "stderr should contain division-overflow message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn compound_mod_overflow_panics_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmut min = -9223372036854775807 - 1\n\tneg = 0 - 1\n\tmin %= neg\n";
+    let test_file = create_test_file(temp_dir.path(), "compound_mod_overflow.ryo", code);
+
+    let output = run_ryo_command(&["run", "compound_mod_overflow.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "INT_MIN %= -1 should exit 101. stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("integer modulo overflow"),
+        "stderr should contain modulo-overflow message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn div_by_neg_one_ok_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tneg = 0 - 1\n\ty = 10 / neg\n";
+    let test_file = create_test_file(temp_dir.path(), "div_neg_one_ok.ryo", code);
+
+    let output = run_ryo_command(&["run", "div_neg_one_ok.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "10 / -1 is representable and must not panic. stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn div_overflow_aot_run_exits_101() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tmin = -9223372036854775807 - 1\n\tneg = 0 - 1\n\ty = min / neg\n";
+    let test_file = create_test_file(temp_dir.path(), "div_overflow_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = exe_path(temp_dir.path(), "div_overflow_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+
+    assert_eq!(
+        run_output.status.code(),
+        Some(101),
+        "binary should exit 101 on division overflow"
+    );
+    let stderr = String::from_utf8_lossy(&run_output.stderr);
+    assert!(
+        stderr.contains("integer division overflow"),
+        "stderr should contain division-overflow message, got: {}",
+        stderr
+    );
+}
+
 // ============================================================================
 // Integer overflow traps (spec §18: checked arithmetic in all build modes)
 // ============================================================================

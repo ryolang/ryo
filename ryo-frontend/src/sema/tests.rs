@@ -818,12 +818,10 @@ fn diagnostics_ordered_by_decl_then_position() {
 
 // ---------- Substrate stubs for comptime / generics ----------
 //
-// Per pipeline_alignment.md §5.3 commit 5, these are
-// `cfg(any())`-gated ("never compiled") infrastructure tests.
-// They exist as named hooks so the comptime / generics
+// These are `cfg(any())`-gated ("never compiled") infrastructure
+// tests. They exist as named hooks so the comptime / generics
 // milestones land as concrete test bodies — no follow-on
-// refactor needed to make space for them. `cfg(any())` is the
-// idiomatic Rust spelling of the doc's `cfg(unimplemented)`.
+// refactor needed to make space for them.
 #[cfg(any())]
 mod future {
     use super::*;

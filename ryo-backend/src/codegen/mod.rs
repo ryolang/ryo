@@ -30,6 +30,7 @@ use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use expr::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MSG};
 use ryo_core::ast::CompoundOp;
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
@@ -115,16 +116,12 @@ pub struct Codegen<M: Module> {
     /// same `.rodata` blob without an extra hash on the bytes.
     string_data: HashMap<StringId, DataId>,
     /// Cache of `DataId` per compiler-generated guard message
-    /// (zero-divisor checks). These strings never pass through the
-    /// `InternPool`, so they are keyed on the static text itself.
+    /// (division and checked-arithmetic guards). These strings never
+    /// pass through the `InternPool`, so they are keyed on the static
+    /// text itself.
     guard_msg_data: HashMap<&'static str, DataId>,
 }
 
-/// Zero-divisor guard messages, written verbatim by `ryo_panic`
-/// (raw bytes, trailing newline — same convention as the runtime's
-/// slice-failure messages).
-const DIV_ZERO_MSG: &str = "integer division by zero\n";
-const MOD_ZERO_MSG: &str = "integer modulo by zero\n";
 /// Overflow guard message for the spec §18 checked-arithmetic traps.
 const OVERFLOW_MSG: &str = "integer overflow\n";
 
@@ -1390,11 +1387,27 @@ impl<M: Module> Codegen<M> {
                         rhs,
                     )?,
                     (CompoundOp::Div, false) => {
-                        Self::emit_div_zero_guard(builder, ctx, rhs, DIV_ZERO_MSG)?;
+                        Self::emit_div_guard(
+                            builder,
+                            ctx,
+                            current,
+                            lhs_range,
+                            rhs,
+                            DIV_ZERO_MSG,
+                            DIV_OVERFLOW_MSG,
+                        )?;
                         builder.ins().sdiv(current, rhs)
                     }
                     (CompoundOp::Mod, false) => {
-                        Self::emit_div_zero_guard(builder, ctx, rhs, MOD_ZERO_MSG)?;
+                        Self::emit_div_guard(
+                            builder,
+                            ctx,
+                            current,
+                            lhs_range,
+                            rhs,
+                            MOD_ZERO_MSG,
+                            MOD_OVERFLOW_MSG,
+                        )?;
                         builder.ins().srem(current, rhs)
                     }
                     (CompoundOp::Add, true) => builder.ins().fadd(current, rhs),

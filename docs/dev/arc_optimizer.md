@@ -2,15 +2,15 @@
 
 # ARC Optimizer Pass (`ryo-driver/src/arc_optimizer.rs` or `ryo-frontend/src/arc_optimizer.rs`)
 
-> Draft. The pass does not exist yet; this doc is the design sketch that will be referenced when the pass lands. Milestone TBD — likely sequenced with M11 (structs) or M15 (`shared[T]` stdlib type), whichever introduces refcounted values first.
+> Draft. The pass does not exist yet; this doc is the design sketch that will be referenced when the pass lands. Sequencing: designed and prototyped during M22 (collections / COW buffers — the first refcounted infrastructure), and a **hard gate** before `shared[T]` ships user-facing with the concurrency runtime — see `implementation_roadmap.md`.
 
 This pass is the compiler-engineering investment that makes `shared[T]`'s performance story (spec 5.6) credible. Without it, every implicit retain/release on assignment fires an atomic op, and `shared[T]` overhead dominates application code. With it, retain/release pairs that bracket regions where the value cannot be deallocated are elided before codegen, matching the Swift model the spec commits to.
 
-The pass is conceptually distinct from the ownership pass (`ryo-frontend/src/ownership.rs`):
+The pass is conceptually distinct from the ownership pass (`ryo-frontend/src/ownership/mod.rs`):
 
 | Pass | Concern | Soundness vs perf |
 |---|---|---|
-| `ryo-frontend/src/ownership.rs` (M8.1) | Move semantics, use-after-move, `Free` insertion for owned types like `str` | Soundness: rejects programs |
+| `ryo-frontend/src/ownership/mod.rs` (M8.1) | Move semantics, use-after-move, `Free` insertion for owned types like `str` | Soundness: rejects programs |
 | `ryo-driver/src/arc_optimizer.rs` or `ryo-frontend/src/arc_optimizer.rs` (this doc) | Elide redundant retain/release on `shared[T]` values | Perf only: never changes program meaning |
 
 Both passes run on TIR (post-sema, pre-codegen). The ownership pass must run first because its inserted `Free` instructions are inputs to the ARC pass's "what's the last use of this value?" analysis.
@@ -179,18 +179,16 @@ The ARC optimizer interacts with COW like this: most reads of a `list[T]` never 
 - **It is not a soundness check.** Use-after-free of a `shared[T]` is impossible by construction (refcount holds the storage); the pass can never introduce a use-after-free, only remove redundant safety.
 - **It does not handle cross-function elision.** All analysis is intra-procedural. Inlining (whether done by Cranelift or by a future Ryo-side inliner) is the prerequisite for cross-function ARC elision. Pre-monomorphization (M11+) most inlining will be limited.
 - **It does not insert retain/release ops.** Those come from the lowering of `shared[T]` semantics in earlier passes (sema or a dedicated shared-lowering step). The optimizer only removes redundant ops.
-- **It does not handle cycle collection.** Cycles between `shared[T]` values that don't include a `weak[T]` link leak. Spec section 5.6 acknowledges this; the optimizer doesn't change it.
+- **It does not handle cycle collection.** Cycles between `shared[T]` values that don't include a `weak[T]` link leak. Spec section 5.6 acknowledges this; the optimizer doesn't change it. The planned mitigation is runtime tooling, not this pass: a debug-mode cycle detector that reports `shared[T]` reference cycles instead of leaking silently (see the Phase 5 gap table in `implementation_roadmap.md`).
 - **It does not optimize `mutex[T]` or `rwlock[T]` lock acquisition.** Those are independent primitives with their own runtime. Lock elision is a separate project (and a much harder one).
 
 ## Sequencing on the roadmap
 
-The pass is not needed until refcounted values exist as language features. Likely sequencing:
+The pass is not needed until refcounted values exist as language features. Sequencing (tracked in `implementation_roadmap.md`):
 
-1. **M11 (structs)** — first real candidate for `shared[T]` because real-world shared-struct patterns appear once structs land.
-2. **M15 (concurrency / tasks)** — `shared[T]` becomes essential when multiple tasks need access to the same value. Spec section 5.6 implicitly assumes this is available.
-3. **ARC optimizer pass** — should land alongside or shortly after the first stdlib introduction of `shared[T]`, before any benchmark commitments. Without it, microbenchmarks will look bad and erode trust.
-
-A plausible milestone slot is **M11.5** (after structs, before tasks) so the pass is in place when concurrency code starts using `shared[T]` in earnest.
+1. **M22 (collections / COW buffers)** — the first refcounted infrastructure lands here (buffer-level refcounts for `list` / `map` / `str` COW). The pass is designed and prototyped during this milestone.
+2. **Concurrency runtime (Phase 5)** — `shared[T]` becomes user-facing when multiple tasks need access to the same value. Spec section 5.6 implicitly assumes this is available.
+3. **Hard gate:** the pass must be committed before `shared[T]` ships in the stdlib or appears in any published benchmark. Without it, unelided atomic retain/release pairs dominate shared-state microbenchmarks and the feature's performance reputation is set before it has a chance.
 
 ## Testing strategy
 
@@ -208,8 +206,9 @@ A plausible milestone slot is **M11.5** (after structs, before tasks) so the pas
 ## References
 
 - Spec: `docs/specification.md` Section 5.6 (Shared Ownership)
-- Dev: `ryo-frontend/src/ownership.rs` (ownership-pass infrastructure this pass extends)
-- Dev: `docs/dev/mojo_reference.md` (ownership-pass inspiration)
-- Dev: `docs/dev/rust_reference.md` (comparison against Rust's `Arc<T>` model)
+- Dev: `ryo-frontend/src/ownership/mod.rs` (ownership-pass infrastructure this pass extends)
+- Dev: `docs/dev/pl_references/mojo.md` (ownership-pass inspiration)
+- Dev: `docs/dev/pl_references/rust.md` (comparison against Rust's `Arc<T>` model)
+- Dev: `docs/dev/pl_references/swift.md` (Swift compiler snapshot — `lib/SILOptimizer/ARC/` structure)
 - Upstream prior art: Swift's SIL ARC optimizer (`swift/lib/SILOptimizer/ARC/`), Apple's WWDC talks on Swift performance.
-- Milestone: TBD — see *Sequencing on the roadmap* above.
+- Milestone: M22 (design and prototype) — hard gate before user-facing `shared[T]`; see *Sequencing on the roadmap* above.

@@ -174,7 +174,7 @@ Relevant Files
 - `src/cmd/compile/internal/ssagen` \- IR to SSA conversion
 - `src/cmd/compile/internal/noder` \- Unified IR generation
 
-The Go compiler transforms source code through a series of well-defined phases, each building on the previous one. Understanding this pipeline is essential for working with the compiler internals.
+The Go compiler transforms source code through a series of well-defined phases, each building on the previous one. The five phases detailed below group the seven from the architecture overview above: Phase 4 covers the Middle End, Walk, and SSA Generation, and Phase 5 is Code Generation. Understanding this pipeline is essential for working with the compiler internals.
 
 ### Phase 1: Parsing [Link to this section](https://www.augmentcode.com/open-source/golang/go\#phase-1-parsing)
 
@@ -663,5 +663,5 @@ Use `go tool objdump` to disassemble binaries and `go tool addr2line` to map add
 
 ## References
 - Dev: `docs/dev/concurrency.md` (Ryo's Go-inspired concurrency model)
-- Spec: `docs/specification.md` §9 (Concurrency)
+- Spec: [specification.md](../../specification.md) §9 (Concurrency)
 - Upstream: <https://github.com/golang/go>

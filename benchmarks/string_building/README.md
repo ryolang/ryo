@@ -2,7 +2,7 @@
 
 **Focus:** Runtime string ABI + eager destruction. Concat over 50,000 iterations (`s = s + "x"`): every iteration allocates a fresh buffer through `ryo_str_concat` and eagerly frees the previous one at the reassign. This is the direct before/after measure for the packed-`u128` string runtime ABI (commit `7d0a047`, return-by-value replacing the per-call-site out-pointer stack slot) — the ABI decision and its rationale are recorded on `pack_pair` in `runtime/src/lib.rs` and pinned by the `clif_string_ops_use_packed_return_no_stack_slots` integration test.
 
-**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+**Languages compared:** Rust, Swift, Ryo (AOT vs JIT), and Python.
 
 ## Why Ryo trails here: value-semantic concat (and the planned fix)
 
@@ -14,18 +14,21 @@ The planned fix lives in the roadmap's SSO/COW work (see `docs/dev/implementatio
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-26. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-01. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
 | Candidate | Mean time | vs fastest | Max RSS |
 |---|---|---|---|
-| **Rust** | 1.4 ms ± 0.1 ms | 1.00x | 1.61 MB |
-| **Swift** | 2.3 ms ± 0.4 ms | 1.61x slower | 1.81 MB |
-| **Ryo (AOT)** | 17.8 ms ± 0.3 ms | 12.46x slower | 2.25 MB |
-| **Ryo (JIT)** | 19.4 ms ± 0.3 ms | 13.52x slower | 5.84 MB |
+| **Rust** | 1.5 ms ± 0.1 ms | 1.00x | 1.61 MB |
+| **Swift** | 2.4 ms ± 0.1 ms | 1.61x slower | 1.81 MB |
+| **Ryo (AOT)** | 18.3 ms ± 0.3 ms | 12.45x slower | 2.25 MB |
+| **Ryo (JIT)** | 19.7 ms ± 0.3 ms | 13.41x slower | 5.77 MB |
+| **Python** | 36.6 ms ± 0.5 ms | 24.87x slower | 14.72 MB |
+
+Python (CPython 3.14.7) runs the same `s += "x"` loop interpreted; its ~25x gap over Rust is interpreter overhead, and its ~2x gap over Ryo shows the interpreted baseline is slower than Ryo's compiled O(n²) concat even before any allocation-policy fix lands.
 
 ## How to Run
 
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
+Prerequisites: `hyperfine`, `rustc`, `swiftc`, `python3`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
 
 ```bash
 ./run_benchmarks.sh

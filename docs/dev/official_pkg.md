@@ -105,6 +105,8 @@ The **Official Packages** list (managed by the core team) for a credible ecosyst
 
 **Strategic Note:** These should not be placed in the Standard Library (`std`). Keeping `std` small (I/O, FS, Net, Core) and putting these in the registry allows updating the Postgres driver version without forcing users to upgrade their Ryo Compiler.
 
+**Open Decision:** `ryo-std-data-proposal.md` instead proposes the database drivers as stdlib modules (`std.db`, `std.db.sqlite`, `std.db.postgres`). Placement of `pkg:sqlite` / `pkg:postgres` — official `pkg:` packages vs `std` — is deferred to the data-layer milestone (v0.2+); both documents stay in tree until then.
+
 ## References
 - Dev: `docs/dev/pkg_manager.md` (registry + manifest), `docs/dev/std_ext.md` (crate wrapping)
 - Roadmap: `docs/dev/implementation_roadmap.md` (v0.2 packages)

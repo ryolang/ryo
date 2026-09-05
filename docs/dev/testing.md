@@ -2,9 +2,9 @@
 
 # Testing Framework
 
-The current roadmap (Milestone 26) proposes a standard "Cargo-like" or "Go-like" implementation (`#[test]`, `assert_eq`). While functional, **it is too bare-bones for a modern "DX-First" language.**
+Spec §15 now defines the baseline framework: `#[test]` with timeouts, `#[bench]` benchmarks, RAII (`Drop`) fixtures, and the `tests/` black-box integration directory. Those proposals have been absorbed into the spec and are no longer tracked here.
 
-To compete with Python (pytest) and Go, Ryo needs to address the "Setup/Teardown" and "Mocking" problems, which are notoriously painful in compiled languages.
+What remains below are the gaps the spec does **not** yet cover — the recommendations still needed for a modern "DX-First" language to compete with Python (pytest) and Go.
 
 ---
 
@@ -43,40 +43,9 @@ For general-purpose backend work, **Interfaces (Dynamic Dispatch)** are almost m
 
 ---
 
-### 2. The "Setup/Teardown" Trap
-**The Spec:** `#[test]` runs a function.
-**The Problem:** Real backend tests need state.
-*   Create a temp DB.
-*   Seed data.
-*   Run test.
-*   **Cleanup (even if test fails/panics).**
+### 2. Drop-on-Panic Output Capture
+Spec §15 covers the RAII (`Drop`) fixture pattern for setup/teardown. One runner requirement remains:
 
-In Go, this is manual and error-prone (`defer`). In Python (pytest), `fixtures` are powerful but implicit.
-
-**Proposal:**
-**RAII Fixtures (The Ryo Way).**
-Since Ryo has a strict `Drop` trait (RAII), it can be leveraged for test fixtures.
-
-```ryo
-struct DbFixture:
-    conn: Connection
-
-# Runs on setup
-fn create_db() -> DbFixture:
-    # create temp db...
-    return DbFixture(...)
-
-# Runs on teardown (automatically called when 'fix' goes out of scope)
-impl Drop for DbFixture:
-    fn drop(inout self):
-        # delete temp db...
-
-#[test]
-fn test_query():
-    fix = create_db() # Setup happens here
-    # do testing...
-    # Teardown happens automatically here, even on panic!
-```
 **Action:** Ensure the Test Runner captures output *during* Drop panics, and ensure `Drop` is guaranteed to run even if the test assertion fails.
 
 ---
@@ -129,42 +98,13 @@ fn test_addition():
 
 ---
 
-### 5. Benchmarks
-**The Missing Piece:** `ryo test` exists, but `ryo bench` is missing.
-**Why it matters:** Ryo positions itself between Go and Python. Users *will* want to measure if their Ryo code actually beats Python.
-
-**Proposal:**
-Add `#[bench]` attribute for v0.1.
-```ryo
-#[bench]
-fn bench_parsing(inout b: Bencher):
-    for _ in b.iter():
-        parse_heavy_json()
-```
-This is low effort to implement (run loop N times, measure time) but high value for adoption.
-
----
-
-### 6. Private vs Public Testing
-**The Question:** Where do tests live?
-*   **Unit Tests:** Inside `src/my_module.ryo`. Can access private functions.
-*   **Integration Tests:** Inside `tests/` directory. Treat the package as a black box (Public API only).
-
-**Proposal:**
-Formalize the `tests/` directory in the package structure.
-*   Files in `src/*.ryo` are compiled as part of the library (access to privates).
-*   Files in `tests/*.ryo` are compiled as *separate executables* that import the library (access to public only).
-
----
-
 ### Summary of Recommendations
 
 1.  **Diffs:** Ensure `assert_eq` prints struct-level diffs, not just `!=`.
-2.  **Fixtures:** Document and strictly test the **RAII (Drop)** pattern for test teardown. This is Ryo's "killer feature" for testing compared to Go's `defer` or Python's `yield`.
-3.  **Benchmarks:** Add `#[bench]` to validate performance claims.
-4.  **Integration Tests:** Define the `tests/` folder structure for black-box testing.
-5.  **Dependency Injection:** Since Dynamic Dispatch is missing in v0.1, provide a standard library helper or documentation on mocking via **Function Pointers** (e.g., struct fields that hold `fn` types) so users are not blocked on testing DB interactions.
+2.  **Dependency Injection:** Since Dynamic Dispatch is missing in v0.1, provide a standard library helper or documentation on mocking via **Function Pointers** (e.g., struct fields that hold `fn` types) so users are not blocked on testing DB interactions.
+3.  **Table-Driven Tests:** Endorse/document the loop-over-cases pattern, with failure messages that identify which case failed.
+4.  **Drop-on-Panic Capture:** The Test Runner must capture output during Drop panics and guarantee `Drop` runs even when a test assertion fails.
 
 ## References
-- Spec: `docs/specification.md` (testing section, when written)
+- Spec: `docs/specification.md` Section 15 (Testing Framework)
 - Roadmap: `docs/dev/implementation_roadmap.md` (Milestone 26)

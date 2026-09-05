@@ -70,33 +70,40 @@ offset = 10
 
 ## Task Closure Interaction
 
-Closures spawned as concurrent tasks (see Section 12) have additional representation constraints:
+Closures passed to `task.run`, `task.scope`, and `task.spawn_detached` (see §9.2.1) have additional representation constraints. All three capture by move implicitly — the compiler enforces this because tasks may outlive the spawning scope (§6.2.2) — with one scoped exception:
 
-1. **Must be `FnMove`:** Task closures own their environment entirely. No borrowed references to the spawning scope are permitted.
-2. **Send-safety:** The environment struct must contain only types that are safe to transfer across task boundaries. Specifically:
-   - `shared[T]` handles must be explicitly cloned before capture (not borrowed from the parent scope).
+1. **Move capture for `task.run` / `task.spawn_detached`:** These closures own their environment entirely (the `FnMove` layout above). No borrowed references to the spawning scope are permitted.
+2. **Scoped-borrow exception for `task.scope`:** Because a scope joins all children before exiting, closures inside a `task.scope` body may capture by immutable borrow — the environment may hold references into the spawning scope, including projections (`strview`, `slice[T]`, `bytesview`). The compiler verifies the captured data is frozen for the scope's duration and that no capture escapes the scope.
+3. **Send-safety:** The environment struct must contain only types that are safe to transfer across task boundaries. Specifically:
+   - `shared[T]` handles are captured by assignment, which retains the handle (§5.6) — there is no explicit `.clone()`.
    - Raw mutable references (`inout T`) are prohibited in task closure environments.
-3. **Heap allocation:** Task closure environments are always heap-allocated because their lifetime is decoupled from the spawning scope.
+4. **Heap allocation:** `task.run` / `task.spawn_detached` environments are always heap-allocated because their lifetime is decoupled from the spawning scope. `task.scope` environments need not be heap-allocated for lifetime reasons — the scope join bounds their lifetime to the block — but they still cross to another green thread's stack.
 
 ```ryo
 fn spawn_worker(data: [int]):
-	# Move data into the task closure — task owns it
-	spawn move fn():
+	# Implicit move capture — no `move` keyword needed
+	fut = task.run:
 		for item in data:
 			process(item)
 	# 'data' is no longer accessible here
 
 fn share_state():
-	counter = shared[mutex[int]](0)
-	handle = counter.clone()  # Explicit clone for task capture
-	spawn move fn():
-		lock val = handle.lock():
-			val += 1
+	counter = shared(mutex(0))
+	handle = counter  # Assignment retains the handle — no explicit clone
+	task.run:
+		with handle.lock() as lock:
+			*lock += 1
+
+fn process_batch(items: [str]):
+	# Scoped borrow — the scope joins before returning, so the
+	# closure may reference the spawning scope without moving
+	task.scope:
+		validate_all(items)
 ```
 
 *(Rationale: Closure representation must balance performance — zero-cost for the common no-capture case — with safety guarantees for concurrent and FFI contexts. The fat-pointer model aligns with the planned `dyn Trait` representation (see `docs/dev/dyn_trait.md`), enabling future unification of closure trait objects and general trait objects under a single dispatch mechanism.)*
 
 ## References
-- Spec: `docs/specification.md` §6.2 (Closures)
+- Spec: `docs/specification.md` §6.2 (Closures), §9.2.1 (task closures, scoped-borrow exception), §5.6 (`shared[T]` retain semantics)
 - Dev: `docs/dev/dyn_trait.md` (shared dispatch representation)
 - Roadmap: `docs/dev/implementation_roadmap.md` (closures, v0.2+)

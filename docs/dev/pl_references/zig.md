@@ -135,7 +135,7 @@ The compiler supports incremental compilation through caching and dependency tra
 
 ### Multi-threaded Job Queue [Link to this section](https://www.augmentcode.com/open-source/ziglang/zig\#multi-threaded-job-queue)
 
-Compilation uses a thread pool to parallelize analysis and code generation. The `Compilation` module queues jobs (analyze module, codegen function) that workers process concurrently. Progress tracking ensures semantic analysis completes before code generation begins, preventing race conditions.
+Compilation uses a thread pool to parallelize analysis and code generation. The `Compilation` module queues jobs (analyze module, codegen function) that workers process concurrently. Each function's `codegen_func` job is ordered after its own `analyze_func` job, so code generation of analyzed functions runs concurrently with semantic analysis of the rest — there is no global barrier between the two kinds of work.
 
 ## Semantic Analysis & Type System [Link to this section](https://www.augmentcode.com/open-source/ziglang/zig\#semantic-analysis-type-system)
 
@@ -206,7 +206,7 @@ Relevant Files
 
 ### Overview [Link to this section](https://www.augmentcode.com/open-source/ziglang/zig\#overview-1)
 
-Code generation transforms **AIR** (Analyzed Intermediate Representation) from semantic analysis into **MIR** (Machine Intermediate Representation), which is backend-specific. The compiler supports multiple backends, each producing its own MIR format unified through the `AnyMir` union type.
+Code generation transforms **AIR** (Analyzed Intermediate Representation) from semantic analysis into backend-specific lowerings. The self-hosted native backends (x86_64, aarch64, RISC-V, SPARC64) lower AIR to **MIR** (Machine Intermediate Representation), unified through the `AnyMir` union type. The other backends do not produce `AnyMir`: the LLVM backend lowers AIR to LLVM IR, the C backend emits C source, and the SPIR-V and WebAssembly backends each produce their own backend-specific representation.
 
 ### Supported Backends [Link to this section](https://www.augmentcode.com/open-source/ziglang/zig\#supported-backends)
 
@@ -225,15 +225,24 @@ The compiler includes the following code generation backends:
 
 ```mermaid
 flowchart LR
-    A["AIR + Liveness"] -->|generateFunction| B["Backend CodeGen"]
-    B -->|generate| C["MIR"]
-    C -->|emitFunction| D["Machine Code"]
-    D -->|Linker| E["Binary"]
+    A["AIR + Liveness"] -->|generateFunction| B["Native backends<br/>(x86_64, aarch64, RISC-V, SPARC64)"]
+    A --> C["LLVM backend"]
+    A --> D["C backend"]
+    A --> E["SPIR-V / WebAssembly backends"]
+    B -->|generate| F["MIR (`AnyMir`)"]
+    C --> G["LLVM IR"]
+    D --> H["C source"]
+    E --> I["Backend-specific MIR"]
+    F -->|emitFunction| J["Machine Code / Object"]
+    G --> J
+    H --> J
+    I --> J
+    J -->|Linker| K["Binary"]
 ```
 
 ### Key Concepts [Link to this section](https://www.augmentcode.com/open-source/ziglang/zig\#key-concepts)
 
-**AIR to MIR Conversion:** Each backend implements a `generate()` function that converts AIR instructions into backend-specific MIR. This process includes instruction selection, register allocation, and calling convention handling.
+**AIR to MIR Conversion:** Each self-hosted native backend implements a `generate()` function that converts AIR instructions into backend-specific MIR. This process includes instruction selection, register allocation, and calling convention handling. The LLVM, C, and SPIR-V backends instead lower AIR directly to LLVM IR, C source, and SPIR-V respectively, without a MIR step.
 
 **MIR Representation:** MIR instructions have 1:1 correspondence with target machine instructions. For native backends, MIR postpones offset assignment until emission, enabling smaller instruction encodings (e.g., shorter jumps).
 
@@ -430,7 +439,7 @@ Zig's package management system provides a declarative, hash-based approach to d
 
 **Package Hash:** Every package snapshot is identified by a cryptographic hash combining the package name, version, and SHA-256 digest of its contents. This ensures reproducible builds and prevents tampering. The hash format is `name-version-hashplus`, where `hashplus` encodes the package ID, size, and truncated SHA-256 digest in base64.
 
-**Module:** A `Module` represents an importable unit of code with a root source file and configuration (target, optimization level, sanitizers, etc.). Each package exposes a module with `build.zig` as its root source file.
+**Module:** A `Module` represents an importable unit of code with a root source file and configuration (target, optimization level, sanitizers, etc.). A package's build is identified by its `build.zig`, but each module the package exposes configures its own `root_source_file` (e.g. `src/main.zig`) — an ordinary Zig source file, distinct from the build script.
 
 ### Dependency Resolution [Link to this section](https://www.augmentcode.com/open-source/ziglang/zig\#dependency-resolution)
 

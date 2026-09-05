@@ -137,11 +137,11 @@ This section is for agents extending the Ryo compiler.
 
 ### Design Inspiration
 
-- **Compiler architecture (lexer → parser → UIR → Sema → TIR → Codegen):** takes inspiration from the Zig compiler — see [`/docs/dev/zig_reference.md`](docs/dev/zig_reference.md).
-- **Concurrency:** takes inspiration from Go — see [`/docs/dev/go_reference.md`](docs/dev/go_reference.md).
-- **Ownership pass (`ryo-frontend/src/ownership.rs` & `ryo-core/src/ownership.rs`):** takes inspiration from Mojo — see [`/docs/dev/mojo_reference.md`](docs/dev/mojo_reference.md). Zig has no borrow checker, so it is not a useful reference for move semantics. Mojo's MLIR-based lifetime/ASAP-destruction passes are the closest published precedent for what Ryo's spec commits to (no annotated lifetimes, parameters borrow by default, eager destruction at last use). Sema and the IRs themselves remain Zig-shaped.
+- **Compiler architecture (lexer → parser → UIR → Sema → TIR → Codegen):** takes inspiration from the Zig compiler — see [`/docs/dev/pl_references/zig.md`](docs/dev/pl_references/zig.md).
+- **Concurrency:** takes inspiration from Go — see [`/docs/dev/pl_references/go.md`](docs/dev/pl_references/go.md).
+- **Ownership pass (`ryo-frontend/src/ownership/mod.rs` & `ryo-core/src/ownership.rs`):** takes inspiration from Mojo — see [`/docs/dev/pl_references/mojo.md`](docs/dev/pl_references/mojo.md). Zig has no borrow checker, so it is not a useful reference for move semantics. Mojo's MLIR-based lifetime/ASAP-destruction passes are the closest published precedent for what Ryo's spec commits to (no annotated lifetimes, parameters borrow by default, eager destruction at last use). Sema and the IRs themselves remain Zig-shaped.
 - **`shared[T]` refcounting & ARC optimizer (planned; status lives in `docs/dev/implementation_roadmap.md`):** takes inspiration from Swift — see [`/docs/dev/arc_optimizer.md`](docs/dev/arc_optimizer.md). Swift's SIL ARC optimizer (aggressive retain/release elision, stack promotion, copy-on-write for collections) is the model. The performance promise of `shared[T]` in spec 5.6 depends on this pass actually existing and working; without it `shared[T]` benchmarks badly.
-- **Comparison reference for Rust:** see [`/docs/dev/rust_reference.md`](docs/dev/rust_reference.md). Rust's `rustc_borrowck` and `Arc<T>` story is the obvious comparison point for both the ownership pass and `shared[T]`. Diagnostic UX bar is set against Rust's renderer.
+- **Comparison reference for Rust:** see [`/docs/dev/pl_references/rust.md`](docs/dev/pl_references/rust.md). Rust's `rustc_borrowck` and `Arc<T>` story is the obvious comparison point for both the ownership pass and `shared[T]`. Diagnostic UX bar is set against Rust's renderer.
 
 ### Rust Patterns ([Microsoft Rust Guidelines](https://microsoft.github.io/rust-guidelines/agents/all.txt))
 
@@ -157,7 +157,7 @@ This section is for agents extending the Ryo compiler.
 Source → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema → TIR → Ownership → TIR' → Codegen → Linker → Executable
 ```
 
-(The **Ownership** pass runs post-sema, pre-codegen — see `docs/dev/mojo_reference.md` and `ryo-frontend/src/ownership.rs`.)
+(The **Ownership** pass runs post-sema, pre-codegen — see `docs/dev/pl_references/mojo.md` and `ryo-frontend/src/ownership/mod.rs`.)
 
 The middle-end is split into two flat-arena IRs modeled after Zig's ZIR/AIR:
 
@@ -175,7 +175,7 @@ Ryo does not produce or consume Zig's ZIR/AIR — these are upstream design refe
 
 **Niche-filled refs.** `InstRef` (UIR) and `TirRef` (TIR) wrap `NonZeroU32`, so `Option<InstRef>` / `Option<TirRef>` fit in a single 32-bit slot. Slot 0 of each `instructions` arena is a reserved sentinel that is never emitted — do not hand out `InstRef(0)` / `TirRef(0)`, and do not assume index 0 is a real instruction when iterating.
 
-See `docs/dev/pipeline_alignment.md` for the full design rationale (motivation, phase plan, comptime/generics implications).
+See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan (pending features, divergence notes, future considerations); the shipped phase plan lives in git history.
 
 **Crate and Module Map** (distributed in workspace packages):
 
@@ -198,7 +198,7 @@ See `docs/dev/pipeline_alignment.md` for the full design rationale (motivation, 
 | `ryo-frontend/src/parser.rs` | Chumsky-based parser over `Token` (produces AST) |
 | `ryo-frontend/src/astgen.rs` | AST → UIR structural lowering |
 | `ryo-frontend/src/sema.rs` | Semantic analysis: type-checks UIR, emits one TIR per function body |
-| `ryo-frontend/src/ownership.rs` | Post-sema, pre-codegen ownership flow analysis |
+| `ryo-frontend/src/ownership/mod.rs` | Post-sema, pre-codegen ownership flow analysis |
 | `ryo-frontend/src/builtins.rs` | Builtin function and runtime ABI callee registry |
 
 #### 4. Code Generation and Linking Crate (`ryo-backend`)
@@ -302,7 +302,7 @@ cargo test -- --nocapture       # Show output
 
 ## Related Documentation
 
-- `docs/dev/pipeline_alignment.md` — detailed UIR/TIR pipeline design and Zig alignment rationale
+- `docs/dev/pipeline_alignment.md` — UIR/TIR pipeline: remaining work (comptime/generics substrate), Zig divergence notes, future considerations
 - `docs/dev/implementation_roadmap.md` — feature roadmap
 - `docs/dev/ryo-compiler-llm-instructions.md` — **normative contributor rules (R1–R21)** for compiler work: data-oriented design, Rust discipline, diagnostics, Cranelift discipline, testing
 - `docs/dev/ryo-slicing-and-memory-model-final-spec.md` — slicing/views/memory-model decisions (D1–D11); amends the base spec

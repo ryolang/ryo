@@ -106,6 +106,8 @@ Ryo's error messages are a flagship feature (spec §7.1 style). Rules:
 
 **R18 — No pessimized idioms:** avoid `collect()` into intermediate `Vec`s in hot passes; avoid per-node `HashMap` where a dense `Vec` indexed by `NodeId` works — side tables keyed by index are the standard pattern (Kelley: prefer arrays over hash maps when the key space is a dense index; hash maps are for sparse, string-keyed, or unbounded data only). Deduplicate eagerly: interned types and symbols mean equality is a `u32` compare, not a structural walk.
 
+**R18a — Keep panicking checks out of hot paths.** Internal invariants use `debug_assert!` (zero cost in release). If an always-on check is genuinely required in a hot path, do not use `assert!`/`assert_eq!` — they inline `format_args!` machinery for the panic message at every call site, bloating the function and inhibiting inlining. Instead, branch to an outlined `#[cold] fn(...) -> !` that contains the `panic!`, so the hot path is one compare and a never-taken branch. Prefer encoding invariants in types (`NonZero*`, niche-filled newtypes) over runtime checks where possible — `InstRef`/`TirRef` are the model.
+
 ---
 
 ## 7. Testing Rules

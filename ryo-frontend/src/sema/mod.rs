@@ -26,13 +26,12 @@
 //!   `DeclState::InProgress` and emits a [`DiagCode::CycleInResolution`]
 //!   diagnostic the moment future work (inferred return types,
 //!   comptime evaluation) makes a body depend on another body
-//!   mid-analysis. That's the prerequisite Phase 5 was for; the
-//!   features ride on top.
+//!   mid-analysis. That's the prerequisite the worklist driver
+//!   was built for; the features ride on top.
 //!
 //! Tests at the bottom of this file include a
 //! `cfg(any())`-gated block of comptime / generics smoke tests
-//! — infrastructure-only stubs per pipeline_alignment.md §5.3
-//! commit 5.
+//! — infrastructure-only stubs awaiting those milestones.
 //!
 //! ## Error handling
 //!
