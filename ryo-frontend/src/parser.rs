@@ -685,6 +685,29 @@ where
                     e.state().call(name, &args, span)
                 });
 
+            // Struct literal `Name{field=value, ...}` (M9). Both this
+            // and `call` open with `Ident`; the `{` vs `(` delimiter
+            // disambiguates, so the two alternatives cannot both
+            // consume input. Field order stays in source order —
+            // sema canonicalizes against the declaration.
+            let field_init = select! { Token::Ident(name) => name }
+                .then_ignore(just(Token::Assign))
+                .then(expr.clone());
+
+            let struct_literal = select! { Token::Ident(name) => name }
+                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+                .then(
+                    field_init
+                        .separated_by(just(Token::Comma))
+                        .allow_trailing()
+                        .collect::<Vec<_>>()
+                        .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+                )
+                .map_with(|(name, fields), e: &mut Mx<'a, '_, I>| {
+                    let span = e.span();
+                    e.state().struct_literal(name, &fields, span)
+                });
+
             let ident_expr =
                 select! { Token::Ident(name) => name }.map_with(|name, e: &mut Mx<'a, '_, I>| {
                     let span = e.span();
@@ -705,7 +728,12 @@ where
                 .clone()
                 .delimited_by(just(Token::LParen), just(Token::RParen));
 
-            borrow.or(call).or(ident_expr).or(literal).or(parenthesized)
+            borrow
+                .or(call)
+                .or(struct_literal)
+                .or(ident_expr)
+                .or(literal)
+                .or(parenthesized)
         };
 
         // Postfix operators: method calls (`s.len()`), slice

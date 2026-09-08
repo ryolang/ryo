@@ -24,6 +24,9 @@
 //! - `struct_field_decls: Vec<(StringId, TypeExpr)>` — side arena
 //!   for struct declaration field lists, in declaration order,
 //!   behind a [`StructFieldDeclList`] range.
+//! - `struct_field_inits: Vec<(StringId, ExprId)>` — side arena for
+//!   struct literal field initializers, in source order, behind a
+//!   [`StructFieldInitList`] range.
 //! - `top_level: Vec<StmtId>` — the program's statements in source
 //!   order; everything below is reached by following ids out of them.
 //!
@@ -168,6 +171,21 @@ impl StructFieldDeclList {
     }
 }
 
+/// A `[offset, offset+len)` slice of the `struct_field_inits` side
+/// arena — a struct literal's field initializers, in source order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StructFieldInitList {
+    offset: u32,
+    len: u32,
+}
+
+impl StructFieldInitList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
 // ---------- Expressions ----------
 
 /// A single expression: kind plus inline source span.
@@ -212,6 +230,10 @@ pub enum ExprKind {
         base: ExprId,
         index: ExprId,
     },
+    /// Struct literal `Name{field=value, ...}` (M9). The field
+    /// initializers live in the `struct_field_inits` side arena, in
+    /// source order (sema canonicalizes against the declaration).
+    StructLiteral(StructLiteral),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -307,6 +329,15 @@ pub struct VarDecl {
 pub struct StructDef {
     pub name: Ident,
     pub fields: StructFieldDeclList,
+}
+
+/// A struct literal `Name{field=value, ...}` (M9). All fields are
+/// `Copy` handles; the field initializers live in the
+/// `struct_field_inits` side arena, in source order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StructLiteral {
+    pub name: Ident,
+    pub fields: StructFieldInitList,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -488,6 +519,7 @@ pub struct Ast {
     stmt_lists: Vec<StmtId>,
     elifs: Vec<ElifBranch>,
     struct_field_decls: Vec<(StringId, TypeExpr)>,
+    struct_field_inits: Vec<(StringId, ExprId)>,
     top_level: Vec<StmtId>,
     /// Span covering the first through last top-level statement;
     /// `0..0` for an empty program. Kept for the pretty-printer's
@@ -520,6 +552,7 @@ impl Ast {
             stmt_lists: Vec::new(),
             elifs: Vec::new(),
             struct_field_decls: Vec::new(),
+            struct_field_inits: Vec::new(),
             top_level: Vec::new(),
             span: SimpleSpan::new((), 0..0),
         }
@@ -564,6 +597,12 @@ impl Ast {
     /// range, in declaration order.
     pub fn struct_field_decls(&self, list: StructFieldDeclList) -> &[(StringId, TypeExpr)] {
         &self.struct_field_decls[list.as_range()]
+    }
+
+    /// The field initializers behind a [`StructFieldInitList`]
+    /// range, in source order.
+    pub fn struct_field_inits(&self, list: StructFieldInitList) -> &[(StringId, ExprId)] {
+        &self.struct_field_inits[list.as_range()]
     }
 
     /// The program's top-level statements in source order.
@@ -683,6 +722,20 @@ impl Ast {
             offset,
             len: u32::try_from(items.len())
                 .expect("AST struct field list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Copy a struct literal's field initializers into the
+    /// `struct_field_inits` side arena; see [`Self::push_expr_list`]
+    /// for the checked-conversion rationale.
+    fn push_struct_field_init_list(&mut self, items: &[(StringId, ExprId)]) -> StructFieldInitList {
+        let offset = u32::try_from(self.struct_field_inits.len())
+            .expect("AST struct_field_inits arena exceeded u32::MAX");
+        self.struct_field_inits.extend_from_slice(items);
+        StructFieldInitList {
+            offset,
+            len: u32::try_from(items.len())
+                .expect("AST struct field init list length exceeded u32::MAX"),
         }
     }
 
@@ -821,6 +874,22 @@ impl Ast {
     ) -> StmtId {
         let fields = self.push_struct_field_decl_list(fields);
         self.push_stmt(StmtKind::StructDef(StructDef { name, fields }), span)
+    }
+
+    /// Struct literal `Name{field=value, ...}` (M9); the field
+    /// initializers are copied into the `struct_field_inits` side
+    /// arena in source order.
+    pub fn struct_literal(
+        &mut self,
+        name: Ident,
+        fields: &[(StringId, ExprId)],
+        span: SimpleSpan,
+    ) -> ExprId {
+        let fields = self.push_struct_field_init_list(fields);
+        self.push_expr(
+            ExprKind::StructLiteral(StructLiteral { name, fields }),
+            span,
+        )
     }
 
     pub fn assign_or_decl(&mut self, target: Ident, value: ExprId, span: SimpleSpan) -> StmtId {

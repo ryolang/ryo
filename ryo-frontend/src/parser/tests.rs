@@ -339,6 +339,61 @@ fn malformed_struct_body_does_not_report_empty_body() {
 }
 
 #[test]
+fn parse_struct_literal() {
+    let (ast, pool) = lex_and_parse("p = Point{x=1.0, y=2.0}\n").unwrap();
+    let init = decl_init(&ast);
+    match &ast.expr(init).kind {
+        ExprKind::StructLiteral(lit) => {
+            assert_eq!(pool.str(lit.name.name), "Point");
+            let fields = ast.struct_field_inits(lit.fields);
+            assert_eq!(fields.len(), 2);
+            assert_eq!(pool.str(fields[0].0), "x");
+            assert_eq!(pool.str(fields[1].0), "y");
+            // Field order is source order; sema canonicalizes.
+            assert!(matches!(
+                ast.expr(fields[0].1).kind,
+                ExprKind::Literal(Literal::Float(_))
+            ));
+        }
+        other => panic!("expected StructLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_struct_literal_trailing_comma() {
+    let (ast, pool) = lex_and_parse("p = Point{x=1.0,}\n").unwrap();
+    let init = decl_init(&ast);
+    match &ast.expr(init).kind {
+        ExprKind::StructLiteral(lit) => assert_eq!(pool.str(lit.name.name), "Point"),
+        other => panic!("expected StructLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_struct_literal_empty_fields() {
+    let (ast, pool) = lex_and_parse("p = Point{}\n").unwrap();
+    let init = decl_init(&ast);
+    match &ast.expr(init).kind {
+        ExprKind::StructLiteral(lit) => {
+            assert_eq!(pool.str(lit.name.name), "Point");
+            assert_eq!(ast.struct_field_inits(lit.fields).len(), 0);
+        }
+        other => panic!("expected StructLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn struct_literal_does_not_shadow_call_or_ident() {
+    // `call` keeps winning for `f(...)`; a bare ident stays an Ident.
+    let (ast, _) = lex_and_parse("a = f(1)\nb = g\n").unwrap();
+    let stmts = ast.top_level_stmts();
+    let call_init = var_decl(&ast, stmts[0]).initializer;
+    assert!(matches!(ast.expr(call_init).kind, ExprKind::Call(_, _)));
+    let ident_init = var_decl(&ast, stmts[1]).initializer;
+    assert!(matches!(ast.expr(ident_init).kind, ExprKind::Ident(_)));
+}
+
+#[test]
 fn parse_true_false_literals() {
     let (ast, _) = lex_and_parse("x = true\ny = false").unwrap();
     let stmts = ast.top_level_stmts();
@@ -1217,6 +1272,11 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
                 ExprKind::Index { base, index } => {
                     expr_work.push(base);
                     expr_work.push(index);
+                }
+                ExprKind::StructLiteral(lit) => {
+                    for &(_, value) in ast.struct_field_inits(lit.fields) {
+                        expr_work.push(value);
+                    }
                 }
             }
         }

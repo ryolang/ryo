@@ -481,6 +481,11 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
             let index_ref = gen_expr(b, ast, index);
             b.index(base_ref, index_ref, span)
         }
+        // Struct literals (M9) get UIR lowering with the struct
+        // astgen work; until then the node lowers to a bare reference
+        // to the struct name, so any use fails as an undefined
+        // variable downstream. Field initializers are dropped.
+        ast::ExprKind::StructLiteral(lit) => b.var_ref(lit.name.name, span),
     }
 }
 

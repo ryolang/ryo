@@ -337,6 +337,9 @@ fn write_expr(
         ExprKind::Borrow(_) => Cow::Borrowed("Borrow"),
         ExprKind::Slice { .. } => Cow::Borrowed("Slice"),
         ExprKind::Index { .. } => Cow::Borrowed("Index"),
+        ExprKind::StructLiteral(lit) => {
+            Cow::Owned(format!("StructLiteral({})", pool.str(lit.name.name)))
+        }
     };
 
     writeln!(
@@ -383,6 +386,22 @@ fn write_expr(
         ExprKind::Index { base, index } => {
             write_expr(out, ast, base, &new_prefix, false, "base: ", pool)?;
             write_expr(out, ast, index, &new_prefix, true, "index: ", pool)
+        }
+        ExprKind::StructLiteral(lit) => {
+            let fields = ast.struct_field_inits(lit.fields);
+            for (i, (name, value)) in fields.iter().enumerate() {
+                let label = format!("{}: ", pool.str(*name));
+                write_expr(
+                    out,
+                    ast,
+                    *value,
+                    &new_prefix,
+                    i == fields.len() - 1,
+                    &label,
+                    pool,
+                )?;
+            }
+            Ok(())
         }
     }
 }
