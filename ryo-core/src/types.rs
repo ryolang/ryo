@@ -107,8 +107,13 @@ enum Tag {
     /// Variable payload: `data` is the index into `extra` of an
     /// `(n_elems: u32, elem_0: u32, ..., elem_{n-1}: u32)` block.
     Tuple,
+    /// Nominal struct (M9). Two-phase: `declare_struct` pushes the
+    /// item with `data == u32::MAX` (declared, not yet defined) so
+    /// self-references can be detected; `define_struct` fills `data`
+    /// with the index into `extra` of the layout block.
+    Struct,
     // Reserved for later phases — not constructed today:
-    //   Func, Struct, Enum, Option, ErrorUnion.
+    //   Func, Enum, Option, ErrorUnion.
     // Adding any of those is a new `Tag` variant and a new arm in
     // `kind`/`Display`; storage shape is already in place.
 }
@@ -170,6 +175,9 @@ pub enum TypeKind {
     /// sidecar-`extra` encoding works; not currently constructible
     /// from user syntax.
     Tuple,
+    /// Nominal struct (M9). Identity is the declared name; layout and
+    /// fields are read back via [`InternPool::struct_view`].
+    Struct,
 }
 
 /// The CLOSED set of projection kinds (final spec §3.1, D1).
@@ -188,6 +196,38 @@ pub enum ViewKind {
     Bytes,
     /// `slice[T]` — owners: `[T]` | `list[T]` | `[T; N]`; element: `T`. (M21.)
     Slice(TypeId),
+}
+
+/// Read-back view of a defined struct's interned payload (M9).
+///
+/// Returned by value (like [`InternPool::tuple_elements_vec`]) because
+/// the payload lives as raw `u32`s in the `extra` arena; consumers are
+/// sema, ownership, and codegen layout queries, none of which are hot
+/// enough to justify a borrowed decoding view.
+#[derive(Clone, Debug)]
+pub struct StructView {
+    pub name: StringId,
+    /// Fields in declaration order; `StructField::idx` equals the
+    /// vector position.
+    pub fields: Vec<StructField>,
+    /// Total size in bytes, including trailing padding to `align`.
+    pub size: u32,
+    pub align: u32,
+    /// True when every field is Copy: the struct duplicates on `=`
+    /// and never needs a drop.
+    pub is_copy: bool,
+}
+
+/// One field of a defined struct.
+#[derive(Copy, Clone, Debug)]
+pub struct StructField {
+    pub name: StringId,
+    pub ty: TypeId,
+    /// Byte offset from the struct base, natural alignment in
+    /// declaration order.
+    pub offset: u32,
+    /// Declaration-order index (0-based).
+    pub idx: u32,
 }
 
 // ---------- Pool ----------
@@ -216,6 +256,12 @@ pub struct InternPool {
     /// hash are computed by reading the matching byte range out of
     /// `string_bytes`.
     string_dedup: HashTable<StringId>,
+
+    /// Nominal dedup for structs (M9): struct identity is the declared
+    /// name, so re-declaring the same name returns the same `TypeId`.
+    /// Unlike `type_dedup` this is a plain map — the key is the
+    /// `StringId` handle itself, no arena probing needed.
+    struct_names: std::collections::HashMap<StringId, TypeId>,
 
     /// Single shared `BuildHasher` so probe-time and resize-time
     /// hashes match. `DefaultHashBuilder` is hashbrown's default
@@ -304,6 +350,7 @@ impl InternPool {
             string_bytes: Vec::new(),
             strings: Vec::new(),
             string_dedup: HashTable::new(),
+            struct_names: std::collections::HashMap::new(),
             hasher: DefaultHashBuilder::default(),
         };
         // Order matters: must match ID_VOID..ID_ERROR.
@@ -373,6 +420,7 @@ impl InternPool {
                 _ => unreachable!("no Slice constructor exists"),
             },
             Tag::Tuple => TypeKind::Tuple,
+            Tag::Struct => TypeKind::Struct,
         }
     }
 
@@ -418,18 +466,23 @@ impl InternPool {
 
     /// True for types whose values are duplicated on `=` without
     /// invalidating the source. Mirrors Mojo's `Copyable` trait for
-    /// the scalar primitives Ryo currently has: `int`, `float`,
-    /// `bool`, plus the non-owning views (`strview`, M8.4;
-    /// `bytesview`, M8.4.2) — copying a
-    /// view aliases the buffer but owns nothing. Used by sema (to
+    /// the scalar primitives: `int`, `float`, `bool`, plus the
+    /// non-owning views (`strview`, M8.4; `bytesview`, M8.4.2) —
+    /// copying a view aliases the buffer but owns nothing. A defined
+    /// struct (M9) is Copy when every field is (flag stored by
+    /// `define_struct`). Used by sema (to
     /// flag redundant `move` annotations) and by the ownership pass
     /// (to short-circuit liveness on these values — they never
     /// enter the lattice).
     pub fn is_copy(&self, ty: TypeId) -> bool {
-        matches!(
-            self.kind(ty),
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::View(_)
-        )
+        match self.kind(ty) {
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::View(_) => true,
+            // Defined struct: the flag computed by `define_struct`.
+            // A declared-but-undefined struct panics in `struct_view`
+            // (trusted-producer contract: define before querying).
+            TypeKind::Struct => self.struct_view(ty).is_copy,
+            _ => false,
+        }
     }
 
     /// True for all projection types (final spec §3.1). The dominant
@@ -552,6 +605,158 @@ impl InternPool {
             .iter()
             .map(|&r| TypeId(r))
             .collect()
+    }
+
+    // ----- Structs (M9) -----
+
+    /// Reserve the identity of a struct by name. Deduped: declaring
+    /// the same name twice returns the same `TypeId`.
+    ///
+    /// The item is pushed with `data == u32::MAX` (declared, not yet
+    /// defined) so that self-references and cycles can be *detected*
+    /// by the producer before layout is computed. `define_struct`
+    /// fills the payload once all field types are fully defined.
+    pub fn declare_struct(&mut self, name: StringId) -> TypeId {
+        if let Some(&id) = self.struct_names.get(&name) {
+            return id;
+        }
+        let id = TypeId(
+            u32::try_from(self.items.len())
+                .expect("type pool overflow: more than u32::MAX types interned"),
+        );
+        self.items.push(Item {
+            tag: Tag::Struct,
+            data: u32::MAX,
+        });
+        self.struct_names.insert(name, id);
+        id
+    }
+
+    /// True once `define_struct` has filled the payload.
+    pub fn is_defined_struct(&self, id: TypeId) -> bool {
+        matches!(
+            self.items.get(id.0 as usize),
+            Some(Item {
+                tag: Tag::Struct,
+                data
+            }) if *data != u32::MAX
+        )
+    }
+
+    /// Fill a declared struct's payload: field list, computed layout
+    /// (offsets, size, align), and the inferred Copy flag.
+    ///
+    /// Layout is declaration order with natural alignment, computed
+    /// once here so sema, ownership, and codegen all read it from the
+    /// pool. Every field type must be fully defined before the call —
+    /// the producer's DFS guarantees that or errors first.
+    ///
+    /// Extra block at `data`:
+    /// `[name, n_fields, size, align, is_copy]` then per field
+    /// `[field_name, field_type, offset]` (3 words each).
+    pub fn define_struct(&mut self, id: TypeId, name: StringId, fields: &[(StringId, TypeId)]) {
+        debug_assert!(matches!(self.items[id.0 as usize].tag, Tag::Struct));
+        debug_assert!(!self.is_defined_struct(id), "struct redefined");
+        let mut offset = 0u32;
+        let mut align = 1u32;
+        let mut offsets = Vec::with_capacity(fields.len());
+        let mut is_copy = true;
+        for &(_, fty) in fields {
+            let (fsize, falign) = self.size_align(fty);
+            offset = offset.next_multiple_of(falign);
+            offsets.push(offset);
+            offset = offset
+                .checked_add(fsize)
+                .expect("struct layout overflow: size exceeds u32::MAX");
+            align = align.max(falign);
+            is_copy &= self.is_copy(fty);
+        }
+        let size = offset.next_multiple_of(align);
+        let data = u32::try_from(self.extra.len())
+            .expect("extra arena overflow: more than u32::MAX u32 entries");
+        let n_fields = u32::try_from(fields.len())
+            .expect("struct field count overflow: more than u32::MAX fields");
+        self.extra.push(name.raw());
+        self.extra.push(n_fields);
+        self.extra.push(size);
+        self.extra.push(align);
+        self.extra.push(u32::from(is_copy));
+        for (field_offset, &(fname, fty)) in offsets.iter().zip(fields) {
+            self.extra.push(fname.raw());
+            self.extra.push(fty.raw());
+            self.extra.push(*field_offset);
+        }
+        self.items[id.0 as usize].data = data;
+    }
+
+    /// Read back a defined struct's payload.
+    ///
+    /// Trusted-producer contract (mirrors `tuple_elements_vec`):
+    /// callers must define the struct before querying. A
+    /// declared-but-undefined struct trips the `debug_assert!` below;
+    /// in release the `extra` index (`u32::MAX`) is out of bounds and
+    /// still panics — it can never silently decode garbage.
+    pub fn struct_view(&self, id: TypeId) -> StructView {
+        let item = self.items[id.0 as usize];
+        debug_assert!(matches!(item.tag, Tag::Struct));
+        debug_assert!(
+            item.data != u32::MAX,
+            "struct_view on declared-but-undefined struct"
+        );
+        let start = item.data as usize;
+        let n = self.extra[start + 1] as usize;
+        let mut fields = Vec::with_capacity(n);
+        for i in 0..n {
+            let base = start + 5 + 3 * i;
+            fields.push(StructField {
+                name: StringId::from_raw(self.extra[base]),
+                ty: TypeId::from_raw(self.extra[base + 1]),
+                offset: self.extra[base + 2],
+                idx: u32::try_from(i).expect("struct field index overflow"),
+            });
+        }
+        StructView {
+            name: StringId::from_raw(self.extra[start]),
+            fields,
+            size: self.extra[start + 2],
+            align: self.extra[start + 3],
+            is_copy: self.extra[start + 4] != 0,
+        }
+    }
+
+    /// Field lookup by name, for sema.
+    pub fn struct_field(&self, id: TypeId, field: StringId) -> Option<StructField> {
+        self.struct_view(id)
+            .fields
+            .into_iter()
+            .find(|f| f.name == field)
+    }
+
+    /// `(size, align)` in bytes for types with a fixed layout:
+    /// bool (1,1); int/float (8,8); str/bytes (24,8); view (16,8);
+    /// defined struct → the layout stored by `define_struct`.
+    pub fn size_align(&self, ty: TypeId) -> (u32, u32) {
+        match self.kind(ty) {
+            TypeKind::Bool => (1, 1),
+            TypeKind::Int | TypeKind::Float => (8, 8),
+            TypeKind::Str | TypeKind::Bytes => (24, 8),
+            TypeKind::View(_) => (16, 8),
+            TypeKind::Struct => {
+                let v = self.struct_view(ty);
+                (v.size, v.align)
+            }
+            other => unreachable!("size_align: no layout for {other:?}"),
+        }
+    }
+
+    /// True for types that own heap state and must be dropped:
+    /// `str`/`bytes`, or a defined struct that is not Copy.
+    pub fn needs_drop(&self, ty: TypeId) -> bool {
+        match self.kind(ty) {
+            TypeKind::Str | TypeKind::Bytes => true,
+            TypeKind::Struct => !self.struct_view(ty).is_copy,
+            _ => false,
+        }
     }
 
     // ----- String interning -----
@@ -688,6 +893,10 @@ impl fmt::Display for DisplayType<'_> {
                     write!(f, "{}", self.pool.display(*e))?;
                 }
                 write!(f, ")")
+            }
+            TypeKind::Struct => {
+                let view = self.pool.struct_view(self.id);
+                write!(f, "{}", self.pool.str(view.name))
             }
         }
     }
@@ -1009,5 +1218,59 @@ mod tests {
         assert_eq!(pool.intern_bytes(&[0x41, 0x00, 0xff]), id);
         // Same bytes interned as a str share the id (same byte content).
         assert_eq!(pool.intern_str("A"), pool.intern_bytes(b"A"));
+    }
+
+    #[test]
+    fn struct_declare_define_round_trip() {
+        let mut pool = InternPool::new();
+        let name = pool.intern_str("Point");
+        let (x, y) = (pool.intern_str("x"), pool.intern_str("y"));
+        let id = pool.declare_struct(name);
+        assert!(!pool.is_defined_struct(id));
+        pool.define_struct(id, name, &[(x, pool.float()), (y, pool.float())]);
+        assert!(pool.is_defined_struct(id));
+        let view = pool.struct_view(id);
+        assert_eq!(pool.str(view.name), "Point");
+        assert_eq!(view.fields.len(), 2);
+        assert_eq!(view.fields[0].offset, 0);
+        assert_eq!(view.fields[1].offset, 8);
+        assert_eq!((view.size, view.align), (16, 8));
+        assert!(view.is_copy);
+        assert!(pool.is_copy(id));
+        assert!(!pool.needs_drop(id));
+        assert_eq!(pool.display(id).to_string(), "Point");
+    }
+
+    #[test]
+    fn struct_layout_mixed_alignment_and_copy_inference() {
+        let mut pool = InternPool::new();
+        let name = pool.intern_str("Person");
+        let (n, a) = (pool.intern_str("name"), pool.intern_str("age"));
+        let id = pool.declare_struct(name);
+        pool.define_struct(id, name, &[(n, pool.str_()), (a, pool.int())]);
+        let view = pool.struct_view(id);
+        assert_eq!(view.fields[0].offset, 0); // str: 24 bytes at 0
+        assert_eq!(view.fields[1].offset, 24); // int: 8 bytes at 24
+        assert_eq!((view.size, view.align), (32, 8));
+        assert!(!view.is_copy); // str field => move type
+        assert!(pool.needs_drop(id));
+    }
+
+    #[test]
+    fn struct_names_dedup_and_nested_layout() {
+        let mut pool = InternPool::new();
+        let p = pool.intern_str("Point");
+        let (x, y) = (pool.intern_str("x"), pool.intern_str("y"));
+        let a = pool.declare_struct(p);
+        assert_eq!(a, pool.declare_struct(p)); // same name, same TypeId
+        pool.define_struct(a, p, &[(x, pool.float()), (y, pool.float())]);
+        let line = pool.intern_str("Line");
+        let (s, e) = (pool.intern_str("start"), pool.intern_str("end"));
+        let b = pool.declare_struct(line);
+        pool.define_struct(b, line, &[(s, a), (e, a)]);
+        let view = pool.struct_view(b);
+        assert_eq!(view.fields[1].offset, 16);
+        assert_eq!((view.size, view.align), (32, 8));
+        assert!(view.is_copy); // nested Copy struct stays Copy
     }
 }

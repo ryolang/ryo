@@ -102,6 +102,8 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
             // validate the InternPool's sidecar encoding.
             unreachable!("cranelift_type_for: tuple TypeId reached codegen")
         }
+        // Struct codegen (aggregate layout) lands in a later M9 task.
+        TypeKind::Struct => unreachable!("cranelift_type_for: struct TypeId reached codegen"),
     }
 }
 
