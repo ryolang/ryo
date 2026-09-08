@@ -1616,3 +1616,40 @@ fn cond_temp_free_anchors_after_if() {
         "cond temp Free must anchor after the if statement"
     );
 }
+
+#[test]
+fn compound_assign_rhs_method_call_counts_as_use() {
+    // `total += t.len()` reads `t` through the method-call receiver —
+    // the CompoundAssign walk must visit its RHS so the read clears
+    // t's dead-store entry: no W0001, and t is still freed at last use.
+    let src = "fn main():\n\tmut total = 0\n\tfor i in range(0, 10):\n\t\tt = int_to_str(i) + \"!\"\n\t\ttotal += t.len()\n\tprint(\"ok\\n\")\n";
+    let (diags, sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
+        "method-call receiver read must count as a use; got: {diags:?}"
+    );
+    let tir = &tirs[0];
+    let body = tir.body_stmts();
+    let loop_stmt = body
+        .iter()
+        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::ForRange)
+        .copied()
+        .expect("for-range stmt");
+    let loop_body = tir.for_range_view(loop_stmt).body;
+    let t_init = loop_body
+        .iter()
+        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
+        .map(|&s| tir.var_decl_view(s).initializer)
+        .expect("var_decl for t");
+    let frees_for_t: Vec<_> = sidecar.functions[0]
+        .free_schedule
+        .iter()
+        .filter(|fp| fp.target == t_init)
+        .collect();
+    assert_eq!(
+        frees_for_t.len(),
+        1,
+        "exactly one Free for t's owner; got: {:?}",
+        sidecar.functions[0].free_schedule
+    );
+}

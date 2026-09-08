@@ -167,18 +167,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
 
-### I-158 — `string_slicing` JIT regressed +53% with the packed-u128 runtime ABI (AOT flat)
-
-**Files:** `ryo-backend/src/codegen/` (JIT module path), `benchmarks/string_slicing/`
-**Summary:** After the packed-u128 string runtime ABI change (commit `7d0a047`, string-producing runtime functions return `{ptr, len}` packed in `u128` instead of writing through an out-pointer stack slot), the `string_slicing` benchmark's JIT leg regressed from ~6.6 ms to ~10.1 ms (+53%, reproduced across runs) while AOT stayed flat (~4.9 → ~5.4 ms). Recorded in `benchmarks/string_slicing/README.md`. Cause not investigated — candidates: JIT code layout/instruction-count change around the view-slice call path, or extra `ireduce`/`ushr` unpack work that the JIT's lower optimization level doesn't fold.
-**Resolution:** Profile the JIT leg (e.g. Samply per `benchmarks/README.md`), compare CLIF for `count_fox` pre/post `7d0a047`, and either reclaim the delta or document it as accepted. Re-run the suite checkpoint per the manual checkpoint convention when resolved.
-
-### I-159 — W0001 dead-store false positive: method-call receiver not counted as a use
-
-**Files:** `ryo-frontend/src/ownership/walk.rs` (:296-305), `ryo-frontend/src/ownership/mod.rs` (:577-581)
-**Summary:** `t = int_to_str(i) + "!"; total += t.len()` triggers W0001 ("`t` declared but never used") — the ownership pass's dead-store tracking does not count a method-call receiver read (`t.len()`) as a use. Reproduces on `benchmarks/many_small_strings/many_small_strings.ryo` (the only suite member that hits it; sibling benchmarks are clean). User-visible false-positive warning on a shipped benchmark.
-**Resolution:** Count method-call receiver reads as uses in the dead-store/last-use walk (check how `StrLen`/`MethodCall`-shaped TIR reads propagate), then pin with an ownership test for `x = <expr>; … x.len()` staying warning-free.
-
 ---
 
 ## 🟢 Cleanup

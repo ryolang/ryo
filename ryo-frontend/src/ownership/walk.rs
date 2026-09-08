@@ -50,6 +50,11 @@ pub(crate) fn analyze_stmt(
                 "compound-assign on Move-typed value reached ownership pass; \
                  sema should have rejected",
             );
+            // The RHS is a Copy-typed expression, but it can still READ
+            // Move-typed bindings (`total += t.len()` reads `t`). Walk it
+            // so those reads clear dead-store entries and record
+            // owner_at_read like any other expression position.
+            visit_expr(tir, pool, own, sink, sidecar, view.value);
         }
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {
