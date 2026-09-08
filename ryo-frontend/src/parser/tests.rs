@@ -54,6 +54,13 @@ fn fn_def(ast: &Ast, stmt: StmtId) -> &FunctionDef {
     }
 }
 
+fn struct_def_stmt(ast: &Ast, id: StmtId) -> &StructDef {
+    match &ast.stmt(id).kind {
+        StmtKind::StructDef(def) => def,
+        other => panic!("expected StructDef, got {other:?}"),
+    }
+}
+
 /// Body statements of a parsed function definition.
 fn fn_body<'a>(ast: &'a Ast, def: &FunctionDef) -> &'a [StmtId] {
     ast.stmt_list(def.body)
@@ -263,6 +270,72 @@ fn accept_statement_with_trailing_newline() {
 fn accept_blank_lines_between_statements() {
     let (ast, _) = lex_and_parse("x = 1\n\ny = 2").unwrap();
     assert_eq!(ast.top_level_stmts().len(), 2);
+}
+
+#[test]
+fn parse_struct_declaration() {
+    let (ast, pool) = lex_and_parse("struct Point:\n\tx: float\n\ty: float\n").unwrap();
+    let def = struct_def_stmt(&ast, only_stmt(&ast));
+    assert_eq!(pool.str(def.name.name), "Point");
+    let fields = ast.struct_field_decls(def.fields);
+    assert_eq!(fields.len(), 2);
+    assert_eq!(pool.str(fields[0].0), "x");
+    assert_eq!(pool.str(fields[0].1.name), "float");
+    assert_eq!(pool.str(fields[1].0), "y");
+}
+
+#[test]
+fn parse_struct_declaration_no_trailing_newline() {
+    let (ast, pool) = lex_and_parse("struct Point:\n\tx: float").unwrap();
+    let def = struct_def_stmt(&ast, only_stmt(&ast));
+    assert_eq!(pool.str(def.name.name), "Point");
+    assert_eq!(ast.struct_field_decls(def.fields).len(), 1);
+}
+
+#[test]
+fn parse_struct_declaration_with_blank_lines() {
+    let (ast, pool) = lex_and_parse("struct Point:\n\n\tx: float\n\n\ty: float\n").unwrap();
+    let def = struct_def_stmt(&ast, only_stmt(&ast));
+    assert_eq!(ast.struct_field_decls(def.fields).len(), 2);
+    let fields = ast.struct_field_decls(def.fields);
+    assert_eq!(pool.str(fields[0].0), "x");
+    assert_eq!(pool.str(fields[1].0), "y");
+}
+
+#[test]
+fn struct_declaration_alongside_fn_main() {
+    // A struct declaration is a declaration, not a top-level
+    // executable statement: it must coexist with an explicit main.
+    let (ast, pool) =
+        lex_and_parse("struct Point:\n\tx: float\nfn main():\n\tpass_through = 1\n").unwrap();
+    assert_eq!(ast.top_level_stmts().len(), 2);
+    let def = struct_def_stmt(&ast, ast.top_level_stmts()[0]);
+    assert_eq!(pool.str(def.name.name), "Point");
+}
+
+#[test]
+fn empty_struct_body_is_rejected() {
+    let (_ok, _ast, errs, _pool) =
+        lex_and_parse_recovering("struct Empty:\nfn main():\n\tpass_through = 1\n");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.reason(), RichReason::Custom(ParseDiag::EmptyStructBody))),
+        "expected an EmptyStructBody diagnostic, got: {errs:?}"
+    );
+}
+
+#[test]
+fn malformed_struct_body_does_not_report_empty_body() {
+    // An indented but unparseable field line is a generic parse
+    // error (recovered to an Error node), not "empty struct body".
+    let (_ok, _ast, errs, _pool) = lex_and_parse_recovering("struct S:\n\tgarbage line\n");
+    assert!(!errs.is_empty());
+    assert!(
+        !errs
+            .iter()
+            .any(|e| matches!(e.reason(), RichReason::Custom(ParseDiag::EmptyStructBody))),
+        "malformed body must not report EmptyStructBody: {errs:?}"
+    );
 }
 
 #[test]
@@ -1107,6 +1180,9 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
                 stmt_work.extend_from_slice(ast.stmt_list(*body));
             }
             StmtKind::Break | StmtKind::Continue | StmtKind::Error => {}
+            // Field declarations are scalar metadata in a side
+            // arena, not node children — nothing reachable to follow.
+            StmtKind::StructDef(_) => {}
         }
         while let Some(expr) = expr_work.pop() {
             if expr_seen[expr.index()] {

@@ -170,6 +170,9 @@ pub enum DiagCode {
     /// Empty brackets `s[]`: the colon is mandatory for a slice, the
     /// expression for an index.
     EmptyBrackets,
+    /// A `struct` declaration whose body is missing: `struct Name:`
+    /// not followed by an indented field block (M9).
+    EmptyStructBody,
 
     /// Emitted by `DiagSink::into_diags` when the sink dropped
     /// diagnostics past `MAX_DIAGS`. Distinct from `ParseError` so
@@ -321,6 +324,8 @@ pub enum ParseDiag {
     RangeArity { found: usize },
     /// Empty brackets `s[]`.
     EmptyBrackets,
+    /// `struct Name:` with no indented field block (M9).
+    EmptyStructBody,
     /// Escape hatch for one-off messages (e.g. lexer diagnostics
     /// re-wrapped as parser errors in tests).
     Message(String),
@@ -332,6 +337,7 @@ impl ParseDiag {
             ParseDiag::ChainedComparison => DiagCode::ChainedComparison,
             ParseDiag::RangeArity { .. } => DiagCode::RangeArity,
             ParseDiag::EmptyBrackets => DiagCode::EmptyBrackets,
+            ParseDiag::EmptyStructBody => DiagCode::EmptyStructBody,
             ParseDiag::Message(_) => DiagCode::ParseError,
         }
     }
@@ -352,6 +358,10 @@ impl std::fmt::Display for ParseDiag {
             ParseDiag::EmptyBrackets => {
                 f.write_str("empty brackets: use s[i] to index or s[start:end] to slice")
             }
+            ParseDiag::EmptyStructBody => f.write_str(
+                "struct declaration has no fields: \
+                 indent at least one `name: type` field line",
+            ),
             ParseDiag::Message(msg) => f.write_str(msg),
         }
     }

@@ -21,6 +21,9 @@
 //!   [`ExprList`] / [`StmtList`] range into the side arena.
 //! - `elifs: Vec<ElifBranch>` — side arena for an `if`'s elif
 //!   chain, behind an [`ElifList`] range.
+//! - `struct_field_decls: Vec<(StringId, TypeExpr)>` — side arena
+//!   for struct declaration field lists, in declaration order,
+//!   behind a [`StructFieldDeclList`] range.
 //! - `top_level: Vec<StmtId>` — the program's statements in source
 //!   order; everything below is reached by following ids out of them.
 //!
@@ -150,6 +153,21 @@ impl ElifList {
     }
 }
 
+/// A `[offset, offset+len)` slice of the `struct_field_decls` side
+/// arena — a struct declaration's field list, in declaration order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StructFieldDeclList {
+    offset: u32,
+    len: u32,
+}
+
+impl StructFieldDeclList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
 // ---------- Expressions ----------
 
 /// A single expression: kind plus inline source span.
@@ -224,6 +242,9 @@ pub struct Stmt {
 pub enum StmtKind {
     VarDecl(VarDecl),
     FunctionDef(FunctionDef),
+    /// `struct Name:` declaration (M9). The field list lives in the
+    /// `struct_field_decls` side arena, in declaration order.
+    StructDef(StructDef),
     Return(Option<ExprId>),
     ExprStmt(ExprId),
     IfStmt(IfStmt),
@@ -278,6 +299,14 @@ pub struct VarDecl {
     pub name: Ident,
     pub type_annotation: Option<TypeExpr>,
     pub initializer: ExprId,
+}
+
+/// A `struct` declaration (M9). All fields are `Copy` handles; the
+/// field list itself lives in the `struct_field_decls` side arena.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StructDef {
+    pub name: Ident,
+    pub fields: StructFieldDeclList,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -458,6 +487,7 @@ pub struct Ast {
     expr_lists: Vec<ExprId>,
     stmt_lists: Vec<StmtId>,
     elifs: Vec<ElifBranch>,
+    struct_field_decls: Vec<(StringId, TypeExpr)>,
     top_level: Vec<StmtId>,
     /// Span covering the first through last top-level statement;
     /// `0..0` for an empty program. Kept for the pretty-printer's
@@ -489,6 +519,7 @@ impl Ast {
             expr_lists: Vec::new(),
             stmt_lists: Vec::new(),
             elifs: Vec::new(),
+            struct_field_decls: Vec::new(),
             top_level: Vec::new(),
             span: SimpleSpan::new((), 0..0),
         }
@@ -527,6 +558,12 @@ impl Ast {
     /// The element slice behind an [`ElifList`] range.
     pub fn elif_list(&self, list: ElifList) -> &[ElifBranch] {
         &self.elifs[list.as_range()]
+    }
+
+    /// The field declarations behind a [`StructFieldDeclList`]
+    /// range, in declaration order.
+    pub fn struct_field_decls(&self, list: StructFieldDeclList) -> &[(StringId, TypeExpr)] {
+        &self.struct_field_decls[list.as_range()]
     }
 
     /// The program's top-level statements in source order.
@@ -629,6 +666,23 @@ impl Ast {
         ElifList {
             offset,
             len: u32::try_from(items.len()).expect("AST elif chain length exceeded u32::MAX"),
+        }
+    }
+
+    /// Copy a struct declaration's field list into the
+    /// `struct_field_decls` side arena; see [`Self::push_expr_list`]
+    /// for the checked-conversion rationale.
+    fn push_struct_field_decl_list(
+        &mut self,
+        items: &[(StringId, TypeExpr)],
+    ) -> StructFieldDeclList {
+        let offset = u32::try_from(self.struct_field_decls.len())
+            .expect("AST struct_field_decls arena exceeded u32::MAX");
+        self.struct_field_decls.extend_from_slice(items);
+        StructFieldDeclList {
+            offset,
+            len: u32::try_from(items.len())
+                .expect("AST struct field list length exceeded u32::MAX"),
         }
     }
 
@@ -755,6 +809,18 @@ impl Ast {
             }),
             span,
         )
+    }
+
+    /// `struct Name:` declaration (M9); the field list is copied
+    /// into the `struct_field_decls` side arena in declaration order.
+    pub fn struct_def(
+        &mut self,
+        name: Ident,
+        fields: &[(StringId, TypeExpr)],
+        span: SimpleSpan,
+    ) -> StmtId {
+        let fields = self.push_struct_field_decl_list(fields);
+        self.push_stmt(StmtKind::StructDef(StructDef { name, fields }), span)
     }
 
     pub fn assign_or_decl(&mut self, target: Ident, value: ExprId, span: SimpleSpan) -> StmtId {

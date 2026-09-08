@@ -66,6 +66,7 @@ fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
     let label = match stmt.kind {
         StmtKind::VarDecl(_) => "VarDecl",
         StmtKind::FunctionDef(_) => "FunctionDef",
+        StmtKind::StructDef(_) => "StructDef",
         StmtKind::Return(_) => "Return",
         StmtKind::ExprStmt(_) => "ExprStmt",
         StmtKind::IfStmt(_) => "IfStmt",
@@ -113,6 +114,20 @@ fn write_stmt_children(
     match &ast.stmt(stmt).kind {
         StmtKind::VarDecl(decl) => write_var_decl(out, ast, decl, prefix, pool),
         StmtKind::FunctionDef(func) => write_function_def(out, ast, func, prefix, pool),
+        StmtKind::StructDef(def) => {
+            writeln!(out, "{}StructDef: {}", prefix, pool.str(def.name.name))?;
+            let inner = format!("{}  ", prefix);
+            for (field_name, field_ty) in ast.struct_field_decls(def.fields) {
+                writeln!(
+                    out,
+                    "{}├── field: {}: {}",
+                    inner,
+                    pool.str(*field_name),
+                    pool.str(field_ty.name)
+                )?;
+            }
+            Ok(())
+        }
         StmtKind::Return(value) => {
             if let Some(e) = value {
                 write_expr(out, ast, *e, prefix, true, "", pool)?;

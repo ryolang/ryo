@@ -342,6 +342,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::ChainedComparison => "E0104",
         DiagCode::RangeArity => "E0105",
         DiagCode::EmptyBrackets => "E0106",
+        DiagCode::EmptyStructBody => "E0107",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -699,6 +700,7 @@ mod tests {
             (DiagCode::ChainedComparison, "E0104"),
             (DiagCode::RangeArity, "E0105"),
             (DiagCode::EmptyBrackets, "E0106"),
+            (DiagCode::EmptyStructBody, "E0107"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -759,6 +761,7 @@ mod tests {
                 | DiagCode::ChainedComparison
                 | DiagCode::RangeArity
                 | DiagCode::EmptyBrackets
+                | DiagCode::EmptyStructBody
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape

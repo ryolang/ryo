@@ -461,7 +461,65 @@ where
         .boxed()
 }
 
-/// Top-level statements: only function defs and var decls.
+/// A `struct` declaration: `struct Name:` followed by an indented
+/// block of `field: type` lines (M9).
+fn struct_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let field = select! { Token::Ident(name) => name }
+        .then_ignore(just(Token::Colon))
+        .then(type_expr_parser());
+
+    // Field lines mirror `statement_list`'s newline structure: at
+    // least one newline between fields, blank lines tolerated, and
+    // the block-final field may sit directly against the `Dedent`
+    // (files without a trailing newline).
+    let field_line = field.then_ignore(require_newlines().or(peek_terminator(Token::Dedent)));
+
+    // Same delimiting shape as `indented_block`: blank lines between
+    // the header and the body land *before* the `Indent`.
+    let body = skip_newlines()
+        .ignore_then(field_line.repeated().collect::<Vec<_>>())
+        .delimited_by(
+            skip_newlines().ignore_then(just(Token::Indent)),
+            just(Token::Dedent),
+        )
+        .map(Some);
+
+    // No indented block follows the header: the body is empty. Peek
+    // (consuming nothing) so the enclosing statement list still sees
+    // the line's newline tail; `validate` below emits the targeted
+    // diagnostic. A *malformed* indented block fails both
+    // alternatives and falls to statement recovery as a generic
+    // parse error instead of misreporting as an empty body.
+    let no_body = empty()
+        .and_is(require_newlines().then_ignore(just(Token::Indent).not()))
+        .to(None);
+
+    just(Token::Struct)
+        .ignore_then(
+            select! { Token::Ident(name) => name }
+                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
+        )
+        .then_ignore(just(Token::Colon))
+        .then(body.or(no_body))
+        .validate(|(name, fields), e: &mut Mx<'a, '_, I>, emitter| {
+            let fields = fields.unwrap_or_default();
+            if fields.is_empty() {
+                emitter.emit(Rich::custom(e.span(), ParseDiag::EmptyStructBody));
+            }
+            (name, fields)
+        })
+        .map_with(|(name, fields), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().struct_def(name, &fields, span)
+        })
+        .boxed()
+}
+
+/// Top-level statements: struct declarations, function defs, and
+/// var decls (plus bare expression statements for flat scripts).
 fn top_level_statement_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -475,7 +533,15 @@ where
         e.state().expr_stmt(expr, span)
     });
 
-    choice((function_def_parser(), var_decl_parser(), expr_stmt)).boxed()
+    // `struct` opens with a unique keyword, so trying it first is
+    // safe and keeps speculation cheap.
+    choice((
+        struct_decl_parser(),
+        function_def_parser(),
+        var_decl_parser(),
+        expr_stmt,
+    ))
+    .boxed()
 }
 
 fn statement_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a

@@ -82,6 +82,13 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
             // parse stage, and not a "top-level statement" for the
             // explicit-main check.
             ast::StmtKind::Error => {}
+            // Struct declarations (M9) are declarations, not
+            // executable top-level statements — they must not trip
+            // the explicit-main check. UIR lowering lands with the
+            // struct astgen work; until then the node is dropped
+            // here, so any use of the declared name fails as an
+            // unknown type downstream.
+            ast::StmtKind::StructDef(_) => {}
             _ => top_level.push(stmt),
         }
     }
@@ -388,6 +395,9 @@ fn gen_stmt(
         // diagnostic was already emitted; lower it to nothing so the
         // rest of the program still reaches sema.
         ast::StmtKind::Error => {}
+        // Struct declarations are top-level only and are filtered
+        // out before lowering (see `generate`); nothing to lower.
+        ast::StmtKind::StructDef(_) => {}
     }
 }
 
