@@ -30,14 +30,16 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.4.1 — `strview` Spelling & View→`str` Re-borrow [alpha] ✅ COMPLETE](#milestone-841-strview-spelling--viewstr-re-borrow-alpha--complete)
 - [x] [Milestone 8.4.1.2 — View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE](#milestone-8412-view-materialization-strview--w0003-alpha--complete)
 - [x] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha] ✅ COMPLETE](#milestone-842-bytes-type--bytesview-alpha--complete)
-- [ ] [Milestone 8.5 — Default Parameters & Named Arguments](#milestone-85-default-parameters--named-arguments)
-- [ ] [Milestone 8.7 — Literal Completeness (Hex/Octal/Binary Ints, Escapes)](#milestone-87-literal-completeness-hexoctalbinary-ints-escapes)
 - [ ] [Milestone 9 — Structs](#milestone-9-structs)
 - [ ] [Milestone 9.1 — Synthesized Eq & Debug for Structs](#milestone-91-synthesized-eq--debug-for-structs)
 - [ ] [Milestone 10 — Tuples](#milestone-10-tuples)
 - [ ] [Milestone 11 — Enums (Algebraic Data Types) [alpha]](#milestone-11-enums-algebraic-data-types-alpha)
 - [ ] [Milestone 12 — Pattern Matching [alpha]](#milestone-12-pattern-matching-alpha)
 - [ ] [Milestone 13 — Error Types & Unions [alpha]](#milestone-13-error-types--unions-alpha)
+- [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
+- [ ] [Milestone 13.7 — Literal Completeness (Hex/Octal/Binary Ints, Escapes)](#milestone-137-literal-completeness-hexoctalbinary-ints-escapes) *(deferred — no dependencies; slots in anywhere)*
+
+> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M13.5 and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule.
 
 ### Phase 3: Type System & Memory Safety
 
@@ -835,7 +837,7 @@ if not cond:
 
 `__ryo_assert_failed` is a runtime intrinsic — not user-callable, lives in your runtime crate/module. It writes `assertion failed at <file>:<line>: <msg>\n` to stderr and exits with code 101 (steal Rust's panic convention) or 1.
 
-**Roadmap placement.** Hard dependencies are `bool`, `if`, and unary `not` — all M8. Slot it as **M8.7** (right after M8.6 closures), or fold it into M8's deliverables since it's a one-day task once `if`/`bool` work. Don't wait for M9+; you'll want to use `assert` while writing tests for those milestones.
+**Roadmap placement.** Hard dependencies are `bool`, `if`, and unary `not` — all M8. Slot it as **M13.7** (right after M8.6 closures), or fold it into M8's deliverables since it's a one-day task once `if`/`bool` work. Don't wait for M9+; you'll want to use `assert` while writing tests for those milestones.
 
 One thing to defer explicitly: **lazy message formatting** (`assert(x, "got {}", x)`-style). That needs format strings, which need owned `String`, which is M15. For now, plain string literal message is fine and matches your existing capabilities. Document it as a known follow-up.
 
@@ -979,7 +981,7 @@ fn main():
 - ✅ [M8.1b: Ownership pass + move tracking](../superpowers/plans/2026-06-03-milestone-8.1b-ownership-pass.md) (June 2026)
 - ✅ [M8.1c: ASAP destruction (Free insertion)](../superpowers/plans/2026-06-05-milestone-8.1c-asap-destruction.md) (June 2026)
 
-**Why this comes before M8.5 (and the rest of Phase 2):**
+**Why this comes before M13.5 (and the rest of Phase 2):**
 Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching, error types) uses `str` in its examples and signatures — `error NotFound(path: str)`, `Result.Error("...")`, struct fields with string names. Landing strings and the borrow checker here makes those milestones implementable as written, instead of forward-referencing features. It also means the move-tracking pass exists before structs and tuples, so their move semantics are checked from day one.
 
 **Tasks:**
@@ -1299,7 +1301,7 @@ fn main():
 	raw2 = text.to_bytes()        # owned copy
 
 	mut buf = b"\x00"
-	bytes_push(&buf, 255)         # hex literals land in Milestone 8.7
+	bytes_push(&buf, 255)         # hex literals land in Milestone 13.7
 	buf = buf + raw
 	print(buf)                    # b"\x00\xff\x01\x02\x03"
 ```
@@ -1312,120 +1314,6 @@ fn main():
 - `str` indexing remains forbidden (spec §4.7); `b[i]` applies to `bytes` only
 - Mutable view types remain rejected (final spec §12); mutable sub-ranges use `inout` + range parameters (Q4)
 - Dependencies: Milestone 8.4 (projection machinery, `TypeKind::View(ViewKind)`, slice codegen)
-
-### Milestone 8.5: Default Parameters & Named Arguments
-
-**Goal:** Support default parameter values and named arguments for all functions (user-defined and builtins), with named-by-default calling convention
-
-**Status:** ⏳ Planned (depends on Milestone 8)
-
-**Calling Convention (Swift-style):**
-
-- All parameters are **keyword-only by default** — callers must use `name=value`
-- `_` before a parameter name opts it into **positional** — callers can pass by position
-- Named arguments always work, even for `_` params — `_` adds positional as an option, it doesn't remove named
-- Positional args must come before named args at the call site
-- This replaces the spec's `#[named]` attribute (Section 6.1.1) with a simpler, safer default
-
-**Tasks:**
-
-1. **Parser Extensions:**
-   - Parse `name=expr` in call argument lists (inside `()` = named arg, at statement level = assignment)
-   - Parse default values in function parameter definitions: `param: Type = default_expr`
-   - Parse `_` prefix on parameter names: `_ param: Type`
-
-2. **AST Extensions:**
-   - Add `default: Option<Expression>` and `positional: bool` to function parameter nodes
-   - Add `name: Option<String>` to call argument nodes to represent `CallArg { name, value }`
-
-3. **Sema / Lowering:**
-   - Validate: defaults must be trailing (no `fn f(a: int = 1, b: int)` — compile error)
-   - Validate: named args match parameter names
-   - Validate: positional args can only target `_`-marked params
-   - Validate: no positional args after named args at call site
-   - Insert default values for omitted arguments during lowering
-   - All calls arrive at codegen fully resolved
-
-4. **Codegen:**
-   - No structural changes needed if lowering inserts defaults
-   - All calls arrive at codegen fully resolved with all arguments filled in
-
-5. **Builtin Updates:**
-   - Update `BuiltinFunction` struct to include parameter metadata (names, types, defaults, positional flag)
-   - Builtins like `print` participate in the named/positional system
-
-6. **Testing:**
-   - Default values, named args, `_` positional params
-   - Mixing positional + named args
-   - Error cases: wrong name, positional for non-`_` param, positional after named, missing required arg, duplicate arg
-
-**Visible Progress:** Functions with defaults and named arguments work. Clear compile errors for argument misuse.
-
-**Example:**
-
-```ryo
-# All params keyword-only by default
-fn create_user(name: str, age: int, role: str = "user"):
- ...
-
-create_user(name="Alice", age=30)              # ok
-create_user(name="Alice", age=30, role="admin") # ok
-create_user("Alice", 30)                        # compile error
-
-# _ opts into positional
-fn add(_ a: int, _ b: int) -> int:
- return a + b
-
-add(1, 2)          # ok
-add(a=1, b=2)      # also ok
-
-# Mix: first param positional, rest keyword-only
-fn print(_ text: str, end: str = "\n"):
- ...
-
-print("hello")              # ok — text positional, end defaults to "\n"
-print("hello", end="")      # ok — explicit end
-print("hello", "")          # compile error — end is keyword-only
-```
-
-**Design Decisions:**
-
-- **Named by default, `_` opts into positional** (Swift model) — replaces the spec's `#[named]` attribute with a simpler, safer default. Proven at scale by Swift for 10+ years
-- **Defaults evaluated at each call site** (Kotlin/Swift model), not at definition time — avoids Python's mutable default gotcha where `def f(x=[])` shares the list across calls
-- **Defaults must be compile-time evaluable expressions** (literals, constants, future `comptime` calls) — simplifies codegen, aligns with Zig philosophy
-- **Trailing position required** for params with defaults (like Python, Kotlin, C++)
-- **AI-era rationale:** Named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature
-
-**Implementation Notes:**
-
-- Struct construction `Point{x=1, y=2}` (D11 braces) and function named args `f(x=1)` share the `name=value` grammar inside their delimiters — the parser distinguishes them by delimiter (`{}` vs `()`), resolution happens during lowering
-- No function overloading in Ryo, so defaults don't create ambiguity
-- Languages analyzed: Go (no defaults — too limiting), Rust (no defaults — relies on builders/traits Ryo lacks), Python (`*` separator — good but `_` is cleaner), Swift (named by default — best fit for Ryo)
-- Dependencies: Milestone 8 (control flow for conditional default handling), Milestone 7 (comparison operators)
-
-**Unlocks:** Milestone 9 struct literals share `name=value` parsing infrastructure. Future `print(_ text: str, end: str = "\n")` API.
-
-> **Note:** Closures and lambda expressions were originally planned as Milestone 8.6 but have been **deferred to v0.2** (see Phase 5: Closures & Lambda Expressions). Closures are not strictly required for the v0.1.0 core language; named functions plus the standard library cover every v0.1 use case, and deferring capture analysis (originally M15.5) lets the v0.1 borrow checker stay focused on let/struct/method bindings.
-
-### Milestone 8.7: Literal Completeness (Hex/Octal/Binary Ints, Escapes)
-
-**Goal:** Implement the literal forms spec §3 documents but the lexer never got: non-decimal integer literals and the full escape set.
-
-**Status:** ⏳ Planned
-
-**Tasks:**
-
-- Integer literals: hex `0xFF`, octal `0o77`, binary `0b11`, underscore separators `1_000` (and `1_000.0` for floats) — all produce the existing `int`/`float`; same i64 range rules and `IntLitMin` handling as decimal
-- String escapes: `\xHH` and `\u{HHHH}`. Both are Unicode-scalar semantics (Python-style): `\xFF` in a `"..."` literal means U+00FF, UTF-8 encoded — two bytes, not one. Bytes literals are the raw-byte form and keep their M8.4.2 rule: `\xNN` accepts the full 0x00–0xFF range there
-- Tests: all bases, separators, escape ranges, rejection cases (bad digits, `\x` with fewer than two hex digits, `\u{}` surrogates / above U+10FFFF)
-
-**Visible Progress:** Byte-oriented code reads naturally (`bytes_push(&b, 0xFF)`); string literals accept the full spec §3 escape set.
-
-**Implementation Notes:**
-
-- Lexer-scoped change: the raw int token gains prefixed forms; conversion to `i64` happens at lex time like decimal today
-- `\u{HHHH}` encodes the scalar as UTF-8 into the decoded literal — no `char` type required (that is Milestone 17.2)
-- Dependencies: none
 
 ### Milestone 9: Structs
 
@@ -1478,8 +1366,8 @@ fn main():
 - Default layout is **unspecified** — the compiler may reorder fields to minimize padding (source-invisible; field access is by name). `#[repr(C)]` opts into declaration-order C layout (added in Milestone 9.1, consumed by FFI in v0.2)
 - No default values for fields (all must be initialized)
 - No methods yet (added in Milestone 17)
-- **D11 (final spec §10):** struct literals use brace construction — `Point{x=1, y=2}` — per the Brace Law (braces group by name; construction is visibly distinct from calls). The named-argument grammar for *calls* still comes from Milestone 8.5; braces are no longer reserved exclusively for f-string interpolation
-- Dependencies: Milestone 4 (functions for passing structs), Milestone 8.5 (named argument parsing)
+- **D11 (final spec §10):** struct literals use brace construction — `Point{x=1, y=2}` — per the Brace Law (braces group by name; construction is visibly distinct from calls). The named-argument grammar for *calls* still comes from Milestone 13.5; braces are no longer reserved exclusively for f-string interpolation
+- Dependencies: Milestone 4 (functions for passing structs). Struct literals use brace construction (D11) with their own grammar — they do **not** depend on Milestone 13.5's named-argument parsing, so the M13.5 deferral does not block this milestone.
 
 ### Milestone 9.1: Synthesized Eq & Debug for Structs
 
@@ -1749,6 +1637,120 @@ fn main():
 
 > **Note:** The `try` *propagation* operator (originally Milestone 14) is **deferred to v0.2** — see Phase 5: Try/Catch Operators. Error-union *types*, the `.message()` accessor, and `expr catch as e:` *handling* all ship in v0.1 (spec §7.4); v0.1 propagates errors with explicit `match`/`return`, which is verbose but fully expressive.
 
+### Milestone 13.5: Default Parameters & Named Arguments
+
+**Goal:** Support default parameter values and named arguments for all functions (user-defined and builtins), with named-by-default calling convention
+
+**Status:** ⏳ Deferred — post-alpha core cluster (M9 → M9.1 → M11 → M12 → M13 → M16); not alpha-gating (see [alpha_scope.md](alpha_scope.md)). May slip to v0.2 if the core cluster absorbs the v0.1 schedule. Depends on Milestone 8.
+
+**Calling Convention (Swift-style):**
+
+- All parameters are **keyword-only by default** — callers must use `name=value`
+- `_` before a parameter name opts it into **positional** — callers can pass by position
+- Named arguments always work, even for `_` params — `_` adds positional as an option, it doesn't remove named
+- Positional args must come before named args at the call site
+- This replaces the spec's `#[named]` attribute (Section 6.1.1) with a simpler, safer default
+
+**Tasks:**
+
+1. **Parser Extensions:**
+   - Parse `name=expr` in call argument lists (inside `()` = named arg, at statement level = assignment)
+   - Parse default values in function parameter definitions: `param: Type = default_expr`
+   - Parse `_` prefix on parameter names: `_ param: Type`
+
+2. **AST Extensions:**
+   - Add `default: Option<Expression>` and `positional: bool` to function parameter nodes
+   - Add `name: Option<String>` to call argument nodes to represent `CallArg { name, value }`
+
+3. **Sema / Lowering:**
+   - Validate: defaults must be trailing (no `fn f(a: int = 1, b: int)` — compile error)
+   - Validate: named args match parameter names
+   - Validate: positional args can only target `_`-marked params
+   - Validate: no positional args after named args at call site
+   - Insert default values for omitted arguments during lowering
+   - All calls arrive at codegen fully resolved
+
+4. **Codegen:**
+   - No structural changes needed if lowering inserts defaults
+   - All calls arrive at codegen fully resolved with all arguments filled in
+
+5. **Builtin Updates:**
+   - Update `BuiltinFunction` struct to include parameter metadata (names, types, defaults, positional flag)
+   - Builtins like `print` participate in the named/positional system
+
+6. **Testing:**
+   - Default values, named args, `_` positional params
+   - Mixing positional + named args
+   - Error cases: wrong name, positional for non-`_` param, positional after named, missing required arg, duplicate arg
+
+**Visible Progress:** Functions with defaults and named arguments work. Clear compile errors for argument misuse.
+
+**Example:**
+
+```ryo
+# All params keyword-only by default
+fn create_user(name: str, age: int, role: str = "user"):
+ ...
+
+create_user(name="Alice", age=30)              # ok
+create_user(name="Alice", age=30, role="admin") # ok
+create_user("Alice", 30)                        # compile error
+
+# _ opts into positional
+fn add(_ a: int, _ b: int) -> int:
+ return a + b
+
+add(1, 2)          # ok
+add(a=1, b=2)      # also ok
+
+# Mix: first param positional, rest keyword-only
+fn print(_ text: str, end: str = "\n"):
+ ...
+
+print("hello")              # ok — text positional, end defaults to "\n"
+print("hello", end="")      # ok — explicit end
+print("hello", "")          # compile error — end is keyword-only
+```
+
+**Design Decisions:**
+
+- **Named by default, `_` opts into positional** (Swift model) — replaces the spec's `#[named]` attribute with a simpler, safer default. Proven at scale by Swift for 10+ years
+- **Defaults evaluated at each call site** (Kotlin/Swift model), not at definition time — avoids Python's mutable default gotcha where `def f(x=[])` shares the list across calls
+- **Defaults must be compile-time evaluable expressions** (literals, constants, future `comptime` calls) — simplifies codegen, aligns with Zig philosophy
+- **Trailing position required** for params with defaults (like Python, Kotlin, C++)
+- **AI-era rationale:** Named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature
+
+**Implementation Notes:**
+
+- Struct construction `Point{x=1, y=2}` (D11 braces) and function named args `f(x=1)` share the `name=value` grammar inside their delimiters — the parser distinguishes them by delimiter (`{}` vs `()`), resolution happens during lowering
+- No function overloading in Ryo, so defaults don't create ambiguity
+- Languages analyzed: Go (no defaults — too limiting), Rust (no defaults — relies on builders/traits Ryo lacks), Python (`*` separator — good but `_` is cleaner), Swift (named by default — best fit for Ryo)
+- Dependencies: Milestone 8 (control flow for conditional default handling), Milestone 7 (comparison operators)
+
+**Unlocks:** Future `print(_ text: str, end: str = "\n")` API. (Milestone 9 struct literals no longer depend on this milestone — D11 brace construction has its own grammar.)
+
+> **Note:** Closures and lambda expressions were originally planned as Milestone 8.6 but have been **deferred to v0.2** (see Phase 5: Closures & Lambda Expressions). Closures are not strictly required for the v0.1.0 core language; named functions plus the standard library cover every v0.1 use case, and deferring capture analysis (originally M15.5) lets the v0.1 borrow checker stay focused on let/struct/method bindings.
+
+### Milestone 13.7: Literal Completeness (Hex/Octal/Binary Ints, Escapes)
+
+**Goal:** Implement the literal forms spec §3 documents but the lexer never got: non-decimal integer literals and the full escape set.
+
+**Status:** ⏳ Deferred — no dependencies; slots in anywhere past the alpha core cluster (see the sequencing note in the milestone index).
+
+**Tasks:**
+
+- Integer literals: hex `0xFF`, octal `0o77`, binary `0b11`, underscore separators `1_000` (and `1_000.0` for floats) — all produce the existing `int`/`float`; same i64 range rules and `IntLitMin` handling as decimal
+- String escapes: `\xHH` and `\u{HHHH}`. Both are Unicode-scalar semantics (Python-style): `\xFF` in a `"..."` literal means U+00FF, UTF-8 encoded — two bytes, not one. Bytes literals are the raw-byte form and keep their M8.4.2 rule: `\xNN` accepts the full 0x00–0xFF range there
+- Tests: all bases, separators, escape ranges, rejection cases (bad digits, `\x` with fewer than two hex digits, `\u{}` surrogates / above U+10FFFF)
+
+**Visible Progress:** Byte-oriented code reads naturally (`bytes_push(&b, 0xFF)`); string literals accept the full spec §3 escape set.
+
+**Implementation Notes:**
+
+- Lexer-scoped change: the raw int token gains prefixed forms; conversion to `i64` happens at lex time like decimal today
+- `\u{HHHH}` encodes the scalar as UTF-8 into the decoded literal — no `char` type required (that is Milestone 17.2)
+- Dependencies: none
+
 ## Phase 3: Type System & Memory Safety
 
 > **Phase 3 is now smaller than originally planned.** The string type, ownership-tracking pass, immutable borrows, mutable borrows, and string slices were all moved forward into Phase 2 as Milestones 8.1–8.4 so that downstream Phase 2 milestones (structs, enums, error types) can use them in their examples and signatures. What remains here is everything that builds *on top of* the borrow checker: optional types, methods, array slices, collections, and RAII.
@@ -1927,7 +1929,7 @@ fn main():
 **Implementation Notes:**
 
 - `.chars()` / `.char_count()` themselves land with M22 (iterator machinery); this milestone ships only the type
-- Dependencies: Milestone 8.7 recommended (shares the `\u{HHHH}` escape decoder)
+- Dependencies: Milestone 13.7 recommended (shares the `\u{HHHH}` escape decoder)
 
 ### Milestone 21: Array Slices (`slice[T]`)
 
@@ -2696,6 +2698,8 @@ Available commands:
 - Complex runtime implementation (executor, scheduler, reactor, stack swapping)
 - Not essential for initial adoption (synchronous code works fine)
 - Allows more design iteration based on community feedback
+
+**Implementation plan:** [concurrency.md](concurrency.md) — phased M:N green-thread runtime (`corosensei` + `mio` + `crossbeam-deque`). **Implementation is gated on a proof-of-concept spike** validating the core stack on all three OSes; Phase 1 of the plan starts only once the PoC is ready and validates feasibility (see the gate note in that document's Overview).
 
 **Design Decision: Green Threads (Stack Swapping) vs async/await**
 
@@ -3496,6 +3500,8 @@ result = try task.timeout(5s, worker).await catch as e:
 
 ### Named Parameters (`#[named]`)
 
+> **Superseded by Milestone 13.5's named-by-default calling convention** — keyword-only-by-default makes a per-function `#[named]` attribute redundant. This entry remains only as the fallback design if M13.5 slips past v0.1 entirely.
+
 **Goal:** Allow functions to require callers to use named arguments
 
 **Why Post-v0.1.0:**
@@ -3609,7 +3615,7 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 - ❌ Task/Future runtime (v0.4+)
 - ❌ FFI/unsafe blocks (v0.2+)
 - ❌ Full generics system (v0.3+)
-- ✅ Named parameters & default values (v0.1 — Milestone 8.5)
+- ⏳ Named parameters & default values (deferred — Milestone 13.5, post-alpha core cluster; may slip to v0.2)
 - ✅ Integer overflow semantics frozen (v0.1 — GAP-2: traps in all build modes; spec §18)
 - ❌ LSP/advanced tooling (v0.2+)
 
@@ -3620,7 +3626,7 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Realistic Estimates (2-4 weeks per milestone)
 
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
-**Phase 2 (M4-M13):** 15 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (strview), M8.7 (literal forms); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~45 weeks (~11 months)
+**Phase 2 (M4-M13):** 15 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (strview), M13.7 (literal forms); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~45 weeks (~11 months)
 **Phase 3 (M16, M17, M17.1, M17.2, M21, M22, M23):** 7 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~21 weeks (~5 months)
 **Phase 4 (M24-M27):** 6 milestones (includes M26.5 Distribution & Installer and M26.6 Cross-Compilation) × 4 weeks avg = ~24 weeks (~6 months)
 
@@ -3635,8 +3641,8 @@ This foundation enables building **synchronous applications** including CLI tool
 
 ### Milestones by Complexity
 
-**Simple (2 weeks):** M4, M5, M7, M10, M8.4, M8.7
-**Medium (3 weeks):** M6, M8, M8.1, M8.2, M8.3, M8.5, M9, M11, M12, M13, M16, M17, M17.2, M21, M22, M24, M25, M26, M26.5
+**Simple (2 weeks):** M4, M5, M7, M10, M8.4, M13.7
+**Medium (3 weeks):** M6, M8, M8.1, M8.2, M8.3, M13.5, M9, M11, M12, M13, M16, M17, M17.2, M21, M22, M24, M25, M26, M26.5
 **Complex (4-5 weeks):** M17.1, M20, M23, M27
 
 This timeline is **realistic** based on compiler development best practices. Each milestone includes implementation, testing, documentation, and examples.

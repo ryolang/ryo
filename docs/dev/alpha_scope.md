@@ -121,7 +121,7 @@ These are documented in the roadmap as v0.1.0 milestones but are **not** part of
 | Feature | Roadmap | Why deferred from alpha |
 |---|---|---|
 | Module system | M5, M6 | Single-file programs are sufficient for alpha-scale evaluation |
-| Default parameters & named arguments | M8.5 | Pure ergonomics; positional args work |
+| Default parameters & named arguments | M13.5 | Pure ergonomics; positional args work |
 | Structs | M9 | Snippet uses no structs; tuples + enums cover early needs |
 | Tuples | M10 | Not in snippet |
 | Methods (`impl` blocks) | M17 | Free functions cover all alpha use cases |
