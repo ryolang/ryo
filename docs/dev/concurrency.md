@@ -67,6 +67,33 @@ normative specification. Ryo remains colorless: no `async`/`await`, no
 | Dispatcher worker budget | `4 × RYOMAXPROCS` | Total `workers` across all custom dispatchers (§4.5). |
 | Timer wheel resolution | `1 ms` | Sufficient for scripting workloads. |
 
+**Gate: proof-of-concept spike before Phase 1.** No runtime code is written until a
+throwaway PoC validates the core stack end to end. The PoC is scratch work (not
+committed runtime code): `corosensei` stack switching plus `mio` polling on Linux,
+macOS, and Windows, driven by a minimal single-threaded round-robin scheduler over a
+hardcoded task set, with a rough task-switch cost measurement. When the PoC is ready
+and validates feasibility, Phase 1 implementation begins. If it surfaces blocking
+issues (stack growth behavior, IOCP integration, context-switch overhead), revisit
+the core-stack choices in this document first.
+
+**Pass/fail criteria** (sanity bars, not production targets — revise with data):
+
+- **Stack growth:** tasks that exceed the initial 32 KB stack complete correctly on
+  all three OSes under the §1.1 stack strategy — 10 000 such tasks, zero corruption
+  or unexpected `StackOverflow` deliveries. Fail → revisit §1.1 before Phase 1.
+- **IOCP integration:** a `mio` echo loopback sustains 1 000 concurrent connections
+  on Windows with zero lost or duplicated events (epoll/kqueue equivalents on
+  Linux/macOS as a control). Fail → revisit the `mio` choice before Phase 1.
+- **Task-switch cost:** mean context-switch cost ≤ 1 µs on the dev machine — an
+  order of magnitude above Go's ~100 ns goroutine switch, which is still cheap
+  enough to justify M:N. Above the bar → revisit `corosensei` / the stack-switching
+  approach before Phase 1.
+
+Every measured result is recorded in `docs/dev/concurrency_poc.md` (created by the
+PoC; one table row per criterion per OS, with the raw numbers). All three criteria
+must pass — or be explicitly waived with the reason recorded in that file — before
+Phase 1 implementation begins.
+
 > **Sibling reference docs:** [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`arc_optimizer.md`](arc_optimizer.md), [`proposals/wasm_target.md`](proposals/wasm_target.md).
 
 ---

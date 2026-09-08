@@ -429,7 +429,7 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
 ///
 /// `hex_escapes` enables `\xNN` (exactly two hex digits, M8.4.2) —
 /// accepted in bytes literals only; in string literals `\xNN` stays an
-/// `UnknownEscape` until M8.7 (Literal Completeness).
+/// `UnknownEscape` until M13.7 (Literal Completeness).
 ///
 /// `body_span` is the span of the unquoted body (the caller computes
 /// it: 1 byte past the opening quote for `"..."`, 2 for `b"..."`).
@@ -1123,7 +1123,7 @@ mod tests {
 
     #[test]
     fn string_literal_still_rejects_hex_escape() {
-        // `\xNN` is bytes-literal-only at M8.4.2; string escapes grow at M8.7.
+        // `\xNN` is bytes-literal-only at M8.4.2; string escapes grow at M13.7.
         let mut pool = InternPool::new();
         let mut sink = DiagSink::new();
         let _ = lex(r#"x = "\x41""#, &mut pool, &mut sink);
