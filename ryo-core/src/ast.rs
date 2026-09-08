@@ -234,6 +234,12 @@ pub enum ExprKind {
     /// initializers live in the `struct_field_inits` side arena, in
     /// source order (sema canonicalizes against the declaration).
     StructLiteral(StructLiteral),
+    /// Field access `object.field` (M9). Chains fold left:
+    /// `a.b.c` is `FieldAccess(FieldAccess(a, b), c)`.
+    FieldAccess {
+        object: ExprId,
+        field: Ident,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -890,6 +896,11 @@ impl Ast {
             ExprKind::StructLiteral(StructLiteral { name, fields }),
             span,
         )
+    }
+
+    /// Field access `object.field` (M9).
+    pub fn field_access(&mut self, object: ExprId, field: Ident, span: SimpleSpan) -> ExprId {
+        self.push_expr(ExprKind::FieldAccess { object, field }, span)
     }
 
     pub fn assign_or_decl(&mut self, target: Ident, value: ExprId, span: SimpleSpan) -> StmtId {

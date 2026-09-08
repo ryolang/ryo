@@ -486,6 +486,11 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
         // to the struct name, so any use fails as an undefined
         // variable downstream. Field initializers are dropped.
         ast::ExprKind::StructLiteral(lit) => b.var_ref(lit.name.name, span),
+        // Field access (M9) gets UIR lowering with the struct sema
+        // work; until then the node lowers to a bare reference to the
+        // field name, so any use fails as an undefined variable
+        // downstream. The object expression is dropped.
+        ast::ExprKind::FieldAccess { field, .. } => b.var_ref(field.name, span),
     }
 }
 

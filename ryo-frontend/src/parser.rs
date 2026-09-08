@@ -736,12 +736,13 @@ where
                 .or(parenthesized)
         };
 
-        // Postfix operators: method calls (`s.len()`), slice
-        // projections `s[start:end]` (M8.4), and scalar indexing
-        // `s[i]` (M8.4.2). Either slice bound may be omitted
-        // (`s[start:]`, `s[:end]`, `s[:]`); `s[]` is rejected.
+        // Postfix operators: method calls (`s.len()`), field access
+        // (`p.x`, M9), slice projections `s[start:end]` (M8.4), and
+        // scalar indexing `s[i]` (M8.4.2). Either slice bound may be
+        // omitted (`s[start:]`, `s[:end]`, `s[:]`); `s[]` is rejected.
         enum PostfixOp {
             Method(StringId, Vec<ExprId>, SimpleSpan),
+            Field(Ident, SimpleSpan),
             Slice(Option<ExprId>, Option<ExprId>, SimpleSpan),
             Index(ExprId, SimpleSpan),
         }
@@ -758,6 +759,16 @@ where
             .map_with(|(method, args), e: &mut Mx<'a, '_, I>| {
                 PostfixOp::Method(method, args, e.span())
             });
+
+        // Field access `p.x` (M9). Tried after `method_op`: the method
+        // rule has the longer required match (parens), so chumsky
+        // backtracks to this one when no `(` follows the name.
+        let field_op = just(Token::Dot)
+            .ignore_then(
+                select! { Token::Ident(name) => name }
+                    .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
+            )
+            .map_with(|field, e: &mut Mx<'a, '_, I>| PostfixOp::Field(field, e.span()));
 
         // One bracket parse, no speculation: the optional leading
         // expression is parsed exactly once, then `:` (slice) vs `]`
@@ -787,7 +798,7 @@ where
 
         let postfix = atom
             .foldl_with(
-                choice((method_op, bracket_op)).repeated(),
+                choice((method_op, field_op, bracket_op)).repeated(),
                 |receiver, op, e: &mut Mx<'a, '_, I>| {
                     let start = e.state().expr_span(receiver).start;
                     match op {
@@ -795,6 +806,11 @@ where
                             receiver,
                             method,
                             &args,
+                            SimpleSpan::new((), start..span.end),
+                        ),
+                        PostfixOp::Field(field, span) => e.state().field_access(
+                            receiver,
+                            field,
                             SimpleSpan::new((), start..span.end),
                         ),
                         PostfixOp::Slice(lo, hi, span) => {

@@ -394,6 +394,53 @@ fn struct_literal_does_not_shadow_call_or_ident() {
 }
 
 #[test]
+fn parse_field_access() {
+    let (ast, pool) = lex_and_parse("fn main():\n\ty = p.x\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let init = assign_value(&ast, fn_body(&ast, f)[0]);
+    match ast.expr(init).kind {
+        ExprKind::FieldAccess { object, field } => {
+            assert_eq!(pool.str(field.name), "x");
+            assert!(matches!(ast.expr(object).kind, ExprKind::Ident(_)));
+        }
+        other => panic!("expected FieldAccess, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_chained_field_access() {
+    let (ast, pool) = lex_and_parse("fn main():\n\tv = a.b.c\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let init = assign_value(&ast, fn_body(&ast, f)[0]);
+    // `a.b.c` parses as FieldAccess(FieldAccess(a, b), c).
+    match ast.expr(init).kind {
+        ExprKind::FieldAccess { object, field } => {
+            assert_eq!(pool.str(field.name), "c");
+            match ast.expr(object).kind {
+                ExprKind::FieldAccess {
+                    object: inner,
+                    field: inner_field,
+                } => {
+                    assert_eq!(pool.str(inner_field.name), "b");
+                    assert!(matches!(ast.expr(inner).kind, ExprKind::Ident(_)));
+                }
+                other => panic!("expected nested FieldAccess, got {:?}", other),
+            }
+        }
+        other => panic!("expected FieldAccess, got {:?}", other),
+    }
+}
+
+#[test]
+fn method_call_still_parses_as_method_call() {
+    // `method_op` wins over `field_op` when parens follow the name.
+    let (ast, _) = lex_and_parse("fn main():\n\tn = s.len()\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let init = assign_value(&ast, fn_body(&ast, f)[0]);
+    assert!(matches!(ast.expr(init).kind, ExprKind::MethodCall { .. }));
+}
+
+#[test]
 fn parse_true_false_literals() {
     let (ast, _) = lex_and_parse("x = true\ny = false").unwrap();
     let stmts = ast.top_level_stmts();
@@ -1277,6 +1324,9 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
                     for &(_, value) in ast.struct_field_inits(lit.fields) {
                         expr_work.push(value);
                     }
+                }
+                ExprKind::FieldAccess { object, .. } => {
+                    expr_work.push(object);
                 }
             }
         }

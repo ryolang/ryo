@@ -340,6 +340,9 @@ fn write_expr(
         ExprKind::StructLiteral(lit) => {
             Cow::Owned(format!("StructLiteral({})", pool.str(lit.name.name)))
         }
+        ExprKind::FieldAccess { field, .. } => {
+            Cow::Owned(format!("FieldAccess(.{})", pool.str(field.name)))
+        }
     };
 
     writeln!(
@@ -402,6 +405,9 @@ fn write_expr(
                 )?;
             }
             Ok(())
+        }
+        ExprKind::FieldAccess { object, .. } => {
+            write_expr(out, ast, object, &new_prefix, true, "object: ", pool)
         }
     }
 }
