@@ -292,3 +292,11 @@ fn valgrind_str_materialize_copy() {
 fn valgrind_bytes_ops() {
     run_valgrind_smoke(common::find_fixture("bytes_ops"), "bytes_ops");
 }
+
+#[test]
+fn valgrind_struct_leak_check() {
+    run_valgrind_smoke(
+        common::find_fixture("struct_leak_check"),
+        "struct_leak_check",
+    );
+}

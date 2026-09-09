@@ -1,0 +1,19 @@
+struct Point:
+	x: float
+	y: float
+
+struct Rectangle:
+	width: float
+	height: float
+
+fn area(rect: Rectangle) -> float:
+	return rect.width * rect.height
+
+fn main():
+	p = Point{x=1.0, y=2.0}
+	print(float_to_str(p.x))
+	r = Rectangle{width=10.0, height=5.0}
+	print(float_to_str(area(r)))
+	mut q = Point{x=0.0, y=0.0}
+	q.x = 7.0
+	print(float_to_str(q.x))

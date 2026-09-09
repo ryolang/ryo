@@ -478,6 +478,19 @@ fn main():
 \teat(str(s[0:2]))
 ",
     ),
+    (
+        // M9: a struct owning a heap `str` field — destruction must
+        // recurse into the field and free the buffer exactly once.
+        "struct_leak_check",
+        "\
+struct Person:
+\tname: str
+
+fn main():
+\tp = Person{name=\"alice\"}
+\tprint(p.name)
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's

@@ -232,3 +232,11 @@ fn asan_slice_across_blocks() {
 fn asan_bytes_ops() {
     run_asan_smoke(common::find_fixture("bytes_ops"), "bytes_ops");
 }
+
+#[test]
+fn asan_struct_leak_check() {
+    run_asan_smoke(
+        common::find_fixture("struct_leak_check"),
+        "struct_leak_check",
+    );
+}

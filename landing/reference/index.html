@@ -180,6 +180,7 @@
                 <a href="#integers">Integers &amp; Arithmetic</a>
                 <a href="#booleans">Booleans &amp; Logic</a>
                 <a href="#strings">Strings</a>
+                <a href="#structs">Structs</a>
               </nav>
             </div>
 
@@ -729,6 +730,142 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
           </section>
 
           <!-- =================================================== -->
+          <section id="structs">
+            <h2>
+              Structs
+              <a class="anchor" href="#structs" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Structs are user-defined composite types with named fields.
+              Declare one with <code>struct</code> and an indented field
+              list; construct values with brace syntax —
+              <code>Point{x=1.0, y=2.0}</code> — naming every field (no
+              defaults). Field access is by name: <code>p.x</code>. By
+              convention, struct names use <code>PascalCase</code>.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">structs.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">struct Point:
+	x: float
+	y: float
+
+struct Rectangle:
+	width: float
+	height: float
+
+fn area(rect: Rectangle) -&gt; float:
+	return rect.width * rect.height
+
+fn main():
+	p = Point{x=1.0, y=2.0}
+	print(float_to_str(p.x))          # 1.0
+
+	r = Rectangle{width=10.0, height=5.0}
+	print(float_to_str(area(r)))      # 50.0
+
+	mut q = Point{x=0.0, y=0.0}
+	q.x = 7.0                         # field assignment needs `mut`
+	print(float_to_str(q.x))          # 7.0</code></pre>
+            </div>
+
+            <h3>Field Access &amp; Mutation</h3>
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Syntax</th>
+                    <th>Meaning</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>p.x</code></td>
+                    <td>Read field <code>x</code> (nests: <code>l.end.x</code>)</td>
+                  </tr>
+                  <tr>
+                    <td><code>p.x = v</code></td>
+                    <td>
+                      Assign a field — the binding must be
+                      <code>mut</code>; compound forms like
+                      <code>p.x += 1.0</code> work too
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>Point{x=1.0, y=2.0}</code></td>
+                    <td>
+                      Brace construction — every field, by name, any order
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>f(&amp;p.x)</code></td>
+                    <td>
+                      A field is a valid <code>inout</code> borrow target —
+                      the callee mutates it in place
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3>Copy vs. Move</h3>
+            <p>
+              A struct whose fields are all Copy types (numbers, booleans)
+              is itself Copy — assignment duplicates it, and both sides
+              stay usable. A struct that owns a non-Copy field (like
+              <code>str</code>) <strong>moves</strong> on assignment: the
+              old binding is dead afterward, and destruction recurses into
+              the fields, freeing each owned buffer exactly once. Partial
+              moves are rejected — you can't move a single field out of a
+              struct.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">struct_move.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">struct Person:
+	name: str
+	age: int
+
+fn main():
+	p = Person{name="alice", age=30}
+	q = p                  # moves — p is no longer usable
+	print(q.name)          # alice
+	print(int_to_str(q.age))  # 30</code></pre>
+            </div>
+
+            <div class="callout callout--info">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="16" x2="12" y2="12"></line>
+                <line x1="12" y1="8" x2="12.01" y2="8"></line>
+              </svg>
+              <div>
+                <p class="callout-title">No methods yet</p>
+                <p>
+                  Structs are plain data today — methods land with
+                  Milestone 17. Behavior lives in free functions like
+                  <code>area(rect)</code> above. Printing a struct
+                  directly (<code>print(p)</code>) and <code>==</code> on
+                  structs arrive with Milestone 9.1.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
           <section id="control-flow">
             <h2>
               Control Flow
@@ -1171,8 +1308,8 @@ fn main():
                 </thead>
                 <tbody>
                   <tr>
-                    <td>Structs &amp; methods</td>
-                    <td><span class="pill">Milestone 9</span></td>
+                    <td>Methods on structs</td>
+                    <td><span class="pill">Milestone 17</span></td>
                   </tr>
                   <tr>
                     <td>Tuples</td>
