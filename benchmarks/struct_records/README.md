@@ -12,13 +12,13 @@ This flat-loop record workload is the interim form. Once `list[T]` lands (M22, s
 
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-09. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
-| Candidate | Mean time | vs fastest | Max RSS |
-|---|---|---|---|
-| **Swift** | 15.2 ms ± 3.6 ms | 1.00x | 1.56 MB |
-| **Rust** | 37.9 ms ± 1.2 ms | 2.49x slower | 1.52 MB |
-| **Ryo (AOT)** | 38.1 ms ± 2.4 ms | 2.50x slower | 1.39 MB |
-| **Ryo (JIT)** | 40.5 ms ± 4.1 ms | 2.66x slower | 5.33 MB |
-| **Python** | 173.5 ms ± 12.4 ms | 11.39x slower | 14.50 MB |
+| Candidate | Version | Mean time | vs fastest | Max RSS |
+|---|---|---|---|---|
+| **Swift** | 6.3.3 | 15.2 ms ± 3.6 ms | 1.00x | 1.56 MB |
+| **Rust** | 1.98.0 | 37.9 ms ± 1.2 ms | 2.49x slower | 1.52 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260909+9b92b25 | 38.1 ms ± 2.4 ms | 2.50x slower | 1.39 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260909+9b92b25 | 40.5 ms ± 4.1 ms | 2.66x slower | 5.33 MB |
+| **Python** | 3.14.7 | 173.5 ms ± 12.4 ms | 11.39x slower | 14.50 MB |
 
 Ryo AOT lands neck-and-neck with Rust (within noise) at the lightest RSS of the suite — the struct ABI traffic (sret returns, field copies, eager drops) costs the same as Rust's move-and-drop-glue path. Both trail Swift ~2.5x on this workload for a reason unrelated to aggregates: every name here is ≤ 10 UTF-8 bytes, so Swift's small-string optimization keeps the `String` inline in the struct while Rust's `String` and Ryo's `str` heap-allocate each one — the same effect visible in `many_small_strings`. Ryo AOT runs **4.6x faster than Python** with ~10x less memory.
 
