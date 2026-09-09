@@ -1,6 +1,6 @@
 //! Diagnostic name formatting — split from `mod.rs`; see module docs there.
 
-use super::{Owner, Ownership, inout_owner};
+use super::{Owner, Ownership, inout_owner, struct_base_name};
 use ryo_core::tir::{Tir, TirData, TirRef};
 use ryo_core::types::{InternPool, StringId};
 
@@ -33,7 +33,8 @@ pub(crate) fn owner_name_for_diag(owner: Owner, tir: &Tir, pool: &InternPool) ->
 }
 
 /// Rule 7 (E0032) binding name: scan the call's args for a `Var` read
-/// that resolves to `owner` and use ITS name. `owner_name_for_diag`
+/// (or a `FieldAccess` chain's root binding, M9) that resolves to
+/// `owner` and use ITS name. `owner_name_for_diag`
 /// inspects the binding's initializer (an IntConst/StrConst — never a
 /// `Var`), so it falls back to "value" for locals; the conflicting arg
 /// reads always carry the name.
@@ -45,7 +46,12 @@ pub(crate) fn rule7_owner_name(
     owner: Owner,
 ) -> String {
     for arg in args {
-        if let TirData::Var(name) = tir.inst(*arg).data
+        let name = match tir.inst(*arg).data {
+            TirData::Var(name) => Some(name),
+            TirData::FieldAccess { .. } => struct_base_name(tir, *arg),
+            _ => None,
+        };
+        if let Some(name) = name
             && inout_owner(own, tir, *arg) == owner
         {
             return format!("`{}`", pool.str(name));

@@ -368,7 +368,8 @@ pub(crate) fn underlying_owner(own: &Ownership, init: TirRef) -> Owner {
 /// read is its own SSA value. An unregistered name (a Copy-typed
 /// parameter, which the param loop skips) falls back to
 /// `Owner::Param(name)` — the correct per-binding key for exactly that
-/// case.
+/// case. A `FieldAccess` chain (M9) resolves to its ROOT owner: `&p.x`
+/// is the one mutable borrow of `p` for the call's duration.
 pub(crate) fn inout_owner(own: &Ownership, tir: &Tir, arg: TirRef) -> Owner {
     match tir.inst(arg).data {
         TirData::Var(name) => own
@@ -376,6 +377,9 @@ pub(crate) fn inout_owner(own: &Ownership, tir: &Tir, arg: TirRef) -> Owner {
             .get(&name)
             .copied()
             .unwrap_or(Owner::Param(name)),
+        TirData::FieldAccess { .. } => {
+            struct_root(own, tir, arg).unwrap_or_else(|| underlying_owner(own, arg))
+        }
         _ => underlying_owner(own, arg),
     }
 }

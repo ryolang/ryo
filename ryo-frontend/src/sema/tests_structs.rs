@@ -174,6 +174,38 @@ fn field_assignment_undefined_root() {
 }
 
 #[test]
+fn inout_field_arg_accepted_when_root_mut() {
+    // `&p.x` is a valid inout argument (M9): the ROOT binding `p` is
+    // `mut`, so the field borrow is allowed.
+    let src = "struct Point:\n\tx: int\n\ty: int\n\nfn inc(inout v: int):\n\tv += 1\n\nfn main():\n\tmut p = Point{x=1, y=2}\n\tinc(&p.x)\n";
+    assert!(run(src).is_ok());
+}
+
+#[test]
+fn inout_nested_field_arg_accepted() {
+    let src = "struct Inner:\n\tv: int\n\nstruct Outer:\n\tinner: Inner\n\nfn inc(inout v: int):\n\tv += 1\n\nfn main():\n\tmut o = Outer{inner=Inner{v=1}}\n\tinc(&o.inner.v)\n";
+    assert!(run(src).is_ok());
+}
+
+#[test]
+fn inout_field_arg_requires_mut_root() {
+    // Same rule as a bare `&x` on an immutable binding: BorrowMismatch.
+    let src = "struct Point:\n\tx: int\n\nfn inc(inout v: int):\n\tv += 1\n\nfn main():\n\tp = Point{x=1}\n\tinc(&p.x)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert!(any_code(&diags, DiagCode::BorrowMismatch), "got {diags:?}");
+}
+
+#[test]
+fn inout_field_arg_unknown_field_uses_field_diagnostic() {
+    // An invalid hop keeps the FieldAccess analysis diagnostic — no
+    // extra BorrowMismatch noise, no panic.
+    let src = "struct Point:\n\tx: int\n\nfn inc(inout v: int):\n\tv += 1\n\nfn main():\n\tmut p = Point{x=1}\n\tinc(&p.z)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert!(any_code(&diags, DiagCode::UnknownField), "got {diags:?}");
+    assert!(!any_code(&diags, DiagCode::BorrowMismatch), "got {diags:?}");
+}
+
+#[test]
 fn compound_field_assignment_rejects_bad_operator() {
     let src = "struct Point:\n\tx: float\n\nfn main():\n\tmut p = Point{x=1.0}\n\tp.x %= 2.0\n";
     let (_t, diags, _p) = run_with_errors(src);

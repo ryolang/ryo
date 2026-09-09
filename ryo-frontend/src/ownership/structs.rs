@@ -48,7 +48,7 @@ pub(crate) fn struct_root(own: &Ownership, tir: &Tir, r: TirRef) -> Option<Owner
 /// The binding name at the base of a `FieldAccess` chain, for
 /// diagnostics (`p` for `p.name.first`). `None` when the chain is
 /// rooted in an anonymous value.
-fn struct_base_name(tir: &Tir, mut r: TirRef) -> Option<StringId> {
+pub(crate) fn struct_base_name(tir: &Tir, mut r: TirRef) -> Option<StringId> {
     loop {
         match tir.inst(r).data {
             TirData::FieldAccess { object, .. } => r = object,

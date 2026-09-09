@@ -748,15 +748,36 @@ where
                     e.state().ident(name, span)
                 });
 
-            // `&ident` — call-site mutable-borrow marker (M8.3). Restricted to
-            // a bare identifier in v0.1; sema validates the target is an
-            // assignable lvalue (`mut` local or `inout` param).
-            let borrow = just(Token::Amp).ignore_then(ident_expr).map_with(
-                |inner, e: &mut Mx<'a, '_, I>| {
+            // `&ident` / `&ident.field...` — call-site mutable-borrow
+            // marker (M8.3, extended to field chains in M9). Field hops
+            // are folded INTO the borrow target (`&p.x` is `&(p.x)`,
+            // never `(&p).x`), so the outer postfix loop never sees
+            // them. Sema validates the target is an assignable lvalue
+            // (`mut` local or `inout` param at the chain's root).
+            let borrow = just(Token::Amp)
+                .ignore_then(ident_expr)
+                .then(
+                    just(Token::Dot)
+                        .ignore_then(
+                            select! { Token::Ident(name) => name }
+                                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
+                        )
+                        .repeated()
+                        .collect::<Vec<_>>(),
+                )
+                .map_with(|(inner, fields), e: &mut Mx<'a, '_, I>| {
                     let span = e.span();
-                    e.state().borrow(inner, span)
-                },
-            );
+                    let mut target = inner;
+                    for field in fields {
+                        let start = e.state().expr_span(target).start;
+                        target = e.state().field_access(
+                            target,
+                            field,
+                            SimpleSpan::new((), start..field.span.end),
+                        );
+                    }
+                    e.state().borrow(target, span)
+                });
 
             let parenthesized = expr
                 .clone()

@@ -242,27 +242,31 @@ pub(crate) fn check_call(
 
 /// Returns `None` if `inner` is an assignable lvalue (a `mut` local or
 /// an `inout` parameter), else a human reason why it is not borrowable
-/// as mutable (M8.3).
+/// as mutable (M8.3). A `FieldAccess` chain (M9) resolves to its ROOT
+/// binding: `&p.x` borrows `p` mutably, so `p` must be `mut`. Each
+/// hop's validity (struct type, field name) is enforced by the
+/// `FieldAccess` expression analysis — this function only checks the
+/// root's mutability.
 pub(crate) fn borrow_target_reason(
     sema: &Sema<'_>,
     scope: &Scope,
     inner: InstRef,
 ) -> Option<String> {
-    match sema.uir.inst(inner).tag {
-        InstTag::Var => {
-            let name = match sema.uir.inst(inner).data {
-                InstData::Var(n) => n,
-                _ => unreachable!("Var must carry InstData::Var"),
-            };
-            match scope.lookup_full(name) {
-                Some((_, true)) => None, // mutable binding (mut local or inout param)
-                Some((_, false)) => {
-                    Some(format!("`{}` is not declared `mut`", sema.pool.str(name)))
-                }
-                None => Some(format!("`{}` is not defined", sema.pool.str(name))),
+    let mut root = inner;
+    loop {
+        match sema.uir.inst(root).data {
+            InstData::FieldAccess { object, .. } => root = object,
+            InstData::Var(name) => {
+                return match scope.lookup_full(name) {
+                    Some((_, true)) => None, // mutable binding (mut local or inout param)
+                    Some((_, false)) => {
+                        Some(format!("`{}` is not declared `mut`", sema.pool.str(name)))
+                    }
+                    None => Some(format!("`{}` is not defined", sema.pool.str(name))),
+                };
             }
+            _ => return Some("only `mut` variables can be borrowed as mutable".to_string()),
         }
-        _ => Some("only `mut` variables can be borrowed as mutable".to_string()),
     }
 }
 

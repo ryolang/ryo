@@ -85,3 +85,66 @@ fn str_field_reassign_frees_old_value() {
     let f = take_function_sidecar(&mut sidecar, 0);
     assert!(f.field_free_on_reassign.iter().any(|e| e.is_some()));
 }
+
+#[test]
+fn field_inout_borrow_accepted_no_diags() {
+    // `inc(&p.x)` on a `mut` root is a valid inout pass (M9): the
+    // field borrow is call-scoped, the root stays usable afterwards.
+    let src = "struct Point:\n\tx: int\n\ty: int\n\nfn inc(inout v: int):\n\tv += 1\n\nfn main():\n\tmut p = Point{x=1, y=2}\n\tinc(&p.x)\n\tq = p.y\n";
+    let diags = check_src(src);
+    assert!(diags.is_empty(), "got {diags:?}");
+}
+
+#[test]
+fn two_field_inout_borrows_same_root_rejected() {
+    // set2(&p.x, &p.y) — distinct fields, but ONE root owner: two
+    // mutable borrows of it in the same call (Rule 7 case 1).
+    let src = "struct Point:\n\tx: int\n\ty: int\n\nfn set2(inout a: int, inout b: int):\n\ta = b\n\nfn main():\n\tmut p = Point{x=1, y=2}\n\tset2(&p.x, &p.y)\n";
+    let diags = check_src(src);
+    let count = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::MutableAliasingViolation)
+        .count();
+    assert_eq!(count, 1, "got {diags:?}");
+}
+
+#[test]
+fn field_inout_plus_whole_struct_borrow_rejected() {
+    // f(&p.x, p) — a mutable borrow of the root via the field plus an
+    // immutable borrow of the whole struct (Rule 7 case 2).
+    let src = "struct Point:\n\tx: int\n\ty: int\n\nfn f(inout a: int, q: Point):\n\ta = q.y\n\nfn main():\n\tmut p = Point{x=1, y=2}\n\tf(&p.x, p)\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::MutableAliasingViolation),
+        "got {diags:?}"
+    );
+}
+
+#[test]
+fn field_inout_plus_whole_struct_move_rejected() {
+    // f(&p.name, p) with a move-mode param — mutable borrow of the
+    // root via the field plus a whole-struct move (Rule 7 case 3).
+    let src = "struct Person:\n\tname: str\n\nfn f(inout s: str, move q: Person):\n\tprint(s)\n\nfn main():\n\tmut p = Person{name=\"alice\"}\n\tf(&p.name, p)\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::MutableAliasingViolation),
+        "got {diags:?}"
+    );
+}
+
+#[test]
+fn field_inout_rule7_names_root_binding() {
+    // E0032 must name the root binding `p`, not the generic "value".
+    let src = "struct Point:\n\tx: int\n\ty: int\n\nfn set2(inout a: int, inout b: int):\n\ta = b\n\nfn main():\n\tmut p = Point{x=1, y=2}\n\tset2(&p.x, &p.y)\n";
+    let diags = check_src(src);
+    let msg = &diags
+        .iter()
+        .find(|d| d.code == DiagCode::MutableAliasingViolation)
+        .expect("E0032 must fire")
+        .message;
+    assert!(msg.contains("`p`"), "E0032 must name `p`; got: {msg}");
+}
