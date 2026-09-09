@@ -339,7 +339,11 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::CycleInResolution => "E0016",
         DiagCode::MissingReturn => "E0036",
         DiagCode::DivisionByZero => "E0037",
-        DiagCode::StructsUnsupported => "E0038",
+        DiagCode::UnknownField => "E0038",
+        DiagCode::MissingStructFields => "E0039",
+        DiagCode::DuplicateStructField => "E0040",
+        DiagCode::NotAStruct => "E0041",
+        DiagCode::ViewFieldType => "E0042",
         DiagCode::ParseError => "E0100",
         DiagCode::ChainedComparison => "E0104",
         DiagCode::RangeArity => "E0105",
@@ -696,7 +700,11 @@ mod tests {
             (DiagCode::SourceProjected, "E0035"),
             (DiagCode::MissingReturn, "E0036"),
             (DiagCode::DivisionByZero, "E0037"),
-            (DiagCode::StructsUnsupported, "E0038"),
+            (DiagCode::UnknownField, "E0038"),
+            (DiagCode::MissingStructFields, "E0039"),
+            (DiagCode::DuplicateStructField, "E0040"),
+            (DiagCode::NotAStruct, "E0041"),
+            (DiagCode::ViewFieldType, "E0042"),
             (DiagCode::ParseError, "E0100"),
             (DiagCode::TooManyDiagnostics, "E0101"),
             (DiagCode::InvalidCharacter, "E0102"),
@@ -761,7 +769,11 @@ mod tests {
                 | DiagCode::SourceProjected
                 | DiagCode::MissingReturn
                 | DiagCode::DivisionByZero
-                | DiagCode::StructsUnsupported
+                | DiagCode::UnknownField
+                | DiagCode::MissingStructFields
+                | DiagCode::DuplicateStructField
+                | DiagCode::NotAStruct
+                | DiagCode::ViewFieldType
                 | DiagCode::CycleInResolution
                 | DiagCode::ParseError
                 | DiagCode::ChainedComparison

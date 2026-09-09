@@ -1240,12 +1240,23 @@ pub(crate) fn recurse_operands(
                 }
             }
         }
+        TirData::FieldAccess { object, .. } => {
+            // M9: a field access reads its object (non-consuming,
+            // like a slice's base read); per-field ownership
+            // classification lands with the struct ownership work.
+            visit_expr(tir, pool, own, sink, sidecar, object);
+            if needs_tracking(tir.inst(object).ty, pool) {
+                check_use_moved(tir, pool, own, sink, object, tir.span(object));
+            }
+        }
         // `Extra`-shaped instructions (VarDecl, Assign, Call,
         // IfStmt, WhileLoop, ForRange, CompoundAssign) have
         // bespoke decoders. Consumption logic lands in subsequent
         // tasks; until then their operands are deliberately not
         // descended into here so we avoid double-visits when those
-        // tasks introduce per-tag handling.
+        // tasks introduce per-tag handling. `StructLit` (M9) is also
+        // `Extra`-shaped; its field values are walked by the struct
+        // ownership work, not here.
         TirData::Extra(_) => {}
         TirData::None
         | TirData::Int(_)

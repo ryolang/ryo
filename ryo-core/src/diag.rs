@@ -134,10 +134,19 @@ pub enum DiagCode {
     /// the body must end in `return` (or diverge via `never`).
     MissingReturn,
 
-    /// A struct literal or field access reached semantic analysis
-    /// before struct sema support landed. Transitional: removed once
-    /// struct sema ships.
-    StructsUnsupported,
+    /// A struct literal initializer or field access names a field
+    /// the struct does not declare (M9).
+    UnknownField,
+    /// A struct literal omits one or more declared fields (M9).
+    MissingStructFields,
+    /// A struct literal initializes the same field twice (M9).
+    DuplicateStructField,
+    /// Field access (`x.f`) on a value whose type is not a struct
+    /// (M9).
+    NotAStruct,
+    /// A struct field declared with a view type (M9, Rule 6): struct
+    /// fields must be owned values, not projections.
+    ViewFieldType,
 
     // --- ownership (M8.1b) ---
     /// Use of a value after it has been moved.

@@ -194,6 +194,12 @@ pub struct Sema<'a> {
     /// Per-decl emitted TIR slot. Filled as decls transition to
     /// `Resolved`. Result extraction drains this in source order.
     results: Vec<Option<Tir>>,
+    /// Struct name → interned struct type (M9), populated from
+    /// `uir.struct_decls` (which carries only fully-defined structs;
+    /// astgen already diagnosed duplicates / cycles / unknown field
+    /// types). Struct literals and field accesses resolve against
+    /// this table.
+    struct_types: HashMap<StringId, TypeId>,
     /// Refs that appear as direct arguments of some call anywhere in
     /// the program. `&expr` (UIR `Borrow`) is only meaningful as a call
     /// argument to an `inout` parameter; the `Borrow` arm in
@@ -240,6 +246,7 @@ impl<'a> Sema<'a> {
         file_path: &'a Path,
     ) -> Vec<Tir> {
         let mut sema = Sema::new(uir, pool, sink, source, file_path);
+        sema.register_structs();
         sema.resolve_signatures();
         sema.seed_worklist();
         sema.drive();
@@ -291,7 +298,35 @@ impl<'a> Sema<'a> {
             name_to_decl,
             signatures: HashMap::with_capacity(n),
             results,
+            struct_types: HashMap::new(),
             call_arg_refs: collect_call_arg_refs(uir),
+        }
+    }
+
+    /// Populate `struct_types` from `uir.struct_decls` (M9) and
+    /// validate field types. First-wins on a duplicate name — astgen
+    /// already emitted `DuplicateDeclaration` for it and kept the
+    /// first decl's `TypeId` in the pool.
+    ///
+    /// Rule 6 / E3: struct fields must be owned values — a view-typed
+    /// field (`strview`, `bytesview`) is a projection and is rejected
+    /// at its own span (`uir.struct_decls` carries per-field spans
+    /// for exactly this).
+    fn register_structs(&mut self) {
+        for decl in &self.uir.struct_decls {
+            for field in &decl.fields {
+                if self.pool.is_view(field.ty) {
+                    self.sink.emit(Diag::error(
+                        field.span,
+                        DiagCode::ViewFieldType,
+                        format!(
+                            "struct fields must be owned values; '{}' is a projection (Rule 6)",
+                            self.pool.display(field.ty),
+                        ),
+                    ));
+                }
+            }
+            self.struct_types.entry(decl.name).or_insert(decl.ty);
         }
     }
 
@@ -533,3 +568,5 @@ pub(crate) struct FuncCtx {
 mod tests;
 #[cfg(test)]
 mod tests_bytes;
+#[cfg(test)]
+mod tests_structs;

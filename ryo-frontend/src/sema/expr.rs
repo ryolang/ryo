@@ -34,9 +34,6 @@ pub(crate) fn analyze_expr(
     t
 }
 
-// Transitional: the M9 StructLit/FieldAccess stub arm pushes this
-// dispatch one line past the cap until struct sema lands.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn analyze_expr_allow_never(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -407,28 +404,9 @@ pub(crate) fn analyze_expr_allow_never(
                 span,
             )
         }
-        InstTag::Borrow => {
-            let inner = match inst.data {
-                InstData::Borrow(inner) => inner,
-                _ => unreachable!("Borrow must carry InstData::Borrow"),
-            };
-            // The `&` is a marker, not an op: lower to the inner value's
-            // TirRef. Codegen decides pass-by-pointer from the callee's
-            // `ParamMode::Inout`. (&/inout agreement + lvalue validation
-            // are enforced in `check_call`, not here.)
-            if !sema.call_arg_refs[r.index()] {
-                // A `&` that is not a direct call argument marks
-                // no mutation at all — reject it instead of silently
-                // discarding it.
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::BorrowMismatch,
-                    "`&` is only valid as an argument to an `inout` parameter".to_string(),
-                ));
-            }
-            analyze_expr(sema, fcx, scope, inner)
-        }
-        InstTag::StructLit | InstTag::FieldAccess => reject_struct_expr(sema, fcx, span),
+        InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span),
+        InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span),
+        InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span),
         // UIR trusted-producer contract (see the `uir.rs` module
         // header): astgen is the only producer, so a non-expression tag
         // reaching `analyze_expr` is a compiler bug, not user input.
@@ -443,19 +421,197 @@ pub(crate) fn analyze_expr_allow_never(
     emitted
 }
 
-/// Transitional stub for struct expressions (M9): astgen lowers
-/// them and registers `uir.struct_decls`, but struct sema has not
-/// landed yet. Reject with a real diagnostic (and poison the slot)
-/// rather than tripping the trusted-producer catch-all — the driver
-/// runs sema even when astgen already emitted errors, so a panic
-/// here would mask the real diagnostics.
-fn reject_struct_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, span: Span) -> TirRef {
-    sema.sink.emit(Diag::error(
-        span,
-        DiagCode::StructsUnsupported,
-        "struct literals and field access are not yet supported by semantic analysis".to_string(),
-    ));
-    fcx.builder.unreachable(sema.pool.error_type(), span)
+/// The `&` marker (M8.3): lowers to the inner value's TirRef.
+/// Codegen decides pass-by-pointer from the callee's
+/// `ParamMode::Inout`. (&/inout agreement + lvalue validation are
+/// enforced in `check_call`, not here.)
+fn analyze_borrow(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    data: InstData,
+    span: Span,
+) -> TirRef {
+    let inner = match data {
+        InstData::Borrow(inner) => inner,
+        _ => unreachable!("Borrow must carry InstData::Borrow"),
+    };
+    if !sema.call_arg_refs[r.index()] {
+        // A `&` that is not a direct call argument marks no mutation
+        // at all — reject it instead of silently discarding it.
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::BorrowMismatch,
+            "`&` is only valid as an argument to an `inout` parameter".to_string(),
+        ));
+    }
+    analyze_expr(sema, fcx, scope, inner)
+}
+
+/// Struct literal `Name{field = value, ...}` (M9). Validates the
+/// literal against the declaration registered in `sema.struct_types`
+/// (unknown / duplicated / missing / mistyped fields each get their
+/// own diagnostic; analysis continues past all of them) and emits a
+/// canonical-order TIR `StructLit`. Slots with no valid initializer
+/// recover with an error-typed `Unreachable`.
+fn analyze_struct_lit(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    let view = sema.uir.struct_lit_view(r);
+    let Some(&sty) = sema.struct_types.get(&view.name) else {
+        // Not a registered struct: either never declared, or declared
+        // but left undefined by astgen (cycle / unknown field type —
+        // already diagnosed). Recover with the error sentinel.
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::UnknownType,
+            format!("unknown struct: '{}'", sema.pool.str(view.name)),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    };
+    let sview = sema.pool.struct_view(sty);
+    let mut by_index: Vec<Option<TirRef>> = vec![None; sview.fields.len()];
+    for (fname, value_ref) in view.fields {
+        let fspan = sema.uir.span(value_ref);
+        let Some(field) = sema.pool.struct_field(sty, fname) else {
+            sema.sink.emit(Diag::error(
+                fspan,
+                DiagCode::UnknownField,
+                format!(
+                    "'{}' has no field '{}' (fields: {})",
+                    sema.pool.str(sview.name),
+                    sema.pool.str(fname),
+                    field_list(sema.pool, &sview),
+                ),
+            ));
+            continue;
+        };
+        if by_index[field.idx as usize].is_some() {
+            sema.sink.emit(Diag::error(
+                fspan,
+                DiagCode::DuplicateStructField,
+                format!(
+                    "field '{}' is specified more than once",
+                    sema.pool.str(fname)
+                ),
+            ));
+            continue;
+        }
+        let value = analyze_expr(sema, fcx, scope, value_ref);
+        let vty = fcx.builder.ty_of(value);
+        if !sema.pool.compatible(vty, field.ty) {
+            sema.sink.emit(Diag::error(
+                fspan,
+                DiagCode::TypeMismatch,
+                format!(
+                    "field '{}': expected '{}', found '{}'",
+                    sema.pool.str(fname),
+                    sema.pool.display(field.ty),
+                    sema.pool.display(vty),
+                ),
+            ));
+        }
+        by_index[field.idx as usize] = Some(value);
+    }
+    let missing: Vec<String> = sview
+        .fields
+        .iter()
+        .zip(&by_index)
+        .filter(|(_, slot)| slot.is_none())
+        .map(|(f, _)| format!("'{}'", sema.pool.str(f.name)))
+        .collect();
+    if !missing.is_empty() {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::MissingStructFields,
+            format!(
+                "missing field(s) {} in '{}' construction",
+                missing.join(", "),
+                sema.pool.str(sview.name),
+            ),
+        ));
+    }
+    // Canonical declaration order; slots that never got a valid
+    // initializer recover with an error-typed Unreachable.
+    let error_ty = sema.pool.error_type();
+    let fields: Vec<(u32, TirRef)> = by_index
+        .into_iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            let v = slot.unwrap_or_else(|| fcx.builder.unreachable(error_ty, span));
+            (i as u32, v)
+        })
+        .collect();
+    fcx.builder.struct_lit(sty, &fields, span)
+}
+
+/// Field access `object.field` (M9). Resolves the field against the
+/// object's struct type and emits a TIR `FieldAccess` carrying the
+/// canonical declaration-order field index and the field type.
+fn analyze_field_access(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    let (object, field) = match sema.uir.inst(r).data {
+        InstData::FieldAccess { object, field } => (object, field),
+        _ => unreachable!("FieldAccess must carry InstData::FieldAccess"),
+    };
+    let obj = analyze_expr(sema, fcx, scope, object);
+    let oty = fcx.builder.ty_of(obj);
+    if sema.pool.is_error(oty) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let is_struct = matches!(sema.pool.kind(oty), TypeKind::Struct);
+    if !is_struct {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::NotAStruct,
+            format!("type '{}' has no fields", sema.pool.display(oty)),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if !sema.pool.is_defined_struct(oty) {
+        // Declared but never defined (cycle / unknown field type) —
+        // astgen already diagnosed it. Recover without touching
+        // `struct_view`, which panics on undefined structs.
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    match sema.pool.struct_field(oty, field) {
+        Some(f) => fcx.builder.field_access(obj, f.idx, f.ty, span),
+        None => {
+            let sview = sema.pool.struct_view(oty);
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::UnknownField,
+                format!(
+                    "'{}' has no field '{}' (fields: {})",
+                    sema.pool.str(sview.name),
+                    sema.pool.str(field),
+                    field_list(sema.pool, &sview),
+                ),
+            ));
+            fcx.builder.unreachable(sema.pool.error_type(), span)
+        }
+    }
+}
+
+/// Comma-separated quoted field names of a struct, for the
+/// "has no field" diagnostics.
+fn field_list(pool: &ryo_core::types::InternPool, sview: &ryo_core::types::StructView) -> String {
+    sview
+        .fields
+        .iter()
+        .map(|f| format!("'{}'", pool.str(f.name)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// M8.4.2 bridging methods: `bytes`/`bytesview`.to_str() lowers to
