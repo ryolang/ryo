@@ -22,7 +22,8 @@ use chumsky::span::{SimpleSpan, Span as _};
 use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::types::{InternPool, StringId, TypeId};
-use ryo_core::uir::{InstRef, InstTag, Uir, UirBuilder, UirParam};
+use ryo_core::uir::{InstRef, InstTag, Uir, UirBuilder, UirParam, UirStructDecl, UirStructField};
+use std::collections::HashMap;
 
 type Span = SimpleSpan;
 
@@ -62,6 +63,81 @@ impl Primitives {
     }
 }
 
+/// Type-annotation resolution: primitive names plus the struct
+/// declarations collected by `generate`'s pre-scan (M9).
+///
+/// Primitive names win over struct names, mirroring the historical
+/// behavior where only primitives resolved — a struct named `int`
+/// stays shadowed by the primitive.
+struct TypeResolver {
+    prims: Primitives,
+    struct_types: HashMap<StringId, TypeId>,
+}
+
+impl TypeResolver {
+    fn is_primitive(&self, name: StringId) -> bool {
+        let p = &self.prims;
+        name == p.int
+            || name == p.str_
+            || name == p.strview
+            || name == p.bytes
+            || name == p.bytesview
+            || name == p.bool_
+            || name == p.float
+    }
+
+    fn resolve(
+        &self,
+        name: StringId,
+        is_view: bool,
+        span: Span,
+        pool: &InternPool,
+        sink: &mut DiagSink,
+    ) -> TypeId {
+        if is_view {
+            // Legacy `&name` type syntax (M8.4 pre-Q5). Only `&str` was ever
+            // valid; it is now a targeted migration error (final spec Q5).
+            let msg = if name == self.prims.str_ {
+                "`&str` was renamed to `strview` (final spec Q5)".to_string()
+            } else {
+                format!(
+                    "unknown view type: '&{}' (view types are named: `strview`)",
+                    pool.str(name)
+                )
+            };
+            sink.emit(Diag::error(span, DiagCode::UnknownType, msg));
+            return pool.error_type();
+        }
+        let p = &self.prims;
+        if name == p.int {
+            pool.int()
+        } else if name == p.str_ {
+            pool.str_()
+        } else if name == p.strview {
+            pool.str_view()
+        } else if name == p.bytes {
+            pool.bytes()
+        } else if name == p.bytesview {
+            pool.bytes_view()
+        } else if name == p.bool_ {
+            pool.bool_()
+        } else if name == p.float {
+            pool.float()
+        } else if let Some(&ty) = self.struct_types.get(&name) {
+            ty
+        } else {
+            // Only resolve the &str on the unhappy path; the common
+            // primitive path stays a pure `StringId` compare.
+            sink.emit(Diag::error(
+                span,
+                DiagCode::UnknownType,
+                format!("unknown type: '{}'", pool.str(name)),
+            ));
+            pool.error_type()
+        }
+    }
+}
+
 /// Lower an [`ast::Ast`] to UIR, accumulating diagnostics in `sink`.
 ///
 /// Returns the lowered UIR even on error (using `pool.error_type()`
@@ -73,7 +149,14 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
     let mut top_level: Vec<ast::StmtId> = Vec::new();
 
     let main_id = pool.intern_str("main");
-    let prims = Primitives::new(pool);
+
+    // Pre-scan (M9): declare every top-level struct before any field
+    // type is resolved, so field annotations can name structs
+    // declared later in the file — and so a struct can name itself
+    // (which the define DFS below then accepts or rejects).
+    let mut struct_types: HashMap<StringId, TypeId> = HashMap::new();
+    let mut struct_entries: HashMap<StringId, (TypeId, ast::StructDef, Span)> = HashMap::new();
+    let mut struct_order: Vec<StringId> = Vec::new();
 
     for &stmt in program.top_level_stmts() {
         match &program.stmt(stmt).kind {
@@ -84,13 +167,50 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
             ast::StmtKind::Error => {}
             // Struct declarations (M9) are declarations, not
             // executable top-level statements — they must not trip
-            // the explicit-main check. UIR lowering lands with the
-            // struct astgen work; until then the node is dropped
-            // here, so any use of the declared name fails as an
-            // unknown type downstream.
-            ast::StmtKind::StructDef(_) => {}
+            // the explicit-main check and must not reach
+            // `gen_implicit_main`. They lower to `uir.struct_decls`
+            // entries below, not to instructions.
+            ast::StmtKind::StructDef(def) => {
+                let name = def.name.name;
+                if struct_entries.contains_key(&name) {
+                    sink.emit(Diag::error(
+                        def.name.span,
+                        DiagCode::DuplicateDeclaration,
+                        format!("duplicate struct declaration: '{}'", pool.str(name)),
+                    ));
+                    continue;
+                }
+                let ty = pool.declare_struct(name);
+                struct_types.insert(name, ty);
+                struct_entries.insert(name, (ty, *def, program.stmt_span(stmt)));
+                struct_order.push(name);
+            }
             _ => top_level.push(stmt),
         }
+    }
+
+    let types = TypeResolver {
+        prims: Primitives::new(pool),
+        struct_types,
+    };
+
+    // Define DFS with cycle detection (M9): a struct's field types
+    // must all be fully defined before `pool.define_struct` computes
+    // its layout, so definitions happen in dependency order. A
+    // by-value self-reference (direct or transitive) has no finite
+    // layout and is rejected with `InfiniteSize`.
+    let mut definer = StructDefiner {
+        entries: &struct_entries,
+        types: &types,
+        ast: program,
+        states: struct_order
+            .iter()
+            .map(|&name| (name, DefState::Pending))
+            .collect(),
+        resolved: HashMap::new(),
+    };
+    for &name in &struct_order {
+        definer.define(name, pool, sink);
     }
 
     let has_explicit_main = func_defs.iter().any(|def| def.name.name == main_id);
@@ -111,65 +231,139 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
 
     let mut b = UirBuilder::new();
 
+    // Register defined structs in source order. Structs that failed
+    // (cycle, unknown field type) stay declared-but-undefined in the
+    // pool and are left out — the sink already holds their errors.
+    for &name in &struct_order {
+        if definer.states[&name] != DefState::Defined {
+            continue;
+        }
+        let (ty, _, span) = struct_entries[&name];
+        b.add_struct_decl(UirStructDecl {
+            name,
+            ty,
+            fields: definer.resolved.remove(&name).unwrap_or_default(),
+            span,
+        });
+    }
+
     for func in &func_defs {
-        gen_function_def(&mut b, program, func, &prims, pool, sink);
+        gen_function_def(&mut b, program, func, &types, pool, sink);
     }
     if !has_explicit_main {
         // Synthesize an implicit `main` from top-level statements.
         // User-defined helper functions still appear above;
         // without this, calls to them in top-level code would
         // dangle as "undefined function" errors in sema.
-        gen_implicit_main(&mut b, program, &top_level, main_id, &prims, pool, sink);
+        gen_implicit_main(&mut b, program, &top_level, main_id, &types, pool, sink);
     }
 
     b.finish()
 }
 
-fn resolve_type(
-    name: StringId,
-    is_view: bool,
-    span: Span,
-    prims: &Primitives,
-    pool: &InternPool,
-    sink: &mut DiagSink,
-) -> TypeId {
-    if is_view {
-        // Legacy `&name` type syntax (M8.4 pre-Q5). Only `&str` was ever
-        // valid; it is now a targeted migration error (final spec Q5).
-        let msg = if name == prims.str_ {
-            "`&str` was renamed to `strview` (final spec Q5)".to_string()
-        } else {
-            format!(
-                "unknown view type: '&{}' (view types are named: `strview`)",
-                pool.str(name)
-            )
-        };
-        sink.emit(Diag::error(span, DiagCode::UnknownType, msg));
-        return pool.error_type();
-    }
-    if name == prims.int {
-        pool.int()
-    } else if name == prims.str_ {
-        pool.str_()
-    } else if name == prims.strview {
-        pool.str_view()
-    } else if name == prims.bytes {
-        pool.bytes()
-    } else if name == prims.bytesview {
-        pool.bytes_view()
-    } else if name == prims.bool_ {
-        pool.bool_()
-    } else if name == prims.float {
-        pool.float()
-    } else {
-        // Only resolve the &str on the unhappy path; the common
-        // primitive path stays a pure `StringId` compare.
-        sink.emit(Diag::error(
-            span,
-            DiagCode::UnknownType,
-            format!("unknown type: '{}'", pool.str(name)),
-        ));
-        pool.error_type()
+/// Definition progress for one declared struct in the define DFS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefState {
+    /// Declared in the pre-scan; definition not attempted yet.
+    Pending,
+    /// On the current DFS stack — a field pointing here is a
+    /// by-value cycle.
+    InProgress,
+    /// `pool.define_struct` has run; the layout is in the pool.
+    Defined,
+    /// Definition was abandoned after a diagnostic (cycle or
+    /// unresolvable field type); dependents must fail too.
+    Failed,
+}
+
+/// Working state for the struct define DFS (M9): tracks each
+/// pre-scanned declaration's definition progress and its resolved
+/// field list.
+struct StructDefiner<'a> {
+    entries: &'a HashMap<StringId, (TypeId, ast::StructDef, Span)>,
+    types: &'a TypeResolver,
+    ast: &'a ast::Ast,
+    states: HashMap<StringId, DefState>,
+    resolved: HashMap<StringId, Vec<UirStructField>>,
+}
+
+impl StructDefiner<'_> {
+    /// Define one struct's fields in dependency order, depth-first.
+    ///
+    /// Cycle and unknown-type paths format diagnostics from the names
+    /// already in hand — never `pool.display(id)`, which panics on a
+    /// declared-but-undefined struct.
+    fn define(&mut self, name: StringId, pool: &mut InternPool, sink: &mut DiagSink) {
+        if self.states[&name] != DefState::Pending {
+            return;
+        }
+        self.states.insert(name, DefState::InProgress);
+        let (ty, def, _) = self.entries[&name];
+        let decl_fields = self.ast.struct_field_decls(def.fields);
+        let mut fields: Vec<UirStructField> = Vec::new();
+        let mut failed = false;
+        for &(fname, texpr) in decl_fields {
+            // Order/cycle handling applies only to by-value struct
+            // fields; primitives resolve without layout recursion,
+            // and `&name` view syntax is a targeted migration error
+            // handled by `resolve` below.
+            if !texpr.is_view
+                && !self.types.is_primitive(texpr.name)
+                && let Some(&fty) = self.types.struct_types.get(&texpr.name)
+            {
+                match self.states[&texpr.name] {
+                    DefState::InProgress => {
+                        sink.emit(Diag::error(
+                            texpr.span,
+                            DiagCode::InfiniteSize,
+                            format!(
+                                "struct '{}' cannot contain itself by value: field '{}' has \
+                                 type '{}', which would make its size infinite",
+                                pool.str(name),
+                                pool.str(fname),
+                                pool.str(texpr.name),
+                            ),
+                        ));
+                        failed = true;
+                        continue;
+                    }
+                    DefState::Pending => {
+                        self.define(texpr.name, pool, sink);
+                        if !pool.is_defined_struct(fty) {
+                            // The dependency failed its own
+                            // definition; defining `name` against it
+                            // would have no valid layout.
+                            failed = true;
+                            continue;
+                        }
+                    }
+                    DefState::Defined => {}
+                    DefState::Failed => {
+                        failed = true;
+                        continue;
+                    }
+                }
+            }
+            let fty = self
+                .types
+                .resolve(texpr.name, texpr.is_view, texpr.span, pool, sink);
+            if pool.is_error(fty) {
+                failed = true;
+            }
+            fields.push(UirStructField {
+                name: fname,
+                ty: fty,
+                span: texpr.span,
+            });
+        }
+        if failed {
+            self.states.insert(name, DefState::Failed);
+            return;
+        }
+        let field_types: Vec<(StringId, TypeId)> = fields.iter().map(|f| (f.name, f.ty)).collect();
+        pool.define_struct(ty, name, &field_types);
+        self.states.insert(name, DefState::Defined);
+        self.resolved.insert(name, fields);
     }
 }
 
@@ -177,13 +371,13 @@ fn lower_block(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     stmts: &[ast::StmtId],
-    prims: &Primitives,
+    types: &TypeResolver,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> Vec<InstRef> {
     let mut out = Vec::new();
     for &s in stmts {
-        gen_stmt(b, ast, s, prims, pool, sink, &mut out);
+        gen_stmt(b, ast, s, types, pool, sink, &mut out);
     }
     out
 }
@@ -193,7 +387,7 @@ fn gen_implicit_main(
     ast: &ast::Ast,
     stmts: &[ast::StmtId],
     main_id: StringId,
-    prims: &Primitives,
+    types: &TypeResolver,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) {
@@ -204,7 +398,7 @@ fn gen_implicit_main(
     // user.
     let mut body_stmts: Vec<InstRef> = Vec::new();
     for &stmt in stmts {
-        gen_stmt(b, ast, stmt, prims, pool, sink, &mut body_stmts);
+        gen_stmt(b, ast, stmt, types, pool, sink, &mut body_stmts);
     }
 
     let void_ty = pool.void();
@@ -215,7 +409,7 @@ fn gen_function_def(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     func: &ast::FunctionDef,
-    prims: &Primitives,
+    types: &TypeResolver,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) {
@@ -224,11 +418,10 @@ fn gen_function_def(
         .iter()
         .map(|p| UirParam {
             name: p.name.name,
-            ty: resolve_type(
+            ty: types.resolve(
                 p.type_annotation.name,
                 p.type_annotation.is_view,
                 p.type_annotation.span,
-                prims,
                 pool,
                 sink,
             ),
@@ -238,7 +431,7 @@ fn gen_function_def(
         .collect();
 
     let return_type = match &func.return_type {
-        Some(ty) => resolve_type(ty.name, ty.is_view, ty.span, prims, pool, sink),
+        Some(ty) => types.resolve(ty.name, ty.is_view, ty.span, pool, sink),
         None => pool.void(),
     };
 
@@ -264,7 +457,7 @@ fn gen_function_def(
         }
     }
 
-    let body_stmts = lower_block(b, ast, ast.stmt_list(func.body), prims, pool, sink);
+    let body_stmts = lower_block(b, ast, ast.stmt_list(func.body), types, pool, sink);
 
     b.add_function(
         func.name.name,
@@ -279,7 +472,7 @@ fn gen_stmt(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     stmt: ast::StmtId,
-    prims: &Primitives,
+    types: &TypeResolver,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     out: &mut Vec<InstRef>,
@@ -291,7 +484,7 @@ fn gen_stmt(
             let ty = decl
                 .type_annotation
                 .as_ref()
-                .map(|ann| resolve_type(ann.name, ann.is_view, ann.span, prims, pool, sink));
+                .map(|ann| types.resolve(ann.name, ann.is_view, ann.span, pool, sink));
             let r = b.var_decl(decl.name.name, decl.mutable, ty, initializer, span);
             out.push(r);
         }
@@ -328,7 +521,7 @@ fn gen_stmt(
         ast::StmtKind::IfStmt(if_stmt) => {
             let cond = gen_expr(b, ast, if_stmt.cond);
             let then_stmts =
-                lower_block(b, ast, ast.stmt_list(if_stmt.then_block), prims, pool, sink);
+                lower_block(b, ast, ast.stmt_list(if_stmt.then_block), types, pool, sink);
 
             let elif_branches: Vec<_> = ast
                 .elif_list(if_stmt.elif_branches)
@@ -336,14 +529,14 @@ fn gen_stmt(
                 .map(|elif| {
                     let elif_cond = gen_expr(b, ast, elif.cond);
                     let elif_body =
-                        lower_block(b, ast, ast.stmt_list(elif.block), prims, pool, sink);
+                        lower_block(b, ast, ast.stmt_list(elif.block), types, pool, sink);
                     (elif_cond, elif_body)
                 })
                 .collect();
 
             let else_stmts = if_stmt
                 .else_block
-                .map(|stmts| lower_block(b, ast, ast.stmt_list(stmts), prims, pool, sink));
+                .map(|stmts| lower_block(b, ast, ast.stmt_list(stmts), types, pool, sink));
 
             let r = b.if_stmt(
                 cond,
@@ -356,7 +549,7 @@ fn gen_stmt(
         }
         ast::StmtKind::WhileLoop { cond, body } => {
             let cond_ref = gen_expr(b, ast, *cond);
-            let body_refs = lower_block(b, ast, ast.stmt_list(*body), prims, pool, sink);
+            let body_refs = lower_block(b, ast, ast.stmt_list(*body), types, pool, sink);
             let r = b.while_loop(cond_ref, &body_refs, span);
             out.push(r);
         }
@@ -379,7 +572,7 @@ fn gen_stmt(
             }
             let start_ref = gen_expr(b, ast, *start);
             let end_ref = gen_expr(b, ast, *end);
-            let body_refs = lower_block(b, ast, ast.stmt_list(*body), prims, pool, sink);
+            let body_refs = lower_block(b, ast, ast.stmt_list(*body), types, pool, sink);
             let r = b.for_range(var.name, start_ref, end_ref, &body_refs, span);
             out.push(r);
         }
@@ -481,16 +674,23 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
             let index_ref = gen_expr(b, ast, index);
             b.index(base_ref, index_ref, span)
         }
-        // Struct literals (M9) get UIR lowering with the struct
-        // astgen work; until then the node lowers to a bare reference
-        // to the struct name, so any use fails as an undefined
-        // variable downstream. Field initializers are dropped.
-        ast::ExprKind::StructLiteral(lit) => b.var_ref(lit.name.name, span),
-        // Field access (M9) gets UIR lowering with the struct sema
-        // work; until then the node lowers to a bare reference to the
-        // field name, so any use fails as an undefined variable
-        // downstream. The object expression is dropped.
-        ast::ExprKind::FieldAccess { field, .. } => b.var_ref(field.name, span),
+        // Struct literal `Name{field=value, ...}` (M9). The field
+        // initializers stay in source order; sema canonicalizes them
+        // against the declaration in `uir.struct_decls`.
+        ast::ExprKind::StructLiteral(lit) => {
+            let fields: Vec<(StringId, InstRef)> = ast
+                .struct_field_inits(lit.fields)
+                .iter()
+                .map(|&(fname, e)| (fname, gen_expr(b, ast, e)))
+                .collect();
+            b.struct_lit(lit.name.name, &fields, span)
+        }
+        // Field access `object.field` (M9); chains fold left in the
+        // AST, so each access lowers against its own object.
+        ast::ExprKind::FieldAccess { object, field } => {
+            let obj = gen_expr(b, ast, object);
+            b.field_access(obj, field.name, span)
+        }
     }
 }
 
@@ -906,6 +1106,89 @@ mod tests {
             }
         }
         assert!(found, "no BytesLiteral instruction emitted");
+    }
+
+    #[test]
+    fn struct_decl_registered_with_resolved_fields() {
+        let src =
+            "struct Point:\n\tx: float\n\ty: float\n\nfn main():\n\tp = Point{x=1.0, y=2.0}\n";
+        let (uir, pool) = parse_and_lower(src).unwrap();
+        assert_eq!(uir.struct_decls.len(), 1);
+        let decl = &uir.struct_decls[0];
+        assert_eq!(pool.str(decl.name), "Point");
+        assert_eq!(decl.fields.len(), 2);
+        assert_eq!(decl.fields[0].ty, pool.float());
+        assert!(pool.is_defined_struct(decl.ty));
+    }
+
+    #[test]
+    fn struct_literal_and_field_access_lower() {
+        let src = "struct Point:\n\tx: float\n\np = Point{x=1.0}\nq = p.x\n";
+        let (uir, pool) = parse_and_lower(src).unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let stmts = uir.body_stmts(main);
+        let decl = uir.var_decl_view(stmts[0]);
+        let lit = uir.struct_lit_view(decl.initializer);
+        assert_eq!(pool.str(lit.name), "Point");
+        assert_eq!(lit.fields.len(), 1);
+        assert_eq!(pool.str(lit.fields[0].0), "x");
+        let q = uir.var_decl_view(stmts[1]);
+        assert!(matches!(uir.inst(q.initializer).tag, InstTag::FieldAccess));
+    }
+
+    #[test]
+    fn struct_value_cycle_is_diagnosed() {
+        let err = parse_and_lower("struct Node:\n\tnext: Node\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
+    }
+
+    #[test]
+    fn mutual_struct_value_cycle_is_diagnosed() {
+        let err = parse_and_lower("struct A:\n\tb: B\n\nstruct B:\n\ta: A\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
+    }
+
+    #[test]
+    fn forward_struct_reference_resolves() {
+        // Field types may name structs declared later in the file:
+        // the pre-scan declares every struct before any is defined.
+        let src = "struct Line:\n\tstart: Point\n\nstruct Point:\n\tx: float\n";
+        let (uir, pool) = parse_and_lower(src).unwrap();
+        assert_eq!(uir.struct_decls.len(), 2);
+        let line = &uir.struct_decls[0];
+        let point = &uir.struct_decls[1];
+        assert_eq!(line.fields[0].ty, point.ty);
+        assert!(pool.is_defined_struct(line.ty));
+        assert!(pool.is_defined_struct(point.ty));
+    }
+
+    #[test]
+    fn duplicate_struct_declaration_is_diagnosed() {
+        let err = parse_and_lower("struct P:\n\tx: int\n\nstruct P:\n\ty: int\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == DiagCode::DuplicateDeclaration));
+    }
+
+    #[test]
+    fn unknown_struct_field_type_is_diagnosed_without_defining() {
+        // An unresolvable field type must not reach
+        // `pool.define_struct` (its layout computation has no
+        // answer for the error type).
+        let err = parse_and_lower("struct Bad:\n\tx: nope\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == DiagCode::UnknownType));
+    }
+
+    #[test]
+    fn struct_decl_does_not_trip_explicit_main_check() {
+        parse_and_lower("struct Point:\n\tx: float\n\nfn main():\n\tprint(\"hi\")\n")
+            .expect("struct decl alongside fn main should lower cleanly");
+    }
+
+    #[test]
+    fn struct_only_file_lowers_to_empty_main() {
+        let (uir, _pool) = parse_and_lower("struct Point:\n\tx: float\n").unwrap();
+        assert_eq!(uir.struct_decls.len(), 1);
+        assert_eq!(uir.func_bodies.len(), 1);
+        assert!(uir.body_stmts(&uir.func_bodies[0]).is_empty());
     }
 
     #[test]

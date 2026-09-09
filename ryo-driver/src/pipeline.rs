@@ -307,6 +307,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::NestedFunctionDef => "E0002",
         DiagCode::TopLevelWithExplicitMain => "E0003",
         DiagCode::MainSignature => "E0004",
+        DiagCode::InfiniteSize => "E0005",
         DiagCode::UndefinedVariable => "E0010",
         DiagCode::UndefinedFunction => "E0011",
         DiagCode::TypeMismatch => "E0012",
@@ -338,6 +339,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::CycleInResolution => "E0016",
         DiagCode::MissingReturn => "E0036",
         DiagCode::DivisionByZero => "E0037",
+        DiagCode::StructsUnsupported => "E0038",
         DiagCode::ParseError => "E0100",
         DiagCode::ChainedComparison => "E0104",
         DiagCode::RangeArity => "E0105",
@@ -665,6 +667,7 @@ mod tests {
             (DiagCode::NestedFunctionDef, "E0002"),
             (DiagCode::TopLevelWithExplicitMain, "E0003"),
             (DiagCode::MainSignature, "E0004"),
+            (DiagCode::InfiniteSize, "E0005"),
             (DiagCode::UndefinedVariable, "E0010"),
             (DiagCode::UndefinedFunction, "E0011"),
             (DiagCode::TypeMismatch, "E0012"),
@@ -693,6 +696,7 @@ mod tests {
             (DiagCode::SourceProjected, "E0035"),
             (DiagCode::MissingReturn, "E0036"),
             (DiagCode::DivisionByZero, "E0037"),
+            (DiagCode::StructsUnsupported, "E0038"),
             (DiagCode::ParseError, "E0100"),
             (DiagCode::TooManyDiagnostics, "E0101"),
             (DiagCode::InvalidCharacter, "E0102"),
@@ -726,6 +730,7 @@ mod tests {
                 | DiagCode::NestedFunctionDef
                 | DiagCode::TopLevelWithExplicitMain
                 | DiagCode::MainSignature
+                | DiagCode::InfiniteSize
                 | DiagCode::UndefinedVariable
                 | DiagCode::UndefinedFunction
                 | DiagCode::TypeMismatch
@@ -756,6 +761,7 @@ mod tests {
                 | DiagCode::SourceProjected
                 | DiagCode::MissingReturn
                 | DiagCode::DivisionByZero
+                | DiagCode::StructsUnsupported
                 | DiagCode::CycleInResolution
                 | DiagCode::ParseError
                 | DiagCode::ChainedComparison

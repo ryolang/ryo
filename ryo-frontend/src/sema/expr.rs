@@ -34,6 +34,9 @@ pub(crate) fn analyze_expr(
     t
 }
 
+// Transitional: the M9 StructLit/FieldAccess stub arm pushes this
+// dispatch one line past the cap until struct sema lands.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn analyze_expr_allow_never(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -425,6 +428,7 @@ pub(crate) fn analyze_expr_allow_never(
             }
             analyze_expr(sema, fcx, scope, inner)
         }
+        InstTag::StructLit | InstTag::FieldAccess => reject_struct_expr(sema, fcx, span),
         // UIR trusted-producer contract (see the `uir.rs` module
         // header): astgen is the only producer, so a non-expression tag
         // reaching `analyze_expr` is a compiler bug, not user input.
@@ -437,6 +441,21 @@ pub(crate) fn analyze_expr_allow_never(
 
     fcx.inst_map[r.index()] = Some(emitted);
     emitted
+}
+
+/// Transitional stub for struct expressions (M9): astgen lowers
+/// them and registers `uir.struct_decls`, but struct sema has not
+/// landed yet. Reject with a real diagnostic (and poison the slot)
+/// rather than tripping the trusted-producer catch-all — the driver
+/// runs sema even when astgen already emitted errors, so a panic
+/// here would mask the real diagnostics.
+fn reject_struct_expr(sema: &mut Sema<'_>, fcx: &mut FuncCtx, span: Span) -> TirRef {
+    sema.sink.emit(Diag::error(
+        span,
+        DiagCode::StructsUnsupported,
+        "struct literals and field access are not yet supported by semantic analysis".to_string(),
+    ));
+    fcx.builder.unreachable(sema.pool.error_type(), span)
 }
 
 /// M8.4.2 bridging methods: `bytes`/`bytesview`.to_str() lowers to

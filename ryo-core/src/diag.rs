@@ -59,6 +59,9 @@ pub enum DiagCode {
     /// `main` must be `fn main():` (no args, no return).
     /// Use the future `exit(code)` builtin for non-zero exit codes.
     MainSignature,
+    /// A struct contains itself, directly or transitively, as a
+    /// by-value field, so its size would be unbounded (M9).
+    InfiniteSize,
 
     // --- sema ---
     /// A user-defined function or variable uses the `__ryo_` prefix,
@@ -130,6 +133,11 @@ pub enum DiagCode {
     /// returning a value. Return-flow analysis: every path through
     /// the body must end in `return` (or diverge via `never`).
     MissingReturn,
+
+    /// A struct literal or field access reached semantic analysis
+    /// before struct sema support landed. Transitional: removed once
+    /// struct sema ships.
+    StructsUnsupported,
 
     // --- ownership (M8.1b) ---
     /// Use of a value after it has been moved.
