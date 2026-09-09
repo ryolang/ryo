@@ -1270,6 +1270,11 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
             StmtKind::AssignOrDecl { value, .. } | StmtKind::CompoundAssign { value, .. } => {
                 expr_work.push(*value);
             }
+            StmtKind::FieldAssign { target, value }
+            | StmtKind::CompoundFieldAssign { target, value, .. } => {
+                expr_work.push(*target);
+                expr_work.push(*value);
+            }
             StmtKind::WhileLoop { cond, body } => {
                 expr_work.push(*cond);
                 stmt_work.extend_from_slice(ast.stmt_list(*body));
@@ -1385,4 +1390,67 @@ fn scalar_indexing_parse_leaves_no_orphan_nodes() {
     let (exprs, stmts) = reachable_node_counts(&ast);
     assert_eq!(exprs + 1, ast.expr_count(), "orphan expressions");
     assert_eq!(stmts + 1, ast.stmt_count(), "orphan statements");
+}
+
+#[test]
+fn parse_field_assignment() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tmut p = Point{x=1.0}\n\tp.x = 2.0\n").unwrap();
+    let body = fn_body(&ast, fn_def(&ast, only_stmt(&ast)));
+    match &ast.stmt(body[1]).kind {
+        StmtKind::FieldAssign { target, .. } => {
+            assert!(matches!(
+                ast.expr(*target).kind,
+                ExprKind::FieldAccess { .. }
+            ))
+        }
+        other => panic!("expected FieldAssign, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_compound_field_assignment() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tmut p = Point{x=1.0}\n\tp.x += 2.0\n").unwrap();
+    let body = fn_body(&ast, fn_def(&ast, only_stmt(&ast)));
+    assert!(matches!(
+        ast.stmt(body[1]).kind,
+        StmtKind::CompoundFieldAssign { .. }
+    ));
+}
+
+#[test]
+fn parse_nested_field_assignment_chain() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tmut a = X{b=Y{c=1}}\n\ta.b.c = 2\n").unwrap();
+    let body = fn_body(&ast, fn_def(&ast, only_stmt(&ast)));
+    match &ast.stmt(body[1]).kind {
+        StmtKind::FieldAssign { target, .. } => match ast.expr(*target).kind {
+            ExprKind::FieldAccess { object, .. } => {
+                assert!(matches!(
+                    ast.expr(object).kind,
+                    ExprKind::FieldAccess { .. }
+                ))
+            }
+            other => panic!("expected nested FieldAccess, got {:?}", other),
+        },
+        other => panic!("expected FieldAssign, got {:?}", other),
+    }
+}
+
+#[test]
+fn bare_ident_assignment_still_assign_or_decl() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tx = 1\n").unwrap();
+    let body = fn_body(&ast, fn_def(&ast, only_stmt(&ast)));
+    assert!(matches!(
+        ast.stmt(body[0]).kind,
+        StmtKind::AssignOrDecl { .. }
+    ));
+}
+
+#[test]
+fn bare_ident_compound_assignment_still_compound_assign() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tx = 1\n\tx += 2\n").unwrap();
+    let body = fn_body(&ast, fn_def(&ast, only_stmt(&ast)));
+    assert!(matches!(
+        ast.stmt(body[1]).kind,
+        StmtKind::CompoundAssign { .. }
+    ));
 }

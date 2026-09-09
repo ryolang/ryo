@@ -123,3 +123,59 @@ fn copy_struct_assignment_allows_both_bindings() {
     );
     assert!(diags.is_empty(), "expected clean sema; got {diags:?}");
 }
+
+#[test]
+fn field_assignment_type_checks() {
+    let src = "struct Point:\n\tx: float\n\nfn main():\n\tmut p = Point{x=1.0}\n\tp.x = 2.0\n";
+    assert!(run(src).is_ok());
+}
+
+#[test]
+fn field_assignment_requires_mut() {
+    let src = "struct Point:\n\tx: float\n\nfn main():\n\tp = Point{x=1.0}\n\tp.x = 2.0\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert!(any_code(&diags, DiagCode::ImmutableAssign), "got {diags:?}");
+}
+
+#[test]
+fn compound_field_assignment_type_checks() {
+    let src = "struct Point:\n\tx: float\n\nfn main():\n\tmut p = Point{x=1.0}\n\tp.x += 2.0\n";
+    assert!(run(src).is_ok());
+}
+
+#[test]
+fn compound_field_assignment_requires_mut() {
+    let src = "struct Point:\n\tx: float\n\nfn main():\n\tp = Point{x=1.0}\n\tp.x += 2.0\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert!(any_code(&diags, DiagCode::ImmutableAssign), "got {diags:?}");
+}
+
+#[test]
+fn nested_field_assignment_type_checks() {
+    let src = "struct Inner:\n\tv: int\n\nstruct Outer:\n\tinner: Inner\n\nfn main():\n\tmut o = Outer{inner=Inner{v=1}}\n\to.inner.v = 2\n\to.inner.v += 3\n";
+    assert!(run(src).is_ok());
+}
+
+#[test]
+fn field_assignment_type_mismatch() {
+    let src = "struct Point:\n\tx: float\n\nfn main():\n\tmut p = Point{x=1.0}\n\tp.x = 1\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert!(any_code(&diags, DiagCode::TypeMismatch), "got {diags:?}");
+}
+
+#[test]
+fn field_assignment_undefined_root() {
+    let src = "struct Point:\n\tx: float\n\nfn main():\n\tp.x = 1.0\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert!(
+        any_code(&diags, DiagCode::UndefinedAssignTarget),
+        "got {diags:?}"
+    );
+}
+
+#[test]
+fn compound_field_assignment_rejects_bad_operator() {
+    let src = "struct Point:\n\tx: float\n\nfn main():\n\tmut p = Point{x=1.0}\n\tp.x %= 2.0\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert!(any_code(&diags, DiagCode::FloatModulo), "got {diags:?}");
+}

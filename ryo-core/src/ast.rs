@@ -285,6 +285,20 @@ pub enum StmtKind {
         op: CompoundOp,
         value: ExprId,
     },
+    /// Field-path assignment `p.x = v` (M9). `target` is a
+    /// `FieldAccess` chain expression rooted at an `Ident`; bare
+    /// identifiers stay on `AssignOrDecl`.
+    FieldAssign {
+        target: ExprId,
+        value: ExprId,
+    },
+    /// Compound field-path assignment `p.x += v` (M9). Same target
+    /// shape as `FieldAssign`.
+    CompoundFieldAssign {
+        target: ExprId,
+        op: CompoundOp,
+        value: ExprId,
+    },
     WhileLoop {
         cond: ExprId,
         body: StmtList,
@@ -915,6 +929,23 @@ impl Ast {
         span: SimpleSpan,
     ) -> StmtId {
         self.push_stmt(StmtKind::CompoundAssign { target, op, value }, span)
+    }
+
+    /// Field-path assignment `p.x = v` (M9); `target` is the
+    /// `FieldAccess` chain.
+    pub fn field_assign(&mut self, target: ExprId, value: ExprId, span: SimpleSpan) -> StmtId {
+        self.push_stmt(StmtKind::FieldAssign { target, value }, span)
+    }
+
+    /// Compound field-path assignment `p.x += v` (M9).
+    pub fn compound_field_assign(
+        &mut self,
+        target: ExprId,
+        op: CompoundOp,
+        value: ExprId,
+        span: SimpleSpan,
+    ) -> StmtId {
+        self.push_stmt(StmtKind::CompoundFieldAssign { target, op, value }, span)
     }
 
     pub fn while_loop(&mut self, cond: ExprId, body: &[StmtId], span: SimpleSpan) -> StmtId {

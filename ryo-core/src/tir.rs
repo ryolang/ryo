@@ -309,6 +309,16 @@ pub enum TirTag {
     /// `TirData::FieldAccess` (object + canonical field index);
     /// `TypedInst.ty` is the field type.
     FieldAccess,
+
+    /// Field-path assignment `p.x = v` (M9). Variable payload in
+    /// `extra` — see [`field_assign_extra`]; `TypedInst.ty` is the
+    /// field type.
+    FieldAssign,
+
+    /// Compound field-path assignment `p.x += v` (M9). Variable
+    /// payload in `extra` — see [`compound_field_assign_extra`];
+    /// `TypedInst.ty` is the field type.
+    CompoundFieldAssign,
 }
 
 // ---------- Per-argument call convention ----------
@@ -576,6 +586,32 @@ pub mod struct_lit_extra {
     pub const TY: usize = 0;
     pub const N_FIELDS: usize = 1;
     pub const FIELDS: usize = 2;
+}
+
+/// Layout in `extra` for [`TirTag::FieldAssign`] (M9):
+///
+/// ```text
+///   [0]  target: TirRef.raw() (FieldAccess chain)
+///   [1]  value:  TirRef.raw()
+/// ```
+pub mod field_assign_extra {
+    pub const TARGET: usize = 0;
+    pub const VALUE: usize = 1;
+    pub const LEN: usize = 2;
+}
+
+/// Layout in `extra` for [`TirTag::CompoundFieldAssign`] (M9):
+///
+/// ```text
+///   [0]  target: TirRef.raw() (FieldAccess chain)
+///   [1]  op:     u32 (CompoundOp discriminant)
+///   [2]  value:  TirRef.raw()
+/// ```
+pub mod compound_field_assign_extra {
+    pub const TARGET: usize = 0;
+    pub const OP: usize = 1;
+    pub const VALUE: usize = 2;
+    pub const LEN: usize = 3;
 }
 
 // ---------- Builder ----------
@@ -1011,6 +1047,54 @@ impl TirBuilder {
         )
     }
 
+    /// Emit a `FieldAssign` `target = value` (M9); `ty` is the field
+    /// type.
+    pub fn field_assign(
+        &mut self,
+        target: TirRef,
+        value: TirRef,
+        ty: TypeId,
+        span: Span,
+    ) -> TirRef {
+        let offset = self.extra_offset();
+        self.extra.push(target.raw());
+        self.extra.push(value.raw());
+        self.push(
+            TirTag::FieldAssign,
+            ty,
+            TirData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(field_assign_extra::LEN),
+            }),
+            span,
+        )
+    }
+
+    /// Emit a `CompoundFieldAssign` `target op= value` (M9); `ty` is
+    /// the field type.
+    pub fn compound_field_assign(
+        &mut self,
+        target: TirRef,
+        op: CompoundOp,
+        ty: TypeId,
+        value: TirRef,
+        span: Span,
+    ) -> TirRef {
+        let offset = self.extra_offset();
+        self.extra.push(target.raw());
+        self.extra.push(op as u32);
+        self.extra.push(value.raw());
+        self.push(
+            TirTag::CompoundFieldAssign,
+            ty,
+            TirData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(compound_field_assign_extra::LEN),
+            }),
+            span,
+        )
+    }
+
     pub fn break_stmt(&mut self, ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::Break, ty, TirData::None, span)
     }
@@ -1364,6 +1448,16 @@ impl Tir {
                 }
                 TirTag::CompoundAssign => {
                     let v = self.compound_assign_view(r);
+                    f(r, v.value, ChildKind::Operand);
+                }
+                TirTag::FieldAssign => {
+                    let v = self.field_assign_view(r);
+                    f(r, v.target, ChildKind::Operand);
+                    f(r, v.value, ChildKind::Operand);
+                }
+                TirTag::CompoundFieldAssign => {
+                    let v = self.compound_field_assign_view(r);
+                    f(r, v.target, ChildKind::Operand);
                     f(r, v.value, ChildKind::Operand);
                 }
                 TirTag::IfStmt => {
@@ -1761,6 +1855,25 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                 v.value.index()
             )
         }
+        (TirTag::FieldAssign, TirData::Extra(_)) => {
+            let v = tir.field_assign_view(r);
+            writeln!(
+                f,
+                "field_assign %{} = %{}",
+                v.target.index(),
+                v.value.index()
+            )
+        }
+        (TirTag::CompoundFieldAssign, TirData::Extra(_)) => {
+            let v = tir.compound_field_assign_view(r);
+            writeln!(
+                f,
+                "compound_field_assign %{} {} %{}",
+                v.target.index(),
+                v.op,
+                v.value.index()
+            )
+        }
         (TirTag::IfStmt, TirData::Extra(_)) => {
             let view = tir.if_stmt_view(r);
             write!(f, "if_stmt cond=%{}", view.cond.index())?;
@@ -1876,3 +1989,6 @@ fn un_op_name(t: TirTag) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+mod field_assign;
+pub use field_assign::{CompoundFieldAssignView, FieldAssignView};

@@ -518,6 +518,18 @@ fn gen_stmt(
             let r = b.compound_assign(target.name, *op, value_ref, span);
             out.push(r);
         }
+        ast::StmtKind::FieldAssign { target, value } => {
+            let target_ref = gen_expr(b, ast, *target);
+            let value_ref = gen_expr(b, ast, *value);
+            let r = b.field_assign(target_ref, value_ref, span);
+            out.push(r);
+        }
+        ast::StmtKind::CompoundFieldAssign { target, op, value } => {
+            let target_ref = gen_expr(b, ast, *target);
+            let value_ref = gen_expr(b, ast, *value);
+            let r = b.compound_field_assign(target_ref, *op, value_ref, span);
+            out.push(r);
+        }
         ast::StmtKind::IfStmt(if_stmt) => {
             let cond = gen_expr(b, ast, if_stmt.cond);
             let then_stmts =

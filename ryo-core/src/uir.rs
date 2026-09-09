@@ -240,6 +240,14 @@ pub enum InstTag {
 
     /// Field access `object.field` (M9); see [`InstData::FieldAccess`].
     FieldAccess,
+
+    /// Field-path assignment `p.x = v` (M9). Variable payload in
+    /// `extra` — see [`field_assign_extra`].
+    FieldAssign,
+
+    /// Compound field-path assignment `p.x += v` (M9). Variable
+    /// payload in `extra` — see [`compound_field_assign_extra`].
+    CompoundFieldAssign,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -520,6 +528,32 @@ pub mod struct_lit_extra {
     pub const NAME: usize = 0;
     pub const NFIELDS: usize = 1;
     pub const FIELDS: usize = 2;
+}
+
+/// Layout in `extra` for [`InstTag::FieldAssign`]:
+///
+/// ```text
+///   [0]  target: InstRef.raw() (FieldAccess chain)
+///   [1]  value:  InstRef.raw()
+/// ```
+pub mod field_assign_extra {
+    pub const TARGET: usize = 0;
+    pub const VALUE: usize = 1;
+    pub const LEN: usize = 2;
+}
+
+/// Layout in `extra` for [`InstTag::CompoundFieldAssign`]:
+///
+/// ```text
+///   [0]  target: InstRef.raw() (FieldAccess chain)
+///   [1]  op:     u32 (CompoundOp discriminant)
+///   [2]  value:  InstRef.raw()
+/// ```
+pub mod compound_field_assign_extra {
+    pub const TARGET: usize = 0;
+    pub const OP: usize = 1;
+    pub const VALUE: usize = 2;
+    pub const LEN: usize = 3;
 }
 
 // ---------- Builder ----------
@@ -917,6 +951,44 @@ impl UirBuilder {
         )
     }
 
+    /// Emits a `FieldAssign` `target = value` (M9); `target` is a
+    /// `FieldAccess` chain ref.
+    pub fn field_assign(&mut self, target: InstRef, value: InstRef, span: Span) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(target.raw());
+        self.uir.extra.push(value.raw());
+        self.push(
+            InstTag::FieldAssign,
+            InstData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(field_assign_extra::LEN),
+            }),
+            span,
+        )
+    }
+
+    /// Emits a `CompoundFieldAssign` `target op= value` (M9).
+    pub fn compound_field_assign(
+        &mut self,
+        target: InstRef,
+        op: CompoundOp,
+        value: InstRef,
+        span: Span,
+    ) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(target.raw());
+        self.uir.extra.push(op as u32);
+        self.uir.extra.push(value.raw());
+        self.push(
+            InstTag::CompoundFieldAssign,
+            InstData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(compound_field_assign_extra::LEN),
+            }),
+            span,
+        )
+    }
+
     /// Register a resolved struct declaration in the side table (M9).
     /// Struct decls are metadata, not instructions — sema reads them
     /// to check struct literals and field accesses.
@@ -949,6 +1021,19 @@ pub struct AssignOrDeclView {
 
 pub struct CompoundAssignView {
     pub name: StringId,
+    pub op: CompoundOp,
+    pub value: InstRef,
+}
+
+/// Decoded view of an [`InstTag::FieldAssign`] payload (M9).
+pub struct FieldAssignView {
+    pub target: InstRef,
+    pub value: InstRef,
+}
+
+/// Decoded view of an [`InstTag::CompoundFieldAssign`] payload (M9).
+pub struct CompoundFieldAssignView {
+    pub target: InstRef,
     pub op: CompoundOp,
     pub value: InstRef,
 }
@@ -1061,6 +1146,35 @@ impl Uir {
             name: StringId::from_raw(slice[compound_assign_extra::NAME]),
             op: CompoundOp::from_raw(slice[compound_assign_extra::OP]),
             value: InstRef::from_raw(slice[compound_assign_extra::VALUE]),
+        }
+    }
+
+    pub fn field_assign_view(&self, r: InstRef) -> FieldAssignView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::FieldAssign));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("FieldAssign must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        FieldAssignView {
+            target: InstRef::from_raw(slice[field_assign_extra::TARGET]),
+            value: InstRef::from_raw(slice[field_assign_extra::VALUE]),
+        }
+    }
+
+    pub fn compound_field_assign_view(&self, r: InstRef) -> CompoundFieldAssignView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::CompoundFieldAssign));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("CompoundFieldAssign must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        CompoundFieldAssignView {
+            target: InstRef::from_raw(slice[compound_field_assign_extra::TARGET]),
+            op: CompoundOp::from_raw(slice[compound_field_assign_extra::OP]),
+            value: InstRef::from_raw(slice[compound_field_assign_extra::VALUE]),
         }
     }
 
@@ -1361,6 +1475,25 @@ fn write_inst(
                 f,
                 "compound_assign {} {} %{}",
                 pool.str(v.name),
+                v.op,
+                v.value.index()
+            )
+        }
+        (InstTag::FieldAssign, InstData::Extra(_)) => {
+            let v = uir.field_assign_view(r);
+            writeln!(
+                f,
+                "field_assign %{} = %{}",
+                v.target.index(),
+                v.value.index()
+            )
+        }
+        (InstTag::CompoundFieldAssign, InstData::Extra(_)) => {
+            let v = uir.compound_field_assign_view(r);
+            writeln!(
+                f,
+                "compound_field_assign %{} {} %{}",
+                v.target.index(),
                 v.op,
                 v.value.index()
             )

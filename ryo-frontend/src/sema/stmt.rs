@@ -310,6 +310,8 @@ pub(crate) fn analyze_stmt(
             fcx.builder
                 .compound_assign(view.name, view.op, existing_ty, value_tir, span)
         }
+        InstTag::FieldAssign => analyze_field_assign(sema, fcx, scope, r, span),
+        InstTag::CompoundFieldAssign => analyze_compound_field_assign(sema, fcx, scope, r, span),
         InstTag::WhileLoop => {
             let view = sema.uir.while_loop_view(r);
 
@@ -417,6 +419,189 @@ pub(crate) fn analyze_block(
     stmts: &[InstRef],
 ) -> Vec<TirRef> {
     analyze_block_seeded(sema, fcx, scope, stmts, |_| {})
+}
+
+/// The final field name of a field-assign target chain, for
+/// diagnostics (M9). The parser only produces `FieldAccess`-topped
+/// chains.
+fn field_assign_target_name(sema: &Sema<'_>, target: InstRef) -> StringId {
+    match sema.uir.inst(target).data {
+        InstData::FieldAccess { field, .. } => field,
+        _ => unreachable!("field-assign target must be a FieldAccess chain"),
+    }
+}
+
+/// Field-path assignment `p.x = v` (M9).
+fn analyze_field_assign(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &mut Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    let view = sema.uir.field_assign_view(r);
+    let field_name = field_assign_target_name(sema, view.target);
+    let Some((target_tir, field_ty)) = check_field_chain(sema, fcx, scope, view.target) else {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    };
+    let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+    let value_ty = fcx.builder.ty_of(value_tir);
+    if check_bindable_value(sema, field_name, value_ty, sema.uir.span(view.value)) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if !sema.pool.is_error(value_ty)
+        && !sema.pool.is_error(field_ty)
+        && !sema.pool.compatible(field_ty, value_ty)
+    {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.value),
+            DiagCode::TypeMismatch,
+            format!(
+                "type mismatch: '{}' is '{}', got '{}'",
+                sema.pool.str(field_name),
+                sema.pool.display(field_ty),
+                sema.pool.display(value_ty),
+            ),
+        ));
+    }
+    fcx.builder
+        .field_assign(target_tir, value_tir, field_ty, span)
+}
+
+/// Compound field-path assignment `p.x += v` (M9). Same
+/// operator-vs-type rules as bare `CompoundAssign`, with the field
+/// type as the LHS.
+fn analyze_compound_field_assign(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &mut Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    let view = sema.uir.compound_field_assign_view(r);
+    let field_name = field_assign_target_name(sema, view.target);
+    let Some((target_tir, field_ty)) = check_field_chain(sema, fcx, scope, view.target) else {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    };
+    let op = view.op;
+    let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+    let value_ty = fcx.builder.ty_of(value_tir);
+
+    if field_ty == sema.pool.error_type() {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if check_bindable_value(sema, field_name, value_ty, sema.uir.span(view.value)) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    let is_int = field_ty == sema.pool.int();
+    let is_float = field_ty == sema.pool.float();
+
+    if op == CompoundOp::Mod && is_float {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::FloatModulo,
+            "operator '%=' is not defined for 'float'".to_string(),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    if !is_int && !is_float {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::UnsupportedOperator,
+            format!(
+                "compound assignment is not defined for '{}'",
+                sema.pool.display(field_ty),
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    if !sema.pool.is_error(value_ty) && !sema.pool.compatible(field_ty, value_ty) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.value),
+            DiagCode::TypeMismatch,
+            format!(
+                "type mismatch in compound assignment: '{}' is '{}', got '{}'",
+                sema.pool.str(field_name),
+                sema.pool.display(field_ty),
+                sema.pool.display(value_ty),
+            ),
+        ));
+    }
+
+    // Same constant-zero-divisor rule as binary `x / 0`.
+    if matches!(op, CompoundOp::Div | CompoundOp::Mod)
+        && is_int
+        && matches!(const_eval_int(sema.uir, view.value), ConstInt::Value(0))
+    {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::DivisionByZero,
+            if op == CompoundOp::Div {
+                "division by zero".to_string()
+            } else {
+                "modulo by zero".to_string()
+            },
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    fcx.builder
+        .compound_field_assign(target_tir, op, field_ty, value_tir, span)
+}
+
+/// Check the target of a field-path assignment (M9): walk the
+/// `FieldAccess` chain down to its root identifier, require that
+/// binding to exist and be mutable, then analyze the whole chain as a
+/// normal field access (which re-checks every hop against the struct
+/// declarations). Returns the analyzed target and the final field
+/// type, or `None` after emitting the root diagnostic.
+fn check_field_chain(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    target: InstRef,
+) -> Option<(TirRef, TypeId)> {
+    let mut root = target;
+    loop {
+        match sema.uir.inst(root).data {
+            InstData::FieldAccess { object, .. } => root = object,
+            InstData::Var(name) => {
+                let root_span = sema.uir.span(root);
+                match scope.lookup_full(name) {
+                    Some((_, true)) => break,
+                    Some((_, false)) => {
+                        sema.sink.emit(Diag::error(
+                            root_span,
+                            DiagCode::ImmutableAssign,
+                            format!(
+                                "cannot assign to field of immutable binding '{}'",
+                                sema.pool.str(name)
+                            ),
+                        ));
+                        return None;
+                    }
+                    None => {
+                        sema.sink.emit(Diag::error(
+                            root_span,
+                            DiagCode::UndefinedAssignTarget,
+                            format!(
+                                "cannot assign to field of undeclared variable '{}'",
+                                sema.pool.str(name)
+                            ),
+                        ));
+                        return None;
+                    }
+                }
+            }
+            _ => unreachable!("field-assign target chain must be rooted at a Var"),
+        }
+    }
+    let target_tir = analyze_expr(sema, fcx, scope, target);
+    let field_ty = fcx.builder.ty_of(target_tir);
+    Some((target_tir, field_ty))
 }
 
 /// Variant of [`analyze_block`] that accepts a closure to seed the

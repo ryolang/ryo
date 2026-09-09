@@ -273,20 +273,53 @@ where
         .boxed()
 }
 
-fn assign_or_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+/// Assignment target: a bare identifier or a `.field` path rooted at
+/// one (`p`, `p.x`, `a.b.c`). The segments are folded into a
+/// `FieldAccess` chain by the caller; an empty segment list keeps the
+/// bare-identifier path byte-identical to before M9.
+fn assign_target_parser<'a, I>() -> impl Parser<'a, I, (Ident, Vec<Ident>), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     select! { Token::Ident(s) => s }
-        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident {
-            name: s,
-            span: e.span(),
-        })
+        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident::new(s, e.span()))
+        .then(
+            just(Token::Dot)
+                .ignore_then(
+                    select! { Token::Ident(f) => f }
+                        .map_with(|f, e: &mut Mx<'a, '_, I>| Ident::new(f, e.span())),
+                )
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+}
+
+/// Build the `FieldAccess` chain expression for a parsed assignment
+/// target. Only called when `fields` is non-empty.
+fn field_access_chain(ast: &mut Ast, root: Ident, fields: &[Ident]) -> ExprId {
+    let mut target = ast.ident(root.name, root.span);
+    for field in fields {
+        let span = SimpleSpan::new((), root.span.start..field.span.end);
+        target = ast.field_access(target, *field, span);
+    }
+    target
+}
+
+fn assign_or_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    assign_target_parser()
         .then_ignore(just(Token::Assign))
         .then(expression_parser())
-        .map_with(|(target, value), e: &mut Mx<'a, '_, I>| {
+        .map_with(|((target, fields), value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
-            e.state().assign_or_decl(target, value, span)
+            if fields.is_empty() {
+                e.state().assign_or_decl(target, value, span)
+            } else {
+                let chain = field_access_chain(e.state(), target, &fields);
+                e.state().field_assign(chain, value, span)
+            }
         })
         .boxed()
 }
@@ -303,16 +336,17 @@ where
         just(Token::PercentAssign).to(CompoundOp::Mod),
     ));
 
-    select! { Token::Ident(s) => s }
-        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident {
-            name: s,
-            span: e.span(),
-        })
+    assign_target_parser()
         .then(op)
         .then(expression_parser())
-        .map_with(|((target, op), value), e: &mut Mx<'a, '_, I>| {
+        .map_with(|(((target, fields), op), value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
-            e.state().compound_assign(target, op, value, span)
+            if fields.is_empty() {
+                e.state().compound_assign(target, op, value, span)
+            } else {
+                let chain = field_access_chain(e.state(), target, &fields);
+                e.state().compound_field_assign(chain, op, value, span)
+            }
         })
         .boxed()
 }

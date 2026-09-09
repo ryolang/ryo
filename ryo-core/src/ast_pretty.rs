@@ -72,6 +72,8 @@ fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
         StmtKind::IfStmt(_) => "IfStmt",
         StmtKind::AssignOrDecl { .. } => "AssignOrDecl",
         StmtKind::CompoundAssign { .. } => "CompoundAssign",
+        StmtKind::FieldAssign { .. } => "FieldAssign",
+        StmtKind::CompoundFieldAssign { .. } => "CompoundFieldAssign",
         StmtKind::WhileLoop { .. } => "WhileLoop",
         StmtKind::ForRange { .. } => "ForRange",
         StmtKind::Break => "Break",
@@ -151,6 +153,18 @@ fn write_stmt_children(
             )?;
             let inner = format!("{}  ", prefix);
             write_expr(out, ast, *value, &inner, true, "", pool)
+        }
+        StmtKind::FieldAssign { target, value } => {
+            writeln!(out, "{}FieldAssign", prefix)?;
+            let inner = format!("{}  ", prefix);
+            write_expr(out, ast, *target, &inner, false, "target: ", pool)?;
+            write_expr(out, ast, *value, &inner, true, "value: ", pool)
+        }
+        StmtKind::CompoundFieldAssign { target, op, value } => {
+            writeln!(out, "{}CompoundFieldAssign: {:?}", prefix, op)?;
+            let inner = format!("{}  ", prefix);
+            write_expr(out, ast, *target, &inner, false, "target: ", pool)?;
+            write_expr(out, ast, *value, &inner, true, "value: ", pool)
         }
         StmtKind::WhileLoop { cond, body } => {
             writeln!(out, "{}WhileLoop", prefix)?;

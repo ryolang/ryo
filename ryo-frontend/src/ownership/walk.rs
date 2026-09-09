@@ -56,6 +56,20 @@ pub(crate) fn analyze_stmt(
             // owner_at_read like any other expression position.
             visit_expr(tir, pool, own, sink, sidecar, view.value);
         }
+        TirTag::FieldAssign => {
+            // M9: minimal handling until struct ownership lands —
+            // visit the target chain and the value so reads in either
+            // still register (use-after-move on the value, dead-store
+            // clears), but no per-field consume/free tracking yet.
+            let view = tir.field_assign_view(stmt);
+            visit_expr(tir, pool, own, sink, sidecar, view.target);
+            visit_expr(tir, pool, own, sink, sidecar, view.value);
+        }
+        TirTag::CompoundFieldAssign => {
+            let view = tir.compound_field_assign_view(stmt);
+            visit_expr(tir, pool, own, sink, sidecar, view.target);
+            visit_expr(tir, pool, own, sink, sidecar, view.value);
+        }
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {
                 visit_expr(tir, pool, own, sink, sidecar, o);
