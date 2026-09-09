@@ -40,6 +40,7 @@ use target_lexicon::Triple;
 mod bytes;
 mod expr;
 mod ranges;
+mod structs;
 
 /// Fat-owner triple layout (str/bytes, 24 bytes): ptr at 0, len at 8,
 /// cap at 16. Derived from `RyoStrFat`, not re-hardcoded.
@@ -50,7 +51,7 @@ const STR_SLOT_SIZE: u32 = 24;
 /// callers distinguish "block ended" (`!= None`) from "the function
 /// definitely returns" (`== Return`) explicitly.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum Terminator {
+pub(crate) enum Terminator {
     None,
     Return,
     Break,
@@ -159,6 +160,12 @@ pub(crate) enum ValueRepr {
         ptr: Value,
         len: Value,
     },
+    /// Struct value (M9): the address of the value's stack slot.
+    /// Field reads/writes, copies, and drops all go through this
+    /// pointer (see `codegen/structs.rs`).
+    Struct {
+        addr: Value,
+    },
 }
 
 impl ValueRepr {
@@ -169,6 +176,7 @@ impl ValueRepr {
             ValueRepr::Str { .. } => panic!("expected Scalar, got Str"),
             ValueRepr::Bytes { .. } => panic!("expected Scalar, got Bytes"),
             ValueRepr::View { .. } => panic!("expected Scalar, got View"),
+            ValueRepr::Struct { .. } => panic!("expected Scalar, got Struct"),
         }
     }
 }
@@ -289,6 +297,12 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// appear in the free schedule.
     view_locals: Vec<Option<ViewLocals>>,
     view_locals_undo: Vec<(u32, Option<ViewLocals>)>,
+    /// Struct-typed bindings (M9): one address-holding `Variable` per
+    /// binding — the value itself lives in a stack slot (see
+    /// `codegen/structs.rs`). Dense `StringId::raw()`-indexed table
+    /// with an undo log, same scoping discipline as `locals`.
+    struct_locals: Vec<Option<Variable>>,
+    struct_locals_undo: Vec<(u32, Option<Variable>)>,
     /// Free-target (initializer / Assign value / fat-param virtual ref)
     /// → binding-name map, built once per function by
     /// `build_free_binding_names`. `emit_frees` uses it to release a
@@ -682,6 +696,10 @@ impl<M: Module> Codegen<M> {
                 // `strview` view: 2-word ABI (ptr, len) — no cap word (M8.4).
                 sig.params.push(AbiParam::new(self.int_type)); // ptr
                 sig.params.push(AbiParam::new(types::I64)); // len
+            } else if matches!(pool.kind(param.ty), TypeKind::Struct) {
+                // Struct (M9): a single pointer to the value's stack
+                // slot, regardless of mode (borrow/move/copy).
+                sig.params.push(AbiParam::new(self.int_type));
             } else {
                 let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
                 sig.params.push(AbiParam::new(cl_ty));
@@ -696,7 +714,9 @@ impl<M: Module> Codegen<M> {
         if is_main {
             sig.returns.push(AbiParam::new(self.int_type));
         } else if tir.return_type != pool.void() {
-            if is_fat_type(tir.return_type, pool) {
+            if is_fat_type(tir.return_type, pool)
+                || matches!(pool.kind(tir.return_type), TypeKind::Struct)
+            {
                 // sret: hidden pointer prepended to regular params, no IR-level return.
                 sig.params.insert(
                     0,
@@ -766,8 +786,10 @@ impl<M: Module> Codegen<M> {
 
             let is_main = pool.str(tir.name) == "main";
             let returns_fat = !is_main && is_fat_type(tir.return_type, pool);
-            let mut block_idx: usize = if returns_fat { 1 } else { 0 };
-            let sret_ptr = if returns_fat {
+            let returns_struct = !is_main && matches!(pool.kind(tir.return_type), TypeKind::Struct);
+            let has_sret = returns_fat || returns_struct;
+            let mut block_idx: usize = if has_sret { 1 } else { 0 };
+            let sret_ptr = if has_sret {
                 Some(builder.block_params(entry_block)[0])
             } else {
                 None
@@ -777,6 +799,8 @@ impl<M: Module> Codegen<M> {
             let mut fat_locals_undo: Vec<(u32, Option<FatLocals>)> = Vec::new();
             let mut view_param_locals: Vec<Option<ViewLocals>> = vec![None; pool.string_count()];
             let mut view_locals_undo: Vec<(u32, Option<ViewLocals>)> = Vec::new();
+            let mut struct_param_locals: Vec<Option<Variable>> = vec![None; pool.string_count()];
+            let mut struct_locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
             let mut inout_ptrs: Vec<Option<(Value, TypeId)>> = vec![None; pool.string_count()];
 
             for param in tir.params.iter() {
@@ -818,6 +842,20 @@ impl<M: Module> Codegen<M> {
                                 cap: var_cap,
                             }),
                         );
+                    } else if matches!(pool.kind(param.ty), TypeKind::Struct) {
+                        // Struct inout pointee (M9): mutations happen in
+                        // place through the caller's slot — bind the
+                        // pointer directly and skip the write-back
+                        // table (there is nothing to store back).
+                        let var = builder.declare_var(int_type);
+                        builder.def_var(var, ptr);
+                        Self::write_slot(
+                            &mut struct_param_locals,
+                            &mut struct_locals_undo,
+                            param.name,
+                            Some(var),
+                        );
+                        continue;
                     } else {
                         let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                         let cur = builder.ins().load(cl_ty, MemFlagsData::trusted(), ptr, 0);
@@ -863,6 +901,19 @@ impl<M: Module> Codegen<M> {
                         }),
                     );
                     block_idx += 2;
+                } else if matches!(pool.kind(param.ty), TypeKind::Struct) {
+                    // Struct param (M9): a single pointer to the
+                    // caller-side slot (borrow) or to a transferred
+                    // field-wise copy (move/copy).
+                    let var = builder.declare_var(int_type);
+                    builder.def_var(var, builder.block_params(entry_block)[block_idx]);
+                    Self::write_slot(
+                        &mut struct_param_locals,
+                        &mut struct_locals_undo,
+                        param.name,
+                        Some(var),
+                    );
+                    block_idx += 1;
                 } else {
                     let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                     let var = builder.declare_var(cl_ty);
@@ -907,6 +958,8 @@ impl<M: Module> Codegen<M> {
                 fat_locals_undo,
                 view_locals: view_param_locals,
                 view_locals_undo,
+                struct_locals: struct_param_locals,
+                struct_locals_undo,
                 free_binding_names,
                 free_binding_param_names,
                 inout_ptrs,
@@ -938,6 +991,12 @@ impl<M: Module> Codegen<M> {
                         len: builder.use_var(locals.len),
                     };
                     ctx.param_values[idx] = Some(repr);
+                } else if matches!(pool.kind(param.ty), TypeKind::Struct) {
+                    let var = Self::read_slot(&ctx.struct_locals, param.name)
+                        .expect("every struct param gets a struct_locals entry above");
+                    ctx.param_values[idx] = Some(ValueRepr::Struct {
+                        addr: builder.use_var(var),
+                    });
                 }
             }
 
@@ -952,7 +1011,7 @@ impl<M: Module> Codegen<M> {
                 if is_main {
                     let zero = builder.ins().iconst(int_type, 0);
                     Self::emit_return(&mut builder, &mut ctx, &[zero])?;
-                } else if returns_fat || tir.return_type == pool.void() {
+                } else if has_sret || tir.return_type == pool.void() {
                     Self::emit_return(&mut builder, &mut ctx, &[])?;
                 } else {
                     let zero = builder.ins().iconst(int_type, 0);
@@ -1033,9 +1092,10 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Emit `stmts` with the slot tables scoped: every write the body
-    /// makes to `locals` / `fat_locals` / `view_locals` (and
-    /// `range_facts`) is rolled back on exit by replaying each table's
-    /// undo log down to the mark taken here. On `?` error nothing is
+    /// makes to `locals` / `fat_locals` / `view_locals` /
+    /// `struct_locals` (and `range_facts`) is rolled back on exit by
+    /// replaying each table's undo log down to the mark taken here.
+    /// On `?` error nothing is
     /// restored — the compile is abandoned anyway.
     fn emit_scoped_body(
         builder: &mut FunctionBuilder,
@@ -1045,6 +1105,7 @@ impl<M: Module> Codegen<M> {
         let locals_mark = ctx.locals_undo.len();
         let fat_locals_mark = ctx.fat_locals_undo.len();
         let view_locals_mark = ctx.view_locals_undo.len();
+        let struct_locals_mark = ctx.struct_locals_undo.len();
         let range_facts_mark = ctx.range_facts_undo.len();
         let terminator = Self::emit_body(builder, ctx, stmts)?;
         Self::restore_slots(&mut ctx.locals, &mut ctx.locals_undo, locals_mark);
@@ -1057,6 +1118,11 @@ impl<M: Module> Codegen<M> {
             &mut ctx.view_locals,
             &mut ctx.view_locals_undo,
             view_locals_mark,
+        );
+        Self::restore_slots(
+            &mut ctx.struct_locals,
+            &mut ctx.struct_locals_undo,
+            struct_locals_mark,
         );
         Self::restore_slots(
             &mut ctx.range_facts,
@@ -1192,6 +1258,9 @@ impl<M: Module> Codegen<M> {
                     );
                     return Ok(Terminator::None);
                 }
+                if matches!(ctx.pool.kind(inst.ty), TypeKind::Struct) {
+                    return Self::emit_struct_var_decl(builder, ctx, r);
+                }
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
                 // The variable's resolved type lives in the VarDecl
                 // inst's `ty` slot directly — no side-table lookup.
@@ -1229,6 +1298,8 @@ impl<M: Module> Codegen<M> {
                     builder.ins().store(MemFlagsData::trusted(), cap, sret, 16);
                     Self::emit_due_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[])?;
+                } else if matches!(ctx.pool.kind(ctx.tir.return_type), TypeKind::Struct) {
+                    return Self::emit_struct_return(builder, ctx, r, operand);
                 } else {
                     let val = Self::eval_inst(builder, ctx, operand)?;
                     Self::emit_due_frees(builder, ctx, r)?;
@@ -1265,6 +1336,11 @@ impl<M: Module> Codegen<M> {
                     let _ = Self::eval_inst_fat(builder, ctx, operand)?;
                 } else if ctx.pool.is_view(operand_ty) {
                     let _ = Self::eval_inst_view(builder, ctx, operand)?;
+                } else if matches!(ctx.pool.kind(operand_ty), TypeKind::Struct) {
+                    // Bare struct-valued statement (e.g. a discarded
+                    // struct-returning call): materialize so the call
+                    // is emitted; scheduled temp Frees handle the drop.
+                    let _ = Self::eval_inst_struct(builder, ctx, operand)?;
                 } else {
                     let _ = Self::eval_inst(builder, ctx, operand)?;
                 }
@@ -1331,6 +1407,9 @@ impl<M: Module> Codegen<M> {
                     builder.def_var(locals.len, len);
                     Self::kill_fact(ctx, view.name);
                     return Ok(Terminator::None);
+                }
+                if matches!(ctx.pool.kind(inst.ty), TypeKind::Struct) {
+                    return Self::emit_struct_assign(builder, ctx, r);
                 }
                 let val = Self::eval_inst(builder, ctx, view.value)?;
                 // Kill AFTER evaluating the RHS: `x = x + 1` must still
@@ -1458,10 +1537,9 @@ impl<M: Module> Codegen<M> {
                 builder.ins().jump(loop_ctx.continue_target, &[]);
                 Ok(Terminator::Continue)
             }
-            // M9 struct field assignment: graceful error until Task 9 wires codegen.
-            TirTag::FieldAssign | TirTag::CompoundFieldAssign => {
-                Err("struct field assignment is not yet implemented (M9 codegen)".to_string())
-            }
+            // M9 struct field assignment — lowered in codegen/structs.rs.
+            TirTag::FieldAssign => Self::emit_field_assign(builder, ctx, r),
+            TirTag::CompoundFieldAssign => Self::emit_compound_field_assign(builder, ctx, r),
             other => Err(format!(
                 "emit_stmt: instruction at %{} is not a statement (tag={:?})",
                 r.index(),

@@ -55,12 +55,13 @@ impl<M: Module> Codegen<M> {
                 // means a consumer forgot to gate through eval_inst_fat
                 // / eval_inst_view — reject loudly instead of silently
                 // handing out the data pointer.
-                ValueRepr::Str { .. } | ValueRepr::Bytes { .. } | ValueRepr::View { .. } => {
-                    Err(format!(
-                        "eval_inst: fat/view-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view",
-                        r.index()
-                    ))
-                }
+                ValueRepr::Str { .. }
+                | ValueRepr::Bytes { .. }
+                | ValueRepr::View { .. }
+                | ValueRepr::Struct { .. } => Err(format!(
+                    "eval_inst: fat/view/struct-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view / eval_inst_struct",
+                    r.index()
+                )),
             };
         }
         let inst = ctx.tir.inst(r);
@@ -377,6 +378,7 @@ impl<M: Module> Codegen<M> {
                     "codegen reached an Unreachable TIR inst — sema must have errored".to_string(),
                 );
             }
+            TirTag::FieldAccess => Self::eval_field_access_scalar(builder, ctx, r)?,
             other => {
                 return Err(format!(
                     "eval_inst: instruction at %{} is not a value (tag={:?})",
@@ -839,6 +841,11 @@ impl<M: Module> Codegen<M> {
         let mut bytes_free_ref: Option<FuncRef> = None;
         for (idx, target) in pending {
             ctx.freed_at[idx] = true;
+            // M9: struct-typed targets route to the recursive field
+            // drop; everything below is the str/bytes path.
+            if Self::try_emit_struct_free(builder, ctx, target)? {
+                continue;
+            }
             let is_bytes = Self::free_target_is_bytes(ctx, target);
             let binding = Self::free_binding_name(ctx, target)
                 .and_then(|name| Self::read_slot(&ctx.fat_locals, name));
@@ -896,6 +903,12 @@ impl<M: Module> Codegen<M> {
                         target.index()
                     ));
                 }
+                ValueRepr::Struct { .. } => {
+                    return Err(format!(
+                        "ownership pass scheduled Free for struct %{} but try_emit_struct_free did not claim it",
+                        target.index()
+                    ));
+                }
             }
         }
         ctx.pending_sweep.retain(|&idx| !ctx.freed_at[idx]);
@@ -924,6 +937,10 @@ impl<M: Module> Codegen<M> {
             let Some(name) = Self::free_binding_name(ctx, drop.target) else {
                 continue;
             };
+            // M9: struct bindings drop their needs-drop fields.
+            if Self::try_emit_struct_dead_drop(builder, ctx, name, drop.target)? {
+                continue;
+            }
             let Some(sl) = Self::read_slot(&ctx.fat_locals, name) else {
                 continue;
             };
@@ -1265,6 +1282,7 @@ impl<M: Module> Codegen<M> {
                     CapRule::LenIsCap,
                 )?
             }
+            TirTag::FieldAccess => Self::eval_field_access_fat(builder, ctx, r)?,
             TirTag::ViewAsOwner => {
                 let operand = match inst.data {
                     TirData::UnOp(o) => o,
@@ -1416,7 +1434,7 @@ impl<M: Module> Codegen<M> {
         match Self::eval_inst_fat(builder, ctx, r)? {
             ValueRepr::Str { ptr, len, .. } | ValueRepr::Bytes { ptr, len, .. } => Ok((ptr, len)),
             ValueRepr::View { ptr, len } => Ok((ptr, len)),
-            ValueRepr::Scalar(_) => Err(format!(
+            ValueRepr::Scalar(_) | ValueRepr::Struct { .. } => Err(format!(
                 "eval_str_or_view_parts: instruction at %{} is not a fat/view value",
                 r.index()
             )),
@@ -1526,7 +1544,7 @@ impl<M: Module> Codegen<M> {
         )
     }
 
-    fn emit_call(
+    pub(super) fn emit_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
@@ -1729,7 +1747,17 @@ impl<M: Module> Codegen<M> {
             })?;
             let arg_ty = ctx.tir.inst(*arg).ty;
             if mode == ParamMode::Inout {
-                if is_fat_type(arg_ty, ctx.pool) {
+                if matches!(ctx.tir.inst(*arg).data, TirData::FieldAccess { .. })
+                    || matches!(ctx.pool.kind(arg_ty), TypeKind::Struct)
+                {
+                    // M9 inout field path (`&p.x`) or whole-struct inout
+                    // (`&p`): the pointee already lives in the root
+                    // struct's stack slot — pass its address directly so
+                    // the callee mutates in place. No spill, no reload,
+                    // no write-back.
+                    let addr = Self::inout_pointee_addr(builder, ctx, *arg)?;
+                    arg_values.push(addr);
+                } else if is_fat_type(arg_ty, ctx.pool) {
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
                         STR_SLOT_SIZE,
@@ -1779,6 +1807,11 @@ impl<M: Module> Codegen<M> {
                 let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg)?;
                 arg_values.push(ptr);
                 arg_values.push(len);
+            } else if matches!(ctx.pool.kind(arg_ty), TypeKind::Struct) {
+                // M9 struct arg: a single slot address — the existing
+                // slot for Borrow, a fresh field-wise copy for Move/Copy.
+                let addr = Self::emit_struct_call_arg(builder, ctx, *arg, mode)?;
+                arg_values.push(addr);
             } else {
                 arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
             }
@@ -1838,6 +1871,24 @@ impl<M: Module> Codegen<M> {
             };
             Self::cache_repr(ctx, r, repr);
             return Ok(ptr); // dummy scalar — consumers use eval_inst_fat
+        }
+
+        if matches!(ctx.pool.kind(ret_ty), TypeKind::Struct) {
+            // M9 sret: allocate the struct's slot, prepend its address
+            // to the args, and treat the slot as the result (mirrors
+            // the fat sret path above).
+            let slot = Self::struct_slot(builder, ctx, ret_ty);
+            let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+            let mut all_args = Vec::with_capacity(arg_values.len() + 1);
+            all_args.push(out);
+            all_args.extend(arg_values);
+
+            builder.ins().call(callee_ref, &all_args);
+            Self::reload_inout_args(builder, ctx, &inout_reloads)?;
+
+            Self::cache_repr(ctx, r, ValueRepr::Struct { addr: out });
+            return Ok(out); // dummy scalar — consumers use eval_inst_struct
         }
 
         let call = builder.ins().call(callee_ref, &arg_values);
