@@ -63,7 +63,7 @@ pub struct OwnershipSidecar {
     pub functions: Vec<FunctionSidecar>,
 }
 
-/// Per-function ownership metadata. Owns the three TirRef-keyed maps
+/// Per-function ownership metadata. Owns the four TirRef-keyed maps
 /// that codegen consults during lowering. Created fresh by the
 /// ownership pass (`ryo-frontend`'s `check`, one per body, in order)
 /// and pushed onto the parent [`OwnershipSidecar`].
@@ -88,6 +88,14 @@ pub struct FunctionSidecar {
     /// (never param sentinels); `target` itself may be a param sentinel
     /// ref for `inout` params.
     pub free_on_reassign: Vec<Option<TirRef>>,
+    /// Field-reassignment Frees (M9). Dense side table indexed by the
+    /// `FieldAssign`/`CompoundFieldAssign` instruction's
+    /// `TirRef::index()`, sized like `free_on_reassign`. `Some(target)`
+    /// at slot `r` means: the field designated by the `target`
+    /// `FieldAccess` chain holds a needs-drop value that must be freed
+    /// *before* the new value is stored into it. Codegen (M9 Task 9)
+    /// walks the chain to compute the old field's address.
+    pub field_free_on_reassign: Vec<Option<TirRef>>,
     /// `BranchId` assignments per `IfStmt`. Dense side table indexed by
     /// the `IfStmt` instruction's `TirRef::index()` (slot 0 unused),
     /// sized to the owning function's TIR arena length. Codegen
@@ -112,6 +120,7 @@ impl FunctionSidecar {
             name,
             free_schedule: Vec::new(),
             free_on_reassign: vec![None; arena_len],
+            field_free_on_reassign: vec![None; arena_len],
             if_branches: vec![None; arena_len],
             conditional_dead_drops: Vec::new(),
         }

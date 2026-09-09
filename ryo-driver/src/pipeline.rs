@@ -329,6 +329,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::RedundantMaterialize => "W0003",
         DiagCode::UseAfterMove => "E0020",
         DiagCode::MoveOutOfBorrowedParam => "E0021",
+        DiagCode::MoveOutOfField => "E0043",
         DiagCode::ReturnBorrowedValue => "E0022",
         DiagCode::MoveWhileBorrowedInCall => "E0031",
         DiagCode::BorrowMismatch => "E0033",
@@ -705,6 +706,7 @@ mod tests {
             (DiagCode::DuplicateStructField, "E0040"),
             (DiagCode::NotAStruct, "E0041"),
             (DiagCode::ViewFieldType, "E0042"),
+            (DiagCode::MoveOutOfField, "E0043"),
             (DiagCode::ParseError, "E0100"),
             (DiagCode::TooManyDiagnostics, "E0101"),
             (DiagCode::InvalidCharacter, "E0102"),
@@ -760,6 +762,7 @@ mod tests {
                 | DiagCode::RedundantMaterialize
                 | DiagCode::UseAfterMove
                 | DiagCode::MoveOutOfBorrowedParam
+                | DiagCode::MoveOutOfField
                 | DiagCode::ReturnBorrowedValue
                 | DiagCode::MoveWhileBorrowedInCall
                 | DiagCode::BorrowMismatch

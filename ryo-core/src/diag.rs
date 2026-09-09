@@ -153,6 +153,9 @@ pub enum DiagCode {
     UseAfterMove,
     /// Attempted to move out of a borrowed parameter.
     MoveOutOfBorrowedParam,
+    /// Attempted to move a needs-drop field out of its struct (M9):
+    /// fields move only together with the whole struct value.
+    MoveOutOfField,
     /// Attempted to return a borrowed value (Rule 5).
     ReturnBorrowedValue,
     /// Attempted to move a value while it is borrowed as an argument in the same call.

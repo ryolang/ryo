@@ -2,6 +2,7 @@
 //! pin that `bytes` owners get the same P2/P4/P5 treatment as `str`.
 
 use super::*;
+use ryo_core::types::TypeKind;
 
 #[test]
 fn bytes_owner_classified_as_move_type() {

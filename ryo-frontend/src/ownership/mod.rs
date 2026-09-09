@@ -36,6 +36,8 @@ mod loops;
 pub(crate) use loops::*;
 mod merge;
 pub(crate) use merge::*;
+mod structs;
+pub(crate) use structs::*;
 mod views;
 pub(crate) use views::*;
 mod walk;
@@ -45,17 +47,18 @@ pub use ryo_core::ownership::{
     BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
 };
 use ryo_core::tir::{ParamMode, Span, Tir, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
+use ryo_core::types::{InternPool, StringId, TypeId};
 use std::collections::{HashMap, HashSet};
 
 // ---------- Classification ----------
 
 /// True for types whose values transfer ownership on `=` and must be
-/// tracked through the function body. Today: `str` and `bytes`
-/// (M8.4.2). Future heap types (`List[T]`, `Dict[K, V]`) will join
-/// this set.
+/// tracked through the function body: `str` and `bytes` (M8.4.2), plus
+/// non-Copy structs (M9) — a struct with at least one needs-drop field
+/// moves as a whole, fields and all. Future heap types (`List[T]`,
+/// `Dict[K, V]`) will join this set via `needs_drop` too.
 pub(crate) fn is_move_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(pool.kind(ty), TypeKind::Str | TypeKind::Bytes)
+    pool.needs_drop(ty)
 }
 
 /// Predicate the ownership walk uses to decide whether a `TirRef`
