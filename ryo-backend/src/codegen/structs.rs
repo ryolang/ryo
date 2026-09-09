@@ -645,6 +645,9 @@ impl<M: Module> Codegen<M> {
             return Ok(false);
         };
         let addr = builder.use_var(var);
+        // Conditional dead drops only fire for locals; a param-sentinel
+        // target would panic the arena index below.
+        debug_assert!(!target.is_param());
         let ty = ctx.tir.inst(target).ty;
         Self::emit_struct_drop(builder, ctx, addr, ty)?;
         Ok(true)

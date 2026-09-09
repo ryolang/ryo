@@ -93,7 +93,7 @@ pub struct FunctionSidecar {
     /// `TirRef::index()`, sized like `free_on_reassign`. `Some(target)`
     /// at slot `r` means: the field designated by the `target`
     /// `FieldAccess` chain holds a needs-drop value that must be freed
-    /// *before* the new value is stored into it. Codegen (M9 Task 9)
+    /// *before* the new value is stored into it. Codegen
     /// walks the chain to compute the old field's address.
     pub field_free_on_reassign: Vec<Option<TirRef>>,
     /// `BranchId` assignments per `IfStmt`. Dense side table indexed by

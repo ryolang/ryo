@@ -341,7 +341,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// (`branch: Some(_)`) entries are filtered through
     /// `branch_active`.
     sidecar: &'a ryo_core::ownership::FunctionSidecar,
-    /// Active arm stack for conditional destruction (Task 9). Each
+    /// Active arm stack for conditional destruction. Each
     /// entry is the `BranchId` of an enclosing if/elif/else arm
     /// currently being lowered. `branch_active` walks this stack to
     /// gate branch-tagged `FreePoint`s — `contains` (not `last()`)
@@ -380,7 +380,7 @@ impl<M: Module> Codegen<M> {
 /// Shared Cranelift flags for the AOT object pipeline.
 ///
 /// `enable_llvm_abi_extensions` is required for the packed-u128 string
-/// runtime ABI (Task-8): without it, Cranelift's x64 ABI panics on any
+/// runtime ABI: without it, Cranelift's x64 ABI panics on any
 /// signature containing an i128 ("i128 args/return values not supported
 /// unless LLVM ABI extensions are enabled", `isa/x64/abi.rs`). With it,
 /// an i128 is split into two i64 halves assigned as consecutive

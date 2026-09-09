@@ -871,7 +871,7 @@ impl<M: Module> Codegen<M> {
                 )
             })?;
             // M8.4: views are borrows, never owners — the ownership pass
-            // must never schedule a Free for one (Task 9 invariant). The
+            // must never schedule a Free for one. The
             // repr check below doubles as the release-mode guard.
             debug_assert!(
                 !matches!(repr, ValueRepr::View { .. }),

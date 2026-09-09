@@ -62,7 +62,7 @@ pub(crate) fn analyze_stmt(
             // owner_at_read, and a moved root trips E0020 there), then
             // moves the value into the field. When the field type
             // needs-drop, the OLD field value must be freed before the
-            // store — codegen (M9 Task 9) consults
+            // store — codegen consults
             // `field_free_on_reassign` and walks the target chain.
             let view = tir.field_assign_view(stmt);
             visit_expr(tir, pool, own, sink, sidecar, view.target);
@@ -187,7 +187,7 @@ pub(crate) fn analyze_assign(
         // current owner is Borrowed, yet the callee must drop the old
         // pointee when reassigning the param (the write-back ABI hands
         // the caller whatever triple the param holds at exit — like
-        // `*x = new` dropping the old value in Rust). Codegen (Task 8)
+        // `*x = new` dropping the old value in Rust). Codegen
         // consults this map when lowering Assign.
         if let Some(&old_owner) = own.current_owner.get(&view.name) {
             let old_droppable = match own.states.get(&old_owner) {

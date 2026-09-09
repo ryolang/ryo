@@ -167,6 +167,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
 
+### I-169 — Needs-drop self-assignment double-frees (`s = s`)
+
+**Files:** `ryo-frontend/src/ownership/walk.rs` (`analyze_assign` :171, plus exit/drain scheduling)
+**Summary:** Reassigning a needs-drop binding to itself double-frees. `mut s = dup("alice")` followed by `s = s` schedules the owner twice: `analyze_assign` captures the old owner and emits a `free_on_reassign` entry, while the reseated owner (the same allocation — the RHS read is the binding itself) is freed again at exit/drain. The emitted CLIF shows two consecutive `ryo_str_free` calls with identical (ptr, cap), and an ASan-linked binary aborts. The same shape double-frees for a whole-struct `p = p` where `p` holds a `str` field.
+**Resolution:** Skip the `free_on_reassign` entry when the RHS owner is the same owner as the reassign target's current owner (self-assignment is a no-op for liveness), or make the drain skip owners left in `Moved` state. Add an ASan regression test covering both the `str` and whole-struct shapes.
+
 ---
 
 ## 🟢 Cleanup
@@ -350,6 +356,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `docs/dev/` (`ryo-incremental-compilation.md`, `ryo-context-and-otel-proposal.md`, `ryo-std-data-proposal.md`, `ryo-proposal-review-issues.md`, `ryo-missing-features-and-gaps.md`, `ryo-view-materialization.md`, `ryo-slicing-and-memory-model-final-spec.md`, `ryo-compiler-llm-instructions.md`), plus every doc that links to them
 **Summary:** The repo convention is lowercase with underscores for docs (special files like `README.md` excepted). The eight `ryo-*-*.md` files under `docs/dev/` use hyphens instead. `NOTES.md` was renamed to `notes.md` as the cheap half of this cleanup; the hyphenated set was scoped out because each rename must also update every inbound link (`CLAUDE.md`, `ISSUES.md`, the roadmap, and the docs/dev README index at minimum).
 **Resolution:** One sweep: `git mv` each `ryo-*.md` to its underscore form, then repo-wide grep for each old basename to update links. Verify no residual references with a final grep for `ryo-.*\.md` across tracked markdown.
+
+### I-170 — Rule 7 does not flag Copy field reads overlapping an `inout` of the same root
+
+**Files:** `ryo-frontend/src/ownership/walk.rs` (the Copy-borrow Rule-7 arm, gated on `TirTag::Var` only, ~:949)
+**Summary:** The Rule-7 partition flags `f(&p.x, p)` (inout borrow of a root via a field plus a whole-root borrow in the same call) with E0032, but `f(&p.x, p.y)` — inout borrow of the root plus a Copy-typed field read of the same root in one call — passes unflagged. The Copy-borrow arm only records args whose tag is `TirTag::Var`; Copy field reads (`FieldAccess`) never join the overlap check. Not a soundness hole today: Copy args evaluate eagerly at the call site before any inout write-back, so the read cannot observe a torn value. It still contradicts the coarse root-freeze rule the rest of Rule 7 enforces, and would silently become load-bearing if call-arg evaluation order ever changed.
+**Resolution:** Extend the Copy-borrow arm to also record `FieldAccess` reads by resolving `struct_root` (mirroring the needs-drop field-read arm just below it), so the same-root overlap check fires for Copy field reads too — or document the Copy exemption as deliberate next to the arm.
 
 ---
 
