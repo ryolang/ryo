@@ -19,28 +19,30 @@ fn struct_define_construct_access_jit() {
 #[test]
 fn struct_field_mutation_jit() {
     // Field assignment and compound assignment through a `mut` binding.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "struct Point:\n\tx: float\n\nfn main():\n\tmut p = Point{x=1.0}\n\tp.x = 42.0\n\tp.x += 1.0\n\tprint(float_to_str(p.x))\n";
-    let test_file = create_test_file(temp_dir.path(), "struct_mut.ryo", code);
-    let output = run_ryo_command(&["run", "struct_mut.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\n43.0[Result]"),
-        "field mutation should print 43.0, got: {}",
-        stdout
+    assert_ryo_output(
+        "struct_mut",
+        "struct Point:\n\tx: float\n\nfn main():\n\tmut p = Point{x=1.0}\n\tp.x = 42.0\n\tp.x += 1.0\n\tprint(float_to_str(p.x))\n",
+        "43.0",
     );
 }
 
 #[test]
 fn struct_pass_and_return_jit() {
-    assert_ryo_runs(
+    assert_ryo_output(
         "struct_area",
         "struct Rectangle:\n\twidth: float\n\theight: float\n\nfn area(rect: Rectangle) -> float:\n\treturn rect.width * rect.height\n\nfn main():\n\tr = Rectangle{width=10.0, height=5.0}\n\tprint(float_to_str(area(r)))\n",
+        "50.0",
+    );
+}
+
+#[test]
+fn struct_return_end_to_end_jit() {
+    // A function returning a struct by value (sret ABI), field read
+    // on the returned value at the call site.
+    assert_ryo_output(
+        "struct_make",
+        "struct Point:\n\tx: float\n\nfn make() -> Point:\n\treturn Point{x=4.0}\n\nfn main():\n\tp = make()\n\tprint(float_to_str(p.x))\n",
+        "4.0",
     );
 }
 
@@ -54,9 +56,10 @@ fn struct_with_str_field_moves_and_drops_jit() {
 
 #[test]
 fn nested_struct_jit() {
-    assert_ryo_runs(
+    assert_ryo_output(
         "struct_nested",
         "struct Point:\n\tx: float\n\nstruct Line:\n\tstart: Point\n\tend: Point\n\nfn main():\n\tl = Line{start=Point{x=0.0}, end=Point{x=1.0}}\n\tprint(float_to_str(l.end.x))\n",
+        "1.0",
     );
 }
 
@@ -64,20 +67,10 @@ fn nested_struct_jit() {
 fn struct_field_inout_borrow_jit() {
     // A struct field is a valid `&` borrow target: the callee mutates
     // `p.x` in place through the inout write-back ABI.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "struct Point:\n\tx: float\n\nfn bump(inout v: float):\n\tv += 1.0\n\nfn main():\n\tmut p = Point{x=1.0}\n\tbump(&p.x)\n\tprint(float_to_str(p.x))\n";
-    let test_file = create_test_file(temp_dir.path(), "struct_inout_field.ryo", code);
-    let output = run_ryo_command(&["run", "struct_inout_field.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\n2.0[Result]"),
-        "inout field borrow should print 2.0, got: {}",
-        stdout
+    assert_ryo_output(
+        "struct_inout_field",
+        "struct Point:\n\tx: float\n\nfn bump(inout v: float):\n\tv += 1.0\n\nfn main():\n\tmut p = Point{x=1.0}\n\tbump(&p.x)\n\tprint(float_to_str(p.x))\n",
+        "2.0",
     );
 }
 

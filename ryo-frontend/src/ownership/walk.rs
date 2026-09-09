@@ -196,6 +196,15 @@ pub(crate) fn analyze_assign(
                 _ => false,
             };
             if old_droppable {
+                // Self-assignment (`s = s`, `p = p`): the RHS reads the
+                // same owner the target currently holds, so the reseat is
+                // a liveness no-op. Bail before scheduling anything —
+                // the free_on_reassign entry would free the allocation at
+                // the assign and the reseated owner (the same buffer)
+                // would be freed again at its last use.
+                if underlying_owner(own, view.value) == old_owner {
+                    return;
+                }
                 // P2 freeze (final spec §3.2): reassignment mutates the
                 // owner — illegal while a slice of it is live.
                 check_source_projected(

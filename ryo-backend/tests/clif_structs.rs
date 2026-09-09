@@ -99,6 +99,31 @@ fn struct_call_passes_pointer() {
         clif.contains("explicit_slot"),
         "struct arg must be stack-resident at the call site:\n{clif}"
     );
+    // The callee's own signature is one pointer in, one float out —
+    // not a per-field expansion.
+    assert!(
+        clif.contains("function u0:0(i64) -> f64"),
+        "area must take a single pointer argument:\n{clif}"
+    );
+    // The colocated callee ref is invoked with exactly one argument.
+    let callee = clif
+        .lines()
+        .find(|l| l.contains("= colocated u0:0 "))
+        .and_then(|l| l.split_whitespace().next())
+        .expect("colocated callee ref should exist");
+    let call_line = clif
+        .lines()
+        .find(|l| l.contains(&format!("call {callee}(")))
+        .expect("callee should be called");
+    let args = call_line
+        .split('(')
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .expect("call should have an argument list");
+    assert!(
+        !args.contains(','),
+        "struct call must pass exactly one pointer argument, got ({args}):\n{clif}"
+    );
 }
 
 #[test]
@@ -118,11 +143,25 @@ fn whole_struct_drop_frees_str_fields() {
 fn field_reassign_drops_old_str_value() {
     // `p.name = "bob"` over a live str field must free the old field
     // value before the store (field_free_on_reassign).
-    let obj = object_bytes(
-        "struct Person:\n\tname: str\n\nfn main():\n\tmut p = Person{name=\"alice\"}\n\tp.name = \"bob\"\n\tprint(p.name)\n",
-    );
+    let src = "struct Person:\n\tname: str\n\nfn main():\n\tmut p = Person{name=\"alice\"}\n\tp.name = \"bob\"\n\tprint(p.name)\n";
+    let obj = object_bytes(src);
     assert!(
         contains(&obj, b"ryo_str_free"),
         "field reassign must reference ryo_str_free"
+    );
+    // The symbol reference alone is ambiguous — the end-of-scope drop
+    // also references ryo_str_free. Pin the ordering instead: the
+    // reassign free is the one `call` immediately followed by the
+    // overwrite `store` into the struct slot.
+    let clif = clif_of(src);
+    let free_before_overwrite = clif
+        .lines()
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|w| w[0].starts_with("call fn") && w[1].starts_with("store "));
+    assert!(
+        free_before_overwrite,
+        "the old field value must be freed immediately before the overwrite store:\n{clif}"
     );
 }

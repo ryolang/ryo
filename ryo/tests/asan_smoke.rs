@@ -240,3 +240,16 @@ fn asan_struct_leak_check() {
         "struct_leak_check",
     );
 }
+
+#[test]
+fn asan_self_assign_str_no_double_free() {
+    run_asan_smoke(common::find_fixture("self_assign_str"), "self_assign_str");
+}
+
+#[test]
+fn asan_self_assign_struct_no_double_free() {
+    run_asan_smoke(
+        common::find_fixture("self_assign_struct"),
+        "self_assign_struct",
+    );
+}

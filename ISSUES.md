@@ -167,12 +167,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
 
-### I-169 — Needs-drop self-assignment double-frees (`s = s`)
-
-**Files:** `ryo-frontend/src/ownership/walk.rs` (`analyze_assign` :171, plus exit/drain scheduling)
-**Summary:** Reassigning a needs-drop binding to itself double-frees. `mut s = dup("alice")` followed by `s = s` schedules the owner twice: `analyze_assign` captures the old owner and emits a `free_on_reassign` entry, while the reseated owner (the same allocation — the RHS read is the binding itself) is freed again at exit/drain. The emitted CLIF shows two consecutive `ryo_str_free` calls with identical (ptr, cap), and an ASan-linked binary aborts. The same shape double-frees for a whole-struct `p = p` where `p` holds a `str` field.
-**Resolution:** Skip the `free_on_reassign` entry when the RHS owner is the same owner as the reassign target's current owner (self-assignment is a no-op for liveness), or make the drain skip owners left in `Moved` state. Add an ASan regression test covering both the `str` and whole-struct shapes.
-
 ---
 
 ## 🟢 Cleanup

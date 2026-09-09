@@ -481,13 +481,43 @@ fn main():
     (
         // M9: a struct owning a heap `str` field — destruction must
         // recurse into the field and free the buffer exactly once.
+        // `int_to_str` forces cap != 0 heap buffers leak detection can
+        // observe; the reassign exercises field_free_on_reassign, the
+        // `q = p` move the whole-struct ownership transfer.
         "struct_leak_check",
         "\
 struct Person:
 \tname: str
 
 fn main():
-\tp = Person{name=\"alice\"}
+\tmut p = Person{name=int_to_str(42)}
+\tp.name = int_to_str(7)
+\tq = p
+\tprint(q.name)
+",
+    ),
+    (
+        // Self-assignment of a needs-drop binding is a liveness no-op:
+        // no reassign Free, a single Free at the last use.
+        "self_assign_str",
+        "\
+fn main():
+\tmut s: str = int_to_str(42)
+\ts = s
+\tprint(s)
+",
+    ),
+    (
+        // Whole-struct self-assignment with a heap `str` field: the
+        // same no-op rule, recursive field destruction fires once.
+        "self_assign_struct",
+        "\
+struct Person:
+\tname: str
+
+fn main():
+\tmut p = Person{name=int_to_str(42)}
+\tp = p
 \tprint(p.name)
 ",
     ),
@@ -536,6 +566,27 @@ pub fn assert_ryo_runs(test_name: &str, code: &str) {
         output.status.success(),
         "STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Assert the program compiles, runs under JIT, and prints exactly
+/// `expected` — the runtime output between the `[Codegen]` marker and
+/// `[Result]` (`print` appends no newline, so multiple prints
+/// concatenate).
+pub fn assert_ryo_output(test_name: &str, code: &str, expected: &str) {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), test_name, code);
+    let output =
+        run_ryo_command(&["run", test_name], &test_file).expect("Failed to run ryo command");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("[Codegen]\n{expected}[Result]")),
+        "expected output {expected:?}, got stdout: {stdout}"
     );
 }
 

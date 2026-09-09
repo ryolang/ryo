@@ -489,6 +489,9 @@ fn analyze_struct_lit(
                     field_list(sema.pool, &sview),
                 ),
             ));
+            // Still analyze the initializer so diagnostics inside it
+            // (unknown names, type errors) are reported.
+            analyze_expr(sema, fcx, scope, value_ref);
             continue;
         };
         if by_index[field.idx as usize].is_some() {
@@ -500,6 +503,8 @@ fn analyze_struct_lit(
                     sema.pool.str(fname)
                 ),
             ));
+            // Same recovery: analyze the duplicate's initializer too.
+            analyze_expr(sema, fcx, scope, value_ref);
             continue;
         }
         let value = analyze_expr(sema, fcx, scope, value_ref);
