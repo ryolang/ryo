@@ -101,6 +101,7 @@ jobs:
           ./target/release/ryo build benchmarks/string_slicing/string_slicing.ryo
           ./target/release/ryo build benchmarks/mandelbrot/mandelbrot.ryo
           ./target/release/ryo build benchmarks/collatz/collatz.ryo
+          ./target/release/ryo build benchmarks/struct_records/struct_records.ryo
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:
@@ -134,6 +135,7 @@ jobs:
           ./target/release/ryo build benchmarks/string_slicing/string_slicing.ryo
           ./target/release/ryo build benchmarks/mandelbrot/mandelbrot.ryo
           ./target/release/ryo build benchmarks/collatz/collatz.ryo
+          ./target/release/ryo build benchmarks/struct_records/struct_records.ryo
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:
