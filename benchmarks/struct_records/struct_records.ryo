@@ -5,8 +5,10 @@ struct Person:
 fn make_person(i: int) -> Person:
 	return Person{name="user" + int_to_str(i), age=20 + i % 50}
 
-fn birthday(p: Person) -> Person:
-	return Person{name="user" + int_to_str(p.age), age=p.age + 1}
+fn birthday(move p: Person) -> Person:
+	mut q = p
+	q.age = q.age + 1
+	return q
 
 fn score(p: Person) -> int:
 	return p.name.len() + p.age
@@ -17,5 +19,5 @@ fn main():
 		p = make_person(i)
 		q = birthday(p)
 		total += score(q)
-	assert(total == 25750000, "struct_records checksum")
+	assert(total == 27638890, "struct_records checksum")
 	print("assert passed, struct_records is correct\n")

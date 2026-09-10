@@ -6,7 +6,7 @@ This directory contains various benchmarks used to measure, validate, and compar
 
 We target both execution speed and memory efficiency (specifically focusing on Ryo's Ahead-Of-Time AOT compiler via Cranelift and JIT execution).
 
-**Idiomatic convention:** every benchmark is written the way a developer would naturally write it in that language. Never adapt another language's implementation to work around something Ryo doesn't support yet (e.g. moving a field out of a struct) — the cost of Ryo's current limitations is part of what the suite measures. Where that makes workloads diverge, checksums are per-language and the benchmark's README must say so explicitly (see [`struct_records`](./struct_records/)).
+**Idiomatic convention:** every benchmark is written the way a developer would naturally write it in that language. Never adapt another language's implementation to work around something Ryo doesn't support yet (e.g. moving a field out of a struct) — the cost of Ryo's current limitations is part of what the suite measures. Where that makes workloads diverge, checksums are per-language and the benchmark's README must say so explicitly.
 
 **Checkpoint convention:** run the full suite before each release and after merging any change that touches generated-code shape (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption); record results in each benchmark's README so the trend is visible in git history. Every results table must include a **Version** column capturing each language toolchain's version at measurement time (`rustc --version`, `swiftc --version`, `python3 --version`, `ryo --version`) — timings without versions are not reproducible.
 
@@ -63,7 +63,7 @@ JIT and AOT land within noise of each other (~1.42–1.43×) because both share 
 
 ### 9. [Struct Records Benchmark](./struct_records/)
 
-* **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field, and measures the cost of Ryo's no-partial-move rule.
+* **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field. Ryo AOT currently beats Rust here; only Swift's small-string optimization keeps it ahead.
 * **Languages compared:** Rust, Swift, Python, and Ryo (AOT vs JIT).
 
 ---
