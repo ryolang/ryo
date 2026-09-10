@@ -167,6 +167,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
 
+### I-173 — Parse-error statements vanish in astgen, cascading a spurious `MissingReturn` (E0036)
+
+**Files:** `ryo-frontend/src/astgen.rs` (`StmtKind::Error` empty arms :167, :602), `ryo-core/src/ast.rs` (`StmtKind::Error` :319), `ryo-core/src/tir.rs` (`block_definitely_returns` and the `Unreachable` suppression :1604-1612)
+**Summary:** The parser recovers at statement boundaries by emitting `StmtKind::Error` placeholders (R10), and sema's return-flow analysis already suppresses cascading `MissingReturn` diagnostics for *sema-level* errors via the TIR `Unreachable` sentinel. The parse-error path leaks between those two mechanisms: astgen lowers `StmtKind::Error` to *nothing*, so a function whose only `return` failed to parse reaches sema with a body that genuinely ends without returning, and the user gets a bogus E0036 stacked on the real parse diagnostic (reproduced 2026-09-11: a typo'd `return Person{name=p.name, age=.age + 1}` produced E0100 at the typo *and* E0036 "missing return" on the function signature, pointing the user at the wrong place).
+**Resolution:** Lower `StmtKind::Error` to a UIR error/unreachable sentinel (or have sema treat it as one) so the existing TIR `Unreachable` rule suppresses `MissingReturn` for parse-broken bodies, matching the cascade suppression sema tests already enforce for sema-internal errors. Regression test: a function whose only return statement fails to parse yields exactly the parse diagnostic, no E0036.
+
 ---
 
 ## 🟢 Cleanup
