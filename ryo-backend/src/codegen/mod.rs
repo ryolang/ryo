@@ -35,6 +35,7 @@ use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::HashMap;
 use target_lexicon::Triple;
 
+mod arith;
 mod bytes;
 mod expr;
 mod ranges;

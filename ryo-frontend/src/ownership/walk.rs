@@ -955,18 +955,33 @@ pub(crate) fn visit_expr(
                         if let Some(root) = projection_root(own, tir, pool, *arg) {
                             push_unique(&mut view_borrowed, root);
                         }
-                    } else if mode == ParamMode::Borrow
-                        && matches!(tir.inst(*arg).tag, TirTag::Var | TirTag::FieldAccess)
-                    {
+                    } else if mode == ParamMode::Borrow {
                         // A Copy borrow is a no-op for liveness, but it still
-                        // aliases an `inout` of the same root in this call —
-                        // record Var and Copy field reads for the Rule 7
-                        // overlap check (`inout_owner` resolves a field read
-                        // to its struct root, so `f(&p.x, p.y)` collides the
-                        // same way `f(&p.x, p)` does).
+                        // aliases an `inout` of the same root in this call.
+                        // Record top-level Var reads by name, and every Copy
+                        // field read nested in the arg's expression — `f(&p.x,
+                        // p.y + 1.0)` collides the same way `f(&p.x, p)` does.
+                        // The walk stops at Call boundaries: a nested call's
+                        // args are that call's own Rule-7 partition, fully
+                        // evaluated before this call starts.
                         // (A Copy `move` arg is rejected by sema's RedundantMove,
                         // so only the Borrow arm is reachable from real code.)
-                        push_unique(&mut borrowed, inout_owner(own, tir, *arg));
+                        if matches!(tir.inst(*arg).tag, TirTag::Var) {
+                            push_unique(&mut borrowed, inout_owner(own, tir, *arg));
+                        }
+                        let mut stack = vec![*arg];
+                        while let Some(cur) = stack.pop() {
+                            let inst = tir.inst(cur);
+                            if matches!(inst.tag, TirTag::FieldAccess)
+                                && let Some(root) = struct_root(own, tir, cur)
+                            {
+                                push_unique(&mut borrowed, root);
+                            }
+                            if inst.tag == TirTag::Call {
+                                continue;
+                            }
+                            tir.walk_operands(cur, &mut |_, child, _| stack.push(child));
+                        }
                     }
                     continue;
                 }

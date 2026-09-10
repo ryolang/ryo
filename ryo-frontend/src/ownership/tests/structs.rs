@@ -177,3 +177,32 @@ fn inout_field_and_copy_field_read_different_roots_ok() {
         "no E0032 expected for different roots; got {diags:?}"
     );
 }
+
+#[test]
+fn inout_field_and_copy_field_read_inside_compound_expr_rejected() {
+    // f(&p.x, p.y + 1.0) — the Copy field read of root p is nested in a
+    // compound expression, not the top-level arg. Rule 7 must still
+    // discover it and collide with the inout borrow of the same root.
+    let src = "struct Point:\n\tx: float\n\ty: float\n\nfn f(inout a: float, b: float):\n\ta += b\n\nfn main():\n\tmut p = Point{x=1.0, y=2.0}\n\tf(&p.x, p.y + 1.0)\n\tprint(float_to_str(p.x))\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::MutableAliasingViolation),
+        "expected E0032 MutableAliasingViolation; got {diags:?}"
+    );
+}
+
+#[test]
+fn inout_field_and_nested_read_of_other_root_ok() {
+    // f(&p.x, q.y + 1.0) — the nested field read is of a DIFFERENT
+    // root: no overlap, must not fire.
+    let src = "struct Point:\n\tx: float\n\ty: float\n\nfn f(inout a: float, b: float):\n\ta += b\n\nfn main():\n\tmut p = Point{x=1.0, y=2.0}\n\tq = Point{x=3.0, y=4.0}\n\tf(&p.x, q.y + 1.0)\n\tprint(float_to_str(p.x))\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == DiagCode::MutableAliasingViolation),
+        "no E0032 expected for different roots; got {diags:?}"
+    );
+}
