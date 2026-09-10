@@ -71,6 +71,11 @@ JIT and AOT land within noise of each other (~1.42–1.43×) because both share 
 * **Focus:** The keep-original record update — same record, but the caller uses `p` again after `birthday`, so the update cannot consume it. Rust and Ryo pay an explicit clone, Swift/Go/Python share cheaply; tracking measure for the record-update ergonomics gap (I-172) and what `shared[T]` or a small-string optimization would buy.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
 
+### 11. [Struct Records Inout Benchmark](./struct_records_inout/)
+
+* **Focus:** Imperative update-in-place through a mutable borrow (`inout` / `&mut` / pointer / attribute store) — no new record, no clone, no sret. Verifies that choosing between inout and the consuming move+return form costs nothing, so the idiom choice can be driven by intent.
+* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+
 ---
 
 ## General Prerequisites
