@@ -59,6 +59,9 @@ pub enum DiagCode {
     /// `main` must be `fn main():` (no args, no return).
     /// Use the future `exit(code)` builtin for non-zero exit codes.
     MainSignature,
+    /// A struct contains itself, directly or transitively, as a
+    /// by-value field, so its size would be unbounded (M9).
+    InfiniteSize,
 
     // --- sema ---
     /// A user-defined function or variable uses the `__ryo_` prefix,
@@ -131,11 +134,28 @@ pub enum DiagCode {
     /// the body must end in `return` (or diverge via `never`).
     MissingReturn,
 
+    /// A struct literal initializer or field access names a field
+    /// the struct does not declare (M9).
+    UnknownField,
+    /// A struct literal omits one or more declared fields (M9).
+    MissingStructFields,
+    /// A struct literal initializes the same field twice (M9).
+    DuplicateStructField,
+    /// Field access (`x.f`) on a value whose type is not a struct
+    /// (M9).
+    NotAStruct,
+    /// A struct field declared with a view type (M9, Rule 6): struct
+    /// fields must be owned values, not projections.
+    ViewFieldType,
+
     // --- ownership (M8.1b) ---
     /// Use of a value after it has been moved.
     UseAfterMove,
     /// Attempted to move out of a borrowed parameter.
     MoveOutOfBorrowedParam,
+    /// Attempted to move a needs-drop field out of its struct (M9):
+    /// fields move only together with the whole struct value.
+    MoveOutOfField,
     /// Attempted to return a borrowed value (Rule 5).
     ReturnBorrowedValue,
     /// Attempted to move a value while it is borrowed as an argument in the same call.
@@ -170,6 +190,9 @@ pub enum DiagCode {
     /// Empty brackets `s[]`: the colon is mandatory for a slice, the
     /// expression for an index.
     EmptyBrackets,
+    /// A `struct` declaration whose body is missing: `struct Name:`
+    /// not followed by an indented field block (M9).
+    EmptyStructBody,
 
     /// Emitted by `DiagSink::into_diags` when the sink dropped
     /// diagnostics past `MAX_DIAGS`. Distinct from `ParseError` so
@@ -321,6 +344,8 @@ pub enum ParseDiag {
     RangeArity { found: usize },
     /// Empty brackets `s[]`.
     EmptyBrackets,
+    /// `struct Name:` with no indented field block (M9).
+    EmptyStructBody,
     /// Escape hatch for one-off messages (e.g. lexer diagnostics
     /// re-wrapped as parser errors in tests).
     Message(String),
@@ -332,6 +357,7 @@ impl ParseDiag {
             ParseDiag::ChainedComparison => DiagCode::ChainedComparison,
             ParseDiag::RangeArity { .. } => DiagCode::RangeArity,
             ParseDiag::EmptyBrackets => DiagCode::EmptyBrackets,
+            ParseDiag::EmptyStructBody => DiagCode::EmptyStructBody,
             ParseDiag::Message(_) => DiagCode::ParseError,
         }
     }
@@ -352,6 +378,10 @@ impl std::fmt::Display for ParseDiag {
             ParseDiag::EmptyBrackets => {
                 f.write_str("empty brackets: use s[i] to index or s[start:end] to slice")
             }
+            ParseDiag::EmptyStructBody => f.write_str(
+                "struct declaration has no fields: \
+                 indent at least one `name: type` field line",
+            ),
             ParseDiag::Message(msg) => f.write_str(msg),
         }
     }

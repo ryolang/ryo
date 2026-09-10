@@ -30,7 +30,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.4.1 — `strview` Spelling & View→`str` Re-borrow [alpha] ✅ COMPLETE](#milestone-841-strview-spelling--viewstr-re-borrow-alpha--complete)
 - [x] [Milestone 8.4.1.2 — View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE](#milestone-8412-view-materialization-strview--w0003-alpha--complete)
 - [x] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha] ✅ COMPLETE](#milestone-842-bytes-type--bytesview-alpha--complete)
-- [ ] [Milestone 9 — Structs](#milestone-9-structs)
+- [x] [Milestone 9 — Structs ✅ COMPLETE](#milestone-9-structs--complete)
 - [ ] [Milestone 9.1 — Synthesized Eq & Debug for Structs](#milestone-91-synthesized-eq--debug-for-structs)
 - [ ] [Milestone 10 — Tuples](#milestone-10-tuples)
 - [ ] [Milestone 11 — Enums (Algebraic Data Types) [alpha]](#milestone-11-enums-algebraic-data-types-alpha)
@@ -1315,9 +1315,11 @@ fn main():
 - Mutable view types remain rejected (final spec §12); mutable sub-ranges use `inout` + range parameters (Q4)
 - Dependencies: Milestone 8.4 (projection machinery, `TypeKind::View(ViewKind)`, slice codegen)
 
-### Milestone 9: Structs
+### Milestone 9: Structs ✅ COMPLETE
 
 **Goal:** Implement user-defined composite types with named fields
+
+**Status:** ✅ COMPLETE (2026-09-09)
 
 **Tasks:**
 

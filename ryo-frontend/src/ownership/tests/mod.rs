@@ -3,6 +3,7 @@ mod frees;
 mod inout;
 mod loops;
 mod merge;
+mod structs;
 mod views_basics;
 mod views_branches;
 mod views_bytes;

@@ -273,20 +273,53 @@ where
         .boxed()
 }
 
-fn assign_or_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+/// Assignment target: a bare identifier or a `.field` path rooted at
+/// one (`p`, `p.x`, `a.b.c`). The segments are folded into a
+/// `FieldAccess` chain by the caller; an empty segment list keeps the
+/// bare-identifier path byte-identical to before M9.
+fn assign_target_parser<'a, I>() -> impl Parser<'a, I, (Ident, Vec<Ident>), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     select! { Token::Ident(s) => s }
-        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident {
-            name: s,
-            span: e.span(),
-        })
+        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident::new(s, e.span()))
+        .then(
+            just(Token::Dot)
+                .ignore_then(
+                    select! { Token::Ident(f) => f }
+                        .map_with(|f, e: &mut Mx<'a, '_, I>| Ident::new(f, e.span())),
+                )
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+}
+
+/// Build the `FieldAccess` chain expression for a parsed assignment
+/// target. Only called when `fields` is non-empty.
+fn field_access_chain(ast: &mut Ast, root: Ident, fields: &[Ident]) -> ExprId {
+    let mut target = ast.ident(root.name, root.span);
+    for field in fields {
+        let span = SimpleSpan::new((), root.span.start..field.span.end);
+        target = ast.field_access(target, *field, span);
+    }
+    target
+}
+
+fn assign_or_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    assign_target_parser()
         .then_ignore(just(Token::Assign))
         .then(expression_parser())
-        .map_with(|(target, value), e: &mut Mx<'a, '_, I>| {
+        .map_with(|((target, fields), value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
-            e.state().assign_or_decl(target, value, span)
+            if fields.is_empty() {
+                e.state().assign_or_decl(target, value, span)
+            } else {
+                let chain = field_access_chain(e.state(), target, &fields);
+                e.state().field_assign(chain, value, span)
+            }
         })
         .boxed()
 }
@@ -303,16 +336,17 @@ where
         just(Token::PercentAssign).to(CompoundOp::Mod),
     ));
 
-    select! { Token::Ident(s) => s }
-        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident {
-            name: s,
-            span: e.span(),
-        })
+    assign_target_parser()
         .then(op)
         .then(expression_parser())
-        .map_with(|((target, op), value), e: &mut Mx<'a, '_, I>| {
+        .map_with(|(((target, fields), op), value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
-            e.state().compound_assign(target, op, value, span)
+            if fields.is_empty() {
+                e.state().compound_assign(target, op, value, span)
+            } else {
+                let chain = field_access_chain(e.state(), target, &fields);
+                e.state().compound_field_assign(chain, op, value, span)
+            }
         })
         .boxed()
 }
@@ -461,7 +495,65 @@ where
         .boxed()
 }
 
-/// Top-level statements: only function defs and var decls.
+/// A `struct` declaration: `struct Name:` followed by an indented
+/// block of `field: type` lines (M9).
+fn struct_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let field = select! { Token::Ident(name) => name }
+        .then_ignore(just(Token::Colon))
+        .then(type_expr_parser());
+
+    // Field lines mirror `statement_list`'s newline structure: at
+    // least one newline between fields, blank lines tolerated, and
+    // the block-final field may sit directly against the `Dedent`
+    // (files without a trailing newline).
+    let field_line = field.then_ignore(require_newlines().or(peek_terminator(Token::Dedent)));
+
+    // Same delimiting shape as `indented_block`: blank lines between
+    // the header and the body land *before* the `Indent`.
+    let body = skip_newlines()
+        .ignore_then(field_line.repeated().collect::<Vec<_>>())
+        .delimited_by(
+            skip_newlines().ignore_then(just(Token::Indent)),
+            just(Token::Dedent),
+        )
+        .map(Some);
+
+    // No indented block follows the header: the body is empty. Peek
+    // (consuming nothing) so the enclosing statement list still sees
+    // the line's newline tail; `validate` below emits the targeted
+    // diagnostic. A *malformed* indented block fails both
+    // alternatives and falls to statement recovery as a generic
+    // parse error instead of misreporting as an empty body.
+    let no_body = empty()
+        .and_is(require_newlines().then_ignore(just(Token::Indent).not()))
+        .to(None);
+
+    just(Token::Struct)
+        .ignore_then(
+            select! { Token::Ident(name) => name }
+                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
+        )
+        .then_ignore(just(Token::Colon))
+        .then(body.or(no_body))
+        .validate(|(name, fields), e: &mut Mx<'a, '_, I>, emitter| {
+            let fields = fields.unwrap_or_default();
+            if fields.is_empty() {
+                emitter.emit(Rich::custom(e.span(), ParseDiag::EmptyStructBody));
+            }
+            (name, fields)
+        })
+        .map_with(|(name, fields), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().struct_def(name, &fields, span)
+        })
+        .boxed()
+}
+
+/// Top-level statements: struct declarations, function defs, and
+/// var decls (plus bare expression statements for flat scripts).
 fn top_level_statement_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -475,7 +567,15 @@ where
         e.state().expr_stmt(expr, span)
     });
 
-    choice((function_def_parser(), var_decl_parser(), expr_stmt)).boxed()
+    // `struct` opens with a unique keyword, so trying it first is
+    // safe and keeps speculation cheap.
+    choice((
+        struct_decl_parser(),
+        function_def_parser(),
+        var_decl_parser(),
+        expr_stmt,
+    ))
+    .boxed()
 }
 
 fn statement_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
@@ -619,35 +719,85 @@ where
                     e.state().call(name, &args, span)
                 });
 
+            // Struct literal `Name{field=value, ...}` (M9). Both this
+            // and `call` open with `Ident`; the `{` vs `(` delimiter
+            // disambiguates, so the two alternatives cannot both
+            // consume input. Field order stays in source order —
+            // sema canonicalizes against the declaration.
+            let field_init = select! { Token::Ident(name) => name }
+                .then_ignore(just(Token::Assign))
+                .then(expr.clone());
+
+            let struct_literal = select! { Token::Ident(name) => name }
+                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+                .then(
+                    field_init
+                        .separated_by(just(Token::Comma))
+                        .allow_trailing()
+                        .collect::<Vec<_>>()
+                        .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+                )
+                .map_with(|(name, fields), e: &mut Mx<'a, '_, I>| {
+                    let span = e.span();
+                    e.state().struct_literal(name, &fields, span)
+                });
+
             let ident_expr =
                 select! { Token::Ident(name) => name }.map_with(|name, e: &mut Mx<'a, '_, I>| {
                     let span = e.span();
                     e.state().ident(name, span)
                 });
 
-            // `&ident` — call-site mutable-borrow marker (M8.3). Restricted to
-            // a bare identifier in v0.1; sema validates the target is an
-            // assignable lvalue (`mut` local or `inout` param).
-            let borrow = just(Token::Amp).ignore_then(ident_expr).map_with(
-                |inner, e: &mut Mx<'a, '_, I>| {
+            // `&ident` / `&ident.field...` — call-site mutable-borrow
+            // marker (M8.3, extended to field chains in M9). Field hops
+            // are folded INTO the borrow target (`&p.x` is `&(p.x)`,
+            // never `(&p).x`), so the outer postfix loop never sees
+            // them. Sema validates the target is an assignable lvalue
+            // (`mut` local or `inout` param at the chain's root).
+            let borrow = just(Token::Amp)
+                .ignore_then(ident_expr)
+                .then(
+                    just(Token::Dot)
+                        .ignore_then(
+                            select! { Token::Ident(name) => name }
+                                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
+                        )
+                        .repeated()
+                        .collect::<Vec<_>>(),
+                )
+                .map_with(|(inner, fields), e: &mut Mx<'a, '_, I>| {
                     let span = e.span();
-                    e.state().borrow(inner, span)
-                },
-            );
+                    let mut target = inner;
+                    for field in fields {
+                        let start = e.state().expr_span(target).start;
+                        target = e.state().field_access(
+                            target,
+                            field,
+                            SimpleSpan::new((), start..field.span.end),
+                        );
+                    }
+                    e.state().borrow(target, span)
+                });
 
             let parenthesized = expr
                 .clone()
                 .delimited_by(just(Token::LParen), just(Token::RParen));
 
-            borrow.or(call).or(ident_expr).or(literal).or(parenthesized)
+            borrow
+                .or(call)
+                .or(struct_literal)
+                .or(ident_expr)
+                .or(literal)
+                .or(parenthesized)
         };
 
-        // Postfix operators: method calls (`s.len()`), slice
-        // projections `s[start:end]` (M8.4), and scalar indexing
-        // `s[i]` (M8.4.2). Either slice bound may be omitted
-        // (`s[start:]`, `s[:end]`, `s[:]`); `s[]` is rejected.
+        // Postfix operators: method calls (`s.len()`), field access
+        // (`p.x`, M9), slice projections `s[start:end]` (M8.4), and
+        // scalar indexing `s[i]` (M8.4.2). Either slice bound may be
+        // omitted (`s[start:]`, `s[:end]`, `s[:]`); `s[]` is rejected.
         enum PostfixOp {
             Method(StringId, Vec<ExprId>, SimpleSpan),
+            Field(Ident, SimpleSpan),
             Slice(Option<ExprId>, Option<ExprId>, SimpleSpan),
             Index(ExprId, SimpleSpan),
         }
@@ -664,6 +814,16 @@ where
             .map_with(|(method, args), e: &mut Mx<'a, '_, I>| {
                 PostfixOp::Method(method, args, e.span())
             });
+
+        // Field access `p.x` (M9). Tried after `method_op`: the method
+        // rule has the longer required match (parens), so chumsky
+        // backtracks to this one when no `(` follows the name.
+        let field_op = just(Token::Dot)
+            .ignore_then(
+                select! { Token::Ident(name) => name }
+                    .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
+            )
+            .map_with(|field, e: &mut Mx<'a, '_, I>| PostfixOp::Field(field, e.span()));
 
         // One bracket parse, no speculation: the optional leading
         // expression is parsed exactly once, then `:` (slice) vs `]`
@@ -693,7 +853,7 @@ where
 
         let postfix = atom
             .foldl_with(
-                choice((method_op, bracket_op)).repeated(),
+                choice((method_op, field_op, bracket_op)).repeated(),
                 |receiver, op, e: &mut Mx<'a, '_, I>| {
                     let start = e.state().expr_span(receiver).start;
                     match op {
@@ -701,6 +861,11 @@ where
                             receiver,
                             method,
                             &args,
+                            SimpleSpan::new((), start..span.end),
+                        ),
+                        PostfixOp::Field(field, span) => e.state().field_access(
+                            receiver,
+                            field,
                             SimpleSpan::new((), start..span.end),
                         ),
                         PostfixOp::Slice(lo, hi, span) => {

@@ -2,11 +2,11 @@
 
 use super::{
     BranchState, Owner, OwnerState, Ownership, ReseatDrop, analyze_for_range, analyze_while_loop,
-    check_source_projected, consumed_binding_name, drain_dying_views, format_binding,
-    needs_tracking, owner_name_for_diag, owner_sort_key, param_idx, projection_root,
-    prune_branch_dead_projections, push_unique, record_return_epilogue,
+    check_field_move_out, check_source_projected, consume_struct_lit_fields, consumed_binding_name,
+    drain_dying_views, format_binding, needs_tracking, owner_name_for_diag, owner_sort_key,
+    param_idx, projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
     refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
-    rule7_owner_name,
+    rule7_owner_name, struct_root,
 };
 use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
@@ -55,6 +55,48 @@ pub(crate) fn analyze_stmt(
             // so those reads clear dead-store entries and record
             // owner_at_read like any other expression position.
             visit_expr(tir, pool, own, sink, sidecar, view.value);
+        }
+        TirTag::FieldAssign => {
+            // M9: `p.f = v` reads its root (liveness: the target-chain
+            // visit clears the root's dead-store entry and records
+            // owner_at_read, and a moved root trips E0020 there), then
+            // moves the value into the field. When the field type
+            // needs-drop, the OLD field value must be freed before the
+            // store — codegen consults
+            // `field_free_on_reassign` and walks the target chain.
+            let view = tir.field_assign_view(stmt);
+            visit_expr(tir, pool, own, sink, sidecar, view.target);
+            visit_expr(tir, pool, own, sink, sidecar, view.value);
+            if needs_tracking(inst.ty, pool) {
+                sidecar.field_free_on_reassign[stmt.index()] = Some(view.target);
+                let span = tir.span(stmt);
+                let consumed_name = consumed_binding_name(tir, view.value);
+                // P2 freeze (final spec §3.2): the consume moves the owner.
+                check_source_projected(
+                    tir,
+                    pool,
+                    own,
+                    sink,
+                    underlying_owner(own, view.value),
+                    span,
+                    "move",
+                    consumed_name,
+                );
+                consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name, stmt);
+            }
+        }
+        TirTag::CompoundFieldAssign => {
+            // M9: `p.f += v`. Sema rejects compound-assign on
+            // needs-drop fields (`str` supports no compound operator),
+            // but schedule the field free by the same rule as
+            // `FieldAssign` so a future relaxation is handled, not
+            // silently skipped.
+            let view = tir.compound_field_assign_view(stmt);
+            visit_expr(tir, pool, own, sink, sidecar, view.target);
+            visit_expr(tir, pool, own, sink, sidecar, view.value);
+            if needs_tracking(inst.ty, pool) {
+                sidecar.field_free_on_reassign[stmt.index()] = Some(view.target);
+            }
         }
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {
@@ -145,7 +187,7 @@ pub(crate) fn analyze_assign(
         // current owner is Borrowed, yet the callee must drop the old
         // pointee when reassigning the param (the write-back ABI hands
         // the caller whatever triple the param holds at exit — like
-        // `*x = new` dropping the old value in Rust). Codegen (Task 8)
+        // `*x = new` dropping the old value in Rust). Codegen
         // consults this map when lowering Assign.
         if let Some(&old_owner) = own.current_owner.get(&view.name) {
             let old_droppable = match own.states.get(&old_owner) {
@@ -154,6 +196,15 @@ pub(crate) fn analyze_assign(
                 _ => false,
             };
             if old_droppable {
+                // Self-assignment (`s = s`, `p = p`): the RHS reads the
+                // same owner the target currently holds, so the reseat is
+                // a liveness no-op. Bail before scheduling anything —
+                // the free_on_reassign entry would free the allocation at
+                // the assign and the reseated owner (the same buffer)
+                // would be freed again at its last use.
+                if underlying_owner(own, view.value) == old_owner {
+                    return;
+                }
                 // P2 freeze (final spec §3.2): reassignment mutates the
                 // owner — illegal while a slice of it is live.
                 check_source_projected(
@@ -326,7 +377,8 @@ pub(crate) fn underlying_owner(own: &Ownership, init: TirRef) -> Owner {
 /// read is its own SSA value. An unregistered name (a Copy-typed
 /// parameter, which the param loop skips) falls back to
 /// `Owner::Param(name)` — the correct per-binding key for exactly that
-/// case.
+/// case. A `FieldAccess` chain (M9) resolves to its ROOT owner: `&p.x`
+/// is the one mutable borrow of `p` for the call's duration.
 pub(crate) fn inout_owner(own: &Ownership, tir: &Tir, arg: TirRef) -> Owner {
     match tir.inst(arg).data {
         TirData::Var(name) => own
@@ -334,6 +386,9 @@ pub(crate) fn inout_owner(own: &Ownership, tir: &Tir, arg: TirRef) -> Owner {
             .get(&name)
             .copied()
             .unwrap_or(Owner::Param(name)),
+        TirData::FieldAccess { .. } => {
+            struct_root(own, tir, arg).unwrap_or_else(|| underlying_owner(own, arg))
+        }
         _ => underlying_owner(own, arg),
     }
 }
@@ -419,6 +474,8 @@ pub(crate) fn consume_for_assignment(
 /// move-typed Call argument). Walks back to the underlying owner,
 /// reads its state, and either:
 ///
+/// * a needs-drop `FieldAccess` operand is rejected outright
+///   (`MoveOutOfField`, M9 — fields move only with the whole struct),
 /// * `Valid` → stamp `Moved { moved_at: span }`, clear any pending
 ///   dead-store entry, and log a W0003 move-hazard at `site`,
 /// * `Borrowed` → emit E0021 or E0022 per `on_borrowed`,
@@ -437,6 +494,11 @@ pub(crate) fn consume_underlying(
     on_borrowed: BorrowedAction,
     site: TirRef,
 ) {
+    // M9: consuming a needs-drop field read moves only the field out
+    // of its struct — rejected; the struct's fields move as one.
+    if check_field_move_out(tir, pool, sink, operand, span) {
+        return;
+    }
     let underlying = underlying_owner(own, operand);
     let mut state = own
         .states
@@ -793,6 +855,23 @@ pub(crate) fn visit_expr(
                 }
             }
         }
+        // ---- Struct literal (M9) ----
+        // A needs-drop struct literal materializes a fresh owner, like
+        // `StrConst`. Its payload is `TirData::Extra`, so the
+        // `recurse_operands` catch-all deliberately does not descend —
+        // this arm is the ONLY walk of the field values, and the only
+        // place they are consumed (`Person{name=s}` MOVES `s`).
+        TirTag::StructLit => {
+            if needs_tracking(inst.ty, pool) {
+                own.states.insert(Owner::Inst(r), OwnerState::Valid);
+                Ownership::dense_set(&mut own.origin, r, None);
+                own.temp_owners.insert(Owner::Inst(r));
+            }
+            for &(_, value) in &tir.struct_lit_view(r).fields {
+                visit_expr(tir, pool, own, sink, sidecar, value);
+            }
+            consume_struct_lit_fields(tir, pool, own, sink, r);
+        }
         TirTag::Call => {
             // A str-returning call (e.g. `int_to_str`) is a producer.
             if needs_tracking(inst.ty, pool) {
@@ -876,14 +955,46 @@ pub(crate) fn visit_expr(
                         if let Some(root) = projection_root(own, tir, pool, *arg) {
                             push_unique(&mut view_borrowed, root);
                         }
-                    } else if mode == ParamMode::Borrow && matches!(tir.inst(*arg).tag, TirTag::Var)
-                    {
+                    } else if mode == ParamMode::Borrow {
                         // A Copy borrow is a no-op for liveness, but it still
-                        // aliases an `inout` of the same binding in this call —
-                        // record Var reads by name for the Rule 7 overlap check.
+                        // aliases an `inout` of the same root in this call.
+                        // Record every Var read and Copy field read in the
+                        // arg's expression — `f(&c, c + 1)` and `f(&p.x, p.y +
+                        // 1.0)` collide the same way `f(&c, c)` / `f(&p.x, p)`
+                        // do. The walk stops at Call boundaries: a nested
+                        // call's args are that call's own Rule-7 partition,
+                        // fully evaluated before this call starts.
                         // (A Copy `move` arg is rejected by sema's RedundantMove,
                         // so only the Borrow arm is reachable from real code.)
-                        push_unique(&mut borrowed, inout_owner(own, tir, *arg));
+                        let mut stack = vec![*arg];
+                        while let Some(cur) = stack.pop() {
+                            let inst = tir.inst(cur);
+                            match inst.tag {
+                                TirTag::Var => {
+                                    push_unique(&mut borrowed, inout_owner(own, tir, cur));
+                                }
+                                TirTag::FieldAccess => {
+                                    if let Some(root) = struct_root(own, tir, cur) {
+                                        push_unique(&mut borrowed, root);
+                                    }
+                                }
+                                TirTag::Call => continue,
+                                _ => {}
+                            }
+                            tir.walk_operands(cur, &mut |_, child, _| stack.push(child));
+                        }
+                    }
+                    continue;
+                }
+                // M9: a needs-drop field read in a borrow-mode argument
+                // borrows the ROOT struct owner for the call's duration
+                // (mirrors the E4 view rule above): moving the whole
+                // struct in the same call is E0031. The phase-1 visit
+                // already ran the use-after-move check on the chain's
+                // base read.
+                if mode == ParamMode::Borrow && matches!(tir.inst(*arg).tag, TirTag::FieldAccess) {
+                    if let Some(root) = struct_root(own, tir, *arg) {
+                        push_unique(&mut borrowed, root);
                     }
                     continue;
                 }
@@ -1008,13 +1119,18 @@ pub(crate) fn visit_expr(
                     // view re-borrowed into a `str` arg via ViewAsOwner
                     // borrows the view's ROOT owner — look through the
                     // conversion or the "borrowed here" note is lost.
-                    let arg_owner =
-                        if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::ViewAsOwner {
-                            projection_root(own, tir, pool, *arg)
-                                .unwrap_or_else(|| underlying_owner(own, *arg))
-                        } else {
-                            underlying_owner(own, *arg)
-                        };
+                    let arg_owner = if mode == ParamMode::Borrow
+                        && tir.inst(*arg).tag == TirTag::ViewAsOwner
+                    {
+                        projection_root(own, tir, pool, *arg)
+                            .unwrap_or_else(|| underlying_owner(own, *arg))
+                    } else if matches!(tir.inst(*arg).tag, TirTag::FieldAccess) {
+                        // M9: a field-read borrow aliases the ROOT
+                        // struct owner (see the phase-2 partition).
+                        struct_root(own, tir, *arg).unwrap_or_else(|| underlying_owner(own, *arg))
+                    } else {
+                        underlying_owner(own, *arg)
+                    };
                     if arg_owner == *owner {
                         match mode {
                             ParamMode::Borrow => borrow_span = Some(tir.span(*arg)),
@@ -1240,12 +1356,25 @@ pub(crate) fn recurse_operands(
                 }
             }
         }
+        TirData::FieldAccess { object, .. } => {
+            // M9: a field access reads its object (non-consuming,
+            // like a slice's base read). Field-level ownership rules
+            // live at the use sites, keyed on the chain's root owner:
+            // borrow-mode call args register the root in `structs.rs`
+            // (`struct_root`), consume sites reject needs-drop field
+            // reads via `check_field_move_out`.
+            visit_expr(tir, pool, own, sink, sidecar, object);
+            if needs_tracking(tir.inst(object).ty, pool) {
+                check_use_moved(tir, pool, own, sink, object, tir.span(object));
+            }
+        }
         // `Extra`-shaped instructions (VarDecl, Assign, Call,
-        // IfStmt, WhileLoop, ForRange, CompoundAssign) have
-        // bespoke decoders. Consumption logic lands in subsequent
-        // tasks; until then their operands are deliberately not
-        // descended into here so we avoid double-visits when those
-        // tasks introduce per-tag handling.
+        // IfStmt, WhileLoop, ForRange, CompoundAssign, FieldAssign,
+        // CompoundFieldAssign) have bespoke decoders and per-tag
+        // handling elsewhere; their operands are deliberately not
+        // descended into here so we avoid double-visits. `StructLit`
+        // (M9) is also `Extra`-shaped; its field values are walked and
+        // consumed by `visit_expr`'s `StructLit` arm, not here.
         TirData::Extra(_) => {}
         TirData::None
         | TirData::Int(_)

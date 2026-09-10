@@ -298,6 +298,27 @@ pub enum TirTag {
     /// `ty == pool.error_type()`. Codegen must never see one — the
     /// driver short-circuits on `sink.has_errors()`.
     Unreachable,
+
+    /// Struct literal `Name{field = value, ...}` (M9). Variable
+    /// payload in `extra` — see [`struct_lit_extra`]. Entries are in
+    /// canonical (declaration-order) field order; `TypedInst.ty` is
+    /// the struct type.
+    StructLit,
+
+    /// Field access `object.field` (M9). Payload in
+    /// `TirData::FieldAccess` (object + canonical field index);
+    /// `TypedInst.ty` is the field type.
+    FieldAccess,
+
+    /// Field-path assignment `p.x = v` (M9). Variable payload in
+    /// `extra` — see [`field_assign_extra`]; `TypedInst.ty` is the
+    /// field type.
+    FieldAssign,
+
+    /// Compound field-path assignment `p.x += v` (M9). Variable
+    /// payload in `extra` — see [`compound_field_assign_extra`];
+    /// `TypedInst.ty` is the field type.
+    CompoundFieldAssign,
 }
 
 // ---------- Per-argument call convention ----------
@@ -353,6 +374,12 @@ pub enum TirData {
         base: TirRef,
         start: Option<TirRef>,
         end: Option<TirRef>,
+    },
+    /// Field access (M9): object + canonical (declaration-order)
+    /// field index. Two 32-bit handles, so this stays inline.
+    FieldAccess {
+        object: TirRef,
+        field_index: u32,
     },
     Extra(ExtraRange),
 }
@@ -544,6 +571,47 @@ pub mod for_range_extra {
     pub const END: usize = 2;
     pub const BODY_COUNT: usize = 3;
     pub const BODY_START: usize = 4;
+}
+
+/// Layout in `extra` for [`TirTag::StructLit`] (M9):
+///
+/// ```text
+///   [0]         struct_ty: TypeId raw
+///   [1]         n_fields:  u32
+///   [2..2+2*n]  (field_index: u32, value: TirRef.raw()) pairs,
+///               sorted by field_index (canonical declaration order;
+///               literal field order is irrelevant after sema)
+/// ```
+pub mod struct_lit_extra {
+    pub const TY: usize = 0;
+    pub const N_FIELDS: usize = 1;
+    pub const FIELDS: usize = 2;
+}
+
+/// Layout in `extra` for [`TirTag::FieldAssign`] (M9):
+///
+/// ```text
+///   [0]  target: TirRef.raw() (FieldAccess chain)
+///   [1]  value:  TirRef.raw()
+/// ```
+pub mod field_assign_extra {
+    pub const TARGET: usize = 0;
+    pub const VALUE: usize = 1;
+    pub const LEN: usize = 2;
+}
+
+/// Layout in `extra` for [`TirTag::CompoundFieldAssign`] (M9):
+///
+/// ```text
+///   [0]  target: TirRef.raw() (FieldAccess chain)
+///   [1]  op:     u32 (CompoundOp discriminant)
+///   [2]  value:  TirRef.raw()
+/// ```
+pub mod compound_field_assign_extra {
+    pub const TARGET: usize = 0;
+    pub const OP: usize = 1;
+    pub const VALUE: usize = 2;
+    pub const LEN: usize = 3;
 }
 
 // ---------- Builder ----------
@@ -935,6 +1003,98 @@ impl TirBuilder {
         )
     }
 
+    /// Emit a `StructLit` (M9). `fields` are `(field_index, value)`
+    /// pairs in canonical (declaration) order — sema sorts before
+    /// calling. `ty` is the struct type.
+    pub fn struct_lit(&mut self, ty: TypeId, fields: &[(u32, TirRef)], span: Span) -> TirRef {
+        debug_assert!(
+            fields.windows(2).all(|w| w[0].0 < w[1].0),
+            "TirBuilder::struct_lit: fields must be sorted by field index"
+        );
+        let offset = self.extra_offset();
+        self.extra.push(ty.raw());
+        self.extra.push(Self::len_u32(fields.len()));
+        for &(idx, v) in fields {
+            self.extra.push(idx);
+            self.extra.push(v.raw());
+        }
+        let len = Self::len_u32(struct_lit_extra::FIELDS + 2 * fields.len());
+        self.push(
+            TirTag::StructLit,
+            ty,
+            TirData::Extra(ExtraRange { offset, len }),
+            span,
+        )
+    }
+
+    /// Emit a `FieldAccess` (M9). `field_index` is the canonical
+    /// declaration-order index; `ty` is the field type.
+    pub fn field_access(
+        &mut self,
+        object: TirRef,
+        field_index: u32,
+        ty: TypeId,
+        span: Span,
+    ) -> TirRef {
+        self.push(
+            TirTag::FieldAccess,
+            ty,
+            TirData::FieldAccess {
+                object,
+                field_index,
+            },
+            span,
+        )
+    }
+
+    /// Emit a `FieldAssign` `target = value` (M9); `ty` is the field
+    /// type.
+    pub fn field_assign(
+        &mut self,
+        target: TirRef,
+        value: TirRef,
+        ty: TypeId,
+        span: Span,
+    ) -> TirRef {
+        let offset = self.extra_offset();
+        self.extra.push(target.raw());
+        self.extra.push(value.raw());
+        self.push(
+            TirTag::FieldAssign,
+            ty,
+            TirData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(field_assign_extra::LEN),
+            }),
+            span,
+        )
+    }
+
+    /// Emit a `CompoundFieldAssign` `target op= value` (M9); `ty` is
+    /// the field type.
+    pub fn compound_field_assign(
+        &mut self,
+        target: TirRef,
+        op: CompoundOp,
+        ty: TypeId,
+        value: TirRef,
+        span: Span,
+    ) -> TirRef {
+        let offset = self.extra_offset();
+        self.extra.push(target.raw());
+        self.extra.push(op as u32);
+        self.extra.push(value.raw());
+        self.push(
+            TirTag::CompoundFieldAssign,
+            ty,
+            TirData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(compound_field_assign_extra::LEN),
+            }),
+            span,
+        )
+    }
+
     pub fn break_stmt(&mut self, ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::Break, ty, TirData::None, span)
     }
@@ -1016,6 +1176,13 @@ pub struct ForRangeView {
     pub start: TirRef,
     pub end: TirRef,
     pub body: Vec<TirRef>,
+}
+
+/// Decoded view of a [`TirTag::StructLit`] payload (M9). Fields are
+/// `(field_index, value)` pairs in canonical declaration order.
+pub struct StructLitView {
+    pub ty: TypeId,
+    pub fields: Vec<(u32, TirRef)>,
 }
 
 impl Tir {
@@ -1171,6 +1338,25 @@ impl Tir {
             body,
         }
     }
+
+    pub fn struct_lit_view(&self, r: TirRef) -> StructLitView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::StructLit));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("StructLit must carry TirData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let ty = TypeId::from_raw(slice[struct_lit_extra::TY]);
+        let n = slice[struct_lit_extra::N_FIELDS] as usize;
+        let fields = (0..n)
+            .map(|i| {
+                let base = struct_lit_extra::FIELDS + 2 * i;
+                (slice[base], TirRef::from_raw(slice[base + 1]))
+            })
+            .collect();
+        StructLitView { ty, fields }
+    }
 }
 
 fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<TirRef> {
@@ -1237,11 +1423,19 @@ impl Tir {
                     f(r, e, ChildKind::Operand);
                 }
             }
+            TirData::FieldAccess { object, .. } => {
+                f(r, object, ChildKind::Operand);
+            }
             TirData::Extra(_) => match inst.tag {
                 TirTag::Call => {
                     let view = self.call_view(r);
                     for &arg in &view.args {
                         f(r, arg, ChildKind::Operand);
+                    }
+                }
+                TirTag::StructLit => {
+                    for &(_, value) in &self.struct_lit_view(r).fields {
+                        f(r, value, ChildKind::Operand);
                     }
                 }
                 TirTag::VarDecl => {
@@ -1254,6 +1448,16 @@ impl Tir {
                 }
                 TirTag::CompoundAssign => {
                     let v = self.compound_assign_view(r);
+                    f(r, v.value, ChildKind::Operand);
+                }
+                TirTag::FieldAssign => {
+                    let v = self.field_assign_view(r);
+                    f(r, v.target, ChildKind::Operand);
+                    f(r, v.value, ChildKind::Operand);
+                }
+                TirTag::CompoundFieldAssign => {
+                    let v = self.compound_field_assign_view(r);
+                    f(r, v.target, ChildKind::Operand);
                     f(r, v.value, ChildKind::Operand);
                 }
                 TirTag::IfStmt => {
@@ -1651,6 +1855,25 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                 v.value.index()
             )
         }
+        (TirTag::FieldAssign, TirData::Extra(_)) => {
+            let v = tir.field_assign_view(r);
+            writeln!(
+                f,
+                "field_assign %{} = %{}",
+                v.target.index(),
+                v.value.index()
+            )
+        }
+        (TirTag::CompoundFieldAssign, TirData::Extra(_)) => {
+            let v = tir.compound_field_assign_view(r);
+            writeln!(
+                f,
+                "compound_field_assign %{} {} %{}",
+                v.target.index(),
+                v.op,
+                v.value.index()
+            )
+        }
         (TirTag::IfStmt, TirData::Extra(_)) => {
             let view = tir.if_stmt_view(r);
             write!(f, "if_stmt cond=%{}", view.cond.index())?;
@@ -1692,6 +1915,24 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
         }
         (TirTag::Break, TirData::None) => writeln!(f, "break"),
         (TirTag::Continue, TirData::None) => writeln!(f, "continue"),
+        (TirTag::StructLit, TirData::Extra(_)) => {
+            let view = tir.struct_lit_view(r);
+            write!(f, "struct_lit {} {{", pool.display(view.ty))?;
+            for (i, (idx, v)) in view.fields.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{idx}: %{}", v.index())?;
+            }
+            writeln!(f, "}}")
+        }
+        (
+            TirTag::FieldAccess,
+            TirData::FieldAccess {
+                object,
+                field_index,
+            },
+        ) => writeln!(f, "field_access %{}.{}", object.index(), field_index),
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
 }
@@ -1748,3 +1989,6 @@ fn un_op_name(t: TirTag) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+mod field_assign;
+pub use field_assign::{CompoundFieldAssignView, FieldAssignView};

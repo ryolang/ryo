@@ -231,6 +231,23 @@ pub enum InstTag {
     /// Scalar indexing `base[index]`; `InstData::BinOp` (lhs=base,
     /// rhs=index). Sema gates to bytes/bytesview (M8.4.2).
     Index,
+
+    /// Struct literal `Name{field=value, ...}` (M9). Variable payload
+    /// in `extra` — see [`struct_lit_extra`]. The field initializers
+    /// are in source order; sema canonicalizes them against the
+    /// declaration.
+    StructLit,
+
+    /// Field access `object.field` (M9); see [`InstData::FieldAccess`].
+    FieldAccess,
+
+    /// Field-path assignment `p.x = v` (M9). Variable payload in
+    /// `extra` — see [`field_assign_extra`].
+    FieldAssign,
+
+    /// Compound field-path assignment `p.x += v` (M9). Variable
+    /// payload in `extra` — see [`compound_field_assign_extra`].
+    CompoundFieldAssign,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -271,6 +288,12 @@ pub enum InstData {
         lhs: InstRef,
         rhs: InstRef,
     },
+    /// Field access `object.field` (M9). Two 32-bit handles, so this
+    /// stays inline — no `extra` arena needed.
+    FieldAccess {
+        object: InstRef,
+        field: StringId,
+    },
     /// Range into `extra` for variable-size payloads.
     Extra(ExtraRange),
 }
@@ -302,6 +325,31 @@ pub struct FuncBody {
     pub span: Span,
 }
 
+// ---------- Struct declarations (M9) ----------
+
+/// A struct declaration registered by astgen, with field types
+/// already resolved through the `InternPool`. Metadata, not an
+/// instruction: sema reads this table to type-check
+/// [`InstTag::StructLit`] / [`InstTag::FieldAccess`].
+#[derive(Debug, Clone)]
+pub struct UirStructDecl {
+    pub name: StringId,
+    /// The struct's nominal type, declared and defined in the pool
+    /// by astgen's two-phase pass.
+    pub ty: TypeId,
+    /// Fields in declaration order.
+    pub fields: Vec<UirStructField>,
+    pub span: Span,
+}
+
+/// One field of a [`UirStructDecl`].
+#[derive(Debug, Clone, Copy)]
+pub struct UirStructField {
+    pub name: StringId,
+    pub ty: TypeId,
+    pub span: Span,
+}
+
 // ---------- Top-level UIR ----------
 
 #[derive(Debug, Clone)]
@@ -310,6 +358,9 @@ pub struct Uir {
     pub extra: Vec<u32>,
     pub spans: Vec<Span>,
     pub func_bodies: Vec<FuncBody>,
+    /// Struct declarations in source order (M9). Side table — struct
+    /// decls lower to no instructions.
+    pub struct_decls: Vec<UirStructDecl>,
 }
 
 impl Default for Uir {
@@ -332,6 +383,7 @@ impl Uir {
             extra: Vec::new(),
             spans: vec![placeholder_span],
             func_bodies: Vec::new(),
+            struct_decls: Vec::new(),
         }
     }
 
@@ -463,6 +515,45 @@ pub mod for_range_extra {
     pub const END: usize = 2;
     pub const BODY_COUNT: usize = 3;
     pub const BODY_START: usize = 4;
+}
+
+/// Layout in `extra` for [`InstTag::StructLit`]:
+///
+/// ```text
+///   [0]  name:     StringId
+///   [1]  n_fields: u32
+///   [2..2+2*n]     per field: [field_name: StringId.raw(), value: InstRef.raw()]
+/// ```
+pub mod struct_lit_extra {
+    pub const NAME: usize = 0;
+    pub const NFIELDS: usize = 1;
+    pub const FIELDS: usize = 2;
+}
+
+/// Layout in `extra` for [`InstTag::FieldAssign`]:
+///
+/// ```text
+///   [0]  target: InstRef.raw() (FieldAccess chain)
+///   [1]  value:  InstRef.raw()
+/// ```
+pub mod field_assign_extra {
+    pub const TARGET: usize = 0;
+    pub const VALUE: usize = 1;
+    pub const LEN: usize = 2;
+}
+
+/// Layout in `extra` for [`InstTag::CompoundFieldAssign`]:
+///
+/// ```text
+///   [0]  target: InstRef.raw() (FieldAccess chain)
+///   [1]  op:     u32 (CompoundOp discriminant)
+///   [2]  value:  InstRef.raw()
+/// ```
+pub mod compound_field_assign_extra {
+    pub const TARGET: usize = 0;
+    pub const OP: usize = 1;
+    pub const VALUE: usize = 2;
+    pub const LEN: usize = 3;
 }
 
 // ---------- Builder ----------
@@ -827,6 +918,83 @@ impl UirBuilder {
             span,
         )
     }
+
+    /// Emits a `StructLit` with the struct name and the source-order
+    /// field initializers packed into `extra` (M9).
+    pub fn struct_lit(
+        &mut self,
+        name: StringId,
+        fields: &[(StringId, InstRef)],
+        span: Span,
+    ) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(name.raw());
+        self.uir.extra.push(Self::len_u32(fields.len()));
+        for &(fname, value) in fields {
+            self.uir.extra.push(fname.raw());
+            self.uir.extra.push(value.raw());
+        }
+        let len = Self::len_u32(struct_lit_extra::FIELDS + 2 * fields.len());
+        self.push(
+            InstTag::StructLit,
+            InstData::Extra(ExtraRange { offset, len }),
+            span,
+        )
+    }
+
+    /// Emits a `FieldAccess` `object.field` (M9).
+    pub fn field_access(&mut self, object: InstRef, field: StringId, span: Span) -> InstRef {
+        self.push(
+            InstTag::FieldAccess,
+            InstData::FieldAccess { object, field },
+            span,
+        )
+    }
+
+    /// Emits a `FieldAssign` `target = value` (M9); `target` is a
+    /// `FieldAccess` chain ref.
+    pub fn field_assign(&mut self, target: InstRef, value: InstRef, span: Span) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(target.raw());
+        self.uir.extra.push(value.raw());
+        self.push(
+            InstTag::FieldAssign,
+            InstData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(field_assign_extra::LEN),
+            }),
+            span,
+        )
+    }
+
+    /// Emits a `CompoundFieldAssign` `target op= value` (M9).
+    pub fn compound_field_assign(
+        &mut self,
+        target: InstRef,
+        op: CompoundOp,
+        value: InstRef,
+        span: Span,
+    ) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(target.raw());
+        self.uir.extra.push(op as u32);
+        self.uir.extra.push(value.raw());
+        self.push(
+            InstTag::CompoundFieldAssign,
+            InstData::Extra(ExtraRange {
+                offset,
+                len: Self::len_u32(compound_field_assign_extra::LEN),
+            }),
+            span,
+        )
+    }
+
+    /// Register a resolved struct declaration in the side table (M9).
+    /// Struct decls are metadata, not instructions — sema reads them
+    /// to check struct literals and field accesses.
+    pub fn add_struct_decl(&mut self, decl: UirStructDecl) {
+        self.uir.struct_decls.push(decl);
+    }
 }
 
 // ---------- Read-side helpers ----------
@@ -857,6 +1025,19 @@ pub struct CompoundAssignView {
     pub value: InstRef,
 }
 
+/// Decoded view of an [`InstTag::FieldAssign`] payload (M9).
+pub struct FieldAssignView {
+    pub target: InstRef,
+    pub value: InstRef,
+}
+
+/// Decoded view of an [`InstTag::CompoundFieldAssign`] payload (M9).
+pub struct CompoundFieldAssignView {
+    pub target: InstRef,
+    pub op: CompoundOp,
+    pub value: InstRef,
+}
+
 pub struct WhileLoopView {
     pub cond: InstRef,
     pub body: Vec<InstRef>,
@@ -874,6 +1055,13 @@ pub struct MethodCallView {
     pub receiver: InstRef,
     pub name: StringId,
     pub args: Vec<InstRef>,
+}
+
+/// Decoded view of an [`InstTag::StructLit`] payload. Field
+/// initializers are in source order.
+pub struct StructLitView {
+    pub name: StringId,
+    pub fields: Vec<(StringId, InstRef)>,
 }
 
 pub struct ElifView {
@@ -961,6 +1149,35 @@ impl Uir {
         }
     }
 
+    pub fn field_assign_view(&self, r: InstRef) -> FieldAssignView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::FieldAssign));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("FieldAssign must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        FieldAssignView {
+            target: InstRef::from_raw(slice[field_assign_extra::TARGET]),
+            value: InstRef::from_raw(slice[field_assign_extra::VALUE]),
+        }
+    }
+
+    pub fn compound_field_assign_view(&self, r: InstRef) -> CompoundFieldAssignView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::CompoundFieldAssign));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("CompoundFieldAssign must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        CompoundFieldAssignView {
+            target: InstRef::from_raw(slice[compound_field_assign_extra::TARGET]),
+            op: CompoundOp::from_raw(slice[compound_field_assign_extra::OP]),
+            value: InstRef::from_raw(slice[compound_field_assign_extra::VALUE]),
+        }
+    }
+
     pub fn while_loop_view(&self, r: InstRef) -> WhileLoopView {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::WhileLoop));
@@ -1021,6 +1238,27 @@ impl Uir {
             name,
             args,
         }
+    }
+
+    pub fn struct_lit_view(&self, r: InstRef) -> StructLitView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::StructLit));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("StructLit must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let name = StringId::from_raw(slice[struct_lit_extra::NAME]);
+        let n = slice[struct_lit_extra::NFIELDS] as usize;
+        let mut fields = Vec::with_capacity(n);
+        for i in 0..n {
+            let base = struct_lit_extra::FIELDS + 2 * i;
+            fields.push((
+                StringId::from_raw(slice[base]),
+                InstRef::from_raw(slice[base + 1]),
+            ));
+        }
+        StructLitView { name, fields }
     }
 
     pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView {
@@ -1102,6 +1340,15 @@ impl<'a> fmt::Display for UirDump<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let uir = self.uir;
         let pool = self.pool;
+
+        // Section 0: struct declarations (M9 side table).
+        for decl in &uir.struct_decls {
+            write!(f, "struct {}:", pool.str(decl.name))?;
+            for field in &decl.fields {
+                write!(f, " {}: {}", pool.str(field.name), pool.display(field.ty))?;
+            }
+            writeln!(f)?;
+        }
 
         // Section 1: per-function signature and the ordered list of
         // body-statement refs, so a reader can see what each function
@@ -1232,6 +1479,25 @@ fn write_inst(
                 v.value.index()
             )
         }
+        (InstTag::FieldAssign, InstData::Extra(_)) => {
+            let v = uir.field_assign_view(r);
+            writeln!(
+                f,
+                "field_assign %{} = %{}",
+                v.target.index(),
+                v.value.index()
+            )
+        }
+        (InstTag::CompoundFieldAssign, InstData::Extra(_)) => {
+            let v = uir.compound_field_assign_view(r);
+            writeln!(
+                f,
+                "compound_field_assign %{} {} %{}",
+                v.target.index(),
+                v.op,
+                v.value.index()
+            )
+        }
         (InstTag::WhileLoop, InstData::Extra(_)) => {
             let v = uir.while_loop_view(r);
             let body_refs: Vec<_> = v.body.iter().map(|b| format!("%{}", b.index())).collect();
@@ -1272,6 +1538,20 @@ fn write_inst(
         }
         (InstTag::Break, InstData::None) => writeln!(f, "break"),
         (InstTag::Continue, InstData::None) => writeln!(f, "continue"),
+        (InstTag::StructLit, InstData::Extra(_)) => {
+            let view = uir.struct_lit_view(r);
+            write!(f, "struct_lit {} {{", pool.str(view.name))?;
+            for (i, (fname, v)) in view.fields.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}: %{}", pool.str(*fname), v.index())?;
+            }
+            writeln!(f, "}}")
+        }
+        (InstTag::FieldAccess, InstData::FieldAccess { object, field }) => {
+            writeln!(f, "field_access %{}.{}", object.index(), pool.str(field))
+        }
         (InstTag::Borrow, InstData::Borrow(inner)) => {
             writeln!(f, "borrow %{}", inner.index())
         }
@@ -1535,6 +1815,43 @@ mod tests {
         let view = uir.assign_or_decl_view(assign_or_decl);
         assert_eq!(view.name, x);
         assert_eq!(view.value, value);
+    }
+
+    #[test]
+    fn struct_lit_round_trips_through_extra() {
+        let mut pool = InternPool::new();
+        let point = pool.intern_str("Point");
+        let x = pool.intern_str("x");
+        let y = pool.intern_str("y");
+
+        let mut b = UirBuilder::new();
+        let one = b.float_literal(1.0, sp());
+        let two = b.float_literal(2.0, sp());
+        let lit = b.struct_lit(point, &[(x, one), (y, two)], sp());
+
+        let uir = b.finish();
+        let view = uir.struct_lit_view(lit);
+        assert_eq!(view.name, point);
+        assert_eq!(view.fields, vec![(x, one), (y, two)]);
+    }
+
+    #[test]
+    fn field_access_round_trips() {
+        let mut pool = InternPool::new();
+        let x = pool.intern_str("x");
+
+        let mut b = UirBuilder::new();
+        let obj = b.var_ref(x, sp());
+        let access = b.field_access(obj, x, sp());
+
+        let uir = b.finish();
+        match uir.inst(access).data {
+            InstData::FieldAccess { object, field } => {
+                assert_eq!(object, obj);
+                assert_eq!(field, x);
+            }
+            other => panic!("expected FieldAccess data, got {:?}", other),
+        }
     }
 
     #[test]

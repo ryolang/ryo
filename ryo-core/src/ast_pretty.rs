@@ -66,11 +66,14 @@ fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
     let label = match stmt.kind {
         StmtKind::VarDecl(_) => "VarDecl",
         StmtKind::FunctionDef(_) => "FunctionDef",
+        StmtKind::StructDef(_) => "StructDef",
         StmtKind::Return(_) => "Return",
         StmtKind::ExprStmt(_) => "ExprStmt",
         StmtKind::IfStmt(_) => "IfStmt",
         StmtKind::AssignOrDecl { .. } => "AssignOrDecl",
         StmtKind::CompoundAssign { .. } => "CompoundAssign",
+        StmtKind::FieldAssign { .. } => "FieldAssign",
+        StmtKind::CompoundFieldAssign { .. } => "CompoundFieldAssign",
         StmtKind::WhileLoop { .. } => "WhileLoop",
         StmtKind::ForRange { .. } => "ForRange",
         StmtKind::Break => "Break",
@@ -113,6 +116,20 @@ fn write_stmt_children(
     match &ast.stmt(stmt).kind {
         StmtKind::VarDecl(decl) => write_var_decl(out, ast, decl, prefix, pool),
         StmtKind::FunctionDef(func) => write_function_def(out, ast, func, prefix, pool),
+        StmtKind::StructDef(def) => {
+            writeln!(out, "{}StructDef: {}", prefix, pool.str(def.name.name))?;
+            let inner = format!("{}  ", prefix);
+            for (field_name, field_ty) in ast.struct_field_decls(def.fields) {
+                writeln!(
+                    out,
+                    "{}├── field: {}: {}",
+                    inner,
+                    pool.str(*field_name),
+                    pool.str(field_ty.name)
+                )?;
+            }
+            Ok(())
+        }
         StmtKind::Return(value) => {
             if let Some(e) = value {
                 write_expr(out, ast, *e, prefix, true, "", pool)?;
@@ -136,6 +153,18 @@ fn write_stmt_children(
             )?;
             let inner = format!("{}  ", prefix);
             write_expr(out, ast, *value, &inner, true, "", pool)
+        }
+        StmtKind::FieldAssign { target, value } => {
+            writeln!(out, "{}FieldAssign", prefix)?;
+            let inner = format!("{}  ", prefix);
+            write_expr(out, ast, *target, &inner, false, "target: ", pool)?;
+            write_expr(out, ast, *value, &inner, true, "value: ", pool)
+        }
+        StmtKind::CompoundFieldAssign { target, op, value } => {
+            writeln!(out, "{}CompoundFieldAssign: {:?}", prefix, op)?;
+            let inner = format!("{}  ", prefix);
+            write_expr(out, ast, *target, &inner, false, "target: ", pool)?;
+            write_expr(out, ast, *value, &inner, true, "value: ", pool)
         }
         StmtKind::WhileLoop { cond, body } => {
             writeln!(out, "{}WhileLoop", prefix)?;
@@ -322,6 +351,12 @@ fn write_expr(
         ExprKind::Borrow(_) => Cow::Borrowed("Borrow"),
         ExprKind::Slice { .. } => Cow::Borrowed("Slice"),
         ExprKind::Index { .. } => Cow::Borrowed("Index"),
+        ExprKind::StructLiteral(lit) => {
+            Cow::Owned(format!("StructLiteral({})", pool.str(lit.name.name)))
+        }
+        ExprKind::FieldAccess { field, .. } => {
+            Cow::Owned(format!("FieldAccess(.{})", pool.str(field.name)))
+        }
     };
 
     writeln!(
@@ -368,6 +403,25 @@ fn write_expr(
         ExprKind::Index { base, index } => {
             write_expr(out, ast, base, &new_prefix, false, "base: ", pool)?;
             write_expr(out, ast, index, &new_prefix, true, "index: ", pool)
+        }
+        ExprKind::StructLiteral(lit) => {
+            let fields = ast.struct_field_inits(lit.fields);
+            for (i, (name, value)) in fields.iter().enumerate() {
+                let label = format!("{}: ", pool.str(*name));
+                write_expr(
+                    out,
+                    ast,
+                    *value,
+                    &new_prefix,
+                    i == fields.len() - 1,
+                    &label,
+                    pool,
+                )?;
+            }
+            Ok(())
+        }
+        ExprKind::FieldAccess { object, .. } => {
+            write_expr(out, ast, object, &new_prefix, true, "object: ", pool)
         }
     }
 }

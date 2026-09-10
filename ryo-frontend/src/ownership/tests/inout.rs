@@ -522,3 +522,33 @@ fn inout_call_inside_loop_no_false_dead_store() {
         sc.free_schedule
     );
 }
+
+#[test]
+fn inout_and_nested_copy_var_read_same_owner_rejected() {
+    // f(&c, c + 1) — the Copy read of `c` is nested in a compound
+    // expression, not the top-level arg. Rule 7 must still collide it
+    // with the inout borrow of the same binding.
+    let src = "fn f(inout a: int, b: int):\n\ta += b\n\nfn main():\n\tmut c = 1\n\tf(&c, c + 1)\n\tprint(int_to_str(c))\n";
+    let diags = check_src(src);
+    let e0032_count = diags
+        .iter()
+        .filter(|d| matches!(d.code, DiagCode::MutableAliasingViolation))
+        .count();
+    assert_eq!(
+        e0032_count, 1,
+        "Expected exactly one MutableAliasingViolation (E0032) for f(&c, c + 1); got {diags:?}"
+    );
+}
+
+#[test]
+fn inout_and_nested_copy_var_read_other_binding_ok() {
+    // f(&c, d + 1) — nested read of a DIFFERENT binding: no overlap.
+    let src = "fn f(inout a: int, b: int):\n\ta += b\n\nfn main():\n\tmut c = 1\n\td = 2\n\tf(&c, d + 1)\n\tprint(int_to_str(c))\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == DiagCode::MutableAliasingViolation),
+        "no E0032 expected for a different binding; got {diags:?}"
+    );
+}

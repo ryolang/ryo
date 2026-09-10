@@ -307,6 +307,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::NestedFunctionDef => "E0002",
         DiagCode::TopLevelWithExplicitMain => "E0003",
         DiagCode::MainSignature => "E0004",
+        DiagCode::InfiniteSize => "E0005",
         DiagCode::UndefinedVariable => "E0010",
         DiagCode::UndefinedFunction => "E0011",
         DiagCode::TypeMismatch => "E0012",
@@ -328,6 +329,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::RedundantMaterialize => "W0003",
         DiagCode::UseAfterMove => "E0020",
         DiagCode::MoveOutOfBorrowedParam => "E0021",
+        DiagCode::MoveOutOfField => "E0043",
         DiagCode::ReturnBorrowedValue => "E0022",
         DiagCode::MoveWhileBorrowedInCall => "E0031",
         DiagCode::BorrowMismatch => "E0033",
@@ -338,10 +340,16 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::CycleInResolution => "E0016",
         DiagCode::MissingReturn => "E0036",
         DiagCode::DivisionByZero => "E0037",
+        DiagCode::UnknownField => "E0038",
+        DiagCode::MissingStructFields => "E0039",
+        DiagCode::DuplicateStructField => "E0040",
+        DiagCode::NotAStruct => "E0041",
+        DiagCode::ViewFieldType => "E0042",
         DiagCode::ParseError => "E0100",
         DiagCode::ChainedComparison => "E0104",
         DiagCode::RangeArity => "E0105",
         DiagCode::EmptyBrackets => "E0106",
+        DiagCode::EmptyStructBody => "E0107",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -664,6 +672,7 @@ mod tests {
             (DiagCode::NestedFunctionDef, "E0002"),
             (DiagCode::TopLevelWithExplicitMain, "E0003"),
             (DiagCode::MainSignature, "E0004"),
+            (DiagCode::InfiniteSize, "E0005"),
             (DiagCode::UndefinedVariable, "E0010"),
             (DiagCode::UndefinedFunction, "E0011"),
             (DiagCode::TypeMismatch, "E0012"),
@@ -692,6 +701,12 @@ mod tests {
             (DiagCode::SourceProjected, "E0035"),
             (DiagCode::MissingReturn, "E0036"),
             (DiagCode::DivisionByZero, "E0037"),
+            (DiagCode::UnknownField, "E0038"),
+            (DiagCode::MissingStructFields, "E0039"),
+            (DiagCode::DuplicateStructField, "E0040"),
+            (DiagCode::NotAStruct, "E0041"),
+            (DiagCode::ViewFieldType, "E0042"),
+            (DiagCode::MoveOutOfField, "E0043"),
             (DiagCode::ParseError, "E0100"),
             (DiagCode::TooManyDiagnostics, "E0101"),
             (DiagCode::InvalidCharacter, "E0102"),
@@ -699,6 +714,7 @@ mod tests {
             (DiagCode::ChainedComparison, "E0104"),
             (DiagCode::RangeArity, "E0105"),
             (DiagCode::EmptyBrackets, "E0106"),
+            (DiagCode::EmptyStructBody, "E0107"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -724,6 +740,7 @@ mod tests {
                 | DiagCode::NestedFunctionDef
                 | DiagCode::TopLevelWithExplicitMain
                 | DiagCode::MainSignature
+                | DiagCode::InfiniteSize
                 | DiagCode::UndefinedVariable
                 | DiagCode::UndefinedFunction
                 | DiagCode::TypeMismatch
@@ -745,6 +762,7 @@ mod tests {
                 | DiagCode::RedundantMaterialize
                 | DiagCode::UseAfterMove
                 | DiagCode::MoveOutOfBorrowedParam
+                | DiagCode::MoveOutOfField
                 | DiagCode::ReturnBorrowedValue
                 | DiagCode::MoveWhileBorrowedInCall
                 | DiagCode::BorrowMismatch
@@ -754,11 +772,17 @@ mod tests {
                 | DiagCode::SourceProjected
                 | DiagCode::MissingReturn
                 | DiagCode::DivisionByZero
+                | DiagCode::UnknownField
+                | DiagCode::MissingStructFields
+                | DiagCode::DuplicateStructField
+                | DiagCode::NotAStruct
+                | DiagCode::ViewFieldType
                 | DiagCode::CycleInResolution
                 | DiagCode::ParseError
                 | DiagCode::ChainedComparison
                 | DiagCode::RangeArity
                 | DiagCode::EmptyBrackets
+                | DiagCode::EmptyStructBody
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape

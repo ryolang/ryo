@@ -18,6 +18,7 @@ These compile and run with the current compiler.
 | [hello_world_str.ryo](hello_world_str.ryo) | `str` parameters, string concatenation |
 | [ownership.ryo](ownership.ryo) | Ownership: implicit borrow, `inout` + `&`, `move` |
 | [string_slices.ryo](string_slices.ryo) | `strview` slices, view parameters, zero-copy scanning, P4 lift |
+| [structs.ryo](structs.ryo) | Struct declaration, brace construction, field access/mutation |
 
 ### Running
 

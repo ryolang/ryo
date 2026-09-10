@@ -1,5 +1,6 @@
 //! Expression evaluation and call emission — split from `mod.rs`; see module docs there.
 
+use super::arith::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MSG};
 use super::bytes::store_string;
 use super::{
     Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, ValueRepr, cranelift_type_for,
@@ -9,18 +10,10 @@ use cranelift::codegen::ir::{
     BlockArg, FuncRef, InstructionData, MemFlagsData, Opcode, StackSlot, ValueDef,
 };
 use cranelift::prelude::*;
-use cranelift_module::{DataDescription, DataId, Linkage, Module};
+use cranelift_module::{Linkage, Module};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind, ViewKind};
 use std::collections::HashMap;
-
-/// Zero-divisor guard messages, written verbatim by `ryo_panic`
-/// (raw bytes, trailing newline — same convention as the runtime's
-/// slice-failure messages).
-pub(crate) const DIV_ZERO_MSG: &str = "integer division by zero\n";
-pub(crate) const MOD_ZERO_MSG: &str = "integer modulo by zero\n";
-pub(crate) const DIV_OVERFLOW_MSG: &str = "integer division overflow\n";
-pub(crate) const MOD_OVERFLOW_MSG: &str = "integer modulo overflow\n";
 
 /// Cap derivation for the packed-u128 runtime string/bytes ABI (Phase 0):
 /// string-producing runtime functions return `{ptr, len}` packed in
@@ -55,12 +48,13 @@ impl<M: Module> Codegen<M> {
                 // means a consumer forgot to gate through eval_inst_fat
                 // / eval_inst_view — reject loudly instead of silently
                 // handing out the data pointer.
-                ValueRepr::Str { .. } | ValueRepr::Bytes { .. } | ValueRepr::View { .. } => {
-                    Err(format!(
-                        "eval_inst: fat/view-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view",
-                        r.index()
-                    ))
-                }
+                ValueRepr::Str { .. }
+                | ValueRepr::Bytes { .. }
+                | ValueRepr::View { .. }
+                | ValueRepr::Struct { .. } => Err(format!(
+                    "eval_inst: fat/view/struct-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view / eval_inst_struct",
+                    r.index()
+                )),
             };
         }
         let inst = ctx.tir.inst(r);
@@ -377,6 +371,7 @@ impl<M: Module> Codegen<M> {
                     "codegen reached an Unreachable TIR inst — sema must have errored".to_string(),
                 );
             }
+            TirTag::FieldAccess => Self::eval_field_access_scalar(builder, ctx, r)?,
             other => {
                 return Err(format!(
                     "eval_inst: instruction at %{} is not a value (tag={:?})",
@@ -405,252 +400,6 @@ impl<M: Module> Codegen<M> {
         let data_id = store_string(id, content, ctx.module, ctx.data_ctx, ctx.string_data)?;
         let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
         Ok(builder.ins().symbol_value(ctx.int_type, data_ref))
-    }
-
-    /// Define a compiler-generated message as a read-only data object,
-    /// deduped per module through `Codegen::guard_msg_data`.
-    fn store_guard_msg(
-        module: &mut M,
-        data_ctx: &mut DataDescription,
-        cache: &mut HashMap<&'static str, DataId>,
-        msg: &'static str,
-    ) -> Result<DataId, String> {
-        if let Some(&data_id) = cache.get(msg) {
-            return Ok(data_id);
-        }
-        let data_id = module
-            .declare_anonymous_data(false, false)
-            .map_err(|e| format!("Failed to declare guard message data: {}", e))?;
-        data_ctx.clear();
-        data_ctx.define(msg.as_bytes().into());
-        module
-            .define_data(data_id, data_ctx)
-            .map_err(|e| format!("Failed to define guard message data: {}", e))?;
-        cache.insert(msg, data_id);
-        Ok(data_id)
-    }
-
-    /// The immediate behind `v` when it was produced by an `iconst`
-    /// in the function being built, otherwise `None`. The checked
-    /// arithmetic guards use it to drop a check the constant makes
-    /// unreachable (`x + 0`, `x * 1`, a non-zero constant divisor).
-    /// Sema only const-folds when *every* operand is constant, so
-    /// these mixed const/runtime shapes reach codegen intact.
-    fn const_int(builder: &FunctionBuilder, v: Value) -> Option<i64> {
-        let ValueDef::Result(inst, _) = builder.func.dfg.value_def(v) else {
-            return None;
-        };
-        match builder.func.dfg.insts[inst] {
-            InstructionData::UnaryImm {
-                opcode: Opcode::Iconst,
-                imm,
-            } => Some(imm.bits()),
-            _ => None,
-        }
-    }
-
-    /// Spec §18 checked `+`/`-`/`*` with value-range elision: when both
-    /// operands' bounds prove the result fits in `i64`, emit the raw op
-    /// and skip the overflow guard entirely. Any unknown side falls
-    /// back to the checked helpers.
-    pub(crate) fn emit_int_binop(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        tag: TirTag,
-        lhs_range: Option<ranges::IntRange>,
-        rhs_range: Option<ranges::IntRange>,
-        lv: Value,
-        rv: Value,
-    ) -> Result<Value, String> {
-        // Both dispatch sites below assume IMul in their `_` arm.
-        debug_assert!(matches!(tag, TirTag::IAdd | TirTag::ISub | TirTag::IMul));
-        let fits = lhs_range.zip(rhs_range).and_then(|(a, b)| match tag {
-            TirTag::IAdd => a.checked_add(b),
-            TirTag::ISub => a.checked_sub(b),
-            TirTag::IMul => a.checked_mul(b),
-            _ => unreachable!("emit_int_binop: not an int arith tag"),
-        });
-        if fits.is_some() {
-            return Ok(match tag {
-                TirTag::IAdd => builder.ins().iadd(lv, rv),
-                TirTag::ISub => builder.ins().isub(lv, rv),
-                _ => builder.ins().imul(lv, rv),
-            });
-        }
-        match tag {
-            TirTag::IAdd => Self::emit_checked_iadd(builder, ctx, lv, rv),
-            TirTag::ISub => Self::emit_checked_isub(builder, ctx, lv, rv),
-            _ => Self::emit_checked_imul(builder, ctx, lv, rv),
-        }
-    }
-
-    /// Checked signed addition (spec §18): `sadd_overflow` plus the
-    /// `ryo_panic` guard, except when a constant operand makes the
-    /// operation exact. `x + 0` is `x` for every `x`, so the guard —
-    /// and the add itself — is dropped.
-    pub(crate) fn emit_checked_iadd(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        lhs: Value,
-        rhs: Value,
-    ) -> Result<Value, String> {
-        // Addition commutes, so either side may carry the zero.
-        if Self::const_int(builder, rhs) == Some(0) {
-            return Ok(lhs);
-        }
-        if Self::const_int(builder, lhs) == Some(0) {
-            return Ok(rhs);
-        }
-        let (sum, of) = builder.ins().sadd_overflow(lhs, rhs);
-        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
-        Ok(sum)
-    }
-
-    /// Checked signed subtraction (spec §18). `x - 0` is exact for
-    /// every `x`; a constant minuend has no such shortcut (`0 - x`
-    /// overflows at `INT_MIN`), so it keeps the guard.
-    pub(crate) fn emit_checked_isub(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        lhs: Value,
-        rhs: Value,
-    ) -> Result<Value, String> {
-        if Self::const_int(builder, rhs) == Some(0) {
-            return Ok(lhs);
-        }
-        let (diff, of) = builder.ins().ssub_overflow(lhs, rhs);
-        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
-        Ok(diff)
-    }
-
-    /// Checked signed multiplication (spec §18). `x * 0` and `x * 1`
-    /// are exact for every `x`, so those drop the guard — `x * -1`
-    /// does not, since `INT_MIN * -1` overflows.
-    pub(crate) fn emit_checked_imul(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        lhs: Value,
-        rhs: Value,
-    ) -> Result<Value, String> {
-        let konst = Self::const_int(builder, rhs).or_else(|| Self::const_int(builder, lhs));
-        if matches!(konst, Some(0) | Some(1)) {
-            return Ok(builder.ins().imul(lhs, rhs));
-        }
-        let (prod, of) = builder.ins().smul_overflow(lhs, rhs);
-        Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
-        Ok(prod)
-    }
-
-    /// Guards for `sdiv`/`srem`, which are UB in Cranelift when the
-    /// divisor is zero (`idiv` traps on x86-64; `sdiv` silently
-    /// returns garbage on aarch64) and on signed overflow:
-    /// `INT_MIN / -1` (and `% -1`) has no representable result.
-    /// `dividend_range` lets a dividend proven not to be `i64::MIN`
-    /// skip the overflow check.
-    pub(crate) fn emit_div_guard(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        dividend: Value,
-        dividend_range: Option<ranges::IntRange>,
-        divisor: Value,
-        zero_msg: &'static str,
-        overflow_msg: &'static str,
-    ) -> Result<(), String> {
-        // A constant divisor outside {0, -1} can trip neither guard.
-        // The zero constant keeps its guard: sema rejects the literal
-        // forms, so anything reaching here must still panic at runtime.
-        let divisor_const = Self::const_int(builder, divisor);
-        if divisor_const.is_some_and(|c| c != 0 && c != -1) {
-            return Ok(());
-        }
-        if divisor_const != Some(-1) {
-            let zero = builder.ins().iconst(ctx.int_type, 0);
-            let is_zero = builder.ins().icmp(IntCC::Equal, divisor, zero);
-            Self::emit_panic_guard(builder, ctx, is_zero, zero_msg)?;
-        }
-        // Overflow needs dividend == i64::MIN and divisor == -1; a
-        // constant or range-bounded dividend that excludes i64::MIN
-        // makes the check unreachable.
-        let dividend_safe = Self::const_int(builder, dividend).is_some_and(|c| c != i64::MIN)
-            || dividend_range.is_some_and(|r| r.lo > i64::MIN);
-        if !dividend_safe {
-            let min = builder.ins().iconst(ctx.int_type, i64::MIN);
-            let neg_one = builder.ins().iconst(ctx.int_type, -1);
-            let d_is_min = builder.ins().icmp(IntCC::Equal, dividend, min);
-            let r_is_neg_one = builder.ins().icmp(IntCC::Equal, divisor, neg_one);
-            let overflow = builder.ins().band(d_is_min, r_is_neg_one);
-            Self::emit_panic_guard(builder, ctx, overflow, overflow_msg)?;
-        }
-        Ok(())
-    }
-
-    /// Branch to a shared cold block that calls `ryo_panic` — stderr
-    /// message + exit 101, the same contract as the `panic()` builtin —
-    /// when `flag` is set; otherwise fall through. Shared by the
-    /// zero-divisor guard and the spec §18 overflow checks.
-    ///
-    /// The panic block is NOT emitted here: it is deferred to
-    /// end-of-function (`emit_deferred_panic_blocks`) so the hot path
-    /// falls through the `brif` and all cold code sits out of line,
-    /// after the function body. Guards with the same message share one
-    /// panic block.
-    fn emit_panic_guard(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        flag: Value,
-        msg: &'static str,
-    ) -> Result<(), String> {
-        let panic_block = match ctx.panic_blocks.iter().find(|(m, _)| *m == msg) {
-            Some(&(_, block)) => block,
-            None => {
-                let block = builder.create_block();
-                ctx.panic_blocks.push((msg, block));
-                block
-            }
-        };
-        let ok_block = builder.create_block();
-        builder.ins().brif(flag, panic_block, &[], ok_block, &[]);
-
-        // `ok_block` has exactly one predecessor (the brif above), so
-        // it can be sealed immediately. The shared panic block gains a
-        // predecessor per guard and is sealed when emitted.
-        builder.seal_block(ok_block);
-        builder.switch_to_block(ok_block);
-        Ok(())
-    }
-
-    /// Emit the deferred guard-failure blocks collected in
-    /// `ctx.panic_blocks` after the function body. Must be called once
-    /// per function, after `emit_body`, before `builder.finalize()`.
-    pub(crate) fn emit_deferred_panic_blocks(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-    ) -> Result<(), String> {
-        let panic_blocks = std::mem::take(&mut ctx.panic_blocks);
-        for (msg, block) in panic_blocks {
-            builder.seal_block(block);
-            builder.switch_to_block(block);
-            let data_id = Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, msg)?;
-            let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-            let ptr = builder.ins().symbol_value(ctx.int_type, data_ref);
-            let len = builder.ins().iconst(types::I64, msg.len() as i64);
-            let panic_ref = Self::declare_runtime_fn(
-                ctx.module,
-                builder,
-                "ryo_panic",
-                // Runtime contract: ryo_panic(ptr, len: u64) — the
-                // length is fixed I64 regardless of target pointer width.
-                &[ctx.int_type, types::I64],
-                &[],
-            )?;
-            builder.ins().call(panic_ref, &[ptr, len]);
-            // Unreachable in practice (ryo_panic never returns); keeps
-            // Cranelift honest about the block having a terminator.
-            builder.ins().trap(
-                TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
-            );
-        }
-        Ok(())
     }
 
     /// Declare an external runtime function by name and return a
@@ -839,6 +588,11 @@ impl<M: Module> Codegen<M> {
         let mut bytes_free_ref: Option<FuncRef> = None;
         for (idx, target) in pending {
             ctx.freed_at[idx] = true;
+            // M9: struct-typed targets route to the recursive field
+            // drop; everything below is the str/bytes path.
+            if Self::try_emit_struct_free(builder, ctx, target)? {
+                continue;
+            }
             let is_bytes = Self::free_target_is_bytes(ctx, target);
             let binding = Self::free_binding_name(ctx, target)
                 .and_then(|name| Self::read_slot(&ctx.fat_locals, name));
@@ -864,7 +618,7 @@ impl<M: Module> Codegen<M> {
                 )
             })?;
             // M8.4: views are borrows, never owners — the ownership pass
-            // must never schedule a Free for one (Task 9 invariant). The
+            // must never schedule a Free for one. The
             // repr check below doubles as the release-mode guard.
             debug_assert!(
                 !matches!(repr, ValueRepr::View { .. }),
@@ -896,6 +650,12 @@ impl<M: Module> Codegen<M> {
                         target.index()
                     ));
                 }
+                ValueRepr::Struct { .. } => {
+                    return Err(format!(
+                        "ownership pass scheduled Free for struct %{} but try_emit_struct_free did not claim it",
+                        target.index()
+                    ));
+                }
             }
         }
         ctx.pending_sweep.retain(|&idx| !ctx.freed_at[idx]);
@@ -924,6 +684,10 @@ impl<M: Module> Codegen<M> {
             let Some(name) = Self::free_binding_name(ctx, drop.target) else {
                 continue;
             };
+            // M9: struct bindings drop their needs-drop fields.
+            if Self::try_emit_struct_dead_drop(builder, ctx, name, drop.target)? {
+                continue;
+            }
             let Some(sl) = Self::read_slot(&ctx.fat_locals, name) else {
                 continue;
             };
@@ -1265,6 +1029,7 @@ impl<M: Module> Codegen<M> {
                     CapRule::LenIsCap,
                 )?
             }
+            TirTag::FieldAccess => Self::eval_field_access_fat(builder, ctx, r)?,
             TirTag::ViewAsOwner => {
                 let operand = match inst.data {
                     TirData::UnOp(o) => o,
@@ -1416,7 +1181,7 @@ impl<M: Module> Codegen<M> {
         match Self::eval_inst_fat(builder, ctx, r)? {
             ValueRepr::Str { ptr, len, .. } | ValueRepr::Bytes { ptr, len, .. } => Ok((ptr, len)),
             ValueRepr::View { ptr, len } => Ok((ptr, len)),
-            ValueRepr::Scalar(_) => Err(format!(
+            ValueRepr::Scalar(_) | ValueRepr::Struct { .. } => Err(format!(
                 "eval_str_or_view_parts: instruction at %{} is not a fat/view value",
                 r.index()
             )),
@@ -1526,7 +1291,7 @@ impl<M: Module> Codegen<M> {
         )
     }
 
-    fn emit_call(
+    pub(super) fn emit_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
@@ -1729,7 +1494,17 @@ impl<M: Module> Codegen<M> {
             })?;
             let arg_ty = ctx.tir.inst(*arg).ty;
             if mode == ParamMode::Inout {
-                if is_fat_type(arg_ty, ctx.pool) {
+                if matches!(ctx.tir.inst(*arg).data, TirData::FieldAccess { .. })
+                    || matches!(ctx.pool.kind(arg_ty), TypeKind::Struct)
+                {
+                    // M9 inout field path (`&p.x`) or whole-struct inout
+                    // (`&p`): the pointee already lives in the root
+                    // struct's stack slot — pass its address directly so
+                    // the callee mutates in place. No spill, no reload,
+                    // no write-back.
+                    let addr = Self::inout_pointee_addr(builder, ctx, *arg)?;
+                    arg_values.push(addr);
+                } else if is_fat_type(arg_ty, ctx.pool) {
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
                         STR_SLOT_SIZE,
@@ -1779,6 +1554,11 @@ impl<M: Module> Codegen<M> {
                 let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg)?;
                 arg_values.push(ptr);
                 arg_values.push(len);
+            } else if matches!(ctx.pool.kind(arg_ty), TypeKind::Struct) {
+                // M9 struct arg: a single slot address — the existing
+                // slot for Borrow, a fresh field-wise copy for Move/Copy.
+                let addr = Self::emit_struct_call_arg(builder, ctx, *arg, mode)?;
+                arg_values.push(addr);
             } else {
                 arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
             }
@@ -1838,6 +1618,24 @@ impl<M: Module> Codegen<M> {
             };
             Self::cache_repr(ctx, r, repr);
             return Ok(ptr); // dummy scalar — consumers use eval_inst_fat
+        }
+
+        if matches!(ctx.pool.kind(ret_ty), TypeKind::Struct) {
+            // M9 sret: allocate the struct's slot, prepend its address
+            // to the args, and treat the slot as the result (mirrors
+            // the fat sret path above).
+            let slot = Self::struct_slot(builder, ctx, ret_ty);
+            let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
+
+            let mut all_args = Vec::with_capacity(arg_values.len() + 1);
+            all_args.push(out);
+            all_args.extend(arg_values);
+
+            builder.ins().call(callee_ref, &all_args);
+            Self::reload_inout_args(builder, ctx, &inout_reloads)?;
+
+            Self::cache_repr(ctx, r, ValueRepr::Struct { addr: out });
+            return Ok(out); // dummy scalar — consumers use eval_inst_struct
         }
 
         let call = builder.ins().call(callee_ref, &arg_values);

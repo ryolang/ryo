@@ -54,6 +54,13 @@ fn fn_def(ast: &Ast, stmt: StmtId) -> &FunctionDef {
     }
 }
 
+fn struct_def_stmt(ast: &Ast, id: StmtId) -> &StructDef {
+    match &ast.stmt(id).kind {
+        StmtKind::StructDef(def) => def,
+        other => panic!("expected StructDef, got {other:?}"),
+    }
+}
+
 /// Body statements of a parsed function definition.
 fn fn_body<'a>(ast: &'a Ast, def: &FunctionDef) -> &'a [StmtId] {
     ast.stmt_list(def.body)
@@ -263,6 +270,174 @@ fn accept_statement_with_trailing_newline() {
 fn accept_blank_lines_between_statements() {
     let (ast, _) = lex_and_parse("x = 1\n\ny = 2").unwrap();
     assert_eq!(ast.top_level_stmts().len(), 2);
+}
+
+#[test]
+fn parse_struct_declaration() {
+    let (ast, pool) = lex_and_parse("struct Point:\n\tx: float\n\ty: float\n").unwrap();
+    let def = struct_def_stmt(&ast, only_stmt(&ast));
+    assert_eq!(pool.str(def.name.name), "Point");
+    let fields = ast.struct_field_decls(def.fields);
+    assert_eq!(fields.len(), 2);
+    assert_eq!(pool.str(fields[0].0), "x");
+    assert_eq!(pool.str(fields[0].1.name), "float");
+    assert_eq!(pool.str(fields[1].0), "y");
+}
+
+#[test]
+fn parse_struct_declaration_no_trailing_newline() {
+    let (ast, pool) = lex_and_parse("struct Point:\n\tx: float").unwrap();
+    let def = struct_def_stmt(&ast, only_stmt(&ast));
+    assert_eq!(pool.str(def.name.name), "Point");
+    assert_eq!(ast.struct_field_decls(def.fields).len(), 1);
+}
+
+#[test]
+fn parse_struct_declaration_with_blank_lines() {
+    let (ast, pool) = lex_and_parse("struct Point:\n\n\tx: float\n\n\ty: float\n").unwrap();
+    let def = struct_def_stmt(&ast, only_stmt(&ast));
+    assert_eq!(ast.struct_field_decls(def.fields).len(), 2);
+    let fields = ast.struct_field_decls(def.fields);
+    assert_eq!(pool.str(fields[0].0), "x");
+    assert_eq!(pool.str(fields[1].0), "y");
+}
+
+#[test]
+fn struct_declaration_alongside_fn_main() {
+    // A struct declaration is a declaration, not a top-level
+    // executable statement: it must coexist with an explicit main.
+    let (ast, pool) =
+        lex_and_parse("struct Point:\n\tx: float\nfn main():\n\tpass_through = 1\n").unwrap();
+    assert_eq!(ast.top_level_stmts().len(), 2);
+    let def = struct_def_stmt(&ast, ast.top_level_stmts()[0]);
+    assert_eq!(pool.str(def.name.name), "Point");
+}
+
+#[test]
+fn empty_struct_body_is_rejected() {
+    let (_ok, _ast, errs, _pool) =
+        lex_and_parse_recovering("struct Empty:\nfn main():\n\tpass_through = 1\n");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.reason(), RichReason::Custom(ParseDiag::EmptyStructBody))),
+        "expected an EmptyStructBody diagnostic, got: {errs:?}"
+    );
+}
+
+#[test]
+fn malformed_struct_body_does_not_report_empty_body() {
+    // An indented but unparseable field line is a generic parse
+    // error (recovered to an Error node), not "empty struct body".
+    let (_ok, _ast, errs, _pool) = lex_and_parse_recovering("struct S:\n\tgarbage line\n");
+    assert!(!errs.is_empty());
+    assert!(
+        !errs
+            .iter()
+            .any(|e| matches!(e.reason(), RichReason::Custom(ParseDiag::EmptyStructBody))),
+        "malformed body must not report EmptyStructBody: {errs:?}"
+    );
+}
+
+#[test]
+fn parse_struct_literal() {
+    let (ast, pool) = lex_and_parse("p = Point{x=1.0, y=2.0}\n").unwrap();
+    let init = decl_init(&ast);
+    match &ast.expr(init).kind {
+        ExprKind::StructLiteral(lit) => {
+            assert_eq!(pool.str(lit.name.name), "Point");
+            let fields = ast.struct_field_inits(lit.fields);
+            assert_eq!(fields.len(), 2);
+            assert_eq!(pool.str(fields[0].0), "x");
+            assert_eq!(pool.str(fields[1].0), "y");
+            // Field order is source order; sema canonicalizes.
+            assert!(matches!(
+                ast.expr(fields[0].1).kind,
+                ExprKind::Literal(Literal::Float(_))
+            ));
+        }
+        other => panic!("expected StructLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_struct_literal_trailing_comma() {
+    let (ast, pool) = lex_and_parse("p = Point{x=1.0,}\n").unwrap();
+    let init = decl_init(&ast);
+    match &ast.expr(init).kind {
+        ExprKind::StructLiteral(lit) => assert_eq!(pool.str(lit.name.name), "Point"),
+        other => panic!("expected StructLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_struct_literal_empty_fields() {
+    let (ast, pool) = lex_and_parse("p = Point{}\n").unwrap();
+    let init = decl_init(&ast);
+    match &ast.expr(init).kind {
+        ExprKind::StructLiteral(lit) => {
+            assert_eq!(pool.str(lit.name.name), "Point");
+            assert_eq!(ast.struct_field_inits(lit.fields).len(), 0);
+        }
+        other => panic!("expected StructLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn struct_literal_does_not_shadow_call_or_ident() {
+    // `call` keeps winning for `f(...)`; a bare ident stays an Ident.
+    let (ast, _) = lex_and_parse("a = f(1)\nb = g\n").unwrap();
+    let stmts = ast.top_level_stmts();
+    let call_init = var_decl(&ast, stmts[0]).initializer;
+    assert!(matches!(ast.expr(call_init).kind, ExprKind::Call(_, _)));
+    let ident_init = var_decl(&ast, stmts[1]).initializer;
+    assert!(matches!(ast.expr(ident_init).kind, ExprKind::Ident(_)));
+}
+
+#[test]
+fn parse_field_access() {
+    let (ast, pool) = lex_and_parse("fn main():\n\ty = p.x\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let init = assign_value(&ast, fn_body(&ast, f)[0]);
+    match ast.expr(init).kind {
+        ExprKind::FieldAccess { object, field } => {
+            assert_eq!(pool.str(field.name), "x");
+            assert!(matches!(ast.expr(object).kind, ExprKind::Ident(_)));
+        }
+        other => panic!("expected FieldAccess, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_chained_field_access() {
+    let (ast, pool) = lex_and_parse("fn main():\n\tv = a.b.c\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let init = assign_value(&ast, fn_body(&ast, f)[0]);
+    // `a.b.c` parses as FieldAccess(FieldAccess(a, b), c).
+    match ast.expr(init).kind {
+        ExprKind::FieldAccess { object, field } => {
+            assert_eq!(pool.str(field.name), "c");
+            match ast.expr(object).kind {
+                ExprKind::FieldAccess {
+                    object: inner,
+                    field: inner_field,
+                } => {
+                    assert_eq!(pool.str(inner_field.name), "b");
+                    assert!(matches!(ast.expr(inner).kind, ExprKind::Ident(_)));
+                }
+                other => panic!("expected nested FieldAccess, got {:?}", other),
+            }
+        }
+        other => panic!("expected FieldAccess, got {:?}", other),
+    }
+}
+
+#[test]
+fn method_call_still_parses_as_method_call() {
+    // `method_op` wins over `field_op` when parens follow the name.
+    let (ast, _) = lex_and_parse("fn main():\n\tn = s.len()\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let init = assign_value(&ast, fn_body(&ast, f)[0]);
+    assert!(matches!(ast.expr(init).kind, ExprKind::MethodCall { .. }));
 }
 
 #[test]
@@ -1095,6 +1270,11 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
             StmtKind::AssignOrDecl { value, .. } | StmtKind::CompoundAssign { value, .. } => {
                 expr_work.push(*value);
             }
+            StmtKind::FieldAssign { target, value }
+            | StmtKind::CompoundFieldAssign { target, value, .. } => {
+                expr_work.push(*target);
+                expr_work.push(*value);
+            }
             StmtKind::WhileLoop { cond, body } => {
                 expr_work.push(*cond);
                 stmt_work.extend_from_slice(ast.stmt_list(*body));
@@ -1107,6 +1287,9 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
                 stmt_work.extend_from_slice(ast.stmt_list(*body));
             }
             StmtKind::Break | StmtKind::Continue | StmtKind::Error => {}
+            // Field declarations are scalar metadata in a side
+            // arena, not node children — nothing reachable to follow.
+            StmtKind::StructDef(_) => {}
         }
         while let Some(expr) = expr_work.pop() {
             if expr_seen[expr.index()] {
@@ -1141,6 +1324,14 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
                 ExprKind::Index { base, index } => {
                     expr_work.push(base);
                     expr_work.push(index);
+                }
+                ExprKind::StructLiteral(lit) => {
+                    for &(_, value) in ast.struct_field_inits(lit.fields) {
+                        expr_work.push(value);
+                    }
+                }
+                ExprKind::FieldAccess { object, .. } => {
+                    expr_work.push(object);
                 }
             }
         }
@@ -1199,4 +1390,67 @@ fn scalar_indexing_parse_leaves_no_orphan_nodes() {
     let (exprs, stmts) = reachable_node_counts(&ast);
     assert_eq!(exprs + 1, ast.expr_count(), "orphan expressions");
     assert_eq!(stmts + 1, ast.stmt_count(), "orphan statements");
+}
+
+#[test]
+fn parse_field_assignment() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tmut p = Point{x=1.0}\n\tp.x = 2.0\n").unwrap();
+    let body = fn_body(&ast, fn_def(&ast, only_stmt(&ast)));
+    match &ast.stmt(body[1]).kind {
+        StmtKind::FieldAssign { target, .. } => {
+            assert!(matches!(
+                ast.expr(*target).kind,
+                ExprKind::FieldAccess { .. }
+            ))
+        }
+        other => panic!("expected FieldAssign, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_compound_field_assignment() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tmut p = Point{x=1.0}\n\tp.x += 2.0\n").unwrap();
+    let body = fn_body(&ast, fn_def(&ast, only_stmt(&ast)));
+    assert!(matches!(
+        ast.stmt(body[1]).kind,
+        StmtKind::CompoundFieldAssign { .. }
+    ));
+}
+
+#[test]
+fn parse_nested_field_assignment_chain() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tmut a = X{b=Y{c=1}}\n\ta.b.c = 2\n").unwrap();
+    let body = fn_body(&ast, fn_def(&ast, only_stmt(&ast)));
+    match &ast.stmt(body[1]).kind {
+        StmtKind::FieldAssign { target, .. } => match ast.expr(*target).kind {
+            ExprKind::FieldAccess { object, .. } => {
+                assert!(matches!(
+                    ast.expr(object).kind,
+                    ExprKind::FieldAccess { .. }
+                ))
+            }
+            other => panic!("expected nested FieldAccess, got {:?}", other),
+        },
+        other => panic!("expected FieldAssign, got {:?}", other),
+    }
+}
+
+#[test]
+fn bare_ident_assignment_still_assign_or_decl() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tx = 1\n").unwrap();
+    let body = fn_body(&ast, fn_def(&ast, only_stmt(&ast)));
+    assert!(matches!(
+        ast.stmt(body[0]).kind,
+        StmtKind::AssignOrDecl { .. }
+    ));
+}
+
+#[test]
+fn bare_ident_compound_assignment_still_compound_assign() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tx = 1\n\tx += 2\n").unwrap();
+    let body = fn_body(&ast, fn_def(&ast, only_stmt(&ast)));
+    assert!(matches!(
+        ast.stmt(body[1]).kind,
+        StmtKind::CompoundAssign { .. }
+    ));
 }
