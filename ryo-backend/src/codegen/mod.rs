@@ -30,8 +30,6 @@ use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use expr::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MSG};
-use ryo_core::ast::CompoundOp;
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::HashMap;
@@ -1438,65 +1436,10 @@ impl<M: Module> Codegen<M> {
                 let is_float = inst.ty == ctx.pool.float();
                 let lhs_range = Self::read_slot(&ctx.range_facts, view.name);
                 let rhs_range = ranges::int_range_of(ctx.tir, &ctx.range_facts, view.value);
-                let result = match (view.op, is_float) {
-                    // Same spec §18 checked arithmetic as the binop arm.
-                    (CompoundOp::Add, false) => Self::emit_int_binop(
-                        builder,
-                        ctx,
-                        TirTag::IAdd,
-                        lhs_range,
-                        rhs_range,
-                        current,
-                        rhs,
-                    )?,
-                    (CompoundOp::Sub, false) => Self::emit_int_binop(
-                        builder,
-                        ctx,
-                        TirTag::ISub,
-                        lhs_range,
-                        rhs_range,
-                        current,
-                        rhs,
-                    )?,
-                    (CompoundOp::Mul, false) => Self::emit_int_binop(
-                        builder,
-                        ctx,
-                        TirTag::IMul,
-                        lhs_range,
-                        rhs_range,
-                        current,
-                        rhs,
-                    )?,
-                    (CompoundOp::Div, false) => {
-                        Self::emit_div_guard(
-                            builder,
-                            ctx,
-                            current,
-                            lhs_range,
-                            rhs,
-                            DIV_ZERO_MSG,
-                            DIV_OVERFLOW_MSG,
-                        )?;
-                        builder.ins().sdiv(current, rhs)
-                    }
-                    (CompoundOp::Mod, false) => {
-                        Self::emit_div_guard(
-                            builder,
-                            ctx,
-                            current,
-                            lhs_range,
-                            rhs,
-                            MOD_ZERO_MSG,
-                            MOD_OVERFLOW_MSG,
-                        )?;
-                        builder.ins().srem(current, rhs)
-                    }
-                    (CompoundOp::Add, true) => builder.ins().fadd(current, rhs),
-                    (CompoundOp::Sub, true) => builder.ins().fsub(current, rhs),
-                    (CompoundOp::Mul, true) => builder.ins().fmul(current, rhs),
-                    (CompoundOp::Div, true) => builder.ins().fdiv(current, rhs),
-                    (CompoundOp::Mod, true) => return Err("float modulo not supported".to_string()),
-                };
+                // Same spec §18 checked arithmetic as the binop arm.
+                let result = Self::emit_compound_op(
+                    builder, ctx, view.op, is_float, lhs_range, rhs_range, current, rhs,
+                )?;
 
                 Self::kill_fact(ctx, view.name);
                 builder.def_var(var, result);

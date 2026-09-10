@@ -10,6 +10,7 @@ use cranelift::codegen::ir::{
 };
 use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, Linkage, Module};
+use ryo_core::ast::CompoundOp;
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind, ViewKind};
 use std::collections::HashMap;
@@ -584,6 +585,81 @@ impl<M: Module> Codegen<M> {
             Self::emit_panic_guard(builder, ctx, overflow, overflow_msg)?;
         }
         Ok(())
+    }
+
+    /// Checked `current op= rhs` arithmetic (spec §18), shared by the
+    /// bare `CompoundAssign` arm and compound field assignment.
+    /// `lhs_range` carries the target's known range when it has one
+    /// (bindings do; struct fields don't).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_compound_op(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        op: CompoundOp,
+        is_float: bool,
+        lhs_range: Option<ranges::IntRange>,
+        rhs_range: Option<ranges::IntRange>,
+        current: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        Ok(match (op, is_float) {
+            (CompoundOp::Add, false) => Self::emit_int_binop(
+                builder,
+                ctx,
+                TirTag::IAdd,
+                lhs_range,
+                rhs_range,
+                current,
+                rhs,
+            )?,
+            (CompoundOp::Sub, false) => Self::emit_int_binop(
+                builder,
+                ctx,
+                TirTag::ISub,
+                lhs_range,
+                rhs_range,
+                current,
+                rhs,
+            )?,
+            (CompoundOp::Mul, false) => Self::emit_int_binop(
+                builder,
+                ctx,
+                TirTag::IMul,
+                lhs_range,
+                rhs_range,
+                current,
+                rhs,
+            )?,
+            (CompoundOp::Div, false) => {
+                Self::emit_div_guard(
+                    builder,
+                    ctx,
+                    current,
+                    lhs_range,
+                    rhs,
+                    DIV_ZERO_MSG,
+                    DIV_OVERFLOW_MSG,
+                )?;
+                builder.ins().sdiv(current, rhs)
+            }
+            (CompoundOp::Mod, false) => {
+                Self::emit_div_guard(
+                    builder,
+                    ctx,
+                    current,
+                    lhs_range,
+                    rhs,
+                    MOD_ZERO_MSG,
+                    MOD_OVERFLOW_MSG,
+                )?;
+                builder.ins().srem(current, rhs)
+            }
+            (CompoundOp::Add, true) => builder.ins().fadd(current, rhs),
+            (CompoundOp::Sub, true) => builder.ins().fsub(current, rhs),
+            (CompoundOp::Mul, true) => builder.ins().fmul(current, rhs),
+            (CompoundOp::Div, true) => builder.ins().fdiv(current, rhs),
+            (CompoundOp::Mod, true) => return Err("float modulo not supported".to_string()),
+        })
     }
 
     /// Branch to a shared cold block that calls `ryo_panic` — stderr

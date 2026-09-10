@@ -12,11 +12,9 @@
 use cranelift::codegen::ir::{MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
 use cranelift::prelude::*;
 use cranelift_module::Module;
-use ryo_core::ast::CompoundOp;
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeId, TypeKind};
 
-use super::expr::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MSG};
 use super::{Codegen, FunctionContext, Terminator, ValueRepr, cranelift_type_for, ranges};
 
 impl<M: Module> Codegen<M> {
@@ -548,46 +546,9 @@ impl<M: Module> Codegen<M> {
             .load(cl_ty, MemFlagsData::trusted(), field_addr, 0);
         let is_float = field_ty == ctx.pool.float();
         let rhs_range = ranges::int_range_of(ctx.tir, &ctx.range_facts, view.value);
-        let result = match (view.op, is_float) {
-            (CompoundOp::Add, false) => {
-                Self::emit_int_binop(builder, ctx, TirTag::IAdd, None, rhs_range, current, rhs)?
-            }
-            (CompoundOp::Sub, false) => {
-                Self::emit_int_binop(builder, ctx, TirTag::ISub, None, rhs_range, current, rhs)?
-            }
-            (CompoundOp::Mul, false) => {
-                Self::emit_int_binop(builder, ctx, TirTag::IMul, None, rhs_range, current, rhs)?
-            }
-            (CompoundOp::Div, false) => {
-                Self::emit_div_guard(
-                    builder,
-                    ctx,
-                    current,
-                    None,
-                    rhs,
-                    DIV_ZERO_MSG,
-                    DIV_OVERFLOW_MSG,
-                )?;
-                builder.ins().sdiv(current, rhs)
-            }
-            (CompoundOp::Mod, false) => {
-                Self::emit_div_guard(
-                    builder,
-                    ctx,
-                    current,
-                    None,
-                    rhs,
-                    MOD_ZERO_MSG,
-                    MOD_OVERFLOW_MSG,
-                )?;
-                builder.ins().srem(current, rhs)
-            }
-            (CompoundOp::Add, true) => builder.ins().fadd(current, rhs),
-            (CompoundOp::Sub, true) => builder.ins().fsub(current, rhs),
-            (CompoundOp::Mul, true) => builder.ins().fmul(current, rhs),
-            (CompoundOp::Div, true) => builder.ins().fdiv(current, rhs),
-            (CompoundOp::Mod, true) => return Err("float modulo not supported".to_string()),
-        };
+        let result = Self::emit_compound_op(
+            builder, ctx, view.op, is_float, None, rhs_range, current, rhs,
+        )?;
         builder
             .ins()
             .store(MemFlagsData::trusted(), result, field_addr, 0);
