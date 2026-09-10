@@ -8,7 +8,7 @@ func makePerson(_ i: Int) -> Person {
 }
 
 func birthday(_ p: Person) -> Person {
-    Person(name: "user" + String(p.age), age: p.age + 1)
+    Person(name: p.name, age: p.age + 1)
 }
 
 func score(_ p: Person) -> Int {
@@ -21,5 +21,5 @@ for i in 0..<500000 {
     let q = birthday(p)
     total += score(q)
 }
-precondition(total == 25750000, "struct_records checksum")
+precondition(total == 27638890, "struct_records checksum")
 print("assert passed, struct_records is correct")

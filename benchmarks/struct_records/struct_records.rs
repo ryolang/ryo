@@ -12,7 +12,7 @@ fn make_person(i: i64) -> Person {
 
 fn birthday(p: Person) -> Person {
     Person {
-        name: format!("user{}", p.age),
+        name: p.name,
         age: p.age + 1,
     }
 }
@@ -28,6 +28,6 @@ fn main() {
         let q = birthday(p);
         total += score(&q);
     }
-    assert!(total == 25750000, "struct_records checksum");
+    assert!(total == 27638890, "struct_records checksum");
     println!("assert passed, struct_records is correct");
 }

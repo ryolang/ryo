@@ -11,7 +11,7 @@ def make_person(i):
 
 
 def birthday(p):
-    return Person("user" + str(p.age), p.age + 1)
+    return Person(p.name, p.age + 1)
 
 
 def score(p):
@@ -24,7 +24,7 @@ def main():
         p = make_person(i)
         q = birthday(p)
         total += score(q)
-    assert total == 25750000, "struct_records checksum"
+    assert total == 27638890, "struct_records checksum"
     print("assert passed, struct_records is correct")
 
 
