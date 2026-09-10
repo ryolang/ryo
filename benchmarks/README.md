@@ -60,6 +60,7 @@ JIT and AOT land within noise of each other (~1.42–1.43×) because both share 
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 9. [Struct Records Benchmark](./struct_records/)
+
 * **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, stressing struct returns, field-wise copies, and drop glue across a heap field.
 * **Languages compared:** Rust, Swift, Python, and Ryo (AOT vs JIT).
 

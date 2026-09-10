@@ -1,6 +1,6 @@
 # Struct Records Benchmark
 
-**Focus:** Aggregate ABI traffic. Runs 500,000 rounds of `make_person(i)` → `birthday(p)` → `score(q)` on a `Person{name: str, age: int}` record. Every round constructs a struct, consumes it into a new struct, and reads it back — stressing struct return conventions (sret), field-wise copies, and drop glue across a heap-allocated `str` field plus a Copy `int` field. Rust runs its drop glue, Swift its ARC retain/release traffic on the `String` field, Python its object model (`__slots__` class), and Ryo its eager-destruction scheduling.
+**Focus:** Aggregate ABI traffic. Runs 500,000 rounds of `make_person(i)` → `birthday(p)` → `score(q)` on a `Person{name: str, age: int}` record. Every round constructs a struct, consumes it into a new struct, and reads it back — stressing struct return conventions (sret), field-wise copies, and drop glue across a heap-allocated `str` field plus a Copy `int` field. Rust runs its drop glue, Swift its ARC retain/release traffic on the `String` field, Python its object model (`__slots__` class), and Ryo its eager-destruction scheduling. Note on the `birthday` shape: Ryo rejects moving a single field out of a struct (E0043 — fields move only with the whole struct), so `birthday` rebuilds the name rather than constructing from `p.name`; all four implementations rebuild identically to keep the workload semantically uniform (and the checksum comparable).
 
 **Languages compared:** Rust, Swift, Python, and Ryo (AOT vs JIT).
 
