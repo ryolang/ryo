@@ -17,6 +17,11 @@ if ! command -v swiftc &> /dev/null; then
     exit 1
 fi
 
+if ! command -v go &> /dev/null; then
+    echo "Error: 'go' is not installed or not in PATH."
+    exit 1
+fi
+
 if ! command -v python3 &> /dev/null; then
     echo "Error: 'python3' is not installed or not in PATH."
     exit 1
@@ -26,6 +31,7 @@ echo "Building benchmarks..."
 (cd ../.. && cargo build --release > /dev/null)
 rustc -O struct_records.rs -o struct_records_rs
 swiftc -O struct_records.swift -o struct_records_swift
+go build -o struct_records_go struct_records.go
 ryo_bin="../../target/release/ryo"
 $ryo_bin build struct_records.ryo > /dev/null
 
@@ -35,6 +41,7 @@ echo "Compiler Version"
 echo "-------------------"
 echo "Rust:     $(rustc --version | cut -d' ' -f2)"
 echo "Swift:    $(swiftc --version | head -1 | awk '{for (i = 1; i < NF; i++) if ($i == "Swift" && $(i+1) == "version") { print $(i+2); exit }}')"
+echo "Go:       $(go version | cut -d' ' -f3 | sed 's/^go//')"
 echo "Python:   $(python3 --version | cut -d' ' -f2)"
 echo "Ryo:      $($ryo_bin --version 2>&1 || echo 'dev')"
 
@@ -74,6 +81,7 @@ measure_mem() {
 # Run once each to collect memory usage
 measure_mem "Rust" ./struct_records_rs
 measure_mem "Swift" ./struct_records_swift
+measure_mem "Go" ./struct_records_go
 measure_mem "Python" python3 struct_records.py
 measure_mem "Ryo (AOT)" ./struct_records
 measure_mem "Ryo (JIT)" $ryo_bin run struct_records.ryo
@@ -86,6 +94,7 @@ echo "-------------------"
 hyperfine --warmup 3 --shell=none \
   './struct_records_rs' \
   './struct_records_swift' \
+  './struct_records_go' \
   'python3 struct_records.py' \
   './struct_records' \
   "$ryo_bin run struct_records.ryo"
