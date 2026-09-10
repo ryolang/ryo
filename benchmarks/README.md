@@ -66,6 +66,11 @@ JIT and AOT land within noise of each other (~1.42–1.43×) because both share 
 * **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field. Ryo AOT currently beats Rust and Go here; only Swift's small-string optimization keeps it ahead.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
 
+### 10. [Struct Records Reuse Benchmark](./struct_records_reuse/)
+
+* **Focus:** The keep-original record update — same record, but the caller uses `p` again after `birthday`, so the update cannot consume it. Rust and Ryo pay an explicit clone, Swift/Go/Python share cheaply; tracking measure for the record-update ergonomics gap (I-172) and what `shared[T]` or a small-string optimization would buy.
+* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+
 ---
 
 ## General Prerequisites
