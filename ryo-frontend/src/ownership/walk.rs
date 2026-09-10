@@ -955,11 +955,15 @@ pub(crate) fn visit_expr(
                         if let Some(root) = projection_root(own, tir, pool, *arg) {
                             push_unique(&mut view_borrowed, root);
                         }
-                    } else if mode == ParamMode::Borrow && matches!(tir.inst(*arg).tag, TirTag::Var)
+                    } else if mode == ParamMode::Borrow
+                        && matches!(tir.inst(*arg).tag, TirTag::Var | TirTag::FieldAccess)
                     {
                         // A Copy borrow is a no-op for liveness, but it still
-                        // aliases an `inout` of the same binding in this call —
-                        // record Var reads by name for the Rule 7 overlap check.
+                        // aliases an `inout` of the same root in this call —
+                        // record Var and Copy field reads for the Rule 7
+                        // overlap check (`inout_owner` resolves a field read
+                        // to its struct root, so `f(&p.x, p.y)` collides the
+                        // same way `f(&p.x, p)` does).
                         // (A Copy `move` arg is rejected by sema's RedundantMove,
                         // so only the Borrow arm is reachable from real code.)
                         push_unique(&mut borrowed, inout_owner(own, tir, *arg));

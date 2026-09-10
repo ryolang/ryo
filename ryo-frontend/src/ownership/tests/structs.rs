@@ -148,3 +148,32 @@ fn field_inout_rule7_names_root_binding() {
         .message;
     assert!(msg.contains("`p`"), "E0032 must name `p`; got: {msg}");
 }
+
+#[test]
+fn inout_field_and_copy_field_read_same_root_rejected() {
+    // f(&p.x, p.y) — inout borrow of the root via a field plus a
+    // Copy-typed field read of the same root in one call. The coarse
+    // root-freeze rule (an `inout` of any field borrows the whole
+    // struct for the call) must flag it, same as f(&p.x, p).
+    let src = "struct Point:\n\tx: float\n\ty: float\n\nfn f(inout a: float, b: float):\n\ta += b\n\nfn main():\n\tmut p = Point{x=1.0, y=2.0}\n\tf(&p.x, p.y)\n\tprint(float_to_str(p.x))\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::MutableAliasingViolation),
+        "expected E0032 MutableAliasingViolation; got {diags:?}"
+    );
+}
+
+#[test]
+fn inout_field_and_copy_field_read_different_roots_ok() {
+    // f(&p.x, q.y) — different roots, no overlap: must NOT fire.
+    let src = "struct Point:\n\tx: float\n\ty: float\n\nfn f(inout a: float, b: float):\n\ta += b\n\nfn main():\n\tmut p = Point{x=1.0, y=2.0}\n\tq = Point{x=3.0, y=4.0}\n\tf(&p.x, q.y)\n\tprint(float_to_str(p.x))\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == DiagCode::MutableAliasingViolation),
+        "no E0032 expected for different roots; got {diags:?}"
+    );
+}

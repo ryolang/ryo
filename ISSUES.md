@@ -351,12 +351,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** The repo convention is lowercase with underscores for docs (special files like `README.md` excepted). The eight `ryo-*-*.md` files under `docs/dev/` use hyphens instead. `NOTES.md` was renamed to `notes.md` as the cheap half of this cleanup; the hyphenated set was scoped out because each rename must also update every inbound link (`CLAUDE.md`, `ISSUES.md`, the roadmap, and the docs/dev README index at minimum).
 **Resolution:** One sweep: `git mv` each `ryo-*.md` to its underscore form, then repo-wide grep for each old basename to update links. Verify no residual references with a final grep for `ryo-.*\.md` across tracked markdown.
 
-### I-170 — Rule 7 does not flag Copy field reads overlapping an `inout` of the same root
-
-**Files:** `ryo-frontend/src/ownership/walk.rs` (the Copy-borrow Rule-7 arm, gated on `TirTag::Var` only, ~:949)
-**Summary:** The Rule-7 partition flags `f(&p.x, p)` (inout borrow of a root via a field plus a whole-root borrow in the same call) with E0032, but `f(&p.x, p.y)` — inout borrow of the root plus a Copy-typed field read of the same root in one call — passes unflagged. The Copy-borrow arm only records args whose tag is `TirTag::Var`; Copy field reads (`FieldAccess`) never join the overlap check. Not a soundness hole today: Copy args evaluate eagerly at the call site before any inout write-back, so the read cannot observe a torn value. It still contradicts the coarse root-freeze rule the rest of Rule 7 enforces, and would silently become load-bearing if call-arg evaluation order ever changed.
-**Resolution:** Extend the Copy-borrow arm to also record `FieldAccess` reads by resolving `struct_root` (mirroring the needs-drop field-read arm just below it), so the same-root overlap check fires for Copy field reads too — or document the Copy exemption as deliberate next to the arm.
-
 ---
 
 ## Cross-References
