@@ -32,8 +32,6 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 | **Ryo (AOT)** | 0.1.0-dev.20260911+490b10d | 4.9 ms ± 0.3 ms | 2.94x slower | 2.75 MB |
 | **Ryo (JIT)** | 0.1.0-dev.20260911+490b10d | 6.5 ms ± 0.4 ms | 3.90x slower | 6.62 MB |
 
-Note: the JIT regression from the packed-`u128` ABI (~6.6 ms → ~10 ms) is gone — the JIT is back to ~6.5 ms now that the per-iteration `ryo_str_from_literal` / `ryo_str_free` calls are eliminated, confirming those extern calls priced higher under the JIT than under AOT.
-
 ## How to Run
 
 Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
