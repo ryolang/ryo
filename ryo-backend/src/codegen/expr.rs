@@ -21,15 +21,13 @@ use std::collections::HashMap;
 /// supported target (see `pack_pair` in `runtime/src/lib.rs` for why
 /// not a struct). The `cap` word is a codegen-side derivation:
 /// `Static` (cap = 0, the .rodata sentinel) for
-/// `ryo_str_from_literal` / `ryo_bytes_from_literal`, `LenIsCap`
-/// (cap = len) for the remaining packed-u128 allocating producers (the
-/// concats — the slot-out producers report their own tagged cap, and
-/// `__ryo_str_push` / `__ryo_bytes_push` manage growth capacity through
-/// their unchanged slot ABI).
+/// `ryo_str_from_literal` / `ryo_bytes_from_literal` — the only
+/// remaining packed-u128 producers. The slot-out producers report
+/// their own tagged cap, and `__ryo_str_push` / `__ryo_bytes_push`
+/// manage growth capacity through their unchanged slot ABI.
 #[derive(Clone, Copy)]
 pub(crate) enum CapRule {
     Static,
-    LenIsCap,
 }
 
 impl<M: Module> Codegen<M> {
@@ -815,7 +813,6 @@ impl<M: Module> Codegen<M> {
         let (ptr, len) = Self::emit_rv_pair_call(builder, ctx, fn_name, args)?;
         let cap = match cap_rule {
             CapRule::Static => builder.ins().iconst(types::I64, 0),
-            CapRule::LenIsCap => len,
         };
         Ok(ValueRepr::Str { ptr, len, cap })
     }
@@ -1115,14 +1112,16 @@ impl<M: Module> Codegen<M> {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                // SSO-aware extraction (operands 0/1): an inline
-                // operand's ptr/len words are byte data, not a pointer —
-                // spill to the per-operand scratch slots and read the
-                // tag-encoded length instead.
+                // Transient extraction (the helper inside
+                // eval_str_or_view_parts) is sound here: the pointers
+                // are consumed by the concat call itself. Binary
+                // consumer: lhs extracts into scratch slot 0, rhs into
+                // slot 1 — a single slot would clobber two inline
+                // operands.
                 let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs, 0)?;
                 let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs, 1)?;
 
-                Self::emit_rv_str_call(
+                let (ptr, len, cap) = Self::emit_slot_out_call(
                     builder,
                     ctx,
                     "ryo_str_concat",
@@ -1132,19 +1131,19 @@ impl<M: Module> Codegen<M> {
                         (ctx.int_type, r_ptr),
                         (types::I64, r_len),
                     ],
-                    CapRule::LenIsCap,
-                )?
+                )?;
+                ValueRepr::Str { ptr, len, cap }
             }
             TirTag::BytesConcat => {
                 let (lhs, rhs) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                // SSO-aware extraction, as in StrConcat above.
+                // Transient extraction, as in StrConcat above.
                 let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs, 0)?;
                 let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs, 1)?;
 
-                Self::emit_rv_bytes_call(
+                let (ptr, len, cap) = Self::emit_slot_out_call(
                     builder,
                     ctx,
                     "ryo_bytes_concat",
@@ -1154,8 +1153,8 @@ impl<M: Module> Codegen<M> {
                         (ctx.int_type, r_ptr),
                         (types::I64, r_len),
                     ],
-                    CapRule::LenIsCap,
-                )?
+                )?;
+                ValueRepr::Bytes { ptr, len, cap }
             }
             TirTag::FieldAccess => Self::eval_field_access_fat(builder, ctx, r)?,
             TirTag::ViewAsOwner => {

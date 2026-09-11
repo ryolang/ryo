@@ -445,11 +445,12 @@ fn assert_explicit_24byte_slots(clif: &str, expected: usize) {
 #[test]
 fn clif_string_ops_slot_out_producers() {
     // Slot-out runtime ABI: string producers (`int_to_str`, from_view,
-    // conversions) write a tagged 24-byte slot passed as arg 0 and
-    // return nothing; literals, slices, and concat still return
-    // {ptr, len} packed in one u128. Slots in this program: 2 shared
-    // SSO extraction scratch slots (the `s + t` concat operands) + 1
-    // slot-out call slot (`int_to_str`).
+    // conversions, concat) write a tagged 24-byte slot passed as arg 0
+    // and return nothing; literals and slices still return {ptr, len}
+    // packed in one u128. Slots in this program: 2 shared SSO
+    // extraction scratch slots (the `s + t` concat operands) + 3
+    // slot-out call slots (the `"a" + "b"` concat, `int_to_str`, and
+    // the `s + t` concat).
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -468,18 +469,19 @@ fn clif_string_ops_slot_out_producers() {
 
     assert!(
         stdout.contains("-> i128"),
-        "literal/concat runtime calls still return the packed u128 pair: {}",
+        "literal runtime calls still return the packed u128 pair: {}",
         stdout
     );
-    assert_explicit_24byte_slots(&stdout, 3);
+    assert_explicit_24byte_slots(&stdout, 5);
 }
 
 #[test]
 fn clif_bytes_ops_slot_out_producers() {
     // M8.4.2 twin of the str pin above. Slots in this program: 2 shared
     // SSO extraction scratch slots (the `b"\x01" + b"\x02"` concat
-    // operands) + 1 promote-on-view slot (the `b[0:1]` slice base) + 2
-    // slot-out call slots (`bytes(...)` and `int_to_str(...)`).
+    // operands) + 1 promote-on-view slot (the `b[0:1]` slice base) + 3
+    // slot-out call slots (the concat, `bytes(...)`, and
+    // `int_to_str(...)`).
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -498,10 +500,10 @@ fn clif_bytes_ops_slot_out_producers() {
 
     assert!(
         stdout.contains("-> i128"),
-        "literal/concat runtime calls still return the packed u128 pair: {}",
+        "literal/slice runtime calls still return the packed u128 pair: {}",
         stdout
     );
-    assert_explicit_24byte_slots(&stdout, 5);
+    assert_explicit_24byte_slots(&stdout, 6);
 }
 
 #[test]
