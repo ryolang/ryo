@@ -417,31 +417,41 @@ fn ir_emit_default_is_ast_and_clif() {
     );
 }
 
-/// SSO extraction-scratch pin: fat-byte extraction spills through one
-/// shared 24-byte stack slot per function (`emit_fat_bytes_ptr_len`).
-/// Assert the emitted CLIF contains exactly that slot and that every
-/// `stack_addr` references it — i.e. no per-call-site out-pointer slots
-/// have crept back in.
+/// SSO extraction-scratch pin: fat-byte extraction spills through a
+/// shared 24-byte stack slot per operand per function
+/// (`emit_fat_bytes_ptr_len`; slot 0 for lhs/unary operands, slot 1 for
+/// rhs operands of binary consumers). Assert the emitted CLIF contains
+/// only those slots — at most two `explicit_slot 24` entries — and that
+/// every `stack_addr` references one of them, i.e. no per-call-site
+/// out-pointer slots have crept back in.
 fn assert_sso_scratch_only(clif: &str) {
     let slot_lines: Vec<&str> = clif
         .lines()
         .filter(|l| l.contains("explicit_slot"))
         .collect();
-    assert_eq!(
-        slot_lines.len(),
-        1,
-        "expected exactly the shared SSO scratch slot: {}",
-        clif
-    );
     assert!(
-        slot_lines[0].contains("explicit_slot 24"),
-        "the only stack slot must be the 24-byte SSO scratch slot: {}",
+        slot_lines.len() <= 2,
+        "expected at most the two shared SSO scratch slots: {}",
         clif
     );
+    for (i, line) in slot_lines.iter().enumerate() {
+        assert!(
+            line.contains("explicit_slot 24"),
+            "stack slot {} must be a 24-byte SSO scratch slot: {}",
+            i,
+            clif
+        );
+        let name = format!("ss{}", i);
+        assert!(
+            line.contains(&name),
+            "scratch slots must be ss0/ss1 in order: {}",
+            clif
+        );
+    }
     for line in clif.lines().filter(|l| l.contains("stack_addr")) {
         assert!(
-            line.contains("ss0"),
-            "stack_addr must reference the scratch slot ss0: {}",
+            line.contains("ss0") || line.contains("ss1"),
+            "stack_addr must reference an SSO scratch slot: {}",
             clif
         );
     }

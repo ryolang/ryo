@@ -304,7 +304,7 @@ impl<M: Module> Codegen<M> {
                     TirData::UnOp(r) => r,
                     _ => unreachable!("StrLen must carry TirData::UnOp"),
                 };
-                Self::eval_str_or_view_len(builder, ctx, operand)?
+                Self::eval_str_or_view_len(builder, ctx, operand, 0)?
             }
             TirTag::StrCmpEq | TirTag::StrCmpNe => {
                 let (lhs, rhs) = match inst.data {
@@ -313,9 +313,10 @@ impl<M: Module> Codegen<M> {
                 };
                 // M8.4 §3.3: operands may be owned str triples or strview
                 // view pairs (mixed equality wraps the owned side in
-                // ToView); ryo_str_eq only needs (ptr, len).
-                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
-                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
+                // ToView); ryo_str_eq only needs (ptr, len). Binary
+                // consumer: lhs spills to scratch slot 0, rhs to slot 1.
+                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs, 0)?;
+                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs, 1)?;
 
                 let eq_ref = Self::declare_runtime_fn(
                     ctx.module,
@@ -348,7 +349,7 @@ impl<M: Module> Codegen<M> {
                 };
                 // Bounds check + panic are runtime-side, mirroring
                 // `__ryo_slice` — no Cranelift branch needed.
-                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, base)?;
+                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, base, 0)?;
                 let idx = Self::eval_inst(builder, ctx, index)?;
                 let index_ref = Self::declare_runtime_fn(
                     ctx.module,
@@ -819,12 +820,14 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Lazily create the per-function 24-byte inline-extraction scratch
-    /// slot.
+    /// slot for `operand` (0 or 1).
     fn inline_scratch(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
+        operand: u8,
     ) -> Result<StackSlot, String> {
-        if let Some(slot) = ctx.inline_scratch {
+        debug_assert!(operand < 2, "inline scratch slot index out of range");
+        if let Some(slot) = ctx.inline_scratch[operand as usize] {
             return Ok(slot);
         }
         let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -832,19 +835,21 @@ impl<M: Module> Codegen<M> {
             STR_SLOT_SIZE,
             3,
         ));
-        ctx.inline_scratch = Some(slot);
+        ctx.inline_scratch[operand as usize] = Some(slot);
         Ok(slot)
     }
 
     /// Extract a readable `(ptr, len)` for the byte content of a fat
     /// value whose words may be tagged-inline (SSO). Inline: spill the
-    /// three words to the scratch slot and hand back its address plus
-    /// the tag-encoded len. Heap/static: pass through unchanged.
+    /// three words to scratch slot `operand` and hand back its address
+    /// plus the tag-encoded len. Heap/static: pass through unchanged.
     ///
     /// TRANSIENT CONSUMERS ONLY (print, eq, concat operands, push
     /// suffix, conversion args): the returned ptr for an inline value
-    /// addresses the shared scratch slot and is invalidated by the next
-    /// extraction. View-creating ops (slice, ToView) must go through
+    /// addresses a shared scratch slot and is invalidated by the next
+    /// extraction of the SAME operand. Binary consumers (eq) pass 0
+    /// for lhs and 1 for rhs so the two spills cannot clobber each
+    /// other. View-creating ops (slice, ToView) must go through
     /// `__ryo_*_ensure_heap` instead (promote-on-view).
     pub(crate) fn emit_fat_bytes_ptr_len(
         builder: &mut FunctionBuilder,
@@ -852,8 +857,9 @@ impl<M: Module> Codegen<M> {
         ptr: Value,
         len: Value,
         cap: Value,
+        operand: u8,
     ) -> Result<(Value, Value), String> {
-        let scratch = Self::inline_scratch(builder, ctx)?;
+        let scratch = Self::inline_scratch(builder, ctx, operand)?;
         let addr = builder.ins().stack_addr(ctx.int_type, scratch, 0);
         // Unconditional spill: three stores are cheaper than a branch,
         // and the scratch is written before either select reads it.
@@ -960,7 +966,7 @@ impl<M: Module> Codegen<M> {
                 } else if name_str == "__ryo_str_to_bytes" {
                     // `str.to_bytes()` / `strview.to_bytes()` — only
                     // (ptr, len) is read.
-                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0], 0)?;
                     Self::emit_rv_bytes_call(
                         builder,
                         ctx,
@@ -971,7 +977,7 @@ impl<M: Module> Codegen<M> {
                 } else if name_str == "__ryo_bytes_to_str" {
                     // `bytes.to_str()` / `bytesview.to_str()` — returns
                     // an owned str (validated copy; panics on bad UTF-8).
-                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0], 0)?;
                     Self::emit_rv_str_call(
                         builder,
                         ctx,
@@ -982,7 +988,7 @@ impl<M: Module> Codegen<M> {
                 } else if name_str == "__ryo_bytes_repr" {
                     // print(bytes) rewrite (sema, M8.4.2) — returns the
                     // escaped-repr str.
-                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0], 0)?;
                     Self::emit_rv_str_call(
                         builder,
                         ctx,
@@ -1132,7 +1138,10 @@ impl<M: Module> Codegen<M> {
                     _ => unreachable!("Slice must carry TirData::Slice"),
                 };
                 // Base may be an owned str (triple) or a view (pair).
-                let (base_ptr, base_len) = Self::eval_str_or_view_parts(builder, ctx, base)?;
+                // TRANSITIONAL: slicing creates a view and must move to
+                // `__ryo_*_ensure_heap` (promote-on-view); until then the
+                // base extracts through the transient scratch path.
+                let (base_ptr, base_len) = Self::eval_str_or_view_parts(builder, ctx, base, 0)?;
                 let start_v = match start {
                     Some(s) => Self::eval_inst(builder, ctx, s)?,
                     None => builder.ins().iconst(types::I64, 0),
@@ -1213,21 +1222,25 @@ impl<M: Module> Codegen<M> {
     /// hand back its `(ptr, len)` words regardless of representation —
     /// owned triple or borrowed view pair (M8.4/M8.4.2). Owned triples
     /// extract through the SSO-aware `emit_fat_bytes_ptr_len`, which
-    /// spills a tagged-inline value's words to the shared scratch slot
+    /// spills a tagged-inline value's words to scratch slot `operand`
     /// and passes heap/static values through unchanged. Consumers that
     /// only need the viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`,
-    /// `BytesCmpEq/Ne`, the `__ryo_str_push` suffix, the
-    /// `__ryo_slice`/`__ryo_bytes_slice` base, the bytes conversion
-    /// calls) use this; anything needing the cap must stay on
-    /// `eval_inst_fat`.
+    /// `BytesCmpEq/Ne`, the `__ryo_str_push` suffix, the bytes
+    /// conversion calls) use this; anything needing the cap must stay
+    /// on `eval_inst_fat`. (The `__ryo_slice`/`__ryo_bytes_slice` base
+    /// also extracts here TRANSITIONALLY, until the promote-on-view
+    /// rewiring moves slice bases to `__ryo_*_ensure_heap`.)
     ///
     /// TRANSIENT CONSUMERS ONLY: for an inline value the returned ptr
-    /// addresses the shared scratch slot and is invalidated by the next
-    /// extraction. View-creating ops (slice, ToView) must not use it.
+    /// addresses a shared scratch slot and is invalidated by the next
+    /// extraction of the same `operand`. Binary consumers pass 0 for
+    /// lhs and 1 for rhs. View-creating ops (slice, ToView) must not
+    /// use it.
     pub(super) fn eval_str_or_view_parts(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        operand: u8,
     ) -> Result<(Value, Value), String> {
         let ty = ctx.tir.inst(r).ty;
         if ctx.pool.is_view(ty) {
@@ -1238,7 +1251,7 @@ impl<M: Module> Codegen<M> {
         }
         match Self::eval_inst_fat(builder, ctx, r)? {
             ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
-                Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap)
+                Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, operand)
             }
             ValueRepr::View { ptr, len } => Ok((ptr, len)),
             ValueRepr::Scalar(_) | ValueRepr::Struct { .. } => Err(format!(
@@ -1250,13 +1263,15 @@ impl<M: Module> Codegen<M> {
 
     /// The `len` word of a `str`/`bytes`/`strview`/`bytesview`-typed
     /// operand, from either representation (M8.4/M8.4.2). Backs the
-    /// `StrLen` arm.
+    /// `StrLen` arm. `operand` selects the extraction scratch slot, as
+    /// in `eval_str_or_view_parts`.
     fn eval_str_or_view_len(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        operand: u8,
     ) -> Result<Value, String> {
-        let (_, len) = Self::eval_str_or_view_parts(builder, ctx, r)?;
+        let (_, len) = Self::eval_str_or_view_parts(builder, ctx, r, operand)?;
         Ok(len)
     }
 
@@ -1415,7 +1430,7 @@ impl<M: Module> Codegen<M> {
                 ),
                 "sema should reject non-str print() args",
             );
-            let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+            let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args[0], 0)?;
             let print_ref = Self::declare_runtime_fn(
                 ctx.module,
                 builder,
@@ -1453,7 +1468,7 @@ impl<M: Module> Codegen<M> {
             // passes its ptr+len, a slice/view passes directly (no
             // ToView wrap: builtins bypass check_call's §3.4
             // conversion, so sema accepts `Str | View(_)` here).
-            let (suf_ptr, suf_len) = Self::eval_str_or_view_parts(builder, ctx, suffix_ref)?;
+            let (suf_ptr, suf_len) = Self::eval_str_or_view_parts(builder, ctx, suffix_ref, 0)?;
             let func_ref = Self::declare_runtime_fn(
                 ctx.module,
                 builder,
@@ -1611,7 +1626,7 @@ impl<M: Module> Codegen<M> {
                 // `strview` arg → 2-word ABI (ptr, len), matching the
                 // callee's build_signature. Sema has already inserted
                 // ToView for owned-str actuals (§3.4).
-                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg)?;
+                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg, 0)?;
                 arg_values.push(ptr);
                 arg_values.push(len);
             } else if matches!(ctx.pool.kind(arg_ty), TypeKind::Struct) {

@@ -291,11 +291,13 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// an undo log, same scoping discipline as `locals`.
     fat_locals: Vec<Option<FatLocals>>,
     fat_locals_undo: Vec<(u32, Option<FatLocals>)>,
-    /// Lazily-created 24-byte scratch slot used by
+    /// Lazily-created 24-byte scratch slots used by
     /// `emit_fat_bytes_ptr_len` to give inline (SSO) strings a readable
-    /// address for transient consumers. One per function; reused by
-    /// every extraction.
-    inline_scratch: Option<StackSlot>,
+    /// address for transient consumers. Two per function (indexed by
+    /// the `operand` selector): binary consumers spill lhs to slot 0
+    /// and rhs to slot 1, so the rhs spill cannot clobber the lhs
+    /// bytes.
+    inline_scratch: [Option<StackSlot>; 2],
     /// `strview` view bindings (M8.4): two SSA `Variable`s per binding,
     /// mirroring `fat_locals`. Views are non-owning — they never
     /// appear in the free schedule.
@@ -960,7 +962,7 @@ impl<M: Module> Codegen<M> {
                 loop_stack: Vec::new(),
                 fat_locals: fat_param_locals,
                 fat_locals_undo,
-                inline_scratch: None,
+                inline_scratch: [None, None],
                 view_locals: view_param_locals,
                 view_locals_undo,
                 struct_locals: struct_param_locals,
