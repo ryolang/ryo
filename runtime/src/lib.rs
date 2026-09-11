@@ -150,30 +150,24 @@ pub struct RyoStrFat {
     pub cap: u64,
 }
 
-// SSO consumers (producers that write tagged slots) land in follow-up
-// string work; until then these helpers are exercised only by tests.
 /// Inline capacity of the small-string optimization (SSO): strings of
 /// at most this many bytes live directly inside the 24-byte slot.
 /// 23 >= 20, so every `int_to_str`/`bool_to_str` output is inline.
-#[allow(dead_code)]
 pub(crate) const INLINE_CAP: usize = 23;
 
 /// Cap-word tag: the top byte (byte 23, little-endian) discriminates.
 /// `0x80 | len` marks an inline string; a top byte of `0x00` is a heap
 /// cap (caps stay below 2^56 by construction) or the all-zero static
 /// `.rodata` sentinel.
-#[allow(dead_code)]
 pub(crate) fn inline_tag(len: u64) -> u64 {
     debug_assert!(len <= INLINE_CAP as u64);
     (0x80 | len) << 56
 }
 
-#[allow(dead_code)]
 pub(crate) fn is_inline(cap: u64) -> bool {
     (cap >> 56) & 0x80 != 0
 }
 
-#[allow(dead_code)]
 pub(crate) fn inline_len(cap: u64) -> u64 {
     debug_assert!(is_inline(cap));
     (cap >> 56) & 0x7f
@@ -188,18 +182,20 @@ pub(crate) fn inline_len(cap: u64) -> u64 {
 /// # Safety
 /// `out` points to a valid 24-byte `RyoStrFat` whose inline data bytes
 /// (offsets 0..len) are already initialized.
-#[allow(dead_code)]
 pub(crate) unsafe fn write_inline_tag(out: *mut RyoStrFat, len: u64) {
     debug_assert!(len <= INLINE_CAP as u64);
     // SAFETY: caller contract — out is valid for 24 bytes; we touch only
     // byte 23, leaving data bytes 0..=22 intact.
-    unsafe { (out as *mut u8).add(23).write(0x80 | len as u8) };
+    unsafe {
+        (out as *mut u8)
+            .add(23)
+            .write((inline_tag(len) >> 56) as u8)
+    };
 }
 
 /// Heap capacity policy for producers that want push-ready headroom:
 /// next power of two above `min`, floor 16. Matches `__ryo_str_push`'s
 /// doubling so a produced buffer grows smoothly.
-#[allow(dead_code)]
 pub(crate) fn growth_cap(min: u64) -> u64 {
     debug_assert!(min < (1 << 56), "cap must keep the tag byte clear");
     min.checked_next_power_of_two()
@@ -213,7 +209,6 @@ pub(crate) fn growth_cap(min: u64) -> u64 {
 ///
 /// # Safety
 /// `out` points to a valid, uninitialized `RyoStrFat` (24 bytes).
-#[allow(dead_code)]
 unsafe fn write_str_slot(out: *mut RyoStrFat, bytes: &[u8]) {
     let len = bytes.len();
     if len <= INLINE_CAP {
@@ -263,10 +258,11 @@ unsafe fn write_str_slot(out: *mut RyoStrFat, bytes: &[u8]) {
 ///
 /// `cap` is deliberately NOT in the return value: it is derivable at
 /// the call site — 0 for `ryo_str_from_literal` (the static .rodata
-/// sentinel) and `len` for every allocating producer below (none of
-/// them over-allocates; `__ryo_str_push` manages growth capacity
-/// through its unchanged slot ABI). A producer that ever needs
-/// `cap != len` must change this ABI.
+/// sentinel) and `len` for the remaining packed-u128 allocating
+/// producers (the concats; neither over-allocates, and `__ryo_str_push`
+/// manages growth capacity through its unchanged slot ABI). Producers
+/// that need `cap != len` — or SSO inline results — use the slot-out
+/// ABI (`write_str_slot`) instead.
 #[inline]
 fn pack_pair(ptr: *mut u8, len: u64) -> u128 {
     ((len as u128) << 64) | (ptr as usize as u128)
@@ -328,18 +324,6 @@ pub unsafe extern "C" fn ryo_str_realloc(ptr: *mut u8, old_cap: u64, new_cap: u6
     new_ptr
 }
 
-/// Helper for fixed-string results (nan, inf, etc.): heap-copy `s` and
-/// return the packed pair.
-fn str_pair_from_bytes(s: &[u8]) -> u128 {
-    let ptr = ryo_str_alloc(s.len() as u64);
-    // SAFETY: ptr is freshly allocated for s.len() bytes; s.as_ptr() is
-    // readable for the same length; the regions do not overlap.
-    unsafe {
-        core::ptr::copy_nonoverlapping(s.as_ptr(), ptr, s.len());
-    }
-    pack_pair(ptr, s.len() as u64)
-}
-
 fn oom_abort() -> ! {
     let msg = b"ryo: out of memory\n";
     write_all(STDERR_FD, msg.as_ptr(), msg.len());
@@ -375,29 +359,28 @@ pub unsafe fn ryo_str_from_literal(data: *const u8, len: u64) -> u128 {
     pack_pair(data as *mut u8, len)
 }
 
-/// Materialize an owned `str` copy from a `strview` (M8.4.1.2). The
-/// result owns a fresh heap buffer of exactly `len` bytes; `len == 0`
-/// yields the empty `{null, 0}` pair.
+/// Materialize an owned `str` copy from a `strview` (M8.4.1.2), written
+/// as a tagged slot: inline when `len <= 23`, else a fresh heap buffer
+/// with growth headroom. `len == 0` yields the inline-empty slot.
 ///
 /// # Safety
-/// `ptr` must point to `len` readable bytes — or be null/dangling when
-/// `len == 0`.
+/// `out` points to a valid, uninitialized `RyoStrFat`. `ptr` must point
+/// to `len` readable bytes — or be null/dangling when `len == 0`.
 #[unsafe(no_mangle)]
-pub unsafe fn ryo_str_from_view(ptr: *const u8, len: u64) -> u128 {
+pub unsafe extern "C" fn ryo_str_from_view(out: *mut RyoStrFat, ptr: *const u8, len: u64) {
     if len == 0 {
-        return pack_pair(core::ptr::null_mut(), 0);
+        // SAFETY: out is a valid out-slot.
+        unsafe { write_str_slot(out, b"") };
+        return;
     }
     let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
-    let buf = ryo_str_alloc(len);
     if ptr.is_null() {
         null_abort();
     }
-    // SAFETY: caller contract — ptr/len describe a readable byte range;
-    // buf is freshly allocated for len bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(ptr, buf, n);
-    }
-    pack_pair(buf, len)
+    // SAFETY: caller contract — ptr/len describe a readable byte range.
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, n) };
+    // SAFETY: out is a valid out-slot; `bytes` holds `len` initialized bytes.
+    unsafe { write_str_slot(out, bytes) };
 }
 
 fn slice_fail(msg: &str) -> ! {
@@ -627,8 +610,10 @@ pub unsafe extern "C" fn ryo_str_eq(
     if a_slice == b_slice { 1 } else { 0 }
 }
 
+/// # Safety
+/// `out` points to a valid, uninitialized `RyoStrFat`.
 #[unsafe(no_mangle)]
-pub fn ryo_int_to_str(value: i64) -> u128 {
+pub unsafe extern "C" fn ryo_int_to_str(out: *mut RyoStrFat, value: i64) {
     let mut buf = [0u8; 32];
     let negative = value < 0;
     // Work with unsigned magnitude to handle i64::MIN correctly
@@ -653,43 +638,46 @@ pub fn ryo_int_to_str(value: i64) -> u128 {
         pos -= 1;
         buf[pos] = b'-';
     }
-    let len = (buf.len() - pos) as u64;
-    let ptr = ryo_str_alloc(len);
-    // SAFETY: ptr is newly allocated for len bytes; buf is readable from
-    // pos onward for len bytes; the regions do not overlap.
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr().add(pos), ptr, len as usize);
-    }
-    pack_pair(ptr, len)
+    // SAFETY: out is a valid out-slot; buf[pos..] holds the formatted
+    // digits (at most 20 bytes, always inline).
+    unsafe { write_str_slot(out, &buf[pos..]) };
 }
 
+/// # Safety
+/// `out` points to a valid, uninitialized `RyoStrFat`.
 #[unsafe(no_mangle)]
-pub fn ryo_float_to_str(value: f64) -> u128 {
+pub unsafe extern "C" fn ryo_float_to_str(out: *mut RyoStrFat, value: f64) {
     if value.is_nan() {
-        return str_pair_from_bytes(b"nan");
+        // SAFETY: out is a valid out-slot.
+        unsafe { write_str_slot(out, b"nan") };
+        return;
     }
     if value.is_infinite() {
-        return if value < 0.0 {
-            str_pair_from_bytes(b"-inf")
-        } else {
-            str_pair_from_bytes(b"inf")
-        };
+        // SAFETY: out is a valid out-slot.
+        unsafe { write_str_slot(out, if value < 0.0 { b"-inf" } else { b"inf" }) };
+        return;
     }
 
     let mut buf = ryu::Buffer::new();
-    str_pair_from_bytes(buf.format(value).as_bytes())
+    // SAFETY: out is a valid out-slot; the ryu buffer holds the
+    // formatted bytes.
+    unsafe { write_str_slot(out, buf.format(value).as_bytes()) };
 }
 
+/// # Safety
+/// `out` points to a valid, uninitialized `RyoStrFat`.
 #[unsafe(no_mangle)]
-pub fn ryo_bool_to_str(value: u8) -> u128 {
-    str_pair_from_bytes(if value != 0 { b"true" } else { b"false" })
+pub unsafe extern "C" fn ryo_bool_to_str(out: *mut RyoStrFat, value: u8) {
+    // SAFETY: out is a valid out-slot.
+    unsafe { write_str_slot(out, if value != 0 { b"true" } else { b"false" }) };
 }
 
 // ---------- bytes (M8.4.2) ----------
 //
-// Owned `bytes` buffers mirror the `str` ABI exactly: producers return
-// `{ptr, len}` packed in one `u128` (see `pack_pair`), `cap` is derived
-// at the call site (0 for literals, len for allocating producers), and
+// Owned `bytes` buffers mirror the `str` ABI exactly: literals and
+// concat still return `{ptr, len}` packed in one `u128` (see
+// `pack_pair`) with `cap` derived at the call site, while from_view and
+// the conversions write tagged slots via `write_str_slot`;
 // `__ryo_bytes_push` manages growth through the same 24-byte slot ABI.
 // No UTF-8 invariants anywhere in this family.
 
@@ -728,27 +716,26 @@ pub unsafe fn ryo_bytes_from_literal(data: *const u8, len: u64) -> u128 {
     pack_pair(data as *mut u8, len)
 }
 
-/// Materialize an owned `bytes` copy from a `bytesview` (M8.4.2). The
-/// result owns a fresh heap buffer of exactly `len` bytes; `len == 0`
-/// yields the empty `{null, 0}` pair.
+/// Materialize an owned `bytes` copy from a `bytesview` (M8.4.2),
+/// written as a tagged slot: inline when `len <= 23`, else a fresh heap
+/// buffer with growth headroom. `len == 0` yields the inline-empty slot.
 ///
 /// # Safety
-/// `ptr` must point to `len` readable bytes — or be null/dangling when
-/// `len == 0`.
+/// `out` points to a valid, uninitialized `RyoStrFat`. `ptr` must point
+/// to `len` readable bytes — or be null/dangling when `len == 0`.
 #[unsafe(no_mangle)]
-pub unsafe fn ryo_bytes_from_view(ptr: *const u8, len: u64) -> u128 {
+pub unsafe extern "C" fn ryo_bytes_from_view(out: *mut RyoStrFat, ptr: *const u8, len: u64) {
     if len == 0 {
-        return pack_pair(core::ptr::null_mut(), 0);
+        // SAFETY: out is a valid out-slot.
+        unsafe { write_str_slot(out, b"") };
+        return;
     }
     let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
-    let buf = ryo_bytes_alloc(len);
     debug_assert!(!ptr.is_null());
-    // SAFETY: caller contract — ptr/len describe a readable byte range;
-    // buf is freshly allocated for len bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(ptr, buf, n);
-    }
-    pack_pair(buf, len)
+    // SAFETY: caller contract — ptr/len describe a readable byte range.
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, n) };
+    // SAFETY: out is a valid out-slot; `bytes` holds `len` initialized bytes.
+    unsafe { write_str_slot(out, bytes) };
 }
 
 /// # Safety
@@ -854,64 +841,67 @@ pub unsafe extern "C" fn __ryo_bytes_index(ptr: *const u8, len: u64, idx: u64) -
 }
 
 /// `bytes.to_str()` backing (M8.4.2 stopgap): validates UTF-8 and
-/// returns an owned `str` copy; panics (exit 101) on invalid input
-/// until M13 turns the signature into `Utf8Error!str`.
+/// writes an owned `str` copy as a tagged slot; panics (exit 101) on
+/// invalid input until M13 turns the signature into `Utf8Error!str`.
 ///
 /// # Safety
-/// `ptr` must point to `len` readable bytes (or be null/dangling when
-/// `len == 0`).
+/// `out` points to a valid, uninitialized `RyoStrFat`. `ptr` must point
+/// to `len` readable bytes (or be null/dangling when `len == 0`).
 #[unsafe(no_mangle)]
-pub unsafe fn __ryo_bytes_to_str(ptr: *const u8, len: u64) -> u128 {
+pub unsafe extern "C" fn __ryo_bytes_to_str(out: *mut RyoStrFat, ptr: *const u8, len: u64) {
     if len == 0 {
-        return pack_pair(core::ptr::null_mut(), 0);
+        // SAFETY: out is a valid out-slot.
+        unsafe { write_str_slot(out, b"") };
+        return;
     }
     debug_assert!(!ptr.is_null());
+    let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
     // SAFETY: caller contract — ptr/len describe a readable byte range.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, n) };
     if core::str::from_utf8(bytes).is_err() {
         slice_fail("bytes are not valid UTF-8");
     }
-    let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
-    let buf = ryo_str_alloc(len);
-    // SAFETY: buf is freshly allocated for len bytes; regions disjoint.
-    unsafe {
-        core::ptr::copy_nonoverlapping(ptr, buf, n);
-    }
-    pack_pair(buf, len)
+    // SAFETY: out is a valid out-slot; `bytes` holds `len` initialized bytes.
+    unsafe { write_str_slot(out, bytes) };
 }
 
-/// `str.to_bytes()` backing (M8.4.2): owned copy of the UTF-8 bytes.
-/// Never fails.
+/// `str.to_bytes()` backing (M8.4.2): owned copy of the UTF-8 bytes,
+/// written as a tagged slot. Never fails.
 ///
 /// # Safety
-/// `ptr` must point to `len` readable bytes (or be null/dangling when
-/// `len == 0`).
+/// `out` points to a valid, uninitialized `RyoStrFat`. `ptr` must point
+/// to `len` readable bytes (or be null/dangling when `len == 0`).
 #[unsafe(no_mangle)]
-pub unsafe fn __ryo_str_to_bytes(ptr: *const u8, len: u64) -> u128 {
+pub unsafe extern "C" fn __ryo_str_to_bytes(out: *mut RyoStrFat, ptr: *const u8, len: u64) {
     if len == 0 {
-        return pack_pair(core::ptr::null_mut(), 0);
+        // SAFETY: out is a valid out-slot.
+        unsafe { write_str_slot(out, b"") };
+        return;
     }
     let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
-    let buf = ryo_bytes_alloc(len);
     debug_assert!(!ptr.is_null());
-    // SAFETY: caller contract; buf is freshly allocated for len bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(ptr, buf, n);
-    }
-    pack_pair(buf, len)
+    // SAFETY: caller contract — ptr/len describe a readable byte range.
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, n) };
+    // SAFETY: out is a valid out-slot; `bytes` holds `len` initialized bytes.
+    unsafe { write_str_slot(out, bytes) };
 }
 
 /// `print(bytes)` backing (M8.4.2): render the escaped repr as a fresh
-/// owned `str`. Printable ASCII (0x20..=0x7E except `\` and `"`) is
-/// shown literally; the short escapes `\n \t \r \0 \\ \"` are used
-/// where they exist; every other byte renders as `\xNN` (lowercase
-/// hex); the result is wrapped in `b"..."`.
+/// owned `str`, written as a tagged slot. Printable ASCII (0x20..=0x7E
+/// except `\` and `"`) is shown literally; the short escapes
+/// `\n \t \r \0 \\ \"` are used where they exist; every other byte
+/// renders as `\xNN` (lowercase hex); the result is wrapped in `b"..."`.
+///
+/// The slot is verbatim heap even when the repr would fit inline: the
+/// worst-case buffer is allocated up front and written in place, so the
+/// slot reports the real allocation cap (`4*len+3`) rather than routing
+/// the tail through a second copy.
 ///
 /// # Safety
-/// `ptr` must point to `len` readable bytes (or be null/dangling when
-/// `len == 0`).
+/// `out` points to a valid, uninitialized `RyoStrFat`. `ptr` must point
+/// to `len` readable bytes (or be null/dangling when `len == 0`).
 #[unsafe(no_mangle)]
-pub unsafe fn __ryo_bytes_repr(ptr: *const u8, len: u64) -> u128 {
+pub unsafe extern "C" fn __ryo_bytes_repr(out: *mut RyoStrFat, ptr: *const u8, len: u64) {
     let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
     // Worst case: 3 fixed bytes (`b"`, `"`) + 4 per input byte (`\xNN`).
     let cap = match len.checked_mul(4).and_then(|m| m.checked_add(3)) {
@@ -969,15 +959,37 @@ pub unsafe fn __ryo_bytes_repr(ptr: *const u8, len: u64) -> u128 {
         }
         push(buf, &mut w, b'"');
     }
-    // `cap` is derived at the call site as `len` (LenIsCap); the actual
-    // allocation is larger, which is harmless — `ryo_str_free` only
-    // reads `cap == 0` as the static sentinel.
-    pack_pair(buf, w as u64)
+    // Verbatim heap slot: report the real allocation cap (not `len`) so
+    // `ryo_str_free` and future growth see the true buffer size.
+    // SAFETY: out is a valid out-slot; buf is a heap allocation of `cap`
+    // bytes holding `w` initialized bytes.
+    unsafe {
+        *out = RyoStrFat {
+            ptr: buf,
+            len: w as u64,
+            cap,
+        };
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Read the byte content of a tagged slot, whether inline (bytes in
+    /// the slot itself) or heap (bytes at `slot.ptr`).
+    fn slot_content(slot: &RyoStrFat) -> &[u8] {
+        if is_inline(slot.cap) {
+            let len = inline_len(slot.cap) as usize;
+            // SAFETY: an inline slot holds `len` initialized bytes in its
+            // data region (offsets 0..len).
+            unsafe { core::slice::from_raw_parts(slot as *const RyoStrFat as *const u8, len) }
+        } else {
+            // SAFETY: a heap slot's ptr is valid for `len` initialized
+            // bytes (produced by a slot-out runtime function).
+            unsafe { core::slice::from_raw_parts(slot.ptr, slot.len as usize) }
+        }
+    }
 
     #[test]
     fn test_alloc_and_free() {
@@ -1141,128 +1153,175 @@ mod tests {
 
     #[test]
     fn test_int_to_str_positive() {
-        let (out_ptr, out_len) = unpack_pair(ryo_int_to_str(42));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        assert_eq!(slice, b"42");
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_int_to_str(&mut slot, 42) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), b"42");
     }
 
     #[test]
     fn test_int_to_str_negative() {
-        let (out_ptr, out_len) = unpack_pair(ryo_int_to_str(-123));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        assert_eq!(slice, b"-123");
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_int_to_str(&mut slot, -123) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), b"-123");
     }
 
     #[test]
     fn test_int_to_str_zero() {
-        let (out_ptr, out_len) = unpack_pair(ryo_int_to_str(0));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        assert_eq!(slice, b"0");
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_int_to_str(&mut slot, 0) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), b"0");
     }
 
     #[test]
     fn test_int_to_str_min() {
-        let (out_ptr, out_len) = unpack_pair(ryo_int_to_str(i64::MIN));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        assert_eq!(slice, b"-9223372036854775808");
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_int_to_str(&mut slot, i64::MIN) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), b"-9223372036854775808");
+    }
+
+    #[test]
+    fn test_int_to_str_inline() {
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_int_to_str(&mut slot, -9223372036854775808) }; // 20 chars: max
+        assert!(is_inline(slot.cap));
+        assert_eq!(inline_len(slot.cap), 20);
+        // SAFETY: the inline slot data region holds 20 initialized bytes.
+        let bytes =
+            unsafe { core::slice::from_raw_parts(&slot as *const RyoStrFat as *const u8, 20) };
+        assert_eq!(bytes, b"-9223372036854775808");
     }
 
     #[test]
     fn test_float_to_str_nan() {
-        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(f64::NAN));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        assert_eq!(slice, b"nan");
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_float_to_str(&mut slot, f64::NAN) };
+        assert_eq!(slot_content(&slot), b"nan");
     }
 
     #[test]
     fn test_float_to_str_inf() {
-        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(f64::INFINITY));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        assert_eq!(slice, b"inf");
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_float_to_str(&mut slot, f64::INFINITY) };
+        assert_eq!(slot_content(&slot), b"inf");
     }
 
     #[test]
     fn test_float_to_str_neg_inf() {
-        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(f64::NEG_INFINITY));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        assert_eq!(slice, b"-inf");
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_float_to_str(&mut slot, f64::NEG_INFINITY) };
+        assert_eq!(slot_content(&slot), b"-inf");
     }
 
     #[test]
     fn test_float_to_str() {
-        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(2.75));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        let s = core::str::from_utf8(slice).unwrap();
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_float_to_str(&mut slot, 2.75) };
+        let s = core::str::from_utf8(slot_content(&slot)).unwrap();
         assert!(s.starts_with("2.75"), "got: {}", s);
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_float_to_str_large_value() {
         // Value larger than u64::MAX — old code would saturate
-        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(1.8e19));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        let s = core::str::from_utf8(slice).unwrap();
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_float_to_str(&mut slot, 1.8e19) };
+        let s = core::str::from_utf8(slot_content(&slot)).unwrap();
         let parsed: f64 = s.parse().unwrap();
         assert_eq!(parsed, 1.8e19);
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_float_to_str_precision() {
-        let (out_ptr, out_len) = unpack_pair(ryo_float_to_str(0.1 + 0.2));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        let s = core::str::from_utf8(slice).unwrap();
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_float_to_str(&mut slot, 0.1 + 0.2) };
+        let s = core::str::from_utf8(slot_content(&slot)).unwrap();
         let parsed: f64 = s.parse().unwrap();
         assert_eq!(parsed, 0.1 + 0.2);
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
     }
 
     #[test]
     fn test_bool_to_str_true() {
-        let (out_ptr, out_len) = unpack_pair(ryo_bool_to_str(1));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        assert_eq!(slice, b"true");
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_bool_to_str(&mut slot, 1) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), b"true");
     }
 
     #[test]
     fn test_bool_to_str_false() {
-        let (out_ptr, out_len) = unpack_pair(ryo_bool_to_str(0));
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        assert_eq!(slice, b"false");
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { ryo_bool_to_str(&mut slot, 0) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), b"false");
     }
 
     #[test]
@@ -1346,48 +1405,82 @@ mod tests {
     #[test]
     fn str_from_view_copies_bytes() {
         let src = b"hello";
-        // SAFETY: src points to 5 readable bytes.
-        let pair = unsafe { ryo_str_from_view(src.as_ptr(), 5) };
-        let (out_ptr, out_len) = unpack_pair(pair);
-        assert_eq!(out_len, 5);
-        // cap == len for allocating producers (codegen-side derivation).
-        // SAFETY: the pair points to a freshly allocated buffer of out_len bytes.
-        let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-        assert_eq!(slice, b"hello");
-        // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-        unsafe { ryo_str_free(out_ptr, out_len) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; src points to 5 readable bytes.
+        unsafe { ryo_str_from_view(&mut slot, src.as_ptr(), 5) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), b"hello");
     }
 
     #[test]
     fn str_from_view_buffer_is_independent() {
         unsafe {
-            // Heap-backed source: the copy must own a fresh buffer.
-            let src = ryo_str_alloc(3);
-            core::ptr::copy_nonoverlapping(b"abc".as_ptr(), src, 3);
-            let pair = ryo_str_from_view(src, 3);
-            let (out_ptr, out_len) = unpack_pair(pair);
+            // Heap-backed source (> INLINE_CAP so the copy is heap too):
+            // the copy must own a fresh buffer.
+            let src = ryo_str_alloc(30);
+            core::ptr::copy_nonoverlapping(b"abcdefghijklmnopqrstuvwxyzabcd".as_ptr(), src, 30);
+            let mut slot = RyoStrFat {
+                ptr: core::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            // SAFETY: valid out-slot; src is readable for 30 bytes.
+            ryo_str_from_view(&mut slot, src, 30);
+            assert!(!is_inline(slot.cap));
             assert!(
-                !core::ptr::eq(out_ptr, src),
+                !core::ptr::eq(slot.ptr, src),
                 "copy must not alias the source"
             );
             // Overwrite and free the source; the copy is unaffected.
-            core::ptr::write_bytes(src, b'x', 3);
-            ryo_str_free(src, 3);
-            let slice = core::slice::from_raw_parts(out_ptr, out_len as usize);
-            assert_eq!(slice, b"abc");
-            // SAFETY: out_ptr came from ryo_str_alloc with capacity out_len.
-            ryo_str_free(out_ptr, out_len);
+            core::ptr::write_bytes(src, b'x', 30);
+            ryo_str_free(src, 30);
+            assert_eq!(slot_content(&slot), b"abcdefghijklmnopqrstuvwxyzabcd");
+            // SAFETY: heap slot produced above; cap is its allocation size.
+            ryo_str_free(slot.ptr, slot.cap);
         }
     }
 
     #[test]
     fn str_from_view_empty() {
         // ptr may be null/dangling when len == 0 (`ryo_str_from_view` invariant).
-        // SAFETY: len == 0, so the pointer is never dereferenced.
-        let pair = unsafe { ryo_str_from_view(core::ptr::null(), 0) };
-        let (out_ptr, out_len) = unpack_pair(pair);
-        assert!(out_ptr.is_null());
-        assert_eq!(out_len, 0);
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; len == 0, so the pointer is never
+        // dereferenced.
+        unsafe { ryo_str_from_view(&mut slot, core::ptr::null(), 0) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(inline_len(slot.cap), 0);
+    }
+
+    #[test]
+    fn test_from_view_inline_and_heap() {
+        let mut small = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; source literal readable for 5 bytes.
+        unsafe { ryo_str_from_view(&mut small, b"hello".as_ptr(), 5) };
+        assert!(is_inline(small.cap));
+        let long = [b'y'; 40];
+        let mut big = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; `long` readable for 40 bytes.
+        unsafe { ryo_str_from_view(&mut big, long.as_ptr(), 40) };
+        assert!(!is_inline(big.cap));
+        assert_eq!(big.len, 40);
+        // SAFETY: heap slot produced above.
+        unsafe { ryo_str_free(big.ptr, big.cap) };
     }
 
     #[test]
@@ -1421,14 +1514,32 @@ mod tests {
 
     #[test]
     fn bytes_from_view_copies() {
+        // Small result lands inline.
         let src = [0xaau8, 0xbb];
-        let v = unsafe { ryo_bytes_from_view(src.as_ptr(), src.len() as u64) };
-        let (p, l) = unpack_pair(v);
-        assert_eq!(l, 2);
-        assert_ne!(p, src.as_ptr() as *mut u8); // independent copy
-        let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
-        assert_eq!(s, &[0xaa, 0xbb]);
-        unsafe { ryo_bytes_free(p, l) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; src is readable for 2 bytes.
+        unsafe { ryo_bytes_from_view(&mut slot, src.as_ptr(), src.len() as u64) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), &[0xaa, 0xbb]);
+
+        // Large result is an independent heap copy.
+        let big = [0xccu8; 30];
+        let mut big_slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; `big` is readable for 30 bytes.
+        unsafe { ryo_bytes_from_view(&mut big_slot, big.as_ptr(), big.len() as u64) };
+        assert!(!is_inline(big_slot.cap));
+        assert_ne!(big_slot.ptr, big.as_ptr() as *mut u8); // independent copy
+        assert_eq!(slot_content(&big_slot), &big);
+        // SAFETY: heap slot produced above; cap is its allocation size.
+        unsafe { ryo_bytes_free(big_slot.ptr, big_slot.cap) };
     }
 
     #[test]
@@ -1494,41 +1605,65 @@ mod tests {
     #[test]
     fn bytes_to_str_copies_valid_utf8() {
         let src = "héllo".as_bytes();
-        let v = unsafe { __ryo_bytes_to_str(src.as_ptr(), src.len() as u64) };
-        let (p, l) = unpack_pair(v);
-        let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
-        assert_eq!(s, "héllo".as_bytes());
-        unsafe { ryo_str_free(p, l) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; src is readable for its byte length.
+        unsafe { __ryo_bytes_to_str(&mut slot, src.as_ptr(), src.len() as u64) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), "héllo".as_bytes());
     }
 
     #[test]
     fn str_to_bytes_copies() {
         let src = "héllo".as_bytes();
-        let v = unsafe { __ryo_str_to_bytes(src.as_ptr(), src.len() as u64) };
-        let (p, l) = unpack_pair(v);
-        let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
-        assert_eq!(s, "héllo".as_bytes());
-        unsafe { ryo_bytes_free(p, l) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; src is readable for its byte length.
+        unsafe { __ryo_str_to_bytes(&mut slot, src.as_ptr(), src.len() as u64) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), "héllo".as_bytes());
     }
 
     #[test]
     fn bytes_repr_escapes() {
         // A, NUL, 0xff, newline, '"', '\', '~' (0x7e printable), ESC (0x1b)
         let input = [b'A', 0x00, 0xff, b'\n', b'"', b'\\', 0x7e, 0x1b];
-        let v = unsafe { __ryo_bytes_repr(input.as_ptr(), input.len() as u64) };
-        let (p, l) = unpack_pair(v);
-        let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
-        assert_eq!(s, b"b\"A\\0\\xff\\n\\\"\\\\~\\x1b\"");
-        unsafe { ryo_str_free(p, l) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; input is readable for its byte length.
+        unsafe { __ryo_bytes_repr(&mut slot, input.as_ptr(), input.len() as u64) };
+        assert_eq!(slot_content(&slot), b"b\"A\\0\\xff\\n\\\"\\\\~\\x1b\"");
+        // The verbatim-heap slot reports its real allocation cap, which
+        // covers the written length (fixes the old LenIsCap under-report).
+        assert!(!is_inline(slot.cap));
+        assert!(slot.cap >= slot.len);
+        // SAFETY: heap slot produced above; cap is its allocation size.
+        unsafe { ryo_str_free(slot.ptr, slot.cap) };
     }
 
     #[test]
     fn bytes_repr_empty() {
-        let v = unsafe { __ryo_bytes_repr(core::ptr::null(), 0) };
-        let (p, l) = unpack_pair(v);
-        let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
-        assert_eq!(s, b"b\"\"");
-        unsafe { ryo_str_free(p, l) };
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; len == 0, so the pointer is never
+        // dereferenced.
+        unsafe { __ryo_bytes_repr(&mut slot, core::ptr::null(), 0) };
+        assert_eq!(slot_content(&slot), b"b\"\"");
+        assert!(slot.cap >= slot.len);
+        // SAFETY: heap slot produced above; cap is its allocation size.
+        unsafe { ryo_str_free(slot.ptr, slot.cap) };
     }
 
     #[test]

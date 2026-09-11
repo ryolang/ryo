@@ -22,9 +22,10 @@ use std::collections::HashMap;
 /// not a struct). The `cap` word is a codegen-side derivation:
 /// `Static` (cap = 0, the .rodata sentinel) for
 /// `ryo_str_from_literal` / `ryo_bytes_from_literal`, `LenIsCap`
-/// (cap = len) for every allocating producer — the runtime never
-/// over-allocates, and `__ryo_str_push` / `__ryo_bytes_push` manage
-/// growth capacity through their unchanged slot ABI.
+/// (cap = len) for the remaining packed-u128 allocating producers (the
+/// concats — the slot-out producers report their own tagged cap, and
+/// `__ryo_str_push` / `__ryo_bytes_push` manage growth capacity through
+/// their unchanged slot ABI).
 #[derive(Clone, Copy)]
 pub(crate) enum CapRule {
     Static,
@@ -819,6 +820,42 @@ impl<M: Module> Codegen<M> {
         Ok(ValueRepr::Str { ptr, len, cap })
     }
 
+    /// Call a slot-out runtime producer: allocate a 24-byte slot, pass
+    /// its address as arg 0, then load the tagged (ptr, len, cap)
+    /// triple. The runtime writes the full slot (SSO tag, headroom
+    /// cap) — codegen never derives cap anymore.
+    pub(crate) fn emit_slot_out_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &str,
+        args: &[(Type, Value)],
+    ) -> Result<(Value, Value, Value), String> {
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        let mut param_tys = Vec::with_capacity(args.len() + 1);
+        param_tys.push(ctx.int_type);
+        param_tys.extend(args.iter().map(|(ty, _)| *ty));
+        let func_ref = Self::declare_runtime_fn(ctx.module, builder, fn_name, &param_tys, &[])?;
+        let mut call_args = Vec::with_capacity(args.len() + 1);
+        call_args.push(addr);
+        call_args.extend(args.iter().map(|(_, v)| *v));
+        builder.ins().call(func_ref, &call_args);
+        let ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 8);
+        let cap = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 16);
+        Ok((ptr, len, cap))
+    }
+
     /// Lazily create the per-function 24-byte inline-extraction scratch
     /// slot for `operand` (0 or 1).
     fn inline_scratch(
@@ -988,13 +1025,13 @@ impl<M: Module> Codegen<M> {
                     else {
                         unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
                     };
-                    Self::emit_rv_str_call(
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
                         ctx,
                         "ryo_str_from_view",
                         &[(ctx.int_type, v_ptr), (types::I64, v_len)],
-                        CapRule::LenIsCap,
-                    )?
+                    )?;
+                    ValueRepr::Str { ptr, len, cap }
                 } else if name_str == "__ryo_bytes_from_view" {
                     // M8.4.2 `bytes(bview)` materialization: the
                     // argument is a view pair via `eval_inst_view`.
@@ -1005,46 +1042,46 @@ impl<M: Module> Codegen<M> {
                     else {
                         unreachable!("__ryo_bytes_from_view argument must produce ValueRepr::View")
                     };
-                    Self::emit_rv_bytes_call(
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
                         ctx,
                         "ryo_bytes_from_view",
                         &[(ctx.int_type, v_ptr), (types::I64, v_len)],
-                        CapRule::LenIsCap,
-                    )?
+                    )?;
+                    ValueRepr::Bytes { ptr, len, cap }
                 } else if name_str == "__ryo_str_to_bytes" {
                     // `str.to_bytes()` / `strview.to_bytes()` — only
                     // (ptr, len) is read.
                     let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0], 0)?;
-                    Self::emit_rv_bytes_call(
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
                         ctx,
                         "__ryo_str_to_bytes",
                         &[(ctx.int_type, p), (types::I64, l)],
-                        CapRule::LenIsCap,
-                    )?
+                    )?;
+                    ValueRepr::Bytes { ptr, len, cap }
                 } else if name_str == "__ryo_bytes_to_str" {
                     // `bytes.to_str()` / `bytesview.to_str()` — returns
                     // an owned str (validated copy; panics on bad UTF-8).
                     let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0], 0)?;
-                    Self::emit_rv_str_call(
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
                         ctx,
                         "__ryo_bytes_to_str",
                         &[(ctx.int_type, p), (types::I64, l)],
-                        CapRule::LenIsCap,
-                    )?
+                    )?;
+                    ValueRepr::Str { ptr, len, cap }
                 } else if name_str == "__ryo_bytes_repr" {
                     // print(bytes) rewrite (sema, M8.4.2) — returns the
                     // escaped-repr str.
                     let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0], 0)?;
-                    Self::emit_rv_str_call(
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
                         ctx,
                         "__ryo_bytes_repr",
                         &[(ctx.int_type, p), (types::I64, l)],
-                        CapRule::LenIsCap,
-                    )?
+                    )?;
+                    ValueRepr::Str { ptr, len, cap }
                 } else if name_str == "int_to_str"
                     || name_str == "float_to_str"
                     || name_str == "bool_to_str"
@@ -1056,13 +1093,9 @@ impl<M: Module> Codegen<M> {
                         "bool_to_str" => ("ryo_bool_to_str", types::I8),
                         _ => unreachable!(),
                     };
-                    Self::emit_rv_str_call(
-                        builder,
-                        ctx,
-                        fn_name,
-                        &[(param_ty, arg_val)],
-                        CapRule::LenIsCap,
-                    )?
+                    let (ptr, len, cap) =
+                        Self::emit_slot_out_call(builder, ctx, fn_name, &[(param_ty, arg_val)])?;
+                    ValueRepr::Str { ptr, len, cap }
                 } else {
                     // User call — emit_call handles sret for fat-returning
                     // calls and caches the triple. Called directly
@@ -1082,16 +1115,12 @@ impl<M: Module> Codegen<M> {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                let l_repr = Self::eval_inst_fat(builder, ctx, lhs)?;
-                let r_repr = Self::eval_inst_fat(builder, ctx, rhs)?;
-                let (l_ptr, l_len) = match l_repr {
-                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
-                    _ => unreachable!(),
-                };
-                let (r_ptr, r_len) = match r_repr {
-                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
-                    _ => unreachable!(),
-                };
+                // SSO-aware extraction (operands 0/1): an inline
+                // operand's ptr/len words are byte data, not a pointer —
+                // spill to the per-operand scratch slots and read the
+                // tag-encoded length instead.
+                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs, 0)?;
+                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs, 1)?;
 
                 Self::emit_rv_str_call(
                     builder,
@@ -1111,16 +1140,9 @@ impl<M: Module> Codegen<M> {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                let l_repr = Self::eval_inst_fat(builder, ctx, lhs)?;
-                let r_repr = Self::eval_inst_fat(builder, ctx, rhs)?;
-                let (l_ptr, l_len) = match l_repr {
-                    ValueRepr::Bytes { ptr, len, .. } => (ptr, len),
-                    _ => unreachable!(),
-                };
-                let (r_ptr, r_len) = match r_repr {
-                    ValueRepr::Bytes { ptr, len, .. } => (ptr, len),
-                    _ => unreachable!(),
-                };
+                // SSO-aware extraction, as in StrConcat above.
+                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs, 0)?;
+                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs, 1)?;
 
                 Self::emit_rv_bytes_call(
                     builder,

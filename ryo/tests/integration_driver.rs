@@ -417,58 +417,39 @@ fn ir_emit_default_is_ast_and_clif() {
     );
 }
 
-/// SSO extraction-scratch pin: fat-byte extraction spills through a
-/// shared 24-byte stack slot per operand per function
-/// (`emit_fat_bytes_ptr_len`; slot 0 for lhs/unary operands, slot 1 for
-/// rhs operands of binary consumers). Assert the emitted CLIF contains
-/// only those slots — at most two `explicit_slot 24` entries — and that
-/// every `stack_addr` references one of them, i.e. no per-call-site
-/// out-pointer slots have crept back in.
-fn assert_sso_scratch_only(clif: &str) {
+/// Slot discipline pin: every explicit stack slot is a 24-byte
+/// STR_SLOT_SIZE slot, and their total count is exactly `expected` —
+/// the shared SSO extraction scratch slots (one per operand, created
+/// lazily by `emit_fat_bytes_ptr_len`), one per slot-out producer call
+/// site (`emit_slot_out_call`), and one per promote-on-view site
+/// (`emit_ensure_heap_for_view_base`). The exact count keeps
+/// per-call-site slots from creeping in unnoticed.
+fn assert_explicit_24byte_slots(clif: &str, expected: usize) {
     let slot_lines: Vec<&str> = clif
         .lines()
         .filter(|l| l.contains("explicit_slot"))
         .collect();
-    assert!(
-        slot_lines.len() <= 2,
-        "expected at most the two shared SSO scratch slots: {}",
-        clif
+    assert_eq!(
+        slot_lines.len(),
+        expected,
+        "unexpected explicit-slot count (want {expected}): {clif}"
     );
     for (i, line) in slot_lines.iter().enumerate() {
         assert!(
             line.contains("explicit_slot 24"),
-            "stack slot {} must be a 24-byte SSO scratch slot: {}",
-            i,
-            clif
-        );
-        let name = format!("ss{}", i);
-        assert!(
-            line.contains(&name),
-            "scratch slots must be ss0/ss1 in order: {}",
-            clif
-        );
-    }
-    for line in clif.lines().filter(|l| l.contains("stack_addr")) {
-        assert!(
-            line.contains("ss0") || line.contains("ss1"),
-            "stack_addr must reference an SSO scratch slot: {}",
-            clif
+            "stack slot {i} must be 24 bytes: {clif}"
         );
     }
 }
 
 #[test]
-fn clif_string_ops_use_packed_return_sso_scratch() {
-    // Phase 0 runtime ABI: string-producing runtime calls return
-    // {ptr, len} packed in one u128 — no per-call-site stack slots,
-    // no out-pointer, no reload (spec 2026-08-25 §2 amendment).
-    //
-    // SSO (spec §3) adds exactly ONE slot per function: the shared
-    // 24-byte extraction scratch slot `emit_fat_bytes_ptr_len` spills
-    // tagged-inline triples into so transient consumers get a readable
-    // address. The pin below tolerates that single slot (and only that
-    // slot — every stack_addr must reference it); later tasks move
-    // producers to slot-out and will update this pin again.
+fn clif_string_ops_slot_out_producers() {
+    // Slot-out runtime ABI: string producers (`int_to_str`, from_view,
+    // conversions) write a tagged 24-byte slot passed as arg 0 and
+    // return nothing; literals, slices, and concat still return
+    // {ptr, len} packed in one u128. Slots in this program: 2 shared
+    // SSO extraction scratch slots (the `s + t` concat operands) + 1
+    // slot-out call slot (`int_to_str`).
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -487,20 +468,18 @@ fn clif_string_ops_use_packed_return_sso_scratch() {
 
     assert!(
         stdout.contains("-> i128"),
-        "runtime string calls must return the packed u128 pair: {}",
+        "literal/concat runtime calls still return the packed u128 pair: {}",
         stdout
     );
-    assert_sso_scratch_only(&stdout);
+    assert_explicit_24byte_slots(&stdout, 3);
 }
 
 #[test]
-fn clif_bytes_ops_use_packed_return_sso_scratch() {
-    // M8.4.2 rides the Phase 0 runtime ABI: bytes-producing runtime
-    // calls return {ptr, len} packed in one u128 — no per-call-site
-    // stack slots, no out-pointer, no reload (same pin as the str twin
-    // above; the bytes_push slot ABI is not exercised by this program).
-    // The single tolerated slot is the SSO extraction scratch — see the
-    // str twin's comment.
+fn clif_bytes_ops_slot_out_producers() {
+    // M8.4.2 twin of the str pin above. Slots in this program: 2 shared
+    // SSO extraction scratch slots (the `b"\x01" + b"\x02"` concat
+    // operands) + 1 promote-on-view slot (the `b[0:1]` slice base) + 2
+    // slot-out call slots (`bytes(...)` and `int_to_str(...)`).
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -519,10 +498,10 @@ fn clif_bytes_ops_use_packed_return_sso_scratch() {
 
     assert!(
         stdout.contains("-> i128"),
-        "runtime bytes calls must return the packed u128 pair: {}",
+        "literal/concat runtime calls still return the packed u128 pair: {}",
         stdout
     );
-    assert_sso_scratch_only(&stdout);
+    assert_explicit_24byte_slots(&stdout, 5);
 }
 
 #[test]
