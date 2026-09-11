@@ -150,6 +150,81 @@ pub struct RyoStrFat {
     pub cap: u64,
 }
 
+// SSO consumers (producers that write tagged slots) land in follow-up
+// string work; until then these helpers are exercised only by tests.
+/// Inline capacity of the small-string optimization (SSO): strings of
+/// at most this many bytes live directly inside the 24-byte slot.
+/// 23 >= 20, so every `int_to_str`/`bool_to_str` output is inline.
+#[allow(dead_code)]
+pub(crate) const INLINE_CAP: usize = 23;
+
+/// Cap-word tag: the top byte (byte 23, little-endian) discriminates.
+/// `0x80 | len` marks an inline string; a top byte of `0x00` is a heap
+/// cap (caps stay below 2^56 by construction) or the all-zero static
+/// `.rodata` sentinel.
+#[allow(dead_code)]
+pub(crate) fn inline_tag(len: u64) -> u64 {
+    debug_assert!(len <= INLINE_CAP as u64);
+    (0x80 | len) << 56
+}
+
+#[allow(dead_code)]
+pub(crate) fn is_inline(cap: u64) -> bool {
+    (cap >> 56) & 0x80 != 0
+}
+
+#[allow(dead_code)]
+pub(crate) fn inline_len(cap: u64) -> u64 {
+    debug_assert!(is_inline(cap));
+    (cap >> 56) & 0x7f
+}
+
+/// Heap capacity policy for producers that want push-ready headroom:
+/// next power of two above `min`, floor 16. Matches `__ryo_str_push`'s
+/// doubling so a produced buffer grows smoothly.
+#[allow(dead_code)]
+pub(crate) fn growth_cap(min: u64) -> u64 {
+    debug_assert!(min < (1 << 56), "cap must keep the tag byte clear");
+    min.checked_next_power_of_two()
+        .unwrap_or_else(|| overflow_abort())
+        .max(16)
+}
+
+/// Write `bytes` into `out` as a tagged slot: inline when it fits,
+/// else a heap allocation with growth headroom. Producer ABI for every
+/// slot-out runtime function.
+///
+/// # Safety
+/// `out` points to a valid, uninitialized `RyoStrFat` (24 bytes).
+#[allow(dead_code)]
+unsafe fn write_str_slot(out: *mut RyoStrFat, bytes: &[u8]) {
+    let len = bytes.len();
+    if len <= INLINE_CAP {
+        // SAFETY: out is valid for 24 bytes; len <= 23 fits the inline
+        // data region (offsets 0..=22). The cap word is written last so
+        // the slot is never half-initialized observable.
+        unsafe {
+            if len > 0 {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, len);
+            }
+            (*out).cap = inline_tag(len as u64);
+        }
+    } else {
+        let cap = growth_cap(len as u64);
+        let buf = ryo_str_alloc(cap);
+        // SAFETY: buf is freshly allocated for cap >= len bytes; the
+        // source slice is readable for len bytes; regions do not overlap.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+            *out = RyoStrFat {
+                ptr: buf,
+                len: len as u64,
+                cap,
+            };
+        }
+    }
+}
+
 /// Return-value packing for the string-producing runtime functions
 /// (Phase 0 ABI modernization): `{ptr, len}` is returned as one
 /// `u128` (lo = ptr, hi = len).
@@ -1387,5 +1462,64 @@ mod tests {
         let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
         assert_eq!(s, b"b\"\"");
         unsafe { ryo_str_free(p, l) };
+    }
+
+    #[test]
+    fn test_inline_tag_roundtrip() {
+        for len in 0..=INLINE_CAP as u64 {
+            let cap = inline_tag(len);
+            assert!(is_inline(cap));
+            assert_eq!(inline_len(cap), len);
+        }
+        // Heap caps (top byte clear) and the static sentinel are never inline.
+        assert!(!is_inline(0));
+        assert!(!is_inline(16));
+        assert!(!is_inline(u64::MAX >> 8)); // 2^56-1: max legal heap cap
+    }
+
+    #[test]
+    fn test_write_str_slot_inline() {
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        let bytes = b"hello ryo sso"; // 13 bytes
+        // SAFETY: slot is a valid 24-byte out-slot.
+        unsafe { write_str_slot(&mut slot, bytes) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(inline_len(slot.cap), bytes.len() as u64);
+        // Byte content lives in the slot's first `len` bytes.
+        let stored = unsafe {
+            core::slice::from_raw_parts(&slot as *const RyoStrFat as *const u8, bytes.len())
+        };
+        assert_eq!(stored, bytes);
+    }
+
+    #[test]
+    fn test_write_str_slot_heap_at_boundary() {
+        let bytes = [b'x'; INLINE_CAP + 1]; // 24 bytes: one past inline capacity
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: slot is a valid out-slot; result is heap and freed below.
+        unsafe { write_str_slot(&mut slot, &bytes) };
+        assert!(!is_inline(slot.cap));
+        assert_eq!(slot.len, 24);
+        assert!(slot.cap >= 24); // headroom allowed, exact fit allowed
+        let stored = unsafe { core::slice::from_raw_parts(slot.ptr, 24) };
+        assert_eq!(stored, &bytes);
+        // SAFETY: heap slot produced above; cap is its allocation size.
+        unsafe { ryo_str_free(slot.ptr, slot.cap) };
+    }
+
+    #[test]
+    fn test_growth_cap_policy() {
+        assert_eq!(growth_cap(1), 16);
+        assert_eq!(growth_cap(16), 16);
+        assert_eq!(growth_cap(17), 32);
+        assert_eq!(growth_cap(1000), 1024);
     }
 }
