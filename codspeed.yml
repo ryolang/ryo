@@ -15,3 +15,9 @@ benchmarks:
     exec: ./benchmarks/mandelbrot/mandelbrot
   - name: collatz-aot
     exec: ./benchmarks/collatz/collatz
+  - name: struct-records-aot
+    exec: ./benchmarks/struct_records/struct_records
+  - name: struct-records-reuse-aot
+    exec: ./benchmarks/struct_records_reuse/struct_records_reuse
+  - name: struct-records-inout-aot
+    exec: ./benchmarks/struct_records_inout/struct_records_inout

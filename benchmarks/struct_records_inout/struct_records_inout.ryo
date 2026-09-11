@@ -1,0 +1,21 @@
+struct Person:
+	name: str
+	age: int
+
+fn make_person(i: int) -> Person:
+	return Person{name="user" + int_to_str(i), age=20 + i % 50}
+
+fn birthday(inout p: Person):
+	p.age += 1
+
+fn score(p: Person) -> int:
+	return p.name.len() + p.age
+
+fn main():
+	mut total = 0
+	for i in range(0, 500000):
+		mut p = make_person(i)
+		birthday(&p)
+		total += score(p)
+	assert(total == 27638890, "struct_records_inout checksum")
+	print("assert passed, struct_records_inout is correct\n")

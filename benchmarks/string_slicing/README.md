@@ -23,16 +23,14 @@ A second, smaller asymmetry: hyperfine times whole processes, so every arm's in-
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-08-26 — all rows re-measured after literal hoisting + static-cap free elision landed (same day); the Swift arm's match loop now uses a zero-copy slice `elementsEqual` (same shape as Rust's `&text[i..i+3] == b"fox"`). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11 — all rows re-measured after the Rust and Swift arms were rewritten to be idiomatic per the repository convention: Rust now builds the string with `s.repeat(2)` and scans with `text.windows(3).filter(|w| *w == b"fox")`, and Swift hoists the needle array out of the scan loop (previously it transliterated Ryo's `s = s + s` as `s.clone() + &s` and rebuilt a magic `[102, 111, 120]` literal per comparison). Same checksums and semantics; only expression quality changed. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
-| Candidate | Mean time | vs fastest | Max RSS |
-|---|---|---|---|
-| **Rust** | 1.8 ms ± 0.6 ms | 1.00x | 2.97 MB |
-| **Swift** | 2.4 ms ± 0.1 ms | 1.39x slower | 7.09 MB |
-| **Ryo (AOT)** | 4.9 ms ± 0.2 ms | 2.80x slower | 2.75 MB |
-| **Ryo (JIT)** | 6.7 ms ± 0.7 ms | 3.84x slower | 6.58 MB |
-
-Note: the JIT regression from the packed-`u128` ABI (~6.6 ms → ~10 ms) is gone — the JIT is back to ~6.8 ms now that the per-iteration `ryo_str_from_literal` / `ryo_str_free` calls are eliminated, confirming those extern calls priced higher under the JIT than under AOT.
+| Candidate | Version | Mean time | vs fastest | Max RSS |
+|---|---|---|---|---|
+| **Rust** | 1.98.0 | 1.7 ms ± 0.2 ms | 1.00x | 2.88 MB |
+| **Swift** | 6.3.3 | 2.6 ms ± 0.2 ms | 1.54x slower | 7.09 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260911+490b10d | 4.9 ms ± 0.3 ms | 2.94x slower | 2.75 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260911+490b10d | 6.5 ms ± 0.4 ms | 3.90x slower | 6.62 MB |
 
 ## How to Run
 

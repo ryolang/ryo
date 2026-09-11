@@ -1,11 +1,13 @@
 import Foundation
 
+let fox = Array("fox".utf8)
+
 func countFox(_ text: [UInt8]) -> Int {
 	var count = 0
 	var i = 0
 	let n = text.count
 	while i + 3 <= n {
-		if text[i..<(i + 3)].elementsEqual([102, 111, 120]) {
+		if text[i..<(i + 3)].elementsEqual(fox) {
 			count += 1
 		}
 		i += 1

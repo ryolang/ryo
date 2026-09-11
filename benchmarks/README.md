@@ -6,7 +6,9 @@ This directory contains various benchmarks used to measure, validate, and compar
 
 We target both execution speed and memory efficiency (specifically focusing on Ryo's Ahead-Of-Time AOT compiler via Cranelift and JIT execution).
 
-**Checkpoint convention:** run the full suite before each release and after merging any change that touches generated-code shape (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption); record results in each benchmark's README so the trend is visible in git history.
+**Idiomatic convention:** every benchmark is written the way a developer would naturally write it in that language. Never adapt another language's implementation to work around something Ryo doesn't support yet (e.g. moving a field out of a struct) — the cost of Ryo's current limitations is part of what the suite measures. Where that makes workloads diverge, checksums are per-language and the benchmark's README must say so explicitly.
+
+**Checkpoint convention:** run the full suite before each release and after merging any change that touches generated-code shape (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption); record results in each benchmark's README so the trend is visible in git history. Every results table must include a **Version** column capturing each language toolchain's version at measurement time (`rustc --version`, `swiftc --version`, `python3 --version`, `ryo --version`) — timings without versions are not reproducible.
 
 ---
 
@@ -15,6 +17,7 @@ We target both execution speed and memory efficiency (specifically focusing on R
 We maintain self-contained, reproducible benchmarks in separate subdirectories:
 
 ### 1. [Fibonacci Benchmark](./fibonacci/)
+
 * **Focus:** Deep function recursion, standard integer arithmetic, and basic execution overhead.
 * **Languages compared:** Rust, Go, Swift, Kotlin, Bun (TypeScript), Julia, Elixir, Python, Ruby, and Ryo.
 * **Highlights:** Ryo AOT achieves the **lightest memory usage of all languages tested** (1.34 MB max resident size). On execution speed, Ryo currently runs at ~1.42× Rust's time on `fib(40)` — see the note below for why.
@@ -25,39 +28,61 @@ The 1.00× Rust baseline is compiled in release mode, where integer overflow **w
 
 The fair like-for-like is **Swift**, which also traps on overflow and sits at ~1.26× Rust. Ryo's remaining margin over Swift is not semantic but mechanical: Cranelift 0.135.1 lowers each surviving overflow check to `cset` + `tst` + `b.ne` (~3 extra instructions per op; verified by disassembly) instead of a single branch on the CPU overflow flag. Closing that gap is tracked as compiler work, not accepted as a language cost:
 
-- Value-range guard elision **landed** (commit `d6aee06`, checkpoint 2026-08-26 in [`fibonacci/README.md`](./fibonacci/README.md#checkpoint-value-range-guard-elision-2026-08-26)): `if n <= 1: return n` proves `n - 1` and `n - 2` cannot overflow, so those guards are no longer emitted. Measured walltime change was ~zero — the elided branches were perfectly predicted — and the residual gap is structural (middle-end transforms), not the guards.
-- The one surviving guard on the outer `fibonacci(n - 1) + fibonacci(n - 2)` addition lowers to an unfused `cset` + `tst` + `b.ne`; the flag-fusing fix is tracked as **I-165** (`ISSUES.md`). Cranelift itself is pinned and upgraded regularly (0.135.1 at the time of writing).
+* Value-range guard elision **landed** (commit `d6aee06`, checkpoint 2026-08-26 in [`fibonacci/README.md`](./fibonacci/README.md#checkpoint-value-range-guard-elision-2026-08-26)): `if n <= 1: return n` proves `n - 1` and `n - 2` cannot overflow, so those guards are no longer emitted. Measured walltime change was ~zero — the elided branches were perfectly predicted — and the residual gap is structural (middle-end transforms), not the guards.
+* The one surviving guard on the outer `fibonacci(n - 1) + fibonacci(n - 2)` addition lowers to an unfused `cset` + `tst` + `b.ne`; the flag-fusing fix is tracked as **I-165** (`ISSUES.md`). Cranelift itself is pinned and upgraded regularly (0.135.1 at the time of writing).
 
 JIT and AOT land within noise of each other (~1.42–1.43×) because both share the same Cranelift codegen (both at `opt_level=speed`).
 
 ### 2. [Eager Destruction Benchmark](./eager_destruction/)
+
 * **Focus:** Eager memory deallocation at last use (Eager Destruction / ASAP Destruction) vs. scope-based (RAII) destruction under deep recursion.
 * **Languages compared:** Rust (Scope-Based vs. Manual Drop) and Ryo.
 * **Highlights:** Ryo AOT uses nearly **3x less heap memory** than standard Rust and is completely immune to stack overflows under deep recursion because deallocations are automatically and eagerly scheduled *before* nested recursive calls.
 
 ### 3. [String Building Benchmark](./string_building/)
+
 * **Focus:** Runtime string ABI + eager destruction — concat over 50,000 iterations; the direct before/after measure for the packed-`u128` runtime ABI.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 4. [String Slicing Benchmark](./string_slicing/)
+
 * **Focus:** Zero-copy views — scan a 688 KiB in-program-generated string counting substring matches through `strview` slices, copying and storing nothing.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 5. [Mandelbrot Benchmark](./mandelbrot/)
+
 * **Focus:** Float codegen — 401×501 grid, max 80 iterations per pixel; no overflow guards in play, the cleanest Cranelift readout.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 6. [Collatz Benchmark](./collatz/)
+
 * **Focus:** Integer loop/branch — total stopping time for seeds 1..1,000,000; a hot flat loop complementing fibonacci's recursion profile.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 7. [Doubling Concat Benchmark](./doubling_concat/)
+
 * **Focus:** Runtime allocation strategy — `s = s + s` exponential growth to 16 MiB, stressing `ryo_str_alloc` / `ryo_str_concat`.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
 ### 8. [Many Small Strings Benchmark](./many_small_strings/)
+
 * **Focus:** Flat-loop alloc/free churn — 500,000 short strings built and dropped, complementing eager_destruction's recursion angle.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+
+### 9. [Struct Records Benchmark](./struct_records/)
+
+* **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field. Ryo AOT currently beats Rust and Go here; only Swift's small-string optimization keeps it ahead.
+* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+
+### 10. [Struct Records Reuse Benchmark](./struct_records_reuse/)
+
+* **Focus:** The keep-original record update — same record, but the caller uses `p` again after `birthday`, so the update cannot consume it. Rust and Ryo pay an explicit clone, Swift/Go/Python share cheaply; tracking measure for the record-update ergonomics gap (I-172) and what `shared[T]` or a small-string optimization would buy.
+* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+
+### 11. [Struct Records Inout Benchmark](./struct_records_inout/)
+
+* **Focus:** Imperative update-in-place through a mutable borrow (`inout` / `&mut` / pointer / attribute store) — no new record, no clone, no sret. Verifies that choosing between inout and the consuming move+return form costs nothing, so the idiom choice can be driven by intent.
+* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
 
 ---
 
@@ -84,6 +109,7 @@ cd benchmarks/eager_destruction
 To deeply inspect the performance characteristics of Ryo's execution via flamegraphs, we recommend using [samply](https://github.com/mstange/samply).
 
 First, install `samply`:
+
 ```bash
 cargo install samply
 ```
@@ -93,11 +119,13 @@ Then, navigate to any benchmark directory, build the benchmark, and profile eith
 ### Example: Profiling Fibonacci
 
 **Profile the standalone AOT binary:**
+
 ```bash
 samply record ./fib
 ```
 
 **Profile the JIT compiler executing a file:**
+
 ```bash
 samply record ../../target/release/ryo run fib.ryo
 ```

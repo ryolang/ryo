@@ -1,20 +1,11 @@
 fn count_fox(text: &[u8]) -> usize {
-    let mut count = 0;
-    let mut i = 0;
-    let n = text.len();
-    while i + 3 <= n {
-        if &text[i..i + 3] == b"fox" {
-            count += 1;
-        }
-        i += 1;
-    }
-    count
+    text.windows(3).filter(|w| *w == b"fox").count()
 }
 
 fn main() {
     let mut s = String::from("the quick brown fox jumps over the lazy dog");
     for _ in 0..14 {
-        s = s.clone() + &s;
+        s = s.repeat(2);
     }
     let count = count_fox(s.as_bytes());
     let n = s.len();
