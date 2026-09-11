@@ -10,9 +10,9 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 
 | Candidate | Version | Mean time | vs fastest | Max RSS |
 |---|---|---|---|---|
+| **Ryo (AOT)** | 0.1.0-dev.20260911+b3b7d25 | 3.5 ms ± 0.1 ms | 1.00x | 33.42 MB |
 | **Rust** | 1.98.0 | 3.7 ms ± 0.2 ms | 1.06x slower | 35.64 MB |
 | **Swift** | 6.3.3 | 4.0 ms ± 0.1 ms | 1.13x slower | 34.03 MB |
-| **Ryo (AOT)** | 0.1.0-dev.20260911+b3b7d25 | 3.5 ms ± 0.1 ms | 1.00x | 33.42 MB |
 | **Ryo (JIT)** | 0.1.0-dev.20260911+b3b7d25 | 4.7 ms ± 0.6 ms | 1.34x slower | 37.03 MB |
 
 ## How to Run
