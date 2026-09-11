@@ -292,11 +292,14 @@ pub extern "C" fn ryo_str_alloc(cap: u64) -> *mut u8 {
 }
 
 /// # Safety
-/// `ptr` must have been returned by `ryo_str_alloc` or `ryo_str_realloc`
-/// with the given `cap`, or be null.
+/// `ptr` must have been returned by `ryo_str_alloc` or `ryo_str_realloc`,
+/// or be null. `cap` is the tagged cap word: an inline (`0x80`-tagged)
+/// cap and `cap == 0` (the static `.rodata` sentinel) are both no-ops.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64) {
-    if ptr.is_null() || cap == 0 {
+    // Tag check FIRST: for an inline string the ptr word is byte data,
+    // never a heap pointer — nothing to free. Then the static sentinel.
+    if is_inline(cap) || ptr.is_null() || cap == 0 {
         return;
     }
     // SAFETY: caller contract — ptr came from ryo_str_alloc/realloc.
@@ -1566,5 +1569,21 @@ mod tests {
                 unsafe { core::slice::from_raw_parts(&slot as *const RyoStrFat as *const u8, len) };
             assert_eq!(stored, &bytes[..], "len {len} content corrupted");
         }
+    }
+
+    #[test]
+    fn test_free_inline_str_is_noop() {
+        // An inline slot's ptr word is byte data, NOT a heap pointer;
+        // free must no-op on it without dereferencing or calling c_free.
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { write_str_slot(&mut slot, b"short") };
+        // SAFETY: tagged inline slot; free must recognize the tag.
+        unsafe { ryo_str_free(slot.ptr, slot.cap) };
+        assert!(is_inline(slot.cap)); // slot untouched
     }
 }
