@@ -179,6 +179,23 @@ pub(crate) fn inline_len(cap: u64) -> u64 {
     (cap >> 56) & 0x7f
 }
 
+/// Write ONLY the tag byte (byte 23) of a slot, marking it inline with
+/// the given length. The low 7 bytes of the cap word (offsets 16–22)
+/// are inline DATA for strings of length 17–23 — a full-word
+/// `(*out).cap = inline_tag(len)` store would zero them and corrupt the
+/// string. Every inline retag goes through this helper.
+///
+/// # Safety
+/// `out` points to a valid 24-byte `RyoStrFat` whose inline data bytes
+/// (offsets 0..len) are already initialized.
+#[allow(dead_code)]
+pub(crate) unsafe fn write_inline_tag(out: *mut RyoStrFat, len: u64) {
+    debug_assert!(len <= INLINE_CAP as u64);
+    // SAFETY: caller contract — out is valid for 24 bytes; we touch only
+    // byte 23, leaving data bytes 0..=22 intact.
+    unsafe { (out as *mut u8).add(23).write(0x80 | len as u8) };
+}
+
 /// Heap capacity policy for producers that want push-ready headroom:
 /// next power of two above `min`, floor 16. Matches `__ryo_str_push`'s
 /// doubling so a produced buffer grows smoothly.
@@ -201,13 +218,16 @@ unsafe fn write_str_slot(out: *mut RyoStrFat, bytes: &[u8]) {
     let len = bytes.len();
     if len <= INLINE_CAP {
         // SAFETY: out is valid for 24 bytes; len <= 23 fits the inline
-        // data region (offsets 0..=22). The cap word is written last so
-        // the slot is never half-initialized observable.
+        // data region (offsets 0..=22).
         unsafe {
             if len > 0 {
                 core::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, len);
             }
-            (*out).cap = inline_tag(len as u64);
+            // SAFETY: out is valid and its inline data bytes 0..len are
+            // initialized by the copy above. Byte-23-only tag write: a
+            // full cap-word store would zero data bytes 16..len when
+            // len > 16.
+            write_inline_tag(out, len as u64);
         }
     } else {
         let cap = growth_cap(len as u64);
@@ -1490,6 +1510,7 @@ mod tests {
         assert!(is_inline(slot.cap));
         assert_eq!(inline_len(slot.cap), bytes.len() as u64);
         // Byte content lives in the slot's first `len` bytes.
+        // SAFETY: the slot data region holds bytes.len() initialized bytes.
         let stored = unsafe {
             core::slice::from_raw_parts(&slot as *const RyoStrFat as *const u8, bytes.len())
         };
@@ -1509,6 +1530,7 @@ mod tests {
         assert!(!is_inline(slot.cap));
         assert_eq!(slot.len, 24);
         assert!(slot.cap >= 24); // headroom allowed, exact fit allowed
+        // SAFETY: slot.ptr points to slot.cap (>= 24) initialized bytes.
         let stored = unsafe { core::slice::from_raw_parts(slot.ptr, 24) };
         assert_eq!(stored, &bytes);
         // SAFETY: heap slot produced above; cap is its allocation size.
@@ -1521,5 +1543,28 @@ mod tests {
         assert_eq!(growth_cap(16), 16);
         assert_eq!(growth_cap(17), 32);
         assert_eq!(growth_cap(1000), 1024);
+    }
+
+    #[test]
+    fn test_write_str_slot_inline_boundary_sweep() {
+        // Every inline length 0..=23, verifying ALL len bytes survive —
+        // lengths 17..=23 overlap the cap word's low bytes, which only a
+        // byte-23-only tag write preserves.
+        for len in 0..=INLINE_CAP {
+            let bytes = vec![b'a' + (len % 26) as u8; len];
+            let mut slot = RyoStrFat {
+                ptr: core::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            // SAFETY: slot is a valid 24-byte out-slot.
+            unsafe { write_str_slot(&mut slot, &bytes) };
+            assert!(is_inline(slot.cap), "len {len} must be inline");
+            assert_eq!(inline_len(slot.cap), len as u64);
+            // SAFETY: slot data region holds len initialized bytes.
+            let stored =
+                unsafe { core::slice::from_raw_parts(&slot as *const RyoStrFat as *const u8, len) };
+            assert_eq!(stored, &bytes[..], "len {len} content corrupted");
+        }
     }
 }
