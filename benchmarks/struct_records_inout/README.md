@@ -8,7 +8,7 @@
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11, at Ryo revision `af2cae3`; later branch commits through `b3b7d25` touch only benchmark files and docs — no compiler code — so these numbers remain directly comparable with suites re-measured at `b3b7d25`. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
 | Candidate | Version | Mean time | vs fastest | Max RSS |
 |---|---|---|---|---|
