@@ -7,7 +7,7 @@ fn make_person(i: int) -> Person:
 
 fn birthday(move p: Person) -> Person:
 	mut q = p
-	q.age = q.age + 1
+	q.age += 1
 	return q
 
 fn score(p: Person) -> int:
