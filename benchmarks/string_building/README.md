@@ -6,7 +6,7 @@
 
 ## Why Ryo trails here: value-semantic concat (and the planned fix)
 
-The two programs do different work. Rust's `s.push_str("x")` appends with amortized growth — capacity doubling means ~17 reallocs total. Ryo's `s = s + "x"` is value-semantic: `ryo_str_concat` constructs a **fresh exact-size buffer every iteration**, copies the whole current string into it, and eager destruction frees the old buffer at the reassign. Iteration *i* copies *i* bytes, so the loop copies ~1.25 GB in total — that O(n²) churn is the entire ~12.5× gap, not codegen quality.
+The two programs do different work. Rust's `s.push_str("x")` appends with amortized growth — capacity doubling means ~17 reallocs total. Ryo's `s = s + "x"` is value-semantic: `ryo_str_concat` constructs a **fresh exact-size buffer every iteration**, copies the whole current string into it, and eager destruction frees the old buffer at the reassign. Iteration *i* copies *i* bytes, so the loop copies ~1.25 GB in total — that O(n²) churn is the entire ~11.8× gap, not codegen quality.
 
 This is deliberately **not** filed as a compiler issue: nothing is miscompiled — the copying is the honest cost of asking for a fresh value per iteration. The amortized fast path already exists as `str_push(&s, "x")` (capacity growth via `__ryo_str_push`, `runtime/src/lib.rs:382`); this benchmark intentionally measures the concat + eager-free path (the ABI / eager-destruction measure), not the fastest way to build a string in Ryo.
 
@@ -14,15 +14,15 @@ The planned fix lives in the roadmap's SSO/COW work (see `docs/dev/implementatio
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-01. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
-| Candidate | Mean time | vs fastest | Max RSS |
-|---|---|---|---|
-| **Rust** | 1.5 ms ± 0.1 ms | 1.00x | 1.61 MB |
-| **Swift** | 2.4 ms ± 0.1 ms | 1.61x slower | 1.81 MB |
-| **Ryo (AOT)** | 18.3 ms ± 0.3 ms | 12.45x slower | 2.25 MB |
-| **Ryo (JIT)** | 19.7 ms ± 0.3 ms | 13.41x slower | 5.77 MB |
-| **Python** | 36.6 ms ± 0.5 ms | 24.87x slower | 14.72 MB |
+| Candidate | Version | Mean time | vs fastest | Max RSS |
+|---|---|---|---|---|
+| **Rust** | 1.98.0 | 1.4 ms ± 0.0 ms | 1.00x | 1.59 MB |
+| **Swift** | 6.3.3 | 2.3 ms ± 0.2 ms | 1.60x slower | 1.81 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260911+b3b7d25 | 17.1 ms ± 0.2 ms | 11.83x slower | 2.27 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260911+b3b7d25 | 18.6 ms ± 0.7 ms | 12.91x slower | 5.77 MB |
+| **Python** | 3.14.7 | 35.3 ms ± 0.9 ms | 24.47x slower | 14.69 MB |
 
 Python (CPython 3.14.7) runs the same `s += "x"` loop interpreted; its ~25x gap over Rust is interpreter overhead, and its ~2x gap over Ryo shows the interpreted baseline is slower than Ryo's compiled O(n²) concat even before any allocation-policy fix lands.
 
