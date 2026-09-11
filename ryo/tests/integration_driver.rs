@@ -417,11 +417,48 @@ fn ir_emit_default_is_ast_and_clif() {
     );
 }
 
+/// SSO extraction-scratch pin: fat-byte extraction spills through one
+/// shared 24-byte stack slot per function (`emit_fat_bytes_ptr_len`).
+/// Assert the emitted CLIF contains exactly that slot and that every
+/// `stack_addr` references it — i.e. no per-call-site out-pointer slots
+/// have crept back in.
+fn assert_sso_scratch_only(clif: &str) {
+    let slot_lines: Vec<&str> = clif
+        .lines()
+        .filter(|l| l.contains("explicit_slot"))
+        .collect();
+    assert_eq!(
+        slot_lines.len(),
+        1,
+        "expected exactly the shared SSO scratch slot: {}",
+        clif
+    );
+    assert!(
+        slot_lines[0].contains("explicit_slot 24"),
+        "the only stack slot must be the 24-byte SSO scratch slot: {}",
+        clif
+    );
+    for line in clif.lines().filter(|l| l.contains("stack_addr")) {
+        assert!(
+            line.contains("ss0"),
+            "stack_addr must reference the scratch slot ss0: {}",
+            clif
+        );
+    }
+}
+
 #[test]
-fn clif_string_ops_use_packed_return_no_stack_slots() {
+fn clif_string_ops_use_packed_return_sso_scratch() {
     // Phase 0 runtime ABI: string-producing runtime calls return
     // {ptr, len} packed in one u128 — no per-call-site stack slots,
     // no out-pointer, no reload (spec 2026-08-25 §2 amendment).
+    //
+    // SSO (spec §3) adds exactly ONE slot per function: the shared
+    // 24-byte extraction scratch slot `emit_fat_bytes_ptr_len` spills
+    // tagged-inline triples into so transient consumers get a readable
+    // address. The pin below tolerates that single slot (and only that
+    // slot — every stack_addr must reference it); later tasks move
+    // producers to slot-out and will update this pin again.
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -443,24 +480,17 @@ fn clif_string_ops_use_packed_return_no_stack_slots() {
         "runtime string calls must return the packed u128 pair: {}",
         stdout
     );
-    assert!(
-        !stdout.contains("explicit_slot"),
-        "string call paths must not allocate stack slots: {}",
-        stdout
-    );
-    assert!(
-        !stdout.contains("stack_addr"),
-        "string call paths must not take stack-slot addresses: {}",
-        stdout
-    );
+    assert_sso_scratch_only(&stdout);
 }
 
 #[test]
-fn clif_bytes_ops_use_packed_return_no_stack_slots() {
+fn clif_bytes_ops_use_packed_return_sso_scratch() {
     // M8.4.2 rides the Phase 0 runtime ABI: bytes-producing runtime
     // calls return {ptr, len} packed in one u128 — no per-call-site
     // stack slots, no out-pointer, no reload (same pin as the str twin
     // above; the bytes_push slot ABI is not exercised by this program).
+    // The single tolerated slot is the SSO extraction scratch — see the
+    // str twin's comment.
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -482,16 +512,7 @@ fn clif_bytes_ops_use_packed_return_no_stack_slots() {
         "runtime bytes calls must return the packed u128 pair: {}",
         stdout
     );
-    assert!(
-        !stdout.contains("explicit_slot"),
-        "bytes call paths must not allocate stack slots: {}",
-        stdout
-    );
-    assert!(
-        !stdout.contains("stack_addr"),
-        "bytes call paths must not take stack-slot addresses: {}",
-        stdout
-    );
+    assert_sso_scratch_only(&stdout);
 }
 
 #[test]

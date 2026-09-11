@@ -818,6 +818,57 @@ impl<M: Module> Codegen<M> {
         Ok(ValueRepr::Str { ptr, len, cap })
     }
 
+    /// Lazily create the per-function 24-byte inline-extraction scratch
+    /// slot.
+    fn inline_scratch(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+    ) -> Result<StackSlot, String> {
+        if let Some(slot) = ctx.inline_scratch {
+            return Ok(slot);
+        }
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        ctx.inline_scratch = Some(slot);
+        Ok(slot)
+    }
+
+    /// Extract a readable `(ptr, len)` for the byte content of a fat
+    /// value whose words may be tagged-inline (SSO). Inline: spill the
+    /// three words to the scratch slot and hand back its address plus
+    /// the tag-encoded len. Heap/static: pass through unchanged.
+    ///
+    /// TRANSIENT CONSUMERS ONLY (print, eq, concat operands, push
+    /// suffix, conversion args): the returned ptr for an inline value
+    /// addresses the shared scratch slot and is invalidated by the next
+    /// extraction. View-creating ops (slice, ToView) must go through
+    /// `__ryo_*_ensure_heap` instead (promote-on-view).
+    pub(crate) fn emit_fat_bytes_ptr_len(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        ptr: Value,
+        len: Value,
+        cap: Value,
+    ) -> Result<(Value, Value), String> {
+        let scratch = Self::inline_scratch(builder, ctx)?;
+        let addr = builder.ins().stack_addr(ctx.int_type, scratch, 0);
+        // Unconditional spill: three stores are cheaper than a branch,
+        // and the scratch is written before either select reads it.
+        builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+        builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+        builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+        let tag = builder.ins().ushr_imm_u(cap, 56);
+        let tag_bit = builder.ins().band_imm_u(tag, 0x80);
+        let is_in = builder.ins().icmp_imm_u(IntCC::NotEqual, tag_bit, 0);
+        let in_len = builder.ins().band_imm_u(tag, 0x7f);
+        let out_ptr = builder.ins().select(is_in, addr, ptr);
+        let out_len = builder.ins().select(is_in, in_len, len);
+        Ok((out_ptr, out_len))
+    }
+
     /// Materialize a fat-typed (`str` or `bytes`, M8.4.2) TIR
     /// instruction, returning the `ValueRepr::Str` / `ValueRepr::Bytes`
     /// triple matching the inst's type. Falls back to scalar
@@ -1160,12 +1211,19 @@ impl<M: Module> Codegen<M> {
 
     /// Evaluate a `str`/`bytes`/`strview`/`bytesview`-typed operand and
     /// hand back its `(ptr, len)` words regardless of representation —
-    /// owned triple or borrowed view pair (M8.4/M8.4.2). Consumers that
+    /// owned triple or borrowed view pair (M8.4/M8.4.2). Owned triples
+    /// extract through the SSO-aware `emit_fat_bytes_ptr_len`, which
+    /// spills a tagged-inline value's words to the shared scratch slot
+    /// and passes heap/static values through unchanged. Consumers that
     /// only need the viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`,
     /// `BytesCmpEq/Ne`, the `__ryo_str_push` suffix, the
     /// `__ryo_slice`/`__ryo_bytes_slice` base, the bytes conversion
     /// calls) use this; anything needing the cap must stay on
     /// `eval_inst_fat`.
+    ///
+    /// TRANSIENT CONSUMERS ONLY: for an inline value the returned ptr
+    /// addresses the shared scratch slot and is invalidated by the next
+    /// extraction. View-creating ops (slice, ToView) must not use it.
     pub(super) fn eval_str_or_view_parts(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1179,7 +1237,9 @@ impl<M: Module> Codegen<M> {
             return Ok((ptr, len));
         }
         match Self::eval_inst_fat(builder, ctx, r)? {
-            ValueRepr::Str { ptr, len, .. } | ValueRepr::Bytes { ptr, len, .. } => Ok((ptr, len)),
+            ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
+                Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap)
+            }
             ValueRepr::View { ptr, len } => Ok((ptr, len)),
             ValueRepr::Scalar(_) | ValueRepr::Struct { .. } => Err(format!(
                 "eval_str_or_view_parts: instruction at %{} is not a fat/view value",
