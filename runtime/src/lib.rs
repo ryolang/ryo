@@ -536,6 +536,76 @@ pub unsafe extern "C" fn __ryo_str_push(
             None => overflow_abort(),
         };
 
+        if is_inline(cur_cap) {
+            // Inline source: bytes live in the slot itself. The slot's
+            // `ptr`/`len` words ARE byte data here — the real length
+            // lives only in the cap-word tag.
+            let ilen = inline_len(cur_cap);
+            let new_len = match ilen.checked_add(add) {
+                Some(l) => l,
+                None => overflow_abort(),
+            };
+            if new_len <= INLINE_CAP as u64 {
+                // SAFETY: slot data region holds ilen bytes; appending
+                // add bytes stays within INLINE_CAP; suffix readable.
+                if add > 0 {
+                    debug_assert!(!suffix_ptr.is_null());
+                    core::ptr::copy_nonoverlapping(
+                        suffix_ptr,
+                        (s_ptr as *mut u8).add(ilen as usize),
+                        add as usize,
+                    );
+                }
+                // SAFETY: slot data region holds new_len initialized
+                // bytes; retag touches byte 23 only (a full-word cap
+                // store would zero data bytes 16–22).
+                write_inline_tag(s_ptr, new_len);
+                return;
+            }
+            // Promote: copy inline bytes out BEFORE overwriting the slot,
+            // then fall into a heap buffer with growth headroom.
+            let mut tmp = [0u8; INLINE_CAP];
+            core::ptr::copy_nonoverlapping(s_ptr as *const u8, tmp.as_mut_ptr(), ilen as usize);
+            let new_cap = growth_cap(new_len);
+            let nb = ryo_str_alloc(new_cap);
+            core::ptr::copy_nonoverlapping(tmp.as_ptr(), nb, ilen as usize);
+            if add > 0 {
+                debug_assert!(!suffix_ptr.is_null());
+                core::ptr::copy_nonoverlapping(suffix_ptr, nb.add(ilen as usize), add as usize);
+            }
+            *s_ptr = RyoStrFat {
+                ptr: nb,
+                len: new_len,
+                cap: new_cap,
+            };
+            return;
+        }
+        if cur_cap == 0 && new_len <= INLINE_CAP as u64 {
+            // Static (.rodata) source, short result: copy off rodata
+            // into the slot as inline — no heap allocation at all.
+            // Read the static bytes into a temp BEFORE overwriting.
+            let mut tmp = [0u8; INLINE_CAP];
+            if cur_len > 0 {
+                debug_assert!(!cur_ptr.is_null());
+                core::ptr::copy_nonoverlapping(cur_ptr, tmp.as_mut_ptr(), cur_len as usize);
+            }
+            // SAFETY: tmp holds the old bytes; slot data region fits
+            // new_len <= INLINE_CAP bytes; suffix readable.
+            core::ptr::copy_nonoverlapping(tmp.as_ptr(), s_ptr as *mut u8, cur_len as usize);
+            if add > 0 {
+                debug_assert!(!suffix_ptr.is_null());
+                core::ptr::copy_nonoverlapping(
+                    suffix_ptr,
+                    (s_ptr as *mut u8).add(cur_len as usize),
+                    add as usize,
+                );
+            }
+            // SAFETY: slot data region holds new_len initialized bytes;
+            // retag touches byte 23 only.
+            write_inline_tag(s_ptr, new_len);
+            return;
+        }
+
         // Reuse the current buffer when it already fits; otherwise grow.
         // Capacity policy: double the old capacity (or fit exactly when
         // the old buffer was empty) — a tighter ARC/CoW policy is a
@@ -1702,6 +1772,65 @@ mod tests {
     }
 
     #[test]
+    fn test_push_inline_fits_no_alloc() {
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { write_str_slot(&mut slot, b"abc") };
+        // SAFETY: slot is a valid tagged string; suffix readable for 3 bytes.
+        unsafe { __ryo_str_push(&mut slot, b"def".as_ptr(), 3) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(inline_len(slot.cap), 6);
+        // SAFETY: an inline slot holds inline_len initialized bytes in
+        // its data region (offsets 0..6).
+        let bytes =
+            unsafe { core::slice::from_raw_parts(&slot as *const RyoStrFat as *const u8, 6) };
+        assert_eq!(bytes, b"abcdef");
+    }
+
+    #[test]
+    fn test_push_inline_promotes_on_overflow() {
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { write_str_slot(&mut slot, b"abcdefghijklmnopqrstuvw") }; // 23
+        // SAFETY: slot valid; suffix readable for 1 byte.
+        unsafe { __ryo_str_push(&mut slot, b"x".as_ptr(), 1) };
+        assert!(!is_inline(slot.cap));
+        assert_eq!(slot.len, 24);
+        assert!(slot.cap >= 32);
+        // SAFETY: heap slot produced above; ptr valid for len bytes.
+        let bytes = unsafe { core::slice::from_raw_parts(slot.ptr, 24) };
+        assert_eq!(bytes, b"abcdefghijklmnopqrstuvwx");
+        // SAFETY: heap slot produced above.
+        unsafe { ryo_str_free(slot.ptr, slot.cap) };
+    }
+
+    #[test]
+    fn test_push_static_short_goes_inline() {
+        let mut slot = RyoStrFat {
+            ptr: b"lit" as *const u8 as *mut u8, // .rodata stand-in
+            len: 3,
+            cap: 0,
+        };
+        // SAFETY: slot valid; suffix readable for 2 bytes.
+        unsafe { __ryo_str_push(&mut slot, b"!!".as_ptr(), 2) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(inline_len(slot.cap), 5);
+        // SAFETY: an inline slot holds inline_len initialized bytes in
+        // its data region (offsets 0..5).
+        let bytes =
+            unsafe { core::slice::from_raw_parts(&slot as *const RyoStrFat as *const u8, 5) };
+        assert_eq!(bytes, b"lit!!");
+    }
+
+    #[test]
     fn bytes_push_appends_and_grows_from_static() {
         let src = [0x01u8];
         let mut fat = RyoStrFat {
@@ -1709,11 +1838,34 @@ mod tests {
             len: 1,
             cap: 0,
         };
+        // SAFETY: slot valid; byte appended rides __ryo_str_push.
         unsafe { __ryo_bytes_push(&mut fat, 0xff) };
-        assert_eq!(fat.len, 2);
-        assert!(fat.cap >= 2);
+        // Short static append stays off-heap: the result goes inline.
+        assert!(is_inline(fat.cap));
+        assert_eq!(inline_len(fat.cap), 2);
+        assert_eq!(slot_content(&fat), &[0x01, 0xff]);
+    }
+
+    #[test]
+    fn bytes_push_static_overflow_goes_heap() {
+        // Static source whose result exceeds INLINE_CAP still takes the
+        // explicit-copy heap path.
+        let src = [0x2au8; 30];
+        let mut fat = RyoStrFat {
+            ptr: src.as_ptr() as *mut u8, // static cap=0: NOT heap-owned
+            len: 30,
+            cap: 0,
+        };
+        // SAFETY: slot valid; byte appended rides __ryo_str_push.
+        unsafe { __ryo_bytes_push(&mut fat, 0xff) };
+        assert!(!is_inline(fat.cap));
+        assert_eq!(fat.len, 31);
+        assert!(fat.cap >= 31);
+        // SAFETY: heap slot produced above; ptr valid for len bytes.
         let s = unsafe { core::slice::from_raw_parts(fat.ptr, fat.len as usize) };
-        assert_eq!(s, &[0x01, 0xff]);
+        assert_eq!(&s[..30], &[0x2au8; 30]);
+        assert_eq!(s[30], 0xff);
+        // SAFETY: heap slot produced above; cap is its allocation size.
         unsafe { ryo_bytes_free(fat.ptr, fat.cap) };
     }
 
