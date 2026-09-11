@@ -561,6 +561,50 @@ pub unsafe extern "C" fn __ryo_str_push(
     }
 }
 
+/// Promote an inline (SSO) string to a heap buffer in place, writing
+/// the heap triple back through `s_ptr`. No-op for heap and static
+/// (`cap == 0`) strings. Called by codegen before any view-creating op
+/// (slice, view conversion) so views always point at memory that never
+/// moves — inline bytes live in the slot and would dangle.
+///
+/// # Safety
+/// `s_ptr` points to a valid tagged `RyoStrFat` owned by the caller.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __ryo_str_ensure_heap(s_ptr: *mut RyoStrFat) {
+    // SAFETY: s_ptr is a valid tagged slot per the ABI contract.
+    unsafe {
+        let cap = (*s_ptr).cap;
+        if !is_inline(cap) {
+            return;
+        }
+        let len = inline_len(cap) as usize;
+        // Copy the inline bytes out BEFORE overwriting the slot.
+        let mut tmp = [0u8; INLINE_CAP];
+        core::ptr::copy_nonoverlapping(s_ptr as *const u8, tmp.as_mut_ptr(), len);
+        let new_cap = growth_cap(len as u64);
+        let buf = ryo_str_alloc(new_cap);
+        // SAFETY: buf is freshly allocated for new_cap >= len bytes;
+        // tmp holds the inline bytes; regions do not overlap.
+        core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf, len);
+        *s_ptr = RyoStrFat {
+            ptr: buf,
+            len: len as u64,
+            cap: new_cap,
+        };
+    }
+}
+
+/// Bytes twin of `__ryo_str_ensure_heap` — promotion is
+/// representation-only, no UTF-8 concerns.
+///
+/// # Safety
+/// `s_ptr` points to a valid tagged `RyoStrFat` owned by the caller.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __ryo_bytes_ensure_heap(s_ptr: *mut RyoStrFat) {
+    // SAFETY: forwarded contract.
+    unsafe { __ryo_str_ensure_heap(s_ptr) };
+}
+
 /// # Safety
 /// `a_ptr` must point to `a_len` readable bytes (or be null/dangling if a_len==0).
 /// Same for `b_ptr`/`b_len`.
@@ -1569,6 +1613,53 @@ mod tests {
                 unsafe { core::slice::from_raw_parts(&slot as *const RyoStrFat as *const u8, len) };
             assert_eq!(stored, &bytes[..], "len {len} content corrupted");
         }
+    }
+
+    #[test]
+    fn test_ensure_heap_promotes_inline() {
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot.
+        unsafe { write_str_slot(&mut slot, b"slice me please") };
+        // SAFETY: slot is a valid tagged RyoStrFat.
+        unsafe { __ryo_str_ensure_heap(&mut slot) };
+        assert!(!is_inline(slot.cap));
+        assert_eq!(slot.len, 15);
+        assert!(slot.cap >= 16); // growth headroom
+        // SAFETY: slot.ptr points to slot.cap (>= 15) initialized bytes.
+        let bytes = unsafe { core::slice::from_raw_parts(slot.ptr, 15) };
+        assert_eq!(bytes, b"slice me please");
+        // SAFETY: heap slot produced above.
+        unsafe { ryo_str_free(slot.ptr, slot.cap) };
+    }
+
+    #[test]
+    fn test_ensure_heap_noop_for_heap_and_static() {
+        // Heap: allocated triple passes through untouched.
+        let p = ryo_str_alloc(32);
+        let mut heap = RyoStrFat {
+            ptr: p,
+            len: 5,
+            cap: 32,
+        };
+        // SAFETY: heap is a valid tagged slot.
+        unsafe { __ryo_str_ensure_heap(&mut heap) };
+        assert_eq!(heap.ptr, p);
+        assert_eq!(heap.cap, 32);
+        // Static: cap == 0 sentinel is not inline — untouched.
+        let mut st = RyoStrFat {
+            ptr: p,
+            len: 5,
+            cap: 0,
+        };
+        // SAFETY: st is a valid tagged slot.
+        unsafe { __ryo_str_ensure_heap(&mut st) };
+        assert_eq!(st.cap, 0);
+        // SAFETY: p came from ryo_str_alloc(32).
+        unsafe { ryo_str_free(p, 32) };
     }
 
     #[test]

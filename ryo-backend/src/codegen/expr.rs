@@ -875,6 +875,55 @@ impl<M: Module> Codegen<M> {
         Ok((out_ptr, out_len))
     }
 
+    /// Materialize an owner-typed (`str`/`bytes`) value for VIEW
+    /// CREATION: spill its triple to a 24-byte slot, call the
+    /// family `ensure_heap` (promotes inline → heap in place), reload,
+    /// and return a stable `(ptr, len)` that outlives this expression.
+    /// Views into `.rodata`/heap were already stable; this adds the
+    /// inline case (promote-on-view).
+    pub(crate) fn emit_ensure_heap_for_view_base(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<(Value, Value), String> {
+        // A view-typed base (reslice, strview of a view param) already
+        // addresses stable memory — pass it through untouched.
+        if ctx.pool.is_view(ctx.tir.inst(r).ty) {
+            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, r)? else {
+                unreachable!("eval_inst_view must produce ValueRepr::View");
+            };
+            return Ok((ptr, len));
+        }
+        let (ptr, len, cap, is_bytes) = match Self::eval_inst_fat(builder, ctx, r)? {
+            ValueRepr::Str { ptr, len, cap } => (ptr, len, cap, false),
+            ValueRepr::Bytes { ptr, len, cap } => (ptr, len, cap, true),
+            _ => unreachable!("view base must be fat or view typed"),
+        };
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+        builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+        builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+        let callee = if is_bytes {
+            "__ryo_bytes_ensure_heap"
+        } else {
+            "__ryo_str_ensure_heap"
+        };
+        let func_ref = Self::declare_runtime_fn(ctx.module, builder, callee, &[ctx.int_type], &[])?;
+        builder.ins().call(func_ref, &[addr]);
+        let out_ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+        let out_len = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 8);
+        Ok((out_ptr, out_len))
+    }
+
     /// Materialize a fat-typed (`str` or `bytes`, M8.4.2) TIR
     /// instruction, returning the `ValueRepr::Str` / `ValueRepr::Bytes`
     /// triple matching the inst's type. Falls back to scalar
@@ -1137,11 +1186,11 @@ impl<M: Module> Codegen<M> {
                     TirData::Slice { base, start, end } => (base, start, end),
                     _ => unreachable!("Slice must carry TirData::Slice"),
                 };
-                // Base may be an owned str (triple) or a view (pair).
-                // TRANSITIONAL: slicing creates a view and must move to
-                // `__ryo_*_ensure_heap` (promote-on-view); until then the
-                // base extracts through the transient scratch path.
-                let (base_ptr, base_len) = Self::eval_str_or_view_parts(builder, ctx, base, 0)?;
+                // Promote-on-view: an inline (SSO) base's bytes live in
+                // its slot; the view must point at memory that never
+                // moves, so owners go through ensure_heap first.
+                let (base_ptr, base_len) =
+                    Self::emit_ensure_heap_for_view_base(builder, ctx, base)?;
                 let start_v = match start {
                     Some(s) => Self::eval_inst(builder, ctx, s)?,
                     None => builder.ins().iconst(types::I64, 0),
@@ -1176,13 +1225,9 @@ impl<M: Module> Codegen<M> {
                     TirData::UnOp(o) => o,
                     _ => unreachable!("ToView must carry TirData::UnOp"),
                 };
-                // Representation conversion only: drop the cap word.
-                let (ptr, len) = match Self::eval_inst_fat(builder, ctx, operand)? {
-                    ValueRepr::Str { ptr, len, .. } | ValueRepr::Bytes { ptr, len, .. } => {
-                        (ptr, len)
-                    }
-                    _ => unreachable!("ToView operand must produce a fat repr"),
-                };
+                // Promote-on-view for owner operands: the view must
+                // address stable memory (see emit_ensure_heap_for_view_base).
+                let (ptr, len) = Self::emit_ensure_heap_for_view_base(builder, ctx, operand)?;
                 ValueRepr::View { ptr, len }
             }
             TirTag::Var => {
@@ -1227,9 +1272,7 @@ impl<M: Module> Codegen<M> {
     /// only need the viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`,
     /// `BytesCmpEq/Ne`, the `__ryo_str_push` suffix, the bytes
     /// conversion calls) use this; anything needing the cap must stay
-    /// on `eval_inst_fat`. (The `__ryo_slice`/`__ryo_bytes_slice` base
-    /// also extracts here TRANSITIONALLY, until the promote-on-view
-    /// rewiring moves slice bases to `__ryo_*_ensure_heap`.)
+    /// on `eval_inst_fat`.
     ///
     /// TRANSIENT CONSUMERS ONLY: for an inline value the returned ptr
     /// addresses a shared scratch slot and is invalidated by the next

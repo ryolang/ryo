@@ -483,6 +483,14 @@ impl Codegen<JITModule> {
             ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
             ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
             ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
+            (
+                "__ryo_str_ensure_heap",
+                ryo_runtime::__ryo_str_ensure_heap as *const u8,
+            ),
+            (
+                "__ryo_bytes_ensure_heap",
+                ryo_runtime::__ryo_bytes_ensure_heap as *const u8,
+            ),
             ("__ryo_slice", ryo_runtime::__ryo_slice as *const u8),
             ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
             ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
