@@ -21,7 +21,7 @@ func score(p Person) int {
 
 func main() {
 	total := 0
-	for i := 0; i < 500000; i++ {
+	for i := range 500000 {
 		p := makePerson(i)
 		q := birthday(p)
 		total += score(p) + score(q)
