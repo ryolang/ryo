@@ -124,11 +124,23 @@ impl<M: Module> Codegen<M> {
         // storage so the owner's free releases the heap buffer.
         match Self::local_name_of(ctx, r) {
             Some(name) => {
+                // Every fat binding gets FatLocals at the param/local
+                // preamble, so a missing entry would be an invariant
+                // violation; the silent fall-through is defensive only.
                 if let Some(sl) = Self::read_slot(&ctx.fat_locals, name) {
                     builder.def_var(sl.ptr, out_ptr);
                     builder.def_var(sl.len, out_len);
                     builder.def_var(sl.cap, out_cap);
                 }
+                // Known leak, unrelated to the fall-through: for a
+                // BORROWED param the write-back lands but no free is
+                // ever scheduled (the callee doesn't own its params),
+                // so a promoted inline argument's buffer leaks. The
+                // free cannot simply be added — it cannot tell a
+                // callee-promoted buffer apart from a caller-owned heap
+                // buffer and would double-free; the planned resolution
+                // is an ownership-pass-scheduled free of the promotion
+                // buffer at the view's last use.
             }
             None => {
                 let repr = if is_bytes {

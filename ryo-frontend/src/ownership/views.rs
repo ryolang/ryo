@@ -1,6 +1,6 @@
 //! M8.4 slice projections and view liveness — split from `mod.rs`.
 
-use super::structs::struct_root;
+use super::structs::{field_path_of, struct_root};
 use super::{
     LoopNesting, Owner, OwnerState, Ownership, format_binding, needs_tracking, underlying_owner,
 };
@@ -88,6 +88,44 @@ pub(crate) fn projection_root(
     }
 }
 
+/// The field path a view slices, mirroring `projection_root`'s walk:
+/// a `FieldAccess` base yields its chain, `Var` copies and reslices
+/// inherit the aliased view's recorded path, everything else has no
+/// field identity (`None` — projections of plain str/bytes bindings).
+fn projection_field_path(
+    own: &Ownership,
+    tir: &Tir,
+    pool: &InternPool,
+    r: TirRef,
+) -> Option<Vec<u32>> {
+    let inst = *tir.inst(r);
+    if inst.tag == TirTag::ViewAsOwner
+        && let TirData::UnOp(inner) = inst.data
+    {
+        return projection_field_path(own, tir, pool, inner);
+    }
+    if needs_tracking(inst.ty, pool) {
+        if let TirData::FieldAccess { .. } = inst.data {
+            return field_path_of(tir, r);
+        }
+        return None;
+    }
+    if !pool.is_view(inst.ty) {
+        return None;
+    }
+    match inst.data {
+        TirData::Var(name) => own
+            .current_owner
+            .get(&name)
+            .and_then(|owner| own.projection_fields.get(owner).cloned()),
+        TirData::Slice { base, .. } => projection_field_path(own, tir, pool, base),
+        TirData::UnOp(inner) if inst.tag == TirTag::ToView => {
+            projection_field_path(own, tir, pool, inner)
+        }
+        _ => None,
+    }
+}
+
 /// P3 (final spec §3.2): register `view_owner` as a live projection of
 /// the root owner its initializer resolves to. Idempotent — loop
 /// convergence re-walks and `Var` copies re-register the same view.
@@ -100,6 +138,9 @@ pub(crate) fn register_projection(
 ) {
     if let Some(root) = projection_root(own, tir, pool, init) {
         own.root_owner.insert(view_owner, root);
+        if let Some(path) = projection_field_path(own, tir, pool, init) {
+            own.projection_fields.insert(view_owner, path);
+        }
         let projections = own.live_projections.entry(root).or_default();
         if !projections.contains(&view_owner) {
             projections.push(view_owner);
@@ -238,6 +279,63 @@ pub(crate) fn check_source_projected(
         .with_note(Some(note_span), note_msg)
         .with_help(
             "move or mutate the owner before slicing it, or keep all slice uses before this point",
+        ),
+    );
+}
+
+/// FieldAssign-target freeze: `p.f = v` frees the old buffer of field
+/// `f` only, so it threatens exactly the live projections whose field
+/// path lies at or below `target_path` — sibling fields' buffers are
+/// untouched and must not trip the freeze. A projection with no
+/// recorded field path cannot prove it is a sibling, so it counts as
+/// threatened (conservative).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_field_target_projected(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &Ownership,
+    sink: &mut DiagSink,
+    root: Owner,
+    target_path: &[u32],
+    span: Span,
+    name: Option<StringId>,
+) {
+    if matches!(own.states.get(&root), Some(OwnerState::Moved { .. })) {
+        return;
+    }
+    let Some(projections) = own.live_projections.get(&root) else {
+        return;
+    };
+    let threatened: Vec<Owner> = projections
+        .iter()
+        .copied()
+        .filter(|p| match own.projection_fields.get(p) {
+            Some(path) => path.starts_with(target_path),
+            None => true,
+        })
+        .collect();
+    let Some(first) = threatened.first() else {
+        return;
+    };
+    let (note_span, note_msg) = match first.inst_tirref() {
+        Some(vi) => match Ownership::dense_get(&own.view_last_use, vi) {
+            Some(lu) => (tir.span(lu), "last slice use here"),
+            None => (tir.span(vi), "slice created here"),
+        },
+        None => (span, "slice projection live here"),
+    };
+    sink.emit(
+        Diag::error(
+            span,
+            DiagCode::SourceProjected,
+            format!(
+                "cannot mutate {} while a slice of it is live",
+                format_binding(name, pool)
+            ),
+        )
+        .with_note(Some(note_span), note_msg)
+        .with_help(
+            "reassign the field before slicing it, or keep all slice uses before this point",
         ),
     );
 }

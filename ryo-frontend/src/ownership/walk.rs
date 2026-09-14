@@ -2,9 +2,10 @@
 
 use super::{
     BranchState, Owner, OwnerState, Ownership, ReseatDrop, analyze_for_range, analyze_while_loop,
-    check_field_move_out, check_source_projected, consume_struct_lit_fields, consumed_binding_name,
-    drain_dying_views, format_binding, needs_tracking, owner_name_for_diag, owner_sort_key,
-    param_idx, projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
+    check_field_move_out, check_field_target_projected, check_source_projected,
+    consume_struct_lit_fields, consumed_binding_name, drain_dying_views, field_path_of,
+    format_binding, needs_tracking, owner_name_for_diag, owner_sort_key, param_idx,
+    projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
     refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
     rule7_owner_name, struct_base_name, struct_root,
 };
@@ -71,18 +72,20 @@ pub(crate) fn analyze_stmt(
                 sidecar.field_free_on_reassign[stmt.index()] = Some(view.target);
                 let span = tir.span(stmt);
                 // P2 freeze on the TARGET side: the reassign frees the
-                // old field buffer, so a live slice of it would dangle.
-                // Field projections register on the struct root (the
-                // field's storage owner), so the check keys on it.
+                // old buffer of the assigned field only, so the check
+                // matches the target's field path against each live
+                // projection's — sibling-field reassigns stay legal,
+                // same-field (or parent-struct-field) ones are rejected.
                 if let Some(root) = struct_root(own, tir, view.target) {
-                    check_source_projected(
+                    let target_path = field_path_of(tir, view.target).unwrap_or_default();
+                    check_field_target_projected(
                         tir,
                         pool,
                         own,
                         sink,
                         root,
+                        &target_path,
                         span,
-                        "mutate",
                         struct_base_name(tir, view.target),
                     );
                 }

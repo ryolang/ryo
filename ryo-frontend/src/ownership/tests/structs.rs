@@ -265,3 +265,29 @@ fn field_slice_without_reassign_is_clean() {
         "no errors expected; got: {diags:?}"
     );
 }
+
+#[test]
+fn sibling_field_reassign_allowed_while_field_view_live() {
+    // v = p.a[0:1]; p.b = "z" — the reassign frees field b's buffer,
+    // which the view never pointed into: only the assigned field's own
+    // buffer is threatened, so this must compile.
+    let src = "struct P:\n\ta: str\n\tb: str\n\nfn main():\n\tmut p = P{a=\"x\", b=\"y\"}\n\tv = p.a[0:1]\n\tp.b = \"z\"\n\tprint(v)\n";
+    let diags = check_src(src);
+    assert!(
+        !diags.iter().any(|d| d.code == DiagCode::SourceProjected),
+        "sibling-field reassign must not trip the freeze; got {diags:?}"
+    );
+}
+
+#[test]
+fn same_field_reassign_rejected_while_field_view_live() {
+    // v = p.a[0:1]; p.a = "z" — frees the very buffer v points into.
+    let src = "struct P:\n\ta: str\n\tb: str\n\nfn main():\n\tmut p = P{a=\"x\", b=\"y\"}\n\tv = p.a[0:1]\n\tp.a = \"z\"\n\tprint(v)\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::SourceProjected && d.message.contains("`p`")),
+        "expected SourceProjected naming `p`; got {diags:?}"
+    );
+}
