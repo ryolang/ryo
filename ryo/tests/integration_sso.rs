@@ -80,3 +80,75 @@ fn main():
         "b\"bc\"\nb\"abcdefghijklmnopqr\""
     );
 }
+
+#[test]
+fn mixed_static_inline_heap_concat() {
+    // One expression mixing all three representations: "user" is a
+    // static literal (cap==0), int_to_str(7) is inline (SSO), and the
+    // 44-byte result of the second concat is heap-allocated.
+    let src = "\
+fn main():
+\tname: str = \"user\" + int_to_str(7)
+\tlong: str = name + \"-abcdefghijklmnopqrstuvwxyz0123456789\"
+\tprint(name)
+\tprint(\"\\n\")
+\tprint(long)
+\tprint(\"\\n\")
+";
+    assert_eq!(
+        run_ryo(src, "sso_mixed_concat"),
+        "user7\nuser7-abcdefghijklmnopqrstuvwxyz0123456789\n"
+    );
+}
+
+#[test]
+fn slice_of_inline_str_then_owner_grows() {
+    // Slicing promotes the inline (SSO) base to heap before the view is
+    // taken, so the view reads from stable memory. Growing the owner
+    // while the view is live is a compile-time ownership error, so the
+    // view is consumed (printed) before the consuming reassign-concat.
+    let src = "\
+fn main():
+\tmut s: str = int_to_str(12345)
+\tv = s[1:3]
+\tprint(v)
+\tprint(\"\\n\")
+\ts = s + \"678901234567890123456789\"
+\tprint(s)
+\tprint(\"\\n\")
+";
+    assert_eq!(
+        run_ryo(src, "sso_slice_stable"),
+        "23\n12345678901234567890123456789\n"
+    );
+}
+
+#[test]
+fn struct_with_short_str_fields() {
+    // Inline (SSO) strings embedded in an aggregate: constructed from a
+    // static+inline concat, moved through a function, field-reassigned
+    // with an inline concat, and dropped. The struct drop glue's
+    // (ptr@off, cap@off+16) free path must no-op on inline tags, and
+    // the field-reassign free-on-reassign path must not free the old
+    // inline value.
+    let src = "\
+struct Person:
+\tname: str
+\tage: int
+
+fn birthday(move p: Person) -> Person:
+\tmut r = p
+\tr.age += 1
+\treturn r
+
+fn main():
+\tp = Person{name=\"user\" + int_to_str(42), age=30}
+\tmut q = birthday(p)
+\tq.name = q.name + \"!\"
+\tprint(q.name)
+\tprint(\" \")
+\tprint(int_to_str(q.age))
+\tprint(\"\\n\")
+";
+    assert_eq!(run_ryo(src, "sso_struct_fields"), "user42! 31\n");
+}
