@@ -45,3 +45,38 @@ fn main():
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
     );
 }
+
+#[test]
+fn bytes_concat_and_push_across_representations() {
+    // Consuming reassign-concat + bytes_push on an inline (SSO) bytes value:
+    // both must read the inline data bytes, never a raw cap word.
+    let src = "\
+fn main():
+\tmut b: bytes = b\"ab\"
+\tb = b + b\"cd\"
+\tbytes_push(&b, 101)
+\tprint(b)
+";
+    assert_eq!(run_ryo(src, "sso_bytes_building"), "b\"abcde\"");
+}
+
+#[test]
+fn bytes_slice_of_short_owner_is_stable() {
+    // Slicing promotes the inline (SSO) base to heap before the view is
+    // taken: the view reads b"bc" from stable memory, and the owner
+    // still grows correctly afterwards. (Growing while the view is live
+    // is a compile-time ownership error, so the view is consumed first.)
+    let src = "\
+fn main():
+\tmut b: bytes = b\"abcdef\"
+\tv = b[1:3]
+\tprint(v)
+\tprint(\"\\n\")
+\tb = b + b\"ghijklmnopqr\"
+\tprint(b)
+";
+    assert_eq!(
+        run_ryo(src, "sso_bytes_slice"),
+        "b\"bc\"\nb\"abcdefghijklmnopqr\""
+    );
+}
