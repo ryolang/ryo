@@ -16,7 +16,7 @@ fn run_ryo(source: &str, name: &str) -> String {
 
 #[test]
 fn string_building_loop_is_correct() {
-    // The I-175 shape: consuming reassign-concat in a loop.
+    // Consuming reassign-concat loop: the string_building benchmark shape.
     let src = "\
 fn main():
 \tmut s: str = \"\"
