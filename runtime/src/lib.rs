@@ -197,7 +197,10 @@ pub(crate) unsafe fn write_inline_tag(out: *mut RyoStrFat, len: u64) {
 /// next power of two above `min`, floor 16. Matches `__ryo_str_push`'s
 /// doubling so a produced buffer grows smoothly.
 pub(crate) fn growth_cap(min: u64) -> u64 {
-    debug_assert!(min < (1 << 56), "cap must keep the tag byte clear");
+    // checked_next_power_of_two returns exactly 2^56 for min in
+    // [2^55, 2^56), which would set the tag byte — cap the input one
+    // power lower so caps stay below 2^56 by construction.
+    debug_assert!(min < (1 << 55), "cap must keep the tag byte clear");
     min.checked_next_power_of_two()
         .unwrap_or_else(|| overflow_abort())
         .max(16)
@@ -304,7 +307,9 @@ pub unsafe extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64) {
 
 /// # Safety
 /// `ptr` must have been returned by `ryo_str_alloc` or `ryo_str_realloc`
-/// with the given `old_cap`, or be null.
+/// with the given `old_cap`, or be null. `old_cap` must be a heap cap
+/// (tag byte clear): this function is not tag-aware and must never be
+/// handed an inline slot's tagged cap word.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_str_realloc(ptr: *mut u8, old_cap: u64, new_cap: u64) -> *mut u8 {
     if ptr.is_null() || old_cap == 0 {

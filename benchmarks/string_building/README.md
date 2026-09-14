@@ -1,6 +1,6 @@
 # String Building Benchmark
 
-**Focus:** Runtime string ABI + eager destruction. Concat over 50,000 iterations (`s = s + "x"` — now spelled identically in Rust and Ryo): every iteration allocates a fresh buffer through `ryo_str_concat` and eagerly frees the previous one at the reassign. This is the direct before/after measure for the packed-`u128` string runtime ABI (commit `7d0a047`, return-by-value replacing the per-call-site out-pointer stack slot) — the ABI decision and its rationale are recorded on `pack_pair` in `runtime/src/lib.rs` and pinned by the `clif_string_ops_use_packed_return_no_stack_slots` integration test.
+**Focus:** Runtime string ABI + eager destruction. Concat over 50,000 iterations (`s = s + "x"` — now spelled identically in Rust and Ryo). Historically every iteration allocated a fresh buffer through `ryo_str_concat` and eagerly freed the previous one at the reassign; since 2026-09-14 a provably-consuming reassign-concat appends in place with growth headroom, so the loop is amortized O(n) (see the checkpoint below). This is the direct before/after measure for the packed-`u128` string runtime ABI (commit `7d0a047`, return-by-value replacing the per-call-site out-pointer stack slot) — the ABI decision and its rationale are recorded on `pack_pair` in `runtime/src/lib.rs` and pinned by the `clif_string_ops_use_packed_return_no_stack_slots` integration test.
 
 **Languages compared:** Rust, Swift, Ryo (AOT vs JIT), and Python.
 
@@ -10,7 +10,7 @@ The Rust and Ryo arms are now the *identical* program — both are `s = s + "x"`
 
 The sharper learning (2026-09-11): Ryo doesn't need COW refcounts to close this. The ownership pass already proves statically what Rust's type system proves — at a reassign concat the old binding is dead, and a reassignable `s` provably has no live views — so in-place append is sound for exactly this pattern. What was missing was purely allocation policy: Ryo buffers were always exact-size (`cap == len`, no growth headroom), and concat never attempted to extend the lhs buffer. This landed on 2026-09-14: buffers now carry growth headroom, and a provably-consuming `s = s + suffix` routes through the `__ryo_str_push`-style growth path — realloc-or-extend, copy the suffix only — turning this loop amortized O(n) with no source change. The gap collapsed to Rust parity; see the checkpoint below. The SSO/COW roadmap work (`docs/dev/implementation_roadmap.md` → *Standard Library Allocation Optimizations*, `docs/dev/stdlib_optimizations.md`) then generalizes the win beyond the consuming case.
 
-The amortized fast path also already exists explicitly as `str_push(&s, "x")` (capacity growth via `__ryo_str_push`, `runtime/src/lib.rs:382`); this benchmark intentionally measures the concat + eager-free path (the ABI / eager-destruction measure), not the fastest way to build a string in Ryo.
+The amortized fast path also exists explicitly as `str_push(&s, "x")` (capacity growth via `__ryo_str_push`, `runtime/src/lib.rs:521`); this benchmark intentionally keeps the `s = s + "x"` spelling — it measured the concat + eager-free path (the ABI / eager-destruction measure) before 2026-09-14 and now measures the provably-consuming in-place append that the same spelling lowers to, not the explicit-push idiom.
 
 ## Benchmarks & Performance Results
 

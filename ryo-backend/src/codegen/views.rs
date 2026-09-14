@@ -167,6 +167,12 @@ impl<M: Module> Codegen<M> {
                 builder.def_var(sl.len, out_len);
                 builder.def_var(sl.cap, out_cap);
             }
+            // Invariant: after this write-back, the cached repr of the
+            // binding's Var inst is STALE (it holds the pre-promotion
+            // inline triple) — consumers must read the binding through
+            // `fat_locals`, never through `cached_repr`. Latent, not
+            // live: TIR is tree-shaped today, so each Var inst is
+            // evaluated once at its own use site.
             // Known leak, unrelated to the fall-through: for a
             // BORROWED param the write-back lands but no free is
             // ever scheduled (the callee doesn't own its params),
