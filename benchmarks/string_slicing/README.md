@@ -32,6 +32,19 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 | **Ryo (AOT)** | 0.1.0-dev.20260911+490b10d | 4.9 ms ± 0.3 ms | 2.94x slower | 2.75 MB |
 | **Ryo (JIT)** | 0.1.0-dev.20260911+490b10d | 6.5 ms ± 0.4 ms | 3.90x slower | 6.62 MB |
 
+### Checkpoint: SSO + consuming concat (2026-09-14)
+
+The string-runtime rework moved this benchmark twice, in opposite directions. (1) Promote-on-view landed with an *unconditional* runtime call: every slice of an owner-typed `str` paid a spill + extern `__ryo_str_ensure_heap` + reload to guarantee the base never moves — 4.9 → 5.7 ms across the ~700k-iteration scan loop. (2) A codegen tag-branch then recovered it: view creation now tests the base's inline tag (top byte of the cap word) and only inline bases take the promote call, while heap and static bases pass their pointer/length straight through — 5.7 → 5.1 ms. The ~0.2 ms residual over the pre-rework 4.9 ms is the per-slice tag test itself; closing it folds into the planned tiny-runtime-op inlining work named above (the same mechanism that will inline `__ryo_slice` and `ryo_str_eq`).
+
+| Candidate | Version | Mean time | vs fastest | Max RSS |
+|---|---|---|---|---|
+| **Rust** | 1.98.0 | 1.7 ms ± 0.1 ms | 1.00x | 2.88 MB |
+| **Swift** | 6.3.3 | 2.7 ms ± 0.1 ms | 1.60x slower | 7.09 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260914+4cef5f9 | 5.1 ms ± 0.2 ms | 3.03x slower | 2.75 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260914+4cef5f9 | 7.4 ms ± 0.7 ms | 4.41x slower | 6.89 MB |
+
+Measurement note: the Ryo rows are quiet-window means at the tagged commit (three runs, 5.1 ms ± 0.2/0.3; full-suite batches under machine load read 5.8–6.0 ms with every arm inflated proportionally). The Rust and Swift rows are from the same-day full-suite run and match their 2026-09-11 values.
+
 ## How to Run
 
 Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).

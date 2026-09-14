@@ -15,6 +15,19 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 | **Swift** | 6.3.3 | 4.0 ms ± 0.1 ms | 1.13x slower | 34.03 MB |
 | **Ryo (JIT)** | 0.1.0-dev.20260911+b3b7d25 | 4.7 ms ± 0.6 ms | 1.34x slower | 37.03 MB |
 
+### Checkpoint: SSO + consuming concat (2026-09-14)
+
+Re-measured after the string-runtime rework (tagged 24-byte slot: inline ≤ 23 B, heap with growth headroom, static `.rodata`; consuming reassign-concat appends in place via the push path — see `string_building`'s checkpoint). Unchanged by design: `s = s + s` uses the lhs buffer as its own suffix, and the in-place path only fires when the suffix is a *different* owner, so every doubling keeps the fresh-buffer allocating path.
+
+| Candidate | Version | Mean time | vs fastest | Max RSS |
+|---|---|---|---|---|
+| **Rust** | 1.98.0 | 3.8 ms ± 0.2 ms | 1.00x | 35.64 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260914+75d0f1e | 4.2 ms ± 1.0 ms | 1.09x slower | 33.41 MB |
+| **Swift** | 6.3.3 | 4.3 ms ± 0.6 ms | 1.11x slower | 34.03 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260914+75d0f1e | 4.9 ms ± 0.2 ms | 1.27x slower | 37.06 MB |
+
+This full-suite batch run was noisy (hyperfine reported outliers on every arm); a quiet targeted re-run measured Ryo AOT at 3.5 ms ± 0.1 ms — matching the 2026-09-11 checkpoint, still the fastest arm. RSS is unchanged (33.4 MB).
+
 ## How to Run
 
 Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
