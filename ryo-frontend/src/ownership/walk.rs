@@ -221,6 +221,23 @@ pub(crate) fn analyze_assign(
                 // is a `Param`, resolved here to its virtual ref — codegen
                 // caches that ref's repr at the prologue.
                 sidecar.free_on_reassign[r.index()] = Some(old_owner.tirref(&own.param_index));
+                // Consuming concat: `s = s + suffix` where the lhs Var
+                // resolves to the dying owner and the rhs is a different
+                // owner. Only for Valid owners (the inout-param Borrowed
+                // exception above is excluded: the callee does not own
+                // the caller's buffer). The `check_source_projected`
+                // call above has already proven no live views.
+                let old_valid = matches!(own.states.get(&old_owner), Some(OwnerState::Valid));
+                let value_inst = tir.inst(view.value);
+                if old_valid
+                    && matches!(value_inst.tag, TirTag::StrConcat | TirTag::BytesConcat)
+                    && let TirData::BinOp { lhs, rhs } = value_inst.data
+                    && matches!(tir.inst(lhs).data, TirData::Var(_))
+                    && underlying_owner(own, lhs) == old_owner
+                    && underlying_owner(own, rhs) != old_owner
+                {
+                    sidecar.consumed_concat_lhs[r.index()] = Some(view.value);
+                }
                 // W0003 case-B support: reassignment mutates the binding's
                 // owner — a defensive-copy hazard on it.
                 own.owner_hazards.push((old_owner, r));

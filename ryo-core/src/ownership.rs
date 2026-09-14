@@ -88,6 +88,17 @@ pub struct FunctionSidecar {
     /// (never param sentinels); `target` itself may be a param sentinel
     /// ref for `inout` params.
     pub free_on_reassign: Vec<Option<TirRef>>,
+    /// In-place concat selections (consuming-concat optimization).
+    /// Dense side table indexed by the `Assign` instruction's
+    /// `TirRef::index()`, sized like `free_on_reassign`. `Some(concat)`
+    /// at slot `r` means: the Assign's value is the StrConcat/
+    /// BytesConcat `concat` whose lhs is a plain local binding that
+    /// dies exactly at this reassign (Valid owner, no live views — the
+    /// same facts `free_on_reassign` already proves), so codegen may
+    /// append the rhs onto the lhs buffer in place instead of
+    /// allocating. The old buffer is CONSUMED, not orphaned: codegen
+    /// must skip the `free_on_reassign` free for this Assign.
+    pub consumed_concat_lhs: Vec<Option<TirRef>>,
     /// Field-reassignment Frees (M9). Dense side table indexed by the
     /// `FieldAssign`/`CompoundFieldAssign` instruction's
     /// `TirRef::index()`, sized like `free_on_reassign`. `Some(target)`
@@ -120,6 +131,7 @@ impl FunctionSidecar {
             name,
             free_schedule: Vec::new(),
             free_on_reassign: vec![None; arena_len],
+            consumed_concat_lhs: vec![None; arena_len],
             field_free_on_reassign: vec![None; arena_len],
             if_branches: vec![None; arena_len],
             conditional_dead_drops: Vec::new(),
