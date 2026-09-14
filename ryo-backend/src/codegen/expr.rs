@@ -3,8 +3,8 @@
 use super::arith::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MSG};
 use super::bytes::store_string;
 use super::{
-    Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, ValueRepr, cranelift_type_for,
-    is_fat_type, ranges,
+    Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, Terminator, ValueRepr,
+    cranelift_type_for, is_fat_type, ranges,
 };
 use cranelift::codegen::ir::{
     BlockArg, FuncRef, InstructionData, MemFlagsData, Opcode, StackSlot, ValueDef,
@@ -1786,6 +1786,106 @@ impl<M: Module> Codegen<M> {
         } else {
             Ok(results[0])
         }
+    }
+
+    /// Consuming-concat fast path: `s = s + suffix` where the ownership
+    /// pass has proven the lhs binding dies at this reassign (Valid
+    /// owner, no live views, rhs not aliasing). Append the rhs onto the
+    /// lhs buffer in place via `__ryo_str_push` and reload — no fresh
+    /// allocation, and no free of the old buffer (it was CONSUMED:
+    /// `free_on_reassign` for this Assign is deliberately skipped by
+    /// never reaching the shared Assign code).
+    pub(crate) fn emit_consuming_concat_assign(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        assign_ref: TirRef,
+        concat_ref: TirRef,
+    ) -> Result<Terminator, String> {
+        let view = ctx.tir.assign_view(assign_ref);
+        let concat = ctx.tir.inst(concat_ref);
+        let (lhs, rhs) = match concat.data {
+            TirData::BinOp { lhs, rhs } => (lhs, rhs),
+            _ => unreachable!("consumed_concat_lhs must key a BinOp concat"),
+        };
+        let lhs_name = match ctx.tir.inst(lhs).data {
+            TirData::Var(n) => n,
+            _ => unreachable!("sidecar guarantees a Var lhs"),
+        };
+        debug_assert_eq!(
+            lhs_name, view.name,
+            "consuming concat must target the reassigned binding itself"
+        );
+        // The rhs bytes are consumed by the push call — transient
+        // extraction is sound (eval_str_or_view_parts contract). Sole
+        // extraction in this sequence → operand 0.
+        let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs, 0)?;
+        let locals = Self::read_slot(&ctx.fat_locals, lhs_name).ok_or_else(|| {
+            format!(
+                "Undefined fat variable in consuming concat: '{}'",
+                ctx.pool.str(lhs_name)
+            )
+        })?;
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        let old_ptr = builder.use_var(locals.ptr);
+        let old_len = builder.use_var(locals.len);
+        let old_cap = builder.use_var(locals.cap);
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), old_ptr, addr, 0);
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), old_len, addr, 8);
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), old_cap, addr, 16);
+        // __ryo_str_push serves both families: the tagged-slot layout
+        // is shared, and appending valid-UTF-8 + valid-UTF-8 stays
+        // valid (no boundary check needed).
+        let push_ref = Self::declare_runtime_fn(
+            ctx.module,
+            builder,
+            "__ryo_str_push",
+            &[ctx.int_type, ctx.int_type, types::I64],
+            &[],
+        )?;
+        builder.ins().call(push_ref, &[addr, r_ptr, r_len]);
+        let np = builder
+            .ins()
+            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+        let nl = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 8);
+        let nc = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 16);
+        builder.def_var(locals.ptr, np);
+        builder.def_var(locals.len, nl);
+        builder.def_var(locals.cap, nc);
+        // The concat inst stands in for the value the binding now
+        // holds. Caching its repr lets the end-of-statement sweep fire
+        // Frees anchored on the concat (e.g. a heap rhs temp) exactly
+        // as the allocating path does.
+        let repr = if matches!(ctx.pool.kind(concat.ty), TypeKind::Bytes) {
+            ValueRepr::Bytes {
+                ptr: np,
+                len: nl,
+                cap: nc,
+            }
+        } else {
+            ValueRepr::Str {
+                ptr: np,
+                len: nl,
+                cap: nc,
+            }
+        };
+        Self::cache_repr(ctx, concat_ref, repr);
+        Self::kill_fact(ctx, view.name);
+        Ok(Terminator::None)
     }
 
     /// Reload each inout slot after a call and write the updated value

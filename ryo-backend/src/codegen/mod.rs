@@ -1365,6 +1365,13 @@ impl<M: Module> Codegen<M> {
             TirTag::Assign => {
                 let view = ctx.tir.assign_view(r);
                 if is_fat_type(inst.ty, ctx.pool) {
+                    // Consuming reassign-concat fast path: the ownership
+                    // pass proved the lhs binding dies at this reassign, so
+                    // codegen appends in place and skips the
+                    // free_on_reassign free below by never reaching it.
+                    if let Some(concat_ref) = ctx.sidecar.consumed_concat_lhs[r.index()] {
+                        return Self::emit_consuming_concat_assign(builder, ctx, r, concat_ref);
+                    }
                     let repr = Self::eval_inst_fat(builder, ctx, view.value)?;
                     let (ptr, len, cap) = match repr {
                         ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
