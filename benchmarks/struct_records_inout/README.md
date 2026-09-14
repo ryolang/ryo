@@ -19,7 +19,22 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 | **Go** | 1.27.1 | 25.1 ms ± 0.6 ms | 2.15x slower | 9.92 MB |
 | **Python** | 3.14.7 | 110.3 ms ± 1.5 ms | 9.42x slower | 14.52 MB |
 
-Read against the sibling suites: Ryo AOT matches its own consuming-update time (20.2 ms here vs 20.6 ms in `struct_records` — a wash, as designed) and again beats Rust and Go. The inout form also beats Ryo's keep-original time (28.7 ms in `struct_records_reuse`) by exactly the clone it avoids — the three suites together price Ryo's record-update vocabulary: in-place mutation ≈ consuming update < duplicate-and-modify. Python improves relative to the reuse suite (9.4x vs 12.4x) because in-place mutation skips its object allocation, though it remains an order of magnitude behind. Swift's lead is unchanged and remains the small-string optimization story (I-171). Ryo AOT runs **5.5x faster than Python** with ~11x less memory, at the lightest RSS of the suite.
+Read against the sibling suites: Ryo AOT matches its own consuming-update time (20.2 ms here vs 20.6 ms in `struct_records` — a wash, as designed) and again beats Rust and Go. The inout form also beats Ryo's keep-original time (28.7 ms in `struct_records_reuse`) by exactly the clone it avoids — the three suites together price Ryo's record-update vocabulary: in-place mutation ≈ consuming update < duplicate-and-modify. Python improves relative to the reuse suite (9.4x vs 12.4x) because in-place mutation skips its object allocation, though it remains an order of magnitude behind. Swift's lead at this checkpoint is the small-string optimization story; that optimization shipped on 2026-09-14 (a tagged 24-byte slot: names ≤ 23 bytes live inline in the record, no heap alloc, free a no-op) — the re-checkpoint below shows Ryo AOT taking the lead. Ryo AOT runs **5.5x faster than Python** with ~11x less memory, at the lightest RSS of the suite.
+
+### Checkpoint: SSO + consuming concat (2026-09-14)
+
+Re-measured after the string-runtime rework shipped the small-string optimization: `str` is a tagged 24-byte slot — names ≤ 23 bytes live inline inside the record, so the per-round `int_to_str` + field store never touches the heap and the record's drop is a no-op on the inline tag.
+
+| Candidate | Version | Mean time | vs fastest | Max RSS |
+|---|---|---|---|---|
+| **Ryo (AOT)** | 0.1.0-dev.20260914+04588a3 | 11.1 ms ± 0.3 ms | 1.00x | 1.36 MB |
+| **Swift** | 6.3.3 | 12.3 ms ± 0.8 ms | 1.11x slower | 1.56 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260914+04588a3 | 13.5 ms ± 0.4 ms | 1.22x slower | 5.25 MB |
+| **Rust** | 1.98.0 | 25.5 ms ± 2.0 ms | 2.29x slower | 1.53 MB |
+| **Go** | 1.27.1 | 25.9 ms ± 0.5 ms | 2.32x slower | 9.23 MB |
+| **Python** | 3.14.7 | 112.1 ms ± 1.9 ms | 10.07x slower | 14.55 MB |
+
+Ryo AOT went from 20.2 ms (1.72x behind Swift) to 11.1 ms — now the **fastest arm**, ahead of Swift (12.3 ms). The suite's design claim now holds at the new level: inout matches the consuming update's post-SSO time (11.1 ms here vs 11.4 ms in `struct_records` — still a wash), so the choice between the two idioms remains free. Ryo AOT runs **10.1x faster than Python** with ~11x less memory, again at the lightest RSS.
 
 ## How to Run
 
