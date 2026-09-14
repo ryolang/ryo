@@ -229,6 +229,22 @@ fn asan_slice_across_blocks() {
 }
 
 #[test]
+fn asan_slice_of_struct_field_inline() {
+    run_asan_smoke(
+        common::find_fixture("slice_of_struct_field_inline"),
+        "slice_of_struct_field_inline",
+    );
+}
+
+#[test]
+fn asan_slice_of_struct_field_heap() {
+    run_asan_smoke(
+        common::find_fixture("slice_of_struct_field_heap"),
+        "slice_of_struct_field_heap",
+    );
+}
+
+#[test]
 fn asan_bytes_ops() {
     run_asan_smoke(common::find_fixture("bytes_ops"), "bytes_ops");
 }

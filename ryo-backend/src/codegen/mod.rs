@@ -40,6 +40,7 @@ mod bytes;
 mod expr;
 mod ranges;
 mod structs;
+mod views;
 
 /// Fat-owner triple layout (str/bytes, 24 bytes): ptr at 0, len at 8,
 /// cap at 16. Derived from `RyoStrFat`, not re-hardcoded.

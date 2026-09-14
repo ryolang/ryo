@@ -1,5 +1,6 @@
 //! M8.4 slice projections and view liveness — split from `mod.rs`.
 
+use super::structs::struct_root;
 use super::{
     LoopNesting, Owner, OwnerState, Ownership, format_binding, needs_tracking, underlying_owner,
 };
@@ -53,6 +54,14 @@ pub(crate) fn projection_root(
         return projection_root(own, tir, pool, inner);
     }
     if needs_tracking(inst.ty, pool) {
+        // A str/bytes field read projects the STRUCT's storage: the
+        // struct binding's drop frees the field buffer, so the root
+        // owner is the struct — not the field-access instruction.
+        if let TirData::FieldAccess { .. } = inst.data
+            && let Some(root) = struct_root(own, tir, r)
+        {
+            return Some(root);
+        }
         return Some(underlying_owner(own, r));
     }
     if !pool.is_view(inst.ty) {

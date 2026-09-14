@@ -521,7 +521,7 @@ impl<M: Module> Codegen<M> {
     /// .rodata sentinel. `ryo_str_free` returns immediately for
     /// cap == 0, so the call is dead at the emission site and can be
     /// skipped; the ownership schedule itself stays untouched.
-    fn is_static_cap_zero(func: &cranelift::codegen::ir::Function, cap: Value) -> bool {
+    pub(crate) fn is_static_cap_zero(func: &cranelift::codegen::ir::Function, cap: Value) -> bool {
         let ValueDef::Result(inst, _) = func.dfg.value_def(cap) else {
             return false;
         };
@@ -906,55 +906,6 @@ impl<M: Module> Codegen<M> {
         let in_len = builder.ins().band_imm_u(tag, 0x7f);
         let out_ptr = builder.ins().select(is_in, addr, ptr);
         let out_len = builder.ins().select(is_in, in_len, len);
-        Ok((out_ptr, out_len))
-    }
-
-    /// Materialize an owner-typed (`str`/`bytes`) value for VIEW
-    /// CREATION: spill its triple to a 24-byte slot, call the
-    /// family `ensure_heap` (promotes inline → heap in place), reload,
-    /// and return a stable `(ptr, len)` that outlives this expression.
-    /// Views into `.rodata`/heap were already stable; this adds the
-    /// inline case (promote-on-view).
-    pub(crate) fn emit_ensure_heap_for_view_base(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        r: TirRef,
-    ) -> Result<(Value, Value), String> {
-        // A view-typed base (reslice, strview of a view param) already
-        // addresses stable memory — pass it through untouched.
-        if ctx.pool.is_view(ctx.tir.inst(r).ty) {
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, r)? else {
-                unreachable!("eval_inst_view must produce ValueRepr::View");
-            };
-            return Ok((ptr, len));
-        }
-        let (ptr, len, cap, is_bytes) = match Self::eval_inst_fat(builder, ctx, r)? {
-            ValueRepr::Str { ptr, len, cap } => (ptr, len, cap, false),
-            ValueRepr::Bytes { ptr, len, cap } => (ptr, len, cap, true),
-            _ => unreachable!("view base must be fat or view typed"),
-        };
-        let slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            STR_SLOT_SIZE,
-            3,
-        ));
-        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-        builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
-        builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
-        builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
-        let callee = if is_bytes {
-            "__ryo_bytes_ensure_heap"
-        } else {
-            "__ryo_str_ensure_heap"
-        };
-        let func_ref = Self::declare_runtime_fn(ctx.module, builder, callee, &[ctx.int_type], &[])?;
-        builder.ins().call(func_ref, &[addr]);
-        let out_ptr = builder
-            .ins()
-            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
-        let out_len = builder
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), addr, 8);
         Ok((out_ptr, out_len))
     }
 
@@ -1940,7 +1891,7 @@ impl<M: Module> Codegen<M> {
     /// `None`. Used to resolve an inout arg (lowered to its inner
     /// `Var(name)`) back to the caller local that must receive the
     /// reloaded value.
-    fn local_name_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
+    pub(crate) fn local_name_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
         let inst = ctx.tir.inst(r);
         match inst.tag {
             TirTag::Var => match inst.data {

@@ -289,6 +289,22 @@ fn valgrind_str_materialize_copy() {
 }
 
 #[test]
+fn valgrind_slice_of_struct_field_inline() {
+    run_valgrind_smoke(
+        common::find_fixture("slice_of_struct_field_inline"),
+        "slice_of_struct_field_inline",
+    );
+}
+
+#[test]
+fn valgrind_slice_of_struct_field_heap() {
+    run_valgrind_smoke(
+        common::find_fixture("slice_of_struct_field_heap"),
+        "slice_of_struct_field_heap",
+    );
+}
+
+#[test]
 fn valgrind_bytes_ops() {
     run_valgrind_smoke(common::find_fixture("bytes_ops"), "bytes_ops");
 }
