@@ -4,7 +4,7 @@
 
 **Languages compared:** Rust, Swift, Ryo (AOT vs JIT), and Python.
 
-## Why Ryo trails here: same source, different allocation policy
+## Why Ryo trailed here: same source, different allocation policy
 
 The Rust and Ryo arms are now the *identical* program — both are `s = s + "x"` in a loop — so the ~12x gap is entirely runtime semantics, not algorithm choice. Rust's `impl Add<&str> for String` **consumes the left-hand side and reuses its buffer** (documented std behavior): ownership moves into the operator, uniqueness is proven by the type system, and the append happens in place with amortized capacity growth (~17 reallocs total, O(n)). Ryo's `s = s + "x"` calls `ryo_str_concat`, which constructs a **fresh exact-size buffer every iteration**, copies the whole current string into it, and eager destruction frees the old buffer at the reassign. Iteration *i* copies *i* bytes, so the loop copies ~1.25 GB in total — that O(n²) churn is the entire gap, not codegen quality.
 
@@ -24,7 +24,7 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 | **Ryo (JIT)** | 0.1.0-dev.20260911+f25e95a | 18.6 ms ± 0.4 ms | 12.95x slower | 5.73 MB |
 | **Python** | 3.14.7 | 36.1 ms ± 1.4 ms | 25.11x slower | 14.75 MB |
 
-Python (CPython 3.14.7) runs the same `s += "x"` loop interpreted; its ~25x gap over Rust is interpreter overhead, and its ~2x gap over Ryo shows the interpreted baseline is slower than Ryo's compiled O(n²) concat even before any allocation-policy fix lands.
+Python (CPython 3.14.7) runs the same `s += "x"` loop interpreted; its ~25x gap over Rust is interpreter overhead, and its ~2x gap over Ryo shows the interpreted baseline is slower than Ryo's compiled O(n²) concat even before any allocation-policy fix landed.
 
 ### Checkpoint: SSO + consuming concat (2026-09-14)
 

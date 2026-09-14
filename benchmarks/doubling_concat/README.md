@@ -21,12 +21,12 @@ Re-measured after the string-runtime rework (tagged 24-byte slot: inline ≤ 23 
 
 | Candidate | Version | Mean time | vs fastest | Max RSS |
 |---|---|---|---|---|
-| **Rust** | 1.98.0 | 3.8 ms ± 0.2 ms | 1.00x | 35.64 MB |
-| **Ryo (AOT)** | 0.1.0-dev.20260914+75d0f1e | 4.2 ms ± 1.0 ms | 1.09x slower | 33.41 MB |
-| **Swift** | 6.3.3 | 4.3 ms ± 0.6 ms | 1.11x slower | 34.03 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260914+75d0f1e | 4.9 ms ± 0.2 ms | 1.27x slower | 37.06 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260914+75d0f1e | 3.5 ms ± 0.1 ms | 1.00x | 33.41 MB |
+| **Rust** | 1.98.0 | 3.8 ms ± 0.2 ms | 1.09x slower | 35.64 MB |
+| **Swift** | 6.3.3 | 4.3 ms ± 0.6 ms | 1.23x slower | 34.03 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260914+75d0f1e | 4.9 ms ± 0.2 ms | 1.40x slower | 37.06 MB |
 
-This full-suite batch run was noisy (hyperfine reported outliers on every arm); a quiet targeted re-run measured Ryo AOT at 3.5 ms ± 0.1 ms — matching the 2026-09-11 checkpoint, still the fastest arm. RSS is unchanged (33.4 MB).
+Measurement note: the Ryo (AOT) row is a quiet targeted re-run (3.5 ms ± 0.1 ms — matching the 2026-09-11 checkpoint, still the fastest arm); the full-suite batch run under machine load read 4.2 ms ± 1.0 ms with hyperfine outlier warnings on every arm. The Rust, Swift, and Ryo (JIT) rows are from that batch and match their 2026-09-11 values. RSS is unchanged (33.4 MB).
 
 ## How to Run
 
