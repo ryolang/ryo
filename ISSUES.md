@@ -399,6 +399,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** `int_to_str(i64)` produces at most 20 chars — always under the 23-byte inline capacity — so its result is provably always-inline, yet codegen treats it as an opaque producer: an address-taken stack slot (defeating register allocation and forcing every use through memory), plus an unconditional `ryo_str_free` extern call that is a guaranteed no-op on the inline tag. Same shape for the other bounded producers (bool/char/float formatters, small conversions).
 **Resolution:** Add a max-output-length annotation to the builtin registry; when it is ≤ the inline capacity, (1) return the tagged slot by value in registers (multi-value return) instead of slot-out, so the value only touches the stack if spilled, and (2) elide `ryo_str_free` for that value entirely — the inline tag is statically known, generalizing the elision the cap=0 static-literal path already performs.
 
+### I-181 — `(ptr, len)` pairs flow through codegen as packed i128; extracting a half costs a 128-bit shift legalization
+
+**Files:** `ryo-backend/src/codegen/expr.rs` (slice / `ryo_str_eq` call sites and view value representation), `ryo-core/src/tir.rs` (how pair values are typed), `runtime/src/lib.rs` (`pack_pair`)
+**Summary:** Slice results and literal values are packed `(ptr, len)` pairs represented as i128, so extracting one half is a 128-bit shift — which Cranelift legalizes into a ~9-instruction funnel-shift/select sequence (`lsr`/`lsl`/`orr`/`csel`) instead of the register move it already is. Disassembly of `benchmarks/string_slicing`'s `count_fox` (aarch64, 2026-09-15): two such sequences per scan iteration, one to unpack the `__ryo_slice` result and one to unpack the literal — ~18 wasted instructions × 700k iterations ≈ 12.6M instructions, on top of the extern-call overhead tracked separately. Inlining the slice/eq bodies will not remove this if the values keep flowing as i128.
+**Resolution:** Stop representing small pair values as packed i128 in codegen: keep `(ptr, len)` as two i64 SSA values (Cranelift multi-value) end to end, packing only at the C-ABI boundary where the runtime signature demands it. Where an i128 pack is unavoidable, recognize shift-by-64 of a known pack and emit the half directly.
+
 ---
 
 ## Cross-References
