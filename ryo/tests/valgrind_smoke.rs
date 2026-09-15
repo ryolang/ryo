@@ -102,6 +102,22 @@ fn valgrind_int_to_str_then_print() {
 }
 
 #[test]
+fn valgrind_slice_borrowed_param_inline() {
+    run_valgrind_smoke(
+        common::find_fixture("slice_borrowed_param_inline"),
+        "slice_borrowed_param_inline",
+    );
+}
+
+#[test]
+fn valgrind_slice_borrowed_param_heap() {
+    run_valgrind_smoke(
+        common::find_fixture("slice_borrowed_param_heap"),
+        "slice_borrowed_param_heap",
+    );
+}
+
+#[test]
 fn valgrind_mut_reassign() {
     run_valgrind_smoke(common::find_fixture("mut_reassign"), "mut_reassign");
 }

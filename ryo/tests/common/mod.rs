@@ -558,6 +558,36 @@ fn main():
 \tprint(p.name)
 ",
     ),
+    (
+        // I-176 repro: slicing a borrowed str param whose argument is
+        // inline (SSO) promotes a heap buffer that must be freed.
+        "slice_borrowed_param_inline",
+        "\
+fn scan(s: str):
+\tv = s[0:1]
+\tprint(v)
+
+fn main():
+\tx: str = int_to_str(7)
+\tscan(x)
+\tscan(x)
+",
+    ),
+    (
+        // Heap argument (> 23 B): promotion is a no-op pass-through;
+        // the scheduled free must not touch the caller's buffer.
+        "slice_borrowed_param_heap",
+        "\
+fn scan(s: str):
+\tv = s[0:2]
+\tprint(v)
+
+fn main():
+\tx: str = int_to_str(123456789)
+\ty: str = x + x + x + x
+\tscan(y)
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's

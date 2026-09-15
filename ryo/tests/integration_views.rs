@@ -47,6 +47,49 @@ fn test_slice_of_borrowed_param_ok() {
 }
 
 #[test]
+fn test_slice_of_borrowed_param_then_read_param() {
+    // Reading the param after the view dies must still see the
+    // original (inline) value — the promoted buffer is freed, the
+    // param itself is not.
+    assert_ryo_output(
+        "slice_param_then_read.ryo",
+        "fn scan(s: str):\n\tv = s[0:1]\n\tprint(v)\n\tprint(s)\n\nfn main():\n\tx: str = int_to_str(7)\n\tscan(x)\n",
+        "77",
+    );
+}
+
+#[test]
+fn test_slice_of_borrowed_param_in_loop() {
+    // Fresh view per loop iteration: each iteration's promotion buffer
+    // is freed at that iteration's last use.
+    assert_ryo_output(
+        "slice_param_loop.ryo",
+        "fn scan(s: str):\n\tfor i in range(0, 3):\n\t\tv = s[i:i+1]\n\t\tprint(v)\n\nfn main():\n\tscan(\"abc\")\n",
+        "abc",
+    );
+}
+
+#[test]
+fn test_slice_of_borrowed_param_transient() {
+    assert_ryo_output(
+        "slice_param_transient.ryo",
+        "fn scan(s: str):\n\tprint(s[1:3])\n\nfn main():\n\tscan(\"abc\")\n",
+        "bc",
+    );
+}
+
+#[test]
+fn test_reslice_of_borrowed_param_view() {
+    // A reslice keeps the same promotion buffer alive past the first
+    // view's last use — the free must defer to the reslice's last use.
+    assert_ryo_output(
+        "reslice_param_view.ryo",
+        "fn scan(s: str):\n\tw = s[0:3]\n\tv = w[1:3]\n\tprint(v)\n\nfn main():\n\tscan(\"abc\")\n",
+        "bc",
+    );
+}
+
+#[test]
 fn test_slice_empty() {
     assert_ryo_runs(
         "slice_empty.ryo",
