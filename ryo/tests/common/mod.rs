@@ -626,6 +626,29 @@ fn main():
 \tscan(x)
 ",
     ),
+    (
+        // View declared before the loop, rebound inside it, read only
+        // after it: the in-loop slice gets no recorded last use (the
+        // liveness pre-pass attributes the post-loop read to the
+        // pre-loop slice), so its promo free falls to the
+        // bound-never-read fallback. Anchoring that fallback at the
+        // loop exit releases the final iteration's buffer right before
+        // the post-loop read — Valgrind flags the read as a
+        // use-after-free. The post-loop `print(v)` (prints `4`) proves
+        // the slice path executed.
+        "slice_borrowed_param_rebind_loop_read_after",
+        "\
+fn scan(s: str):
+\tmut v = s[0:1]
+\tfor i in range(0, 3):
+\t\tv = s[i:i+1]
+\tprint(v)
+
+fn main():
+\tx: str = int_to_str(654321)
+\tscan(x)
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's

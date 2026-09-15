@@ -104,11 +104,13 @@ fn test_slice_of_borrowed_param_rebound_in_loop() {
 #[test]
 fn test_slice_of_borrowed_param_rebound_in_loop_read_after() {
     // Same rebind shape, but the view is read AFTER the loop: the final
-    // iteration's promotion buffer must survive to that read.
+    // iteration's promotion buffer must survive to that read. The
+    // argument is runtime-built — a static literal never promotes, so
+    // the free-at-loop-exit UAF would not trigger.
     assert_ryo_output(
         "slice_param_rebind_loop_after.ryo",
-        "fn scan(s: str):\n\tmut v = s[0:1]\n\tfor i in range(0, 3):\n\t\tv = s[i:i+1]\n\tprint(v)\n\nfn main():\n\tscan(\"abc\")\n",
-        "c",
+        "fn scan(s: str):\n\tmut v = s[0:1]\n\tfor i in range(0, 3):\n\t\tv = s[i:i+1]\n\tprint(v)\n\nfn main():\n\tx: str = int_to_str(654321)\n\tscan(x)\n",
+        "4",
     );
 }
 
