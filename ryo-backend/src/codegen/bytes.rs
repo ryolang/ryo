@@ -99,8 +99,8 @@ impl<M: Module> Codegen<M> {
         lhs: TirRef,
         rhs: TirRef,
     ) -> Result<Value, String> {
-        let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs, 0)?;
-        let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs, 1)?;
+        let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
+        let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
 
         let eq_ref = Self::declare_runtime_fn(
             ctx.module,

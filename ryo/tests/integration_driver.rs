@@ -419,11 +419,12 @@ fn ir_emit_default_is_ast_and_clif() {
 
 /// Slot discipline pin: every explicit stack slot is a 24-byte
 /// STR_SLOT_SIZE slot, and their total count is exactly `expected` —
-/// the shared SSO extraction scratch slots (one per operand, created
-/// lazily by `emit_fat_bytes_ptr_len`), one per slot-out producer call
-/// site (`emit_slot_out_call`), and one per promote-on-view site
+/// one per inline-extraction site (`emit_fat_bytes_ptr_len` allocates
+/// a fresh scratch slot per extraction so nested evaluation cannot
+/// clobber a live spill), one per slot-out producer call site
+/// (`emit_slot_out_call`), and one per promote-on-view site
 /// (`emit_ensure_heap_for_view_base`). The exact count keeps
-/// per-call-site slots from creeping in unnoticed.
+/// unexpected slot growth from creeping in unnoticed.
 fn assert_explicit_24byte_slots(clif: &str, expected: usize) {
     let slot_lines: Vec<&str> = clif
         .lines()
@@ -447,10 +448,11 @@ fn clif_string_ops_slot_out_producers() {
     // Slot-out runtime ABI: string producers (`int_to_str`, from_view,
     // conversions, concat) write a tagged 24-byte slot passed as arg 0
     // and return nothing; literals and slices still return {ptr, len}
-    // packed in one u128. Slots in this program: 2 shared SSO
-    // extraction scratch slots (the `s + t` concat operands) + 3
-    // slot-out call slots (the `"a" + "b"` concat, `int_to_str`, and
-    // the `s + t` concat).
+    // packed in one u128. Slots in this program: 5 extraction scratch
+    // slots (the `"a" + "b"` operands, the `s + t` operands, and the
+    // print arg — one fresh slot per extraction site) + 3 slot-out
+    // call slots (the `"a" + "b"` concat, `int_to_str`, and the
+    // `s + t` concat).
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -472,14 +474,15 @@ fn clif_string_ops_slot_out_producers() {
         "literal runtime calls still return the packed u128 pair: {}",
         stdout
     );
-    assert_explicit_24byte_slots(&stdout, 5);
+    assert_explicit_24byte_slots(&stdout, 8);
 }
 
 #[test]
 fn clif_bytes_ops_slot_out_producers() {
-    // M8.4.2 twin of the str pin above. Slots in this program: 2 shared
-    // SSO extraction scratch slots (the `b"\x01" + b"\x02"` concat
-    // operands) + 1 promote-on-view slot (the `b[0:1]` slice base) + 3
+    // M8.4.2 twin of the str pin above. Slots in this program: 5
+    // extraction scratch slots (the concat operands, `b.len()`,
+    // `c.len()`, and the print arg — one fresh slot per extraction
+    // site) + 1 promote-on-view slot (the `b[0:1]` slice base) + 3
     // slot-out call slots (the concat, `bytes(...)`, and
     // `int_to_str(...)`).
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
@@ -503,7 +506,7 @@ fn clif_bytes_ops_slot_out_producers() {
         "literal/slice runtime calls still return the packed u128 pair: {}",
         stdout
     );
-    assert_explicit_24byte_slots(&stdout, 6);
+    assert_explicit_24byte_slots(&stdout, 9);
 }
 
 #[test]

@@ -124,6 +124,32 @@ fn main():
 }
 
 #[test]
+fn nested_inline_concat_and_eq_read_correct_bytes() {
+    // Inline (SSO) operands extracted inside a nested expression: the
+    // outer operand's scratch spill must survive evaluating the nested
+    // concat. `a + (b + c)` must read a's bytes, and `x == (y + z)`
+    // must compare x's bytes — not whatever the nested extraction
+    // spilled last.
+    let src = "\
+fn main():
+\ta = int_to_str(1)
+\tb = int_to_str(2)
+\tc = int_to_str(3)
+\ts = a + (b + c)
+\tprint(s)
+\tprint(\"\\n\")
+\tx = int_to_str(12)
+\ty = int_to_str(1)
+\tz = int_to_str(2)
+\tif x == (y + z):
+\t\tprint(\"equal\\n\")
+\telse:
+\t\tprint(\"not equal\\n\")
+";
+    assert_eq!(run_ryo(src, "sso_nested_scratch"), "123\nequal\n");
+}
+
+#[test]
 fn struct_with_short_str_fields() {
     // Inline (SSO) strings embedded in an aggregate: constructed from a
     // static+inline concat, moved through a function, field-reassigned
