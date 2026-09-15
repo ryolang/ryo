@@ -45,6 +45,7 @@ pub(crate) use walk::*;
 
 pub use ryo_core::ownership::{
     BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
+    PromoFree,
 };
 use ryo_core::tir::{ParamMode, Span, Tir, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId};
@@ -290,10 +291,8 @@ pub(crate) struct Ownership {
     pub owner_hazards: Vec<(Owner, TirRef)>,
 
     /// View-creating insts over borrowed-param bases, recorded by the
-    /// walk (`record_promo_candidate`). Consumed by the borrowed-param
-    /// promotion-free pass that follows this recording change.
-    // Written but not read yet — the consumer lands with that pass.
-    #[allow(dead_code)]
+    /// walk (`record_promo_candidate`). Consumed by the post-walk
+    /// promotion-free scheduling pass in `analyze_function`.
     pub(crate) promo_candidates: Vec<PromoCandidate>,
 
     /// The statement currently being walked; set (and restored) by
@@ -337,9 +336,6 @@ pub(crate) struct ReseatDrop {
 /// A `Slice`/`ToView` instruction whose base is a borrowed `str`/`bytes`
 /// parameter. Codegen promotes the callee's inline copy of the param to
 /// heap for such bases; the post-walk pass schedules the free.
-// `base`/`stmt` are recorded now but only read once the
-// promotion-free scheduling pass lands.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PromoCandidate {
     /// The `Slice`/`ToView` instruction.
@@ -656,6 +652,64 @@ fn analyze_function(
         // No consumer = unreachable from any body statement; can't
         // happen in well-formed TIR. Don't emit (no consumer means
         // codegen's inst_values won't have ptr/cap either).
+    }
+
+    // Promotion-buffer frees for borrowed-param view bases: codegen
+    // promotes the callee's inline copy of the param to heap so the
+    // view addresses stable memory; the buffer is freed at the view's
+    // death. Only bases recorded by the walk qualify (borrowed,
+    // owner-typed, param-rooted).
+    let candidates = std::mem::take(&mut own.promo_candidates);
+    for cand in candidates {
+        let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
+        let bound = own.root_owner.contains_key(&Owner::Inst(cand.view_inst));
+        let after = if bound {
+            if let Some(loop_ref) = Ownership::dense_get(&own.view_defer_loop, cand.view_inst) {
+                // Created outside a loop, last read inside it: dies at
+                // the loop's exit. The creation dominates the loop, so
+                // the scratch slot is initialized on every path here.
+                loop_ref
+            } else if let Some(lu) = Ownership::dense_get(&own.view_last_use, cand.view_inst) {
+                // P5: a reslice of this view (e.g. `w = s[0:2];
+                // v = w[0:1]`) keeps the same promotion buffer alive —
+                // defer to the last use of any projection of this view,
+                // exactly as owner frees do.
+                let lu = defer_anchor(
+                    lu,
+                    &Owner::Inst(cand.view_inst),
+                    &projections_of,
+                    &last_use,
+                    &order,
+                );
+                // Conditional last use: re-anchor to the branch exit —
+                // but only when the view's creation dominates the
+                // branch, else the slot may be uninitialized on the
+                // skipped path (mirrors the declared-before check of
+                // the Owner::Param free path).
+                match outermost_branch_of(tir, lu) {
+                    Some(branch_stmt)
+                        if branch_may_not_return(tir, branch_stmt)
+                            && rank(cand.view_inst) < rank(branch_stmt) =>
+                    {
+                        branch_stmt
+                    }
+                    _ => lu,
+                }
+            } else {
+                // Bound but never read: free at the binding statement.
+                cand.stmt
+            }
+        } else {
+            // Transient slice (e.g. `print(s[0:1])`): the projection
+            // dies with its enclosing statement.
+            cand.stmt
+        };
+        sidecar.promotion_frees.push(PromoFree {
+            after,
+            base: cand.base,
+            span: tir.span(cand.view_inst),
+            branch: None,
+        });
     }
 
     // Dead-store survivors: emit W0001 and schedule a Free anchored
