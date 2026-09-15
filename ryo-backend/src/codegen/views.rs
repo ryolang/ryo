@@ -320,7 +320,7 @@ impl<M: Module> Codegen<M> {
         Ok((m_ptr, m_len))
     }
 
-    /// Fire promotion frees anchored after `tir_ref` (I-176). Mirrors
+    /// Fire promotion frees anchored after `tir_ref`. Mirrors
     /// `emit_due_frees`.
     pub(crate) fn emit_due_promo_frees(
         builder: &mut FunctionBuilder,
