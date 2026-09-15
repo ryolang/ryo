@@ -385,11 +385,17 @@ impl<M: Module> Codegen<M> {
             if ctx.promo_freed_at[idx] {
                 continue;
             }
-            ctx.promo_freed_at[idx] = true;
             let pf = ctx.sidecar.promotion_frees[idx].clone();
-            let Some(&slot) = ctx.promo_slots.get(&pf.base) else {
-                continue;
-            };
+            // Invariant: compile_function creates a scratch slot for
+            // every scheduled base — a missing entry would silently
+            // drop the free, so fail loudly like emit_frees does.
+            let slot = *ctx.promo_slots.get(&pf.base).ok_or_else(|| {
+                format!(
+                    "ownership pass scheduled promotion free for base %{} but no scratch slot was created",
+                    pf.base.index()
+                )
+            })?;
+            ctx.promo_freed_at[idx] = true;
             let is_bytes = matches!(ctx.pool.kind(ctx.tir.inst(pf.base).ty), TypeKind::Bytes);
             let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
             let flag = builder
