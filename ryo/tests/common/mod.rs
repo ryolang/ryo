@@ -559,8 +559,8 @@ fn main():
 ",
     ),
     (
-        // I-176 repro: slicing a borrowed str param whose argument is
-        // inline (SSO) promotes a heap buffer that must be freed.
+        // Slicing a borrowed str param whose argument is inline (SSO)
+        // promotes a heap buffer that must be freed.
         "slice_borrowed_param_inline",
         "\
 fn scan(s: str):
