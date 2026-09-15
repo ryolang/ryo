@@ -87,7 +87,7 @@ impl<M: Module> Codegen<M> {
 
     /// Address + field type of a `FieldAccess` chain: the base
     /// struct's slot address plus the field's byte offset.
-    fn field_addr_of(
+    pub(crate) fn field_addr_of(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,

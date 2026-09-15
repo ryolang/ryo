@@ -206,3 +206,100 @@ fn inout_field_and_nested_read_of_other_root_ok() {
         "no E0032 expected for different roots; got {diags:?}"
     );
 }
+
+#[test]
+fn field_slice_projects_struct_root_field_reassign_rejected() {
+    // v = p.name[0:1]; p.name = "xyz" — the reassign frees the old
+    // field buffer the view points into (field_free_on_reassign), so
+    // the P2 freeze must reject it: the slice projects the STRUCT's
+    // storage, keyed on the struct root.
+    let src = "struct Person:\n\tname: str\n\nfn main():\n\tmut p = Person{name=\"abc\"}\n\tv = p.name[0:1]\n\tp.name = \"xyz\"\n\tprint(v)\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::SourceProjected && d.message.contains("`p`")),
+        "expected SourceProjected naming `p`; got {diags:?}"
+    );
+}
+
+#[test]
+fn field_slice_projects_struct_root_whole_struct_reassign_rejected() {
+    // v = p.name[0:1]; p = Person{...} — the whole-struct reassign
+    // drops the old struct (freeing the field buffer the view points
+    // into); the Assign path's P2 freeze sees the projection now that
+    // it registers on the struct root.
+    let src = "struct Person:\n\tname: str\n\nfn main():\n\tmut p = Person{name=\"abc\"}\n\tv = p.name[0:1]\n\tp = Person{name=\"xyz\"}\n\tprint(v)\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::SourceProjected && d.message.contains("`p`")),
+        "expected SourceProjected naming `p`; got {diags:?}"
+    );
+}
+
+#[test]
+fn copy_field_reassign_allowed_while_field_view_live() {
+    // v = p.name[0:1]; p.age = 2 — a Copy-typed field reassign frees
+    // nothing, so the freeze must not fire.
+    let src = "struct Person:\n\tname: str\n\tage: int\n\nfn main():\n\tmut p = Person{name=\"abc\", age=1}\n\tv = p.name[0:1]\n\tp.age = 2\n\tprint(v)\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected for a Copy-field reassign; got {diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == DiagCode::SourceProjected),
+        "no SourceProjected expected for a Copy-field reassign; got {diags:?}"
+    );
+}
+
+#[test]
+fn field_slice_without_reassign_is_clean() {
+    // v = p.name[0:1]; print(v) — a plain field slice registers the
+    // projection on the struct root and defers the struct's drop past
+    // the view's last use; no diagnostics.
+    let src = "struct Person:\n\tname: str\n\nfn main():\n\tp = Person{name=\"abc\"}\n\tv = p.name[0:1]\n\tprint(v)\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected; got: {diags:?}"
+    );
+}
+
+#[test]
+fn sibling_field_reassign_allowed_while_field_view_live() {
+    // v = p.a[0:1]; p.b = "z" — the reassign frees field b's buffer,
+    // which the view never pointed into: only the assigned field's own
+    // buffer is threatened, so this must compile.
+    let src = "struct P:\n\ta: str\n\tb: str\n\nfn main():\n\tmut p = P{a=\"x\", b=\"y\"}\n\tv = p.a[0:1]\n\tp.b = \"z\"\n\tprint(v)\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected for a sibling-field reassign; got {diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == DiagCode::SourceProjected),
+        "sibling-field reassign must not trip the freeze; got {diags:?}"
+    );
+}
+
+#[test]
+fn same_field_reassign_rejected_while_field_view_live() {
+    // v = p.a[0:1]; p.a = "z" — frees the very buffer v points into.
+    let src = "struct P:\n\ta: str\n\tb: str\n\nfn main():\n\tmut p = P{a=\"x\", b=\"y\"}\n\tv = p.a[0:1]\n\tp.a = \"z\"\n\tprint(v)\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == DiagCode::SourceProjected && d.message.contains("`p`")),
+        "expected SourceProjected naming `p`; got {diags:?}"
+    );
+}

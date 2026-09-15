@@ -40,6 +40,7 @@ mod bytes;
 mod expr;
 mod ranges;
 mod structs;
+mod views;
 
 /// Fat-owner triple layout (str/bytes, 24 bytes): ptr at 0, len at 8,
 /// cap at 16. Derived from `RyoStrFat`, not re-hardcoded.
@@ -476,6 +477,14 @@ impl Codegen<JITModule> {
             ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
             ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
             ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
+            (
+                "__ryo_str_ensure_heap",
+                ryo_runtime::__ryo_str_ensure_heap as *const u8,
+            ),
+            (
+                "__ryo_bytes_ensure_heap",
+                ryo_runtime::__ryo_bytes_ensure_heap as *const u8,
+            ),
             ("__ryo_slice", ryo_runtime::__ryo_slice as *const u8),
             ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
             ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
@@ -1349,6 +1358,13 @@ impl<M: Module> Codegen<M> {
             TirTag::Assign => {
                 let view = ctx.tir.assign_view(r);
                 if is_fat_type(inst.ty, ctx.pool) {
+                    // Consuming reassign-concat fast path: the ownership
+                    // pass proved the lhs binding dies at this reassign, so
+                    // codegen appends in place and skips the
+                    // free_on_reassign free below by never reaching it.
+                    if let Some(concat_ref) = ctx.sidecar.consumed_concat_lhs[r.index()] {
+                        return Self::emit_consuming_concat_assign(builder, ctx, r, concat_ref);
+                    }
                     let repr = Self::eval_inst_fat(builder, ctx, view.value)?;
                     let (ptr, len, cap) = match repr {
                         ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {

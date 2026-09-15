@@ -50,8 +50,13 @@ pub fn build_and_link(
         .expect("ryo build");
     assert!(status.success(), "ryo build failed for {name}");
 
-    // Step 2: relink
-    let obj = tmp.path().join(format!("{name}.o"));
+    // Step 2: relink (object extension matches the AOT pipeline:
+    // `.obj` on Windows, `.o` elsewhere — see pipeline.rs
+    // get_output_filenames)
+    let obj = tmp.path().join(format!(
+        "{name}.{}",
+        if cfg!(windows) { "obj" } else { "o" }
+    ));
     let exe = tmp.path().join(format!("{name}_test_binary"));
 
     let runtime_lib = runtime_lib_path();
@@ -438,6 +443,38 @@ fn main():
 \tif s[0:1] == \"7\":
 \t\tprint(v)
 \tprint(s)
+",
+    ),
+    (
+        // Field-base slice of an inline (SSO) field: promote-on-view
+        // promotes the field in place (the struct's slot is the
+        // owner-side storage), the view reads the promoted buffer,
+        // and the struct drop frees it exactly once.
+        "slice_of_struct_field_inline",
+        "\
+struct Person:
+\tname: str
+
+fn main():
+\tp = Person{name=int_to_str(42)}
+\tv = p.name[0:1]
+\tprint(v)
+\tprint(p.name)
+",
+    ),
+    (
+        // Field-base slice of a heap field: the view projects the
+        // STRUCT's storage, so the struct outlives the view (P2
+        // freeze) — a drop at the field read would dangle the view.
+        "slice_of_struct_field_heap",
+        "\
+struct Person:
+\tname: str
+
+fn main():
+\tp = Person{name=\"the quick brown fox\" + int_to_str(7)}
+\tv = p.name[0:3]
+\tprint(v)
 ",
     ),
     (

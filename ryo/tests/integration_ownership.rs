@@ -1108,6 +1108,26 @@ fn heap_str_last_use_in_loop_slice_comparison() {
 }
 
 #[test]
+fn slice_then_reassign_while_view_live_rejected() {
+    // P2 freeze (final spec §3.2): `v`'s last use is after the
+    // reassign-concat, so the slice projection is live at `s = s + ...`.
+    // The consuming-concat fast path (in-place append) must not bypass
+    // this check — reassignment of a projected owner stays E0035.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tmut s: str = int_to_str(12345)\n\tv = s[1:3]\n\ts = s + \"678901234567890123456789\"\n\tprint(v)\n";
+    let test_file = create_test_file(temp_dir.path(), "freeze_reassign_concat.ryo", code);
+    let output = run_ryo_command(&["run", "freeze_reassign_concat.ryo"], &test_file).expect("run");
+    assert!(!output.status.success(), "expected compile error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0035"), "expected E0035: {}", stderr);
+    assert!(
+        stderr.contains("cannot mutate `s` while a slice of it is live"),
+        "expected freeze message: {}",
+        stderr
+    );
+}
+
+#[test]
 fn heap_str_last_use_in_inline_assert() {
     // `assert(s.len() == ...)` as the last use of a concat-built string:
     // the desugared if's condition read must count as a use (no W0001,

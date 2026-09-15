@@ -1,7 +1,7 @@
 //! Bytes codegen (M8.4.2) — split from `expr.rs` to keep both files
 //! under the 2000-line CI cap (`scripts/check_file_length.sh`).
 //! Everything here mirrors the `str` path: same 24-byte fat-pointer
-//! ABI, same packed-u128 producer convention, `ryo_bytes_*` symbols.
+//! ABI, same packed-u128 literal convention, `ryo_bytes_*` symbols.
 //! Also hosts the shared `.rodata` dedup helpers (`store_string` /
 //! `store_bytes`), displaced from `mod.rs` by the same cap.
 
@@ -29,7 +29,6 @@ impl<M: Module> Codegen<M> {
         let (ptr, len) = Self::emit_rv_pair_call(builder, ctx, fn_name, args)?;
         let cap = match cap_rule {
             CapRule::Static => builder.ins().iconst(types::I64, 0),
-            CapRule::LenIsCap => len,
         };
         Ok(ValueRepr::Bytes { ptr, len, cap })
     }

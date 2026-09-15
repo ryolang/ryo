@@ -3,8 +3,8 @@
 use super::arith::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MSG};
 use super::bytes::store_string;
 use super::{
-    Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, ValueRepr, cranelift_type_for,
-    is_fat_type, ranges,
+    Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, Terminator, ValueRepr,
+    cranelift_type_for, is_fat_type, ranges,
 };
 use cranelift::codegen::ir::{
     BlockArg, FuncRef, InstructionData, MemFlagsData, Opcode, StackSlot, ValueDef,
@@ -21,14 +21,13 @@ use std::collections::HashMap;
 /// supported target (see `pack_pair` in `runtime/src/lib.rs` for why
 /// not a struct). The `cap` word is a codegen-side derivation:
 /// `Static` (cap = 0, the .rodata sentinel) for
-/// `ryo_str_from_literal` / `ryo_bytes_from_literal`, `LenIsCap`
-/// (cap = len) for every allocating producer — the runtime never
-/// over-allocates, and `__ryo_str_push` / `__ryo_bytes_push` manage
-/// growth capacity through their unchanged slot ABI.
+/// `ryo_str_from_literal` / `ryo_bytes_from_literal` — the only
+/// remaining packed-u128 producers. The slot-out producers report
+/// their own tagged cap, and `__ryo_str_push` / `__ryo_bytes_push`
+/// manage growth capacity through their unchanged slot ABI.
 #[derive(Clone, Copy)]
 pub(crate) enum CapRule {
     Static,
-    LenIsCap,
 }
 
 impl<M: Module> Codegen<M> {
@@ -521,7 +520,7 @@ impl<M: Module> Codegen<M> {
     /// .rodata sentinel. `ryo_str_free` returns immediately for
     /// cap == 0, so the call is dead at the emission site and can be
     /// skipped; the ownership schedule itself stays untouched.
-    fn is_static_cap_zero(func: &cranelift::codegen::ir::Function, cap: Value) -> bool {
+    pub(crate) fn is_static_cap_zero(func: &cranelift::codegen::ir::Function, cap: Value) -> bool {
         let ValueDef::Result(inst, _) = func.dfg.value_def(cap) else {
             return false;
         };
@@ -813,9 +812,84 @@ impl<M: Module> Codegen<M> {
         let (ptr, len) = Self::emit_rv_pair_call(builder, ctx, fn_name, args)?;
         let cap = match cap_rule {
             CapRule::Static => builder.ins().iconst(types::I64, 0),
-            CapRule::LenIsCap => len,
         };
         Ok(ValueRepr::Str { ptr, len, cap })
+    }
+
+    /// Call a slot-out runtime producer: allocate a 24-byte slot, pass
+    /// its address as arg 0, then load the tagged (ptr, len, cap)
+    /// triple. The runtime writes the full slot (SSO tag, headroom
+    /// cap) — codegen never derives cap anymore.
+    pub(crate) fn emit_slot_out_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &str,
+        args: &[(Type, Value)],
+    ) -> Result<(Value, Value, Value), String> {
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        let mut param_tys = Vec::with_capacity(args.len() + 1);
+        param_tys.push(ctx.int_type);
+        param_tys.extend(args.iter().map(|(ty, _)| *ty));
+        let func_ref = Self::declare_runtime_fn(ctx.module, builder, fn_name, &param_tys, &[])?;
+        let mut call_args = Vec::with_capacity(args.len() + 1);
+        call_args.push(addr);
+        call_args.extend(args.iter().map(|(_, v)| *v));
+        builder.ins().call(func_ref, &call_args);
+        let ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 8);
+        let cap = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 16);
+        Ok((ptr, len, cap))
+    }
+
+    /// Extract a readable `(ptr, len)` for the byte content of a fat
+    /// value whose words may be tagged-inline (SSO). Inline: spill the
+    /// three words to a fresh 24-byte scratch slot and hand back its
+    /// address plus the tag-encoded len. Heap/static: pass through
+    /// unchanged.
+    ///
+    /// TRANSIENT CONSUMERS ONLY (print, eq, concat operands, push
+    /// suffix, conversion args): the returned ptr for an inline value
+    /// addresses the scratch slot. Each call allocates a fresh slot, so
+    /// extractions never clobber each other — nested evaluation of the
+    /// next operand cannot overwrite a pointer that is still live.
+    /// View-creating ops (slice, ToView) must go through
+    /// `__ryo_*_ensure_heap` instead (promote-on-view).
+    pub(crate) fn emit_fat_bytes_ptr_len(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        ptr: Value,
+        len: Value,
+        cap: Value,
+    ) -> Result<(Value, Value), String> {
+        let scratch = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let addr = builder.ins().stack_addr(ctx.int_type, scratch, 0);
+        // Unconditional spill: three stores are cheaper than a branch,
+        // and the scratch is written before either select reads it.
+        builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+        builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+        builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+        let tag = builder.ins().ushr_imm_u(cap, 56);
+        let tag_bit = builder.ins().band_imm_u(tag, 0x80);
+        let is_in = builder.ins().icmp_imm_u(IntCC::NotEqual, tag_bit, 0);
+        let in_len = builder.ins().band_imm_u(tag, 0x7f);
+        let out_ptr = builder.ins().select(is_in, addr, ptr);
+        let out_len = builder.ins().select(is_in, in_len, len);
+        Ok((out_ptr, out_len))
     }
 
     /// Materialize a fat-typed (`str` or `bytes`, M8.4.2) TIR
@@ -882,13 +956,13 @@ impl<M: Module> Codegen<M> {
                     else {
                         unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
                     };
-                    Self::emit_rv_str_call(
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
                         ctx,
                         "ryo_str_from_view",
                         &[(ctx.int_type, v_ptr), (types::I64, v_len)],
-                        CapRule::LenIsCap,
-                    )?
+                    )?;
+                    ValueRepr::Str { ptr, len, cap }
                 } else if name_str == "__ryo_bytes_from_view" {
                     // M8.4.2 `bytes(bview)` materialization: the
                     // argument is a view pair via `eval_inst_view`.
@@ -899,46 +973,46 @@ impl<M: Module> Codegen<M> {
                     else {
                         unreachable!("__ryo_bytes_from_view argument must produce ValueRepr::View")
                     };
-                    Self::emit_rv_bytes_call(
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
                         ctx,
                         "ryo_bytes_from_view",
                         &[(ctx.int_type, v_ptr), (types::I64, v_len)],
-                        CapRule::LenIsCap,
-                    )?
+                    )?;
+                    ValueRepr::Bytes { ptr, len, cap }
                 } else if name_str == "__ryo_str_to_bytes" {
                     // `str.to_bytes()` / `strview.to_bytes()` — only
                     // (ptr, len) is read.
                     let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
-                    Self::emit_rv_bytes_call(
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
                         ctx,
                         "__ryo_str_to_bytes",
                         &[(ctx.int_type, p), (types::I64, l)],
-                        CapRule::LenIsCap,
-                    )?
+                    )?;
+                    ValueRepr::Bytes { ptr, len, cap }
                 } else if name_str == "__ryo_bytes_to_str" {
                     // `bytes.to_str()` / `bytesview.to_str()` — returns
                     // an owned str (validated copy; panics on bad UTF-8).
                     let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
-                    Self::emit_rv_str_call(
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
                         ctx,
                         "__ryo_bytes_to_str",
                         &[(ctx.int_type, p), (types::I64, l)],
-                        CapRule::LenIsCap,
-                    )?
+                    )?;
+                    ValueRepr::Str { ptr, len, cap }
                 } else if name_str == "__ryo_bytes_repr" {
                     // print(bytes) rewrite (sema, M8.4.2) — returns the
                     // escaped-repr str.
                     let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
-                    Self::emit_rv_str_call(
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
                         ctx,
                         "__ryo_bytes_repr",
                         &[(ctx.int_type, p), (types::I64, l)],
-                        CapRule::LenIsCap,
-                    )?
+                    )?;
+                    ValueRepr::Str { ptr, len, cap }
                 } else if name_str == "int_to_str"
                     || name_str == "float_to_str"
                     || name_str == "bool_to_str"
@@ -950,13 +1024,9 @@ impl<M: Module> Codegen<M> {
                         "bool_to_str" => ("ryo_bool_to_str", types::I8),
                         _ => unreachable!(),
                     };
-                    Self::emit_rv_str_call(
-                        builder,
-                        ctx,
-                        fn_name,
-                        &[(param_ty, arg_val)],
-                        CapRule::LenIsCap,
-                    )?
+                    let (ptr, len, cap) =
+                        Self::emit_slot_out_call(builder, ctx, fn_name, &[(param_ty, arg_val)])?;
+                    ValueRepr::Str { ptr, len, cap }
                 } else {
                     // User call — emit_call handles sret for fat-returning
                     // calls and caches the triple. Called directly
@@ -976,18 +1046,14 @@ impl<M: Module> Codegen<M> {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                let l_repr = Self::eval_inst_fat(builder, ctx, lhs)?;
-                let r_repr = Self::eval_inst_fat(builder, ctx, rhs)?;
-                let (l_ptr, l_len) = match l_repr {
-                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
-                    _ => unreachable!(),
-                };
-                let (r_ptr, r_len) = match r_repr {
-                    ValueRepr::Str { ptr, len, .. } => (ptr, len),
-                    _ => unreachable!(),
-                };
+                // Transient extraction (the helper inside
+                // eval_str_or_view_parts) is sound here: each extraction
+                // spills to its own fresh scratch slot and the pointers
+                // are consumed by the concat call itself.
+                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
+                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
 
-                Self::emit_rv_str_call(
+                let (ptr, len, cap) = Self::emit_slot_out_call(
                     builder,
                     ctx,
                     "ryo_str_concat",
@@ -997,26 +1063,19 @@ impl<M: Module> Codegen<M> {
                         (ctx.int_type, r_ptr),
                         (types::I64, r_len),
                     ],
-                    CapRule::LenIsCap,
-                )?
+                )?;
+                ValueRepr::Str { ptr, len, cap }
             }
             TirTag::BytesConcat => {
                 let (lhs, rhs) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                let l_repr = Self::eval_inst_fat(builder, ctx, lhs)?;
-                let r_repr = Self::eval_inst_fat(builder, ctx, rhs)?;
-                let (l_ptr, l_len) = match l_repr {
-                    ValueRepr::Bytes { ptr, len, .. } => (ptr, len),
-                    _ => unreachable!(),
-                };
-                let (r_ptr, r_len) = match r_repr {
-                    ValueRepr::Bytes { ptr, len, .. } => (ptr, len),
-                    _ => unreachable!(),
-                };
+                // Transient extraction, as in StrConcat above.
+                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
+                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
 
-                Self::emit_rv_bytes_call(
+                let (ptr, len, cap) = Self::emit_slot_out_call(
                     builder,
                     ctx,
                     "ryo_bytes_concat",
@@ -1026,8 +1085,8 @@ impl<M: Module> Codegen<M> {
                         (ctx.int_type, r_ptr),
                         (types::I64, r_len),
                     ],
-                    CapRule::LenIsCap,
-                )?
+                )?;
+                ValueRepr::Bytes { ptr, len, cap }
             }
             TirTag::FieldAccess => Self::eval_field_access_fat(builder, ctx, r)?,
             TirTag::ViewAsOwner => {
@@ -1080,8 +1139,11 @@ impl<M: Module> Codegen<M> {
                     TirData::Slice { base, start, end } => (base, start, end),
                     _ => unreachable!("Slice must carry TirData::Slice"),
                 };
-                // Base may be an owned str (triple) or a view (pair).
-                let (base_ptr, base_len) = Self::eval_str_or_view_parts(builder, ctx, base)?;
+                // Promote-on-view: an inline (SSO) base's bytes live in
+                // its slot; the view must point at memory that never
+                // moves, so owners go through ensure_heap first.
+                let (base_ptr, base_len) =
+                    Self::emit_ensure_heap_for_view_base(builder, ctx, base)?;
                 let start_v = match start {
                     Some(s) => Self::eval_inst(builder, ctx, s)?,
                     None => builder.ins().iconst(types::I64, 0),
@@ -1116,13 +1178,9 @@ impl<M: Module> Codegen<M> {
                     TirData::UnOp(o) => o,
                     _ => unreachable!("ToView must carry TirData::UnOp"),
                 };
-                // Representation conversion only: drop the cap word.
-                let (ptr, len) = match Self::eval_inst_fat(builder, ctx, operand)? {
-                    ValueRepr::Str { ptr, len, .. } | ValueRepr::Bytes { ptr, len, .. } => {
-                        (ptr, len)
-                    }
-                    _ => unreachable!("ToView operand must produce a fat repr"),
-                };
+                // Promote-on-view for owner operands: the view must
+                // address stable memory (see emit_ensure_heap_for_view_base).
+                let (ptr, len) = Self::emit_ensure_heap_for_view_base(builder, ctx, operand)?;
                 ValueRepr::View { ptr, len }
             }
             TirTag::Var => {
@@ -1160,12 +1218,18 @@ impl<M: Module> Codegen<M> {
 
     /// Evaluate a `str`/`bytes`/`strview`/`bytesview`-typed operand and
     /// hand back its `(ptr, len)` words regardless of representation —
-    /// owned triple or borrowed view pair (M8.4/M8.4.2). Consumers that
+    /// owned triple or borrowed view pair (M8.4/M8.4.2). Owned triples
+    /// extract through the SSO-aware `emit_fat_bytes_ptr_len`, which
+    /// spills a tagged-inline value's words to a fresh scratch slot and
+    /// passes heap/static values through unchanged. Consumers that
     /// only need the viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`,
-    /// `BytesCmpEq/Ne`, the `__ryo_str_push` suffix, the
-    /// `__ryo_slice`/`__ryo_bytes_slice` base, the bytes conversion
-    /// calls) use this; anything needing the cap must stay on
-    /// `eval_inst_fat`.
+    /// `BytesCmpEq/Ne`, the `__ryo_str_push` suffix, the bytes
+    /// conversion calls) use this; anything needing the cap must stay
+    /// on `eval_inst_fat`.
+    ///
+    /// TRANSIENT CONSUMERS ONLY: for an inline value the returned ptr
+    /// addresses a scratch slot private to this extraction. View-
+    /// creating ops (slice, ToView) must not use it.
     pub(super) fn eval_str_or_view_parts(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1179,7 +1243,9 @@ impl<M: Module> Codegen<M> {
             return Ok((ptr, len));
         }
         match Self::eval_inst_fat(builder, ctx, r)? {
-            ValueRepr::Str { ptr, len, .. } | ValueRepr::Bytes { ptr, len, .. } => Ok((ptr, len)),
+            ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
+                Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap)
+            }
             ValueRepr::View { ptr, len } => Ok((ptr, len)),
             ValueRepr::Scalar(_) | ValueRepr::Struct { .. } => Err(format!(
                 "eval_str_or_view_parts: instruction at %{} is not a fat/view value",
@@ -1649,6 +1715,105 @@ impl<M: Module> Codegen<M> {
         }
     }
 
+    /// Consuming-concat fast path: `s = s + suffix` where the ownership
+    /// pass has proven the lhs binding dies at this reassign (Valid
+    /// owner, no live views, rhs not aliasing). Append the rhs onto the
+    /// lhs buffer in place via `__ryo_str_push` and reload — no fresh
+    /// allocation, and no free of the old buffer (it was CONSUMED:
+    /// `free_on_reassign` for this Assign is deliberately skipped by
+    /// never reaching the shared Assign code).
+    pub(crate) fn emit_consuming_concat_assign(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        assign_ref: TirRef,
+        concat_ref: TirRef,
+    ) -> Result<Terminator, String> {
+        let view = ctx.tir.assign_view(assign_ref);
+        let concat = ctx.tir.inst(concat_ref);
+        let (lhs, rhs) = match concat.data {
+            TirData::BinOp { lhs, rhs } => (lhs, rhs),
+            _ => unreachable!("consumed_concat_lhs must key a BinOp concat"),
+        };
+        let lhs_name = match ctx.tir.inst(lhs).data {
+            TirData::Var(n) => n,
+            _ => unreachable!("sidecar guarantees a Var lhs"),
+        };
+        debug_assert_eq!(
+            lhs_name, view.name,
+            "consuming concat must target the reassigned binding itself"
+        );
+        // The rhs bytes are consumed by the push call — transient
+        // extraction is sound (eval_str_or_view_parts contract).
+        let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
+        let locals = Self::read_slot(&ctx.fat_locals, lhs_name).ok_or_else(|| {
+            format!(
+                "Undefined fat variable in consuming concat: '{}'",
+                ctx.pool.str(lhs_name)
+            )
+        })?;
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        let old_ptr = builder.use_var(locals.ptr);
+        let old_len = builder.use_var(locals.len);
+        let old_cap = builder.use_var(locals.cap);
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), old_ptr, addr, 0);
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), old_len, addr, 8);
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), old_cap, addr, 16);
+        // __ryo_str_push serves both families: the tagged-slot layout
+        // is shared, and appending valid-UTF-8 + valid-UTF-8 stays
+        // valid (no boundary check needed).
+        let push_ref = Self::declare_runtime_fn(
+            ctx.module,
+            builder,
+            "__ryo_str_push",
+            &[ctx.int_type, ctx.int_type, types::I64],
+            &[],
+        )?;
+        builder.ins().call(push_ref, &[addr, r_ptr, r_len]);
+        let np = builder
+            .ins()
+            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+        let nl = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 8);
+        let nc = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 16);
+        builder.def_var(locals.ptr, np);
+        builder.def_var(locals.len, nl);
+        builder.def_var(locals.cap, nc);
+        // The concat inst stands in for the value the binding now
+        // holds. Caching its repr lets the end-of-statement sweep fire
+        // Frees anchored on the concat (e.g. a heap rhs temp) exactly
+        // as the allocating path does.
+        let repr = if matches!(ctx.pool.kind(concat.ty), TypeKind::Bytes) {
+            ValueRepr::Bytes {
+                ptr: np,
+                len: nl,
+                cap: nc,
+            }
+        } else {
+            ValueRepr::Str {
+                ptr: np,
+                len: nl,
+                cap: nc,
+            }
+        };
+        Self::cache_repr(ctx, concat_ref, repr);
+        Self::kill_fact(ctx, view.name);
+        Ok(Terminator::None)
+    }
+
     /// Reload each inout slot after a call and write the updated value
     /// back into the caller's local. The inout arg was sema-lowered to
     /// its inner `Var(name)` ref, so `*arg_ref` is that `Var` inst —
@@ -1701,7 +1866,7 @@ impl<M: Module> Codegen<M> {
     /// `None`. Used to resolve an inout arg (lowered to its inner
     /// `Var(name)`) back to the caller local that must receive the
     /// reloaded value.
-    fn local_name_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
+    pub(crate) fn local_name_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
         let inst = ctx.tir.inst(r);
         match inst.tag {
             TirTag::Var => match inst.data {

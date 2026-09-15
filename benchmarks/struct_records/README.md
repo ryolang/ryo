@@ -21,7 +21,22 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 | **Go** | 1.27.1 | 25.6 ms ± 0.8 ms | 2.17x slower | 9.30 MB |
 | **Python** | 3.14.7 | 132.2 ms ± 2.1 ms | 11.21x slower | 14.59 MB |
 
-Ryo AOT **beats both Rust and Go** here (20.6 ms vs 24.4 / 25.6 ms). The earlier Ryo arm re-derived the name per round because field-level moves are rejected (E0043); rewriting `birthday` to take the record by `move` and mutate the field in place — the idiomatic Ryo shape — removed the per-round `int_to_str` + concat + alloc/free entirely (36.9 ms → ~20 ms) and unified the checksum across all five languages. What remains is pure aggregate ABI traffic, where Ryo's eager-destruction scheduling and sret returns hold up well; Rust additionally pays `format!` machinery per round, and Go pays its GC twice over — in walltime (write barriers, allocation pacing) and most visibly in memory (9.30 MB RSS vs Ryo's 1.39 MB, the classic GC headroom tax). Swift still wins outright: its small-string optimization keeps every name inline (≤ 10 UTF-8 bytes) and its value copy is cheap — closing that is tracked as the small-string optimization work in `ISSUES.md`. Ryo AOT runs **6.4x faster than Python** with ~10x less memory, at the lightest RSS of the suite.
+Ryo AOT **beats both Rust and Go** here (20.6 ms vs 24.4 / 25.6 ms). The earlier Ryo arm re-derived the name per round because field-level moves are rejected (E0043); rewriting `birthday` to take the record by `move` and mutate the field in place — the idiomatic Ryo shape — removed the per-round `int_to_str` + concat + alloc/free entirely (36.9 ms → ~20 ms) and unified the checksum across all five languages. What remains is pure aggregate ABI traffic, where Ryo's eager-destruction scheduling and sret returns hold up well; Rust additionally pays `format!` machinery per round, and Go pays its GC twice over — in walltime (write barriers, allocation pacing) and most visibly in memory (9.30 MB RSS vs Ryo's 1.39 MB, the classic GC headroom tax). Swift still wins outright at this checkpoint: its small-string optimization keeps every name inline (≤ 10 UTF-8 bytes) and its value copy is cheap — Ryo closed exactly that gap on 2026-09-14 (see the checkpoint below). Ryo AOT runs **6.4x faster than Python** with ~10x less memory, at the lightest RSS of the suite.
+
+### Checkpoint: SSO + consuming concat (2026-09-14)
+
+Re-measured after the string-runtime rework: `str` is now a tagged 24-byte slot — inline for ≤ 23-byte strings, heap with growth headroom, static `.rodata` for literals. Every `user499999`-style name is at most 10 bytes, so names now live inline inside the record — the per-round heap alloc + free attributed above to the missing small-string optimization is gone.
+
+| Candidate | Version | Mean time | vs fastest | Max RSS |
+|---|---|---|---|---|
+| **Ryo (AOT)** | 0.1.0-dev.20260914+75d0f1e | 11.4 ms ± 0.4 ms | 1.00x | 1.36 MB |
+| **Swift** | 6.3.3 | 12.1 ms ± 0.5 ms | 1.06x slower | 1.56 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260914+75d0f1e | 13.7 ms ± 0.4 ms | 1.21x slower | 5.30 MB |
+| **Rust** | 1.98.0 | 24.8 ms ± 0.6 ms | 2.18x slower | 1.53 MB |
+| **Go** | 1.27.1 | 26.0 ms ± 0.4 ms | 2.29x slower | 9.39 MB |
+| **Python** | 3.14.7 | 132.1 ms ± 2.6 ms | 11.60x slower | 14.56 MB |
+
+Ryo AOT went from 20.6 ms (1.74x behind Swift) to 11.4 ms — now the **fastest arm**, ahead of Swift (12.1 ms), at the lightest RSS of the suite. A same-day re-run on a busier machine confirmed the ranking (Ryo AOT 12.3 ms vs Swift 13.4 ms).
 
 ## How to Run
 

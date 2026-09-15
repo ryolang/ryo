@@ -2,11 +2,12 @@
 
 use super::{
     BranchState, Owner, OwnerState, Ownership, ReseatDrop, analyze_for_range, analyze_while_loop,
-    check_field_move_out, check_source_projected, consume_struct_lit_fields, consumed_binding_name,
-    drain_dying_views, format_binding, needs_tracking, owner_name_for_diag, owner_sort_key,
-    param_idx, projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
+    check_field_move_out, check_field_target_projected, check_source_projected,
+    consume_struct_lit_fields, consumed_binding_name, drain_dying_views, field_path_of,
+    format_binding, needs_tracking, owner_name_for_diag, owner_sort_key, param_idx,
+    projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
     refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
-    rule7_owner_name, struct_root,
+    rule7_owner_name, struct_base_name, struct_root,
 };
 use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
@@ -70,6 +71,24 @@ pub(crate) fn analyze_stmt(
             if needs_tracking(inst.ty, pool) {
                 sidecar.field_free_on_reassign[stmt.index()] = Some(view.target);
                 let span = tir.span(stmt);
+                // P2 freeze on the TARGET side: the reassign frees the
+                // old buffer of the assigned field only, so the check
+                // matches the target's field path against each live
+                // projection's — sibling-field reassigns stay legal,
+                // same-field (or parent-struct-field) ones are rejected.
+                if let Some(root) = struct_root(own, tir, view.target) {
+                    let target_path = field_path_of(tir, view.target).unwrap_or_default();
+                    check_field_target_projected(
+                        tir,
+                        pool,
+                        own,
+                        sink,
+                        root,
+                        &target_path,
+                        span,
+                        struct_base_name(tir, view.target),
+                    );
+                }
                 let consumed_name = consumed_binding_name(tir, view.value);
                 // P2 freeze (final spec §3.2): the consume moves the owner.
                 check_source_projected(
@@ -221,6 +240,23 @@ pub(crate) fn analyze_assign(
                 // is a `Param`, resolved here to its virtual ref — codegen
                 // caches that ref's repr at the prologue.
                 sidecar.free_on_reassign[r.index()] = Some(old_owner.tirref(&own.param_index));
+                // Consuming concat: `s = s + suffix` where the lhs Var
+                // resolves to the dying owner and the rhs is a different
+                // owner. Only for Valid owners (the inout-param Borrowed
+                // exception above is excluded: the callee does not own
+                // the caller's buffer). The `check_source_projected`
+                // call above has already proven no live views.
+                let old_valid = matches!(own.states.get(&old_owner), Some(OwnerState::Valid));
+                let value_inst = tir.inst(view.value);
+                if old_valid
+                    && matches!(value_inst.tag, TirTag::StrConcat | TirTag::BytesConcat)
+                    && let TirData::BinOp { lhs, rhs } = value_inst.data
+                    && matches!(tir.inst(lhs).data, TirData::Var(_))
+                    && underlying_owner(own, lhs) == old_owner
+                    && underlying_owner(own, rhs) != old_owner
+                {
+                    sidecar.consumed_concat_lhs[r.index()] = Some(view.value);
+                }
                 // W0003 case-B support: reassignment mutates the binding's
                 // owner — a defensive-copy hazard on it.
                 own.owner_hazards.push((old_owner, r));

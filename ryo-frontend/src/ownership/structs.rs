@@ -58,6 +58,32 @@ pub(crate) fn struct_base_name(tir: &Tir, mut r: TirRef) -> Option<StringId> {
     }
 }
 
+/// Field-index path from the struct root down to the field a
+/// `FieldAccess` chain targets: `p.a.b` → `[a, b]`. `None` when `r`
+/// is not a `FieldAccess` chain. The path identifies one field's
+/// storage within the root, so a freeze check can tell `p.a = x`
+/// (threatens slices of `p.a` only) apart from a sibling-field
+/// reassign.
+pub(crate) fn field_path_of(tir: &Tir, mut r: TirRef) -> Option<Vec<u32>> {
+    let mut path = Vec::new();
+    loop {
+        match tir.inst(r).data {
+            TirData::FieldAccess {
+                object,
+                field_index,
+            } => {
+                path.push(field_index);
+                r = object;
+            }
+            TirData::Var(_) => {
+                path.reverse();
+                return Some(path);
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Consume each needs-drop field value of a `StructLit` under the
 /// normal rules: a bound source moves (`Person{name=s}` invalidates
 /// `s`), a fresh temp is stamped `Moved` so the anon-temp free pass

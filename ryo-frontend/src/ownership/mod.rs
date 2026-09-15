@@ -226,6 +226,18 @@ pub(crate) struct Ownership {
     /// deterministic.
     pub live_projections: HashMap<Owner, Vec<Owner>>,
 
+    /// Field path (indices from the struct root, see `field_path_of`)
+    /// of the str/bytes field a view slices, keyed by view owner.
+    /// Present only for field-base projections; whole-struct
+    /// operations (drop/move/reassign) check `live_projections` by
+    /// root alone, while a `FieldAssign` target check matches the
+    /// assigned field's path against these. Monotone like
+    /// `root_owner`: a view owner's path never changes, so branch
+    /// arms accumulate in place and merges need no rule for it.
+    /// Entries for dead views are left behind harmlessly — lookups
+    /// only happen for views present in `live_projections`.
+    pub projection_fields: HashMap<Owner, Vec<u32>>,
+
     /// Walk-constant pre-pass liveness (P4): bound view instruction →
     /// its last reading instruction. Views with no entry are never
     /// read — their projection lives to scope end. Constant per
