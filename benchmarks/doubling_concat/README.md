@@ -21,12 +21,12 @@ Re-measured after the string-runtime rework (tagged 24-byte slot: inline ≤ 23 
 
 | Candidate | Version | Mean time | vs fastest | Max RSS |
 |---|---|---|---|---|
-| **Ryo (AOT)** | 0.1.0-dev.20260914+75d0f1e | 3.5 ms ± 0.1 ms | 1.00x | 33.41 MB |
-| **Rust** | 1.98.0 | 3.8 ms ± 0.2 ms | 1.09x slower | 35.64 MB |
-| **Swift** | 6.3.3 | 4.3 ms ± 0.6 ms | 1.23x slower | 34.03 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260914+75d0f1e | 4.9 ms ± 0.2 ms | 1.40x slower | 37.06 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260915+c598378 | 3.7 ms ± 0.3 ms | 1.00x | 33.42 MB |
+| **Rust** | 1.98.0 | 3.7 ms ± 0.2 ms | 1.01x slower | 35.64 MB |
+| **Swift** | 6.3.3 | 4.2 ms ± 0.6 ms | 1.14x slower | 34.03 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260915+c598378 | 4.8 ms ± 0.8 ms | 1.31x slower | 37.16 MB |
 
-Measurement note: the Ryo (AOT) row is a quiet targeted re-run (3.5 ms ± 0.1 ms — matching the 2026-09-11 checkpoint, still the fastest arm); the full-suite batch run under machine load read 4.2 ms ± 1.0 ms with hyperfine outlier warnings on every arm. The Rust, Swift, and Ryo (JIT) rows are from that batch and match their 2026-09-11 values. RSS is unchanged (33.4 MB).
+Measurement note: all four rows come from a single full-suite hyperfine run on 2026-09-15 (same protocol for every arm, hyperfine outlier warnings present on Swift/JIT — treat the 1.01x AOT-vs-Rust margin as a tie). The Ryo rows include the scratch-slot fix that followed this checkpoint, which does not touch the doubling path; timings match the 2026-09-14 checkpoint within noise.
 
 ## How to Run
 

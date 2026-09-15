@@ -43,7 +43,7 @@ The string-runtime rework moved this benchmark twice, in opposite directions. (1
 | **Ryo (AOT)** | 0.1.0-dev.20260914+4cef5f9 | 5.1 ms ± 0.2 ms | 3.03x slower | 2.75 MB |
 | **Ryo (JIT)** | 0.1.0-dev.20260914+4cef5f9 | 7.4 ms ± 0.7 ms | 4.41x slower | 6.89 MB |
 
-Measurement note: the Ryo rows are quiet-window means at the tagged commit (three runs, 5.1 ms ± 0.2/0.3; full-suite batches under machine load read 5.8–6.0 ms with every arm inflated proportionally). The Rust and Swift rows are from the same-day full-suite run and match their 2026-09-11 values.
+Measurement note: the Ryo rows are quiet-window means at the tagged commit (three runs each: AOT 5.1 ms ± 0.2, JIT 7.4 ms ± 0.7; full-suite batches under machine load read 5.8–6.0 ms with every arm inflated proportionally). The Rust and Swift rows are from the same-day full-suite run and match their 2026-09-11 values.
 
 ### Known tradeoff: growth headroom on doubling concat (2026-09-15)
 

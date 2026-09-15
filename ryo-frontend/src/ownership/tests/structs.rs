@@ -246,6 +246,12 @@ fn copy_field_reassign_allowed_while_field_view_live() {
     let src = "struct Person:\n\tname: str\n\tage: int\n\nfn main():\n\tmut p = Person{name=\"abc\", age=1}\n\tv = p.name[0:1]\n\tp.age = 2\n\tprint(v)\n";
     let diags = check_src(src);
     assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected for a Copy-field reassign; got {diags:?}"
+    );
+    assert!(
         !diags.iter().any(|d| d.code == DiagCode::SourceProjected),
         "no SourceProjected expected for a Copy-field reassign; got {diags:?}"
     );
@@ -273,6 +279,12 @@ fn sibling_field_reassign_allowed_while_field_view_live() {
     // buffer is threatened, so this must compile.
     let src = "struct P:\n\ta: str\n\tb: str\n\nfn main():\n\tmut p = P{a=\"x\", b=\"y\"}\n\tv = p.a[0:1]\n\tp.b = \"z\"\n\tprint(v)\n";
     let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected for a sibling-field reassign; got {diags:?}"
+    );
     assert!(
         !diags.iter().any(|d| d.code == DiagCode::SourceProjected),
         "sibling-field reassign must not trip the freeze; got {diags:?}"
