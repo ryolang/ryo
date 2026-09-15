@@ -2,6 +2,11 @@
 # Shows the projection pattern at work: scanning is zero-copy (views
 # borrow the owner's storage, never copy), and `mut` lets one name
 # track the current position as it advances.
+#
+# Note: `rest[1:]` steps one byte at a time, which is exact for ASCII
+# text. With multibyte UTF-8 the byte index can land inside a
+# character, and slicing at a non-char-boundary index panics — proper
+# code-point iteration comes with the planned `utf8` module.
 
 # Return the index of the first occurrence of `needle` in `haystack`,
 # or -1 when there is no match. An empty needle matches at index 0.
@@ -9,8 +14,8 @@ fn find(haystack: strview, needle: strview) -> int:
 	if needle.len() == 0:
 		return 0
 	# `rest` is the unsearched remainder: one mutable view, re-sliced a
-	# character at a time. Views are read-only borrows, so the whole
-	# scan allocates nothing.
+	# byte at a time. Views are read-only borrows, so the whole scan
+	# allocates nothing.
 	mut rest = haystack[:]
 	mut index: int = 0
 	while rest.len() >= needle.len():
