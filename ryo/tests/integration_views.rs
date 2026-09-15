@@ -139,6 +139,19 @@ fn test_slice_of_borrowed_param_return_in_loop() {
 }
 
 #[test]
+fn test_slice_of_borrowed_param_last_use_in_returning_arm() {
+    // The view's only use is inside a returning if-arm: the not-taken
+    // path falls through to the function's synthesized return, where
+    // only the fallthrough backstop promo free can release the
+    // promotion buffer (the in-arm anchor never fires).
+    assert_ryo_output(
+        "slice_param_arm_fallthrough.ryo",
+        "fn scan(cond: bool, s: str):\n\tv = s[0:1]\n\tif cond:\n\t\tprint(v)\n\t\treturn\n\nfn main():\n\tx: str = int_to_str(654321)\n\tscan(false, x)\n\tprint(\"done\")\n",
+        "done",
+    );
+}
+
+#[test]
 fn test_slice_empty() {
     assert_ryo_runs(
         "slice_empty.ryo",

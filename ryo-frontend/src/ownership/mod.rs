@@ -775,6 +775,39 @@ fn analyze_function(
         }
     }
 
+    // Fallthrough backstop: a body that can reach its end without an
+    // explicit return exits through codegen's synthesized return, which
+    // has no TIR statement for the return epilogue above to anchor on —
+    // e.g. a view whose only use is inside a returning if-arm keeps its
+    // in-arm anchor, and the not-taken path falls through with the
+    // promotion buffer still live. Anchor a copy of every candidate's
+    // free after the final body statement; flag-conditional emission
+    // keeps it a harmless no-op on paths that already freed (or never
+    // promoted) the buffer.
+    if let Some(&last) = body_stmts.last() {
+        let may_fall_through = match tir.inst(last).tag {
+            TirTag::Return | TirTag::ReturnVoid => false,
+            TirTag::IfStmt => if_may_fall_through(tir, last),
+            _ => true,
+        };
+        if may_fall_through {
+            for &(base, normal_anchor) in &promo_anchors {
+                if normal_anchor == last {
+                    continue;
+                }
+                if !promo_epilogue_emitted.insert((last, base)) {
+                    continue;
+                }
+                sidecar.promotion_frees.push(PromoFree {
+                    after: last,
+                    base,
+                    span: tir.span(last),
+                    branch: None,
+                });
+            }
+        }
+    }
+
     // Dead-store survivors: emit W0001 and schedule a Free anchored
     // after the declaring instruction. Skip owners already covered by
     // `free_on_reassign` to avoid double-freeing the same allocation.

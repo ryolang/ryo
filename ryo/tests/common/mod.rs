@@ -670,6 +670,29 @@ fn main():
 \tscan(x)
 ",
     ),
+    (
+        // View created before an if whose only use is inside a
+        // returning arm: the conditional-last-use re-anchor refuses a
+        // branch whose arm returns, so the normal anchor stays in-arm
+        // and the not-taken path falls through to the function's
+        // synthesized return with the promotion buffer still live.
+        // Only the fallthrough backstop anchor releases it on that
+        // path. The final `print` (prints `done`) proves the
+        // fallthrough path executed.
+        "slice_borrowed_param_last_use_in_returning_arm",
+        "\
+fn scan(cond: bool, s: str):
+\tv = s[0:1]
+\tif cond:
+\t\tprint(v)
+\t\treturn
+
+fn main():
+\tx: str = int_to_str(654321)
+\tscan(false, x)
+\tprint(\"done\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's
