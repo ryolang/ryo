@@ -5,7 +5,7 @@
 //! choke point every view-creating op (slice, `ToView`) uses to turn an
 //! owner-typed base into stable, never-moving memory.
 
-use cranelift::codegen::ir::{BlockArg, MemFlagsData, StackSlotData, StackSlotKind};
+use cranelift::codegen::ir::{BlockArg, FuncRef, MemFlagsData, StackSlotData, StackSlotKind};
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::tir::{TirRef, TirTag};
@@ -318,5 +318,110 @@ impl<M: Module> Codegen<M> {
             Self::cache_repr(ctx, r, repr);
         }
         Ok((m_ptr, m_len))
+    }
+
+    /// Fire promotion frees anchored after `tir_ref` (I-176). Mirrors
+    /// `emit_due_frees`.
+    pub(crate) fn emit_due_promo_frees(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        tir_ref: TirRef,
+    ) -> Result<(), String> {
+        if ctx.sidecar.promotion_frees.is_empty() {
+            return Ok(());
+        }
+        let Some(indices) = ctx.promo_free_by_after.get(tir_ref.index()) else {
+            return Ok(());
+        };
+        let pending: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                let pf = &ctx.sidecar.promotion_frees[idx];
+                Self::branch_active(pf.branch, &ctx.branch_stack) && !ctx.promo_freed_at[idx]
+            })
+            .collect();
+        Self::emit_promo_frees(builder, ctx, pending)
+    }
+
+    /// End-of-statement sweep for promotion frees whose anchor passed
+    /// without an `emit_due_promo_frees` call. Mirrors `sweep_due_frees`.
+    pub(crate) fn sweep_due_promo_frees(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+    ) -> Result<(), String> {
+        if ctx.pending_promo_sweep.is_empty() {
+            return Ok(());
+        }
+        let pending: Vec<usize> = ctx
+            .pending_promo_sweep
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                let pf = &ctx.sidecar.promotion_frees[idx];
+                Self::branch_active(pf.branch, &ctx.branch_stack)
+                    && ctx.promo_slots.contains_key(&pf.base)
+                    && Self::cached_repr(ctx, pf.after).is_some()
+            })
+            .collect();
+        Self::emit_promo_frees(builder, ctx, pending)
+    }
+
+    /// Emit one flag-conditional free per pending promotion free: load
+    /// the flag from the base's scratch slot; only on the promoted
+    /// path free the recorded triple and clear the flag (so a later
+    /// free-before-overwrite or duplicate anchor no-ops).
+    fn emit_promo_frees(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        pending: Vec<usize>,
+    ) -> Result<(), String> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut str_free_ref: Option<FuncRef> = None;
+        let mut bytes_free_ref: Option<FuncRef> = None;
+        for idx in pending {
+            if ctx.promo_freed_at[idx] {
+                continue;
+            }
+            ctx.promo_freed_at[idx] = true;
+            let pf = ctx.sidecar.promotion_frees[idx].clone();
+            let Some(&slot) = ctx.promo_slots.get(&pf.base) else {
+                continue;
+            };
+            let is_bytes = matches!(ctx.pool.kind(ctx.tir.inst(pf.base).ty), TypeKind::Bytes);
+            let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            let flag = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), addr, 0);
+            let free_block = builder.create_block();
+            let done_block = builder.create_block();
+            builder.ins().brif(flag, free_block, &[], done_block, &[]);
+            builder.seal_block(free_block);
+            builder.switch_to_block(free_block);
+            let ptr = builder
+                .ins()
+                .load(ctx.int_type, MemFlagsData::trusted(), addr, 8);
+            let cap = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), addr, 24);
+            let free_ref = Self::free_ref_for(
+                builder,
+                ctx,
+                &mut str_free_ref,
+                &mut bytes_free_ref,
+                is_bytes,
+            )?;
+            builder.ins().call(free_ref, &[ptr, cap]);
+            let zero = builder.ins().iconst(types::I64, 0);
+            builder.ins().store(MemFlagsData::trusted(), zero, addr, 0);
+            builder.ins().jump(done_block, &[]);
+            builder.seal_block(done_block);
+            builder.switch_to_block(done_block);
+        }
+        ctx.pending_promo_sweep
+            .retain(|&idx| !ctx.promo_freed_at[idx]);
+        Ok(())
     }
 }

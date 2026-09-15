@@ -303,6 +303,13 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// through a scratch slot instead of the param's FatLocals: base
     /// inst → slot holding flag (offset 0) + promoted triple (8/16/24).
     promo_slots: HashMap<TirRef, StackSlot>,
+    /// Dense flag per `sidecar.promotion_frees` index (emission-time
+    /// dedup, same discipline as `freed_at`).
+    promo_freed_at: Vec<bool>,
+    /// Anchor `TirRef` → indices into `sidecar.promotion_frees`.
+    promo_free_by_after: Vec<Vec<usize>>,
+    /// Unfired `promotion_frees` indices for the end-of-statement sweep.
+    pending_promo_sweep: Vec<usize>,
     /// `strview` view bindings (M8.4): two SSA `Variable`s per binding,
     /// mirroring `fat_locals`. Views are non-owning — they never
     /// appear in the free schedule.
@@ -954,6 +961,16 @@ impl<M: Module> Codegen<M> {
             let (free_binding_names, free_binding_param_names) =
                 Self::build_free_binding_names(tir, pool);
 
+            let mut promo_free_by_after: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
+            for (idx, pf) in func_sidecar.promotion_frees.iter().enumerate() {
+                debug_assert!(
+                    !pf.after.is_param(),
+                    "promotion-free anchors are never param sentinel refs"
+                );
+                promo_free_by_after[pf.after.index()].push(idx);
+            }
+            let pending_promo_sweep: Vec<usize> = (0..func_sidecar.promotion_frees.len()).collect();
+
             // One scratch slot per borrowed-param view base scheduled
             // for a promotion free: flag word (offset 0) + promoted
             // triple (8/16/24), per PROMO_SLOT_SIZE.
@@ -990,6 +1007,9 @@ impl<M: Module> Codegen<M> {
                 fat_locals: fat_param_locals,
                 fat_locals_undo,
                 promo_slots,
+                promo_freed_at: vec![false; func_sidecar.promotion_frees.len()],
+                promo_free_by_after,
+                pending_promo_sweep,
                 view_locals: view_param_locals,
                 view_locals_undo,
                 struct_locals: struct_param_locals,
@@ -1129,7 +1149,9 @@ impl<M: Module> Codegen<M> {
                 // sub-expression-anchored entries whose consumers have
                 // now finished emitting IR.
                 Self::emit_due_frees(builder, ctx, stmt_ref)?;
+                Self::emit_due_promo_frees(builder, ctx, stmt_ref)?;
                 Self::sweep_due_frees(builder, ctx)?;
+                Self::sweep_due_promo_frees(builder, ctx)?;
             }
         }
         Ok(terminator)
@@ -1341,12 +1363,14 @@ impl<M: Module> Codegen<M> {
                     builder.ins().store(MemFlagsData::trusted(), len, sret, 8);
                     builder.ins().store(MemFlagsData::trusted(), cap, sret, 16);
                     Self::emit_due_frees(builder, ctx, r)?;
+                    Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[])?;
                 } else if matches!(ctx.pool.kind(ctx.tir.return_type), TypeKind::Struct) {
                     return Self::emit_struct_return(builder, ctx, r, operand);
                 } else {
                     let val = Self::eval_inst(builder, ctx, operand)?;
                     Self::emit_due_frees(builder, ctx, r)?;
+                    Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[val])?;
                 }
                 Ok(Terminator::Return)
@@ -1358,9 +1382,11 @@ impl<M: Module> Codegen<M> {
                 if is_main {
                     let zero = builder.ins().iconst(ctx.int_type, 0);
                     Self::emit_due_frees(builder, ctx, r)?;
+                    Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[zero])?;
                 } else {
                     Self::emit_due_frees(builder, ctx, r)?;
+                    Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[])?;
                 }
                 Ok(Terminator::Return)
@@ -1513,6 +1539,7 @@ impl<M: Module> Codegen<M> {
                 // statements. Without this call the Frees would
                 // simply never be emitted.
                 Self::emit_due_frees(builder, ctx, r)?;
+                Self::emit_due_promo_frees(builder, ctx, r)?;
                 let Some(loop_ctx) = ctx.loop_stack.last() else {
                     return Err("codegen reached break outside loop".to_string());
                 };
@@ -1527,6 +1554,7 @@ impl<M: Module> Codegen<M> {
                 // See Break above for why the Frees must be emitted
                 // here instead of via the post-stmt sweep.
                 Self::emit_due_frees(builder, ctx, r)?;
+                Self::emit_due_promo_frees(builder, ctx, r)?;
                 let Some(loop_ctx) = ctx.loop_stack.last() else {
                     return Err("codegen reached continue outside loop".to_string());
                 };

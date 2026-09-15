@@ -463,6 +463,7 @@ impl<M: Module> Codegen<M> {
         let ret_ty = ctx.tir.return_type;
         Self::emit_struct_copy(builder, ctx, sret, src, ret_ty)?;
         Self::emit_due_frees(builder, ctx, r)?;
+        Self::emit_due_promo_frees(builder, ctx, r)?;
         Self::emit_return(builder, ctx, &[])?;
         Ok(Terminator::Return)
     }
