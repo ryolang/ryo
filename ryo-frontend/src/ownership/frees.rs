@@ -284,6 +284,34 @@ pub(crate) fn warn_redundant_materialize(
     }
 }
 
+/// Every `Return`/`ReturnVoid` statement in `stmts` (any depth), in
+/// forward source order. The promotion-free return epilogue anchors a
+/// free at each one, so an early-exit path cannot bypass a promotion
+/// buffer's single normal anchor.
+pub(crate) fn collect_return_stmts(tir: &Tir, stmts: &[TirRef], out: &mut Vec<TirRef>) {
+    for &r in stmts {
+        match tir.inst(r).tag {
+            TirTag::Return | TirTag::ReturnVoid => out.push(r),
+            TirTag::IfStmt => {
+                let view = tir.if_stmt_view(r);
+                collect_return_stmts(tir, &view.then_stmts, out);
+                for elif in &view.elif_branches {
+                    collect_return_stmts(tir, &elif.body, out);
+                }
+                if let Some(else_stmts) = &view.else_stmts {
+                    collect_return_stmts(tir, else_stmts, out);
+                }
+            }
+            TirTag::WhileLoop | TirTag::ForRange => {
+                if let Some(body) = tir.loop_body(r) {
+                    collect_return_stmts(tir, &body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Snapshot the owners still `Valid` at a return — values the function
 /// must destroy on that exit path (see `Ownership::return_epilogue`).
 /// The returned value itself is already `Moved` by `analyze_return`,

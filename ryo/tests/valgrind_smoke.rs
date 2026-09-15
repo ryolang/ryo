@@ -118,6 +118,22 @@ fn valgrind_slice_borrowed_param_heap() {
 }
 
 #[test]
+fn valgrind_slice_borrowed_param_return_last_use() {
+    run_valgrind_smoke(
+        common::find_fixture("slice_borrowed_param_return_last_use"),
+        "slice_borrowed_param_return_last_use",
+    );
+}
+
+#[test]
+fn valgrind_slice_borrowed_param_return_in_loop() {
+    run_valgrind_smoke(
+        common::find_fixture("slice_borrowed_param_return_in_loop"),
+        "slice_borrowed_param_return_in_loop",
+    );
+}
+
+#[test]
 fn valgrind_mut_reassign() {
     run_valgrind_smoke(common::find_fixture("mut_reassign"), "mut_reassign");
 }

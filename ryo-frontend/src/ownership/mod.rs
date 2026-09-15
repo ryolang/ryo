@@ -660,6 +660,8 @@ fn analyze_function(
     // death. Only bases recorded by the walk qualify (borrowed,
     // owner-typed, param-rooted).
     let candidates = std::mem::take(&mut own.promo_candidates);
+    // (base, normal anchor) pairs, kept for the return epilogue below.
+    let mut promo_anchors: Vec<(TirRef, TirRef)> = Vec::with_capacity(candidates.len());
     for cand in candidates {
         let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
         let bound = own.root_owner.contains_key(&Owner::Inst(cand.view_inst));
@@ -696,8 +698,23 @@ fn analyze_function(
                     _ => lu,
                 }
             } else {
-                // Bound but never read: free at the binding statement.
-                cand.stmt
+                // Bound but never read. The liveness pre-pass's
+                // first-wins back-edge merge attributes in-loop reads of
+                // a loop-rebound view to the PRE-loop slice inst, leaving
+                // the in-loop slice with no recorded last use. Anchoring
+                // at the rebind statement then fires every iteration —
+                // freeing the buffer the just-rebound view still points
+                // into (UAF on the next read). Defer to the outermost
+                // enclosing loop's exit instead: free-before-overwrite
+                // at the promotion site covers intermediate iterations
+                // and the entry-zeroed flag covers zero iterations.
+                // Transient slices (the `else` branch below) keep the
+                // per-statement anchor: they die at their own statement
+                // each iteration.
+                own.loop_nesting
+                    .ancestors_innermost_first(cand.stmt)
+                    .last()
+                    .unwrap_or(cand.stmt)
             }
         } else {
             // Transient slice (e.g. `print(s[0:1])`): the projection
@@ -710,6 +727,39 @@ fn analyze_function(
             span: tir.span(cand.view_inst),
             branch: None,
         });
+        promo_anchors.push((cand.base, after));
+    }
+
+    // Return epilogue for promotion buffers, mirroring the owner
+    // return-epilogue pass below: each promo free above has exactly one
+    // anchor, so any path that returns before it leaks the buffer (the
+    // last use inside the return operand lands the anchor on a sub-inst
+    // the end-of-statement sweep skips on terminators; a loop-deferred
+    // anchor is bypassed by a `return` inside the loop). Anchor a copy
+    // of every candidate's free at every Return/ReturnVoid — the
+    // flag-conditional, flag-clearing emission makes the extra anchors
+    // harmless no-ops on paths that already freed (or never promoted)
+    // the buffer. Codegen's Return arms fire due promo frees before the
+    // `return_` terminator. Deduped against the candidate's normal
+    // anchor when that anchor IS the return statement.
+    let mut return_stmts: Vec<TirRef> = Vec::new();
+    collect_return_stmts(tir, &body_stmts, &mut return_stmts);
+    let mut promo_epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
+    for return_stmt in return_stmts {
+        for &(base, normal_anchor) in &promo_anchors {
+            if normal_anchor == return_stmt {
+                continue;
+            }
+            if !promo_epilogue_emitted.insert((return_stmt, base)) {
+                continue;
+            }
+            sidecar.promotion_frees.push(PromoFree {
+                after: return_stmt,
+                base,
+                span: tir.span(return_stmt),
+                branch: None,
+            });
+        }
     }
 
     // Dead-store survivors: emit W0001 and schedule a Free anchored

@@ -588,6 +588,44 @@ fn main():
 \tscan(y)
 ",
     ),
+    (
+        // The view's last use is inside the return operand, so the
+        // free's anchor lands on a sub-inst of the Return — and the
+        // end-of-statement sweep is skipped on terminators. Only the
+        // return-epilogue promo free releases the promotion buffer on
+        // this path. `print(int_to_str(...))` proves the slice executed
+        // (a panic would mask the leak under Valgrind).
+        "slice_borrowed_param_return_last_use",
+        "\
+fn scan(s: str) -> int:
+\tv = s[0:2]
+\treturn v.len()
+
+fn main():
+\tx: str = int_to_str(654321)
+\tprint(int_to_str(scan(x)))
+",
+    ),
+    (
+        // Loop-deferred view (created before the loop, read inside it)
+        // with a `return` inside the loop: the loop-exit anchor is
+        // bypassed on the return path — only the return-epilogue promo
+        // free releases the promotion buffer. The in-loop `print(v)`
+        // proves the slice executed.
+        "slice_borrowed_param_return_in_loop",
+        "\
+fn scan(s: str) -> int:
+\tv = s[0:2]
+\tfor i in range(0, 4):
+\t\tprint(v)
+\t\treturn 1
+\treturn 0
+
+fn main():
+\tx: str = int_to_str(654321)
+\tscan(x)
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's
