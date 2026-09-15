@@ -142,6 +142,14 @@ fn valgrind_slice_borrowed_param_rebind_loop_read_after() {
 }
 
 #[test]
+fn valgrind_slice_borrowed_param_rebind_loop() {
+    run_valgrind_smoke(
+        common::find_fixture("slice_borrowed_param_rebind_loop"),
+        "slice_borrowed_param_rebind_loop",
+    );
+}
+
+#[test]
 fn valgrind_mut_reassign() {
     run_valgrind_smoke(common::find_fixture("mut_reassign"), "mut_reassign");
 }

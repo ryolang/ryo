@@ -115,6 +115,30 @@ fn test_slice_of_borrowed_param_rebound_in_loop_read_after() {
 }
 
 #[test]
+fn test_slice_of_borrowed_param_return_last_use() {
+    // The view's last use is inside the return operand: only the
+    // return-epilogue promo free can release the promotion buffer
+    // (the end-of-statement sweep is skipped on terminators).
+    assert_ryo_output(
+        "slice_param_return_last_use.ryo",
+        "fn scan(s: str) -> int:\n\tv = s[0:2]\n\treturn v.len()\n\nfn main():\n\tx: str = int_to_str(654321)\n\tprint(int_to_str(scan(x)))\n",
+        "2",
+    );
+}
+
+#[test]
+fn test_slice_of_borrowed_param_return_in_loop() {
+    // Loop-deferred view with a `return` inside the loop: the
+    // loop-exit anchor is bypassed on the return path — only the
+    // return-epilogue promo free releases the buffer.
+    assert_ryo_output(
+        "slice_param_return_in_loop.ryo",
+        "fn scan(s: str) -> int:\n\tv = s[0:2]\n\tfor i in range(0, 4):\n\t\tprint(v)\n\t\treturn 1\n\treturn 0\n\nfn main():\n\tx: str = int_to_str(654321)\n\tscan(x)\n",
+        "65",
+    );
+}
+
+#[test]
 fn test_slice_empty() {
     assert_ryo_runs(
         "slice_empty.ryo",

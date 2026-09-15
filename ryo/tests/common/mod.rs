@@ -649,6 +649,27 @@ fn main():
 \tscan(x)
 ",
     ),
+    (
+        // View declared before the loop and rebound inside it, with
+        // the read BEFORE the rebind: the in-loop slice's promotion
+        // buffer must survive until the loop exit — freeing it at the
+        // rebind statement releases the buffer the just-rebound view
+        // points into (the next iteration's read is a use-after-free).
+        // The in-loop `print(v)` (prints `65655443`) proves the slice
+        // path executed.
+        "slice_borrowed_param_rebind_loop",
+        "\
+fn scan(s: str):
+\tmut v = s[0:2]
+\tfor i in range(0, 4):
+\t\tprint(v)
+\t\tv = s[i:i+2]
+
+fn main():
+\tx: str = int_to_str(654321)
+\tscan(x)
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's
