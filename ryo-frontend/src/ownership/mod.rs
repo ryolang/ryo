@@ -511,17 +511,19 @@ fn analyze_function(
                     // exit — the earliest point where the value is dead
                     // on ALL paths. Anchoring after the read itself
                     // fires per-iteration in loops (UAF on later reads)
-                    // and never fires on not-taken arms (leak). Skip
-                    // the re-anchor when the branch may `return` (the
-                    // exit anchor is unreachable on the return path)
-                    // and for temps / branch-local bindings (their
-                    // values don't exist on every exit path).
+                    // and never fires on not-taken arms (leak). Arms
+                    // that `return` never reach the branch exit, but
+                    // the return epilogue owns those paths: its
+                    // covered-check excludes ancestor branches, so the
+                    // exit anchor does not suppress the epilogue Free.
+                    // Skip the re-anchor only for temps / branch-local
+                    // bindings (their values don't exist on every exit
+                    // path).
                     let anchor = match outermost_branch_of(tir, after) {
                         Some(branch_stmt)
-                            if branch_may_not_return(tir, branch_stmt)
-                                && owner_binding_name(tir, *r).is_some_and(|name| {
-                                    declared_before_stmt(tir, name, branch_stmt)
-                                }) =>
+                            if owner_binding_name(tir, *r).is_some_and(|name| {
+                                declared_before_stmt(tir, name, branch_stmt)
+                            }) =>
                         {
                             branch_stmt
                         }
@@ -560,17 +562,11 @@ fn analyze_function(
                         // the branch's exit. Anchoring after the read
                         // itself fires per-iteration in loops (UAF on
                         // later reads) and never fires on not-taken
-                        // arms (leak). Skip when the branch may
-                        // `return` (the exit anchor is unreachable on
-                        // the return path). The declared-before check
-                        // locals need is trivially true here: params
-                        // precede the body.
-                        match outermost_branch_of(tir, after) {
-                            Some(branch_stmt) if branch_may_not_return(tir, branch_stmt) => {
-                                Some(branch_stmt)
-                            }
-                            _ => Some(after),
-                        }
+                        // arms (leak); arms that `return` are covered
+                        // by the return epilogue. The declared-before
+                        // check locals need is trivially true here:
+                        // params precede the body.
+                        Some(outermost_branch_of(tir, after).unwrap_or(after))
                     }
                     None => body_stmts.last().copied(),
                 }) else {
