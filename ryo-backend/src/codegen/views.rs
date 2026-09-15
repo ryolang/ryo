@@ -29,6 +29,11 @@ impl<M: Module> Codegen<M> {
     /// - Named bindings spill → call → reload → `def_var` back into
     ///   their `FatLocals` (the str_push write-back shape; SSA-correct
     ///   at every later program point, including branch joins).
+    ///   Borrowed `str`/`bytes` params are the exception: their
+    ///   promoted triple goes into a per-base scratch slot (flag +
+    ///   triple) instead of `FatLocals`, so the param keeps its
+    ///   original inline triple and the caller's heap buffer is never
+    ///   freed by the callee; the ownership pass schedules the free.
     /// - Anonymous temporaries spill into a scratch slot and re-cache
     ///   the promoted triple — their scheduled Free reads `cached_repr`.
     pub(crate) fn emit_ensure_heap_for_view_base(
@@ -96,6 +101,21 @@ impl<M: Module> Codegen<M> {
         if Self::is_static_cap_zero(builder.func, cap) {
             return Ok((ptr, len));
         }
+        // Borrowed-param base: the ownership pass scheduled a promotion
+        // free for this base. The promoted triple goes into the scratch
+        // slot — NOT back into the param's FatLocals, which must keep
+        // the original inline triple so reads of the param after the
+        // view's death stay valid, and so the caller's heap buffer is
+        // never freed by the callee.
+        let promo_slot = ctx.promo_slots.get(&r).copied();
+        if promo_slot.is_some() {
+            // The ownership pass only schedules promotion frees for
+            // bases that are Vars of borrowed str/bytes params.
+            debug_assert!(
+                matches!(ctx.tir.inst(r).tag, TirTag::Var),
+                "promotion base must be a named param Var"
+            );
+        }
         // Branch on the runtime tag: only an inline base needs the
         // spill/promote/reload round trip. A heap base is already
         // stable, so its (ptr, len) flows straight to the merge —
@@ -114,20 +134,92 @@ impl<M: Module> Codegen<M> {
         builder.append_block_param(merge_block, ctx.int_type);
         builder.append_block_param(merge_block, types::I64);
         builder.append_block_param(merge_block, types::I64);
-        builder.ins().brif(
-            is_inline,
-            inline_block,
-            &[],
-            merge_block,
-            &[
-                BlockArg::Value(ptr),
-                BlockArg::Value(len),
-                BlockArg::Value(cap),
-            ],
-        );
+        let heap_block = if promo_slot.is_some() {
+            Some(builder.create_block())
+        } else {
+            None
+        };
+        match heap_block {
+            Some(hb) => builder.ins().brif(is_inline, inline_block, &[], hb, &[]),
+            None => builder.ins().brif(
+                is_inline,
+                inline_block,
+                &[],
+                merge_block,
+                &[
+                    BlockArg::Value(ptr),
+                    BlockArg::Value(len),
+                    BlockArg::Value(cap),
+                ],
+            ),
+        };
         // Single predecessor (the brif above) — seal immediately.
         builder.seal_block(inline_block);
+        if let Some(hb) = heap_block {
+            // Single predecessor (the brif above) — seal immediately.
+            builder.seal_block(hb);
+            builder.switch_to_block(hb);
+            // Pass-through: record flag=0 + the caller's triple so the
+            // scheduled free no-ops.
+            let slot = promo_slot.expect("heap block exists only with a promo slot");
+            let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            let zero = builder.ins().iconst(types::I64, 0);
+            builder.ins().store(MemFlagsData::trusted(), zero, addr, 0);
+            builder.ins().store(MemFlagsData::trusted(), ptr, addr, 8);
+            builder.ins().store(MemFlagsData::trusted(), len, addr, 16);
+            builder.ins().store(MemFlagsData::trusted(), cap, addr, 24);
+            builder.ins().jump(
+                merge_block,
+                &[
+                    BlockArg::Value(ptr),
+                    BlockArg::Value(len),
+                    BlockArg::Value(cap),
+                ],
+            );
+        }
         builder.switch_to_block(inline_block);
+        if let Some(slot) = promo_slot {
+            // Free-before-overwrite: a prior iteration's promotion
+            // buffer is still recorded here when the view outlives one
+            // loop iteration (loop-deferred death). The flag is zeroed
+            // at function entry and after every free, so this is exact.
+            let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            let old_flag = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), addr, 0);
+            let oldfree_block = builder.create_block();
+            let spill_block = builder.create_block();
+            builder
+                .ins()
+                .brif(old_flag, oldfree_block, &[], spill_block, &[]);
+            // Single predecessor (the brif above) — seal immediately.
+            builder.seal_block(oldfree_block);
+            builder.switch_to_block(oldfree_block);
+            let old_ptr = builder
+                .ins()
+                .load(ctx.int_type, MemFlagsData::trusted(), addr, 8);
+            let old_cap = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), addr, 24);
+            let free_callee = if is_bytes {
+                "ryo_bytes_free"
+            } else {
+                "ryo_str_free"
+            };
+            let free_ref = Self::declare_runtime_fn(
+                ctx.module,
+                builder,
+                free_callee,
+                &[ctx.int_type, types::I64],
+                &[],
+            )?;
+            builder.ins().call(free_ref, &[old_ptr, old_cap]);
+            builder.ins().jump(spill_block, &[]);
+            // Two predecessors (the brif else-edge and the oldfree
+            // jump) — seal only now that both are emitted.
+            builder.seal_block(spill_block);
+            builder.switch_to_block(spill_block);
+        }
         let slot = builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             STR_SLOT_SIZE,
@@ -153,12 +245,33 @@ impl<M: Module> Codegen<M> {
         let out_cap = builder
             .ins()
             .load(types::I64, MemFlagsData::trusted(), addr, 16);
+        if let Some(slot) = promo_slot {
+            // Record flag=1 + the promoted triple in the scratch slot:
+            // the ownership-pass-scheduled promo free releases this
+            // buffer at the view's last use.
+            let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            let one = builder.ins().iconst(types::I64, 1);
+            builder.ins().store(MemFlagsData::trusted(), one, addr, 0);
+            builder
+                .ins()
+                .store(MemFlagsData::trusted(), out_ptr, addr, 8);
+            builder
+                .ins()
+                .store(MemFlagsData::trusted(), out_len, addr, 16);
+            builder
+                .ins()
+                .store(MemFlagsData::trusted(), out_cap, addr, 24);
+        }
         // Write the promoted triple back into owner-side storage so
         // the owner's free releases the heap buffer. Only the inline
         // path needs this — on the heap path the binding's fat locals
-        // already hold the identical bits.
+        // already hold the identical bits. Borrowed-param bases skip
+        // the write-back: their promoted triple lives in the promo
+        // scratch slot above.
         let local_name = Self::local_name_of(ctx, r);
-        if let Some(name) = local_name {
+        if promo_slot.is_none()
+            && let Some(name) = local_name
+        {
             // Every fat binding gets FatLocals at the param/local
             // preamble, so a missing entry would be an invariant
             // violation; the silent fall-through is defensive only.
@@ -173,15 +286,6 @@ impl<M: Module> Codegen<M> {
             // `fat_locals`, never through `cached_repr`. Latent, not
             // live: TIR is tree-shaped today, so each Var inst is
             // evaluated once at its own use site.
-            // Known leak, unrelated to the fall-through: for a
-            // BORROWED param the write-back lands but no free is
-            // ever scheduled (the callee doesn't own its params),
-            // so a promoted inline argument's buffer leaks. The
-            // free cannot simply be added — it cannot tell a
-            // callee-promoted buffer apart from a caller-owned heap
-            // buffer and would double-free; the planned resolution
-            // is an ownership-pass-scheduled free of the promotion
-            // buffer at the view's last use.
         }
         builder.ins().jump(
             merge_block,

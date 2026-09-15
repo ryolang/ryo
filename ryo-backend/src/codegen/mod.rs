@@ -23,7 +23,9 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use cranelift::codegen::ir::{ArgumentPurpose, MemFlagsData};
+use cranelift::codegen::ir::{
+    ArgumentPurpose, MemFlagsData, StackSlot, StackSlotData, StackSlotKind,
+};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -45,6 +47,11 @@ mod views;
 /// Fat-owner triple layout (str/bytes, 24 bytes): ptr at 0, len at 8,
 /// cap at 16. Derived from `RyoStrFat`, not re-hardcoded.
 const STR_SLOT_SIZE: u32 = 24;
+
+/// Promotion scratch-slot layout for borrowed-param view bases: flag
+/// word at 0 (1 = this callee promoted, 0 = pass-through), triple
+/// ptr/len/cap at 8/16/24.
+pub(crate) const PROMO_SLOT_SIZE: u32 = 32;
 
 /// How a statement or body ended the current block, if it did.
 /// Replaces the `bool` that conflated Break/Continue with Return:
@@ -292,6 +299,10 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// an undo log, same scoping discipline as `locals`.
     fat_locals: Vec<Option<FatLocals>>,
     fat_locals_undo: Vec<(u32, Option<FatLocals>)>,
+    /// Borrowed-param view bases (Slice/ToView) that were promoted
+    /// through a scratch slot instead of the param's FatLocals: base
+    /// inst → slot holding flag (offset 0) + promoted triple (8/16/24).
+    promo_slots: HashMap<TirRef, StackSlot>,
     /// `strview` view bindings (M8.4): two SSA `Variable`s per binding,
     /// mirroring `fat_locals`. Views are non-owning — they never
     /// appear in the free schedule.
@@ -943,6 +954,20 @@ impl<M: Module> Codegen<M> {
             let (free_binding_names, free_binding_param_names) =
                 Self::build_free_binding_names(tir, pool);
 
+            // One scratch slot per borrowed-param view base scheduled
+            // for a promotion free: flag word (offset 0) + promoted
+            // triple (8/16/24), per PROMO_SLOT_SIZE.
+            let mut promo_slots: HashMap<TirRef, StackSlot> = HashMap::new();
+            for pf in &func_sidecar.promotion_frees {
+                promo_slots.entry(pf.base).or_insert_with(|| {
+                    builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        PROMO_SLOT_SIZE,
+                        3,
+                    ))
+                });
+            }
+
             let mut ctx: FunctionContext<'_, M> = FunctionContext {
                 module: &mut self.module,
                 data_ctx: &mut self.data_ctx,
@@ -964,6 +989,7 @@ impl<M: Module> Codegen<M> {
                 loop_stack: Vec::new(),
                 fat_locals: fat_param_locals,
                 fat_locals_undo,
+                promo_slots,
                 view_locals: view_param_locals,
                 view_locals_undo,
                 struct_locals: struct_param_locals,
@@ -1006,6 +1032,16 @@ impl<M: Module> Codegen<M> {
                         addr: builder.use_var(var),
                     });
                 }
+            }
+
+            // The promotion flag must start cleared: the
+            // free-before-overwrite in emit_ensure_heap_for_view_base
+            // and the scheduled promo frees both branch on it, and a
+            // first-iteration garbage flag would free garbage.
+            for &slot in ctx.promo_slots.values() {
+                let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                let zero = builder.ins().iconst(types::I64, 0);
+                builder.ins().store(MemFlagsData::trusted(), zero, addr, 0);
             }
 
             // Hoist string and bytes literals while the entry block is
