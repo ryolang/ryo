@@ -50,8 +50,13 @@ pub fn build_and_link(
         .expect("ryo build");
     assert!(status.success(), "ryo build failed for {name}");
 
-    // Step 2: relink
-    let obj = tmp.path().join(format!("{name}.o"));
+    // Step 2: relink (object extension matches the AOT pipeline:
+    // `.obj` on Windows, `.o` elsewhere — see pipeline.rs
+    // get_output_filenames)
+    let obj = tmp.path().join(format!(
+        "{name}.{}",
+        if cfg!(windows) { "obj" } else { "o" }
+    ));
     let exe = tmp.path().join(format!("{name}_test_binary"));
 
     let runtime_lib = runtime_lib_path();
