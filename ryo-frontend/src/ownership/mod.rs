@@ -288,6 +288,18 @@ pub(crate) struct Ownership {
     /// the post-walk redundant-materialize pass to classify escapes of
     /// the copy and defensive-copy hazards on the view's root owner.
     pub owner_hazards: Vec<(Owner, TirRef)>,
+
+    /// View-creating insts over borrowed-param bases, recorded by the
+    /// walk (`record_promo_candidate`). Consumed by the borrowed-param
+    /// promotion-free pass that follows this recording change.
+    // Written but not read yet — the consumer lands with that pass.
+    #[allow(dead_code)]
+    pub(crate) promo_candidates: Vec<PromoCandidate>,
+
+    /// The statement currently being walked; set (and restored) by
+    /// `analyze_stmt` so `record_promo_candidate` can anchor each
+    /// candidate to its enclosing statement.
+    pub(crate) current_stmt: Option<TirRef>,
 }
 
 impl Ownership {
@@ -320,6 +332,24 @@ pub(crate) struct ReseatDrop {
     pub pre_owner: Owner,
     pub reseat_owners: HashSet<Owner>,
     pub untouched_arms: Vec<BranchId>,
+}
+
+/// A `Slice`/`ToView` instruction whose base is a borrowed `str`/`bytes`
+/// parameter. Codegen promotes the callee's inline copy of the param to
+/// heap for such bases; the post-walk pass schedules the free.
+// `base`/`stmt` are recorded now but only read once the
+// promotion-free scheduling pass lands.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PromoCandidate {
+    /// The `Slice`/`ToView` instruction.
+    pub(crate) view_inst: TirRef,
+    /// Its base operand (a `Var` of the borrowed param).
+    pub(crate) base: TirRef,
+    /// The statement being walked when the inst was visited: the
+    /// binding statement for bound views, the enclosing statement for
+    /// transient slices.
+    pub(crate) stmt: TirRef,
 }
 
 /// Validate move safety for every function body. Emits diagnostics
