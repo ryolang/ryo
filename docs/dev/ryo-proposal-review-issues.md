@@ -1,7 +1,7 @@
 # Proposal Reviews — Issue List & Spec Alignment
 
 > **Document Status:** Review Memo (Action Items)
-> **Last Updated:** 2026-07-22
+> **Last Updated:** 2026-09-15
 > **Reviewed files:** `std_ext.md` (stdlib via Rust crate wrapping), `tensor.md` (DLPack tensor wrapping), `unsafe.md` (unsafe code architecture), `concurrency.md` + `concurrency_loom_kt.md` (v0.4 concurrency plan and its improved variant)
 > **Reviewed against:** `ryo-slicing-and-memory-model-final-spec.md` v1.0.0-draft (decisions D1–D11), Ryo Language Specification v0.1.0-draft, `ryo-missing-features-and-gaps.md` (GAP-1), `ryo-std-data-proposal.md`
 > **Scope note:** This memo lists fixes for the *proposal files*. The final spec is unchanged; candidate spec amendments are collected in §7 and require separate approval.
@@ -81,7 +81,7 @@
 
 > **Recommendation:** promote `concurrency_loom_kt.md` from "structured alternative" to **the plan** before Phase 1 begins (its own trigger condition), with amendments L-1…L-3 plus integration sections C-2/C-3. The base plan's Phase 6 and the loom doc's FFI router are both keepers — they compose without conflict.
 
-> **Status (m8.4.2):** Promotion executed — the merged plan now lives at `concurrency.md`. Resolved en route: L-1 (`Dispatcher`/`with_dispatcher` rename), L-2 (overflow system coroutines, `RYO_FFI_OVERFLOW_DEPTH`, fail-fast `FfiReentryLimit`), L-3 (`with_dispatcher` is `[yields]`; `task.pin()` interaction in §6.2.6), L-6 (APIs marked proposal-only, spec edits still owed). Still open: L-4, L-5, C-2…C-5.
+> **Status (m8.4.2):** Promotion executed — the merged plan now lives at `concurrency.md`. Resolved en route: L-1 (`Dispatcher`/`with_dispatcher` rename), L-2 (overflow system coroutines, `RYO_FFI_OVERFLOW_DEPTH`, fail-fast `FfiReentryLimit`), L-3 (`with_dispatcher` is `[yields]`; `task.pin()` interaction in §6.2.6), L-6 (APIs marked proposal-only, spec edits still owed). L-4, L-5 and C-2…C-5 were still open at m8.4.2 (all resolved 2026-09-15 — see below); the remaining spec-side change is L-6's §9 text, owed separately.
 
 > **Status (2026-09-15):** All remaining concurrency items resolved in `concurrency.md`: C-2 (new §4.2.2 — D5 scoped borrows split by pass, `par_*` placed on the ambient dispatcher, not a separate pool), C-3 (context-frame pointer reserved in §1.2, cancellation sources unified in §1.5, ambient-context-as-structured-task-local in §3.6, `ctx.done()` select arm in §4.3), C-4 (`task_local!` macro replaced with Ryo-idiomatic `task.local[T]` builtin, all mentions swept), C-5 (D9 note in Overview: hosted-only; `core` runs FFI on the real OS stack), L-4 (blocking-pool cap configurable from day one via `RYOBLOCKINGPOOL`/`ryo.toml`), L-5 (conflated × select waker semantics drafted in §4.3, pending HB formalization). No open items remain for `concurrency.md`.
 
@@ -142,7 +142,7 @@
 | `tensor.md` | D4 (unsafe containment); user generics (v0.3); D10 (`a + b`, `matmul` notation) | D1/D3 two-tier rule solves its unasked views question (T-4); D5 CPU parallelism | None after T-1…T-5 — compatible |
 | `unsafe.md` | §17 FFI; base spec §1.2 | **Is** the D4 gatekeeper implementation; U-good-1…5 strengthen D4 | U-1 flag naming; U-2 policy muscle — resolved by adopting as companion |
 | `concurrency.md` | D9 (hosted runtime); §9 spec | C-good-2 task-locals are GAP-1's foundation; C-good-3 answers OTel Q2 | C-1 resolved by loom adoption; C-2/C-3 integration sections added 2026-09-15 (§4.2.2, §1.2/§1.5/§3.6/§4.3) |
-| `concurrency_loom_kt.md` | `concurrency.md` phases; D9; §17 FFI | L-good-2 solves C-1; L-good-4 feeds GUI §11 | L-1 naming collision with `std.pool`; L-2/L-3 amendments owed |
+| `concurrency_loom_kt.md` | `concurrency.md` phases; D9; §17 FFI | L-good-2 solves C-1; L-good-4 feeds GUI §11 | L-1…L-3 resolved in the m8.4.2 promotion |
 
 **Direction of influence:** all reviewed proposals fit *under* D1–D11; none requires changing the final spec. The only reverse-flow items are the **G-1 field-visibility gap** (base-spec amendment), the **U-good-1…5 adoptions** (candidate D4 enrichment), and the **C-2/C-3 integration text** (concurrency plan owed alignment to D5 and GAP-1, not vice versa — applied 2026-09-15); the first two remain listed for approval, unapplied.
 
@@ -162,3 +162,11 @@
 ---
 
 *End of Review Memo*
+
+---
+
+## References
+
+- Spec: [§9.2](../specification.md#92-core-primitives-and-safety) (concurrency semantics), §17 (FFI), §5.4 (`drop`/move semantics)
+- Final spec: `ryo-slicing-and-memory-model-final-spec.md` (decisions D1–D11)
+- Dev: `concurrency.md` (merged concurrency plan), `ryo-context-and-otel-proposal.md` (GAP-1)

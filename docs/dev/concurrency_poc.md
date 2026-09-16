@@ -158,4 +158,4 @@ arena), Windows is commit charge (pagefile-tunable), macOS showed none at
 
 - Plan: [`concurrency.md`](concurrency.md) — gate criteria, §1.1 stack
   strategy, §3.6 context machinery
-- Spec: §9.2 (concurrency semantics the runtime must deliver)
+- Spec: [§9.2](../specification.md#92-core-primitives-and-safety) (concurrency semantics the runtime must deliver)

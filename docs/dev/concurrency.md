@@ -89,20 +89,22 @@ real demand materializes, the fix is a profile-agnostic scope construct (a
 `thread.scope` analog with the same join-witness exemption), not a relaxation
 of this gate. Not a v0.4 item.
 
-> **Draft future direction — bundled `core` executor (would amend D9 rule 3;
-> requires approval before adoption).** A TinyGo-class minimal scheduler
-> *could* ship as an opt-in `core` component: it fits `core`'s assumptions
-> (allocator + atomics + a platform clock hook + per-arch switch assembly),
-> needs no dialect (`task.*` semantics are already cooperative; single-core is
-> `RYOMAXPROCS=1`), and dead-strips when unused. Design constraints if ever
-> adopted: fixed stacks sized by compile-time stack analysis (TinyGo lesson
-> #2), overflow = trap (consistent with `core`'s panic=abort), no I/O
-> integration (suspension points reduce to channels/`yield`/`delay`), single
-> core only. Hard limit: it does **not** serve WASM — standard Wasm has one
-> unswitchable stack, so this buys embedded/bare-metal concurrency, not Wasm
-> concurrency. Recommended path stays D9 rule 3: prove the shape as a
-> third-party package (`ryo-embassy` pattern), then absorb — the same route
-> Rust took from crossbeam's scoped threads to `std::thread::scope`.
+#### Bundled `core` executor (Draft — v0.4+)
+
+Draft future direction — would amend D9 rule 3; requires approval before
+adoption. A TinyGo-class minimal scheduler
+*could* ship as an opt-in `core` component: it fits `core`'s assumptions
+(allocator + atomics + a platform clock hook + per-arch switch assembly),
+needs no dialect (`task.*` semantics are already cooperative; single-core is
+`RYOMAXPROCS=1`), and dead-strips when unused. Design constraints if ever
+adopted: fixed stacks sized by compile-time stack analysis (TinyGo lesson
+#2), overflow = trap (consistent with `core`'s panic=abort), no I/O
+integration (suspension points reduce to channels/`yield`/`delay`), single
+core only. Hard limit: it does **not** serve WASM — standard Wasm has one
+unswitchable stack, so this buys embedded/bare-metal concurrency, not Wasm
+concurrency. Recommended path stays D9 rule 3: prove the shape as a
+third-party package (`ryo-embassy` pattern), then absorb — the same route
+Rust took from crossbeam's scoped threads to `std::thread::scope`.
 
 **Gate: proof-of-concept spike before Phase 1.** No runtime code is written until a
 throwaway PoC validates the core stack end to end. The PoC is scratch work (not
@@ -631,16 +633,18 @@ select:
         handle(msg)
     case res = fut.await:      # future completion
         handle(res)
-    case ctx.done().recv:      # ambient context cancelled (deadline/parent)
-        return DeadlineExceeded
+    case err = ctx.done().recv:  # ambient context cancelled (deadline/parent)
+        return err               # DeadlineExceeded on deadline, task.Canceled on parent cancel
     case task.delay(1s).await: # timer
         print("timed out")
     default:                   # non-blocking
         print("nothing ready")
 ```
 
-**Conflated channels × select wakers (draft — pending formalization with the
-data-plane HB rule).** Overwrite never invalidates, duplicates, or leaks a
+#### Conflated channels × select wakers (Draft — v0.4)
+
+Pending formalization with the data-plane HB rule. Overwrite never
+invalidates, duplicates, or leaks a
 registered waker. A waiting receiver implies an empty slot, so a conflated
 `send` with a registered receiver hands off directly — overwrite applies
 only to a buffered, unconsumed slot with no receiver registered. If a
