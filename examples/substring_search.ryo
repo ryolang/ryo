@@ -1,0 +1,43 @@
+# Substring search — sliding a mutable strview window over a buffer.
+# Shows the projection pattern at work: scanning is zero-copy (views
+# borrow the owner's storage, never copy), and `mut` lets one name
+# track the current position as it advances.
+#
+# Note: `rest[1:]` steps one byte at a time, which is exact for ASCII
+# text. With multibyte UTF-8 the byte index can land inside a
+# character, and slicing at a non-char-boundary index panics — proper
+# code-point iteration comes with the planned `utf8` module.
+
+# Return the index of the first occurrence of `needle` in `haystack`,
+# or -1 when there is no match. An empty needle matches at index 0.
+fn find(haystack: strview, needle: strview) -> int:
+	if needle.len() == 0:
+		return 0
+	# `rest` is the unsearched remainder: one mutable view, re-sliced a
+	# byte at a time. Views are read-only borrows, so the whole scan
+	# allocates nothing.
+	mut rest = haystack[:]
+	mut index: int = 0
+	while rest.len() >= needle.len():
+		if rest[0:needle.len()] == needle:
+			return index
+		rest = rest[1:]
+		index += 1
+	return -1
+
+fn main():
+	text: str = "the quick brown fox jumps over the lazy dog"
+
+	print(int_to_str(find(text, "fox")))  # 16
+	print("\n")
+	print(int_to_str(find(text, "dog")))  # 40
+	print("\n")
+	print(int_to_str(find(text, "cat")))  # -1
+	print("\n")
+	print(int_to_str(find(text, "")))     # 0 — empty needle matches at the start
+	print("\n")
+
+	# Owned str and strview both pass to strview parameters — no copies.
+	word = text[16:19]
+	print(int_to_str(find(word, "o")))    # 1
+	print("\n")

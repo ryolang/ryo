@@ -1,8 +1,8 @@
 //! Forward statement/expression walk — split from `mod.rs`.
 
 use super::{
-    BranchState, Owner, OwnerState, Ownership, ReseatDrop, analyze_for_range, analyze_while_loop,
-    check_field_move_out, check_field_target_projected, check_source_projected,
+    BranchState, Owner, OwnerState, Ownership, PromoCandidate, ReseatDrop, analyze_for_range,
+    analyze_while_loop, check_field_move_out, check_field_target_projected, check_source_projected,
     consume_struct_lit_fields, consumed_binding_name, drain_dying_views, field_path_of,
     format_binding, needs_tracking, owner_name_for_diag, owner_sort_key, param_idx,
     projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
@@ -13,7 +13,7 @@ use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::ownership::{BranchId, FreePoint, FunctionSidecar, IfBranchIds};
 use ryo_core::tir::{ParamMode, Span, Tir, TirData, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId};
+use ryo_core::types::{InternPool, StringId, TypeKind};
 use std::collections::HashSet;
 
 pub(crate) fn analyze_stmt(
@@ -24,6 +24,10 @@ pub(crate) fn analyze_stmt(
     sidecar: &mut FunctionSidecar,
     stmt: TirRef,
 ) {
+    // Anchor for `record_promo_candidate`: nested statements (if arms,
+    // loop bodies, loop-convergence re-walks) overwrite this, so save
+    // and restore the enclosing statement on the way out.
+    let prev_stmt = own.current_stmt.replace(stmt);
     let inst = *tir.inst(stmt);
     match inst.tag {
         TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, sidecar, stmt),
@@ -131,6 +135,7 @@ pub(crate) fn analyze_stmt(
     // read and a consume within the same statement both see the view
     // as live.
     drain_dying_views(own);
+    own.current_stmt = prev_stmt;
 }
 
 /// Move-typed `VarDecl` is a consumer: the new binding takes
@@ -1343,12 +1348,73 @@ pub(crate) fn visit_expr(
         TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, sidecar, r),
         TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, sidecar, r),
         TirTag::ForRange => analyze_for_range(tir, pool, own, sink, sidecar, r),
+        // ---- View-creating instructions over borrowed params ----
+        // Same operand recursion as the catch-all (including its
+        // `check_use_moved` calls); additionally record the inst when
+        // its base is a borrowed `str`/`bytes` parameter so the
+        // promotion-free pass can schedule the buffer's release.
+        TirTag::Slice => {
+            recurse_operands(tir, pool, own, sink, sidecar, r);
+            if let TirData::Slice { base, .. } = inst.data {
+                record_promo_candidate(tir, pool, own, r, base);
+            }
+        }
+        TirTag::ToView => {
+            recurse_operands(tir, pool, own, sink, sidecar, r);
+            if let TirData::UnOp(operand) = inst.data {
+                record_promo_candidate(tir, pool, own, r, operand);
+            }
+        }
         // ---- Everything else: recurse on operands so nested
         // ---- producers/aliases are still observed.
         _ => {
             recurse_operands(tir, pool, own, sink, sidecar, r);
         }
     }
+}
+
+/// Record a `Slice`/`ToView` whose base is a borrowed `str`/`bytes`
+/// param. Only owner-typed bases promote (views pass through), and
+/// only borrowed params leak the promotion buffer.
+fn record_promo_candidate(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    view_inst: TirRef,
+    base: TirRef,
+) {
+    let base_inst = tir.inst(base);
+    if !matches!(pool.kind(base_inst.ty), TypeKind::Str | TypeKind::Bytes) {
+        return;
+    }
+    let TirData::Var(name) = base_inst.data else {
+        return;
+    };
+    // The name must currently resolve to the param itself, not a
+    // shadowing local.
+    if !matches!(own.current_owner.get(&name), Some(Owner::Param(_))) {
+        return;
+    }
+    let Some(&idx) = own.param_index.get(&name) else {
+        return;
+    };
+    if tir.params[idx].mode != ParamMode::Borrow {
+        return;
+    }
+    let Some(stmt) = own.current_stmt else { return };
+    // Loop convergence re-walks insts; record each view inst once.
+    if own
+        .promo_candidates
+        .iter()
+        .any(|c| c.view_inst == view_inst)
+    {
+        return;
+    }
+    own.promo_candidates.push(PromoCandidate {
+        view_inst,
+        base,
+        stmt,
+    });
 }
 
 pub(crate) fn recurse_operands(

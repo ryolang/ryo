@@ -430,7 +430,7 @@ impl<M: Module> Codegen<M> {
     /// rather than `last() == Some(&b)` so a Free anchored to a
     /// parent arm still fires when codegen is inside a nested child
     /// arm of that parent.
-    fn branch_active(
+    pub(crate) fn branch_active(
         branch: Option<ryo_core::ownership::BranchId>,
         stack: &[ryo_core::ownership::BranchId],
     ) -> bool {
@@ -551,7 +551,7 @@ impl<M: Module> Codegen<M> {
     /// (`ryo_bytes_free` when `is_bytes`, else `ryo_str_free`).
     /// Resolved only at call sites that survive the cap==0 elision, so
     /// an all-static schedule never declares an unused import.
-    fn free_ref_for(
+    pub(crate) fn free_ref_for(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         str_free_ref: &mut Option<FuncRef>,

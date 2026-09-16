@@ -47,6 +47,111 @@ fn test_slice_of_borrowed_param_ok() {
 }
 
 #[test]
+fn test_slice_of_borrowed_param_then_read_param() {
+    // Reading the param after the view dies must still see the
+    // original (inline) value — the promoted buffer is freed, the
+    // param itself is not.
+    assert_ryo_output(
+        "slice_param_then_read.ryo",
+        "fn scan(s: str):\n\tv = s[0:1]\n\tprint(v)\n\tprint(s)\n\nfn main():\n\tx: str = int_to_str(7)\n\tscan(x)\n",
+        "77",
+    );
+}
+
+#[test]
+fn test_slice_of_borrowed_param_in_loop() {
+    // Fresh view per loop iteration: each iteration's promotion buffer
+    // is freed at that iteration's last use.
+    assert_ryo_output(
+        "slice_param_loop.ryo",
+        "fn scan(s: str):\n\tfor i in range(0, 3):\n\t\tv = s[i:i+1]\n\t\tprint(v)\n\nfn main():\n\tscan(\"abc\")\n",
+        "abc",
+    );
+}
+
+#[test]
+fn test_slice_of_borrowed_param_transient() {
+    assert_ryo_output(
+        "slice_param_transient.ryo",
+        "fn scan(s: str):\n\tprint(s[1:3])\n\nfn main():\n\tscan(\"abc\")\n",
+        "bc",
+    );
+}
+
+#[test]
+fn test_reslice_of_borrowed_param_view() {
+    // A reslice keeps the same promotion buffer alive past the first
+    // view's last use — the free must defer to the reslice's last use.
+    assert_ryo_output(
+        "reslice_param_view.ryo",
+        "fn scan(s: str):\n\tw = s[0:3]\n\tv = w[1:3]\n\tprint(v)\n\nfn main():\n\tscan(\"abc\")\n",
+        "bc",
+    );
+}
+
+#[test]
+fn test_slice_of_borrowed_param_rebound_in_loop() {
+    // View declared before the loop and rebound inside it: the in-loop
+    // slice's promotion buffer must stay alive across the rebind — the
+    // free defers to the loop exit, not the rebind statement.
+    assert_ryo_output(
+        "slice_param_rebind_loop.ryo",
+        "fn scan(s: str):\n\tmut v = s[0:2]\n\tfor i in range(0, 4):\n\t\tprint(v)\n\t\tv = s[i:i+2]\n\nfn main():\n\tx: str = int_to_str(654321)\n\tscan(x)\n",
+        "65655443",
+    );
+}
+
+#[test]
+fn test_slice_of_borrowed_param_rebound_in_loop_read_after() {
+    // Same rebind shape, but the view is read AFTER the loop: the final
+    // iteration's promotion buffer must survive to that read. The
+    // argument is runtime-built — a static literal never promotes, so
+    // the free-at-loop-exit UAF would not trigger.
+    assert_ryo_output(
+        "slice_param_rebind_loop_after.ryo",
+        "fn scan(s: str):\n\tmut v = s[0:1]\n\tfor i in range(0, 3):\n\t\tv = s[i:i+1]\n\tprint(v)\n\nfn main():\n\tx: str = int_to_str(654321)\n\tscan(x)\n",
+        "4",
+    );
+}
+
+#[test]
+fn test_slice_of_borrowed_param_return_last_use() {
+    // The view's last use is inside the return operand: only the
+    // return-epilogue promo free can release the promotion buffer
+    // (the end-of-statement sweep is skipped on terminators).
+    assert_ryo_output(
+        "slice_param_return_last_use.ryo",
+        "fn scan(s: str) -> int:\n\tv = s[0:2]\n\treturn v.len()\n\nfn main():\n\tx: str = int_to_str(654321)\n\tprint(int_to_str(scan(x)))\n",
+        "2",
+    );
+}
+
+#[test]
+fn test_slice_of_borrowed_param_return_in_loop() {
+    // Loop-deferred view with a `return` inside the loop: the
+    // loop-exit anchor is bypassed on the return path — only the
+    // return-epilogue promo free releases the buffer.
+    assert_ryo_output(
+        "slice_param_return_in_loop.ryo",
+        "fn scan(s: str) -> int:\n\tv = s[0:2]\n\tfor i in range(0, 4):\n\t\tprint(v)\n\t\treturn 1\n\treturn 0\n\nfn main():\n\tx: str = int_to_str(654321)\n\tscan(x)\n",
+        "65",
+    );
+}
+
+#[test]
+fn test_slice_of_borrowed_param_last_use_in_returning_arm() {
+    // The view's only use is inside a returning if-arm: the not-taken
+    // path falls through to the function's synthesized return, where
+    // only the fallthrough backstop promo free can release the
+    // promotion buffer (the in-arm anchor never fires).
+    assert_ryo_output(
+        "slice_param_arm_fallthrough.ryo",
+        "fn scan(cond: bool, s: str):\n\tv = s[0:1]\n\tif cond:\n\t\tprint(v)\n\t\treturn\n\nfn main():\n\tx: str = int_to_str(654321)\n\tscan(false, x)\n\tprint(\"done\")\n",
+        "done",
+    );
+}
+
+#[test]
 fn test_slice_empty() {
     assert_ryo_runs(
         "slice_empty.ryo",

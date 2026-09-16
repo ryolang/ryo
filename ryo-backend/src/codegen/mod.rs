@@ -23,7 +23,9 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use cranelift::codegen::ir::{ArgumentPurpose, MemFlagsData};
+use cranelift::codegen::ir::{
+    ArgumentPurpose, MemFlagsData, StackSlot, StackSlotData, StackSlotKind,
+};
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
@@ -32,7 +34,7 @@ use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
 mod arith;
@@ -45,6 +47,11 @@ mod views;
 /// Fat-owner triple layout (str/bytes, 24 bytes): ptr at 0, len at 8,
 /// cap at 16. Derived from `RyoStrFat`, not re-hardcoded.
 const STR_SLOT_SIZE: u32 = 24;
+
+/// Promotion scratch-slot layout for borrowed-param view bases: flag
+/// word at 0 (1 = this callee promoted, 0 = pass-through), triple
+/// ptr/len/cap at 8/16/24.
+pub(crate) const PROMO_SLOT_SIZE: u32 = 32;
 
 /// How a statement or body ended the current block, if it did.
 /// Replaces the `bool` that conflated Break/Continue with Return:
@@ -292,6 +299,17 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// an undo log, same scoping discipline as `locals`.
     fat_locals: Vec<Option<FatLocals>>,
     fat_locals_undo: Vec<(u32, Option<FatLocals>)>,
+    /// Borrowed-param view bases (Slice/ToView) that were promoted
+    /// through a scratch slot instead of the param's FatLocals: base
+    /// inst → slot holding flag (offset 0) + promoted triple (8/16/24).
+    promo_slots: HashMap<TirRef, StackSlot>,
+    /// Dense flag per `sidecar.promotion_frees` index (emission-time
+    /// dedup, same discipline as `freed_at`).
+    promo_freed_at: Vec<bool>,
+    /// Anchor `TirRef` → indices into `sidecar.promotion_frees`.
+    promo_free_by_after: Vec<Vec<usize>>,
+    /// Unfired `promotion_frees` indices for the end-of-statement sweep.
+    pending_promo_sweep: Vec<usize>,
     /// `strview` view bindings (M8.4): two SSA `Variable`s per binding,
     /// mirroring `fat_locals`. Views are non-owning — they never
     /// appear in the free schedule.
@@ -943,6 +961,30 @@ impl<M: Module> Codegen<M> {
             let (free_binding_names, free_binding_param_names) =
                 Self::build_free_binding_names(tir, pool);
 
+            let mut promo_free_by_after: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
+            for (idx, pf) in func_sidecar.promotion_frees.iter().enumerate() {
+                debug_assert!(
+                    !pf.after.is_param(),
+                    "promotion-free anchors are never param sentinel refs"
+                );
+                promo_free_by_after[pf.after.index()].push(idx);
+            }
+            let pending_promo_sweep: Vec<usize> = (0..func_sidecar.promotion_frees.len()).collect();
+
+            // One scratch slot per borrowed-param view base scheduled
+            // for a promotion free: flag word (offset 0) + promoted
+            // triple (8/16/24), per PROMO_SLOT_SIZE.
+            let mut promo_slots: HashMap<TirRef, StackSlot> = HashMap::new();
+            for pf in &func_sidecar.promotion_frees {
+                promo_slots.entry(pf.base).or_insert_with(|| {
+                    builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        PROMO_SLOT_SIZE,
+                        3,
+                    ))
+                });
+            }
+
             let mut ctx: FunctionContext<'_, M> = FunctionContext {
                 module: &mut self.module,
                 data_ctx: &mut self.data_ctx,
@@ -964,6 +1006,10 @@ impl<M: Module> Codegen<M> {
                 loop_stack: Vec::new(),
                 fat_locals: fat_param_locals,
                 fat_locals_undo,
+                promo_slots,
+                promo_freed_at: vec![false; func_sidecar.promotion_frees.len()],
+                promo_free_by_after,
+                pending_promo_sweep,
                 view_locals: view_param_locals,
                 view_locals_undo,
                 struct_locals: struct_param_locals,
@@ -1006,6 +1052,27 @@ impl<M: Module> Codegen<M> {
                         addr: builder.use_var(var),
                     });
                 }
+            }
+
+            // The promotion flag must start cleared: the
+            // free-before-overwrite in emit_ensure_heap_for_view_base
+            // and the scheduled promo frees both branch on it, and a
+            // first-iteration garbage flag would free garbage. Iterate
+            // promotion_frees (deduped), not the HashMap: sidecar order
+            // is deterministic, HashMap iteration order is not — identical
+            // input must yield identical emission.
+            let mut zeroed: HashSet<TirRef> = HashSet::new();
+            for pf in &func_sidecar.promotion_frees {
+                if !zeroed.insert(pf.base) {
+                    continue;
+                }
+                let slot = *ctx
+                    .promo_slots
+                    .get(&pf.base)
+                    .expect("every promotion-free base has a scratch slot");
+                let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                let zero = builder.ins().iconst(types::I64, 0);
+                builder.ins().store(MemFlagsData::trusted(), zero, addr, 0);
             }
 
             // Hoist string and bytes literals while the entry block is
@@ -1093,7 +1160,9 @@ impl<M: Module> Codegen<M> {
                 // sub-expression-anchored entries whose consumers have
                 // now finished emitting IR.
                 Self::emit_due_frees(builder, ctx, stmt_ref)?;
+                Self::emit_due_promo_frees(builder, ctx, stmt_ref)?;
                 Self::sweep_due_frees(builder, ctx)?;
+                Self::sweep_due_promo_frees(builder, ctx)?;
             }
         }
         Ok(terminator)
@@ -1305,12 +1374,14 @@ impl<M: Module> Codegen<M> {
                     builder.ins().store(MemFlagsData::trusted(), len, sret, 8);
                     builder.ins().store(MemFlagsData::trusted(), cap, sret, 16);
                     Self::emit_due_frees(builder, ctx, r)?;
+                    Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[])?;
                 } else if matches!(ctx.pool.kind(ctx.tir.return_type), TypeKind::Struct) {
                     return Self::emit_struct_return(builder, ctx, r, operand);
                 } else {
                     let val = Self::eval_inst(builder, ctx, operand)?;
                     Self::emit_due_frees(builder, ctx, r)?;
+                    Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[val])?;
                 }
                 Ok(Terminator::Return)
@@ -1322,9 +1393,11 @@ impl<M: Module> Codegen<M> {
                 if is_main {
                     let zero = builder.ins().iconst(ctx.int_type, 0);
                     Self::emit_due_frees(builder, ctx, r)?;
+                    Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[zero])?;
                 } else {
                     Self::emit_due_frees(builder, ctx, r)?;
+                    Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[])?;
                 }
                 Ok(Terminator::Return)
@@ -1477,6 +1550,7 @@ impl<M: Module> Codegen<M> {
                 // statements. Without this call the Frees would
                 // simply never be emitted.
                 Self::emit_due_frees(builder, ctx, r)?;
+                Self::emit_due_promo_frees(builder, ctx, r)?;
                 let Some(loop_ctx) = ctx.loop_stack.last() else {
                     return Err("codegen reached break outside loop".to_string());
                 };
@@ -1491,6 +1565,7 @@ impl<M: Module> Codegen<M> {
                 // See Break above for why the Frees must be emitted
                 // here instead of via the post-stmt sweep.
                 Self::emit_due_frees(builder, ctx, r)?;
+                Self::emit_due_promo_frees(builder, ctx, r)?;
                 let Some(loop_ctx) = ctx.loop_stack.last() else {
                     return Err("codegen reached continue outside loop".to_string());
                 };

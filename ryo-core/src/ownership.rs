@@ -18,6 +18,20 @@ pub struct FreePoint {
     pub branch: Option<BranchId>,
 }
 
+/// One scheduled promotion-buffer free. When a borrowed (non-inout)
+/// `str`/`bytes` param is used as a view base, codegen promotes the
+/// callee's inline copy to heap and records the result in a scratch
+/// slot keyed by `base`; codegen emits a flag-conditional
+/// `ryo_str_free(ptr, cap)` from that slot after the instruction at
+/// `after`, gated by `branch` (same discipline as [`FreePoint`]).
+#[derive(Clone, Debug)]
+pub struct PromoFree {
+    pub after: TirRef,
+    pub base: TirRef,
+    pub span: Span,
+    pub branch: Option<BranchId>,
+}
+
 /// Per-`IfStmt` mapping from arm position to its assigned [`BranchId`].
 /// Codegen uses this to push the right `BranchId` onto `branch_stack`
 /// as it lowers each arm, so a branch-gated `FreePoint` only fires
@@ -118,6 +132,8 @@ pub struct FunctionSidecar {
     /// the arms it names (including a synthetic fall-through block for
     /// else-less ifs).
     pub conditional_dead_drops: Vec<ConditionalDeadDrop>,
+    /// Promotion-buffer frees for borrowed-param view bases.
+    pub promotion_frees: Vec<PromoFree>,
 }
 
 impl FunctionSidecar {
@@ -135,6 +151,7 @@ impl FunctionSidecar {
             field_free_on_reassign: vec![None; arena_len],
             if_branches: vec![None; arena_len],
             conditional_dead_drops: Vec::new(),
+            promotion_frees: Vec::new(),
         }
     }
 }

@@ -558,6 +558,141 @@ fn main():
 \tprint(p.name)
 ",
     ),
+    (
+        // Slicing a borrowed str param whose argument is inline (SSO)
+        // promotes a heap buffer that must be freed.
+        "slice_borrowed_param_inline",
+        "\
+fn scan(s: str):
+\tv = s[0:1]
+\tprint(v)
+
+fn main():
+\tx: str = int_to_str(7)
+\tscan(x)
+\tscan(x)
+",
+    ),
+    (
+        // Heap argument (> 23 B): promotion is a no-op pass-through;
+        // the scheduled free must not touch the caller's buffer.
+        "slice_borrowed_param_heap",
+        "\
+fn scan(s: str):
+\tv = s[0:2]
+\tprint(v)
+
+fn main():
+\tx: str = int_to_str(123456789)
+\ty: str = x + x + x + x
+\tscan(y)
+",
+    ),
+    (
+        // The view's last use is inside the return operand, so the
+        // free's anchor lands on a sub-inst of the Return — and the
+        // end-of-statement sweep is skipped on terminators. Only the
+        // return-epilogue promo free releases the promotion buffer on
+        // this path. `print(int_to_str(...))` proves the slice executed
+        // (a panic would mask the leak under Valgrind).
+        "slice_borrowed_param_return_last_use",
+        "\
+fn scan(s: str) -> int:
+\tv = s[0:2]
+\treturn v.len()
+
+fn main():
+\tx: str = int_to_str(654321)
+\tprint(int_to_str(scan(x)))
+",
+    ),
+    (
+        // Loop-deferred view (created before the loop, read inside it)
+        // with a `return` inside the loop: the loop-exit anchor is
+        // bypassed on the return path — only the return-epilogue promo
+        // free releases the promotion buffer. The in-loop `print(v)`
+        // proves the slice executed.
+        "slice_borrowed_param_return_in_loop",
+        "\
+fn scan(s: str) -> int:
+\tv = s[0:2]
+\tfor i in range(0, 4):
+\t\tprint(v)
+\t\treturn 1
+\treturn 0
+
+fn main():
+\tx: str = int_to_str(654321)
+\tscan(x)
+",
+    ),
+    (
+        // View declared before the loop, rebound inside it, read only
+        // after it: the in-loop slice gets no recorded last use (the
+        // liveness pre-pass attributes the post-loop read to the
+        // pre-loop slice), so its promo free falls to the
+        // bound-never-read fallback. Anchoring that fallback at the
+        // loop exit releases the final iteration's buffer right before
+        // the post-loop read — Valgrind flags the read as a
+        // use-after-free. The post-loop `print(v)` (prints `4`) proves
+        // the slice path executed.
+        "slice_borrowed_param_rebind_loop_read_after",
+        "\
+fn scan(s: str):
+\tmut v = s[0:1]
+\tfor i in range(0, 3):
+\t\tv = s[i:i+1]
+\tprint(v)
+
+fn main():
+\tx: str = int_to_str(654321)
+\tscan(x)
+",
+    ),
+    (
+        // View declared before the loop and rebound inside it, with
+        // the read BEFORE the rebind: the in-loop slice's promotion
+        // buffer must survive until the loop exit — freeing it at the
+        // rebind statement releases the buffer the just-rebound view
+        // points into (the next iteration's read is a use-after-free).
+        // The in-loop `print(v)` (prints `65655443`) proves the slice
+        // path executed.
+        "slice_borrowed_param_rebind_loop",
+        "\
+fn scan(s: str):
+\tmut v = s[0:2]
+\tfor i in range(0, 4):
+\t\tprint(v)
+\t\tv = s[i:i+2]
+
+fn main():
+\tx: str = int_to_str(654321)
+\tscan(x)
+",
+    ),
+    (
+        // View created before an if whose only use is inside a
+        // returning arm: the conditional-last-use re-anchor refuses a
+        // branch whose arm returns, so the normal anchor stays in-arm
+        // and the not-taken path falls through to the function's
+        // synthesized return with the promotion buffer still live.
+        // Only the fallthrough backstop anchor releases it on that
+        // path. The final `print` (prints `done`) proves the
+        // fallthrough path executed.
+        "slice_borrowed_param_last_use_in_returning_arm",
+        "\
+fn scan(cond: bool, s: str):
+\tv = s[0:1]
+\tif cond:
+\t\tprint(v)
+\t\treturn
+
+fn main():
+\tx: str = int_to_str(654321)
+\tscan(false, x)
+\tprint(\"done\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's
