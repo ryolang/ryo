@@ -1,6 +1,9 @@
 # TODO
 
-- [cargo crap rules](https://minikin.me/blog/cargo-crap) `cargo crap --lcov lcov.info --top 5`
+- [cargo crap rules](https://minikin.me/blog/cargo-crap) `cargo llvm-cov --workspace --lcov --output-path lcov.info
+cargo crap --workspace --lcov lcov.info`
+- [ ] https://github.com/ludo-technologies/polyscan `npx polyscan analyze .`
+- [ ] Set Up Miri <https://github.com/rust-lang/miri>
 - [ ] <https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md>
 - [ ] FFI tests: sqlite(included), raylib(external)
 - [ ] [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)

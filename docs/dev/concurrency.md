@@ -58,7 +58,7 @@ normative specification. Ryo remains colorless: no `async`/`await`, no
 | Setting | Default | Notes |
 |---|---|---|
 | `RYOMAXPROCS` | `NumCPU` (logical cores) | Number of OS worker threads in the M:N scheduler. Same shape as Go's `GOMAXPROCS`. |
-| Blocking thread pool cap | `1000` | Hard ceiling on concurrent `#[blocking]` calls. Smaller than Go's 10 000 M cap: only blocking-by-design FFI routes here (§3.4); compute FFI runs on the system coroutine (§3.5). Possibly tuned later. |
+| Blocking thread pool cap | `1000` | Hard ceiling on concurrent `#[blocking]` calls, **configurable from day one** via `RYOBLOCKINGPOOL` (env) or `ryo.toml` — DB-heavy deployments tune it without a rebuild. Smaller default than Go's 10 000 M cap: only blocking-by-design FFI routes here (§3.4); compute FFI runs on the system coroutine (§3.5). |
 | Initial task stack | `32 KB` | Grows on demand. See §1.1. |
 | Maximum task stack | `128 KB` (v0.4) | Hard cap; overflow delivers `StackOverflow` to the task. |
 | `RYO_FFI_STACK_SIZE` | `2 MB` | System-coroutine stack size (§3.5). Matches Linux's typical `pthread_create` default; covers virtually all real C libraries. |
@@ -66,6 +66,43 @@ normative specification. Ryo remains colorless: no `async`/`await`, no
 | `RYO_MAX_DISPATCHERS` | `64` | Process-wide cap on live custom dispatchers (§4.5). |
 | Dispatcher worker budget | `4 × RYOMAXPROCS` | Total `workers` across all custom dispatchers (§4.5). |
 | Timer wheel resolution | `1 ms` | Sufficient for scripting workloads. |
+
+**Runtime profile scope (D9).** Everything in this document is **hosted-only**.
+On the `core` profile there is no scheduler, no green threads, and no system
+coroutine: `task.*` is a compile error — *"`task.run` requires the hosted
+runtime (ambient scheduler). Build with `--profile=hosted`, or use a
+third-party executor crate"* (D9 rule 2; concurrency on `core` is unbundled,
+not forbidden — an Embassy-style cooperative executor is an ordinary package
+against `core`, D9 rule 3) — and FFI runs directly on the real OS stack: no
+128 KB cap, no router, nothing to configure. The `RyoStack` machinery below
+never ships in a `core` binary.
+
+**Parallelism on `core`.** Same answer as every language with a
+hosted/freestanding split (Rust `core`/`std`, Embedded Swift, freestanding
+C++): it is a library concern, not a std promise. Move-capture +
+`shared[mutex[T]]` + FFI thread wrappers work on `core` today via D4; an
+Embassy-style executor or rayon-shaped crate is buildable as an ordinary
+package. One deliberate asymmetry to record: D5's scoped *borrow* captures
+(§4.2.2) are bound to `task.scope` and are therefore hosted-only — `core`-side
+fork-join gets move-capture + `shared[T]`, not zero-copy chunk borrows. If
+real demand materializes, the fix is a profile-agnostic scope construct (a
+`thread.scope` analog with the same join-witness exemption), not a relaxation
+of this gate. Not a v0.4 item.
+
+> **Draft future direction — bundled `core` executor (would amend D9 rule 3;
+> requires approval before adoption).** A TinyGo-class minimal scheduler
+> *could* ship as an opt-in `core` component: it fits `core`'s assumptions
+> (allocator + atomics + a platform clock hook + per-arch switch assembly),
+> needs no dialect (`task.*` semantics are already cooperative; single-core is
+> `RYOMAXPROCS=1`), and dead-strips when unused. Design constraints if ever
+> adopted: fixed stacks sized by compile-time stack analysis (TinyGo lesson
+> #2), overflow = trap (consistent with `core`'s panic=abort), no I/O
+> integration (suspension points reduce to channels/`yield`/`delay`), single
+> core only. Hard limit: it does **not** serve WASM — standard Wasm has one
+> unswitchable stack, so this buys embedded/bare-metal concurrency, not Wasm
+> concurrency. Recommended path stays D9 rule 3: prove the shape as a
+> third-party package (`ryo-embassy` pattern), then absorb — the same route
+> Rust took from crossbeam's scoped threads to `std::thread::scope`.
 
 **Gate: proof-of-concept spike before Phase 1.** No runtime code is written until a
 throwaway PoC validates the core stack end to end. The PoC is scratch work (not
@@ -75,6 +112,17 @@ hardcoded task set, with a rough task-switch cost measurement. When the PoC is r
 and validates feasibility, Phase 1 implementation begins. If it surfaces blocking
 issues (stack growth behavior, IOCP integration, context-switch overhead), revisit
 the core-stack choices in this document first.
+
+**No compiler dependency.** The PoC is pure runtime work — a scratch Rust
+crate over `corosensei` + `mio` with no Ryo source involved. The concurrency
+grammar/sema work (`task.*`, `select`, `with`, the D5 capture checks) is a
+parallel workstream that only meets the runtime at Phase 1 integration; do
+not serialize the PoC behind it. The one compiler-adjacent risk the PoC does
+not cover — Cranelift-generated code running on green stacks (switch-call
+placement, probestack on a 32 KB stack, frame-pointer chains through a
+switch) — needs no grammar to test: codegen already emits runtime calls, so
+a small stage-2 spike compiles a minimal Ryo program whose `main` runs on a
+corosensei stack and calls into the PoC scheduler.
 
 **Pass/fail criteria** (sanity bars, not production targets — revise with data):
 
@@ -86,7 +134,12 @@ the core-stack choices in this document first.
   Linux/macOS as a control). Fail → revisit the `mio` choice before Phase 1.
 - **Task-switch cost:** mean context-switch cost ≤ 1 µs on the dev machine — an
   order of magnitude above Go's ~100 ns goroutine switch, which is still cheap
-  enough to justify M:N. Above the bar → revisit `corosensei` / the stack-switching
+  enough to justify M:N. Measure it twice: as a raw switch microbenchmark, and
+  inside a workload with realistic call depth. The WAW 2025 WasmFX retrofit
+  (see *Cranelift `stack_switch`*) found that call-mediated switching's real
+  cost lands in the surrounding code via return-address-predictor
+  mispredictions, not in the switch sequence itself — a bare microbenchmark
+  will miss it. Above the bar → revisit `corosensei` / the stack-switching
   approach before Phase 1.
 
 Every measured result is recorded in `docs/dev/concurrency_poc.md` (created by the
@@ -108,9 +161,38 @@ stack model works.
 
 - Wrap `corosensei` in a `RyoStack` type owned by the runtime
 - **Start at 32 KB, grow up to 128 KB on guard-page hit, hard-fail beyond**
-- Guard page at the bottom of every stack
+- Guard page at the bottom of every stack — plus a **permanent guard gap
+  inside our own mapping** below the usable region (PoC finding: a plain
+  `PROT_NONE` reservation does not reliably catch overflow — a writable
+  neighbor mapping can sit immediately below it and be silently trampled.
+  The gap, not the reservation boundary, is the overflow tripwire)
 - On final guard-page hit (above 128 KB): deliver `StackOverflow` error to the
   task, not a process crash
+- Commit-on-fault handler runs on an **alternate signal stack**
+  (`sigaltstack`/`SA_ONSTACK`; VEH equivalent on Windows) — at grow/overflow
+  time the task stack is exhausted and cannot host the handler
+- On Windows the **kernel owns growth**: corosensei writes the stack's TEB
+  fields on every switch, so guard hits auto-grow the mapping page-by-page
+  before any VEH runs (no 32 KB chunks; growth tracked via
+  `update_teb_fields` read-backs). The VEH only handles the terminal
+  `STATUS_STACK_OVERFLOW` → `StackOverflow` delivery. No 256 KB guard gap
+  needed — a `MEM_RESERVE` boundary can't be claimed by a neighbor
+- Commit chunks clamp at the reservation limit (PoC finding: naive
+  align-down over-commits past the reservation)
+- Per-task mapping = **2 VMAs** (guard gap + committed region): Linux
+  `vm.max_map_count` caps live tasks (PoC-measured 131 059 at the 262 144
+  default, ~32k at the common 65 530 default; macOS has no such ceiling — 1M
+  parked tasks OK). Escape hatch if high task counts matter: pooled stack
+  arena, one reservation carved into slots, 1 VMA total
+- Parked-task RSS is page-granular: ~16.5 KB/task on macOS (one 16 KB
+  page), ~12–14 KB on Linux, vs Go's ~3 KB (GC-shrunk 2 KB stacks + g
+  struct) — ~1.6 GB vs ~0.3 GB at 100k tasks; fine at the v0.4 scale, but
+  keep the initial-commit size class small. Windows is the lowest of the
+  three at ~8.3 KB/task (4 KB pages + page-granular kernel growth) —
+  further support for a small initial commit
+- Windows task ceiling is **commit-charge-bound** (RAM + pagefile;
+  PoC-measured 160 391 on a 4 GB VM) and pagefile-tunable — not a kernel
+  VMA cap like Linux, and no guard-gap VA overhead either
 - Stack caching from Phase 1 — keep a small free list of recently-released
   stacks at each size class (cheap, prevents allocator pressure later)
 - Stack size configurable via spawn options for the future
@@ -141,6 +223,11 @@ net for runaway Ryo recursion.
 - Define `future[T]` as the user-facing return value of `task.run`
 - Implement `Drop` on `future[T]` to request cancellation
 - States: `Pending | Running | Completed(T) | Cancelled | Panicked(Reason)`
+- The `Task` control block carries a **context frame pointer** from Phase 1,
+  captured from the spawning task at spawn time and immutable thereafter.
+  Phase 1 stores an empty frame; the ambient-context proposal
+  (`ryo-context-and-otel-proposal.md`) populates it when it lands. Reserving
+  the field now is free; retrofitting it means auditing every spawn path.
 
 ```
 future[T]:
@@ -166,7 +253,7 @@ future[T]:
 > *not* task-local. In Phase 3 a task can migrate between worker OS threads
 > across yield points, and any value read from native TLS will change
 > identity. Library authors must not store task-state in OS TLS.
-> §3.6 introduces a `task_local!` macro that survives migration.
+> §3.6 introduces a `task.local[T]` builtin that survives migration.
 
 ### 1.5 Cancellation Delivery (Basic)
 
@@ -174,6 +261,10 @@ future[T]:
 - At every suspension point (`.await`, channel ops), check the flag
 - If set, unwind the task's stack via normal Ryo drop semantics
 - Deliver `task.Canceled` as an error into the task's error union
+- Later cancellation sources — context-frame deadlines from
+  `with deadline(...)`, `with cancellation()` scopes (§3.6) — reuse this same
+  flag-and-check machinery; the flag records the source so the delivered
+  error is `task.Canceled` vs `DeadlineExceeded` as appropriate
 
 ### 1.6 Panic Semantics
 
@@ -313,10 +404,13 @@ Worker loop:
   1. Move the blocking call to the thread pool
   2. Suspend the green thread
   3. Resume when the thread pool call completes
-- **Pool cap: 1 000 threads by default.** Starts small, grows on demand,
-  shrinks idle threads after a timeout. The cap is smaller than Go's 10 000 M
-  cap because the pool is narrowed to blocking-by-design FFI — compute FFI
-  runs on the system coroutine (§3.5) instead.
+- **Pool cap: 1 000 threads by default, configurable from day one**
+  (`RYOBLOCKINGPOOL` env var or `ryo.toml`). Starts small, grows on demand,
+  shrinks idle threads after a timeout. The default cap is smaller than Go's
+  10 000 M cap because the pool is narrowed to blocking-by-design FFI —
+  compute FFI runs on the system coroutine (§3.5) instead. Configurability is
+  not deferred: DB-heavy deployments where sqlite/libpq route here are
+  exactly the case a hard-coded 1 000 would sting.
 - `#[blocking]` is sugar for "auto-route this FFI to `dispatcher.blocking`"
   (§4.5); an enclosing `with_dispatcher` block overrides that routing for the
   duration of the block (precedence rule, §4.5).
@@ -379,16 +473,38 @@ across nested calls.
 
 ### 3.6 Task-Local Storage
 
-The OS-TLS caveat from §1.4 becomes load-bearing once tasks migrate. Provide:
+The OS-TLS caveat from §1.4 becomes load-bearing once tasks migrate. Provide
+a Ryo-idiomatic builtin — not a macro (Ryo has none; the earlier `task_local!`
+sketch was Rust syntax leaking into the plan):
 
-```
-task_local! { static REQUEST_ID: Cell<u64> = Cell::new(0); }
+```ryo
+request_id = task.local[int](0)    # per-task slot, survives migration
 ```
 
 Implementation: each task owns a small map of task-local slots. Reads and
 writes go through the current task's map, not OS TLS. Survives migration.
 Inherited by child tasks spawned within the same `task.scope` (§4.2)
 unless explicitly overridden.
+
+**The ambient context is a structured task-local.** The context/OTel proposal
+(`ryo-context-and-otel-proposal.md`) puts deadlines, cancellation, and trace
+identity in a scope-bound context frame that propagates down the task tree.
+Mechanically it rides this section's machinery, with four refinements:
+
+- The frame pointer lives in the `Task` control block (§1.2). The scheduler
+  points the ambient TLS slot at the current task's frame on every resume —
+  the same moment it swaps the task-local map — so `ctx.*` accessors stay
+  correct under migration, and the §1.4 OS-TLS caveat never applies to them.
+- Inheritance mirrors the rule above: `task.scope` / `task.run` children
+  share the parent's frame (the D5 scope join guarantees no child outlives
+  it); `spawn_detached` captures trace identity as a **link** but takes no
+  cancellation ownership (the proposal's rule 3).
+- FFI-originated spawns (data-plane edge #2) inherit the frame of the task
+  that made the FFI call. The system coroutine (§3.5) is not a task and
+  holds no context of its own.
+- A context deadline is a timer-wheel entry (§2.3) that cancels the covered
+  subtree through the §1.5 machinery — deadlines add no new mechanism, just
+  a new cancellation source.
 
 ### 3.7 Memory Model
 
@@ -416,7 +532,7 @@ locking mistakes on top of that model; the memory model defines what
 - FFI overhead benchmark: plain FFI round-trip ≈200 ns on x86_64
 
 **Exit criteria:** Linear scaling for embarrassingly parallel workloads.
-`task_local!` works across migration. Blocking pool does not stall green
+`task.local` works across migration. Blocking pool does not stall green
 threads. Compute FFI is stack-safe via the system coroutine, and re-entry
 overflow fails fast without deadlock.
 
@@ -471,26 +587,67 @@ Internal implementation:
 - Implementation: same `JoinHandle` list as `task.scope`, different
   failure-propagation policy (~150 LOC).
 
+### 4.2.2 Scoped task borrows (D5) and `par_*`
+
+Spec §9.2.1 tasks capture by move; D5 carves out the provably-safe exception
+this plan must implement: **inside a `task.scope`, child closures may capture
+by immutable borrow** — including projections (`slice[T]`, `strview`). The
+scope join is the safety witness: it is lexically inside the defining
+function and blocks until all children settle, so a borrowed capture cannot
+outlive its lender. Implementation duties, split by pass:
+
+- **Ownership pass (compiler):** verify borrowed captures are not mutated for
+  the scope's duration (the P2 freeze machinery, extended to the end of the
+  `task.scope` block) and cannot escape (scope children cannot be detached).
+  `task.run` outside a scope and `task.spawn_detached` keep move-only
+  capture, enforced exactly as today.
+- **Runtime:** nothing new. The join already provides the happens-before edge
+  the memory model (§3.7) needs; the cancel-siblings-on-panic rule above
+  already guarantees children unwind before the scope's frame pops. A child's
+  green-thread stack referencing parent stack frames is sound precisely
+  because the parent is suspended at the join for the borrow's lifetime.
+- **Stdlib `par_*` combinators** (`par_for_each_chunk`, parallel map, etc.)
+  are library APIs over D5 borrows with D4-permitted unsafe internals — they
+  are *not* a separate thread pool. They schedule onto the calling task's
+  current dispatcher (`dispatcher.default` unless inside a
+  `with_dispatcher` block); users wanting CPU isolation reach for
+  `dispatcher.compute` (§4.5), not for a parallel-specific pool.
+
 ### 4.3 `select`
 
 - Waits on multiple concurrency primitives simultaneously
 - First ready case wins; all others are cancelled atomically (waker
   deregistration is part of the win, not best-effort)
 - `default` branch makes the select non-blocking
+- `ctx.done()` is a valid case — a channel arm over the ambient context
+  frame's cancellation (§3.6); this is how `with deadline(...)` timeouts
+  become selectable
 - Implementation: register all cases as wakers, first waker to fire wins,
   deregister the rest
 
 ```
 select:
-    case msg = rx.recv():     // channel receive
+    case msg = rx.recv():      # channel receive
         handle(msg)
-    case res = fut.await:     // future completion
+    case res = fut.await:      # future completion
         handle(res)
-    case task.delay(1s).await: // timer
+    case ctx.done().recv:      # ambient context cancelled (deadline/parent)
+        return DeadlineExceeded
+    case task.delay(1s).await: # timer
         print("timed out")
-    default:                   // non-blocking
+    default:                   # non-blocking
         print("nothing ready")
 ```
+
+**Conflated channels × select wakers (draft — pending formalization with the
+data-plane HB rule).** Overwrite never invalidates, duplicates, or leaks a
+registered waker. A waiting receiver implies an empty slot, so a conflated
+`send` with a registered receiver hands off directly — overwrite applies
+only to a buffered, unconsumed slot with no receiver registered. If a
+receiver's waker has fired but the task has not yet resumed when an
+overwrite lands, the pending `recv` observes the **latest** value at resume
+time, which may be newer than the value that fired the waker. Waker
+deregistration on select-win stays atomic as above.
 
 ### 4.4 `task.gather` / `task.join` / `task.any`
 
@@ -1010,6 +1167,61 @@ is the one place Ryo chooses to be weaker than BEAM.
 
 ---
 
+## TinyGo cross-reference (added 2026-09)
+
+TinyGo's `scheduler=tasks` ([`scheduler_cooperative.go`](https://github.com/tinygo-org/tinygo/blob/release/src/runtime/scheduler_cooperative.go),
+[`internal/task`](https://github.com/tinygo-org/tinygo/blob/release/src/internal/task/task.go))
+is essentially this plan's **Phase 1 + 2 subset, shipped and proven** in the
+embedded/WASM domain: cooperative FIFO runqueue, per-task stacks switched by
+per-arch assembly (callee-saved registers + SP swap — the same mechanism as
+corosensei), a delta-list sleep queue, switches only at explicit pause points.
+It is also deliberately the *ceiling* of that subset: `hasParallelism =
+false` and `NumCPU() = 1` are literals in the source — no multi-core, no
+stealing, ever. Where TinyGo stops is exactly where Ryo's Phase 3 begins.
+
+Lessons, mapped onto this plan:
+
+1. **Fourth independent confirmation of the core mechanism.** Per-task
+   stacks + a tiny asm switch helper is now the convergent design across Go,
+   Wasmtime-fiber, corosensei, and TinyGo. The PoC gate remains, but the
+   mechanism itself is not the risk.
+2. **Static stack-size analysis is an option this plan hasn't priced in.**
+   TinyGo computes per-goroutine stack bounds *at compile time*
+   (`getGoroutineStackSize` intrinsic over a compiler-emitted section),
+   falling back to a per-target default. Ryo's §1.1 starts every task at
+   32 KB and grows on guard-page hits; a whole-program stack-bound pass could
+   instead pick the initial size class per spawn site, making guard-page
+   growth the exception rather than the rule. Phase 5 tuning candidate —
+   guard pages stay the safety net for what analysis cannot bound (recursion,
+   variadic C).
+3. **The WASM situation, stated honestly.** TinyGo ships goroutines on
+   standard WASM *today* via Binaryen's Asyncify whole-program transform —
+   so "impossible without WasmFX" is wrong; "expensive without WasmFX" is
+   right. The language stays colorless either way; the objection to
+   stackless transformation is transform cost and binary size, not user
+   semantics. Early WasmFX prototypes measured *slower* than optimized
+   Asyncify at runtime (smaller binaries, though); the native CLIF
+   `stack_switch` work (see the WasmFX section) is what closed that gap. The
+   deferral stands, on cost/quality grounds.
+4. **No GC is a structural advantage in this design space.** TinyGo spends
+   real machinery on scanning suspended task stacks as GC roots (including
+   pinning permanently-deadlocked tasks so their stacks stay scannable).
+   Ryo's ownership + ARC model needs none of it. The price — RAII unwinding
+   across suspended stacks (§4.7), a problem Go/TinyGo never have — is
+   already budgeted.
+5. **Single-core atomics trick, noted for completeness:** TinyGo implements
+   atomics on single-core MCUs via interrupt-disable. Irrelevant to `hosted`
+   (real atomics), possibly relevant to a future Embassy-style `core`
+   executor crate (see *Parallelism on `core`* in the overview).
+
+One-line summary: TinyGo proves the cooperative single-threaded core of this
+plan is shippable as-is, contributes the compile-time stack-sizing idea, and
+marks the WASM fallback cost curve — while confirming that everything past
+Phase 2 (M:N, cancellation, RAII unwind, static lock safety) is territory
+Ryo enters largely alone.
+
+---
+
 ## Dependency Summary
 
 | Crate | Purpose | Alternatives considered |
@@ -1204,6 +1416,110 @@ Do not begin WASM work until all of the following are true:
    writing a mock backend for testing purposes first
 4. WASI 0.3 is stable (1.0 expected late 2026 / early 2027)
 
+### Cranelift `stack_switch` (native-side signal)
+
+Cranelift itself — Ryo's codegen backend — has shipped an experimental CLIF
+`stack_switch` instruction since 0.135 (present in 0.135.1, the version Ryo
+pins). It suspends the current stack and resumes another, both described by
+an in-memory `ControlContext { stack_pointer, frame_pointer,
+instruction_pointer }`; a payload value travels between stacks in a fixed
+register, and each switch consumes the target context (one-shot semantics).
+A `stack_switch_model` setting selects the lowering (`none` / `basic` /
+`update_windows_tib` — the last updates Windows' Thread Information Block,
+so Windows is anticipated). The TIB variant is not decorative: on Windows a
+stack switch must update the TIB's stack base/limit fields and SEH chain or
+exception handling and stack-overflow detection break — the same fields
+`corosensei` maintains today (mechanics detailed in the fibers sourcebook
+linked from References).
+
+Limits as of 0.135.1: **x64 Linux only**, explicitly experimental, and it is
+a raw codegen primitive — no stack allocation, growth, or guard pages, all of
+which `corosensei` provides today on every Ryo target. The instruction exists
+to serve Wasmtime's WasmFX implementation (the `ControlContext` layout is
+frame-pointer-chain compatible for that purpose), so its appearance is direct
+evidence for the "active implementation work in Wasmtime" status above.
+
+**Design and provenance.** The instruction is the SWAPSTACK primitive of
+Dolan et al. (2013), added to CLIF by Emrich and Hillerström for the WasmFX
+implementation in Wasmtime — see their [WAW 2025 talk note](https://dhil.net/research/papers/wasmfxtime-waw2025.pdf),
+which also covers keeping gdb/perf and backtraces working across switched
+stacks (relevant to §5.5 observability). Two of its findings bear directly
+on this plan:
+
+- **Symmetric core, asymmetric shell.** The CLIF instruction is symmetric
+  (no caller–callee relationship between stacks); the Wasm proposal's
+  asymmetric semantics are built in generated code around it. Ryo's
+  scheduler is likewise symmetric at its core (tasks switch to the
+  scheduler, the scheduler switches to tasks), so the primitive maps
+  directly onto the §1.3/§3.1 dispatch loop; `.await`-style caller–callee
+  relationships would be runtime bookkeeping, exactly as Wasmtime does it.
+- **Switch-through-a-call has a measured cost.** Their prototype performed
+  each switch as a libcall into the host — the same call-a-helper shape as
+  a `corosensei` resume — and going native gave up to **6×** in
+  microbenchmarks, attributed to return-address-predictor mispredictions
+  when the switch happens inside nested call frames and execution returns
+  on a different stack. A direct `corosensei` switch is a single assembly
+  call rather than nested host libcalls, so the magnitude will not transfer
+  1:1 — but the predictor-desync mechanism applies to any call-mediated
+  switch. This is the concrete performance argument (beyond one less
+  dependency) for emitting `stack_switch` from codegen once it covers Ryo's
+  target matrix.
+
+**Lineage.** The instruction is the belated realization of a request language
+authors have had for years: [wasmtime#5141](https://github.com/bytecodealliance/wasmtime/issues/5141)
+(2022, the Inko language) asked for exactly this — stack switching and
+growable stacks for lightweight processes on Cranelift. Three upstream answers
+from that thread remain load-bearing for this plan:
+
+- The proven pattern needed *nothing special* in Cranelift: at a yield point,
+  call a runtime helper that pushes registers, switches SP, and returns on
+  the other stack — i.e. precisely the `corosensei` call this plan makes from
+  generated code. Cranelift treats all calls as side-effecting and does not
+  move them, so a switch call placed at a yield point stays there.
+- A segmented-stack prologue hook ("if limit reached, call runtime function")
+  was sketched by upstream but never built; the GCC SplitStacks ABI it would
+  have mirrored is the design §1.1 deliberately avoids in favor of guard-page
+  growth. Stack growth stays a runtime concern — do not wait for Cranelift
+  here.
+- Cranelift does have explicit stack-limit bounds-check support (the
+  `stack_limit` mechanism), which §1.1's overflow path could use as a
+  complement to guard pages for delivering `StackOverflow` at the 128 KB cap.
+
+The follow-up migration attempt — [inko-lang/inko#674](https://github.com/inko-lang/inko/issues/674)
+("Replace LLVM with Cranelift", closed 2024 as not-planned; Inko still
+compiles via LLVM) — is the flip side of the story. **Stack switching was
+never among its blockers.** And the blockers it did list have aged: re-checked
+against Cranelift 0.135.1 (September 2026), the version Ryo pins:
+
+- **Tail calls — resolved.** [wasmtime#1065](https://github.com/bytecodealliance/wasmtime/issues/1065)
+  closed in 2024; `return_call` is implemented (driven by the Wasm tail-call
+  proposal).
+- **Debug info — partially resolved.** `cranelift-object` emits DWARF
+  `.eh_frame` unwind information out of the box, which is enough for
+  frame-level backtraces and correct unwinding. Source line tables remain
+  DIY via gimli (the `rustc_codegen_cranelift` approach), so Inko's original
+  complaint is reduced but not gone.
+- **Variadic FFI — still open** ([wasmtime#1030](https://github.com/bytecodealliance/wasmtime/issues/1030),
+  last activity 2025). Caller-side emulation per call site works for known
+  signatures, and libffi is the library fallback if emulation gets painful.
+- **Atomics — still SeqCst-only** in CLIF, though on x64 the lowering is
+  just a plain load/store plus a fence on stores, so the practical cost is
+  small. No relaxed orderings yet.
+- **`powi`, stack-slot reuse — still absent**, both minor (a runtime call;
+  a liveness pass Ryo would own anyway).
+
+Read for this plan: the fiber primitive is the easy part of a Cranelift-based
+concurrent language, and the 2022–2024 gap list has narrowed to variadic FFI
+and line-table debug info — both backend-general concerns for Ryo, neither
+tied to the concurrency design.
+
+**Implication:** `corosensei` remains the v0.4 stack-switching foundation;
+nothing in Phases 1–6 changes. If `stack_switch` matures to Ryo's full target
+matrix (x86_64 + aarch64 across Linux/macOS/Windows), codegen could emit it
+directly for task suspension instead of calling into `corosensei` — one less
+runtime dependency, same one-shot switch semantics. Revisit then, alongside
+the triggers in *Memory profile at scale*.
+
 ### Risk
 
 The single biggest risk is Safari. If WasmFX support lags significantly,
@@ -1226,11 +1542,12 @@ browser target is a stated product priority.
 | Phase 6.2 effect propagation balloons compile time | Medium | Medium | Measure on real corpus from Phase 6 start; budget under 10% overhead |
 | Phase 6.2 dyn-trace error messages turn out unhelpful | Medium | High | Dedicate engineering effort; this is the make-or-break detail for user acceptance |
 | Async drop deadline kills useful destructors | Low | Medium | Configurable deadline; default of 5s is generous; logs name the offender |
-| Task migration breaks user code that read OS TLS | Medium | Medium | `task_local!` from §3.6 + clear documentation |
+| Task migration breaks user code that read OS TLS | Medium | Medium | `task.local` from §3.6 + clear documentation |
 | System coroutine stack memory (~2 MB × `RYOMAXPROCS`) | Low | Low | Bounded by worker count; configurable via `RYO_FFI_STACK_SIZE` |
 | Nested FFI re-entry from C callbacks deadlocks a worker | Medium | High | Bounded overflow coroutines; exhaustion fails immediately with `FfiReentryLimit` — never queues (§3.5) |
 | `dispatcher.custom` from arbitrary code starves the runtime | Medium | Medium | `RYO_MAX_DISPATCHERS` + extra-worker budget with `ResourceExhausted`; capability-gated creation (§4.5) |
 | Conflated-channel HB semantics underspecified | Medium | Medium | Rules are draft (data-plane section); formalize in the Ownership-Lite work before Phase 6 sign-off |
+| Backtraces and debugger/perf tooling break across task stacks | Medium | Medium | The Wasmtime WasmFX retrofit needed explicit work to keep gdb/perf and backtraces useful across switched stacks; budget for it in Phase 5 (§5.5). Keep per-stack frame-pointer chains walkable — the layout constraint Cranelift's `ControlContext` already encodes |
 
 ---
 
@@ -1258,7 +1575,7 @@ browser target is a stated product priority.
 - Historical note: this document began as two drafts — an initial plan and
   the `concurrency_loom_kt.md` Loom/Kotlin alternative. The alternative was
   adopted and merged here.
-- Sibling design docs: [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`arc_optimizer.md`](arc_optimizer.md), [`go.md`](pl_references/go.md) (inspiration), [`proposals/wasm_target.md`](proposals/wasm_target.md)
+- Sibling design docs: [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`arc_optimizer.md`](arc_optimizer.md), [`go.md`](pl_references/go.md) (inspiration), [`proposals/wasm_target.md`](proposals/wasm_target.md), [`ryo-context-and-otel-proposal.md`](ryo-context-and-otel-proposal.md) (ambient context rides §1.2/§1.5/§3.6 machinery)
 - Upstream prior art:
   - [JEP 444: Virtual Threads (Java 21 GA)](https://openjdk.org/jeps/444) — Loom (inspiration for the FFI ergonomics goal).
   - [Loom OpenJDK wiki](https://wiki.openjdk.org/display/loom/Main).
@@ -1267,4 +1584,7 @@ browser target is a stated product priority.
   - [`corosensei`](https://github.com/Amanieu/corosensei) — Rust stack-switching primitive; the foundation of this plan.
   - [`may`](https://github.com/Xudong-Huang/may) — production Rust green-thread runtime (alternative reference).
   - Go's cgo internals — origin of the system-stack switching pattern this plan mirrors via corosensei.
+  - [Emrich & Hillerström, *Continuing Stack Switching in Wasmtime* (WAW 2025)](https://dhil.net/research/papers/wasmfxtime-waw2025.pdf) — design and retrofitting experience behind Cranelift's `stack_switch` instruction (see the WasmFX section).
+  - [Dale Weiler's fibers sourcebook](https://graphitemaster.github.io/fibers/) — the classic user-space context-switching walkthrough (SysV + Windows x64 asm, make/swap context). Its "avoid OS fiber primitives" analysis (ucontext's signal-mask syscall; `CreateFiber` owning the stack, blocking reuse) validates §1.1's custom stack allocator with caching, and its Windows TIB section explains what Cranelift's `update_windows_tib` model must replicate.
+  - [*Fiber in C++: Understanding the Basics*](https://agraphicsguynotes.com/posts/fiber_in_cpp_understanding_the_basics/) — fiber-from-first-principles tutorial (x64 + Arm64 register/ABI walkthrough, job-system motivation, fibers as symmetric stackful coroutines vs C++20's stackless asymmetric ones). Useful onboarding reading for the PoC spike.
   - [WebAssembly stack-switching proposal](https://github.com/WebAssembly/stack-switching) — future path to true Loom semantics on WASM.

@@ -83,6 +83,8 @@
 
 > **Status (m8.4.2):** Promotion executed — the merged plan now lives at `concurrency.md`. Resolved en route: L-1 (`Dispatcher`/`with_dispatcher` rename), L-2 (overflow system coroutines, `RYO_FFI_OVERFLOW_DEPTH`, fail-fast `FfiReentryLimit`), L-3 (`with_dispatcher` is `[yields]`; `task.pin()` interaction in §6.2.6), L-6 (APIs marked proposal-only, spec edits still owed). Still open: L-4, L-5, C-2…C-5.
 
+> **Status (2026-09-15):** All remaining concurrency items resolved in `concurrency.md`: C-2 (new §4.2.2 — D5 scoped borrows split by pass, `par_*` placed on the ambient dispatcher, not a separate pool), C-3 (context-frame pointer reserved in §1.2, cancellation sources unified in §1.5, ambient-context-as-structured-task-local in §3.6, `ctx.done()` select arm in §4.3), C-4 (`task_local!` macro replaced with Ryo-idiomatic `task.local[T]` builtin, all mentions swept), C-5 (D9 note in Overview: hosted-only; `core` runs FFI on the real OS stack), L-4 (blocking-pool cap configurable from day one via `RYOBLOCKINGPOOL`/`ryo.toml`), L-5 (conflated × select waker semantics drafted in §4.3, pending HB formalization). No open items remain for `concurrency.md`.
+
 ### 5.1 `concurrency.md` (base plan)
 
 | ID | Sev | Issue | Required fix | Spec relationship |
@@ -139,23 +141,23 @@
 | `std_ext.md` | §4.11 FFI workflow; D4 (unsafe in wrappers); D10 (simd operators); D9 (profile gating) | D9 pay-per-import alignment; U-good-3 `ffi` package | None — compatible |
 | `tensor.md` | D4 (unsafe containment); user generics (v0.3); D10 (`a + b`, `matmul` notation) | D1/D3 two-tier rule solves its unasked views question (T-4); D5 CPU parallelism | None after T-1…T-5 — compatible |
 | `unsafe.md` | §17 FFI; base spec §1.2 | **Is** the D4 gatekeeper implementation; U-good-1…5 strengthen D4 | U-1 flag naming; U-2 policy muscle — resolved by adopting as companion |
-| `concurrency.md` | D9 (hosted runtime); §9 spec | C-good-2 task-locals are GAP-1's foundation; C-good-3 answers OTel Q2 | C-1 resolved by loom adoption; C-2/C-3 integration sections owed |
+| `concurrency.md` | D9 (hosted runtime); §9 spec | C-good-2 task-locals are GAP-1's foundation; C-good-3 answers OTel Q2 | C-1 resolved by loom adoption; C-2/C-3 integration sections added 2026-09-15 (§4.2.2, §1.2/§1.5/§3.6/§4.3) |
 | `concurrency_loom_kt.md` | `concurrency.md` phases; D9; §17 FFI | L-good-2 solves C-1; L-good-4 feeds GUI §11 | L-1 naming collision with `std.pool`; L-2/L-3 amendments owed |
 
-**Direction of influence:** all reviewed proposals fit *under* D1–D11; none requires changing the final spec. The only reverse-flow items are the **G-1 field-visibility gap** (base-spec amendment), the **U-good-1…5 adoptions** (candidate D4 enrichment), and the **C-2/C-3 integration text** (concurrency plan owes alignment to D5 and GAP-1, not vice versa) — all listed here for approval, none applied.
+**Direction of influence:** all reviewed proposals fit *under* D1–D11; none requires changing the final spec. The only reverse-flow items are the **G-1 field-visibility gap** (base-spec amendment), the **U-good-1…5 adoptions** (candidate D4 enrichment), and the **C-2/C-3 integration text** (concurrency plan owed alignment to D5 and GAP-1, not vice versa — applied 2026-09-15); the first two remain listed for approval, unapplied.
 
 ---
 
 ## 8. Recommended Action Order
 
-1. **Concurrency decision (time-boxed):** promote `concurrency_loom_kt.md` to the plan with amendments L-1…L-3 and integration sections C-2 (D5) / C-3 (GAP-1) — *before Phase 1 begins*, per its own trigger condition.
+1. **Concurrency decision (done):** `concurrency_loom_kt.md` promoted with L-1…L-3; integration sections C-2 (D5) / C-3 (GAP-1) landed 2026-09-15. Remaining spec-side debt: the L-6 user-facing spec §9 text for proposal-only APIs.
 2. **X-1 + T-1 + U-3** — global `drop(move self)` sweep (cheap, prevents copied bugs).
 3. **G-1 (X-2 / U-4)** — decide field-level visibility; everything FFI-shaped blocks on it.
 4. **U-1 + U-2** — unify the unsafe gate on `allow_unsafe = true` and merge unsafe.md's operation set + `unsafe fn` + `ffi` package into D4's record.
 5. **T-2, T-3, T-5** — the three *actual memory-safety* holes in tensor.md (negative index, strides, GPU sync).
 6. **T-4** — write the tensor-views section using the two-tier rule (the highest-value design addition).
 7. **SE-1…SE-3** — harden the JSON shim (API shape, error mapping, Drop).
-8. Everything else (SE-4/5, T-6/7/8, U-5/6/7, C-4/5, L-4/5/6, X-3/4/5) — normal review cycle.
+8. Everything else (SE-4/5, T-6/7/8, U-5/6/7, L-6's spec §9 text, X-3/4/5) — normal review cycle. C-4/5 and L-4/5 resolved 2026-09-15.
 
 ---
 
