@@ -89,7 +89,7 @@ real demand materializes, the fix is a profile-agnostic scope construct (a
 `thread.scope` analog with the same join-witness exemption), not a relaxation
 of this gate. Not a v0.4 item.
 
-#### Bundled `core` executor (Draft — v0.4+)
+### Bundled `core` executor (Draft — v0.4+)
 
 Draft future direction — would amend D9 rule 3; requires approval before
 adoption. A TinyGo-class minimal scheduler
