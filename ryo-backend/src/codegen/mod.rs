@@ -34,7 +34,7 @@ use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
 mod arith;
@@ -1057,8 +1057,19 @@ impl<M: Module> Codegen<M> {
             // The promotion flag must start cleared: the
             // free-before-overwrite in emit_ensure_heap_for_view_base
             // and the scheduled promo frees both branch on it, and a
-            // first-iteration garbage flag would free garbage.
-            for &slot in ctx.promo_slots.values() {
+            // first-iteration garbage flag would free garbage. Iterate
+            // promotion_frees (deduped), not the HashMap: sidecar order
+            // is deterministic, HashMap iteration order is not — identical
+            // input must yield identical emission.
+            let mut zeroed: HashSet<TirRef> = HashSet::new();
+            for pf in &func_sidecar.promotion_frees {
+                if !zeroed.insert(pf.base) {
+                    continue;
+                }
+                let slot = *ctx
+                    .promo_slots
+                    .get(&pf.base)
+                    .expect("every promotion-free base has a scratch slot");
                 let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
                 let zero = builder.ins().iconst(types::I64, 0);
                 builder.ins().store(MemFlagsData::trusted(), zero, addr, 0);
