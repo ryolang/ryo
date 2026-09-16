@@ -19,10 +19,18 @@ shared with the host. One porting fix was needed: `siginfo_t.si_addr` is a
 method on Linux, a field on macOS.
 **Machine (Windows rows):** Windows 11 24H2 ARM64 Pro VM (UTM/QEMU, 4 GB
 RAM) on the same host. corosensei 0.3.4 has no aarch64-windows backend, so
-the binary was cross-built on macOS for `x86_64-pc-windows-gnu` (brew
-mingw-w64 as linker via a `.cargo/config.toml` in the PoC; the in-guest
-MSYS2 GNU toolchain silently no-ops under x64 emulation) and run under
-Windows-on-ARM x64 emulation. Switch-cost numbers are therefore
+the binary was cross-built on macOS and run under Windows-on-ARM x64
+emulation (the in-guest MSYS2 GNU toolchain silently no-ops under x64
+emulation). Cross-build recipe:
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+brew install mingw-w64
+# .cargo/config.toml: [target.x86_64-pc-windows-gnu] linker = "x86_64-w64-mingw32-gcc"
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+Switch-cost numbers are therefore
 emulation-inflated — read them as "works and is fast enough under
 emulation", not native performance. The msvc build remains untried (needs
 VS Build Tools).

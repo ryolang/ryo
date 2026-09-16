@@ -144,7 +144,7 @@
 | `concurrency.md` | D9 (hosted runtime); §9 spec | C-good-2 task-locals are GAP-1's foundation; C-good-3 answers OTel Q2 | C-1 resolved by loom adoption; C-2/C-3 integration sections added 2026-09-15 (§4.2.2, §1.2/§1.5/§3.6/§4.3) |
 | `concurrency_loom_kt.md` | `concurrency.md` phases; D9; §17 FFI | L-good-2 solves C-1; L-good-4 feeds GUI §11 | L-1…L-3 resolved in the m8.4.2 promotion |
 
-**Direction of influence:** all reviewed proposals fit *under* D1–D11; none requires changing the final spec. The only reverse-flow items are the **G-1 field-visibility gap** (base-spec amendment), the **U-good-1…5 adoptions** (candidate D4 enrichment), and the **C-2/C-3 integration text** (concurrency plan owed alignment to D5 and GAP-1, not vice versa — applied 2026-09-15); the first two remain listed for approval, unapplied.
+**Direction of influence:** all reviewed proposals fit *under* D1–D11; none requires changing the final spec beyond the listed reverse-flow items: the **G-1 field-visibility gap** (base-spec amendment), the **U-good-1…5 adoptions** (candidate D4 enrichment), the **C-2/C-3 integration text** (concurrency plan owed alignment to D5 and GAP-1, not vice versa — applied 2026-09-15), and **L-6's user-facing spec §9 text** for the concurrency plan's proposal-only APIs. G-1, U-good-1…5, and L-6 remain listed for approval, unapplied.
 
 ---
 
