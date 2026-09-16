@@ -200,6 +200,22 @@ fn asan_early_return_live_local() {
 }
 
 #[test]
+fn asan_last_use_in_returning_arm_fallthrough() {
+    run_asan_smoke(
+        common::find_fixture("last_use_in_returning_arm_fallthrough"),
+        "last_use_in_returning_arm_fallthrough",
+    );
+}
+
+#[test]
+fn asan_last_use_in_fallthrough_arm_sibling_returns() {
+    run_asan_smoke(
+        common::find_fixture("last_use_in_fallthrough_arm_sibling_returns"),
+        "last_use_in_fallthrough_arm_sibling_returns",
+    );
+}
+
+#[test]
 fn asan_slice_view_no_free() {
     run_asan_smoke(
         common::find_fixture("slice_view_no_free"),

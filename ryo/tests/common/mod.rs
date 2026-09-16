@@ -399,6 +399,44 @@ fn main():
 ",
     ),
     (
+        // Conditional last use inside an arm that RETURNS: the in-arm
+        // anchor covers the taken path (with the return epilogue), and
+        // the branch-exit anchor must cover the not-taken path, which
+        // falls through to the function end with the owner still live.
+        // The heap-backed initializer (runtime concat, > SSO inline
+        // capacity) gives ryo_str_free a real allocation to release.
+        "last_use_in_returning_arm_fallthrough",
+        "\
+fn f():
+\ts: str = int_to_str(42) + \"abcdefghijklmnopqrstuvwxyz0123456789\"
+\td = false
+\tif d:
+\t\tprint(s)
+\t\treturn
+
+fn main():
+\tf()
+",
+    ),
+    (
+        // Same family, mirrored arms: the last use sits in an arm that
+        // FALLS THROUGH while a sibling arm returns. The implicit-else
+        // path reaches the merge with the owner still live — only the
+        // branch-exit anchor frees it there.
+        "last_use_in_fallthrough_arm_sibling_returns",
+        "\
+fn f(x: int):
+\ts: str = int_to_str(42) + \"abcdefghijklmnopqrstuvwxyz0123456789\"
+\tif x == 1:
+\t\tprint(s)
+\telif x == 2:
+\t\treturn
+
+fn main():
+\tf(3)
+",
+    ),
+    (
         // M8.4: a view must not be freed (it owns nothing), and the
         // owner is freed once at its own last use — after the view's.
         "slice_view_no_free",

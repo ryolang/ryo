@@ -1148,3 +1148,32 @@ fn heap_str_last_use_in_inline_assert() {
         stderr
     );
 }
+
+#[test]
+fn last_use_in_returning_arm_fallthrough_runs_clean() {
+    // The owner's only read is inside a returning if-arm: the taken
+    // path frees in-arm (plus the return epilogue), the not-taken path
+    // must still free at the branch exit — the fallthrough reaches the
+    // function end with the owner live and no in-arm anchor firing.
+    // Heap-backed initializer (runtime concat, > SSO inline capacity)
+    // so ryo_str_free releases a real allocation. The Valgrind/ASan
+    // fixtures of the same name are the hard leak net; this is the
+    // behavioral guard.
+    assert_ryo_output(
+        "last_use_ret_arm.ryo",
+        "fn f(take: bool):\n\ts: str = int_to_str(42) + \"abcdefghijklmnopqrstuvwxyz0123456789\"\n\tif take:\n\t\tprint(s)\n\t\treturn\n\nfn main():\n\tf(true)\n\tf(false)\n\tprint(\"done\")\n",
+        "42abcdefghijklmnopqrstuvwxyz0123456789done",
+    );
+}
+
+#[test]
+fn last_use_in_fallthrough_arm_sibling_returns_runs_clean() {
+    // Mirrored shape: the last use sits in an arm that falls through
+    // while a sibling arm returns — the implicit-else path reaches the
+    // merge with the owner live and must free at the branch exit.
+    assert_ryo_output(
+        "last_use_sibling_ret.ryo",
+        "fn f(x: int):\n\ts: str = int_to_str(42) + \"abcdefghijklmnopqrstuvwxyz0123456789\"\n\tif x == 1:\n\t\tprint(s)\n\telif x == 2:\n\t\treturn\n\nfn main():\n\tf(1)\n\tf(2)\n\tf(3)\n\tprint(\"done\")\n",
+        "42abcdefghijklmnopqrstuvwxyz0123456789done",
+    );
+}
