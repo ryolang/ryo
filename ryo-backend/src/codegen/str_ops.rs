@@ -2,7 +2,8 @@
 //! under the 2000-line CI cap (`scripts/check_file_length.sh`).
 //!
 //! The bodies of `__ryo_slice` / `__ryo_bytes_slice` and the
-//! short-literal specialization of `ryo_str_eq` are emitted as inline
+//! short-literal specialization of `ryo_str_eq` / `ryo_bytes_eq` are
+//! emitted as inline
 //! Cranelift IR at the call site instead of extern calls: each body is
 //! a handful of instructions, and the call boundary cost dominated
 //! (`benchmarks/string_slicing` made two such calls per scan
@@ -14,7 +15,6 @@ use cranelift::codegen::ir::{BlockArg, MemFlagsData};
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::tir::{TirData, TirRef, TirTag};
-use ryo_core::types::StringId;
 
 use super::{Codegen, FunctionContext};
 
@@ -111,12 +111,9 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// `str`/`strview` equality (M8.4 §3.3). When either operand is a
-    /// string literal of at most `INLINE_LITERAL_MAX` bytes, emits an
-    /// inline compare — length check plus per-byte compares of the
-    /// other side against the compile-time bytes, gated behind the
-    /// length check so loads never run past the other buffer. Anything
-    /// else falls back to the extern `ryo_str_eq(ptr, len, ptr, len)`.
+    /// `str`/`strview` equality (M8.4 §3.3): shared pair-compare with
+    /// `StrConst`/`BytesConst` literal specialization and the
+    /// `ryo_str_eq` fallback.
     pub(crate) fn emit_str_eq(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -124,26 +121,60 @@ impl<M: Module> Codegen<M> {
         lhs: TirRef,
         rhs: TirRef,
     ) -> Result<Value, String> {
-        // Operands may be owned str triples or strview view pairs
-        // (mixed equality wraps the owned side in ToView); only
-        // (ptr, len) is read.
+        Self::emit_pair_eq(
+            builder,
+            ctx,
+            lhs,
+            rhs,
+            tag == TirTag::StrCmpNe,
+            "ryo_str_eq",
+        )
+    }
+
+    /// `bytes`/`bytesview` equality (M8.4.2): same literal
+    /// specialization as `emit_str_eq`, `ryo_bytes_eq` fallback.
+    pub(crate) fn emit_bytes_eq(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        tag: TirTag,
+        lhs: TirRef,
+        rhs: TirRef,
+    ) -> Result<Value, String> {
+        Self::emit_pair_eq(
+            builder,
+            ctx,
+            lhs,
+            rhs,
+            tag == TirTag::BytesCmpNe,
+            "ryo_bytes_eq",
+        )
+    }
+
+    /// Shared (ptr, len) equality. When either operand is a string or
+    /// bytes literal of at most `INLINE_LITERAL_MAX` bytes, emits an
+    /// inline compare — length check plus per-byte compares of the
+    /// other side against the compile-time bytes, gated behind the
+    /// length check so loads never run past the other buffer. Anything
+    /// else falls back to the extern `fallback(ptr, len, ptr, len)`.
+    /// `invert` flips the result for the `!=` tags.
+    fn emit_pair_eq(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        lhs: TirRef,
+        rhs: TirRef,
+        invert: bool,
+        fallback: &'static str,
+    ) -> Result<Value, String> {
+        // Operands may be owned triples or view pairs (mixed equality
+        // wraps the owned side in ToView); only (ptr, len) is read.
         let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
         let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
 
-        let literal = Self::strconst_id(ctx, lhs)
-            .map(|id| (true, id))
-            .or_else(|| Self::strconst_id(ctx, rhs).map(|id| (false, id)));
-        let mut inline = None;
-        if let Some((is_lhs, id)) = literal {
-            let content = ctx.pool.str(id);
-            if content.len() <= INLINE_LITERAL_MAX {
-                let mut bytes = [0u8; INLINE_LITERAL_MAX];
-                bytes[..content.len()].copy_from_slice(content.as_bytes());
-                inline = Some((is_lhs, content.len(), bytes));
-            }
-        }
+        let literal = Self::literal_bytes(ctx, lhs)
+            .map(|lit| (true, lit))
+            .or_else(|| Self::literal_bytes(ctx, rhs).map(|lit| (false, lit)));
 
-        let result = if let Some((is_lhs, n, bytes)) = inline {
+        let result = if let Some((is_lhs, (n, bytes))) = literal {
             let (other_ptr, other_len) = if is_lhs {
                 (r_ptr, r_len)
             } else {
@@ -151,18 +182,19 @@ impl<M: Module> Codegen<M> {
             };
             Self::emit_literal_eq(builder, other_ptr, other_len, n, &bytes)
         } else {
+            let int_type = ctx.int_type;
             let eq_ref = Self::declare_runtime_fn(
                 ctx,
                 builder,
-                "ryo_str_eq",
-                &[ctx.int_type, types::I64, ctx.int_type, types::I64],
+                fallback,
+                &[int_type, types::I64, int_type, types::I64],
                 &[types::I8],
             )?;
             let call = builder.ins().call(eq_ref, &[l_ptr, l_len, r_ptr, r_len]);
             builder.inst_results(call)[0]
         };
 
-        if tag == TirTag::StrCmpNe {
+        if invert {
             let one = builder.ins().iconst(types::I8, 1);
             Ok(builder.ins().bxor(result, one))
         } else {
@@ -170,16 +202,36 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// The `StringId` behind a `str`-typed operand when it is
-    /// statically a string literal — directly (`StrConst`) or through
-    /// the owner→view `ToView` wrap. Anything else is `None`.
-    fn strconst_id(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
+    /// The compile-time bytes behind an operand when it is statically a
+    /// string or bytes literal of at most `INLINE_LITERAL_MAX` bytes —
+    /// directly (`StrConst`/`BytesConst`) or through the owner→view
+    /// `ToView` wrap. Anything else (or a longer literal) is `None`.
+    /// Returns `(len, bytes)`; `bytes[..len]` is the content.
+    fn literal_bytes(
+        ctx: &FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Option<(usize, [u8; INLINE_LITERAL_MAX])> {
         let inst = ctx.tir.inst(r);
-        match (inst.tag, inst.data) {
-            (TirTag::StrConst, TirData::Str(id)) => Some(id),
-            (TirTag::ToView, TirData::UnOp(inner)) => Self::strconst_id(ctx, inner),
-            _ => None,
+        let (id, is_bytes) = match (inst.tag, inst.data) {
+            (TirTag::StrConst, TirData::Str(id)) => (id, false),
+            (TirTag::BytesConst, TirData::Str(id)) => (id, true),
+            (TirTag::ToView, TirData::UnOp(inner)) => return Self::literal_bytes(ctx, inner),
+            _ => return None,
+        };
+        // A `str` "A" and a `bytes` b"A" share one StringId (content
+        // dedup); bytes payloads need not be UTF-8, so each family
+        // reads through its own pool accessor.
+        let content: &[u8] = if is_bytes {
+            ctx.pool.bytes_payload(id)
+        } else {
+            ctx.pool.str(id).as_bytes()
+        };
+        if content.len() > INLINE_LITERAL_MAX {
+            return None;
         }
+        let mut bytes = [0u8; INLINE_LITERAL_MAX];
+        bytes[..content.len()].copy_from_slice(content);
+        Some((content.len(), bytes))
     }
 
     /// Inline `other == <n known bytes>`: `other_len == n`, then `n`
