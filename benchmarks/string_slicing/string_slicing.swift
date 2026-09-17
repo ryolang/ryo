@@ -10,7 +10,12 @@ func countFox(_ text: String) -> Int {
 	var count = 0
 	var i = utf8.startIndex
 	while let end = utf8.index(i, offsetBy: 3, limitedBy: utf8.endIndex) {
-		if utf8[i..<end].elementsEqual(fox) {
+		// UTF-8 char-boundary validation, mirroring Ryo's strview
+		// slice contract: both endpoints must not land on a
+		// continuation byte (top bits 10).
+		let startOK = (utf8[i] & 0xC0) != 0x80
+		let endOK = end == utf8.endIndex || (utf8[end] & 0xC0) != 0x80
+		if startOK && endOK && utf8[i..<end].elementsEqual(fox) {
 			count += 1
 		}
 		i = utf8.index(after: i)
