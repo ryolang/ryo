@@ -1,7 +1,7 @@
 //! Bytes codegen (M8.4.2) — split from `expr.rs` to keep both files
 //! under the 2000-line CI cap (`scripts/check_file_length.sh`).
 //! Everything here mirrors the `str` path: same 24-byte fat-pointer
-//! ABI, same packed-u128 literal convention, `ryo_bytes_*` symbols.
+//! ABI, `ryo_bytes_*` symbols.
 //! Also hosts the shared `.rodata` dedup helpers (`store_string` /
 //! `store_bytes`), displaced from `mod.rs` by the same cap.
 
@@ -12,29 +12,12 @@ use ryo_core::tir::{Tir, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeKind};
 use std::collections::HashMap;
 
-use super::expr::CapRule;
 use super::{Codegen, FunctionContext, ValueRepr};
 
 impl<M: Module> Codegen<M> {
-    /// Bytes-producing variant of `emit_rv_str_call`: appends the
-    /// derived `cap` word so the triple lands entirely in SSA values.
-    /// Does NOT touch `ctx.inst_values` — caching is the caller's job.
-    pub(crate) fn emit_rv_bytes_call(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        fn_name: &str,
-        args: &[(Type, Value)],
-        cap_rule: CapRule,
-    ) -> Result<ValueRepr, String> {
-        let (ptr, len) = Self::emit_rv_pair_call(builder, ctx, fn_name, args)?;
-        let cap = match cap_rule {
-            CapRule::Static => builder.ins().iconst(types::I64, 0),
-        };
-        Ok(ValueRepr::Bytes { ptr, len, cap })
-    }
-
-    /// Emit a bytes literal as a fat pointer triple (ptr, len, cap=0)
-    /// by calling `ryo_bytes_from_literal` at runtime. Mirrors
+    /// Emit a bytes literal as a fat pointer triple (ptr, len, cap=0):
+    /// the `.rodata` data pointer, the compile-time length, and the
+    /// static cap-0 sentinel — pure constants, no runtime call. Mirrors
     /// `emit_str_literal_fat`; the payload is raw bytes (not
     /// necessarily UTF-8), so it reads through `pool.bytes_payload`.
     pub(crate) fn emit_bytes_literal_fat(
@@ -47,14 +30,12 @@ impl<M: Module> Codegen<M> {
         let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
         let rodata_ptr = builder.ins().symbol_value(ctx.int_type, data_ref);
         let lit_len = builder.ins().iconst(types::I64, content.len() as i64);
-
-        Self::emit_rv_bytes_call(
-            builder,
-            ctx,
-            "ryo_bytes_from_literal",
-            &[(ctx.int_type, rodata_ptr), (types::I64, lit_len)],
-            CapRule::Static,
-        )
+        let cap = builder.ins().iconst(types::I64, 0);
+        Ok(ValueRepr::Bytes {
+            ptr: rodata_ptr,
+            len: lit_len,
+            cap,
+        })
     }
 
     /// Declare `extern "C" fn ryo_bytes_free(ptr: *mut u8, cap: u64)` for

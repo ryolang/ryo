@@ -243,39 +243,6 @@ unsafe fn write_str_slot(out: *mut RyoStrFat, bytes: &[u8]) {
     }
 }
 
-/// Return-value packing for the string-producing runtime functions
-/// (Phase 0 ABI modernization): `{ptr, len}` is returned as one
-/// `u128` (lo = ptr, hi = len).
-///
-/// Why packed `u128` instead of a struct: this crate is compiled by
-/// rustc, and a 24-byte `RyoStrFat` return lowers to a hidden sret
-/// pointer on every supported target, while a 16-byte `{ptr, len}`
-/// struct still srets under the MSVC x64 ABI. `u128` under the Rust
-/// ABI returns in registers everywhere (rax:rdx on x86-64 SysV and
-/// Win64, x0:x1 on aarch64) — the convention Cranelift's
-/// SystemV/WindowsFastcall/AppleAarch64 return tables match. These
-/// functions are therefore `#[unsafe(no_mangle)] pub fn` (Rust ABI),
-/// not `extern "C"`; the build.rs lockstep rebuild keeps this crate
-/// and the compiler on the same rustc, so the unstable Rust ABI
-/// cannot drift within a build.
-///
-/// `cap` is deliberately NOT in the return value: it is derivable at
-/// the call site — 0 for `ryo_str_from_literal` (the static .rodata
-/// sentinel) and `len` for the remaining packed-u128 allocating
-/// producers (the concats; neither over-allocates, and `__ryo_str_push`
-/// manages growth capacity through its unchanged slot ABI). Producers
-/// that need `cap != len` — or SSO inline results — use the slot-out
-/// ABI (`write_str_slot`) instead.
-#[inline]
-fn pack_pair(ptr: *mut u8, len: u64) -> u128 {
-    ((len as u128) << 64) | (ptr as usize as u128)
-}
-
-#[cfg(test)]
-fn unpack_pair(v: u128) -> (*mut u8, u64) {
-    (v as u64 as *mut u8, (v >> 64) as u64)
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn ryo_str_alloc(cap: u64) -> *mut u8 {
     if cap == 0 {
@@ -352,18 +319,6 @@ fn null_abort() -> ! {
     unsafe { abort() }
 }
 
-/// # Safety
-/// `data` must point to `len` readable bytes (or be dangling when `len == 0`).
-#[unsafe(no_mangle)]
-pub unsafe fn ryo_str_from_literal(data: *const u8, len: u64) -> u128 {
-    if len == 0 {
-        return pack_pair(core::ptr::null_mut(), 0);
-    }
-    // Point directly into rodata; the cap=0 static sentinel is derived
-    // at the call site (see `pack_pair` docs).
-    pack_pair(data as *mut u8, len)
-}
-
 /// Materialize an owned `str` copy from a `strview` (M8.4.1.2), written
 /// as a tagged slot: inline when `len <= 23`, else a fresh heap buffer
 /// with growth headroom. `len == 0` yields the inline-empty slot.
@@ -394,55 +349,6 @@ fn slice_fail(msg: &str) -> ! {
     write_all(STDERR_FD, b"\n".as_ptr(), 1);
     // SAFETY: exit never returns.
     unsafe { exit(101) }
-}
-
-/// True when byte offset `i` in `s[..len]` lies on a UTF-8 char
-/// boundary (start, end, or a non-continuation byte).
-///
-/// # Safety
-/// `s` must point to `len` readable bytes (or be null/dangling if `len == 0`).
-unsafe fn is_char_boundary(s: *const u8, len: u64, i: u64) -> bool {
-    if i == 0 || i == len {
-        return true;
-    }
-    // SAFETY: caller contract — s points to len readable bytes; 0 < i < len here.
-    let b = unsafe { *s.add(i as usize) };
-    b & 0xC0 != 0x80
-}
-
-/// Runtime backing for M8.4 `str` slicing (`s[start:end]`). Out-of-range
-/// and non-boundary indices panic at slice creation (final spec §3.1);
-/// panic here means stderr message + exit 101, matching `__ryo_panic`.
-///
-/// Load-bearing invariant: the returned `ptr` is NULL when the
-/// requested range is empty *and* the base is empty, and every consumer
-/// guards on `len == 0` before dereferencing — so the packed `ptr` may
-/// be null whenever the viewed length is 0.
-///
-/// # Safety
-/// `ptr` must point to `len` readable bytes (or be null if `len == 0`).
-/// Panics (exit 101) when `start > end`, `end > len`, or either bound
-/// is not a UTF-8 char boundary.
-#[unsafe(no_mangle)]
-pub unsafe fn __ryo_slice(ptr: *const u8, len: u64, start: u64, end: u64) -> u128 {
-    if start > end || end > len {
-        slice_fail("slice index out of range");
-    }
-    // SAFETY: caller contract — ptr points to len readable bytes.
-    let bounds_ok = unsafe { is_char_boundary(ptr, len, start) && is_char_boundary(ptr, len, end) };
-    if !bounds_ok {
-        slice_fail("slice index is not a UTF-8 char boundary");
-    }
-    // SAFETY: `start <= end <= len` checked above, so ptr.add(start)
-    // stays within (or one past) the base allocation.
-    let out_ptr = unsafe {
-        if len == 0 {
-            core::ptr::null()
-        } else {
-            ptr.add(start as usize)
-        }
-    };
-    pack_pair(out_ptr as *mut u8, end - start)
 }
 
 /// # Safety
@@ -799,11 +705,9 @@ pub unsafe extern "C" fn ryo_bool_to_str(out: *mut RyoStrFat, value: u8) {
 
 // ---------- bytes (M8.4.2) ----------
 //
-// Owned `bytes` buffers mirror the `str` ABI exactly: literals still
-// return `{ptr, len}` packed in one `u128` (see `pack_pair`) with `cap`
-// derived at the call site, while concat, from_view, and the
-// conversions write tagged slots; `__ryo_bytes_push` manages growth
-// through the same 24-byte slot ABI.
+// Owned `bytes` buffers mirror the `str` ABI exactly: concat, from_view,
+// and the conversions write tagged slots; `__ryo_bytes_push` manages
+// growth through the same 24-byte slot ABI.
 // No UTF-8 invariants anywhere in this family.
 
 #[unsafe(no_mangle)]
@@ -827,18 +731,6 @@ pub unsafe extern "C" fn ryo_bytes_free(ptr: *mut u8, cap: u64) {
 pub unsafe extern "C" fn ryo_bytes_realloc(ptr: *mut u8, old_cap: u64, new_cap: u64) -> *mut u8 {
     // SAFETY: caller contract forwarded to `ryo_str_realloc`.
     unsafe { ryo_str_realloc(ptr, old_cap, new_cap) }
-}
-
-/// # Safety
-/// `data` must point to `len` readable bytes (or be dangling when `len == 0`).
-#[unsafe(no_mangle)]
-pub unsafe fn ryo_bytes_from_literal(data: *const u8, len: u64) -> u128 {
-    if len == 0 {
-        return pack_pair(core::ptr::null_mut(), 0);
-    }
-    // Point directly into rodata; the cap=0 static sentinel is derived
-    // at the call site (see `pack_pair` docs).
-    pack_pair(data as *mut u8, len)
 }
 
 /// Materialize an owned `bytes` copy from a `bytesview` (M8.4.2),
@@ -943,30 +835,6 @@ pub unsafe extern "C" fn ryo_bytes_eq(
 ) -> u8 {
     // SAFETY: caller contract forwarded to `ryo_str_eq`.
     unsafe { ryo_str_eq(a_ptr, a_len, b_ptr, b_len) }
-}
-
-/// Runtime backing for M8.4.2 `bytes` slicing (`b[start:end]`).
-/// Bounds-checked like `__ryo_slice`, but WITHOUT the UTF-8 char-boundary
-/// check — the single behavioral divergence from `strview`.
-///
-/// # Safety
-/// `ptr` must point to `len` readable bytes (or be null if `len == 0`).
-/// Panics (exit 101) when `start > end` or `end > len`.
-#[unsafe(no_mangle)]
-pub unsafe fn __ryo_bytes_slice(ptr: *const u8, len: u64, start: u64, end: u64) -> u128 {
-    if start > end || end > len {
-        slice_fail("slice index out of range");
-    }
-    // SAFETY: `start <= end <= len` checked above, so ptr.add(start)
-    // stays within (or one past) the base allocation.
-    let out_ptr = unsafe {
-        if len == 0 {
-            core::ptr::null()
-        } else {
-            ptr.add(start as usize)
-        }
-    };
-    pack_pair(out_ptr as *mut u8, end - start)
 }
 
 /// Runtime backing for `bytes_push(b: inout bytes, x: int)` (M8.4.2

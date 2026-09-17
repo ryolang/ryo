@@ -447,8 +447,9 @@ fn assert_explicit_24byte_slots(clif: &str, expected: usize) {
 fn clif_string_ops_slot_out_producers() {
     // Slot-out runtime ABI: string producers (`int_to_str`, from_view,
     // conversions, concat) write a tagged 24-byte slot passed as arg 0
-    // and return nothing; literals and slices still return {ptr, len}
-    // packed in one u128. Slots in this program: 5 extraction scratch
+    // and return nothing; literals and slices are inlined as constants
+    // and pointer arithmetic — no packed-u128 call remains anywhere.
+    // Slots in this program: 5 extraction scratch
     // slots (the `"a" + "b"` operands, the `s + t` operands, and the
     // print arg — one fresh slot per extraction site) + 3 slot-out
     // call slots (the `"a" + "b"` concat, `int_to_str`, and the
@@ -470,8 +471,8 @@ fn clif_string_ops_slot_out_producers() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
-        stdout.contains("-> i128"),
-        "literal runtime calls still return the packed u128 pair: {}",
+        !stdout.contains("-> i128"),
+        "literal/slice packing is inlined; no call may return the packed u128 pair: {}",
         stdout
     );
     assert_explicit_24byte_slots(&stdout, 8);
@@ -502,8 +503,8 @@ fn clif_bytes_ops_slot_out_producers() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
-        stdout.contains("-> i128"),
-        "literal/slice runtime calls still return the packed u128 pair: {}",
+        !stdout.contains("-> i128"),
+        "literal/slice packing is inlined; no call may return the packed u128 pair: {}",
         stdout
     );
     assert_explicit_24byte_slots(&stdout, 9);
@@ -588,12 +589,11 @@ fn clif_entry_block(clif: &str) -> &str {
 
 #[test]
 fn clif_str_literal_materialized_once_per_function() {
-    // A string literal is pure .rodata packing with no side effects,
-    // so each distinct literal must be materialized exactly once per
-    // function — hoisted into the entry block — instead of emitting a
-    // fresh ryo_str_from_literal call at every use (loop bodies
-    // included). `ryo_str_from_literal(ptr, len) -> i128` is the only
-    // (i64, i64) -> i128 runtime call this program can emit.
+    // A string literal is pure .rodata packing (`symbol_value` +
+    // `iconst`, no runtime call), so each distinct literal must be
+    // materialized exactly once per function — hoisted into the entry
+    // block — instead of re-packing the same (ptr, len) at every use
+    // (loop bodies included).
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -610,20 +610,21 @@ fn clif_str_literal_materialized_once_per_function() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let is_from_literal = |sig: &str| sig.starts_with("(i64, i64) -> i128");
-    let from_literal_fns = clif_fns_matching_sig(&stdout, is_from_literal);
-    // Two distinct literals ("the quick brown fox", "fox") — "fox"
-    // appears at two source sites but must materialize only once.
-    assert_eq!(
-        count_calls_to(&stdout, &from_literal_fns),
-        2,
-        "each distinct literal must be materialized exactly once per function: {}",
+    assert!(
+        !stdout.contains("-> i128"),
+        "no runtime call may return the packed u128 pair anymore: {}",
         stdout
     );
+    // Two distinct literals ("the quick brown fox", "fox") — "fox"
+    // appears at two source sites but must materialize only once, in
+    // the entry block.
+    let entry_symbol_values = clif_entry_block(&stdout)
+        .lines()
+        .filter(|l| l.contains("symbol_value"))
+        .count();
     assert_eq!(
-        count_calls_to(clif_entry_block(&stdout), &from_literal_fns),
-        2,
-        "literal materializations must be hoisted out of the loop into the entry block: {}",
+        entry_symbol_values, 2,
+        "each distinct literal must be materialized exactly once, hoisted into the entry block: {}",
         stdout
     );
 }

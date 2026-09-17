@@ -66,52 +66,12 @@ fn test_realloc_to_zero() {
 }
 
 #[test]
-fn test_from_literal_nonempty() {
-    let data = b"hello";
-    // SAFETY: data points to 5 readable bytes.
-    let pair = unsafe { ryo_str_from_literal(data.as_ptr(), 5) };
-    let (out_ptr, out_len) = unpack_pair(pair);
-    assert_eq!(out_ptr as *const u8, data.as_ptr());
-    assert_eq!(out_len, 5);
-    // cap is 0 by ABI convention (the static sentinel never reaches
-    // the runtime).
-    // SAFETY: the pair points into the readable literal bytes.
-    let slice = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-    assert_eq!(slice, b"hello");
-}
-
-#[test]
-fn test_from_literal_returns_static_pointer() {
-    let data = b"hello";
-    // SAFETY: data points to 5 readable bytes.
-    let pair = unsafe { ryo_str_from_literal(data.as_ptr(), 5) };
-    let (out_ptr, out_len) = unpack_pair(pair);
-    assert_eq!(out_ptr as *const u8, data.as_ptr());
-    assert_eq!(out_len, 5);
-    // cap is 0 by ABI convention (the static sentinel never reaches
-    // the runtime).
-}
-
-#[test]
 fn test_free_static_str_is_noop() {
     let data = b"hello";
-    // SAFETY: data points to 5 readable bytes.
-    let pair = unsafe { ryo_str_from_literal(data.as_ptr(), 5) };
-    let (out_ptr, _) = unpack_pair(pair);
-    // Static sentinel: cap = 0 by ABI convention, so free is a noop.
-    // SAFETY: out_ptr is a static .rodata pointer freed with cap 0.
-    unsafe { ryo_str_free(out_ptr, 0) };
-}
-
-#[test]
-fn test_from_literal_empty() {
-    // SAFETY: len == 0, so the data pointer is never dereferenced.
-    let pair = unsafe { ryo_str_from_literal(b"".as_ptr(), 0) };
-    let (out_ptr, out_len) = unpack_pair(pair);
-    assert!(out_ptr.is_null());
-    assert_eq!(out_len, 0);
-    // cap is 0 by ABI convention (the static sentinel never reaches
-    // the runtime).
+    // Static sentinel: cap = 0 by ABI convention, so free is a noop —
+    // freeing a non-heap .rodata pointer with cap 0 must not touch it.
+    // SAFETY: cap 0 makes ryo_str_free return before dereferencing.
+    unsafe { ryo_str_free(data.as_ptr() as *mut u8, 0) };
 }
 
 #[test]
@@ -433,45 +393,6 @@ fn test_concat_static_left_heap_right() {
 }
 
 #[test]
-fn slice_basic() {
-    let s = "héllo wörld".as_bytes();
-    // "héllo" is 6 bytes (é = 2 bytes)
-    // SAFETY: s is readable for its byte length;
-    // the range 0..6 is in-bounds (see above).
-    let pair = unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 0, 6) };
-    let (out_ptr, out_len) = unpack_pair(pair);
-    assert_eq!(out_len, 6);
-    // SAFETY: __ryo_slice returned a valid view into s for out_len bytes.
-    let got = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-    assert_eq!(got, "héllo".as_bytes());
-}
-
-#[test]
-fn slice_empty_at_len_is_ok() {
-    let s = "abc".as_bytes();
-    // SAFETY: "abc" provides three readable bytes;
-    // start == end == len is the empty-at-end case the ABI allows.
-    let pair = unsafe { __ryo_slice(s.as_ptr(), 3, 3, 3) };
-    let (_, out_len) = unpack_pair(pair);
-    assert_eq!(out_len, 0);
-}
-
-#[test]
-fn slice_nonzero_offset() {
-    let s = "héllo wörld".as_bytes();
-    // "wörld" starts at byte 7 (h=1, é=2, "llo "=4) and is 6 bytes
-    // — exercises the non-zero pointer-offset path.
-    // SAFETY: s is readable for its byte length;
-    // the range 7..13 is in-bounds (see above).
-    let pair = unsafe { __ryo_slice(s.as_ptr(), s.len() as u64, 7, 13) };
-    let (out_ptr, out_len) = unpack_pair(pair);
-    assert_eq!(out_len, 6);
-    // SAFETY: __ryo_slice returned a valid view into s for out_len bytes.
-    let got = unsafe { core::slice::from_raw_parts(out_ptr, out_len as usize) };
-    assert_eq!(got, "wörld".as_bytes());
-}
-
-#[test]
 fn str_from_view_copies_bytes() {
     let src = b"hello";
     let mut slot = RyoStrFat {
@@ -628,27 +549,6 @@ fn bytes_from_view_copies() {
     assert_eq!(slot_content(&big_slot), &big);
     // SAFETY: heap slot produced above; cap is its allocation size.
     unsafe { ryo_bytes_free(big_slot.ptr, big_slot.cap) };
-}
-
-#[test]
-fn bytes_slice_returns_subrange() {
-    let src = [0x01u8, 0x02, 0x03, 0x04];
-    let v = unsafe { __ryo_bytes_slice(src.as_ptr(), 4, 1, 3) };
-    let (p, l) = unpack_pair(v);
-    assert_eq!(l, 2);
-    let s = unsafe { core::slice::from_raw_parts(p, l as usize) };
-    assert_eq!(s, &[0x02, 0x03]);
-    // View into the source — do NOT free.
-}
-
-#[test]
-fn bytes_slice_allows_non_char_boundaries() {
-    // The single behavioral divergence from `__ryo_slice`: no UTF-8
-    // boundary check — slicing mid-codepoint is fine for bytes.
-    let src = "héllo".as_bytes(); // é is two bytes at offsets 1..3
-    let v = unsafe { __ryo_bytes_slice(src.as_ptr(), src.len() as u64, 1, 3) };
-    let (_, l) = unpack_pair(v);
-    assert_eq!(l, 2);
 }
 
 #[test]

@@ -15,21 +15,6 @@ use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind, ViewKind};
 use std::collections::HashMap;
 
-/// Cap derivation for the packed-u128 runtime string/bytes ABI (Phase 0):
-/// string-producing runtime functions return `{ptr, len}` packed in
-/// one u128 (lo = ptr, hi = len) — a true register return on every
-/// supported target (see `pack_pair` in `runtime/src/lib.rs` for why
-/// not a struct). The `cap` word is a codegen-side derivation:
-/// `Static` (cap = 0, the .rodata sentinel) for
-/// `ryo_str_from_literal` / `ryo_bytes_from_literal` — the only
-/// remaining packed-u128 producers. The slot-out producers report
-/// their own tagged cap, and `__ryo_str_push` / `__ryo_bytes_push`
-/// manage growth capacity through their unchanged slot ABI.
-#[derive(Clone, Copy)]
-pub(crate) enum CapRule {
-    Static,
-}
-
 impl<M: Module> Codegen<M> {
     /// Materialize an instruction's value, recursively materializing
     /// operand `TirRef`s as needed. Memoized: a second visit hands
@@ -310,28 +295,7 @@ impl<M: Module> Codegen<M> {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                // M8.4 §3.3: operands may be owned str triples or strview
-                // view pairs (mixed equality wraps the owned side in
-                // ToView); ryo_str_eq only needs (ptr, len).
-                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
-                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
-
-                let eq_ref = Self::declare_runtime_fn(
-                    ctx.module,
-                    builder,
-                    "ryo_str_eq",
-                    &[ctx.int_type, types::I64, ctx.int_type, types::I64],
-                    &[types::I8],
-                )?;
-                let call = builder.ins().call(eq_ref, &[l_ptr, l_len, r_ptr, r_len]);
-                let result = builder.inst_results(call)[0];
-
-                if inst.tag == TirTag::StrCmpNe {
-                    let one = builder.ins().iconst(types::I8, 1);
-                    builder.ins().bxor(result, one)
-                } else {
-                    result
-                }
+                Self::emit_str_eq(builder, ctx, inst.tag, lhs, rhs)?
             }
             TirTag::BytesCmpEq | TirTag::BytesCmpNe => {
                 let (lhs, rhs) = match inst.data {
@@ -345,8 +309,8 @@ impl<M: Module> Codegen<M> {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!("BytesIndex must carry TirData::BinOp"),
                 };
-                // Bounds check + panic are runtime-side, mirroring
-                // `__ryo_slice` — no Cranelift branch needed.
+                // Bounds check + panic are runtime-side, mirroring the
+                // inline slice guards — no Cranelift branch needed.
                 let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, base)?;
                 let idx = Self::eval_inst(builder, ctx, index)?;
                 let index_ref = Self::declare_runtime_fn(
@@ -757,8 +721,8 @@ impl<M: Module> Codegen<M> {
     /// Declare `extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64)` for
     /// the function being built. Returns a `FuncRef` callable via
     /// `builder.ins().call(_, &[ptr, cap])`. `cap == 0` is a runtime
-    /// no-op (covers static `.rodata` strings emitted by
-    /// `ryo_str_from_literal`).
+    /// no-op (covers static `.rodata` strings materialized by
+    /// `emit_str_literal_fat`).
     pub(crate) fn declare_str_free(
         module: &mut M,
         builder: &mut FunctionBuilder,
@@ -771,49 +735,6 @@ impl<M: Module> Codegen<M> {
             &[int_type, types::I64],
             &[],
         )
-    }
-
-    /// Emit a call to a runtime function that returns a (ptr, len) pair
-    /// packed as `u128` (lo = ptr, hi = len), and unpack both halves
-    /// into SSA values — no stack slot, no out-pointer, no reload at
-    /// the call site. `ushr`'s shift amount is any integer type
-    /// (masked to the value width), so a plain i64 constant works.
-    pub(crate) fn emit_rv_pair_call(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        fn_name: &str,
-        args: &[(Type, Value)],
-    ) -> Result<(Value, Value), String> {
-        let param_tys: Vec<Type> = args.iter().map(|(ty, _)| *ty).collect();
-        let func_ref =
-            Self::declare_runtime_fn(ctx.module, builder, fn_name, &param_tys, &[types::I128])?;
-        let call_args: Vec<Value> = args.iter().map(|(_, val)| *val).collect();
-        let call = builder.ins().call(func_ref, &call_args);
-        let pair = builder.inst_results(call)[0];
-        let ptr = builder.ins().ireduce(ctx.int_type, pair);
-        let shift = builder.ins().iconst(types::I64, 64);
-        let hi = builder.ins().ushr(pair, shift);
-        let len = builder.ins().ireduce(types::I64, hi);
-        Ok((ptr, len))
-    }
-
-    /// String-producing variant of `emit_rv_pair_call`: appends the
-    /// derived `cap` word so the triple lands entirely in SSA values.
-    /// Shared by every str-producing runtime call site so they cannot
-    /// drift. Does NOT touch `ctx.inst_values` — caching is the
-    /// caller's job.
-    pub(crate) fn emit_rv_str_call(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        fn_name: &str,
-        args: &[(Type, Value)],
-        cap_rule: CapRule,
-    ) -> Result<ValueRepr, String> {
-        let (ptr, len) = Self::emit_rv_pair_call(builder, ctx, fn_name, args)?;
-        let cap = match cap_rule {
-            CapRule::Static => builder.ins().iconst(types::I64, 0),
-        };
-        Ok(ValueRepr::Str { ptr, len, cap })
     }
 
     /// Call a slot-out runtime producer: allocate a 24-byte slot, pass
@@ -1153,23 +1074,10 @@ impl<M: Module> Codegen<M> {
                     None => base_len,
                 };
                 // M8.4.2: bytes slices skip the UTF-8 boundary check —
-                // select the family callee from the result view type.
+                // the inline emission selects on the result view type.
                 let is_bytes = matches!(ctx.pool.kind(inst.ty), TypeKind::View(ViewKind::Bytes));
-                let callee = if is_bytes {
-                    "__ryo_bytes_slice"
-                } else {
-                    "__ryo_slice"
-                };
-                let (ptr, len) = Self::emit_rv_pair_call(
-                    builder,
-                    ctx,
-                    callee,
-                    &[
-                        (ctx.int_type, base_ptr),
-                        (types::I64, base_len),
-                        (types::I64, start_v),
-                        (types::I64, end_v),
-                    ],
+                let (ptr, len) = Self::emit_slice_inline(
+                    builder, ctx, base_ptr, base_len, start_v, end_v, is_bytes,
                 )?;
                 ValueRepr::View { ptr, len }
             }
@@ -1269,9 +1177,8 @@ impl<M: Module> Codegen<M> {
     /// Materialize every distinct string/bytes literal exactly once, in
     /// the entry block, and pre-seed the `TirRef → ValueRepr` memo so each
     /// use reads the hoisted triple. A literal is pure .rodata packing
-    /// (`symbol_value` + `iconst` + the side-effect-free
-    /// `ryo_str_from_literal` / `ryo_bytes_from_literal` call), so
-    /// entry-block materialization is sound — the entry block dominates
+    /// (`symbol_value` + `iconst` constants — no call), so entry-block
+    /// materialization is sound — the entry block dominates
     /// every use — and keeps loop bodies from re-packing the same
     /// (ptr, len) per iteration.
     ///
@@ -1335,8 +1242,9 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// Emit a string literal as a fat pointer triple (ptr, len, cap)
-    /// by calling `ryo_str_from_literal` at runtime.
+    /// Emit a string literal as a fat pointer triple (ptr, len, cap=0):
+    /// the `.rodata` data pointer, the compile-time length, and the
+    /// static cap-0 sentinel — pure constants, no runtime call.
     fn emit_str_literal_fat(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1347,14 +1255,12 @@ impl<M: Module> Codegen<M> {
         let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
         let rodata_ptr = builder.ins().symbol_value(ctx.int_type, data_ref);
         let lit_len = builder.ins().iconst(types::I64, content.len() as i64);
-
-        Self::emit_rv_str_call(
-            builder,
-            ctx,
-            "ryo_str_from_literal",
-            &[(ctx.int_type, rodata_ptr), (types::I64, lit_len)],
-            CapRule::Static,
-        )
+        let cap = builder.ins().iconst(types::I64, 0);
+        Ok(ValueRepr::Str {
+            ptr: rodata_ptr,
+            len: lit_len,
+            cap,
+        })
     }
 
     pub(super) fn emit_call(

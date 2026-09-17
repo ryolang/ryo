@@ -41,6 +41,7 @@ mod arith;
 mod bytes;
 mod expr;
 mod ranges;
+mod str_ops;
 mod structs;
 mod views;
 
@@ -396,15 +397,6 @@ impl<M: Module> Codegen<M> {
 }
 
 /// Shared Cranelift flags for the AOT object pipeline.
-///
-/// `enable_llvm_abi_extensions` is required for the packed-u128 string
-/// runtime ABI: without it, Cranelift's x64 ABI panics on any
-/// signature containing an i128 ("i128 args/return values not supported
-/// unless LLVM ABI extensions are enabled", `isa/x64/abi.rs`). With it,
-/// an i128 is split into two i64 halves assigned as consecutive
-/// register-sized parts — rax:rdx on both SysV and WindowsFastcall,
-/// matching the Rust ABI the `#[unsafe(no_mangle)] pub fn` runtime
-/// functions use. aarch64 lowers i128 natively and ignores the flag.
 fn aot_shared_flags() -> Result<settings::Flags, String> {
     let mut shared_builder = settings::builder();
     shared_builder
@@ -416,9 +408,6 @@ fn aot_shared_flags() -> Result<settings::Flags, String> {
     shared_builder
         .set("preserve_frame_pointers", "true")
         .map_err(|e| format!("Error setting preserve_frame_pointers: {}", e))?;
-    shared_builder
-        .enable("enable_llvm_abi_extensions")
-        .map_err(|e| format!("Error enabling enable_llvm_abi_extensions: {}", e))?;
     // The Cranelift verifier is a compiler-developer aid (it catches
     // malformed IR our codegen emits); users cannot act on its
     // failures. Keep it in debug builds and the test suite — where
@@ -463,15 +452,12 @@ impl Codegen<ObjectModule> {
 
 impl Codegen<JITModule> {
     pub fn new_jit() -> Result<Self, String> {
-        // enable_llvm_abi_extensions: same rationale as `aot_shared_flags` —
-        // the packed-u128 string runtime ABI requires it on x64.
         // opt_level=speed: run the egraph optimization pipeline (constant
         // folding, algebraic simplification, GVN/LICM) like the AOT path.
         // enable_verifier: debug builds and tests only, same rationale as
         // `aot_shared_flags`.
         let mut jit_builder = JITBuilder::with_flags(
             &[
-                ("enable_llvm_abi_extensions", "true"),
                 ("opt_level", "speed"),
                 (
                     "enable_verifier",
@@ -488,10 +474,6 @@ impl Codegen<JITModule> {
 
         // Register runtime symbols so the JIT can resolve them.
         jit_builder.symbols([
-            (
-                "ryo_str_from_literal",
-                ryo_runtime::ryo_str_from_literal as *const u8,
-            ),
             ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
             ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
             ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
@@ -503,7 +485,6 @@ impl Codegen<JITModule> {
                 "__ryo_bytes_ensure_heap",
                 ryo_runtime::__ryo_bytes_ensure_heap as *const u8,
             ),
-            ("__ryo_slice", ryo_runtime::__ryo_slice as *const u8),
             ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
             ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
             (
@@ -518,10 +499,6 @@ impl Codegen<JITModule> {
             ("ryo_str_free", ryo_runtime::ryo_str_free as *const u8),
             // M8.4.2 bytes family — names match the runtime's
             // `#[unsafe(no_mangle)]` exports verbatim.
-            (
-                "ryo_bytes_from_literal",
-                ryo_runtime::ryo_bytes_from_literal as *const u8,
-            ),
             ("ryo_bytes_alloc", ryo_runtime::ryo_bytes_alloc as *const u8),
             (
                 "ryo_bytes_concat",
@@ -530,10 +507,6 @@ impl Codegen<JITModule> {
             (
                 "__ryo_bytes_push",
                 ryo_runtime::__ryo_bytes_push as *const u8,
-            ),
-            (
-                "__ryo_bytes_slice",
-                ryo_runtime::__ryo_bytes_slice as *const u8,
             ),
             (
                 "__ryo_bytes_index",
