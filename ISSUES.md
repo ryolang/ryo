@@ -201,12 +201,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** (a) `inst_map` is `vec![None; uir.instructions.len()]` — the program-wide UIR size — allocated per function; (b) `check_call` clones `callee_modes`, `sig.params`, and builds `modes`/`arg_tirs` per call (3-4 allocations); (c) method dispatch does `pool.str(..).to_string()` per method call site, allocated even before the receiver-type check.
 **Resolution:** (a) `HashMap<InstRef, TirRef>` or per-function UIR slice (the expr memo is the only consumer that needs random access); (b) borrow from the signatures table instead of cloning; (c) match on pre-interned `StringId`s for `len`/`is_empty` instead of a `String`.
 
-### I-093 — Runtime functions are re-imported per use site; JIT symbol list is hand-synced
-
-**Files:** `ryo-backend/src/codegen/expr.rs` (`declare_runtime_fn` :507-525 and call sites), `ryo-backend/src/codegen/mod.rs` (JIT symbol table; dead `ryo_str_alloc` registration :354)
-**Summary:** No name→`FuncId` cache exists; two `int_to_str` calls in one function produce two import declarations. Same for libc `write` and `exit`. Additionally `ryo_str_alloc` is registered in the JIT symbol table (`codegen/mod.rs:354`) with no call site anywhere — the symbol list and the call sites are kept in sync by hand.
-**Resolution:** Add a per-module `HashMap<&'static str, FuncId>` cache on `Codegen`; drive the JIT symbol list from the same table.
-
 ### I-094 — `compile_function` renders CLIF text unconditionally
 
 **Files:** `ryo-backend/src/codegen/mod.rs` (:800, discarded at :445)
@@ -294,8 +288,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-144 — Per-if clone and repeated dead-drop scans in codegen
 
 **Files:** `ryo-backend/src/codegen/mod.rs` (`if_branches.get(...).cloned().unwrap_or_default()` :1196; called per arm :1237/:1273/:1289/:1305), `ryo-backend/src/codegen/expr.rs` (`emit_conditional_dead_drops` :703-719)
-**Summary:** Every if-statement clones the `IfBranchIds` payload (heap `Vec` for elif branches) out of the sidecar even when there is no entry, because `.cloned().unwrap_or_default()` goes through `ctx`. Separately, `emit_conditional_dead_drops` re-scans the whole per-function `conditional_dead_drops` Vec at the start of *every* if arm with no empty-check early exit, and re-imports `ryo_str_free` inside the drop loop (`expr.rs:713`, cross-ref I-093). On if-heavy functions with dead drops this is O(ifs × arms × drops).
-**Resolution:** Borrow the sidecar out of `ctx` first so `get` returns a reference instead of cloning; add the same `is_empty()` early-return `emit_due_frees` already has or index dead drops by `if_stmt` in a map built once per function; hoist the `ryo_str_free` import out of the loop.
+**Summary:** Every if-statement clones the `IfBranchIds` payload (heap `Vec` for elif branches) out of the sidecar even when there is no entry, because `.cloned().unwrap_or_default()` goes through `ctx`. Separately, `emit_conditional_dead_drops` re-scans the whole per-function `conditional_dead_drops` Vec at the start of *every* if arm with no empty-check early exit. On if-heavy functions with dead drops this is O(ifs × arms × drops).
+**Resolution:** Borrow the sidecar out of `ctx` first so `get` returns a reference instead of cloning; add the same `is_empty()` early-return `emit_due_frees` already has or index dead drops by `if_stmt` in a map built once per function.
 
 ### I-145 — Ownership materializes the full states map per break/continue
 
@@ -345,12 +339,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** On Linux, `ryo build` links natively via `zig cc` with no `-target`, so binaries are dynamically coupled to whatever glibc the build host has — a silent portability gap, not a decision. The runtime staticlib is already `no_std`, so produced binaries need almost nothing from libc, which makes fully static musl (`-target <arch>-linux-musl`) nearly free and matches where Go (no libc), Rust (musl tier-1 opt-in), and Swift (Static Linux SDK) all converged. macOS (libSystem, dynamic mandatory) and Windows (MSVC ABI + UCRT via zig) need no equivalent change.
 **Resolution:** Before applying, re-verify the drawbacks: (1) musl mallocng is slow under multithreaded allocation-heavy load — matters once Go-style concurrency and `shared[T]` refcount churn land; may force shipping our own allocator in `ryo-runtime` first; (2) no NSS, limited `getaddrinfo`, no dlopen of glibc-built libs. If accepted: pass `-target <arch>-linux-musl` in `linker.rs` and switch the `build-support` archive build to the matching `*-unknown-linux-musl` triple in the same change (the two must move together), then check what the ASan/Valgrind smoke lanes still exercise under a static link.
 
-### I-161 — Tiny runtime string ops cross the extern-call boundary per use
-
-**Files:** `ryo-backend/src/codegen/expr.rs` (`ryo_str_eq` call :282, `__ryo_slice` call :1022, `ryo_str_from_literal` call :1132), `runtime/src/lib.rs` (bodies: `ryo_str_from_literal` :251, `__ryo_slice` :319, `ryo_str_eq` :448)
-**Summary:** Codegen imports these as opaque extern calls, so every use pays a full call that Cranelift can neither inline nor hoist. The bodies are a handful of instructions: `ryo_str_from_literal` is just `pack_pair` (shift + or), `__ryo_slice` is two bounds checks, two UTF-8 boundary tests, and a `ptr.add`, and `ryo_str_eq` against a short literal is a few byte compares. In `benchmarks/string_slicing` the scan loop makes three such calls per iteration (slice + literal materialization + eq) where Rust inlines all of it to pointer arithmetic and a 3-byte memcmp — the bulk of the measured 3.5× AOT gap (CLIF verified 2026-08-26: the `str`/`strview` param variants are instruction-identical in the loop except for these calls, and a same-compiler A/B ties at 5.9 ms both ways).
-**Resolution:** Emit the tiny bodies as inline Cranelift IR at the call sites instead of extern calls (slice keeps its panic paths; eq can specialize when one side is a known short literal). Literal re-materialization is already handled (each distinct literal is emitted once per function in the entry block); inlining `pack_pair` would remove the remaining extern call from that one materialization. Larger ops (`ryo_str_concat`, `__ryo_str_push`) stay extern.
-
 ### I-166 — Sema does not reject constant `INT_MIN / -1` at compile time
 
 **Files:** `ryo-frontend/src/sema.rs` (the literal-zero division check), `ryo-backend/src/codegen/expr.rs` (`emit_div_guard`)
@@ -392,12 +380,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-backend/src/codegen/expr.rs` (producer call sites, e.g. `int_to_str` :1033-1045), `ryo-frontend/src/builtins.rs` (builtin registry), `runtime/src/` (`ryo_int_to_str` and the other bounded formatters)
 **Summary:** `int_to_str(i64)` produces at most 20 chars — always under the 23-byte inline capacity — so its result is provably always-inline, yet codegen treats it as an opaque producer: an address-taken stack slot (defeating register allocation and forcing every use through memory), plus an unconditional `ryo_str_free` extern call that is a guaranteed no-op on the inline tag. Same shape for the other bounded producers (bool/char/float formatters, small conversions).
 **Resolution:** Add a max-output-length annotation to the builtin registry; when it is ≤ the inline capacity, (1) return the tagged slot by value in registers (multi-value return) instead of slot-out, so the value only touches the stack if spilled, and (2) elide `ryo_str_free` for that value entirely — the inline tag is statically known, generalizing the elision the cap=0 static-literal path already performs.
-
-### I-181 — `(ptr, len)` pairs flow through codegen as packed i128; extracting a half costs a 128-bit shift legalization
-
-**Files:** `ryo-backend/src/codegen/expr.rs` (slice / `ryo_str_eq` call sites and view value representation), `ryo-core/src/tir.rs` (how pair values are typed), `runtime/src/lib.rs` (`pack_pair`)
-**Summary:** Slice results and literal values are packed `(ptr, len)` pairs represented as i128, so extracting one half is a 128-bit shift — which Cranelift legalizes into a ~9-instruction funnel-shift/select sequence (`lsr`/`lsl`/`orr`/`csel`) instead of the register move it already is. Disassembly of `benchmarks/string_slicing`'s `count_fox` (aarch64, 2026-09-15): two such sequences per scan iteration, one to unpack the `__ryo_slice` result and one to unpack the literal — ~18 wasted instructions × 700k iterations ≈ 12.6M instructions, on top of the extern-call overhead tracked separately. Inlining the slice/eq bodies will not remove this if the values keep flowing as i128.
-**Resolution:** Stop representing small pair values as packed i128 end to end. The C ABI does not require it: on aarch64/x86-64 SysV a `u128` return and a `#[repr(C)]` two-`u64` struct return occupy the same two registers, so changing the runtime signatures (`__ryo_slice` :427, `ryo_str_from_literal` :358, both currently `-> u128` via `pack_pair` :270) to return a repr(C) pair — and modeling views as two i64 SSA values in TIR/codegen — is machine-identical at the boundary while eliminating the i128 type that triggers the legalization. Verify Cranelift maps the two-register struct return correctly on the Windows x64 target (different struct-return convention there) before committing to the signature change.
 
 ### I-183 — View-liveness back-edge merge is one-pass first-wins; reads inside a loop are attributed to the pre-loop slice
 

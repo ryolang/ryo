@@ -4,22 +4,17 @@
 
 **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
-## Why Ryo trails here: a runtime call per operation (and the planned fix)
+## Why Ryo trails here: what remains after inlining the tiny runtime ops
 
-Unlike string_building, this gap is **not** semantic — it is codegen quality, and it is filed as tracked work. Each of the ~700k scan iterations makes two calls across the runtime-library boundary where Rust inlines everything (CLIF-verified 2026-08-26):
+The original gap was **not** semantic — it was codegen quality. Each of the ~700k scan iterations made two calls across the runtime-library boundary where Rust inlines everything: `__ryo_slice(ptr, len, i, i+3)` (two bounds checks, two UTF-8 char-boundary tests, a `ptr.add`) and `ryo_str_eq(...)` (an extern call to compare 3 bytes). As of 2026-09-17 both bodies — plus literal packing, which was pure `pack_pair` — are emitted as inline Cranelift IR at the call site, and the packed-u128 pair ABI they returned is gone entirely (see the checkpoint below). The scan loop now makes zero runtime calls.
 
-1. `__ryo_slice(ptr, len, i, i+3)` — two bounds checks, two UTF-8 char-boundary tests, and a `ptr.add`. Rust's `&text[i..i+3]` is inlined pointer arithmetic.
-2. `ryo_str_eq(...)` — an extern call to compare 3 bytes; LLVM turns Rust's into a load-and-cmp.
+What remains, in rough order of cost:
 
-Two more per-iteration calls used to be on this list and are now removed (2026-08-26, verified by the `clif_str_literal_materialized_once_per_function` and `clif_static_cap_str_free_is_elided` tests): `ryo_str_from_literal("fox", 3)` re-packed the same `(ptr, len)` every iteration — each distinct literal is now materialized once per function in the entry block — and `ryo_str_free(lit, 0)`, a guaranteed no-op on the literal's cap=0 static sentinel, is no longer emitted when the cap is statically 0.
+1. Three checked-arithmetic guard-and-branch pairs per iteration (`i + 3`, `i + 1`, `count += 1`) — spec §18 mandates them; Rust release wraps silently (same story as fibonacci). Value-range guard elision and fused flag branches are tracked work in `ISSUES.md`.
+2. The spec-mandated UTF-8 char-boundary validation per slice (spec §3.1) — two bit tests inlined; Rust scans raw bytes (`&[u8]`) and never pays it.
+3. Cranelift-vs-LLVM mid-end quality on what is left.
 
-Plus three checked-arithmetic guard-and-branch pairs per iteration (`i + 3`, `i + 1`, `count += 1`) — spec §18 mandates them; Rust release wraps silently (same story as fibonacci).
-
-One fairness note: Rust scans raw bytes (`&[u8]`), while Ryo's slice validates UTF-8 char boundaries per spec §3.1 — a mandated check Rust never pays. Inlined, it is two bit tests; across an extern call it is part of the per-iteration call cost above.
-
-A second, smaller asymmetry: hyperfine times whole processes, so every arm's in-program string build (14 doublings) is included by design — and the Swift arm additionally pays a one-time `[UInt8](s.utf8)` materialization (~0.05 ms measured, ~2% of its total, within run noise) because `String.UTF8View` has no O(1) integer subscript and scanning it directly would be far slower.
-
-**The fix path** (tracked in `ISSUES.md`, no language change): emit the tiny runtime bodies as inline Cranelift IR at the call sites, and elide overflow guards a value-range analysis proves safe. These should remove most of the remaining call overhead; whatever margin remains after that is Cranelift-vs-LLVM mid-end quality plus the spec-mandated boundary checks. This benchmark is the tracking measure.
+One fairness note: hyperfine times whole processes, so every arm's in-program string build (14 doublings) is included by design — and the Swift arm additionally pays a one-time `[UInt8](s.utf8)` materialization (~0.05 ms measured, ~2% of its total, within run noise) because `String.UTF8View` has no O(1) integer subscript and scanning it directly would be far slower.
 
 ## Benchmarks & Performance Results
 
@@ -42,6 +37,18 @@ The string-runtime rework moved this benchmark twice, in opposite directions. (1
 | **Swift** | 6.3.3 | 2.7 ms ± 0.1 ms | 1.60x slower | 7.09 MB |
 | **Ryo (AOT)** | 0.1.0-dev.20260914+4cef5f9 | 5.1 ms ± 0.2 ms | 3.03x slower | 2.75 MB |
 | **Ryo (JIT)** | 0.1.0-dev.20260914+4cef5f9 | 7.4 ms ± 0.7 ms | 4.41x slower | 6.89 MB |
+
+### Checkpoint: tiny runtime ops inlined (2026-09-17)
+
+The fix the section above describes landed: `__ryo_slice`/`__ryo_bytes_slice` (bounds + UTF-8 guards, cold `ryo_panic` blocks), literal packing (pure `symbol_value` + `iconst` — `pack_pair` was the whole body), and `==`/`!=` against literals up to 16 bytes (length check + gated per-byte compares) are now inline Cranelift IR at the call site. With no pair-returning runtime call left, the packed-u128 ABI and its ~9-instruction i128 unpack legalization per use are gone, and `enable_llvm_abi_extensions` is retired with it. AOT 5.1 → 3.4 ms; JIT 7.4 → 4.7 ms. The remaining ~2.3× vs Rust is the spec-mandated UTF-8 boundary checks, the §18 overflow guards (elision/fusing tracked in `ISSUES.md`), and Cranelift-vs-LLVM mid-end quality.
+
+| Candidate | Version | Mean time | vs fastest |
+|---|---|---|---|
+| **Rust** | 1.98.0 | 1.5 ms ± 0.0 ms | 1.00x |
+| **Ryo (AOT)** | 0.1.0-dev.20260917+c308a82 | 3.4 ms ± 0.1 ms | 2.27x slower |
+| **Ryo (JIT)** | 0.1.0-dev.20260917+c308a82 | 4.7 ms ± 0.1 ms | 3.13x slower |
+
+(Rust/Swift rows were not re-measured for this checkpoint — same-day runs match their earlier values; Swift omitted from the table, see the 2026-09-14 checkpoint for its number.)
 
 Measurement note: the Ryo rows are quiet-window means at the tagged commit (three runs each: AOT 5.1 ms ± 0.2, JIT 7.4 ms ± 0.7; full-suite batches under machine load read 5.8–6.0 ms with every arm inflated proportionally). The Rust and Swift rows are from the same-day full-suite run and match their 2026-09-11 values.
 
