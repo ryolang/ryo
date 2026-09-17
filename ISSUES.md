@@ -385,6 +385,22 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-185 — Slot-home coverage gaps: homes only for slot-out VarDecl initializers; direct-Assign old-value free skips elision checks
+
+**Files:** `ryo-backend/src/codegen/mod.rs` (VarDecl fat case home creation, Assign fat case direct path), `ryo-backend/src/codegen/expr.rs` (`emit_slot_out_call`)
+**Summary:** The slot-home work (fat bindings get a canonical stack slot the producer writes directly) leaves two residual gaps. (1) A home is created only when the VarDecl initializer is itself a slot-out producer; bindings initialized by a literal, param, or inlined builtin (e.g. `bool_to_str`) and *later* reassigned to slot-out producers never get a home, so every such reassign still pays the temp slot + triple store the home was meant to eliminate. (2) In the direct producer-into-home Assign path, the old buffer is freed with an unconditional `ryo_str_free`/`ryo_bytes_free` call — no `is_static_cap_zero` check and no provably-inline-producer elision on the OLD value — so `s = ""` followed by `s = int_to_str(x)` still emits a guaranteed-no-op free call that the scheduled-free path would have elided.
+**Resolution:** (1) Create the home lazily on the first slot-out Assign to a home-less binding, or eagerly for every fat VarDecl (measuring stack-frame cost of unused homes first). (2) Route the direct-Assign old-value free through the same elision predicates the scheduled-free path uses (`is_static_cap_zero` on the loaded cap; provably-inline producer on the binding's current value when unmutated since that store).
+
+---
+
+### I-186 — Inlined-builtin knowledge is stringly-typed across three places; `writes_out_slot`'s exception has no coherence test
+
+**Files:** `ryo-frontend/src/builtins.rs` (`max_output_len`), `ryo-backend/src/codegen/frees.rs` (`producer_max_output_len`), `ryo-backend/src/codegen/mod.rs` (`writes_out_slot` `!= "bool_to_str"` exception), `ryo-backend/src/codegen/expr.rs` (the `bool_to_str` inlined arm in `eval_inst_fat_slot`)
+**Summary:** Which builtins are provably-inline / fully inlined is recorded in three disconnected, stringly-typed places: the frontend registry's `max_output_len`, the backend's duplicate `producer_max_output_len` table (the backend cannot depend on the frontend), and `writes_out_slot`'s hardcoded `bool_to_str` exception. Only the len tables have a coherence test (`registry_bounds_match_codegen_elision` in `ryo-backend/tests/clif_provably_inline.rs`); the `writes_out_slot` exception has none. The inlined arm in `eval_inst_fat_slot` ignores its `out_slot` parameter entirely — it works today only because `writes_out_slot` guarantees no caller ever passes `Some(slot)` for `bool_to_str`. If a future builtin is inlined in codegen without updating `writes_out_slot`, VarDecl creates a home slot, the inlined arm returns an SSA repr without writing it, the `def_var`s are skipped, and every read through `emit_fat_load` loads garbage — a silent miscompile, not a compile error.
+**Resolution:** Make the hazard fail loudly and centralize the knowledge: (1) `debug_assert!(out_slot.is_none())` (or an `Err`) in the inlined arm so a missed exception aborts codegen instead of emitting garbage, and a test that asserts the set of codegen-inlined builtins equals `writes_out_slot`'s exception set; (2) longer term, drive `writes_out_slot`, `producer_max_output_len`, and the inlining decision from one backend-side table of inlined builtins instead of three string matches.
+
+---
+
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
