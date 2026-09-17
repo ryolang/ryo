@@ -34,4 +34,3 @@ fn value_repr_expect_scalar_panics_on_str() {
     };
     repr.expect_scalar();
 }
-

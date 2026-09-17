@@ -41,9 +41,7 @@ impl<M: Module> Codegen<M> {
         end: Value,
         is_bytes: bool,
     ) -> Result<(Value, Value), String> {
-        let start_gt_end = builder
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThan, start, end);
+        let start_gt_end = builder.ins().icmp(IntCC::UnsignedGreaterThan, start, end);
         let end_gt_len = builder
             .ins()
             .icmp(IntCC::UnsignedGreaterThan, end, base_len);
@@ -84,7 +82,9 @@ impl<M: Module> Codegen<M> {
 
         let check_block = builder.create_block();
         let cont_block = builder.create_block();
-        builder.ins().brif(is_edge, cont_block, &[], check_block, &[]);
+        builder
+            .ins()
+            .brif(is_edge, cont_block, &[], check_block, &[]);
 
         // Single predecessor (the brif above) — seal immediately.
         builder.seal_block(check_block);
@@ -152,15 +152,13 @@ impl<M: Module> Codegen<M> {
             Self::emit_literal_eq(builder, other_ptr, other_len, n, &bytes)
         } else {
             let eq_ref = Self::declare_runtime_fn(
-                ctx.module,
+                ctx,
                 builder,
                 "ryo_str_eq",
                 &[ctx.int_type, types::I64, ctx.int_type, types::I64],
                 &[types::I8],
             )?;
-            let call = builder
-                .ins()
-                .call(eq_ref, &[l_ptr, l_len, r_ptr, r_len]);
+            let call = builder.ins().call(eq_ref, &[l_ptr, l_len, r_ptr, r_len]);
             builder.inst_results(call)[0]
         };
 

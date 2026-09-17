@@ -314,7 +314,7 @@ impl<M: Module> Codegen<M> {
                 let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, base)?;
                 let idx = Self::eval_inst(builder, ctx, index)?;
                 let index_ref = Self::declare_runtime_fn(
-                    ctx.module,
+                    ctx,
                     builder,
                     "__ryo_bytes_index",
                     &[ctx.int_type, types::I64, types::I64],
@@ -366,25 +366,36 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Declare an external runtime function by name and return a
-    /// `FuncRef` usable in the current function being built.
+    /// `FuncRef` usable in the current function being built. The
+    /// module-level import is cached in `Codegen::runtime_fns` (one
+    /// `declare_function` per symbol per module); only the cheap
+    /// per-function `FuncRef` is derived per call site.
     pub(crate) fn declare_runtime_fn(
-        module: &mut M,
+        ctx: &mut FunctionContext<'_, M>,
         builder: &mut FunctionBuilder,
-        name: &str,
+        name: &'static str,
         params: &[types::Type],
         returns: &[types::Type],
     ) -> Result<FuncRef, String> {
-        let mut sig = module.make_signature();
-        for &p in params {
-            sig.params.push(AbiParam::new(p));
-        }
-        for &r in returns {
-            sig.returns.push(AbiParam::new(r));
-        }
-        let func_id = module
-            .declare_function(name, Linkage::Import, &sig)
-            .map_err(|e| format!("Failed to declare {}: {}", name, e))?;
-        Ok(module.declare_func_in_func(func_id, builder.func))
+        let func_id = match ctx.runtime_fns.get(name) {
+            Some(&func_id) => func_id,
+            None => {
+                let mut sig = ctx.module.make_signature();
+                for &p in params {
+                    sig.params.push(AbiParam::new(p));
+                }
+                for &r in returns {
+                    sig.returns.push(AbiParam::new(r));
+                }
+                let func_id = ctx
+                    .module
+                    .declare_function(name, Linkage::Import, &sig)
+                    .map_err(|e| format!("Failed to declare {}: {}", name, e))?;
+                ctx.runtime_fns.insert(name, func_id);
+                func_id
+            }
+        };
+        Ok(ctx.module.declare_func_in_func(func_id, builder.func))
     }
 
     /// True if a `FreePoint` with the given `branch` tag is eligible
@@ -531,9 +542,9 @@ impl<M: Module> Codegen<M> {
             return Ok(*f);
         }
         let f = if is_bytes {
-            Self::declare_bytes_free(ctx.module, builder, ctx.int_type)?
+            Self::declare_bytes_free(ctx, builder)?
         } else {
-            Self::declare_str_free(ctx.module, builder, ctx.int_type)?
+            Self::declare_str_free(ctx, builder)?
         };
         *slot = Some(f);
         Ok(f)
@@ -655,9 +666,9 @@ impl<M: Module> Codegen<M> {
                 continue;
             };
             let free_ref = if Self::free_target_is_bytes(ctx, drop.target) {
-                Self::declare_bytes_free(ctx.module, builder, ctx.int_type)?
+                Self::declare_bytes_free(ctx, builder)?
             } else {
-                Self::declare_str_free(ctx.module, builder, ctx.int_type)?
+                Self::declare_str_free(ctx, builder)?
             };
             let ptr = builder.use_var(sl.ptr);
             let cap = builder.use_var(sl.cap);
@@ -724,17 +735,11 @@ impl<M: Module> Codegen<M> {
     /// no-op (covers static `.rodata` strings materialized by
     /// `emit_str_literal_fat`).
     pub(crate) fn declare_str_free(
-        module: &mut M,
+        ctx: &mut FunctionContext<'_, M>,
         builder: &mut FunctionBuilder,
-        int_type: types::Type,
     ) -> Result<FuncRef, String> {
-        Self::declare_runtime_fn(
-            module,
-            builder,
-            "ryo_str_free",
-            &[int_type, types::I64],
-            &[],
-        )
+        let int_type = ctx.int_type;
+        Self::declare_runtime_fn(ctx, builder, "ryo_str_free", &[int_type, types::I64], &[])
     }
 
     /// Call a slot-out runtime producer: allocate a 24-byte slot, pass
@@ -744,7 +749,7 @@ impl<M: Module> Codegen<M> {
     pub(crate) fn emit_slot_out_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        fn_name: &str,
+        fn_name: &'static str,
         args: &[(Type, Value)],
     ) -> Result<(Value, Value, Value), String> {
         let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -756,7 +761,7 @@ impl<M: Module> Codegen<M> {
         let mut param_tys = Vec::with_capacity(args.len() + 1);
         param_tys.push(ctx.int_type);
         param_tys.extend(args.iter().map(|(ty, _)| *ty));
-        let func_ref = Self::declare_runtime_fn(ctx.module, builder, fn_name, &param_tys, &[])?;
+        let func_ref = Self::declare_runtime_fn(ctx, builder, fn_name, &param_tys, &[])?;
         let mut call_args = Vec::with_capacity(args.len() + 1);
         call_args.push(addr);
         call_args.extend(args.iter().map(|(_, v)| *v));
@@ -1293,7 +1298,7 @@ impl<M: Module> Codegen<M> {
                 }
             }
             let panic_ref = Self::declare_runtime_fn(
-                ctx.module,
+                ctx,
                 builder,
                 "ryo_panic",
                 // Runtime contract: ryo_panic(ptr, len: u64) — the
@@ -1329,7 +1334,7 @@ impl<M: Module> Codegen<M> {
             );
             let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
             let print_ref = Self::declare_runtime_fn(
-                ctx.module,
+                ctx,
                 builder,
                 "ryo_print",
                 &[ctx.int_type, types::I64],
@@ -1367,7 +1372,7 @@ impl<M: Module> Codegen<M> {
             // conversion, so sema accepts `Str | View(_)` here).
             let (suf_ptr, suf_len) = Self::eval_str_or_view_parts(builder, ctx, suffix_ref)?;
             let func_ref = Self::declare_runtime_fn(
-                ctx.module,
+                ctx,
                 builder,
                 "__ryo_str_push",
                 &[ctx.int_type, ctx.int_type, types::I64],
@@ -1419,7 +1424,7 @@ impl<M: Module> Codegen<M> {
                 .store(MemFlagsData::trusted(), cap, b_addr, 16);
             let x_val = Self::eval_inst(builder, ctx, x_ref)?;
             let func_ref = Self::declare_runtime_fn(
-                ctx.module,
+                ctx,
                 builder,
                 "__ryo_bytes_push",
                 &[ctx.int_type, types::I64],
@@ -1679,7 +1684,7 @@ impl<M: Module> Codegen<M> {
         // is shared, and appending valid-UTF-8 + valid-UTF-8 stays
         // valid (no boundary check needed).
         let push_ref = Self::declare_runtime_fn(
-            ctx.module,
+            ctx,
             builder,
             "__ryo_str_push",
             &[ctx.int_type, ctx.int_type, types::I64],

@@ -324,7 +324,7 @@ impl<M: Module> Codegen<M> {
             let ptr = builder.ins().symbol_value(ctx.int_type, data_ref);
             let len = builder.ins().iconst(types::I64, msg.len() as i64);
             let panic_ref = Self::declare_runtime_fn(
-                ctx.module,
+                ctx,
                 builder,
                 "ryo_panic",
                 // Runtime contract: ryo_panic(ptr, len: u64) — the

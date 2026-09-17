@@ -131,6 +131,13 @@ pub struct Codegen<M: Module> {
     /// pass through the `InternPool`, so they are keyed on the static
     /// text itself.
     guard_msg_data: HashMap<&'static str, DataId>,
+    /// Module-level name → `FuncId` cache for imported runtime
+    /// functions: one `declare_function` import per symbol per module,
+    /// regardless of how many call sites (or functions) use it.
+    /// `FuncId`s are module-scoped, so this is valid for every
+    /// function compiled into the same module; the per-function
+    /// `FuncRef` is derived cheaply via `declare_func_in_func`.
+    runtime_fns: HashMap<&'static str, FuncId>,
 }
 
 /// Overflow guard message for the spec §18 checked-arithmetic traps.
@@ -370,6 +377,9 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// Module-level cache for compiler-generated guard messages;
     /// see `Codegen::guard_msg_data`.
     guard_msg_data: &'a mut HashMap<&'static str, DataId>,
+    /// Module-level import cache for runtime functions; see
+    /// `Codegen::runtime_fns`.
+    runtime_fns: &'a mut HashMap<&'static str, FuncId>,
     /// Cold panic blocks for guard failures (overflow, div-by-zero),
     /// paired with their message so all guards with the same message
     /// share one block. A Vec (not a map) keeps the drain order
@@ -392,6 +402,7 @@ impl<M: Module> Codegen<M> {
             data_ctx: DataDescription::new(),
             string_data: HashMap::new(),
             guard_msg_data: HashMap::new(),
+            runtime_fns: HashMap::new(),
         }
     }
 }
@@ -450,6 +461,73 @@ impl Codegen<ObjectModule> {
     }
 }
 
+/// Every runtime symbol the JIT must resolve, with its address. This
+/// table is the single source of truth for JIT registration — the
+/// names must stay in sync with the string literals codegen passes to
+/// `declare_runtime_fn` (the module-level import cache is keyed on the
+/// same names). Functions whose bodies codegen now inlines (literal
+/// packing, slicing) are deliberately absent.
+fn runtime_symbols() -> [(&'static str, *const u8); 21] {
+    [
+        ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
+        ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
+        (
+            "__ryo_str_ensure_heap",
+            ryo_runtime::__ryo_str_ensure_heap as *const u8,
+        ),
+        (
+            "__ryo_bytes_ensure_heap",
+            ryo_runtime::__ryo_bytes_ensure_heap as *const u8,
+        ),
+        ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
+        ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
+        (
+            "ryo_str_from_view",
+            ryo_runtime::ryo_str_from_view as *const u8,
+        ),
+        (
+            "ryo_float_to_str",
+            ryo_runtime::ryo_float_to_str as *const u8,
+        ),
+        ("ryo_bool_to_str", ryo_runtime::ryo_bool_to_str as *const u8),
+        ("ryo_str_free", ryo_runtime::ryo_str_free as *const u8),
+        // M8.4.2 bytes family — names match the runtime's
+        // `#[unsafe(no_mangle)]` exports verbatim.
+        (
+            "ryo_bytes_concat",
+            ryo_runtime::ryo_bytes_concat as *const u8,
+        ),
+        (
+            "__ryo_bytes_push",
+            ryo_runtime::__ryo_bytes_push as *const u8,
+        ),
+        (
+            "__ryo_bytes_index",
+            ryo_runtime::__ryo_bytes_index as *const u8,
+        ),
+        ("ryo_bytes_eq", ryo_runtime::ryo_bytes_eq as *const u8),
+        (
+            "ryo_bytes_from_view",
+            ryo_runtime::ryo_bytes_from_view as *const u8,
+        ),
+        (
+            "__ryo_bytes_to_str",
+            ryo_runtime::__ryo_bytes_to_str as *const u8,
+        ),
+        (
+            "__ryo_str_to_bytes",
+            ryo_runtime::__ryo_str_to_bytes as *const u8,
+        ),
+        (
+            "__ryo_bytes_repr",
+            ryo_runtime::__ryo_bytes_repr as *const u8,
+        ),
+        ("ryo_bytes_free", ryo_runtime::ryo_bytes_free as *const u8),
+        ("ryo_print", ryo_runtime::ryo_print as *const u8),
+        ("ryo_panic", ryo_runtime::ryo_panic as *const u8),
+    ]
+}
+
 impl Codegen<JITModule> {
     pub fn new_jit() -> Result<Self, String> {
         // opt_level=speed: run the egraph optimization pipeline (constant
@@ -473,66 +551,7 @@ impl Codegen<JITModule> {
         .map_err(|e| format!("Failed to create JIT builder: {}", e))?;
 
         // Register runtime symbols so the JIT can resolve them.
-        jit_builder.symbols([
-            ("ryo_str_alloc", ryo_runtime::ryo_str_alloc as *const u8),
-            ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
-            ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
-            (
-                "__ryo_str_ensure_heap",
-                ryo_runtime::__ryo_str_ensure_heap as *const u8,
-            ),
-            (
-                "__ryo_bytes_ensure_heap",
-                ryo_runtime::__ryo_bytes_ensure_heap as *const u8,
-            ),
-            ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
-            ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
-            (
-                "ryo_str_from_view",
-                ryo_runtime::ryo_str_from_view as *const u8,
-            ),
-            (
-                "ryo_float_to_str",
-                ryo_runtime::ryo_float_to_str as *const u8,
-            ),
-            ("ryo_bool_to_str", ryo_runtime::ryo_bool_to_str as *const u8),
-            ("ryo_str_free", ryo_runtime::ryo_str_free as *const u8),
-            // M8.4.2 bytes family — names match the runtime's
-            // `#[unsafe(no_mangle)]` exports verbatim.
-            ("ryo_bytes_alloc", ryo_runtime::ryo_bytes_alloc as *const u8),
-            (
-                "ryo_bytes_concat",
-                ryo_runtime::ryo_bytes_concat as *const u8,
-            ),
-            (
-                "__ryo_bytes_push",
-                ryo_runtime::__ryo_bytes_push as *const u8,
-            ),
-            (
-                "__ryo_bytes_index",
-                ryo_runtime::__ryo_bytes_index as *const u8,
-            ),
-            ("ryo_bytes_eq", ryo_runtime::ryo_bytes_eq as *const u8),
-            (
-                "ryo_bytes_from_view",
-                ryo_runtime::ryo_bytes_from_view as *const u8,
-            ),
-            (
-                "__ryo_bytes_to_str",
-                ryo_runtime::__ryo_bytes_to_str as *const u8,
-            ),
-            (
-                "__ryo_str_to_bytes",
-                ryo_runtime::__ryo_str_to_bytes as *const u8,
-            ),
-            (
-                "__ryo_bytes_repr",
-                ryo_runtime::__ryo_bytes_repr as *const u8,
-            ),
-            ("ryo_bytes_free", ryo_runtime::ryo_bytes_free as *const u8),
-            ("ryo_print", ryo_runtime::ryo_print as *const u8),
-            ("ryo_panic", ryo_runtime::ryo_panic as *const u8),
-        ]);
+        jit_builder.symbols(runtime_symbols());
 
         Ok(Self::from_module(JITModule::new(jit_builder)))
     }
@@ -994,6 +1013,7 @@ impl<M: Module> Codegen<M> {
                 sidecar: func_sidecar,
                 branch_stack: Vec::new(),
                 guard_msg_data: &mut self.guard_msg_data,
+                runtime_fns: &mut self.runtime_fns,
                 panic_blocks: Vec::new(),
             };
 
@@ -1437,9 +1457,9 @@ impl<M: Module> Codegen<M> {
                     // its emission point and may be stale across reassigns.
                     if ctx.sidecar.free_on_reassign[r.index()].is_some() {
                         let free_ref = if matches!(ctx.pool.kind(inst.ty), TypeKind::Bytes) {
-                            Self::declare_bytes_free(ctx.module, builder, ctx.int_type)?
+                            Self::declare_bytes_free(ctx, builder)?
                         } else {
-                            Self::declare_str_free(ctx.module, builder, ctx.int_type)?
+                            Self::declare_str_free(ctx, builder)?
                         };
                         let old_ptr = builder.use_var(locals.ptr);
                         let old_cap = builder.use_var(locals.cap);

@@ -42,20 +42,14 @@ impl<M: Module> Codegen<M> {
     /// the function being built — the bytes-family counterpart of
     /// `declare_str_free`. Returns a `FuncRef` callable via
     /// `builder.ins().call(_, &[ptr, cap])`. `cap == 0` is a runtime
-    /// no-op (covers static `.rodata` payloads emitted by
-    /// `ryo_bytes_from_literal`).
+    /// no-op (covers static `.rodata` payloads materialized by
+    /// `emit_bytes_literal_fat`).
     pub(crate) fn declare_bytes_free(
-        module: &mut M,
+        ctx: &mut FunctionContext<'_, M>,
         builder: &mut FunctionBuilder,
-        int_type: types::Type,
     ) -> Result<FuncRef, String> {
-        Self::declare_runtime_fn(
-            module,
-            builder,
-            "ryo_bytes_free",
-            &[int_type, types::I64],
-            &[],
-        )
+        let int_type = ctx.int_type;
+        Self::declare_runtime_fn(ctx, builder, "ryo_bytes_free", &[int_type, types::I64], &[])
     }
 
     /// True when a scheduled Free target is a `bytes` owner (M8.4.2) —
@@ -84,7 +78,7 @@ impl<M: Module> Codegen<M> {
         let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
 
         let eq_ref = Self::declare_runtime_fn(
-            ctx.module,
+            ctx,
             builder,
             "ryo_bytes_eq",
             &[ctx.int_type, types::I64, ctx.int_type, types::I64],
