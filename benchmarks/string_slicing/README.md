@@ -48,7 +48,7 @@ The fix the section above describes landed: `__ryo_slice`/`__ryo_bytes_slice` (b
 | **Ryo (AOT)** | 0.1.0-dev.20260917+c308a82 | 3.4 ms ± 0.1 ms | 2.27x slower |
 | **Ryo (JIT)** | 0.1.0-dev.20260917+c308a82 | 4.7 ms ± 0.1 ms | 3.13x slower |
 
-(Rust/Swift rows were not re-measured for this checkpoint — same-day runs match their earlier values; Swift omitted from the table, see the 2026-09-14 checkpoint for its number.)
+(Rust was re-measured today alongside the Ryo rows; Swift was not re-run for this checkpoint — see the 2026-09-14 checkpoint for its number.)
 
 Measurement note: the Ryo rows are quiet-window means at the tagged commit (three runs each: AOT 5.1 ms ± 0.2, JIT 7.4 ms ± 0.7; full-suite batches under machine load read 5.8–6.0 ms with every arm inflated proportionally). The Rust and Swift rows are from the same-day full-suite run and match their 2026-09-11 values.
 
