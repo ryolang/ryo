@@ -46,40 +46,45 @@ JIT and AOT land within noise of each other (~1.42–1.43×) because both share 
 
 ### 4. [String Slicing Benchmark](./string_slicing/)
 
-* **Focus:** Zero-copy views — scan a 688 KiB in-program-generated string counting substring matches through `strview` slices, copying and storing nothing.
+* **Focus:** Zero-copy string views — scan a 688 KiB in-program-generated string counting substring matches through string-semantic slices (`strview` / `&str` with boundary validation / `String.UTF8View`), copying and storing nothing.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
-### 5. [Mandelbrot Benchmark](./mandelbrot/)
+### 5. [Byte Slicing Benchmark](./byte_slicing/)
+
+* **Focus:** The same scan workload on raw bytes — `bytesview` / `&[u8]` / `[UInt8]` slices with no UTF-8 char-boundary validation anywhere. Split out of string_slicing (2026-09-17) so each suite compares like with like; the delta between the two isolates Ryo's `str` boundary-validation cost.
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+
+### 6. [Mandelbrot Benchmark](./mandelbrot/)
 
 * **Focus:** Float codegen — 401×501 grid, max 80 iterations per pixel; no overflow guards in play, the cleanest Cranelift readout.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
-### 6. [Collatz Benchmark](./collatz/)
+### 7. [Collatz Benchmark](./collatz/)
 
 * **Focus:** Integer loop/branch — total stopping time for seeds 1..1,000,000; a hot flat loop complementing fibonacci's recursion profile.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
-### 7. [Doubling Concat Benchmark](./doubling_concat/)
+### 8. [Doubling Concat Benchmark](./doubling_concat/)
 
 * **Focus:** Runtime allocation strategy — `s = s + s` exponential growth to 16 MiB, stressing `ryo_str_alloc` / `ryo_str_concat`.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
-### 8. [Many Small Strings Benchmark](./many_small_strings/)
+### 9. [Many Small Strings Benchmark](./many_small_strings/)
 
 * **Focus:** Flat-loop alloc/free churn — 500,000 short strings built and dropped, complementing eager_destruction's recursion angle.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
-### 9. [Struct Records Benchmark](./struct_records/)
+### 10. [Struct Records Benchmark](./struct_records/)
 
 * **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field. Ryo AOT currently beats Rust and Go here; only Swift's small-string optimization keeps it ahead.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
 
-### 10. [Struct Records Reuse Benchmark](./struct_records_reuse/)
+### 11. [Struct Records Reuse Benchmark](./struct_records_reuse/)
 
 * **Focus:** The keep-original record update — same record, but the caller uses `p` again after `birthday`, so the update cannot consume it. Rust and Ryo pay an explicit clone, Swift/Go/Python share cheaply; tracking measure for the record-update ergonomics gap (I-172) and what `shared[T]` or a small-string optimization would buy.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
 
-### 11. [Struct Records Inout Benchmark](./struct_records_inout/)
+### 12. [Struct Records Inout Benchmark](./struct_records_inout/)
 
 * **Focus:** Imperative update-in-place through a mutable borrow (`inout` / `&mut` / pointer / attribute store) — no new record, no clone, no sret. Verifies that choosing between inout and the consuming move+return form costs nothing, so the idiom choice can be driven by intent.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).

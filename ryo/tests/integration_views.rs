@@ -153,9 +153,12 @@ fn test_slice_of_borrowed_param_last_use_in_returning_arm() {
 
 #[test]
 fn test_slice_empty() {
-    assert_ryo_runs(
+    // Empty slices carry the null-ptr/len-0 view: printing one must not
+    // dereference the null pointer, and its length is 0.
+    assert_ryo_output(
         "slice_empty.ryo",
-        "fn main():\n\ts: str = \"abc\"\n\tprint(s[3:])\n\tprint(s[0:0])\n",
+        "fn main():\n\ts: str = \"abc\"\n\tv = s[3:]\n\tprint(v)\n\tprint(int_to_str(v.len()))\n\tprint(int_to_str(s[0:0].len()))\n",
+        "00",
     );
 }
 

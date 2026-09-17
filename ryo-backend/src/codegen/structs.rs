@@ -343,9 +343,9 @@ impl<M: Module> Codegen<M> {
                     .ins()
                     .load(types::I64, MemFlagsData::trusted(), base, off + 16);
                 let free_ref = if matches!(ctx.pool.kind(field_ty), TypeKind::Bytes) {
-                    Self::declare_bytes_free(ctx.module, builder, ctx.int_type)?
+                    Self::declare_bytes_free(ctx, builder)?
                 } else {
-                    Self::declare_str_free(ctx.module, builder, ctx.int_type)?
+                    Self::declare_str_free(ctx, builder)?
                 };
                 builder.ins().call(free_ref, &[ptr, cap]);
                 Ok(())

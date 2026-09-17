@@ -1,7 +1,7 @@
 //! Bytes codegen (M8.4.2) — split from `expr.rs` to keep both files
 //! under the 2000-line CI cap (`scripts/check_file_length.sh`).
 //! Everything here mirrors the `str` path: same 24-byte fat-pointer
-//! ABI, same packed-u128 literal convention, `ryo_bytes_*` symbols.
+//! ABI, `ryo_bytes_*` symbols.
 //! Also hosts the shared `.rodata` dedup helpers (`store_string` /
 //! `store_bytes`), displaced from `mod.rs` by the same cap.
 
@@ -12,29 +12,12 @@ use ryo_core::tir::{Tir, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeKind};
 use std::collections::HashMap;
 
-use super::expr::CapRule;
 use super::{Codegen, FunctionContext, ValueRepr};
 
 impl<M: Module> Codegen<M> {
-    /// Bytes-producing variant of `emit_rv_str_call`: appends the
-    /// derived `cap` word so the triple lands entirely in SSA values.
-    /// Does NOT touch `ctx.inst_values` — caching is the caller's job.
-    pub(crate) fn emit_rv_bytes_call(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        fn_name: &str,
-        args: &[(Type, Value)],
-        cap_rule: CapRule,
-    ) -> Result<ValueRepr, String> {
-        let (ptr, len) = Self::emit_rv_pair_call(builder, ctx, fn_name, args)?;
-        let cap = match cap_rule {
-            CapRule::Static => builder.ins().iconst(types::I64, 0),
-        };
-        Ok(ValueRepr::Bytes { ptr, len, cap })
-    }
-
-    /// Emit a bytes literal as a fat pointer triple (ptr, len, cap=0)
-    /// by calling `ryo_bytes_from_literal` at runtime. Mirrors
+    /// Emit a bytes literal as a fat pointer triple (ptr, len, cap=0):
+    /// the `.rodata` data pointer, the compile-time length, and the
+    /// static cap-0 sentinel — pure constants, no runtime call. Mirrors
     /// `emit_str_literal_fat`; the payload is raw bytes (not
     /// necessarily UTF-8), so it reads through `pool.bytes_payload`.
     pub(crate) fn emit_bytes_literal_fat(
@@ -47,34 +30,26 @@ impl<M: Module> Codegen<M> {
         let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
         let rodata_ptr = builder.ins().symbol_value(ctx.int_type, data_ref);
         let lit_len = builder.ins().iconst(types::I64, content.len() as i64);
-
-        Self::emit_rv_bytes_call(
-            builder,
-            ctx,
-            "ryo_bytes_from_literal",
-            &[(ctx.int_type, rodata_ptr), (types::I64, lit_len)],
-            CapRule::Static,
-        )
+        let cap = builder.ins().iconst(types::I64, 0);
+        Ok(ValueRepr::Bytes {
+            ptr: rodata_ptr,
+            len: lit_len,
+            cap,
+        })
     }
 
     /// Declare `extern "C" fn ryo_bytes_free(ptr: *mut u8, cap: u64)` for
     /// the function being built — the bytes-family counterpart of
     /// `declare_str_free`. Returns a `FuncRef` callable via
     /// `builder.ins().call(_, &[ptr, cap])`. `cap == 0` is a runtime
-    /// no-op (covers static `.rodata` payloads emitted by
-    /// `ryo_bytes_from_literal`).
+    /// no-op (covers static `.rodata` payloads materialized by
+    /// `emit_bytes_literal_fat`).
     pub(crate) fn declare_bytes_free(
-        module: &mut M,
+        ctx: &mut FunctionContext<'_, M>,
         builder: &mut FunctionBuilder,
-        int_type: types::Type,
     ) -> Result<FuncRef, String> {
-        Self::declare_runtime_fn(
-            module,
-            builder,
-            "ryo_bytes_free",
-            &[int_type, types::I64],
-            &[],
-        )
+        let int_type = ctx.int_type;
+        Self::declare_runtime_fn(ctx, builder, "ryo_bytes_free", &[int_type, types::I64], &[])
     }
 
     /// True when a scheduled Free target is a `bytes` owner (M8.4.2) —
@@ -89,36 +64,8 @@ impl<M: Module> Codegen<M> {
         matches!(ctx.pool.kind(ty), TypeKind::Bytes)
     }
 
-    /// `bytes`/`bytesview` equality via `ryo_bytes_eq` (M8.4.2).
-    /// Operands may be owned triples or view pairs; only (ptr, len) is
-    /// read. `BytesCmpNe` inverts the I8 result, mirroring `StrCmpNe`.
-    pub(crate) fn emit_bytes_eq(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        tag: TirTag,
-        lhs: TirRef,
-        rhs: TirRef,
-    ) -> Result<Value, String> {
-        let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
-        let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
-
-        let eq_ref = Self::declare_runtime_fn(
-            ctx.module,
-            builder,
-            "ryo_bytes_eq",
-            &[ctx.int_type, types::I64, ctx.int_type, types::I64],
-            &[types::I8],
-        )?;
-        let call = builder.ins().call(eq_ref, &[l_ptr, l_len, r_ptr, r_len]);
-        let result = builder.inst_results(call)[0];
-
-        if tag == TirTag::BytesCmpNe {
-            let one = builder.ins().iconst(types::I8, 1);
-            Ok(builder.ins().bxor(result, one))
-        } else {
-            Ok(result)
-        }
-    }
+    // `emit_bytes_eq` lives in `str_ops.rs` next to `emit_str_eq` — both
+    // share the literal-specialized pair-compare (`emit_pair_eq`).
 }
 
 /// Define a string literal's content as a read-only `.rodata` object,

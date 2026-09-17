@@ -61,8 +61,7 @@ impl<M: Module> Codegen<M> {
             } else {
                 "__ryo_str_ensure_heap"
             };
-            let func_ref =
-                Self::declare_runtime_fn(ctx.module, builder, callee, &[ctx.int_type], &[])?;
+            let func_ref = Self::declare_runtime_fn(ctx, builder, callee, &[ctx.int_type], &[])?;
             builder.ins().call(func_ref, &[addr]);
             let out_ptr = builder
                 .ins()
@@ -207,7 +206,7 @@ impl<M: Module> Codegen<M> {
                 "ryo_str_free"
             };
             let free_ref = Self::declare_runtime_fn(
-                ctx.module,
+                ctx,
                 builder,
                 free_callee,
                 &[ctx.int_type, types::I64],
@@ -234,7 +233,7 @@ impl<M: Module> Codegen<M> {
         } else {
             "__ryo_str_ensure_heap"
         };
-        let func_ref = Self::declare_runtime_fn(ctx.module, builder, callee, &[ctx.int_type], &[])?;
+        let func_ref = Self::declare_runtime_fn(ctx, builder, callee, &[ctx.int_type], &[])?;
         builder.ins().call(func_ref, &[addr]);
         let out_ptr = builder
             .ins()
