@@ -389,6 +389,14 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-184 — Promote-on-view spill slot is re-written and re-checked every loop iteration for a loop-invariant base
+
+**Files:** `ryo-backend/src/codegen/views.rs` (`emit_ensure_heap_for_view_base` promo-slot path)
+**Summary:** When a view's base owner was promoted (heap-buffered for aliasing), every slice/view derivation re-emits the spill sequence: store the owner (ptr, len, cap) triple plus a spilled flag into a stack slot, then load and branch on the flag — even when the base is loop-invariant and the slot contents never change. In `benchmarks/string_slicing`'s `count_fox` this is ~12 extra aarch64 instructions per scan iteration (measured by disassembly, 2026-09-17), a large share of the remaining gap to Rust after the slice/eq inlining work.
+**Resolution:** Hoist the promo-slot spill and flag initialization out of loops (loop-invariant-code-motion on the spill sequence), or skip the slot write entirely on the heap/static fast path and keep the owner triple in registers when its liveness allows.
+
+---
+
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
