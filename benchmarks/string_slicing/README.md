@@ -1,6 +1,6 @@
 # String Slicing Benchmark
 
-**Focus:** Zero-copy string views. Builds a 688 KiB string in-program (doubling concat of a 43-byte seed), then scans it through string slices counting `fox` occurrences — `count_fox` borrows the string and every comparison is a view into the original buffer; nothing is copied or stored. Every arm is **string-semantic**: Ryo `strview`, Rust `&str` (`text.get(i..i+3)`, which validates UTF-8 char boundaries per slice just like Ryo), and Swift `String.UTF8View` scanned by index. For the raw-byte variant of the same workload (`bytesview` / `&[u8]` / `[UInt8]`, no UTF-8 validation anywhere) see [`byte_slicing`](../byte_slicing/).
+**Focus:** Zero-copy string views. Builds a 688 KiB string in-program (doubling concat of a 43-byte seed), then scans it through string slices counting `fox` occurrences — `count_fox` borrows the string and every comparison is a view into the original buffer; nothing is copied or stored. Every arm is **string-semantic and idiomatic** (per the repository convention): Ryo `strview` byte-offset slices with UTF-8 char-boundary validation, Rust `&str` direct slicing (same boundary validation, panics on a split character), Swift `Substring` windows walked by `String.Index`. One documented divergence: Swift's window is 3 **Characters** (its `String.Index` cannot split a Character — boundary correctness is structural, not a paid check), while Ryo and Rust slice 3 **bytes** with validation; for this ASCII-only input the windows coincide. For the raw-byte variant of the same workload (`bytesview` / `&[u8]` / `[UInt8]`, no UTF-8 semantics anywhere) see [`byte_slicing`](../byte_slicing/).
 
 **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 
@@ -14,20 +14,20 @@ What remains, in rough order of cost:
 2. The promote-on-view per-iteration spill: every slice of the promoted base re-stores the owner triple and re-branches on the spilled flag (~12 aarch64 instructions per iteration for a loop-invariant base) — tracked as I-184 in `ISSUES.md`.
 3. Cranelift-vs-LLVM mid-end quality on what is left.
 
-The spec-mandated UTF-8 char-boundary validation per slice (spec §3.1) is no longer a differentiator: since 2026-09-17 the Rust arm slices directly (`&text[i..i+3]`, panicking on a split character — the same contract as Ryo) and the Swift arm validates both slice endpoints explicitly (`(b & 0xC0) != 0x80` bit tests, mirroring Ryo's inlined checks) over `String.UTF8View`. On string semantics Ryo AOT (3.4 ms) now sits between Rust (1.8 ms) and Swift (7.1 ms) — Swift's index-advanced UTF-8 view scan is the slowest arm, as this README predicted back when it scanned a materialized `[UInt8]` instead.
+The spec-mandated UTF-8 char-boundary validation per slice (spec §3.1) is no longer a differentiator: since 2026-09-17 the Rust arm slices `&str` directly (panicking on a split character — the same contract as Ryo), and the Swift arm pays more, not less: its idiomatic `Substring`-by-`String.Index` scan walks grapheme clusters, so boundary correctness is structural but Character iteration costs it dearly. On string semantics Ryo AOT (3.4 ms) sits between Rust (1.8 ms) and Swift (17.6 ms).
 
 One fairness note: hyperfine times whole processes, so every arm's in-program string build (14 doublings) is included by design.
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-17 — first run with all arms string-semantic (Rust `&str` direct slicing with boundary validation, Swift `String.UTF8View` index scan with explicit boundary tests; see the split checkpoint below). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux). Tables before this date measured byte-scanning Rust/Swift arms — compare those against [`byte_slicing`](../byte_slicing/) instead.
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-17 — first run with all arms string-semantic and idiomatic (Rust `&str` direct slicing with boundary validation, Swift `Substring` windows by `String.Index`; see the split checkpoint below). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux). Tables before this date measured byte-scanning Rust/Swift arms — compare those against [`byte_slicing`](../byte_slicing/) instead.
 
 | Candidate | Version | Mean time | vs fastest | Max RSS |
 |---|---|---|---|---|
-| **Rust** | 1.98.0 | 1.8 ms ± 0.1 ms | 1.00x | 2.88 MB |
-| **Ryo (AOT)** | 0.1.0-dev.20260917+63078ac | 3.4 ms ± 0.2 ms | 1.84x slower | 2.75 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260917+63078ac | 4.9 ms ± 0.1 ms | 2.65x slower | 7.05 MB |
-| **Swift** | 6.3.3 | 7.1 ms ± 0.7 ms | 3.94x slower | 7.03 MB |
+| **Rust** | 1.98.0 | 1.8 ms ± 0.2 ms | 1.00x | 2.88 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260917+63078ac | 3.4 ms ± 0.2 ms | 1.89x slower | 2.75 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260917+63078ac | 4.9 ms ± 0.3 ms | 2.72x slower | 7.05 MB |
+| **Swift** | 6.3.3 | 17.6 ms ± 1.4 ms | 9.78x slower | 7.03 MB |
 
 ### Checkpoint: SSO + consuming concat (2026-09-14)
 
@@ -56,7 +56,7 @@ The fix the section above describes landed: `__ryo_slice`/`__ryo_bytes_slice` (b
 
 ### Checkpoint: string-semantic arms + benchmark split (2026-09-17)
 
-The benchmark was not comparing like with like: Ryo's `strview` slices pay spec-mandated UTF-8 char-boundary validation while the Rust and Swift arms scanned raw bytes (`&[u8]`, `[UInt8]`) and never did. The byte-scanning arms moved to the new [`byte_slicing`](../byte_slicing/) benchmark (where Ryo uses `bytes`/`bytesview`, the intended no-check path), and this benchmark's Rust and Swift arms were converted to string semantics: Rust slices `&str` directly (`&text[i..i+3]` panics on a split character — the same contract as Ryo's exit-101 slice panic), Swift scans `String.UTF8View` by index with no `[UInt8]` materialization and validates both slice endpoints with `(b & 0xC0) != 0x80` continuation-byte tests, mirroring Ryo's inlined boundary checks. Cost of going string-semantic: Rust 1.5 → 1.8 ms (the boundary checks are real but cheap), Swift 2.6 → 7.1 ms (index-advanced UTF-8 view scanning plus the explicit boundary tests). Ryo AOT now beats Swift on the string workload it was designed for. Same-day byte-arm numbers live in `byte_slicing`'s README; the current table at the top of this file holds the string-semantic run.
+The benchmark was not comparing like with like: Ryo's `strview` slices pay spec-mandated UTF-8 char-boundary validation while the Rust and Swift arms scanned raw bytes (`&[u8]`, `[UInt8]`) and never did. The byte-scanning arms moved to the new [`byte_slicing`](../byte_slicing/) benchmark (where Ryo uses `bytes`/`bytesview`, the intended no-check path), and this benchmark's Rust and Swift arms were converted to idiomatic string semantics: Rust slices `&str` directly (`&text[i..i+3]` panics on a split character — the same contract as Ryo's exit-101 slice panic), Swift compares 3-Character `Substring` windows walked by `String.Index` with no `[UInt8]` materialization. Cost of going string-semantic: Rust 1.5 → 1.8 ms (the boundary checks are real but cheap), Swift 2.6 → 17.6 ms (Character iteration carries grapheme-breaking machinery; boundary correctness is structural in Swift, since `String.Index` cannot split a Character). An earlier same-day variant scanned Swift's `UTF8View` by byte index with explicit continuation-byte tests (7.1 ms), but manual bit-twiddling violates the suite's idiomatic-per-language convention, so the `Substring` form is the committed arm. Ryo AOT now beats Swift 5× on the string workload it was designed for. Same-day byte-arm numbers live in `byte_slicing`'s README; the current table at the top of this file holds the string-semantic run.
 
 ### Known tradeoff: growth headroom on doubling concat (2026-09-15)
 

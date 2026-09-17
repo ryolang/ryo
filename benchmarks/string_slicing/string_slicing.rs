@@ -1,19 +1,12 @@
 fn count_fox(text: &str) -> usize {
+    // String-semantic scan: direct &str slicing validates UTF-8 char
+    // boundaries per slice and panics on a split character — the same
+    // contract as Ryo's strview slices. The seed is ASCII-only, so the
+    // checks always pass here, but both languages pay them per window.
     let n = text.len();
-    let mut count = 0;
-    let mut i = 0;
-    while i + 3 <= n {
-        // Byte-offset slicing with UTF-8 char-boundary validation, the
-        // same semantics as Ryo's strview slices: direct slicing panics
-        // when the range splits a character (Ryo panics with exit 101).
-        // The seed is ASCII-only, so the checks always pass here — but
-        // both languages pay them per iteration.
-        if &text[i..i + 3] == "fox" {
-            count += 1;
-        }
-        i += 1;
-    }
-    count
+    (0..n.saturating_sub(2))
+        .filter(|&i| &text[i..i + 3] == "fox")
+        .count()
 }
 
 fn main() {
