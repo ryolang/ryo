@@ -287,7 +287,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ### I-144 — Per-if clone and repeated dead-drop scans in codegen
 
-**Files:** `ryo-backend/src/codegen/mod.rs` (`if_branches.get(...).cloned().unwrap_or_default()` :1196; called per arm :1237/:1273/:1289/:1305), `ryo-backend/src/codegen/expr.rs` (`emit_conditional_dead_drops` :703-719)
+**Files:** `ryo-backend/src/codegen/mod.rs` (`if_branches.get(...).cloned().unwrap_or_default()` :1196; called per arm :1237/:1273/:1289/:1305), `ryo-backend/src/codegen/expr.rs` (`emit_conditional_dead_drops` :648-678)
 **Summary:** Every if-statement clones the `IfBranchIds` payload (heap `Vec` for elif branches) out of the sidecar even when there is no entry, because `.cloned().unwrap_or_default()` goes through `ctx`. Separately, `emit_conditional_dead_drops` re-scans the whole per-function `conditional_dead_drops` Vec at the start of *every* if arm with no empty-check early exit. On if-heavy functions with dead drops this is O(ifs × arms × drops).
 **Resolution:** Borrow the sidecar out of `ctx` first so `get` returns a reference instead of cloning; add the same `is_empty()` early-return `emit_due_frees` already has or index dead drops by `if_stmt` in a map built once per function.
 

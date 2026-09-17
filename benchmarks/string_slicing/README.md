@@ -38,6 +38,8 @@ The string-runtime rework moved this benchmark twice, in opposite directions. (1
 | **Ryo (AOT)** | 0.1.0-dev.20260914+4cef5f9 | 5.1 ms ± 0.2 ms | 3.03x slower | 2.75 MB |
 | **Ryo (JIT)** | 0.1.0-dev.20260914+4cef5f9 | 7.4 ms ± 0.7 ms | 4.41x slower | 6.89 MB |
 
+Measurement note (2026-09-14 checkpoint): the Ryo rows are quiet-window means at the tagged commit (three runs each: AOT 5.1 ms ± 0.2, JIT 7.4 ms ± 0.7; full-suite batches under machine load read 5.8–6.0 ms with every arm inflated proportionally). The Rust and Swift rows are from the same-day full-suite run and match their 2026-09-11 values.
+
 ### Checkpoint: tiny runtime ops inlined (2026-09-17)
 
 The fix the section above describes landed: `__ryo_slice`/`__ryo_bytes_slice` (bounds + UTF-8 guards, cold `ryo_panic` blocks), literal packing (pure `symbol_value` + `iconst` — `pack_pair` was the whole body), and `==`/`!=` against literals up to 16 bytes (length check + gated per-byte compares) are now inline Cranelift IR at the call site. With no pair-returning runtime call left, the packed-u128 ABI and its ~9-instruction i128 unpack legalization per use are gone, and `enable_llvm_abi_extensions` is retired with it. AOT 5.1 → 3.4 ms; JIT 7.4 → 4.7 ms. The remaining ~2.3× vs Rust is the spec-mandated UTF-8 boundary checks, the §18 overflow guards (elision/fusing tracked in `ISSUES.md`), and Cranelift-vs-LLVM mid-end quality.
@@ -49,8 +51,6 @@ The fix the section above describes landed: `__ryo_slice`/`__ryo_bytes_slice` (b
 | **Ryo (JIT)** | 0.1.0-dev.20260917+c308a82 | 4.7 ms ± 0.1 ms | 3.13x slower |
 
 (Rust was re-measured today alongside the Ryo rows; Swift was not re-run for this checkpoint — see the 2026-09-14 checkpoint for its number.)
-
-Measurement note: the Ryo rows are quiet-window means at the tagged commit (three runs each: AOT 5.1 ms ± 0.2, JIT 7.4 ms ± 0.7; full-suite batches under machine load read 5.8–6.0 ms with every arm inflated proportionally). The Rust and Swift rows are from the same-day full-suite run and match their 2026-09-11 values.
 
 ### Known tradeoff: growth headroom on doubling concat (2026-09-15)
 
