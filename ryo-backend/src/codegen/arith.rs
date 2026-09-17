@@ -22,8 +22,9 @@ pub(crate) const MOD_OVERFLOW_MSG: &str = "integer modulo overflow\n";
 
 impl<M: Module> Codegen<M> {
     /// Define a compiler-generated message as a read-only data object,
-    /// deduped per module through `Codegen::guard_msg_data`.
-    fn store_guard_msg(
+    /// deduped per module through `Codegen::guard_msg_data`. Also backs
+    /// the `bool_to_str` inline's `"true"`/`"false"` literals.
+    pub(crate) fn store_guard_msg(
         module: &mut M,
         data_ctx: &mut DataDescription,
         cache: &mut HashMap<&'static str, DataId>,

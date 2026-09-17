@@ -219,15 +219,25 @@ impl<M: Module> Codegen<M> {
             builder.seal_block(spill_block);
             builder.switch_to_block(spill_block);
         }
-        let slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            STR_SLOT_SIZE,
-            3,
-        ));
-        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-        builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
-        builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
-        builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+        // Home-backed binding: promote the home slot in place — no
+        // spill, and no write-back below (the home IS the storage).
+        let local_name = Self::local_name_of(ctx, r);
+        let home_addr = local_name.and_then(|n| Self::fat_home_addr(builder, ctx, n));
+        let addr = match home_addr {
+            Some(addr) => addr,
+            None => {
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    STR_SLOT_SIZE,
+                    3,
+                ));
+                let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+                builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+                builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+                addr
+            }
+        };
         let callee = if is_bytes {
             "__ryo_bytes_ensure_heap"
         } else {
@@ -266,9 +276,10 @@ impl<M: Module> Codegen<M> {
         // path needs this — on the heap path the binding's fat locals
         // already hold the identical bits. Borrowed-param bases skip
         // the write-back: their promoted triple lives in the promo
-        // scratch slot above.
-        let local_name = Self::local_name_of(ctx, r);
+        // scratch slot above. Home-backed bindings skip it too: the
+        // runtime already wrote the promoted triple into the home.
         if promo_slot.is_none()
+            && home_addr.is_none()
             && let Some(name) = local_name
         {
             // Every fat binding gets FatLocals at the param/local

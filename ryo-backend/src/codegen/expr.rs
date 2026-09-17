@@ -6,13 +6,11 @@ use super::{
     Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, Terminator, ValueRepr,
     cranelift_type_for, is_fat_type, ranges,
 };
-use cranelift::codegen::ir::{
-    BlockArg, FuncRef, InstructionData, MemFlagsData, Opcode, StackSlot, ValueDef,
-};
+use cranelift::codegen::ir::{BlockArg, FuncRef, MemFlagsData, StackSlot};
 use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
-use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId, TypeKind, ViewKind};
+use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
+use ryo_core::types::{StringId, TypeKind, ViewKind};
 use std::collections::HashMap;
 
 impl<M: Module> Codegen<M> {
@@ -398,337 +396,6 @@ impl<M: Module> Codegen<M> {
         Ok(ctx.module.declare_func_in_func(func_id, builder.func))
     }
 
-    /// True if a `FreePoint` with the given `branch` tag is eligible
-    /// to fire at the current point in codegen. Unconditional entries
-    /// (`branch == None`) always pass; branch-gated entries fire only
-    /// when their `BranchId` is on `branch_stack`. We use `contains`
-    /// rather than `last() == Some(&b)` so a Free anchored to a
-    /// parent arm still fires when codegen is inside a nested child
-    /// arm of that parent.
-    pub(crate) fn branch_active(
-        branch: Option<ryo_core::ownership::BranchId>,
-        stack: &[ryo_core::ownership::BranchId],
-    ) -> bool {
-        match branch {
-            None => true,
-            Some(b) => stack.contains(&b),
-        }
-    }
-
-    /// Emit the family-appropriate free (`ryo_str_free` /
-    /// `ryo_bytes_free`, selected per target via `free_target_is_bytes`)
-    /// for any scheduled Free whose
-    /// anchor is `tir_ref` and whose `branch` tag is active on the
-    /// current `branch_stack`. Called at the end of each
-    /// materialisation (`eval_inst` / `eval_inst_fat`) so that Task
-    /// 4's anonymous-temporary Frees, anchored on the consuming
-    /// `Call`, fire after the consumer has emitted its IR.
-    ///
-    /// Scheduled Frees only target `Str`-/`Bytes`-cached owners. A
-    /// `Scalar`-cached target is an ownership-pass bug — the
-    /// borrowed-scalar ABI never owns its argument and the ownership
-    /// pass excludes such args from `temp_owners`. If a
-    /// `Scalar` target is observed here, this function returns `Err`.
-    ///
-    /// `freed_at` (a per-`free_schedule`-index flag table) guards against
-    /// double-emission across the eval-end hooks and the end-of-stmt
-    /// sweep.
-    pub(crate) fn emit_due_frees(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        tir_ref: TirRef,
-    ) -> Result<(), String> {
-        if ctx.sidecar.free_schedule.is_empty() {
-            return Ok(());
-        }
-        let Some(indices) = ctx.free_by_after.get(tir_ref.index()) else {
-            return Ok(());
-        };
-        let pending: Vec<(usize, TirRef)> = indices
-            .iter()
-            .copied()
-            .filter(|&idx| {
-                let fp = &ctx.sidecar.free_schedule[idx];
-                Self::branch_active(fp.branch, &ctx.branch_stack) && !ctx.freed_at[idx]
-            })
-            .map(|idx| (idx, ctx.sidecar.free_schedule[idx].target))
-            .collect();
-        Self::emit_frees(builder, ctx, pending)
-    }
-
-    /// End-of-statement sweep: fire any scheduled Free whose anchor
-    /// was materialised within the just-emitted statement but hasn't
-    /// been emitted yet. This covers Task 3's last-use Frees where
-    /// `after` is a sub-expression `Var` read — by the time the
-    /// statement finishes, the consumer has already issued its IR,
-    /// so a Free here lands after the consumer's use of the buffer.
-    /// Eager firing during the inner `eval_inst_fat(Var)` would have
-    /// dropped the allocation before the consumer (e.g. `print`'s
-    /// `write` syscall) finished reading from it.
-    ///
-    /// Branch-gated entries are filtered through `branch_active`, so
-    /// only Frees whose `BranchId` is on the current `branch_stack`
-    /// fire here.
-    pub(crate) fn sweep_due_frees(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-    ) -> Result<(), String> {
-        if ctx.pending_sweep.is_empty() {
-            return Ok(());
-        }
-        let pending: Vec<(usize, TirRef)> = ctx
-            .pending_sweep
-            .iter()
-            .copied()
-            .filter(|&idx| {
-                let fp = &ctx.sidecar.free_schedule[idx];
-                Self::branch_active(fp.branch, &ctx.branch_stack)
-                    && Self::cached_repr(ctx, fp.after).is_some()
-                    && Self::cached_repr(ctx, fp.target).is_some()
-            })
-            .map(|idx| (idx, ctx.sidecar.free_schedule[idx].target))
-            .collect();
-        Self::emit_frees(builder, ctx, pending)
-    }
-
-    /// True when `cap` is a materialized `iconst 0` — the static
-    /// .rodata sentinel. `ryo_str_free` returns immediately for
-    /// cap == 0, so the call is dead at the emission site and can be
-    /// skipped; the ownership schedule itself stays untouched.
-    pub(crate) fn is_static_cap_zero(func: &cranelift::codegen::ir::Function, cap: Value) -> bool {
-        let ValueDef::Result(inst, _) = func.dfg.value_def(cap) else {
-            return false;
-        };
-        let InstructionData::UnaryImm { opcode, imm } = &func.dfg.insts[inst] else {
-            return false;
-        };
-        *opcode == Opcode::Iconst && imm.bits() == 0
-    }
-
-    /// Shared emission body for `emit_due_frees` / `sweep_due_frees`.
-    /// Given the already-filtered `(free_schedule index, target)`
-    /// pairs, declare the family-appropriate free (`ryo_str_free` /
-    /// `ryo_bytes_free`, selected per target via `free_target_is_bytes`)
-    /// and emit one call per pair, marking each index as fired in
-    /// `ctx.freed_at`. A `Scalar`-cached target
-    /// (borrowed-scalar ABI, never heap-owned) returns an error and aborts
-    /// code generation — the ABI registry is supposed to keep such args out
-    /// of `temp_owners`.
-    ///
-    /// When the target is a named binding's initializer/value (or a fat
-    /// param's virtual ref), the Free is emitted from the binding's
-    /// CURRENT `FatLocals` instead of the producing inst's cached repr:
-    /// after a reassign, a branch merge, or an `inout` write-back the
-    /// cached triple may be stale (freed/replaced), while the binding's
-    /// `Variable`s are SSA-correct at every program point (the
-    /// same reasoning the `free_on_reassign` path documents).
-    /// Lazily declare and cache the family-appropriate free `FuncRef`
-    /// (`ryo_bytes_free` when `is_bytes`, else `ryo_str_free`).
-    /// Resolved only at call sites that survive the cap==0 elision, so
-    /// an all-static schedule never declares an unused import.
-    pub(crate) fn free_ref_for(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        str_free_ref: &mut Option<FuncRef>,
-        bytes_free_ref: &mut Option<FuncRef>,
-        is_bytes: bool,
-    ) -> Result<FuncRef, String> {
-        let slot = if is_bytes {
-            bytes_free_ref
-        } else {
-            str_free_ref
-        };
-        if let Some(f) = slot {
-            return Ok(*f);
-        }
-        let f = if is_bytes {
-            Self::declare_bytes_free(ctx, builder)?
-        } else {
-            Self::declare_str_free(ctx, builder)?
-        };
-        *slot = Some(f);
-        Ok(f)
-    }
-
-    fn emit_frees(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        pending: Vec<(usize, TirRef)>,
-    ) -> Result<(), String> {
-        if pending.is_empty() {
-            return Ok(());
-        }
-        let mut str_free_ref: Option<FuncRef> = None;
-        let mut bytes_free_ref: Option<FuncRef> = None;
-        for (idx, target) in pending {
-            ctx.freed_at[idx] = true;
-            // M9: struct-typed targets route to the recursive field
-            // drop; everything below is the str/bytes path.
-            if Self::try_emit_struct_free(builder, ctx, target)? {
-                continue;
-            }
-            let is_bytes = Self::free_target_is_bytes(ctx, target);
-            let binding = Self::free_binding_name(ctx, target)
-                .and_then(|name| Self::read_slot(&ctx.fat_locals, name));
-            if let Some(sl) = binding {
-                let ptr = builder.use_var(sl.ptr);
-                let cap = builder.use_var(sl.cap);
-                if !Self::is_static_cap_zero(builder.func, cap) {
-                    let free_ref = Self::free_ref_for(
-                        builder,
-                        ctx,
-                        &mut str_free_ref,
-                        &mut bytes_free_ref,
-                        is_bytes,
-                    )?;
-                    builder.ins().call(free_ref, &[ptr, cap]);
-                }
-                continue;
-            }
-            let repr = Self::cached_repr(ctx, target).ok_or_else(|| {
-                format!(
-                    "ownership pass scheduled Free for %{} but no ValueRepr cached",
-                    target.index()
-                )
-            })?;
-            // M8.4: views are borrows, never owners — the ownership pass
-            // must never schedule a Free for one. The
-            // repr check below doubles as the release-mode guard.
-            debug_assert!(
-                !matches!(repr, ValueRepr::View { .. }),
-                "ownership pass scheduled Free for strview %{}; views are never freed",
-                target.index()
-            );
-            match repr {
-                ValueRepr::Str { ptr, cap, .. } | ValueRepr::Bytes { ptr, cap, .. } => {
-                    if !Self::is_static_cap_zero(builder.func, cap) {
-                        let free_ref = Self::free_ref_for(
-                            builder,
-                            ctx,
-                            &mut str_free_ref,
-                            &mut bytes_free_ref,
-                            is_bytes,
-                        )?;
-                        builder.ins().call(free_ref, &[ptr, cap]);
-                    }
-                }
-                ValueRepr::View { .. } => {
-                    return Err(format!(
-                        "ownership pass scheduled Free for non-owning strview %{}; views are never owners",
-                        target.index()
-                    ));
-                }
-                ValueRepr::Scalar(_) => {
-                    return Err(format!(
-                        "ownership pass scheduled Free for borrowed-scalar value %{}; the ABI registry should have excluded it.",
-                        target.index()
-                    ));
-                }
-                ValueRepr::Struct { .. } => {
-                    return Err(format!(
-                        "ownership pass scheduled Free for struct %{} but try_emit_struct_free did not claim it",
-                        target.index()
-                    ));
-                }
-            }
-        }
-        ctx.pending_sweep.retain(|&idx| !ctx.freed_at[idx]);
-        Ok(())
-    }
-
-    /// Emit conditional DeadDrops for (`if_stmt`, `arm`): frees of
-    /// the pre-if buffer of a conditionally-reassigned binding on the
-    /// paths where the reassign did NOT happen. Fired at the START of an
-    /// untouched arm, where the binding's `FatLocals` still hold the
-    /// pre-if value. Resolves `target` through `free_binding_names` (the
-    /// init→name map), so the freed buffer is the binding's
-    /// current triple at that program point. The free is
-    /// family-appropriate (`ryo_str_free` / `ryo_bytes_free`, selected
-    /// per target via `free_target_is_bytes`).
-    pub(crate) fn emit_conditional_dead_drops(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        if_stmt: TirRef,
-        arm: ryo_core::ownership::BranchId,
-    ) -> Result<(), String> {
-        for drop in ctx.sidecar.conditional_dead_drops.iter() {
-            if drop.if_stmt != if_stmt || !drop.arms.contains(&arm) {
-                continue;
-            }
-            let Some(name) = Self::free_binding_name(ctx, drop.target) else {
-                continue;
-            };
-            // M9: struct bindings drop their needs-drop fields.
-            if Self::try_emit_struct_dead_drop(builder, ctx, name, drop.target)? {
-                continue;
-            }
-            let Some(sl) = Self::read_slot(&ctx.fat_locals, name) else {
-                continue;
-            };
-            let free_ref = if Self::free_target_is_bytes(ctx, drop.target) {
-                Self::declare_bytes_free(ctx, builder)?
-            } else {
-                Self::declare_str_free(ctx, builder)?
-            };
-            let ptr = builder.use_var(sl.ptr);
-            let cap = builder.use_var(sl.cap);
-            builder.ins().call(free_ref, &[ptr, cap]);
-        }
-        Ok(())
-    }
-
-    /// Map every fat-producing named initializer to its binding: VarDecl
-    /// initializers, Assign values, and fat (str/bytes) params' virtual
-    /// refs. Built
-    /// once per function; `emit_frees` consults it to free a binding's
-    /// current `FatLocals` rather than a stale cached repr.
-    ///
-    /// Returns two dense tables: the first indexed by `TirRef::index()`
-    /// for real instruction refs (slot 0 unused), the second indexed by
-    /// param position for fat-param sentinel refs — queried together via
-    /// `Codegen::free_binding_name`.
-    pub(crate) fn build_free_binding_names(
-        tir: &Tir,
-        pool: &InternPool,
-    ) -> (Vec<Option<StringId>>, Vec<Option<StringId>>) {
-        fn walk(tir: &Tir, stmts: &[TirRef], map: &mut [Option<StringId>]) {
-            for &r in stmts {
-                match tir.inst(r).tag {
-                    TirTag::VarDecl => {
-                        let view = tir.var_decl_view(r);
-                        map[view.initializer.index()] = Some(view.name);
-                    }
-                    TirTag::Assign => {
-                        let view = tir.assign_view(r);
-                        map[view.value.index()] = Some(view.name);
-                    }
-                    TirTag::IfStmt => {
-                        let view = tir.if_stmt_view(r);
-                        walk(tir, &view.then_stmts, map);
-                        for elif in &view.elif_branches {
-                            walk(tir, &elif.body, map);
-                        }
-                        if let Some(else_stmts) = &view.else_stmts {
-                            walk(tir, else_stmts, map);
-                        }
-                    }
-                    TirTag::WhileLoop => walk(tir, &tir.while_loop_view(r).body, map),
-                    TirTag::ForRange => walk(tir, &tir.for_range_view(r).body, map),
-                    _ => {}
-                }
-            }
-        }
-        let mut param_names = vec![None; tir.params.len()];
-        for (idx, param) in tir.params.iter().enumerate() {
-            if is_fat_type(param.ty, pool) {
-                param_names[idx] = Some(param.name);
-            }
-        }
-        let mut inst_names = vec![None; tir.instructions.len()];
-        walk(tir, &tir.body_stmts(), &mut inst_names);
-        (inst_names, param_names)
-    }
-
     /// Declare `extern "C" fn ryo_str_free(ptr: *mut u8, cap: u64)` for
     /// the function being built. Returns a `FuncRef` callable via
     /// `builder.ins().call(_, &[ptr, cap])`. `cap == 0` is a runtime
@@ -742,21 +409,95 @@ impl<M: Module> Codegen<M> {
         Self::declare_runtime_fn(ctx, builder, "ryo_str_free", &[int_type, types::I64], &[])
     }
 
-    /// Call a slot-out runtime producer: allocate a 24-byte slot, pass
-    /// its address as arg 0, then load the tagged (ptr, len, cap)
-    /// triple. The runtime writes the full slot (SSO tag, headroom
-    /// cap) — codegen never derives cap anymore.
+    /// Read a fat binding's current `(ptr, len, cap)`: three loads
+    /// from its stack-slot home when it has one, else `use_var` on the
+    /// SSA `Variable`s. Returns `None` when the name has no fat binding.
+    pub(crate) fn emit_fat_load(
+        builder: &mut FunctionBuilder,
+        ctx: &FunctionContext<'_, M>,
+        name: StringId,
+    ) -> Option<(Value, Value, Value)> {
+        let sl = Self::read_slot(&ctx.fat_locals, name)?;
+        if let Some(home) = sl.home {
+            let addr = builder.ins().stack_addr(ctx.int_type, home, 0);
+            let ptr = builder
+                .ins()
+                .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+            let len = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), addr, 8);
+            let cap = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), addr, 16);
+            Some((ptr, len, cap))
+        } else {
+            Some((
+                builder.use_var(sl.ptr),
+                builder.use_var(sl.len),
+                builder.use_var(sl.cap),
+            ))
+        }
+    }
+
+    /// `(ptr, cap)` half of `emit_fat_load` for the free paths, which
+    /// never read the length.
+    pub(crate) fn emit_fat_load_ptr_cap(
+        builder: &mut FunctionBuilder,
+        ctx: &FunctionContext<'_, M>,
+        name: StringId,
+    ) -> Option<(Value, Value)> {
+        let sl = Self::read_slot(&ctx.fat_locals, name)?;
+        if let Some(home) = sl.home {
+            let addr = builder.ins().stack_addr(ctx.int_type, home, 0);
+            let ptr = builder
+                .ins()
+                .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+            let cap = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), addr, 16);
+            Some((ptr, cap))
+        } else {
+            Some((builder.use_var(sl.ptr), builder.use_var(sl.cap)))
+        }
+    }
+
+    /// The address of a fat binding's home slot, when it has one.
+    /// Producers and in-place mutators (`__ryo_*_push`, inout args,
+    /// `__ryo_*_ensure_heap`) write through it directly.
+    pub(crate) fn fat_home_addr(
+        builder: &mut FunctionBuilder,
+        ctx: &FunctionContext<'_, M>,
+        name: StringId,
+    ) -> Option<Value> {
+        let home = Self::read_slot(&ctx.fat_locals, name)?.home?;
+        Some(builder.ins().stack_addr(ctx.int_type, home, 0))
+    }
+
+    /// Call a slot-out runtime producer: allocate a 24-byte slot (or
+    /// use the caller-provided `out_slot` — a fat binding's canonical
+    /// home when the result initializes one), pass its address as
+    /// arg 0, then load the tagged (ptr, len, cap) triple. The runtime
+    /// writes the full slot (SSO tag, headroom cap) — codegen never
+    /// derives cap anymore.
+    ///
+    /// The reload loads run either way: their values feed the
+    /// `ValueRepr` cache the free sweep keys on. For a home-backed
+    /// binding they are short-lived (never `def_var`'d), so regalloc
+    /// never grows a second spill slot next to the home.
     pub(crate) fn emit_slot_out_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         fn_name: &'static str,
         args: &[(Type, Value)],
+        out_slot: Option<StackSlot>,
     ) -> Result<(Value, Value, Value), String> {
-        let slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            STR_SLOT_SIZE,
-            3,
-        ));
+        let slot = out_slot.unwrap_or_else(|| {
+            builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                STR_SLOT_SIZE,
+                3,
+            ))
+        });
         let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
         let mut param_tys = Vec::with_capacity(args.len() + 1);
         param_tys.push(ctx.int_type);
@@ -781,34 +522,53 @@ impl<M: Module> Codegen<M> {
     /// Extract a readable `(ptr, len)` for the byte content of a fat
     /// value whose words may be tagged-inline (SSO). Inline: spill the
     /// three words to a fresh 24-byte scratch slot and hand back its
-    /// address plus the tag-encoded len. Heap/static: pass through
+    /// address plus the tag-encoded len — or, when `inline_addr` names
+    /// the value's existing in-memory home (a home-backed binding), use
+    /// that address directly with no spill. Heap/static: pass through
     /// unchanged.
     ///
     /// TRANSIENT CONSUMERS ONLY (print, eq, concat operands, push
     /// suffix, conversion args): the returned ptr for an inline value
-    /// addresses the scratch slot. Each call allocates a fresh slot, so
-    /// extractions never clobber each other — nested evaluation of the
-    /// next operand cannot overwrite a pointer that is still live.
-    /// View-creating ops (slice, ToView) must go through
-    /// `__ryo_*_ensure_heap` instead (promote-on-view).
+    /// addresses the scratch slot (or the binding's home). Each spill
+    /// allocates a fresh slot, so extractions never clobber each other
+    /// — nested evaluation of the next operand cannot overwrite a
+    /// pointer that is still live. A home address is equally stable:
+    /// consumers only read through it, and the runtime producers that
+    /// also write a slot (`__ryo_*_push` on the same binding) document
+    /// the inline copy ranges as disjoint. View-creating ops (slice,
+    /// ToView) must go through `__ryo_*_ensure_heap` instead
+    /// (promote-on-view).
     pub(crate) fn emit_fat_bytes_ptr_len(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         ptr: Value,
         len: Value,
         cap: Value,
+        inline_addr: Option<Value>,
     ) -> Result<(Value, Value), String> {
-        let scratch = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            STR_SLOT_SIZE,
-            3,
-        ));
-        let addr = builder.ins().stack_addr(ctx.int_type, scratch, 0);
-        // Unconditional spill: three stores are cheaper than a branch,
-        // and the scratch is written before either select reads it.
-        builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
-        builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
-        builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+        // Static (.rodata, cap == 0) values are never inline: pass
+        // through with no spill and no tag math.
+        if Self::is_static_cap_zero(builder.func, cap) {
+            return Ok((ptr, len));
+        }
+        let addr = match inline_addr {
+            Some(addr) => addr,
+            None => {
+                let scratch = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    STR_SLOT_SIZE,
+                    3,
+                ));
+                let addr = builder.ins().stack_addr(ctx.int_type, scratch, 0);
+                // Unconditional spill: three stores are cheaper than a
+                // branch, and the scratch is written before either
+                // select reads it.
+                builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+                builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+                builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+                addr
+            }
+        };
         let tag = builder.ins().ushr_imm_u(cap, 56);
         let tag_bit = builder.ins().band_imm_u(tag, 0x80);
         let is_in = builder.ins().icmp_imm_u(IntCC::NotEqual, tag_bit, 0);
@@ -826,6 +586,22 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+    ) -> Result<ValueRepr, String> {
+        Self::eval_inst_fat_slot(builder, ctx, r, None)
+    }
+
+    /// `eval_inst_fat` with a caller-provided slot-out destination:
+    /// when `r` is a producer call (runtime slot-out producer, concat,
+    /// or fat-returning user call) the producer writes `out_slot`
+    /// directly instead of a fresh temp. Used by the fat VarDecl/Assign
+    /// paths to write a home-backed binding in a single store round.
+    /// Ignored for non-producer instructions (literals, Var reads,
+    /// view-as-owner) — they never emit a slot-out call.
+    pub(crate) fn eval_inst_fat_slot(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
     ) -> Result<ValueRepr, String> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return Ok(repr);
@@ -851,10 +627,9 @@ impl<M: Module> Codegen<M> {
                     TirData::Var(name) => name,
                     _ => unreachable!(),
                 };
-                if let Some(locals) = Self::read_slot(&ctx.fat_locals, name) {
-                    let ptr = builder.use_var(locals.ptr);
-                    let len = builder.use_var(locals.len);
-                    let cap = builder.use_var(locals.cap);
+                if Self::read_slot(&ctx.fat_locals, name).is_some() {
+                    let (ptr, len, cap) = Self::emit_fat_load(builder, ctx, name)
+                        .expect("fat_locals entry checked above");
                     // The slot table is family-agnostic; the TIR type
                     // picks the repr so downstream type-keyed dispatch
                     // (frees, call ABI) sees the right variant.
@@ -887,6 +662,7 @@ impl<M: Module> Codegen<M> {
                         ctx,
                         "ryo_str_from_view",
                         &[(ctx.int_type, v_ptr), (types::I64, v_len)],
+                        out_slot,
                     )?;
                     ValueRepr::Str { ptr, len, cap }
                 } else if name_str == "__ryo_bytes_from_view" {
@@ -904,6 +680,7 @@ impl<M: Module> Codegen<M> {
                         ctx,
                         "ryo_bytes_from_view",
                         &[(ctx.int_type, v_ptr), (types::I64, v_len)],
+                        out_slot,
                     )?;
                     ValueRepr::Bytes { ptr, len, cap }
                 } else if name_str == "__ryo_str_to_bytes" {
@@ -915,6 +692,7 @@ impl<M: Module> Codegen<M> {
                         ctx,
                         "__ryo_str_to_bytes",
                         &[(ctx.int_type, p), (types::I64, l)],
+                        out_slot,
                     )?;
                     ValueRepr::Bytes { ptr, len, cap }
                 } else if name_str == "__ryo_bytes_to_str" {
@@ -926,6 +704,7 @@ impl<M: Module> Codegen<M> {
                         ctx,
                         "__ryo_bytes_to_str",
                         &[(ctx.int_type, p), (types::I64, l)],
+                        out_slot,
                     )?;
                     ValueRepr::Str { ptr, len, cap }
                 } else if name_str == "__ryo_bytes_repr" {
@@ -937,28 +716,59 @@ impl<M: Module> Codegen<M> {
                         ctx,
                         "__ryo_bytes_repr",
                         &[(ctx.int_type, p), (types::I64, l)],
+                        out_slot,
                     )?;
                     ValueRepr::Str { ptr, len, cap }
-                } else if name_str == "int_to_str"
-                    || name_str == "float_to_str"
-                    || name_str == "bool_to_str"
-                {
+                } else if name_str == "bool_to_str" {
+                    // Provably-inline producer taken all the way: the
+                    // result is one of two static literals, so select
+                    // between their .rodata pointers — no runtime call,
+                    // no slot-out, and the cap=0 static sentinel keeps
+                    // the dead-free elision firing.
+                    let cond = Self::eval_inst(builder, ctx, view.args[0])?;
+                    let true_id = Self::store_guard_msg(
+                        ctx.module,
+                        ctx.data_ctx,
+                        ctx.guard_msg_data,
+                        "true",
+                    )?;
+                    let false_id = Self::store_guard_msg(
+                        ctx.module,
+                        ctx.data_ctx,
+                        ctx.guard_msg_data,
+                        "false",
+                    )?;
+                    let true_ref = ctx.module.declare_data_in_func(true_id, builder.func);
+                    let false_ref = ctx.module.declare_data_in_func(false_id, builder.func);
+                    let true_ptr = builder.ins().symbol_value(ctx.int_type, true_ref);
+                    let false_ptr = builder.ins().symbol_value(ctx.int_type, false_ref);
+                    let ptr = builder.ins().select(cond, true_ptr, false_ptr);
+                    let four = builder.ins().iconst(types::I64, 4);
+                    let five = builder.ins().iconst(types::I64, 5);
+                    let len = builder.ins().select(cond, four, five);
+                    let cap = builder.ins().iconst(types::I64, 0);
+                    ValueRepr::Str { ptr, len, cap }
+                } else if name_str == "int_to_str" || name_str == "float_to_str" {
                     let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
                     let (fn_name, param_ty) = match name_str {
                         "int_to_str" => ("ryo_int_to_str", ctx.int_type),
                         "float_to_str" => ("ryo_float_to_str", types::F64),
-                        "bool_to_str" => ("ryo_bool_to_str", types::I8),
                         _ => unreachable!(),
                     };
-                    let (ptr, len, cap) =
-                        Self::emit_slot_out_call(builder, ctx, fn_name, &[(param_ty, arg_val)])?;
+                    let (ptr, len, cap) = Self::emit_slot_out_call(
+                        builder,
+                        ctx,
+                        fn_name,
+                        &[(param_ty, arg_val)],
+                        out_slot,
+                    )?;
                     ValueRepr::Str { ptr, len, cap }
                 } else {
                     // User call — emit_call handles sret for fat-returning
                     // calls and caches the triple. Called directly
                     // (not via eval_inst): the scalar path rejects
                     // fat-returning calls.
-                    Self::emit_call(builder, ctx, r)?;
+                    Self::emit_call_slot(builder, ctx, r, out_slot)?;
                     if let Some(repr) = Self::cached_repr(ctx, r) {
                         return Ok(repr);
                     }
@@ -989,6 +799,7 @@ impl<M: Module> Codegen<M> {
                         (ctx.int_type, r_ptr),
                         (types::I64, r_len),
                     ],
+                    out_slot,
                 )?;
                 ValueRepr::Str { ptr, len, cap }
             }
@@ -1011,6 +822,7 @@ impl<M: Module> Codegen<M> {
                         (ctx.int_type, r_ptr),
                         (types::I64, r_len),
                     ],
+                    out_slot,
                 )?;
                 ValueRepr::Bytes { ptr, len, cap }
             }
@@ -1157,7 +969,11 @@ impl<M: Module> Codegen<M> {
         }
         match Self::eval_inst_fat(builder, ctx, r)? {
             ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
-                Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap)
+                // A home-backed Var's inline bytes already sit in the
+                // home slot — extract against that address, no spill.
+                let inline_addr =
+                    Self::local_name_of(ctx, r).and_then(|n| Self::fat_home_addr(builder, ctx, n));
+                Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, inline_addr)
             }
             ValueRepr::View { ptr, len } => Ok((ptr, len)),
             ValueRepr::Scalar(_) | ValueRepr::Struct { .. } => Err(format!(
@@ -1273,6 +1089,18 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<Value, String> {
+        Self::emit_call_slot(builder, ctx, r, None)
+    }
+
+    /// `emit_call` with a caller-provided sret destination: a
+    /// fat-returning call writes `out_slot` directly instead of a
+    /// fresh temp slot (see `eval_inst_fat_slot`).
+    pub(super) fn emit_call_slot(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
+    ) -> Result<Value, String> {
         let view = ctx.tir.call_view(r);
         let name_id = view.name;
         let name_str = ctx.pool.str(name_id);
@@ -1348,24 +1176,32 @@ impl<M: Module> Codegen<M> {
             // str_push(&s, suffix): spill s's fat pointer to a 24-byte
             // slot, call __ryo_str_push(slot_addr, suffix_ptr, suffix_len),
             // then reload the mutated triple back into s's FatLocals.
-            // arg 0 is `&s` (lowered to Var(s)); arg 1 is the suffix str.
+            // A home-backed binding skips the spill+reload entirely:
+            // the runtime mutates its home slot in place. arg 0 is
+            // `&s` (lowered to Var(s)); arg 1 is the suffix str.
             let s_ref = view.args[0];
             let suffix_ref = view.args[1];
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                STR_SLOT_SIZE,
-                3,
-            ));
-            let s_addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            let home_addr =
+                Self::local_name_of(ctx, s_ref).and_then(|n| Self::fat_home_addr(builder, ctx, n));
             let s_repr = Self::eval_inst_fat(builder, ctx, s_ref)?;
             let ValueRepr::Str { ptr, len, cap } = s_repr else {
                 unreachable!("str_push target must be a str");
             };
-            builder.ins().store(MemFlagsData::trusted(), ptr, s_addr, 0);
-            builder.ins().store(MemFlagsData::trusted(), len, s_addr, 8);
-            builder
-                .ins()
-                .store(MemFlagsData::trusted(), cap, s_addr, 16);
+            let s_addr = match home_addr {
+                Some(addr) => addr,
+                None => {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        STR_SLOT_SIZE,
+                        3,
+                    ));
+                    let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                    builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+                    builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+                    builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+                    addr
+                }
+            };
             // M8.4: the suffix may be either repr — an owned `str`
             // passes its ptr+len, a slice/view passes directly (no
             // ToView wrap: builtins bypass check_call's §3.4
@@ -1379,22 +1215,26 @@ impl<M: Module> Codegen<M> {
                 &[],
             )?;
             builder.ins().call(func_ref, &[s_addr, suf_ptr, suf_len]);
-            // Reload the mutated fat pointer back into the caller's FatLocals.
-            let np = builder
-                .ins()
-                .load(ctx.int_type, MemFlagsData::trusted(), s_addr, 0);
-            let nl = builder
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), s_addr, 8);
-            let nc = builder
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), s_addr, 16);
-            if let Some(name) = Self::local_name_of(ctx, s_ref)
-                && let Some(sl) = Self::read_slot(&ctx.fat_locals, name)
-            {
-                builder.def_var(sl.ptr, np);
-                builder.def_var(sl.len, nl);
-                builder.def_var(sl.cap, nc);
+            // Reload the mutated fat pointer back into the caller's
+            // FatLocals — home-backed bindings read the home directly,
+            // so only the SSA flavor needs the reload.
+            if home_addr.is_none() {
+                let np = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlagsData::trusted(), s_addr, 0);
+                let nl = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), s_addr, 8);
+                let nc = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), s_addr, 16);
+                if let Some(name) = Self::local_name_of(ctx, s_ref)
+                    && let Some(sl) = Self::read_slot(&ctx.fat_locals, name)
+                {
+                    builder.def_var(sl.ptr, np);
+                    builder.def_var(sl.len, nl);
+                    builder.def_var(sl.cap, nc);
+                }
             }
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
@@ -1402,26 +1242,34 @@ impl<M: Module> Codegen<M> {
         if name_str == "bytes_push" {
             // bytes_push(&b, x): spill b's fat pointer to a 24-byte
             // slot, call __ryo_bytes_push(slot_addr, x), then reload
-            // the mutated triple back into b's FatLocals. arg 0 is
-            // `&b` (lowered to Var(b)); arg 1 is the int byte value.
+            // the mutated triple back into b's FatLocals. A home-backed
+            // binding skips the spill+reload: the runtime mutates its
+            // home slot in place. arg 0 is `&b` (lowered to Var(b));
+            // arg 1 is the int byte value.
             // The 0-255 range check is runtime-side (M8.4.2 stopgap).
             let b_ref = view.args[0];
             let x_ref = view.args[1];
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                STR_SLOT_SIZE,
-                3,
-            ));
-            let b_addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            let home_addr =
+                Self::local_name_of(ctx, b_ref).and_then(|n| Self::fat_home_addr(builder, ctx, n));
             let b_repr = Self::eval_inst_fat(builder, ctx, b_ref)?;
             let ValueRepr::Bytes { ptr, len, cap } = b_repr else {
                 unreachable!("bytes_push target must be bytes");
             };
-            builder.ins().store(MemFlagsData::trusted(), ptr, b_addr, 0);
-            builder.ins().store(MemFlagsData::trusted(), len, b_addr, 8);
-            builder
-                .ins()
-                .store(MemFlagsData::trusted(), cap, b_addr, 16);
+            let b_addr = match home_addr {
+                Some(addr) => addr,
+                None => {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        STR_SLOT_SIZE,
+                        3,
+                    ));
+                    let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                    builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+                    builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+                    builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+                    addr
+                }
+            };
             let x_val = Self::eval_inst(builder, ctx, x_ref)?;
             let func_ref = Self::declare_runtime_fn(
                 ctx,
@@ -1431,22 +1279,25 @@ impl<M: Module> Codegen<M> {
                 &[],
             )?;
             builder.ins().call(func_ref, &[b_addr, x_val]);
-            // Reload the mutated fat pointer back into the caller's FatLocals.
-            let np = builder
-                .ins()
-                .load(ctx.int_type, MemFlagsData::trusted(), b_addr, 0);
-            let nl = builder
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), b_addr, 8);
-            let nc = builder
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), b_addr, 16);
-            if let Some(name) = Self::local_name_of(ctx, b_ref)
-                && let Some(sl) = Self::read_slot(&ctx.fat_locals, name)
-            {
-                builder.def_var(sl.ptr, np);
-                builder.def_var(sl.len, nl);
-                builder.def_var(sl.cap, nc);
+            // Reload the mutated fat pointer back into the caller's
+            // FatLocals — home-backed bindings read the home directly.
+            if home_addr.is_none() {
+                let np = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlagsData::trusted(), b_addr, 0);
+                let nl = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), b_addr, 8);
+                let nc = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), b_addr, 16);
+                if let Some(name) = Self::local_name_of(ctx, b_ref)
+                    && let Some(sl) = Self::read_slot(&ctx.fat_locals, name)
+                {
+                    builder.def_var(sl.ptr, np);
+                    builder.def_var(sl.len, nl);
+                    builder.def_var(sl.cap, nc);
+                }
             }
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
@@ -1482,12 +1333,6 @@ impl<M: Module> Codegen<M> {
                     let addr = Self::inout_pointee_addr(builder, ctx, *arg)?;
                     arg_values.push(addr);
                 } else if is_fat_type(arg_ty, ctx.pool) {
-                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        StackSlotKind::ExplicitSlot,
-                        STR_SLOT_SIZE,
-                        3,
-                    ));
-                    let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
                     let repr = Self::eval_inst_fat(builder, ctx, *arg)?;
                     let (ptr, len, cap) = match repr {
                         ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
@@ -1495,11 +1340,34 @@ impl<M: Module> Codegen<M> {
                         }
                         _ => unreachable!("inout fat arg must produce a fat ValueRepr"),
                     };
-                    builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
-                    builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
-                    builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
-                    arg_values.push(addr);
-                    inout_reloads.push((*arg, slot));
+                    // Home-backed binding: the callee mutates the home
+                    // slot in place — no spill, no reload.
+                    let home_addr = Self::local_name_of(ctx, *arg)
+                        .and_then(|n| Self::fat_home_addr(builder, ctx, n));
+                    match home_addr {
+                        Some(addr) => {
+                            // The callee may have written anything
+                            // through the pointer — the binding's range
+                            // fact dies here (same as the reload path).
+                            if let Some(name) = Self::local_name_of(ctx, *arg) {
+                                Self::kill_fact(ctx, name);
+                            }
+                            arg_values.push(addr);
+                        }
+                        None => {
+                            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                StackSlotKind::ExplicitSlot,
+                                STR_SLOT_SIZE,
+                                3,
+                            ));
+                            let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                            builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+                            builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+                            builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+                            arg_values.push(addr);
+                            inout_reloads.push((*arg, slot));
+                        }
+                    }
                 } else {
                     let cl_ty = cranelift_type_for(arg_ty, ctx.pool, ctx.int_type);
                     let bytes = cl_ty.bytes().max(8);
@@ -1564,12 +1432,15 @@ impl<M: Module> Codegen<M> {
         }
 
         if is_fat_type(ret_ty, ctx.pool) {
-            // sret: allocate 24-byte slot, prepend pointer to args
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                STR_SLOT_SIZE,
-                3,
-            ));
+            // sret: allocate 24-byte slot (or use the caller-provided
+            // binding home), prepend pointer to args
+            let slot = out_slot.unwrap_or_else(|| {
+                builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    STR_SLOT_SIZE,
+                    3,
+                ))
+            });
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
 
             let mut all_args = Vec::with_capacity(arg_values.len() + 1);
@@ -1662,24 +1533,33 @@ impl<M: Module> Codegen<M> {
                 ctx.pool.str(lhs_name)
             )
         })?;
-        let slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            STR_SLOT_SIZE,
-            3,
-        ));
-        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-        let old_ptr = builder.use_var(locals.ptr);
-        let old_len = builder.use_var(locals.len);
-        let old_cap = builder.use_var(locals.cap);
-        builder
-            .ins()
-            .store(MemFlagsData::trusted(), old_ptr, addr, 0);
-        builder
-            .ins()
-            .store(MemFlagsData::trusted(), old_len, addr, 8);
-        builder
-            .ins()
-            .store(MemFlagsData::trusted(), old_cap, addr, 16);
+        // Home-backed binding: push mutates the home in place — no
+        // spill, and the "reload" loads below only feed the cached
+        // repr the free sweep keys on.
+        let addr = match Self::fat_home_addr(builder, ctx, lhs_name) {
+            Some(addr) => addr,
+            None => {
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    STR_SLOT_SIZE,
+                    3,
+                ));
+                let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                let old_ptr = builder.use_var(locals.ptr);
+                let old_len = builder.use_var(locals.len);
+                let old_cap = builder.use_var(locals.cap);
+                builder
+                    .ins()
+                    .store(MemFlagsData::trusted(), old_ptr, addr, 0);
+                builder
+                    .ins()
+                    .store(MemFlagsData::trusted(), old_len, addr, 8);
+                builder
+                    .ins()
+                    .store(MemFlagsData::trusted(), old_cap, addr, 16);
+                addr
+            }
+        };
         // __ryo_str_push serves both families: the tagged-slot layout
         // is shared, and appending valid-UTF-8 + valid-UTF-8 stays
         // valid (no boundary check needed).
@@ -1700,9 +1580,13 @@ impl<M: Module> Codegen<M> {
         let nc = builder
             .ins()
             .load(types::I64, MemFlagsData::trusted(), addr, 16);
-        builder.def_var(locals.ptr, np);
-        builder.def_var(locals.len, nl);
-        builder.def_var(locals.cap, nc);
+        // Home-backed bindings hold the mutated triple in the slot
+        // already; only the SSA flavor needs the reload.
+        if locals.home.is_none() {
+            builder.def_var(locals.ptr, np);
+            builder.def_var(locals.len, nl);
+            builder.def_var(locals.cap, nc);
+        }
         // The concat inst stands in for the value the binding now
         // holds. Caching its repr lets the end-of-statement sweep fire
         // Frees anchored on the concat (e.g. a heap rhs temp) exactly

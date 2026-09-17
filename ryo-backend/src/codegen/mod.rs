@@ -39,7 +39,9 @@ use target_lexicon::Triple;
 
 mod arith;
 mod bytes;
+mod control;
 mod expr;
+mod frees;
 mod ranges;
 mod str_ops;
 mod structs;
@@ -71,7 +73,7 @@ pub(crate) enum Terminator {
 ///
 /// Callers use this to gate multi-value (fat-pointer) paths before
 /// reaching `cranelift_type_for`, where a fat type is a caller bug.
-fn is_fat_type(ty: TypeId, pool: &InternPool) -> bool {
+pub(crate) fn is_fat_type(ty: TypeId, pool: &InternPool) -> bool {
     matches!(pool.kind(ty), TypeKind::Str | TypeKind::Bytes)
 }
 
@@ -198,11 +200,20 @@ impl ValueRepr {
 
 /// Fat-owner locals (str or bytes, M8.4.2): a binding is one XOR the
 /// other; the type is tracked in the TIR, not here.
+///
+/// A binding initialized by a slot-out producer call gets a canonical
+/// 24-byte stack-slot `home`: the producer writes it directly (no
+/// temp slot + reload + regalloc-spill copy), and every read/write of
+/// the binding goes through the home via `emit_fat_load` /
+/// `emit_fat_store` instead of the SSA `Variable`s (which stay
+/// declared-but-unused in that flavor). Branch merges flow through
+/// memory, so no block-param phis are needed.
 #[derive(Clone, Copy)]
 struct FatLocals {
     ptr: Variable,
     len: Variable,
     cap: Variable,
+    home: Option<StackSlot>,
 }
 
 #[derive(Clone, Copy)]
@@ -307,6 +318,15 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// an undo log, same scoping discipline as `locals`.
     fat_locals: Vec<Option<FatLocals>>,
     fat_locals_undo: Vec<(u32, Option<FatLocals>)>,
+    /// Per-name mutation flags from `build_fat_mutation_tables`: a
+    /// provably-inline-initialized binding's free is elided only when
+    /// its name is NOT flagged here.
+    fat_mutated: Vec<bool>,
+    /// Per-inst view-base flags from `build_fat_mutation_tables`: a
+    /// provably-inline temp's free is elided only when its producing
+    /// inst is NOT a slice/`ToView` base (promotion would turn it into
+    /// a real heap buffer).
+    view_base_insts: Vec<bool>,
     /// Borrowed-param view bases (Slice/ToView) that were promoted
     /// through a scratch slot instead of the param's FatLocals: base
     /// inst → slot holding flag (offset 0) + promoted triple (8/16/24).
@@ -616,12 +636,45 @@ impl<M: Module> Codegen<M> {
     /// are served from `free_binding_param_names`; real instruction
     /// refs from `free_binding_names`. Same dispatch shape as
     /// `cached_repr`.
-    fn free_binding_name(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
+    pub(crate) fn free_binding_name(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
         if let Some(idx) = r.as_param_index() {
             ctx.free_binding_param_names[idx as usize]
         } else {
             ctx.free_binding_names.get(r.index()).copied().flatten()
         }
+    }
+
+    /// True when instruction `r` produces its fat result through a
+    /// slot-out call (`emit_slot_out_call` or user-call sret) and can
+    /// therefore write a caller-provided home slot directly. Concat and
+    /// every fat-returning call qualify — except `bool_to_str`, which
+    /// is inlined as a select between static literals and never touches
+    /// a slot.
+    fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+        match tir.inst(r).tag {
+            TirTag::StrConcat | TirTag::BytesConcat => true,
+            TirTag::Call => pool.str(tir.call_view(r).name) != "bool_to_str",
+            _ => false,
+        }
+    }
+
+    /// True if any instruction reachable from `root` (transitive
+    /// operands and nested body statements) is a `Var` read of `name`.
+    /// Conservative aliasing probe for the producer-into-home Assign
+    /// path: an RHS that mentions the target binding (including a
+    /// shadowed same-name read — the probe cannot distinguish shadowing)
+    /// forbids the free-before-overwrite order.
+    fn expr_refs_name(tir: &Tir, root: TirRef, name: StringId) -> bool {
+        let mut stack = vec![root];
+        while let Some(r) = stack.pop() {
+            if let TirData::Var(n) = tir.inst(r).data
+                && n == name
+            {
+                return true;
+            }
+            tir.walk_operands(r, &mut |_parent, child, _kind| stack.push(child));
+        }
+        false
     }
 
     pub fn compile(
@@ -858,6 +911,7 @@ impl<M: Module> Codegen<M> {
                                 ptr: var_ptr,
                                 len: var_len,
                                 cap: var_cap,
+                                home: None,
                             }),
                         );
                     } else if matches!(pool.kind(param.ty), TypeKind::Struct) {
@@ -899,6 +953,7 @@ impl<M: Module> Codegen<M> {
                             ptr: var_ptr,
                             len: var_len,
                             cap: var_cap,
+                            home: None,
                         }),
                     );
                     block_idx += 3;
@@ -952,6 +1007,7 @@ impl<M: Module> Codegen<M> {
             let pending_sweep: Vec<usize> = (0..func_sidecar.free_schedule.len()).collect();
             let (free_binding_names, free_binding_param_names) =
                 Self::build_free_binding_names(tir, pool);
+            let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, pool);
 
             let mut promo_free_by_after: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
             for (idx, pf) in func_sidecar.promotion_frees.iter().enumerate() {
@@ -998,6 +1054,8 @@ impl<M: Module> Codegen<M> {
                 loop_stack: Vec::new(),
                 fat_locals: fat_param_locals,
                 fat_locals_undo,
+                fat_mutated,
+                view_base_insts,
                 promo_slots,
                 promo_freed_at: vec![false; func_sidecar.promotion_frees.len()],
                 promo_free_by_after,
@@ -1273,15 +1331,34 @@ impl<M: Module> Codegen<M> {
             TirTag::VarDecl => {
                 let view = ctx.tir.var_decl_view(r);
                 if is_fat_type(inst.ty, ctx.pool) {
-                    let repr = Self::eval_inst_fat(builder, ctx, view.initializer)?;
+                    // Producer-into-home: a slot-out producer
+                    // initializer (runtime producer call, concat, or
+                    // fat-returning user call) writes the binding's
+                    // canonical 24-byte home slot directly — no temp
+                    // slot, no reload-to-SSA, no second spill slot.
+                    // All later reads/writes go through the home.
+                    let home = if Self::writes_out_slot(ctx.tir, ctx.pool, view.initializer) {
+                        Some(builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            STR_SLOT_SIZE,
+                            3,
+                        )))
+                    } else {
+                        None
+                    };
+                    let repr = Self::eval_inst_fat_slot(builder, ctx, view.initializer, home)?;
                     match repr {
                         ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                             let var_ptr = builder.declare_var(ctx.int_type);
                             let var_len = builder.declare_var(types::I64);
                             let var_cap = builder.declare_var(types::I64);
-                            builder.def_var(var_ptr, ptr);
-                            builder.def_var(var_len, len);
-                            builder.def_var(var_cap, cap);
+                            // Home-backed bindings keep the triple in the
+                            // slot only; the SSA Variables stay unused.
+                            if home.is_none() {
+                                builder.def_var(var_ptr, ptr);
+                                builder.def_var(var_len, len);
+                                builder.def_var(var_cap, cap);
+                            }
                             Self::write_slot(
                                 &mut ctx.fat_locals,
                                 &mut ctx.fat_locals_undo,
@@ -1290,6 +1367,7 @@ impl<M: Module> Codegen<M> {
                                     ptr: var_ptr,
                                     len: var_len,
                                     cap: var_cap,
+                                    home,
                                 }),
                             );
                         }
@@ -1431,43 +1509,87 @@ impl<M: Module> Codegen<M> {
                     if let Some(concat_ref) = ctx.sidecar.consumed_concat_lhs[r.index()] {
                         return Self::emit_consuming_concat_assign(builder, ctx, r, concat_ref);
                     }
-                    let repr = Self::eval_inst_fat(builder, ctx, view.value)?;
-                    let (ptr, len, cap) = match repr {
-                        ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
-                            (ptr, len, cap)
-                        }
-                        _ => unreachable!("fat-typed assign should produce a fat ValueRepr"),
-                    };
                     // `read_slot` copies the FatLocals out (three Cranelift
-                    // `Variable` newtypes), so no table borrow survives into
-                    // the free declaration below, which needs
-                    // &mut ctx.module.
+                    // `Variable` newtypes + home), so no table borrow
+                    // survives into the free declaration below, which
+                    // needs &mut ctx.module.
                     let locals = Self::read_slot(&ctx.fat_locals, view.name).ok_or_else(|| {
                         format!(
                             "Undefined fat variable in assign: '{}'",
                             ctx.pool.str(view.name)
                         )
                     })?;
-                    // Free the old allocation before overwriting locals.
-                    // sidecar.free_on_reassign[r] is set whenever the
-                    // ownership pass observed a Valid old owner at this
-                    // Assign. The old (ptr, cap) live in the binding's
-                    // FatLocals Variables — NOT in inst_values[old_owner],
-                    // which holds the literal's original (ptr, cap) at
-                    // its emission point and may be stale across reassigns.
-                    if ctx.sidecar.free_on_reassign[r.index()].is_some() {
-                        let free_ref = if matches!(ctx.pool.kind(inst.ty), TypeKind::Bytes) {
+                    let is_bytes = matches!(ctx.pool.kind(inst.ty), TypeKind::Bytes);
+                    // Home-backed target whose RHS cannot reference the
+                    // binding: free the old buffer FIRST, then let the
+                    // producer write the home directly (free-before-
+                    // overwrite). An RHS that reads the binding (e.g. a
+                    // non-consuming `s = s + "x"`) takes the eval-then-
+                    // free-then-store order instead — freeing first
+                    // would be a use-after-free.
+                    let direct = locals.home.is_some()
+                        && Self::writes_out_slot(ctx.tir, ctx.pool, view.value)
+                        && !Self::expr_refs_name(ctx.tir, view.value, view.name);
+                    let mut old_freed = false;
+                    if direct && ctx.sidecar.free_on_reassign[r.index()].is_some() {
+                        let free_ref = if is_bytes {
                             Self::declare_bytes_free(ctx, builder)?
                         } else {
                             Self::declare_str_free(ctx, builder)?
                         };
-                        let old_ptr = builder.use_var(locals.ptr);
-                        let old_cap = builder.use_var(locals.cap);
+                        let (old_ptr, old_cap) =
+                            Self::emit_fat_load_ptr_cap(builder, ctx, view.name)
+                                .expect("fat_locals entry read above");
+                        builder.ins().call(free_ref, &[old_ptr, old_cap]);
+                        old_freed = true;
+                    }
+                    let repr = Self::eval_inst_fat_slot(
+                        builder,
+                        ctx,
+                        view.value,
+                        if direct { locals.home } else { None },
+                    )?;
+                    let (ptr, len, cap) = match repr {
+                        ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
+                            (ptr, len, cap)
+                        }
+                        _ => unreachable!("fat-typed assign should produce a fat ValueRepr"),
+                    };
+                    // Free the old allocation before overwriting locals.
+                    // sidecar.free_on_reassign[r] is set whenever the
+                    // ownership pass observed a Valid old owner at this
+                    // Assign. The old (ptr, cap) live in the binding's
+                    // current storage (home slot or FatLocals Variables)
+                    // — NOT in inst_values[old_owner], which holds the
+                    // literal's original (ptr, cap) at its emission point
+                    // and may be stale across reassigns.
+                    if !old_freed && ctx.sidecar.free_on_reassign[r.index()].is_some() {
+                        let free_ref = if is_bytes {
+                            Self::declare_bytes_free(ctx, builder)?
+                        } else {
+                            Self::declare_str_free(ctx, builder)?
+                        };
+                        let (old_ptr, old_cap) =
+                            Self::emit_fat_load_ptr_cap(builder, ctx, view.name)
+                                .expect("fat_locals entry read above");
                         builder.ins().call(free_ref, &[old_ptr, old_cap]);
                     }
-                    builder.def_var(locals.ptr, ptr);
-                    builder.def_var(locals.len, len);
-                    builder.def_var(locals.cap, cap);
+                    match locals.home {
+                        // In direct mode the producer already wrote the
+                        // home; only the aliasing fallback stores here.
+                        Some(home) if !direct => {
+                            let addr = builder.ins().stack_addr(ctx.int_type, home, 0);
+                            builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+                            builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+                            builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+                        }
+                        Some(_) => {}
+                        None => {
+                            builder.def_var(locals.ptr, ptr);
+                            builder.def_var(locals.len, len);
+                            builder.def_var(locals.cap, cap);
+                        }
+                    }
                     Self::kill_fact(ctx, view.name);
                     return Ok(Terminator::None);
                 }
@@ -1574,408 +1696,6 @@ impl<M: Module> Codegen<M> {
                 other
             )),
         }
-    }
-
-    fn generate_if_stmt(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        r: TirRef,
-    ) -> Result<Terminator, String> {
-        let view = ctx.tir.if_stmt_view(r);
-        let outer_facts_mark = ctx.range_facts_undo.len();
-        let scope_mark = ctx.assigned_log.len();
-        // Conditions whose FALSE path dominates each subsequent block
-        // (elif cond blocks, the else arm, and — when every written arm
-        // terminates — the merge block).
-        let mut negated_conds: Vec<TirRef> = vec![view.cond];
-        let merge_block = builder.create_block();
-
-        // Pull the BranchId assignments allocated by the ownership
-        // pass for this if. Default-empty if the sidecar has no entry
-        // (e.g. an if with no Move-typed bindings live across it):
-        // unconditional Frees still fire because their `branch` is
-        // `None`, and there are no branch-gated entries to gate.
-        let branch_ids = ctx.sidecar.if_branches[r.index()]
-            .clone()
-            .unwrap_or_default();
-
-        let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
-        let then_block = builder.create_block();
-
-        let elif_count = view.elif_branches.len();
-        let has_else = view.else_stmts.is_some();
-        // An else-less if whose arms conditionally reseated a
-        // binding needs a REAL fall-through block so the arm-gated
-        // DeadDrops have somewhere to fire.
-        let needs_fallthrough_block = !has_else
-            && ctx
-                .sidecar
-                .conditional_dead_drops
-                .iter()
-                .any(|d| d.if_stmt == r);
-        let capacity = elif_count + usize::from(has_else || needs_fallthrough_block);
-        let mut next_blocks: Vec<Block> = Vec::with_capacity(capacity);
-        for _ in 0..elif_count {
-            next_blocks.push(builder.create_block());
-        }
-        let else_or_merge = if has_else || needs_fallthrough_block {
-            let eb = builder.create_block();
-            next_blocks.push(eb);
-            eb
-        } else {
-            merge_block
-        };
-
-        let first_fallthrough = next_blocks.first().copied().unwrap_or(else_or_merge);
-
-        builder
-            .ins()
-            .brif(cond_val, then_block, &[], first_fallthrough, &[]);
-
-        builder.seal_block(then_block);
-        builder.switch_to_block(then_block);
-        Self::seed_cond_facts(ctx, view.cond, true);
-        // Manual push/pop (not RAII) — `?` propagation interacts
-        // poorly with a scope-guard holding `&mut ctx`. We pop on
-        // both Ok and Err paths by binding the result first.
-        ctx.branch_stack.push(branch_ids.then_branch);
-        Self::emit_conditional_dead_drops(builder, ctx, r, branch_ids.then_branch)?;
-        let then_term_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
-        ctx.branch_stack.pop();
-        let then_term = then_term_result?;
-        if then_term == Terminator::None {
-            builder.ins().jump(merge_block, &[]);
-        }
-
-        // Two separate questions the old bool conflated —
-        // `all_terminated` (every arm ends the block, so the merge
-        // block is unreachable) and `all_return` (every arm actually
-        // returns, which is what the if reports to its caller).
-        let mut all_terminated = then_term != Terminator::None;
-        let mut all_return = then_term == Terminator::Return;
-        for (i, elif) in view.elif_branches.iter().enumerate() {
-            let elif_cond_block = next_blocks[i];
-            builder.seal_block(elif_cond_block);
-            builder.switch_to_block(elif_cond_block);
-            // Re-baseline: true-polarity seeds live only inside their
-            // own arm (emit_scoped_body's restore would resurrect them).
-            // This block is dominated by the FALSE path of every
-            // earlier condition — and by nothing else.
-            Self::restore_slots(
-                &mut ctx.range_facts,
-                &mut ctx.range_facts_undo,
-                outer_facts_mark,
-            );
-            for &prev in &negated_conds {
-                Self::seed_cond_facts(ctx, prev, false);
-            }
-            // The restore above predates every earlier condition's
-            // evaluation — an inout call in one of them killed its
-            // binding's fact via the reload path, and the re-baseline
-            // (or a negation seed on the same name) would resurrect it.
-            // Re-apply every kill logged since scope_mark.
-            Self::kill_assigned_since(ctx, scope_mark);
-
-            let elif_cond_val = Self::eval_inst(builder, ctx, elif.cond)?;
-            let elif_body_block = builder.create_block();
-
-            let elif_fallthrough = if i + 1 < next_blocks.len() {
-                next_blocks[i + 1]
-            } else {
-                merge_block
-            };
-
-            builder
-                .ins()
-                .brif(elif_cond_val, elif_body_block, &[], elif_fallthrough, &[]);
-
-            builder.seal_block(elif_body_block);
-            builder.switch_to_block(elif_body_block);
-            Self::seed_cond_facts(ctx, elif.cond, true);
-            let elif_branch_id = branch_ids.elif_branches.get(i).copied().unwrap_or_default();
-            ctx.branch_stack.push(elif_branch_id);
-            Self::emit_conditional_dead_drops(builder, ctx, r, elif_branch_id)?;
-            let elif_term_result = Self::emit_scoped_body(builder, ctx, &elif.body);
-            ctx.branch_stack.pop();
-            let elif_term = elif_term_result?;
-            if elif_term == Terminator::None {
-                builder.ins().jump(merge_block, &[]);
-            }
-            all_terminated = all_terminated && elif_term != Terminator::None;
-            all_return = all_return && elif_term == Terminator::Return;
-            negated_conds.push(elif.cond);
-        }
-
-        // Whether every written arm (then + elifs) ends the block. With
-        // no else arm, the merge is then reachable ONLY via the
-        // fall-through edge, where every condition is provably false —
-        // the `if n <= 1: return n` fibonacci shape.
-        let written_arms_terminated = all_terminated;
-
-        if let Some(else_stmts) = &view.else_stmts {
-            builder.seal_block(else_or_merge);
-            builder.switch_to_block(else_or_merge);
-            // Same re-baseline as the elif cond blocks, seeded with
-            // every condition's FALSE polarity — the else arm is
-            // dominated by the all-conditions-false path.
-            Self::restore_slots(
-                &mut ctx.range_facts,
-                &mut ctx.range_facts_undo,
-                outer_facts_mark,
-            );
-            for &cond in &negated_conds {
-                Self::seed_cond_facts(ctx, cond, false);
-            }
-            // Same re-application of cond-eval kills as the elif cond
-            // blocks above.
-            Self::kill_assigned_since(ctx, scope_mark);
-            let else_branch_id = branch_ids.else_branch.unwrap_or_default();
-            ctx.branch_stack.push(else_branch_id);
-            Self::emit_conditional_dead_drops(builder, ctx, r, else_branch_id)?;
-            let else_term_result = Self::emit_scoped_body(builder, ctx, else_stmts);
-            ctx.branch_stack.pop();
-            let else_term = else_term_result?;
-            if else_term == Terminator::None {
-                builder.ins().jump(merge_block, &[]);
-            }
-            all_terminated = all_terminated && else_term != Terminator::None;
-            all_return = all_return && else_term == Terminator::Return;
-        } else if needs_fallthrough_block {
-            // The synthetic fall-through — emit the arm-gated
-            // DeadDrops for the paths where no arm reseated the binding.
-            builder.seal_block(else_or_merge);
-            builder.switch_to_block(else_or_merge);
-            let fallthrough_id = branch_ids.else_branch.unwrap_or_default();
-            ctx.branch_stack.push(fallthrough_id);
-            Self::emit_conditional_dead_drops(builder, ctx, r, fallthrough_id)?;
-            ctx.branch_stack.pop();
-            builder.ins().jump(merge_block, &[]);
-            all_terminated = false;
-            all_return = false;
-        } else {
-            all_terminated = false;
-            all_return = false;
-        }
-
-        builder.seal_block(merge_block);
-        if !all_terminated {
-            builder.switch_to_block(merge_block);
-        }
-
-        // Range-fact join. Arm-body seeds were already rolled back by
-        // emit_scoped_body; cond-block seeds are rolled back here by
-        // restoring the pre-if facts. A binding assigned in ANY arm loses
-        // its fact (predecessors disagree). Only when there is no else
-        // and every written arm terminated is the merge dominated by
-        // the fall-through edge alone — seed all negations there.
-        Self::restore_slots(
-            &mut ctx.range_facts,
-            &mut ctx.range_facts_undo,
-            outer_facts_mark,
-        );
-        if !has_else && written_arms_terminated {
-            for &cond in &negated_conds {
-                Self::seed_cond_facts(ctx, cond, false);
-            }
-        }
-        // Re-apply kills AFTER the fall-through seeding: a condition's
-        // inout call wrote through its pointer on EVERY path past it,
-        // so a negation seed from another condition must not resurrect
-        // that binding's fact here.
-        Self::kill_assigned_since(ctx, scope_mark);
-
-        // The if terminates the block only when every arm does; it
-        // counts as a Return for the caller only when every arm
-        // actually returns. For mixed all-terminating shapes (e.g.
-        // break in one arm, return in another) the Break variant is a
-        // stand-in: callers only distinguish None / Return /
-        // "terminated some other way".
-        Ok(if all_return {
-            Terminator::Return
-        } else if all_terminated {
-            Terminator::Break
-        } else {
-            Terminator::None
-        })
-    }
-
-    fn generate_while_loop(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        r: TirRef,
-    ) -> Result<Terminator, String> {
-        let view = ctx.tir.while_loop_view(r);
-
-        let header_block = builder.create_block();
-        let body_block = builder.create_block();
-        let exit_block = builder.create_block();
-
-        builder.ins().jump(header_block, &[]);
-
-        builder.switch_to_block(header_block);
-        // Back-edge rule: kill facts on bindings the body writes BEFORE
-        // emitting the condition — the condition re-evaluates every
-        // iteration, so a fact it consults must hold on every one.
-        // The undo-log mark is taken after this kill, so the post-loop
-        // restore keeps these names dead (a body-written binding's
-        // pre-loop fact does not hold at the exit either). The
-        // cond-true seeds applied below stay sound: the header's brif
-        // re-establishes the condition on every iteration.
-        Self::kill_loop_writes(ctx, Some(view.cond), &view.body);
-        let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
-        builder
-            .ins()
-            .brif(cond_val, body_block, &[], exit_block, &[]);
-
-        builder.seal_block(body_block);
-        builder.switch_to_block(body_block);
-
-        // The condition holds at every body entry (the header's brif
-        // guards it). Assignments inside the body kill facts in place;
-        // the seeds themselves must NOT survive the loop — the exit
-        // block is also reached on the zero-iteration path.
-        let pre_loop_facts_mark = ctx.range_facts_undo.len();
-        let scope_mark = ctx.assigned_log.len();
-        Self::seed_cond_facts(ctx, view.cond, true);
-
-        ctx.loop_stack.push(LoopContext {
-            exit_block,
-            continue_target: header_block,
-        });
-        let body_term = Self::emit_scoped_body(builder, ctx, &view.body)?;
-        ctx.loop_stack.pop();
-
-        Self::restore_slots(
-            &mut ctx.range_facts,
-            &mut ctx.range_facts_undo,
-            pre_loop_facts_mark,
-        );
-        Self::kill_assigned_since(ctx, scope_mark);
-
-        if body_term == Terminator::None {
-            builder.ins().jump(header_block, &[]);
-        }
-
-        // Header has two predecessors: entry fallthrough and body back-edge.
-        // Seal it last because the back-edge didn't exist until the body emitted.
-        builder.seal_block(header_block);
-        builder.seal_block(exit_block);
-        builder.switch_to_block(exit_block);
-
-        Ok(Terminator::None)
-    }
-
-    fn generate_for_range(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        r: TirRef,
-    ) -> Result<Terminator, String> {
-        let view = ctx.tir.for_range_view(r);
-
-        // 1. Create all blocks up front
-        let header_block = builder.create_block();
-        let body_block = builder.create_block();
-        let increment_block = builder.create_block();
-        let exit_block = builder.create_block();
-
-        // 2. Evaluate bounds once, create hidden counter
-        let start_val = Self::eval_inst(builder, ctx, view.start)?;
-        let end_val = Self::eval_inst(builder, ctx, view.end)?;
-        let counter = builder.declare_var(ctx.int_type);
-        builder.def_var(counter, start_val);
-        builder.ins().jump(header_block, &[]);
-
-        // 3. Header — DO NOT seal yet (back-edge from increment not emitted)
-        builder.switch_to_block(header_block);
-        let i = builder.use_var(counter);
-        let cond = builder.ins().icmp(IntCC::SignedLessThan, i, end_val);
-        builder.ins().brif(cond, body_block, &[], exit_block, &[]);
-
-        // Push loop context: continue targets increment
-        ctx.loop_stack.push(LoopContext {
-            exit_block,
-            continue_target: increment_block,
-        });
-
-        // 4. Body — seal immediately (only predecessor is header's brif true-arm)
-        builder.seal_block(body_block);
-        builder.switch_to_block(body_block);
-
-        // Scope the loop variable: bind var_name to the counter Variable.
-        // We deliberately use emit_body rather than emit_scoped_body here
-        // because we need to insert the counter binding between the save
-        // and the emit; emit_scoped_body's internal save would shadow our
-        // insertion. The undo log is NOT replayed at loop exit — only
-        // this one slot is restored by hand below, so body writes to
-        // other bindings persist past the loop exactly as before.
-        let shadowed_var = Self::read_slot(&ctx.locals, view.var_name);
-        Self::write_slot(
-            &mut ctx.locals,
-            &mut ctx.locals_undo,
-            view.var_name,
-            Some(counter),
-        );
-        // The loop variable is a different quantity than any shadowed
-        // outer binding — its fact must not leak onto the counter.
-        let shadowed_fact = Self::read_slot(&ctx.range_facts, view.var_name);
-        Self::write_slot(
-            &mut ctx.range_facts,
-            &mut ctx.range_facts_undo,
-            view.var_name,
-            None,
-        );
-
-        // Back-edge rule (see generate_while_loop): the bounds were
-        // evaluated once pre-loop, so pre-loop facts were valid there —
-        // but a fact consulted inside the body must hold on every
-        // iteration. Kill every binding the body writes before
-        // emitting it. There is no post-loop restore here, so the
-        // kills simply persist past the loop.
-        Self::kill_loop_writes(ctx, None, &view.body);
-
-        let body_term = Self::emit_body(builder, ctx, &view.body)?;
-
-        // Restore locals (loop variable goes out of scope)
-        Self::write_slot(
-            &mut ctx.locals,
-            &mut ctx.locals_undo,
-            view.var_name,
-            shadowed_var,
-        );
-        // The loop variable's facts die with its scope whether or not
-        // the shadowed outer binding had one — write the saved slot back
-        // unconditionally (None clears it), discarding whatever the body
-        // left on this slot.
-        Self::write_slot(
-            &mut ctx.range_facts,
-            &mut ctx.range_facts_undo,
-            view.var_name,
-            shadowed_fact,
-        );
-
-        if body_term == Terminator::None {
-            builder.ins().jump(increment_block, &[]);
-        }
-
-        ctx.loop_stack.pop();
-
-        // 5. Increment — seal after body
-        builder.seal_block(increment_block);
-        builder.switch_to_block(increment_block);
-        let i_current = builder.use_var(counter);
-        let one = builder.ins().iconst(ctx.int_type, 1);
-        let i_next = builder.ins().iadd(i_current, one);
-        builder.def_var(counter, i_next);
-        builder.ins().jump(header_block, &[]);
-
-        // 6. Seal header (predecessors: entry jump + increment back-edge)
-        builder.seal_block(header_block);
-
-        // 7. Exit — always reachable
-        builder.seal_block(exit_block);
-        builder.switch_to_block(exit_block);
-
-        Ok(Terminator::None)
     }
 }
 
