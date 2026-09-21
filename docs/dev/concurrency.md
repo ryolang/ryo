@@ -730,6 +730,29 @@ colorless model.
   callers, so `dispatcher.custom` must not be exposed to untrusted library
   code before the capability check lands.
 
+#### Heterogeneous cores: per-dispatcher QoS hint (Draft — v0.4)
+
+Apple Silicon (P/E cores), ARM big.LITTLE, and Intel P/E all expose the same
+hazard: an M:N worker thread scheduled onto an efficiency core runs every
+task that lands on it at a fraction of P-core speed — visible as tail-latency
+spikes, not uniform slowdown. Policy:
+
+- **Default: trust the OS.** Go/Tokio/.NET carry no core-class awareness;
+  the kernel has strictly better information (thermals, power budget, other
+  processes). This stays the default everywhere.
+- **Dispatcher config reserves a QoS/priority hint** (mapped to
+  `pthread_set_qos_class_self_np` on macOS, thread priority + selected CPU
+  sets on Windows, `sched_setaffinity`/uclamp on Linux) — one attribute at
+  worker spawn, so `dispatcher.default` biases to performance cores and bulk/
+  background custom dispatchers can opt into efficiency cores. Reserving the
+  field in the Phase-4 API shape is free; retrofitting it means auditing
+  every dispatcher creation site.
+- **Class-aware work stealing** (per-class run queues, same-class steal
+  preference) is a Phase 5 tuning candidate, gated on measurements — it is
+  easy to make worse than the OS default if tuned wrong. The §3.3 affinity
+  hooks and the migration-cost data (cold-reload ~17 ns/KB of live stack,
+  `concurrency_poc.md`) already compose with it.
+
 See the appendix for a full workload example (bounded DB concurrency).
 
 ### 4.6 Cancellation Sources
