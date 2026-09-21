@@ -20,6 +20,16 @@ pub struct BuiltinFunction {
     /// `__ryo_str_to_bytes`) borrow their view argument's root owner the
     /// same way.
     pub view_borrow_params: &'static [usize],
+    /// Statically-known upper bound on the produced string's byte
+    /// length, when one exists. A bound at or below the SSO inline
+    /// capacity (23) makes the result provably always-inline: codegen
+    /// elides the guaranteed-no-op `ryo_str_free` for it. `int_to_str`
+    /// is 20 (i64::MIN is `-9223372036854775808`); `bool_to_str` is 5.
+    /// `float_to_str` is deliberately `None`: ryu's f64 worst case is
+    /// 24 bytes (`-2.2250738585072014e-308`), one over the capacity.
+    /// Codegen keeps its own copy of this table (the backend cannot
+    /// depend on the frontend); a ryo-backend test asserts agreement.
+    pub max_output_len: Option<u8>,
 }
 
 #[derive(Copy, Clone)]
@@ -47,48 +57,56 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         return_ty: BuiltinReturn::Void,
         borrowed_scalar_params: &[],
         view_borrow_params: &[],
+        max_output_len: None,
     },
     BuiltinFunction {
         name: "assert",
         return_ty: BuiltinReturn::Void,
         borrowed_scalar_params: &[],
         view_borrow_params: &[],
+        max_output_len: None,
     },
     BuiltinFunction {
         name: "panic",
         return_ty: BuiltinReturn::Never,
         borrowed_scalar_params: &[],
         view_borrow_params: &[],
+        max_output_len: None,
     },
     BuiltinFunction {
         name: "int_to_str",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
         view_borrow_params: &[],
+        max_output_len: Some(20),
     },
     BuiltinFunction {
         name: "float_to_str",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
         view_borrow_params: &[],
+        max_output_len: None,
     },
     BuiltinFunction {
         name: "bool_to_str",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
         view_borrow_params: &[],
+        max_output_len: Some(5),
     },
     BuiltinFunction {
         name: "str_push",
         return_ty: BuiltinReturn::Void,
         borrowed_scalar_params: &[],
         view_borrow_params: &[],
+        max_output_len: None,
     },
     BuiltinFunction {
         name: "bytes_push",
         return_ty: BuiltinReturn::Void,
         borrowed_scalar_params: &[],
         view_borrow_params: &[],
+        max_output_len: None,
     },
 ];
 
@@ -111,36 +129,42 @@ const ABI_CALLEES: &[BuiltinFunction] = &[
         return_ty: BuiltinReturn::Never,
         borrowed_scalar_params: &[0],
         view_borrow_params: &[],
+        max_output_len: None,
     },
     BuiltinFunction {
         name: "__ryo_str_from_view",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
         view_borrow_params: &[0],
+        max_output_len: None,
     },
     BuiltinFunction {
         name: "__ryo_bytes_repr",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
         view_borrow_params: &[0],
+        max_output_len: None,
     },
     BuiltinFunction {
         name: "__ryo_bytes_from_view",
         return_ty: BuiltinReturn::Bytes,
         borrowed_scalar_params: &[],
         view_borrow_params: &[0],
+        max_output_len: None,
     },
     BuiltinFunction {
         name: "__ryo_bytes_to_str",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
         view_borrow_params: &[0],
+        max_output_len: None,
     },
     BuiltinFunction {
         name: "__ryo_str_to_bytes",
         return_ty: BuiltinReturn::Bytes,
         borrowed_scalar_params: &[],
         view_borrow_params: &[0],
+        max_output_len: None,
     },
 ];
 
@@ -180,6 +204,16 @@ pub fn view_borrow_params(name_id: StringId, pool: &InternPool) -> &'static [usi
         .or_else(|| abi_callee(name))
         .map(|b| b.view_borrow_params)
         .unwrap_or(&[])
+}
+
+/// Statically-known upper bound on the byte length of the string a
+/// builtin produces (`BuiltinFunction::max_output_len`), or `None`
+/// when unbounded / unknown. Consults both tables.
+pub fn max_output_len(name_id: StringId, pool: &InternPool) -> Option<u8> {
+    let name = pool.str(name_id);
+    lookup(name)
+        .or_else(|| abi_callee(name))
+        .and_then(|b| b.max_output_len)
 }
 
 /// Names that are not callable builtins but cannot be redefined by user code.
@@ -225,6 +259,24 @@ mod tests {
     #[test]
     fn non_reserved_name() {
         assert!(!is_reserved_name("foo"));
+    }
+
+    #[test]
+    fn bounded_producers_annotated() {
+        let mut pool = InternPool::new();
+        // Provably-inline producers (≤ SSO inline capacity 23).
+        let int = pool.intern_str("int_to_str");
+        assert_eq!(max_output_len(int, &pool), Some(20));
+        let bool_ = pool.intern_str("bool_to_str");
+        assert_eq!(max_output_len(bool_, &pool), Some(5));
+        // float_to_str is NOT provably inline (ryu f64 worst case is
+        // 24 bytes > 23); unbounded producers and unknown callees too.
+        let float = pool.intern_str("float_to_str");
+        assert_eq!(max_output_len(float, &pool), None);
+        let print = pool.intern_str("print");
+        assert_eq!(max_output_len(print, &pool), None);
+        let unknown = pool.intern_str("not_a_builtin");
+        assert_eq!(max_output_len(unknown, &pool), None);
     }
 
     #[test]

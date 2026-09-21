@@ -153,7 +153,9 @@ pub struct RyoStrFat {
 /// Inline capacity of the small-string optimization (SSO): strings of
 /// at most this many bytes live directly inside the 24-byte slot.
 /// 23 >= 20, so every `int_to_str`/`bool_to_str` output is inline.
-pub(crate) const INLINE_CAP: usize = 23;
+/// Public so codegen can prove a producer's result is always inline
+/// and elide the (guaranteed no-op) free.
+pub const INLINE_CAP: usize = 23;
 
 /// Cap-word tag: the top byte (byte 23, little-endian) discriminates.
 /// `0x80 | len` marks an inline string; a top byte of `0x00` is a heap
