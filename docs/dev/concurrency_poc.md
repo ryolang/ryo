@@ -111,6 +111,60 @@ kernel VMA-count parameter (raise `vm.max_map_count` or move to a pooled
 arena), Windows is commit charge (pagefile-tunable), macOS showed none at
 1M.
 
+## Migration microprobe (post-gate, Phase 3 input)
+
+The gate above is single-threaded; this scenario (`migrate`) probes the one
+Phase-3 question worth answering before Phase 1 bakes in assumptions: what
+happens when a suspended task resumes on a **different OS thread**. macOS and
+Linux runs; Windows untested (the probe's errno preset is cfg'd for unix —
+a Windows port needs a `SetLastError` arm). Timing: 3 samples × 100 000 iters
+(10 000 for the 48 KB variant).
+
+| Measurement | macOS | Linux (aarch64, Docker) |
+|---|---|---|
+| Correctness: 200 tasks × 1 000 forced migrations each | 200/200 bit-exact | 200/200 bit-exact |
+| Same-thread deep-chain switch | 15.0–19.3 ns | 16.4–16.5 ns |
+| Spin-handoff round-trip (baseline) | mean 216.6–221.9 ns (p50 ~209) | mean 214.4–223.5 ns (p50 ~211) |
+| Post-migration cold resume, small footprint | mean 215.5–231.3 ns | mean 200.6–221.7 ns |
+| Post-migration cold resume, ~48 KB live stack | mean 1 045.8–1 066.4 ns | mean 1 040.9–1 053.0 ns |
+| TLS/errno hazard demo | **Confirmed** (identity lost) | **Confirmed** (stale value) |
+
+A parking mpsc handoff measured ~3.4 µs round-trip (park/unpark noise buried
+the signal) — the spin-atomic handoff above is what a fast stealing path must
+resemble. corosensei marks `Coroutine` `!Send` via `PhantomData<*mut ()>`;
+the probe wraps it with one justified `unsafe impl Send` (stacks are
+thread-agnostic; the real constraints are one-resume-at-a-time scheduling and
+no borrow outliving a yield).
+
+### Migration findings (feed §3.3 affinity hooks and §3.5 FFI routing)
+
+1. **"Stacks are just memory" holds empirically.** 200 tasks × 1 000 forced
+   migrations each produced bit-exact results on macOS and Linux. Migration
+   needs no platform support beyond what Phase 1 already builds.
+2. **The handoff, not the stack, dominates migration cost.** A spin-atomic
+   handoff costs ~215–230 ns round-trip (~10–14× a hot same-thread switch);
+   for small-footprint tasks the marginal post-migration cold cost is ≈ 0 —
+   first-touch cache misses disappear inside the synchronization cost.
+   Phase-3 work stealing pays for queue synchronization, not stack warmth.
+3. **Cold-reload cost scales with live stack footprint.** Suspending with
+   ~48 KB live makes the first post-migration resume ~1.04 µs vs ~220 ns
+   baseline (~17 ns/KB of live stack). Real but only material for
+   deep-suspension tasks — this is where the §3.3 affinity/pinning hooks pay
+   for themselves.
+4. **The TLS/errno hazard is real and platform-divergent.** macOS: identity
+   silently lost — an `#[inline(never)]` `__error()` call after resume
+   returned the *new* thread's slot with errno=0, so an FFI caller checking
+   errno after an await sees "no error". Linux: the compiler memoized the
+   TLS slot address across the suspend — the new thread read the *old*
+   thread's errno (same address, stale value). Concrete evidence for the
+   FFI-pins-task rule (§3.5): "re-point TLS after resume" must be explicit
+   runtime machinery, not a hope that the compiler reloads it.
+5. **The compiler assumes thread-identity is invariant across a yield.**
+   Nothing in the IR models thread migration at a suspend point. Phase 3
+   must treat any OS-TLS access (errno, thread id, stack guards) across a
+   yield as unsafe-by-default: forbid it, pin the task, or route it through
+   runtime intrinsics that force a fresh TLS lookup on every resume.
+
 ## Findings that change the runtime design (fed back into §1.1)
 
 1. **A plain `PROT_NONE` reservation does not reliably catch overflow on
@@ -165,5 +219,5 @@ arena), Windows is commit charge (pagefile-tunable), macOS showed none at
 ## References
 
 - Plan: [`concurrency.md`](concurrency.md) — gate criteria, §1.1 stack
-  strategy, §3.6 context machinery
+  strategy, §3.3 affinity hooks, §3.5 FFI routing, §3.6 context machinery
 - Spec: [§9.2](../specification.md#92-core-primitives-and-safety) (concurrency semantics the runtime must deliver)
