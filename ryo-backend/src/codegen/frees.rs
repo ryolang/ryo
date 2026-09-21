@@ -293,9 +293,16 @@ impl<M: Module> Codegen<M> {
                 // binding's CURRENT value, so it is sound only when the
                 // initializer is a provably-inline producer AND the
                 // binding is never reassigned, pushed, passed inout, or
-                // view-promoted (the pre-scan marks those names).
-                let elide = !ctx.fat_mutated[name.raw() as usize]
-                    && Self::provably_inline_producer(ctx, target);
+                // view-promoted (the pre-scan marks those names). The
+                // home-provenance flag generalizes this to reassigned
+                // bindings: it tracks the value ACTUALLY in the home at
+                // this program point, cleared at control-flow joins and
+                // in-place mutations.
+                let home_inline =
+                    Self::read_slot(&ctx.fat_locals, name).is_some_and(|fl| fl.home_inline);
+                let elide = home_inline
+                    || (!ctx.fat_mutated[name.raw() as usize]
+                        && Self::provably_inline_producer(ctx, target));
                 if !elide {
                     let (ptr, cap) = Self::emit_fat_load_ptr_cap(builder, ctx, name)
                         .expect("fat_locals entry checked above");

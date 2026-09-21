@@ -77,6 +77,28 @@ pub(crate) fn is_fat_type(ty: TypeId, pool: &InternPool) -> bool {
     matches!(pool.kind(ty), TypeKind::Str | TypeKind::Bytes)
 }
 
+/// Builtins whose fat result codegen materializes inline — no runtime
+/// call, no slot-out write. `writes_out_slot` must exclude exactly
+/// these: the inlined arm in `eval_inst_fat_slot` ignores its
+/// `out_slot` parameter, so handing one a home slot would leave the
+/// slot unwritten and every later home read would load garbage.
+/// Keeping the set wrong in the other direction (listing a builtin
+/// that is NOT inlined) is harmless — it only forgoes the home.
+pub(crate) const CODEGEN_INLINED_BUILTINS: &[&str] = &["bool_to_str"];
+
+/// True when instruction `r` produces its fat result through a
+/// slot-out call (`emit_slot_out_call` or user-call sret) and can
+/// therefore write a caller-provided home slot directly. Concat and
+/// every fat-returning call qualify — except codegen-inlined builtins
+/// (`CODEGEN_INLINED_BUILTINS`), which never touch a slot.
+pub(crate) fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+    match tir.inst(r).tag {
+        TirTag::StrConcat | TirTag::BytesConcat => true,
+        TirTag::Call => !CODEGEN_INLINED_BUILTINS.contains(&pool.str(tir.call_view(r).name)),
+        _ => false,
+    }
+}
+
 /// Map a TIR type to the corresponding Cranelift IR type.
 ///
 /// `Int` uses the target's pointer-sized integer (i64 on 64-bit).
@@ -214,6 +236,13 @@ struct FatLocals {
     len: Variable,
     cap: Variable,
     home: Option<StackSlot>,
+    /// Provenance of the CURRENT home contents: true iff the stored
+    /// triple is provably free-noop (a provably-inline producer result
+    /// or a static cap==0 literal) with no in-place mutation since the
+    /// store. Cleared on push/inout/promote and at control-flow joins
+    /// (`invalidate_home_inline_flags`). Meaningless when `home` is
+    /// `None`.
+    home_inline: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -644,20 +673,6 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// True when instruction `r` produces its fat result through a
-    /// slot-out call (`emit_slot_out_call` or user-call sret) and can
-    /// therefore write a caller-provided home slot directly. Concat and
-    /// every fat-returning call qualify — except `bool_to_str`, which
-    /// is inlined as a select between static literals and never touches
-    /// a slot.
-    fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
-        match tir.inst(r).tag {
-            TirTag::StrConcat | TirTag::BytesConcat => true,
-            TirTag::Call => pool.str(tir.call_view(r).name) != "bool_to_str",
-            _ => false,
-        }
-    }
-
     /// True if any instruction reachable from `root` (transitive
     /// operands and nested body statements) is a `Var` read of `name`.
     /// Conservative aliasing probe for the producer-into-home Assign
@@ -675,6 +690,51 @@ impl<M: Module> Codegen<M> {
             tir.walk_operands(r, &mut |_parent, child, _kind| stack.push(child));
         }
         false
+    }
+
+    /// Provenance of a freshly stored home value: true iff the value
+    /// is provably free-noop — a provably-inline producer result or a
+    /// static (cap == 0) literal — so a later free on the home may be
+    /// elided.
+    fn home_value_provably_inline(
+        ctx: &FunctionContext<'_, M>,
+        func: &cranelift::codegen::ir::Function,
+        value: TirRef,
+        cap: Value,
+    ) -> bool {
+        Self::provably_inline_producer(ctx, value) || Self::is_static_cap_zero(func, cap)
+    }
+
+    /// Set the home-provenance flag on a fat binding. No-op for
+    /// home-less bindings (the flag is meaningless without a home).
+    pub(crate) fn set_home_inline(ctx: &mut FunctionContext<'_, M>, name: StringId, inline: bool) {
+        if let Some(mut fl) = Self::read_slot(&ctx.fat_locals, name)
+            && fl.home.is_some()
+            && fl.home_inline != inline
+        {
+            fl.home_inline = inline;
+            Self::write_slot(
+                &mut ctx.fat_locals,
+                &mut ctx.fat_locals_undo,
+                name,
+                Some(fl),
+            );
+        }
+    }
+
+    /// Clear every home-provenance flag. Called at control-flow joins
+    /// (if merges, loop headers and exits): the home slot is memory,
+    /// so stores inside an arm or iteration persist while the scoped
+    /// table restore reverts the flag — a join must not trust
+    /// pre-branch provenance.
+    pub(crate) fn invalidate_home_inline_flags(ctx: &mut FunctionContext<'_, M>) {
+        let flagged: Vec<StringId> = (0..ctx.fat_locals.len())
+            .filter(|&i| ctx.fat_locals[i].is_some_and(|fl| fl.home.is_some() && fl.home_inline))
+            .map(|i| StringId::from_raw(u32::try_from(i).expect("StringId index out of range")))
+            .collect();
+        for name in flagged {
+            Self::set_home_inline(ctx, name, false);
+        }
     }
 
     pub fn compile(
@@ -912,6 +972,7 @@ impl<M: Module> Codegen<M> {
                                 len: var_len,
                                 cap: var_cap,
                                 home: None,
+                                home_inline: false,
                             }),
                         );
                     } else if matches!(pool.kind(param.ty), TypeKind::Struct) {
@@ -954,6 +1015,7 @@ impl<M: Module> Codegen<M> {
                             len: var_len,
                             cap: var_cap,
                             home: None,
+                            home_inline: false,
                         }),
                     );
                     block_idx += 3;
@@ -1337,7 +1399,7 @@ impl<M: Module> Codegen<M> {
                     // canonical 24-byte home slot directly — no temp
                     // slot, no reload-to-SSA, no second spill slot.
                     // All later reads/writes go through the home.
-                    let home = if Self::writes_out_slot(ctx.tir, ctx.pool, view.initializer) {
+                    let home = if writes_out_slot(ctx.tir, ctx.pool, view.initializer) {
                         Some(builder.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
                             STR_SLOT_SIZE,
@@ -1359,6 +1421,13 @@ impl<M: Module> Codegen<M> {
                                 builder.def_var(var_len, len);
                                 builder.def_var(var_cap, cap);
                             }
+                            let home_inline = home.is_some()
+                                && Self::home_value_provably_inline(
+                                    ctx,
+                                    builder.func,
+                                    view.initializer,
+                                    cap,
+                                );
                             Self::write_slot(
                                 &mut ctx.fat_locals,
                                 &mut ctx.fat_locals_undo,
@@ -1368,6 +1437,7 @@ impl<M: Module> Codegen<M> {
                                     len: var_len,
                                     cap: var_cap,
                                     home,
+                                    home_inline,
                                 }),
                             );
                         }
@@ -1528,19 +1598,28 @@ impl<M: Module> Codegen<M> {
                     // free-then-store order instead — freeing first
                     // would be a use-after-free.
                     let direct = locals.home.is_some()
-                        && Self::writes_out_slot(ctx.tir, ctx.pool, view.value)
+                        && writes_out_slot(ctx.tir, ctx.pool, view.value)
                         && !Self::expr_refs_name(ctx.tir, view.value, view.name);
                     let mut old_freed = false;
-                    if direct && ctx.sidecar.free_on_reassign[r.index()].is_some() {
-                        let free_ref = if is_bytes {
-                            Self::declare_bytes_free(ctx, builder)?
-                        } else {
-                            Self::declare_str_free(ctx, builder)?
-                        };
+                    // Elision, same predicate as the scheduled-free
+                    // path: when the home's CURRENT contents are
+                    // provably free-noop (`locals.home_inline`), the
+                    // old-value free is a guaranteed no-op either way.
+                    if direct
+                        && !locals.home_inline
+                        && ctx.sidecar.free_on_reassign[r.index()].is_some()
+                    {
                         let (old_ptr, old_cap) =
                             Self::emit_fat_load_ptr_cap(builder, ctx, view.name)
                                 .expect("fat_locals entry read above");
-                        builder.ins().call(free_ref, &[old_ptr, old_cap]);
+                        if !Self::is_static_cap_zero(builder.func, old_cap) {
+                            let free_ref = if is_bytes {
+                                Self::declare_bytes_free(ctx, builder)?
+                            } else {
+                                Self::declare_str_free(ctx, builder)?
+                            };
+                            builder.ins().call(free_ref, &[old_ptr, old_cap]);
+                        }
                         old_freed = true;
                     }
                     let repr = Self::eval_inst_fat_slot(
@@ -1563,16 +1642,21 @@ impl<M: Module> Codegen<M> {
                     // — NOT in inst_values[old_owner], which holds the
                     // literal's original (ptr, cap) at its emission point
                     // and may be stale across reassigns.
-                    if !old_freed && ctx.sidecar.free_on_reassign[r.index()].is_some() {
-                        let free_ref = if is_bytes {
-                            Self::declare_bytes_free(ctx, builder)?
-                        } else {
-                            Self::declare_str_free(ctx, builder)?
-                        };
+                    if !old_freed
+                        && ctx.sidecar.free_on_reassign[r.index()].is_some()
+                        && !(locals.home.is_some() && locals.home_inline)
+                    {
                         let (old_ptr, old_cap) =
                             Self::emit_fat_load_ptr_cap(builder, ctx, view.name)
                                 .expect("fat_locals entry read above");
-                        builder.ins().call(free_ref, &[old_ptr, old_cap]);
+                        if !Self::is_static_cap_zero(builder.func, old_cap) {
+                            let free_ref = if is_bytes {
+                                Self::declare_bytes_free(ctx, builder)?
+                            } else {
+                                Self::declare_str_free(ctx, builder)?
+                            };
+                            builder.ins().call(free_ref, &[old_ptr, old_cap]);
+                        }
                     }
                     match locals.home {
                         // In direct mode the producer already wrote the
@@ -1589,6 +1673,11 @@ impl<M: Module> Codegen<M> {
                             builder.def_var(locals.len, len);
                             builder.def_var(locals.cap, cap);
                         }
+                    }
+                    if locals.home.is_some() {
+                        let inline =
+                            Self::home_value_provably_inline(ctx, builder.func, view.value, cap);
+                        Self::set_home_inline(ctx, view.name, inline);
                     }
                     Self::kill_fact(ctx, view.name);
                     return Ok(Terminator::None);

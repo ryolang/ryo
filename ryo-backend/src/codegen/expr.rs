@@ -725,6 +725,15 @@ impl<M: Module> Codegen<M> {
                     // between their .rodata pointers — no runtime call,
                     // no slot-out, and the cap=0 static sentinel keeps
                     // the dead-free elision firing.
+                    if out_slot.is_some() {
+                        // The inline never writes a slot; a Some here
+                        // means `writes_out_slot` failed to exclude this
+                        // builtin — fail loudly instead of leaving the
+                        // home slot unwritten (silent miscompile).
+                        return Err(
+                            "bool_to_str is codegen-inlined but was handed an out slot".to_string()
+                        );
+                    }
                     let cond = Self::eval_inst(builder, ctx, view.args[0])?;
                     let true_id = Self::store_guard_msg(
                         ctx.module,
@@ -1215,6 +1224,11 @@ impl<M: Module> Codegen<M> {
                 &[],
             )?;
             builder.ins().call(func_ref, &[s_addr, suf_ptr, suf_len]);
+            // The push may have heap-promoted the buffer in place —
+            // the home's provenance no longer holds.
+            if let Some(name) = Self::local_name_of(ctx, s_ref) {
+                Self::set_home_inline(ctx, name, false);
+            }
             // Reload the mutated fat pointer back into the caller's
             // FatLocals — home-backed bindings read the home directly,
             // so only the SSA flavor needs the reload.
@@ -1279,6 +1293,11 @@ impl<M: Module> Codegen<M> {
                 &[],
             )?;
             builder.ins().call(func_ref, &[b_addr, x_val]);
+            // The push may have heap-promoted the buffer in place —
+            // the home's provenance no longer holds.
+            if let Some(name) = Self::local_name_of(ctx, b_ref) {
+                Self::set_home_inline(ctx, name, false);
+            }
             // Reload the mutated fat pointer back into the caller's
             // FatLocals — home-backed bindings read the home directly.
             if home_addr.is_none() {
@@ -1348,9 +1367,11 @@ impl<M: Module> Codegen<M> {
                         Some(addr) => {
                             // The callee may have written anything
                             // through the pointer — the binding's range
-                            // fact dies here (same as the reload path).
+                            // fact dies here (same as the reload path),
+                            // and the home's provenance no longer holds.
                             if let Some(name) = Self::local_name_of(ctx, *arg) {
                                 Self::kill_fact(ctx, name);
+                                Self::set_home_inline(ctx, name, false);
                             }
                             arg_values.push(addr);
                         }
@@ -1571,6 +1592,9 @@ impl<M: Module> Codegen<M> {
             &[],
         )?;
         builder.ins().call(push_ref, &[addr, r_ptr, r_len]);
+        // Appending may heap-promote in place — the home's provenance
+        // no longer holds.
+        Self::set_home_inline(ctx, lhs_name, false);
         let np = builder
             .ins()
             .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);

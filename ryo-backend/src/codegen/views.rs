@@ -245,6 +245,13 @@ impl<M: Module> Codegen<M> {
         };
         let func_ref = Self::declare_runtime_fn(ctx, builder, callee, &[ctx.int_type], &[])?;
         builder.ins().call(func_ref, &[addr]);
+        // The promotion may have swapped the home's contents for a
+        // heap triple — its provenance no longer holds.
+        if home_addr.is_some()
+            && let Some(name) = local_name
+        {
+            Self::set_home_inline(ctx, name, false);
+        }
         let out_ptr = builder
             .ins()
             .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);

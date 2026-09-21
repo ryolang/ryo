@@ -204,6 +204,10 @@ impl<M: Module> Codegen<M> {
             &mut ctx.range_facts_undo,
             outer_facts_mark,
         );
+        // Home-provenance join: arm stores into home slots persist in
+        // memory while the table restore reverted the flags — no arm's
+        // provenance may survive the merge.
+        Self::invalidate_home_inline_flags(ctx);
         if !has_else && written_arms_terminated {
             for &cond in &negated_conds {
                 Self::seed_cond_facts(ctx, cond, false);
@@ -253,6 +257,9 @@ impl<M: Module> Codegen<M> {
         // cond-true seeds applied below stay sound: the header's brif
         // re-establishes the condition on every iteration.
         Self::kill_loop_writes(ctx, Some(view.cond), &view.body);
+        // Back-edge rule for home provenance: a flag set pre-loop says
+        // nothing about a value the body stored on a later iteration.
+        Self::invalidate_home_inline_flags(ctx);
         let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
         builder
             .ins()
@@ -282,6 +289,10 @@ impl<M: Module> Codegen<M> {
             pre_loop_facts_mark,
         );
         Self::kill_assigned_since(ctx, scope_mark);
+        // The body's home stores persist in memory but the scoped
+        // restore reverted the flags — post-loop code must not trust
+        // pre-loop (or in-body) provenance.
+        Self::invalidate_home_inline_flags(ctx);
 
         if body_term == Terminator::None {
             builder.ins().jump(header_block, &[]);
@@ -363,6 +374,10 @@ impl<M: Module> Codegen<M> {
         // emitting it. There is no post-loop restore here, so the
         // kills simply persist past the loop.
         Self::kill_loop_writes(ctx, None, &view.body);
+        // Back-edge rule for home provenance (see generate_while_loop):
+        // a flag set pre-loop says nothing about a value the body
+        // stored on a later iteration.
+        Self::invalidate_home_inline_flags(ctx);
 
         let body_term = Self::emit_body(builder, ctx, &view.body)?;
 
@@ -405,6 +420,10 @@ impl<M: Module> Codegen<M> {
         // 7. Exit — always reachable
         builder.seal_block(exit_block);
         builder.switch_to_block(exit_block);
+        // The exit is reached from the header on EVERY path (including
+        // zero iterations), so neither pre-loop nor last-iteration home
+        // provenance holds here.
+        Self::invalidate_home_inline_flags(ctx);
 
         Ok(Terminator::None)
     }

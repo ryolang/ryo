@@ -158,6 +158,58 @@ fn bool_to_str_is_fully_inlined() {
 }
 
 #[test]
+fn reassign_to_inline_elides_frees_via_provenance() {
+    // The home-provenance flag generalizes the elision to reassigned
+    // bindings: both the old-value free at the reassign (previous home
+    // contents provably inline) and the end-of-scope free (current
+    // contents provably inline) are guaranteed no-ops.
+    let obj =
+        object_bytes("fn main():\n\tmut s = int_to_str(1)\n\ts = int_to_str(2)\n\tprint(s)\n");
+    assert!(
+        !contains(&obj, b"ryo_str_free"),
+        "reassign between provably-inline values needs no frees"
+    );
+}
+
+#[test]
+fn if_merge_invalidates_provenance() {
+    // The then-arm stores a concat (heap-capable) into the home; at
+    // the merge the flag must be gone, so the frees after the if stay.
+    let obj = object_bytes(
+        "fn f(x: int):\n\tmut s = int_to_str(1)\n\tif x > 0:\n\t\ts = \"a\" + \"b\"\n\tprint(s)\n",
+    );
+    assert!(
+        contains(&obj, b"ryo_str_free"),
+        "post-merge frees must stay"
+    );
+}
+
+#[test]
+fn loop_back_edge_invalidates_provenance() {
+    // Iteration 2+ frees the heap buffer stored by the previous
+    // iteration — the frees inside and after the loop must stay.
+    let obj = object_bytes(
+        "fn f(n: int):\n\tmut s = int_to_str(1)\n\tfor i in range(0, n):\n\t\ts = \"a\" + \"b\"\n\tprint(s)\n",
+    );
+    assert!(
+        contains(&obj, b"ryo_str_free"),
+        "loop-carried frees must stay"
+    );
+}
+
+#[test]
+fn push_invalidates_provenance() {
+    // str_push may heap-promote the home buffer in place — the free
+    // after the push is real.
+    let obj =
+        object_bytes("fn main():\n\tmut s = int_to_str(1)\n\tstr_push(&s, \"x\")\n\tprint(s)\n");
+    assert!(
+        contains(&obj, b"ryo_str_free"),
+        "pushed binding may hold a heap buffer; free must stay"
+    );
+}
+
+#[test]
 fn registry_bounds_match_codegen_elision() {
     // Coherence pin between the frontend registry annotation
     // (`builtins.rs::max_output_len`) and the backend's elision
