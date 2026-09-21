@@ -1361,15 +1361,15 @@ impl<M: Module> Codegen<M> {
                     };
                     // Home-backed binding: the callee mutates the home
                     // slot in place — no spill, no reload.
-                    let home_addr = Self::local_name_of(ctx, *arg)
-                        .and_then(|n| Self::fat_home_addr(builder, ctx, n));
+                    let arg_name = Self::local_name_of(ctx, *arg);
+                    let home_addr = arg_name.and_then(|n| Self::fat_home_addr(builder, ctx, n));
                     match home_addr {
                         Some(addr) => {
                             // The callee may have written anything
                             // through the pointer — the binding's range
                             // fact dies here (same as the reload path),
                             // and the home's provenance no longer holds.
-                            if let Some(name) = Self::local_name_of(ctx, *arg) {
+                            if let Some(name) = arg_name {
                                 Self::kill_fact(ctx, name);
                                 Self::set_home_inline(ctx, name, false);
                             }
