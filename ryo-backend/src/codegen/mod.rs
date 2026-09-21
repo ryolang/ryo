@@ -1399,7 +1399,14 @@ impl<M: Module> Codegen<M> {
                     // canonical 24-byte home slot directly — no temp
                     // slot, no reload-to-SSA, no second spill slot.
                     // All later reads/writes go through the home.
-                    let home = if writes_out_slot(ctx.tir, ctx.pool, view.initializer) {
+                    // Mutable bindings get a home even when the
+                    // initializer is not a producer: only they can be
+                    // reassigned, and a later slot-out reassign then
+                    // writes the home directly (and the home-provenance
+                    // free elision applies) instead of paying a temp
+                    // slot + triple store at every reassign.
+                    let produces_slot = writes_out_slot(ctx.tir, ctx.pool, view.initializer);
+                    let home = if produces_slot || view.mutable {
                         Some(builder.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
                             STR_SLOT_SIZE,
@@ -1408,7 +1415,12 @@ impl<M: Module> Codegen<M> {
                     } else {
                         None
                     };
-                    let repr = Self::eval_inst_fat_slot(builder, ctx, view.initializer, home)?;
+                    let repr = Self::eval_inst_fat_slot(
+                        builder,
+                        ctx,
+                        view.initializer,
+                        home.filter(|_| produces_slot),
+                    )?;
                     match repr {
                         ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                             let var_ptr = builder.declare_var(ctx.int_type);
@@ -1416,10 +1428,21 @@ impl<M: Module> Codegen<M> {
                             let var_cap = builder.declare_var(types::I64);
                             // Home-backed bindings keep the triple in the
                             // slot only; the SSA Variables stay unused.
-                            if home.is_none() {
-                                builder.def_var(var_ptr, ptr);
-                                builder.def_var(var_len, len);
-                                builder.def_var(var_cap, cap);
+                            // A non-producer initializer needs the triple
+                            // stored into the home by hand.
+                            match home {
+                                Some(home) if !produces_slot => {
+                                    let addr = builder.ins().stack_addr(ctx.int_type, home, 0);
+                                    builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
+                                    builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
+                                    builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
+                                }
+                                Some(_) => {}
+                                None => {
+                                    builder.def_var(var_ptr, ptr);
+                                    builder.def_var(var_len, len);
+                                    builder.def_var(var_cap, cap);
+                                }
                             }
                             let home_inline = home.is_some()
                                 && Self::home_value_provably_inline(

@@ -385,14 +385,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-185 — Slot-home coverage gap: homes only for slot-out VarDecl initializers
-
-**Files:** `ryo-backend/src/codegen/mod.rs` (VarDecl fat case home creation), `ryo-backend/src/codegen/expr.rs` (`emit_slot_out_call`)
-**Summary:** The slot-home work (fat bindings get a canonical stack slot the producer writes directly) creates a home only when the VarDecl initializer is itself a slot-out producer. Bindings initialized by a literal, param, or inlined builtin (e.g. `bool_to_str`) and *later* reassigned to slot-out producers never get a home, so every such reassign still pays the temp slot + triple store the home was meant to eliminate — and the home-provenance free elision (which needs a home) cannot apply to them either.
-**Resolution:** Create the home lazily on the first slot-out Assign to a home-less binding, or eagerly for every fat VarDecl (measuring stack-frame cost of unused homes first).
-
----
-
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).

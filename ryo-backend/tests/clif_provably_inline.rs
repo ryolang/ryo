@@ -210,6 +210,39 @@ fn push_invalidates_provenance() {
 }
 
 #[test]
+fn mutable_literal_initialized_binding_gets_home() {
+    // `mut` bindings get a home even when the initializer is not a
+    // slot-out producer: the reassign writes the home directly (no
+    // temp slot) and both frees elide — the old value is a static
+    // literal, the new one a provably-inline producer result.
+    let src = "fn main():\n\tmut s = \"\"\n\ts = int_to_str(1)\n\tprint(s)\n";
+    let obj = object_bytes(src);
+    assert!(
+        !contains(&obj, b"ryo_str_free"),
+        "static old value + provably-inline new value need no frees"
+    );
+    let clif = clif_of(src);
+    let slots = clif.matches("explicit_slot").count();
+    assert_eq!(slots, 1, "exactly the binding's home slot:\n{clif}");
+}
+
+#[test]
+fn mutable_bool_to_str_initialized_binding_gets_home() {
+    // Same coverage for a codegen-inlined initializer: the home is
+    // created (mut), the inlined select's triple is stored into it by
+    // hand, and the reassign + frees take the home paths.
+    let src = "fn main():\n\tmut s = bool_to_str(true)\n\ts = int_to_str(1)\n\tprint(s)\n";
+    let obj = object_bytes(src);
+    assert!(
+        !contains(&obj, b"ryo_str_free"),
+        "provably-inline old and new values need no frees"
+    );
+    let clif = clif_of(src);
+    let slots = clif.matches("explicit_slot").count();
+    assert_eq!(slots, 1, "exactly the binding's home slot:\n{clif}");
+}
+
+#[test]
 fn registry_bounds_match_codegen_elision() {
     // Coherence pin between the frontend registry annotation
     // (`builtins.rs::max_output_len`) and the backend's elision
