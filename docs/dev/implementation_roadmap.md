@@ -3562,6 +3562,15 @@ create_user("Alice", 30, "admin")                   # compile error
 - **Build Caching:** Incremental compilation and artifact caching
 - **Built-in Profiler (`ryo profile`):** Wrap an external statistical sampler (`samply`/`perf`) into one DX-clean workflow — frame pointers (already emitted via Cranelift) are the enabler, mirroring Python 3.15's Tachyon + PEP 831 framing. Sits next to Benchmarking & Doc Generation and PGO; the collatz codegen-gap diagnosis is the motivating use case (manual disassembly diffing is what this automates)
 
+**Language Server Protocol (LSP) — scoping notes:**
+
+Reference: [Why building a Rust LSP is hard](https://rust-glancer.github.io/blog/why-lsp-is-hard/) — architectural lessons from rust-analyzer and Rust Glancer. The core mindset shift: a compiler has a binary definition of done; an LSP must produce useful answers from partial, often-broken information, immediately, and keep answering while the user types.
+
+- **Sequence features by required analysis depth** — each layer enables the next: document symbols/folding from a CST of the open file alone → hover needs an item tree + definition maps → inlay hints need body analysis + type inference → references need workspace-wide body search seeded by text matching. Ship in that order.
+- **Error-tolerant parsing is a prerequisite Ryo doesn't have yet.** The batch parser stops at the first round of errors; an LSP needs a CST that always parses (the code is permanently broken while typing). The `tree-sitter-ryo` grammar already provides this layer for structural queries; semantic layers need a non-failing mode of the compiler crates (already a library).
+- **Indexing strategy is *the* architecture decision** — lazy incremental query-based (rust-analyzer/salsa: compute only what's asked, invalidate precisely on change) vs. eager index persisted to disk (Rust Glancer: low RAM, instant restarts). Pick deliberately; it shapes everything downstream.
+- **LSP leaks into architecture** — UTF-16 position conversion with line indexes, per-file line-ending detection, a virtual filesystem with source generations, parallel read queries cancelled on state change. Budget for this infrastructure; the protocol is not a thin wrapper.
+
 **Advanced Language Features:**
 
 - **Compile-time Execution (comptime):** Metaprogramming and zero-cost abstractions
