@@ -1685,6 +1685,8 @@ fn main():
    - Mixing positional + named args
    - Error cases: wrong name, positional for non-`_` param, positional after named, missing required arg, duplicate arg
 
+**Design note — sentinels (from Python 3.15's `sentinel`, PEP 661):** default parameters reopen the "not provided vs explicitly `none`" question for optional params. Ryo's static types mostly cover sentinel needs (a dedicated enum variant *is* a sentinel, with exhaustiveness checking), but stdlib APIs with `?T` defaults need a uniform idiom. Decide at scoping: builtin `sentinel` type vs an enum-variant convention.
+
 **Visible Progress:** Functions with defaults and named arguments work. Clear compile errors for argument misuse.
 
 **Example:**
@@ -3549,6 +3551,7 @@ create_user("Alice", 30, "admin")                   # compile error
 - **Package Registry:** Central repository (crates.io-like) with version resolution
 - **Workspaces:** Multi-package projects with shared dependencies
 - **Build Caching:** Incremental compilation and artifact caching
+- **Built-in Profiler (`ryo profile`):** Wrap an external statistical sampler (`samply`/`perf`) into one DX-clean workflow — frame pointers (already emitted via Cranelift) are the enabler, mirroring Python 3.15's Tachyon + PEP 831 framing. Sits next to Benchmarking & Doc Generation and PGO; the collatz codegen-gap diagnosis is the motivating use case (manual disassembly diffing is what this automates)
 
 **Advanced Language Features:**
 
