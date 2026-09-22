@@ -4,7 +4,7 @@
 
 **Status:** Reference
 
-Last updated on Dec 18, 2025 (Commit: [cfc024d](https://github.com/golang/go/commit/cfc024d))
+Last updated on Sep 22, 2026 (Commit: [12c76d4](https://github.com/golang/go/commit/12c76d4), Go 1.27)
 
 [View on GitHub](https://github.com/golang/go)
 
@@ -30,6 +30,14 @@ Go combines the efficiency of compiled languages with the simplicity of dynamic 
 - **Simplicity:** Clean syntax with minimal keywords and straightforward semantics
 - **Static Typing:** Strong type system with type inference for cleaner code
 - **Garbage Collection:** Automatic memory management with low-latency collection
+
+Go has supported parametric polymorphism via generics (type parameters on functions and types) since Go 1.18. Go 1.27 (August 2026) completed the original generics design:
+
+- **Generic methods:** A method declaration may now declare its own type parameters, so generic functionality can live in a method's namespace instead of requiring a package-level function. Example: `math/rand/v2` now declares the generic method `(*Rand) N[Int intType](Int) Int` alongside the existing generic function `N`. Restrictions: interface methods may not declare type parameters, and an interface method cannot be implemented by a generic method.
+- **Generalized function type inference:** Type inference now applies in all contexts where a generic function is assigned to a variable of (or converted to) a matching function type — previously inference only worked at direct calls.
+- **Struct literal keys as field selectors:** A key in a struct literal may be any valid field selector for the struct type, not just a top-level field name.
+
+Ryo relevance: Ryo's planned generics are monomorphization-based (a fresh TIR per instantiation — see `docs/dev/pipeline_alignment.md`). Go 1.27's generic methods are the design point to study if Ryo later considers parameterizing methods rather than only functions.
 
 ### Repository Structure [Link to this section](https://www.augmentcode.com/open-source/golang/go\#repository-structure)
 
@@ -452,6 +460,7 @@ The `go fmt` command wraps gofmt and applies it to packages.
 - `loopclosure` – Loop variable capture in closures
 - `structtag` – Invalid struct field tags
 - `unreachable` – Dead code detection
+- `stdversion` – Standard-library symbols too new for the Go version in force (Go 1.27; runs by default in `go test`)
 
 Vet uses the `golang.org/x/tools/go/analysis` framework. Each analyzer is a pluggable module that can be enabled/disabled individually.
 
@@ -626,6 +635,7 @@ The `runtime/pprof` package enables profiling. Built-in profiles include:
 - **Goroutine** \- `pprof.Lookup("goroutine")` \- Stack traces of all goroutines
 - **Block** \- `pprof.Lookup("block")` \- Synchronization blocking time
 - **Mutex** \- `pprof.Lookup("mutex")` \- Lock contention
+- **Goroutine leak** \- `pprof.Lookup("goroutineleak")` \- Goroutines permanently blocked on unreachable concurrency primitives (Go 1.27, general availability)
 
 Enable profiling in tests with `-cpuprofile`, `-memprofile`, `-blockprofile`, `-mutexprofile` flags. Analyze profiles with `go tool pprof`.
 

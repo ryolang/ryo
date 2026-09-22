@@ -26,7 +26,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** `ryo-frontend/src/sema/stmt.rs` (`analyze_block`)
 **Summary:** Each branch of an if/elif/else creates a child scope. Variables declared inside a branch are dropped when the branch scope ends. There is no "variable promotion" — even if all branches declare `x: int`, `x` is not available after the if statement. This is the correct scoping semantics for now, but may surprise users expecting Python-style scoping where if-branches don't create a new scope.
-**Resolution:** This is intentional for M8b. If user feedback requests Python-style flat scoping, revisit as a language design decision (requires approval per CLAUDE.md escalation rules).
+**Resolution:** This is intentional for M8b. If user feedback requests Python-style flat scoping, revisit as a language design decision (requires approval per AGENTS.md escalation rules).
 
 ### I-011 — Manual error enum where `thiserror` would suffice
 
@@ -279,11 +279,11 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** The value-range fact map behind the landed overflow-guard elision (I-142, commit `d6aee06`) deliberately scopes to guards on `+`/`-`/`*`/unary `-` seeded from bare `var <cmp> const` conditions. Four cheap extensions were identified during that work and deferred, each independent and small once the fact map exists: (a) div/mod zero-guard elision — when the divisor's range excludes 0, the `emit_div_guard` branch is provably unreachable; (b) `BoolAnd`/`BoolOr` decomposition — `x > 0 && y > 0` can seed both sides on the true path (De Morgan on the false path); (c) `VarDecl` constant seeding — `x = 5` records a point fact, useful once real programs (not just fib) are the yardstick; (d) loop-exit facts — a `while` condition's false path holds at the exit block, but only for condition variables never reassigned in the body.
 **Resolution:** Revisit when benchmark headroom justifies it — note that the fibonacci checkpoint (2026-08-26, `benchmarks/fibonacci/README.md`) showed the landed elision produced no walltime change on out-of-order hardware, so these extensions are expected to be equally cheap-but-invisible there; their value is on in-order/constrained targets. Each item follows the same discipline as the landed elision work: boundary-value pinning tests per elision class, since a wrong elision silently drops a mandated trap.
 
-### I-165 — Surviving overflow guards lower to unfused `cset`+`tst`+`b.ne` instead of a single flag branch
+### I-165 — Surviving overflow guards lower to unfused `cset`+`tst`+`b.ne`; needs upstream Cranelift flag-forwarding
 
-**Files:** `ryo-backend/src/codegen/expr.rs` (checked-op helpers, panic-block branch emission)
-**Summary:** Ryo's spec §18 checked arithmetic emits an overflow guard per integer `+`/`-`/`*`. After the value-range work (I-142) removed the provably-unreachable guards from the fibonacci hot path, the one remaining guard (the outer `fibonacci(n - 1) + fibonacci(n - 2)` add) lowers on aarch64 to `adds` + `cset x13, vs` + `tst w13, #0xff` + `b.ne` — three instructions where Swift emits the fused `adds` + `b.hs` (one). Disassembly of `benchmarks/fibonacci/fib` (2026-08-27) shows the overflow flag from `sadd_overflow` is materialized into an SSA boolean and only branched on later, which prevents Cranelift's flag-fusion lowering. x86-64 has the same shape (`seto` + `test` + `jne` instead of a single `jo`). Cranelift 0.134/0.135's branch-to-trap folding does not apply because Ryo's guards branch to a `ryo_panic` call block rather than a raw trap — and even if it did, the flag not feeding the branch directly would block fusion.
-**Resolution:** Emit the branch on the overflow-flag value immediately at the checked-op site (no intermediate SSA bool / block separation), so Cranelift's branch-on-flags lowering can fuse it into `b.vs`/`jo`; verify by disassembly diff of the fibonacci hot path before/after. Do not switch to `trapz`/`trapnz` — that bypasses the `ryo_panic` message/exit-code contract (previously considered and rejected when the panic guards were introduced).
+**Files:** upstream Cranelift (`cranelift/codegen` aarch64 + x64 lowering of `*_overflow` flag results feeding `brif`/`trapnz`); Ryo side already emits the fusible shape (`ryo-backend/src/codegen/expr.rs` checked-op helpers)
+**Summary:** Ryo's spec §18 checked arithmetic emits an overflow guard per integer `+`/`-`/`*`. Each guard lowers on aarch64 to `adds` + `cset xN, vs` + `tst wN, #0xff` + `b.ne` — three extra instructions where Swift/LLVM emit the fused `adds` + `b.vs`. In `benchmarks/collatz` this costs +6 instructions per loop iteration (three checked ops), the largest share of the residual ~1.3x gap to equally-checked Swift (disassembly breakdown, 2026-09-22, in that README). Re-scoped 2026-09-22: an earlier revision of this entry blamed Ryo's CLIF shape (flag materialized into an SSA bool, branch separated from the op) and pointed at branch-to-trap folding. A controlled experiment (minimal CLIF compiled with the pinned Cranelift 0.135.2, aarch64) disproved that: Ryo already emits `brif` directly on the `sadd_overflow` flag result with no intermediate bool, and even a raw `trapnz` on the flag result still lowers to `adds` + `cset` + `tst` + `b.ne` + `udf`. Cranelift's aarch64 backend materializes the overflow flag into a register inside the `*_overflow` lowering itself and has no flag-forwarding into any branch, trap or otherwise. x86-64 has the same shape (`seto` + `test` + `jne` instead of a single `jo`).
+**Resolution:** Upstream Cranelift work: forward the overflow flag from `sadd_overflow`/`ssub_overflow`/`smul_overflow` etc. into a directly-attached `brif`/`trapz`/`trapnz` so the backend can emit a single flags-conditional branch (`b.vs`/`jo`). There is no Ryo-side fix: the only local alternatives (range-guard `icmp`s, or switching to `trapz`/`trapnz`) cost more than they save or bypass the `ryo_panic` message/exit-code contract (previously considered and rejected when the panic guards were introduced). On upgrade, verify by disassembly diff of the fibonacci and collatz hot paths.
 
 ### I-144 — Per-if clone and repeated dead-drop scans in codegen
 
@@ -354,7 +354,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-168 — Hyphenated `ryo-*.md` doc names violate the lowercase-underscore convention
 
 **Files:** `docs/dev/` (`ryo-incremental-compilation.md`, `ryo-context-and-otel-proposal.md`, `ryo-std-data-proposal.md`, `ryo-proposal-review-issues.md`, `ryo-missing-features-and-gaps.md`, `ryo-view-materialization.md`, `ryo-slicing-and-memory-model-final-spec.md`, `ryo-compiler-llm-instructions.md`), plus every doc that links to them
-**Summary:** The repo convention is lowercase with underscores for docs (special files like `README.md` excepted). The eight `ryo-*-*.md` files under `docs/dev/` use hyphens instead. `NOTES.md` was renamed to `notes.md` as the cheap half of this cleanup; the hyphenated set was scoped out because each rename must also update every inbound link (`CLAUDE.md`, `ISSUES.md`, the roadmap, and the docs/dev README index at minimum).
+**Summary:** The repo convention is lowercase with underscores for docs (special files like `README.md` excepted). The eight `ryo-*-*.md` files under `docs/dev/` use hyphens instead. `NOTES.md` was renamed to `notes.md` as the cheap half of this cleanup; the hyphenated set was scoped out because each rename must also update every inbound link (`AGENTS.md`, `ISSUES.md`, the roadmap, and the docs/dev README index at minimum).
 **Resolution:** One sweep: `git mv` each `ryo-*.md` to its underscore form, then repo-wide grep for each old basename to update links. Verify no residual references with a final grep for `ryo-.*\.md` across tracked markdown.
 
 ### I-172 — Consuming struct update has no ergonomic form: move + mutate + return dance, no update sugar, no clone
@@ -382,6 +382,22 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-backend/src/codegen/views.rs` (`emit_ensure_heap_for_view_base` promo-slot path)
 **Summary:** When a view's base owner was promoted (heap-buffered for aliasing), every slice/view derivation re-emits the spill sequence: store the owner (ptr, len, cap) triple plus a spilled flag into a stack slot, then load and branch on the flag — even when the base is loop-invariant and the slot contents never change. In `benchmarks/string_slicing`'s `count_fox` this is ~12 extra aarch64 instructions per scan iteration (measured by disassembly, 2026-09-17), a large share of the remaining gap to Rust after the slice/eq inlining work.
 **Resolution:** Hoist the promo-slot spill and flag initialization out of loops (loop-invariant-code-motion on the spill sequence), or skip the slot write entirely on the heap/static fast path and keep the owner triple in registers when its liveness allows.
+
+---
+
+### I-185 — `x % 2^k == 0` comparisons lower through the full signed-remainder sequence
+
+**Files:** `ryo-backend/src/codegen/expr.rs` (`TirTag::IMod` lowering), `ryo-backend/src/codegen/arith.rs` (`CompoundOp::Mod`)
+**Summary:** Cranelift's egraph rewrites `srem x, 2^k` into the sign-corrected remainder sequence (on aarch64: `lsr`/`add`/`and`/`sub` + `cbz`, 5 instructions) and has no rule folding `srem x, 2^k == 0` into a bit test — but the comparison is sign-invariant: `x % 2^k == 0` iff `(x & (2^k - 1)) == 0` for negative `x` too. In `benchmarks/collatz` the `n % 2 == 0` parity check is ~4 of the ~9 extra per-iteration instructions vs Swift (LLVM emits a single `tst x, #1`; measured by disassembly, 2026-09-22 — see that README's gap breakdown).
+**Resolution:** Pattern-match at CLIF emission: when an `IMod` by a power-of-two constant feeds an equality comparison against 0, emit `band x, 2^k - 1` + `icmp eq 0` instead of `srem`. Upstreaming an egraph rule matching `icmp eq (srem x, pow2), 0` would benefit all Cranelift users, but the local peephole does not depend on it.
+
+---
+
+### I-186 — No function inlining; small hot callees pay full call overhead
+
+**Files:** `ryo-frontend/src/` (TIR-level inlining pass, post-sema alongside ownership), `ryo-backend/src/codegen/mod.rs` (call sites)
+**Summary:** Cranelift has no inliner by design, so every Ryo function call is a real call. In `benchmarks/collatz`, `collatz_steps` is called once per seed (1M calls), each paying an `stp x29, x30` frame setup/teardown that Rust and LLVM eliminate by inlining the callee into the caller's loop (disassembly, 2026-09-22). Minor for collatz (~ms), but it also blocks cross-function constant propagation and guard elision in general.
+**Resolution:** Add a TIR-level inlining pass for small functions (size threshold, e.g. single-block bodies), cloning the per-function TIR arena into the caller before codegen — the per-function arena design makes this a `Tir::clone` plus `TirRef` remapping. Verify by disassembly that `collatz_steps` disappears into `main` and the collatz ratio improves.
 
 ---
 

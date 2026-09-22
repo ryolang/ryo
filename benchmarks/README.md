@@ -43,36 +43,43 @@ JIT and AOT land within noise of each other (~1.42–1.43×) because both share 
 
 * **Focus:** Runtime string ABI + eager destruction — concat over 50,000 iterations; the direct before/after measure for the packed-`u128` runtime ABI.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** After the SSO + consuming-concat rework (2026-09-14) Ryo AOT runs at **Rust parity** (1.6 ms vs 1.5 ms) at the lightest RSS — the pre-rework 12.33x gap was allocation policy (a fresh exact-size buffer per concat), not codegen. See the benchmark's README for the full before/after story.
 
 ### 4. [String Slicing Benchmark](./string_slicing/)
 
 * **Focus:** Zero-copy string views — scan a 688 KiB in-program-generated string counting substring matches through string-semantic slices (`strview` / `&str` with boundary validation / `String.UTF8View`), copying and storing nothing.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT (3.4 ms, 1.89x slower than Rust) sits **far ahead of Swift** (17.6 ms, 9.78x) — the scan loop makes **zero runtime calls** after slice/compare inlining. The residual gap to Rust is §18 checked-arithmetic guards, the promote-on-view spill (I-184), and Cranelift mid-end quality.
 
 ### 5. [Byte Slicing Benchmark](./byte_slicing/)
 
 * **Focus:** The same scan workload on raw bytes — `bytesview` / `&[u8]` / `[UInt8]` slices with no UTF-8 char-boundary validation anywhere. Split out of string_slicing (2026-09-17) so each suite compares like with like; the delta between the two isolates Ryo's `str` boundary-validation cost.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT (2.7 ms) lands **within noise of Swift** (2.5 ms) at 1.70x behind Rust; the ~0.6–0.7 ms delta against Ryo's string_slicing row is exactly the UTF-8 char-boundary validation cost.
 
 ### 6. [Mandelbrot Benchmark](./mandelbrot/)
 
 * **Focus:** Float codegen — 401×501 grid, max 80 iterations per pixel; no overflow guards in play, the cleanest Cranelift readout.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT is **1.11x slower than Rust** (14.6 vs 13.2 ms) — with no overflow guards in play for floats, this is the cleanest readout of Cranelift floating-point codegen and it is near parity.
 
 ### 7. [Collatz Benchmark](./collatz/)
 
 * **Focus:** Integer loop/branch — total stopping time for seeds 1..1,000,000; a hot flat loop complementing fibonacci's recursion profile.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT runs at **2.07x Rust** (216 ms), decomposed by disassembly diff into ~1.6x the spec §18 checked-arithmetic policy (equally-checked Rust measures 1.61x, on par with Swift's 1.58x) plus ~1.3x Cranelift aarch64 lowering gaps (unfolded `srem x, 2`, unfused overflow branches per I-165, unstrength-reduced `mul x, 3`). See the benchmark's README for the breakdown.
 
 ### 8. [Doubling Concat Benchmark](./doubling_concat/)
 
 * **Focus:** Runtime allocation strategy — `s = s + s` exponential growth to 16 MiB, stressing `ryo_str_alloc` / `ryo_str_concat`.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT is the **fastest arm, tied with Rust** at 3.7 ms (1.01x, within noise) at the lowest RSS (33.4 MB) — eager destruction keeps live string memory bounded at ~1.5x the final size through the doublings.
 
 ### 9. [Many Small Strings Benchmark](./many_small_strings/)
 
 * **Focus:** Flat-loop alloc/free churn — 500,000 short strings built and dropped, complementing eager_destruction's recursion angle.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** After the SSO rework (2026-09-14) Ryo AOT is the **fastest arm** (9.6 ms vs Rust 10.5, Swift 10.6) at the lightest RSS (1.34 MB) — ≤ 23-byte strings are inline slots, so the per-iteration string never touches the heap.
 
 ### 10. [Struct Records Benchmark](./struct_records/)
 
