@@ -3393,6 +3393,8 @@ ContractViolation: precondition failed: amount > 0
   contract defined at src/bank.ryo:1
 ```
 
+**Design reference:** [Verus](https://www.amazon.science/blog/developing-provably-correct-rust-code-with-verus) — the most ergonomic existence proof for how contracts should feel: specs (`requires`/`ensures`/invariants) live in the same file as the code, violations render as source-level errors, feedback is fast enough for a red-squiggles loop. Ryo's `#[pre]`/`#[post]` semantics (what's enforceable, diagnostic shape, spec/code drift) should be designed against this model. Verus itself is also the fallback if the runtime's unsafe FFI invariants (string/bytes ABI tag bits, `len ≤ cap`, concat/realloc bounds) ever need machine-checked *all-inputs* guarantees — Miri (CI'd) covers the dynamic side, Verus the static one; adopt only if runtime UB actually ships.
+
 **Effort:** ~1-2 weeks (once attribute system exists from `#[test]` milestone)
 **Dependencies:** Attribute system (Milestone 26), functions (M4), boolean expressions (M8), panic (M25)
 **Timeline:** v0.2 (ships alongside attribute system)
