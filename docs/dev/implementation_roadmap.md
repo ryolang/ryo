@@ -2442,6 +2442,7 @@ Test result: ok. 2 passed; 0 failed
      - `x86_64-pc-windows-msvc` (Windows)
    - Automated release artifact creation
    - Binary signing and checksums
+   - ✅ Done: AOT-produced Linux programs link static musl (`-target <arch>-linux-musl` in `ryo-backend/src/linker.rs`) — they run on any Linux regardless of host glibc version. Caveat carried to the concurrency milestone: musl's resolver skips NSS plugins, so `std.net` needs a resolver decision before it ships. A `--link=glibc|musl` escape hatch remains open.
 
 2. **Installation Scripts:**
    - `install.sh` for Unix-like systems: ✅ Done (repo root)
@@ -2869,7 +2870,7 @@ Adding M:N threading has **specification impacts** that require changes to earli
 - `std.task` - Task spawning, scheduling, scopes, timeouts
 - `std.channel` - Channel creation, sender/receiver types
 - `std.sync` - Mutex, RwLock, Atomic primitives
-- `std.net` - Async network I/O (TCP, UDP, HTTP)
+- `std.net` - Async network I/O (TCP, UDP, HTTP). **DNS gate:** produced Linux binaries link static musl, whose resolver skips NSS plugins — decide the resolver story before shipping (pure-Ryo resolver, or document a dynamic-glibc link recommendation for NSS-heavy environments; Go was forced into its own resolver by exactly this)
 
 **Example (Full Workflow):**
 
