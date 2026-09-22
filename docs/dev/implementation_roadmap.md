@@ -3558,6 +3558,25 @@ create_user("Alice", 30, "admin")                   # compile error
 - **Cross-Compilation:** Easy targeting of different platforms
 - **Profile-Guided Optimization (PGO):** Runtime profiling for better optimization
 
+**Bitwise Operators — Open Decision:**
+
+Shifts and bitwise AND/OR/XOR/NOT for `int` (hashing, checksums, binary protocols, flag sets, bit-trick inner loops). Python familiarity matters (target audience), but `&` and `|` are already assigned in Ryo (borrow, error unions). Three options on the table — **no decision yet**:
+
+| Operation | Contextual symbols (Rust model) | All-words (Erlang/OCaml model) | Mixed |
+|---|---|---|---|
+| borrow / bitand | `&x` / `a & b` | `&x` / `a band b` | `&x` / `a band b` |
+| error union / bitor | `A \| B` / `a \| b` | `A \| B` / `a bor b` | `A \| B` / `a bor b` |
+| shift left / right | `<<` / `>>` | `shl` / `shr` | `<<` / `>>` |
+| xor / bitwise not | `^` / `~` | `bxor` / `bnot` | `^` / `~` |
+
+- **Contextual symbols** — max Python familiarity. Disambiguation is parse-level, not a real collision: `&` prefix = borrow vs `&` infix = bitand; `|` type position = error union vs `|` expression = bitor (Rust does exactly this). Cost: amends the spec's "each operator has exactly one meaning" rule to "one meaning per syntactic role", and infix `&`/`|` bring back the C/Python precedence trap (`a & b == 0`) unless Rust's precedence (bitwise tighter than comparisons) is adopted.
+- **All-words** — one rule covers the set: logical and bitwise operators are words (`and`/`or`/`not` precedent), arithmetic and comparison are symbols. No spec amendment, no reader ambiguity in borrow-heavy code (`f(&a & b)` vs `f(&a band b)`). Precedent: Erlang (`band`/`bor`/`bxor`/`bnot`/`bsl`/`bsr`), OCaml (`land`/`lor`/`lxor`/`lnot`; `lsr` vs `asr` distinguishes logical vs arithmetic right shift — worth stealing), Ada/Pascal/Delphi/VHDL (words type-dispatched to bitwise), Fortran (`.AND.` + `IAND`/`IOR` intrinsics). Cost: zero glyph familiarity for the Python/C mainstream.
+- **Mixed** — Python spellings where symbols are free, words where taken. Rejected: mixing glyph and word operators in one expression (`a << 2 band mask`) has no principle behind it, just availability.
+- Symbol camp, for contrast: C, C++, Go, Rust, Swift, JS, Python, Lua, Zig all use glyphs.
+- Whichever option lands, pin right-shift semantics on negative ints (arithmetic vs logical) explicitly instead of inheriting Cranelift defaults.
+
+**Approval:** new operators — and for contextual symbols, a spec one-meaning-rule amendment — pending explicit human approval.
+
 **Standard Library Expansion:**
 
 - **HTTP Client/Server:** HTTP/2 and HTTP/3 support with concurrent handlers
