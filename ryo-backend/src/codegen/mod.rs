@@ -737,21 +737,19 @@ impl<M: Module> Codegen<M> {
         }
     }
 
+    /// Compile every function in `tirs` and return `main`'s `FuncId`
+    /// together with the rendered CLIF text. The text is only
+    /// produced when `dump_ir` is set (an `--emit=clif`-style
+    /// request): the per-function pretty-print is pure overhead on
+    /// the normal compile path, where the caller discards it.
     pub fn compile(
         &mut self,
         tirs: &[Tir],
         pool: &InternPool,
         sidecar: &ryo_core::ownership::OwnershipSidecar,
-    ) -> Result<FuncId, String> {
-        debug_assert!(
-            bytes::no_unreachable_in(tirs),
-            "codegen::compile requires sema to have produced TIR with no Unreachable instructions"
-        );
-        let func_ids = self.prepare_compilation(tirs, pool)?;
-
-        for (i, tir) in tirs.iter().enumerate() {
-            self.compile_function(tir, &func_ids, pool, sidecar, i)?;
-        }
+        dump_ir: bool,
+    ) -> Result<(FuncId, String), String> {
+        let (func_ids, ir_output) = self.compile_all(tirs, pool, sidecar, dump_ir)?;
 
         // Resolve "main" through the pool. `astgen` always interns
         // the string "main" (it does so explicitly when synthesising
@@ -761,31 +759,53 @@ impl<M: Module> Codegen<M> {
         let main_id = pool
             .find_str("main")
             .ok_or_else(|| "No main function defined".to_string())?;
-        func_ids
+        let main = func_ids
             .get(&main_id)
             .copied()
-            .ok_or_else(|| "No main function defined".to_string())
+            .ok_or_else(|| "No main function defined".to_string())?;
+        Ok((main, ir_output))
     }
 
+    /// Compile every function and return the rendered CLIF text.
+    /// Unlike `compile` this does not resolve `main` — the dump path
+    /// serves `ryo ir --emit=clif`, which also runs on main-less
+    /// files.
     pub fn compile_and_dump_ir(
         &mut self,
         tirs: &[Tir],
         pool: &InternPool,
         sidecar: &ryo_core::ownership::OwnershipSidecar,
     ) -> Result<String, String> {
+        Ok(self.compile_all(tirs, pool, sidecar, true)?.1)
+    }
+
+    /// Shared driver for `compile` / `compile_and_dump_ir`: declare
+    /// all functions, then lower each body. `dump_ir` gates the
+    /// per-function CLIF pretty-print so only the dump paths pay for
+    /// it.
+    fn compile_all(
+        &mut self,
+        tirs: &[Tir],
+        pool: &InternPool,
+        sidecar: &ryo_core::ownership::OwnershipSidecar,
+        dump_ir: bool,
+    ) -> Result<(HashMap<StringId, FuncId>, String), String> {
         debug_assert!(
             bytes::no_unreachable_in(tirs),
-            "codegen::compile_and_dump_ir requires sema to have produced TIR with no Unreachable instructions"
+            "codegen requires sema to have produced TIR with no Unreachable instructions"
         );
         let func_ids = self.prepare_compilation(tirs, pool)?;
 
         let mut ir_output = String::new();
         for (i, tir) in tirs.iter().enumerate() {
-            ir_output.push_str(&self.compile_function(tir, &func_ids, pool, sidecar, i)?);
-            ir_output.push('\n');
+            let text = self.compile_function(tir, &func_ids, pool, sidecar, i, dump_ir)?;
+            if dump_ir {
+                ir_output.push_str(&text);
+                ir_output.push('\n');
+            }
         }
 
-        Ok(ir_output)
+        Ok((func_ids, ir_output))
     }
 
     fn declare_all_functions(
@@ -868,6 +888,7 @@ impl<M: Module> Codegen<M> {
         pool: &InternPool,
         sidecar: &ryo_core::ownership::OwnershipSidecar,
         sidecar_index: usize,
+        dump_ir: bool,
     ) -> Result<String, String> {
         let func_id = *func_ids
             .get(&tir.name)
@@ -1239,7 +1260,14 @@ impl<M: Module> Codegen<M> {
             builder.finalize(self.module.isa().frontend_config());
         }
 
-        let ir_text = format!("{}", self.ctx.func);
+        // The CLIF pretty-print is only worth its cost when the
+        // caller asked for a dump (`--emit=clif`); the plain compile
+        // path would discard it.
+        let ir_text = if dump_ir {
+            format!("{}", self.ctx.func)
+        } else {
+            String::new()
+        };
 
         self.module
             .define_function(func_id, &mut self.ctx)

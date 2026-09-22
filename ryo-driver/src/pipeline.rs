@@ -380,7 +380,18 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     let name = source_name(file);
     let mut pool = InternPool::new();
 
-    let want = EmitSet::from_args(emit);
+    let want = if emit.is_empty() {
+        // Legacy default: AST + Cranelift IR. Anyone who wants
+        // UIR / TIR opts in explicitly via `--emit=...`. We can
+        // flip to "all four" once the docs advertise it.
+        EmitSet {
+            ast: true,
+            clif: true,
+            ..Default::default()
+        }
+    } else {
+        EmitSet::from_args(emit)
+    };
     let (program, parse_diags) = parse_source(&input, &mut pool, &name)?;
 
     if want.ast {
@@ -446,7 +457,9 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
 
 /// Resolve `--emit` flag values into a normalized set. Membership
 /// is what governs printing; the source order on the command line
-/// is intentionally discarded.
+/// is intentionally discarded. An empty list selects nothing —
+/// `ir_command` layers its legacy default (AST + CLIF) on top of
+/// an empty list, while `run`/`build` default to silence.
 #[derive(Debug, Clone, Copy, Default)]
 struct EmitSet {
     ast: bool,
@@ -457,16 +470,6 @@ struct EmitSet {
 
 impl EmitSet {
     fn from_args(emit: &[EmitKind]) -> Self {
-        if emit.is_empty() {
-            // Legacy default: AST + Cranelift IR. Anyone who wants
-            // UIR / TIR opts in explicitly via `--emit=...`. We can
-            // flip to "all four" once the docs advertise it.
-            return EmitSet {
-                ast: true,
-                clif: true,
-                ..Default::default()
-            };
-        }
         let mut s = EmitSet::default();
         for k in emit {
             match k {
@@ -520,10 +523,12 @@ fn display_tir(tirs: &[Tir], pool: &InternPool) {
     print!("{}", tir::dump(tirs, pool));
 }
 
-/// Run the front-end (astgen + sema) and return the typed TIR
-/// per-function. Used by `run` and `build` (which require a clean
-/// front-end before codegen). `ryo ir` does its own staging so it
-/// can print partial UIR / TIR after a failure.
+/// Run the front-end (astgen + sema) and return the UIR plus the
+/// typed TIR per-function with the ownership sidecar. Used by `run`
+/// and `build` (which require a clean front-end before codegen); the
+/// UIR comes back so `run --emit=uir` / `build --emit=uir` can dump
+/// it. `ryo ir` does its own staging so it can print partial UIR /
+/// TIR after a failure.
 fn lower_and_analyze(
     program: &ast::Ast,
     pool: &mut InternPool,
@@ -531,7 +536,7 @@ fn lower_and_analyze(
     source_name: &str,
     file_path: &Path,
     parse_diags: Vec<Diag>,
-) -> Result<(Vec<Tir>, ryo_core::ownership::OwnershipSidecar), CompilerError> {
+) -> Result<(Uir, Vec<Tir>, ryo_core::ownership::OwnershipSidecar), CompilerError> {
     let mut sink = DiagSink::new();
     // Lex/parse diagnostics come first so the final render preserves
     // pipeline order.
@@ -550,7 +555,7 @@ fn lower_and_analyze(
     // without a separate render block that could drift from the
     // error path.
     finalize_diags(sink.into_diags(), input, source_name)?;
-    Ok((tirs, sidecar))
+    Ok((uir, tirs, sidecar))
 }
 
 fn generate_and_display_ir(
@@ -570,53 +575,92 @@ fn generate_and_display_ir(
     Ok(())
 }
 
-pub fn run_file(file: &Path) -> Result<(), CompilerError> {
+/// JIT-compile and run `file`. The default output is exactly what
+/// the compiled program writes to stdout/stderr — no compiler
+/// banners — and the return value is the program's own exit code.
+/// `--emit` additionally prints IR sections in pipeline order (AST
+/// after parse; UIR/TIR after lowering; CLIF after codegen, before
+/// execution), rendered identically to `ryo ir`.
+pub fn run_file(file: &Path, emit: &[EmitKind]) -> Result<i32, CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
+    let want = EmitSet::from_args(emit);
     let (program, parse_diags) = parse_source(&input, &mut pool, &name)?;
 
-    println!("[Input Source]");
-    println!("{}", input);
-    println!();
-    display_ast(&program, &pool);
-    println!();
+    if want.ast {
+        display_ast(&program, &pool);
+        println!();
+    }
 
-    let (tirs, sidecar) = lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
+    let (uir, tirs, sidecar) =
+        lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
 
-    println!("[Codegen]");
+    if want.uir {
+        display_uir(&uir, &pool);
+        println!();
+    }
+    if want.tir {
+        display_tir(&tirs, &pool);
+        println!();
+    }
+
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
-    let main_id = codegen
-        .compile(&tirs, &pool, &sidecar)
+    let (main_id, clif) = codegen
+        .compile(&tirs, &pool, &sidecar, want.clif)
         .map_err(CompilerError::CodegenError)?;
-    let result = codegen
+    if want.clif {
+        println!("[Cranelift IR]");
+        print!("{clif}");
+    }
+
+    codegen
         .execute(main_id)
-        .map_err(CompilerError::ExecutionError)?;
-
-    display_result(result);
-
-    Ok(())
+        .map_err(CompilerError::ExecutionError)
 }
 
-pub fn build_file(file: &Path) -> Result<(), CompilerError> {
+/// AOT-compile `file` to a standalone binary next to the source.
+/// Silent on success unless `--emit` requests IR sections (same
+/// rendering and pipeline order as `ryo ir`; CLIF prints after
+/// codegen, before linking).
+pub fn build_file(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
+    let want = EmitSet::from_args(emit);
     let (program, parse_diags) = parse_source(&input, &mut pool, &name)?;
-    let (tirs, sidecar) = lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
+
+    if want.ast {
+        display_ast(&program, &pool);
+        println!();
+    }
+
+    let (uir, tirs, sidecar) =
+        lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
+
+    if want.uir {
+        display_uir(&uir, &pool);
+        println!();
+    }
+    if want.tir {
+        display_tir(&tirs, &pool);
+        println!();
+    }
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 
-    println!("[Codegen]");
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
-    codegen
-        .compile(&tirs, &pool, &sidecar)
+    let (_main_id, clif) = codegen
+        .compile(&tirs, &pool, &sidecar, want.clif)
         .map_err(CompilerError::CodegenError)?;
+    if want.clif {
+        println!("[Cranelift IR]");
+        print!("{clif}");
+    }
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
     fs::write(&obj_filename, obj_bytes).map_err(CompilerError::from)?;
-    println!("Generated object file: {}", obj_filename.display());
 
     // Extract embedded runtime archive and link
     let runtime_path = runtime_lib::extract_runtime_to_temp()
@@ -636,12 +680,7 @@ pub fn build_file(file: &Path) -> Result<(), CompilerError> {
     }
     link_result?;
 
-    println!("Built: {}", exe_filename.display());
     Ok(())
-}
-
-fn display_result(result: i32) {
-    println!("[Result] => {}", result);
 }
 
 #[cfg(test)]

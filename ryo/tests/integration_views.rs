@@ -358,14 +358,12 @@ fn test_str_materialize_escape_and_independence() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // The program's output sits between the "[Codegen]" dump and
-    // "[Result]". `print` is a raw write (no trailing newline), so the
-    // two prints concatenate: "he" (the copy, unaffected by the `!`
-    // push) then "hel" (the escape-fixed return).
-    let after_codegen = stdout.split("[Codegen]").nth(1).unwrap();
-    let program_out = after_codegen.split("[Result]").next().unwrap().trim();
+    // In default mode stdout IS the program's output. `print` is a
+    // raw write (no trailing newline), so the two prints concatenate:
+    // "he" (the copy, unaffected by the `!` push) then "hel" (the
+    // escape-fixed return).
     assert_eq!(
-        program_out, "hehel",
+        stdout, "hehel",
         "materialized copies must survive mutation of the original"
     );
 }

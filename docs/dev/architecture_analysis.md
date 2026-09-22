@@ -129,7 +129,7 @@ Dependency direction remains acyclic: `ryo` (CLI) → `ryo-driver` → `ryo-fron
 
 - `EmitKind { Ast, Uir, Tir, Clif }` staging intact (`:1-11,357-424`); `parse_with_state` now produces the #117 arena `ast::Ast` (`:143-146`).
 - `DiagCode` grew 41 → **42** (39 E + 3 W): #115 added `DivisionByZero` (E0037, `diag.rs:119`). The E-code stability test pins all 42 (`:647-751`).
-- **Open:** I-099 — `run_file` still echoes `[Input Source]`/`[AST]`/`[Codegen]` (`:558-566`); the integration binaries key on **54 `[Result]`** + **29 `[Codegen]`** assertions. I-013 (`lex`/`parse`/`ir` still separate subcommands).
+- **Fixed:** I-099 — `run`/`build` now print only what the program writes unless `--emit=ast,uir,tir,clif` requests IR sections (rendered identically to `ryo ir`, in pipeline order); the integration suite asserts exact stdout / exit codes instead of parsing `[Result]`/`[Codegen]` markers. I-013 (`lex`/`parse`/`ir` still separate subcommands) remains open.
 - **Fixed:** I-130 — #116 makes recovery swallow a broken block header's indented body instead of mis-nesting it.
 
 ### 2.12 CLI (`main.rs`, 133) & tests (`ryo/tests/`)

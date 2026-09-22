@@ -780,9 +780,9 @@ pub fn assert_ryo_runs(test_name: &str, code: &str) {
 }
 
 /// Assert the program compiles, runs under JIT, and prints exactly
-/// `expected` — the runtime output between the `[Codegen]` marker and
-/// `[Result]` (`print` appends no newline, so multiple prints
-/// concatenate).
+/// `expected` on stdout. In default mode stdout IS the program's own
+/// output — the compiler prints nothing else (`print` appends no
+/// newline, so multiple prints concatenate).
 pub fn assert_ryo_output(test_name: &str, code: &str, expected: &str) {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), test_name, code);
@@ -794,10 +794,7 @@ pub fn assert_ryo_output(test_name: &str, code: &str, expected: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains(&format!("[Codegen]\n{expected}[Result]")),
-        "expected output {expected:?}, got stdout: {stdout}"
-    );
+    assert_eq!(stdout, expected, "stdout mismatch");
 }
 
 /// A `never` value anywhere but a bare statement is a compile error

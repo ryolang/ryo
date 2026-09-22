@@ -47,7 +47,7 @@ fn assert_true_compiles_and_succeeds() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
+    assert_eq!(stdout, "ok\n");
 }
 
 #[test]

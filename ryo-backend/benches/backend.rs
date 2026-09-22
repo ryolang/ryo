@@ -103,8 +103,8 @@ fn bench_codegen(bencher: divan::Bencher, src: &str) {
         .with_inputs(|| analyze(src))
         .bench_values(|(tirs, pool, sidecar)| {
             let mut codegen = Codegen::new_jit().expect("JIT codegen should initialize");
-            let main_id = codegen
-                .compile(divan::black_box(&tirs), &pool, &sidecar)
+            let (main_id, _) = codegen
+                .compile(divan::black_box(&tirs), &pool, &sidecar, false)
                 .expect("codegen should succeed");
             divan::black_box(main_id);
         });

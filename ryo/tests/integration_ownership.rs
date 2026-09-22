@@ -7,20 +7,10 @@ use tempfile::TempDir;
 fn inout_scalar_writeback() {
     // M8.3: an `inout int` parameter is mutated in the callee and the
     // change is visible to the caller via the write-back ABI.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "fn inc(inout x: int):\n\tx += 1\n\nfn main():\n\tmut c = 0\n\tinc(&c)\n\tinc(&c)\n\tprint(int_to_str(c))\n";
-    let test_file = create_test_file(temp_dir.path(), "inout_scalar.ryo", code);
-    let output = run_ryo_command(&["run", "inout_scalar.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\n2[Result]"),
-        "inout write-back should print 2, got: {}",
-        stdout
+    assert_ryo_output(
+        "inout_scalar.ryo",
+        "fn inc(inout x: int):\n\tx += 1\n\nfn main():\n\tmut c = 0\n\tinc(&c)\n\tinc(&c)\n\tprint(int_to_str(c))\n",
+        "2",
     );
 }
 
@@ -28,20 +18,10 @@ fn inout_scalar_writeback() {
 fn inout_float_writeback() {
     // M8.3: `inout float` — exercises a non-int scalar width through
     // the write-back ABI (f64).
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "fn scale(inout x: float):\n\tx += 1.5\n\nfn main():\n\tmut f = 1.0\n\tscale(&f)\n\tprint(float_to_str(f))\n";
-    let test_file = create_test_file(temp_dir.path(), "inout_float.ryo", code);
-    let output = run_ryo_command(&["run", "inout_float.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\n2.5[Result]"),
-        "inout float write-back should print 2.5, got: {}",
-        stdout
+    assert_ryo_output(
+        "inout_float.ryo",
+        "fn scale(inout x: float):\n\tx += 1.5\n\nfn main():\n\tmut f = 1.0\n\tscale(&f)\n\tprint(float_to_str(f))\n",
+        "2.5",
     );
 }
 
@@ -50,20 +30,10 @@ fn inout_early_return_still_writes_back() {
     // M8.3: the write-back chokepoint must fire on an EARLY `return`
     // (ReturnVoid) too, not just function fallthrough. Here `bump` exits
     // via `return` inside the `if` arm, so `a` must be 0+1+10 == 11.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "fn bump(inout x: int, cond: bool):\n\tx += 1\n\tif cond:\n\t\tx += 10\n\t\treturn\n\tx += 100\n\nfn main():\n\tmut a = 0\n\tbump(&a, true)\n\tprint(int_to_str(a))\n";
-    let test_file = create_test_file(temp_dir.path(), "inout_early_ret.ryo", code);
-    let output = run_ryo_command(&["run", "inout_early_ret.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\n11[Result]"),
-        "inout early-return write-back should print 11, got: {}",
-        stdout
+    assert_ryo_output(
+        "inout_early_ret.ryo",
+        "fn bump(inout x: int, cond: bool):\n\tx += 1\n\tif cond:\n\t\tx += 10\n\t\treturn\n\tx += 100\n\nfn main():\n\tmut a = 0\n\tbump(&a, true)\n\tprint(int_to_str(a))\n",
+        "11",
     );
 }
 
@@ -71,20 +41,10 @@ fn inout_early_return_still_writes_back() {
 fn str_push_inout_str_builtin() {
     // M8.3: str_push(s: inout str, suffix: str) appends in place via the
     // __ryo_str_push runtime + the inout str write-back ABI.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, \" there\")\n\tprint(s)\n";
-    let test_file = create_test_file(temp_dir.path(), "str_push.ryo", code);
-    let output = run_ryo_command(&["run", "str_push.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\nhi there[Result]"),
-        "str_push should append ' there' -> 'hi there', got: {}",
-        stdout
+    assert_ryo_output(
+        "str_push.ryo",
+        "fn main():\n\tmut s = \"hi\"\n\tstr_push(&s, \" there\")\n\tprint(s)\n",
+        "hi there",
     );
 }
 
@@ -112,20 +72,10 @@ fn inout_aliasing_same_owner_rejected() {
 fn inout_aliasing_distinct_owners_ok() {
     // M8.3b Rule 7: swap(&a, &b) with distinct owners compiles and the
     // write-back ABI actually swaps the values.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "fn swap(inout a: int, inout b: int):\n\tmut t = a\n\ta = b\n\tb = t\n\nfn main():\n\tmut x = 5\n\tmut y = 7\n\tswap(&x, &y)\n\tprint(int_to_str(x))\n";
-    let test_file = create_test_file(temp_dir.path(), "inout_alias_ok.ryo", code);
-    let output = run_ryo_command(&["run", "inout_alias_ok.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\n7[Result]"),
-        "swap(&x, &y) should leave x == 7, got: {}",
-        stdout
+    assert_ryo_output(
+        "inout_alias_ok.ryo",
+        "fn swap(inout a: int, inout b: int):\n\tmut t = a\n\ta = b\n\tb = t\n\nfn main():\n\tmut x = 5\n\tmut y = 7\n\tswap(&x, &y)\n\tprint(int_to_str(x))\n",
+        "7",
     );
 }
 
@@ -147,8 +97,8 @@ fn inout_str_reassign_in_callee_writeback() {
         stderr
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\nnew[Result]"),
+    assert_eq!(
+        stdout, "new",
         "inout str reassignment should write back 'new', got: {}",
         stdout
     );
@@ -159,20 +109,10 @@ fn inout_str_user_fn_and_reborrow_writeback() {
     // A user function taking `inout str`, mutating it via str_push
     // (a reborrow of the inout param). Exercises the general str inout ABI
     // plus the nested inout call inside the callee.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "fn app(inout s: str):\n\tstr_push(&s, \"!\")\n\nfn main():\n\tmut s = \"hi\"\n\tapp(&s)\n\tprint(s)\n";
-    let test_file = create_test_file(temp_dir.path(), "inout_str_app.ryo", code);
-    let output = run_ryo_command(&["run", "inout_str_app.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\nhi![Result]"),
-        "user-fn inout str write-back should print 'hi!', got: {}",
-        stdout
+    assert_ryo_output(
+        "inout_str_app.ryo",
+        "fn app(inout s: str):\n\tstr_push(&s, \"!\")\n\nfn main():\n\tmut s = \"hi\"\n\tapp(&s)\n\tprint(s)\n",
+        "hi!",
     );
 }
 
@@ -196,11 +136,10 @@ fn str_push_growth_beyond_capacity() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let expected = format!("hi{}", suffix);
-    assert!(
-        stdout.contains(&expected),
-        "str_push growth should print the full concatenated string, got: {}",
-        stdout
+    let expected = format!("hi{suffix}");
+    assert_eq!(
+        stdout, expected,
+        "str_push growth should print the full concatenated string",
     );
 }
 
@@ -208,20 +147,10 @@ fn str_push_growth_beyond_capacity() {
 fn inout_bool_writeback() {
     // Review coverage gap: `inout bool` — exercises the i8 scalar width
     // through the write-back ABI.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "fn set(inout b: bool):\n\tb = true\n\nfn main():\n\tmut b = false\n\tset(&b)\n\tprint(bool_to_str(b))\n";
-    let test_file = create_test_file(temp_dir.path(), "inout_bool.ryo", code);
-    let output = run_ryo_command(&["run", "inout_bool.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\ntrue[Result]"),
-        "inout bool write-back should print true, got: {}",
-        stdout
+    assert_ryo_output(
+        "inout_bool.ryo",
+        "fn set(inout b: bool):\n\tb = true\n\nfn main():\n\tmut b = false\n\tset(&b)\n\tprint(bool_to_str(b))\n",
+        "true",
     );
 }
 
@@ -229,20 +158,10 @@ fn inout_bool_writeback() {
 fn inout_int_reborrow_chain() {
     // Review coverage gap: an inout param is itself a valid `&` target —
     // `twice` reborrows its own inout param into `inc`, twice.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "fn inc(inout x: int):\n\tx += 1\n\nfn twice(inout x: int):\n\tinc(&x)\n\tinc(&x)\n\nfn main():\n\tmut c = 0\n\ttwice(&c)\n\tprint(int_to_str(c))\n";
-    let test_file = create_test_file(temp_dir.path(), "inout_reborrow.ryo", code);
-    let output = run_ryo_command(&["run", "inout_reborrow.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\n2[Result]"),
-        "reborrowed inout chain should print 2, got: {}",
-        stdout
+    assert_ryo_output(
+        "inout_reborrow.ryo",
+        "fn inc(inout x: int):\n\tx += 1\n\nfn twice(inout x: int):\n\tinc(&x)\n\tinc(&x)\n\nfn main():\n\tmut c = 0\n\ttwice(&c)\n\tprint(int_to_str(c))\n",
+        "2",
     );
 }
 
@@ -251,20 +170,10 @@ fn inout_fallthrough_return_writes_back() {
     // Review coverage gap: the multi-return-site test only exercised the
     // EARLY return. The fallthrough exit must write back too:
     // bump(&b, false) takes the fallthrough path, so b == 0+1+100 == 101.
-    let temp_dir = TempDir::new().expect("temp");
-    let code = "fn bump(inout x: int, cond: bool):\n\tx += 1\n\tif cond:\n\t\tx += 10\n\t\treturn\n\tx += 100\n\nfn main():\n\tmut b = 0\n\tbump(&b, false)\n\tprint(int_to_str(b))\n";
-    let test_file = create_test_file(temp_dir.path(), "inout_fallthrough.ryo", code);
-    let output = run_ryo_command(&["run", "inout_fallthrough.ryo"], &test_file).expect("run");
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\n101[Result]"),
-        "fallthrough-return write-back should print 101, got: {}",
-        stdout
+    assert_ryo_output(
+        "inout_fallthrough.ryo",
+        "fn bump(inout x: int, cond: bool):\n\tx += 1\n\tif cond:\n\t\tx += 10\n\t\treturn\n\tx += 100\n\nfn main():\n\tmut b = 0\n\tbump(&b, false)\n\tprint(int_to_str(b))\n",
+        "101",
     );
 }
 
@@ -286,8 +195,8 @@ fn str_reassign_inside_if_no_false_dead_store() {
         stderr
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Codegen]\nb[Result]"),
+    assert_eq!(
+        stdout, "b",
         "reassigned value should print 'b', got: {}",
         stdout
     );
@@ -301,29 +210,12 @@ fn last_use_across_multiple_top_level_statements() {
     // statement loop in reverse while the inner operand walker ran
     // forward with overwriting `insert`, anchoring the Free after the
     // first read instead — turning the second read into use-after-free.
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    // Compute the printed value (7 * 6 == 42) so the literal "42" never
-    // appears in the source dump that `ryo run` emits under the
-    // `[Input Source]` heading. That way `stdout.matches("42").count()`
-    // reflects only the two `print(s)` calls, not the echoed source.
-    let code = "fn main():\n\ts: str = int_to_str(7 * 6)\n\tprint(s)\n\tprint(s)\n";
-    let test_file = create_test_file(temp_dir.path(), "multi_read.ryo", code);
-
-    let output =
-        run_ryo_command(&["run", "multi_read.ryo"], &test_file).expect("Failed to run ryo command");
-
-    assert!(
-        output.status.success(),
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let occurrences = stdout.matches("42").count();
-    assert_eq!(
-        occurrences, 2,
-        "expected '42' to appear exactly twice (once per print) — got {} occurrences. stdout: {}",
-        occurrences, stdout
+    // The printed value (7 * 6 == 42) must appear exactly once per
+    // `print(s)` call.
+    assert_ryo_output(
+        "multi_read.ryo",
+        "fn main():\n\ts: str = int_to_str(7 * 6)\n\tprint(s)\n\tprint(s)\n",
+        "4242",
     );
 }
 
@@ -909,20 +801,15 @@ fn mut_str_reassign_runs_clean() {
         "stdout should contain 'world': {}",
         stdout
     );
-    // The `ryo run` CLI dumps the source program to stdout before
-    // executing, so a naive `!stdout.contains("hello")` check would
-    // false-positive on the echoed source. Instead, look at the
-    // post-`[Codegen]` slice (the runtime's actual output) and
-    // confirm the program printed exactly `"world"` — not the old
-    // `"hello"` value, and not garbled bytes from a use-after-free.
-    let runtime_output = stdout
-        .split("[Codegen]")
-        .nth(1)
-        .expect("CLI trace should include [Codegen] section");
+    // stdout is exactly the program's own output, so a naive
+    // `!stdout.contains("hello")` check is safe — there is no echoed
+    // source to false-positive on. The program printed exactly
+    // `"world"` — not the old `"hello"` value, and not garbled bytes
+    // from a use-after-free.
     assert!(
-        !runtime_output.contains("hello"),
+        !stdout.contains("hello"),
         "runtime stdout should not leak old value 'hello': {}",
-        runtime_output
+        stdout
     );
 }
 
@@ -964,11 +851,8 @@ fn main():
         "STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let runtime_output = stdout
-        .split("[Codegen]")
-        .nth(1)
-        .expect("CLI trace should include [Codegen] section");
+    // stdout is exactly the program's own output.
+    let runtime_output = String::from_utf8_lossy(&output.stdout);
     assert!(
         runtime_output.contains("42"),
         "runtime stdout should contain '42': {}",
@@ -1014,11 +898,8 @@ fn main():
         "STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let runtime_output = stdout
-        .split("[Codegen]")
-        .nth(1)
-        .expect("CLI trace should include [Codegen] section");
+    // stdout is exactly the program's own output.
+    let runtime_output = String::from_utf8_lossy(&output.stdout);
     assert!(
         runtime_output.contains("7"),
         "runtime stdout should contain '7': {}",
@@ -1051,11 +932,8 @@ fn main():
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let runtime_output = stdout
-        .split("[Codegen]")
-        .nth(1)
-        .expect("CLI trace should include [Codegen] section");
+    // stdout is exactly the program's own output.
+    let runtime_output = String::from_utf8_lossy(&output.stdout);
     assert!(
         runtime_output.contains("Alice"),
         "expected 'Alice' in runtime stdout, got: {:?}",

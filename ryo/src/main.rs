@@ -44,11 +44,22 @@ enum Commands {
     Run {
         /// Input file to compile and run
         file: PathBuf,
+        /// Comma-separated list of IRs to dump: ast, uir, tir, clif.
+        /// Sections print in pipeline order before the program's own
+        /// output; without the flag stdout carries only what the
+        /// program writes.
+        #[arg(long, value_delimiter = ',', value_enum)]
+        emit: Vec<EmitKind>,
     },
     /// Compile a Ryo program to a standalone binary (AOT)
     Build {
         /// Input file to compile
         file: PathBuf,
+        /// Comma-separated list of IRs to dump: ast, uir, tir, clif.
+        /// Sections print in pipeline order; without the flag the
+        /// command is silent on success.
+        #[arg(long, value_delimiter = ',', value_enum)]
+        emit: Vec<EmitKind>,
     },
     /// Manage the Ryo toolchain (Zig linker)
     Toolchain {
@@ -86,7 +97,7 @@ fn main() -> std::process::ExitCode {
 fn cli_main() -> std::process::ExitCode {
     let cli = Cli::parse();
     match run_command(cli) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
             // Diagnostics were already rendered to stderr by the
             // pipeline; printing the error again would duplicate the
@@ -101,13 +112,23 @@ fn cli_main() -> std::process::ExitCode {
     }
 }
 
-fn run_command(cli: Cli) -> Result<(), CompilerError> {
+fn run_command(cli: Cli) -> Result<std::process::ExitCode, CompilerError> {
     match cli.command {
         Commands::Lex { file } => pipeline::lex_command(&file)?,
         Commands::Parse { file } => pipeline::parse_command(&file)?,
         Commands::Ir { file, emit } => pipeline::ir_command(&file, &emit)?,
-        Commands::Run { file } => pipeline::run_file(&file)?,
-        Commands::Build { file } => pipeline::build_file(&file)?,
+        Commands::Run { file, emit } => {
+            let program_exit = pipeline::run_file(&file, &emit)?;
+            // Propagate the JIT program's own exit code. Ryo's
+            // `main` is void today (the C-ABI shim returns 0), so
+            // this is always SUCCESS in practice; clamping into the
+            // u8 exit-code space keeps a future value-returning main
+            // sane instead of silently swallowing the code.
+            return Ok(std::process::ExitCode::from(
+                program_exit.clamp(0, 255) as u8
+            ));
+        }
+        Commands::Build { file, emit } => pipeline::build_file(&file, &emit)?,
         Commands::Toolchain { action } => match action {
             ToolchainAction::Install => {
                 toolchain::ensure_zig()?;
@@ -129,5 +150,5 @@ fn run_command(cli: Cli) -> Result<(), CompilerError> {
         },
     }
 
-    Ok(())
+    Ok(std::process::ExitCode::SUCCESS)
 }

@@ -201,12 +201,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** (a) `inst_map` is `vec![None; uir.instructions.len()]` — the program-wide UIR size — allocated per function; (b) `check_call` clones `callee_modes`, `sig.params`, and builds `modes`/`arg_tirs` per call (3-4 allocations); (c) method dispatch does `pool.str(..).to_string()` per method call site, allocated even before the receiver-type check.
 **Resolution:** (a) `HashMap<InstRef, TirRef>` or per-function UIR slice (the expr memo is the only consumer that needs random access); (b) borrow from the signatures table instead of cloning; (c) match on pre-interned `StringId`s for `len`/`is_empty` instead of a `String`.
 
-### I-094 — `compile_function` renders CLIF text unconditionally
-
-**Files:** `ryo-backend/src/codegen/mod.rs` (:800, discarded at :445)
-**Summary:** `compile_function` always `format!`s the Cranelift function even on the plain `compile` path where the caller discards it — one full CLIF pretty-print per function per compile, thrown away.
-**Resolution:** Only render when an IR dump was requested (thread a flag, or render separately in `compile_and_dump_ir`).
-
 ### I-095 — `emit_scoped_body` clones the locals maps per block
 
 **Files:** `ryo-backend/src/codegen/mod.rs` (:845-847)
@@ -224,12 +218,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-backend/src/runtime_lib.rs` (:5), `runtime/` (build profile)
 **Summary:** `include_bytes!` bakes the full staticlib into the compiler binary. The archive has been `no_std` since the runtime migration (std, and the `_Unwind_*` link wart with it, is gone), but it still bundles all of core's precompiled objects, which is what keeps it large. Measured 2026-08-24 (aarch64-apple-darwin): 6.06 MB debug / 5.81 MB release.
 **Resolution:** Build the embedded archive with a slim profile (`opt-level="z"`, strip, LTO — the build scripts control that invocation). The `no_std` migration already landed and did not shrink the archive on its own.
-
-### I-099 — `run_file` debug output is load-bearing for the integration suite
-
-**Files:** `ryo-driver/src/pipeline.rs` (`run_file` :558-566), `ryo/tests/` (six integration binaries)
-**Summary:** `ryo run` echoes `[Input Source]`, the full AST, and `[Codegen]` on every invocation; 54 `[Result]` and 29 `[Codegen]` assertions across the six integration binaries key on the section markers as the pass/fail signal, and tests post-filter stdout (split on `"[Codegen]"`). Any cleanup of the chatter breaks the suite.
-**Resolution:** Gate the debug sections behind a `--verbose` flag, then migrate tests to exit-code assertions. The harness migration to `env!("CARGO_BIN_EXE_ryo")` (no `cargo run` subprocess per test) has already landed — `run_file` itself is the remaining work.
 
 ### I-100 — CodSpeed AOT lanes are unverified and masked by `allow-empty`; no backend benchmarks
 

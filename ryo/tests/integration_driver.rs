@@ -141,27 +141,83 @@ fn test_run_simple_integer_exit_code() {
     let output = run_ryo_command(&["run", "exit_simple.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    // Verify compilation succeeded
+    // Verify compilation succeeded and the program (which prints
+    // nothing) exits 0. Default `ryo run` stdout carries exactly what
+    // the program writes — no compiler banners.
     assert!(
         output.status.success(),
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-
     let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Verify output shows successful compilation
-    // All programs exit with 0 (success) in Milestone 3
     assert!(
-        stdout.contains("[Result] => 0"),
-        "Output should show exit code 0, got: {}",
+        stdout.is_empty(),
+        "default `ryo run` must print nothing but the program's output, got: {}",
         stdout
     );
+}
 
-    // Verify intermediate outputs are present
-    assert!(stdout.contains("[Input Source]"), "Missing input source");
-    assert!(stdout.contains("[AST]"), "Missing AST output");
-    assert!(stdout.contains("[Codegen]"), "Missing codegen output");
+#[test]
+fn run_emit_prints_requested_sections_in_pipeline_order() {
+    // `--emit` sections always print in pipeline order (AST → … →
+    // CLIF) regardless of flag order, with the program's own output
+    // last. Same rendering as `ryo ir`.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "run_emit.ryo",
+        "fn main():\n\tprint(\"ok\\n\")\n",
+    );
+
+    let output = run_ryo_command(&["run", "--emit=clif,ast", "run_emit.ryo"], &test_file)
+        .expect("Failed to run ryo run --emit");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let ast_idx = stdout.find("[AST]").expect("AST banner") as i64;
+    let clif_idx = stdout.find("[Cranelift IR]").expect("CLIF banner") as i64;
+    assert!(
+        ast_idx < clif_idx,
+        "sections out of pipeline order (ast={ast_idx}, clif={clif_idx}):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("[UIR]") && !stdout.contains("[TIR]"),
+        "unrequested sections leaked:\n{stdout}"
+    );
+    assert!(
+        stdout.ends_with("ok\n"),
+        "program output must follow the IR dump:\n{stdout}"
+    );
+}
+
+#[test]
+fn run_emit_tir_prints_tir_before_program_output() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "run_emit_tir.ryo",
+        "fn main():\n\tprint(\"ok\\n\")\n",
+    );
+
+    let output = run_ryo_command(&["run", "--emit=tir", "run_emit_tir.ryo"], &test_file)
+        .expect("Failed to run ryo run --emit=tir");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("[TIR]"), "missing [TIR] banner: {}", stdout);
+    assert!(
+        stdout.ends_with("ok\n"),
+        "program output must follow the IR dump: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -173,12 +229,6 @@ fn test_run_zero_exit_code() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Output should show exit code 0"
-    );
 }
 
 #[test]
@@ -190,14 +240,6 @@ fn test_run_arithmetic_expression_exit_code() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // 2 + 3 * 4 = 2 + 12 = 14 (correct precedence), but exit code is 0
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0, got: {}",
-        stdout
-    );
 }
 
 #[test]
@@ -210,13 +252,6 @@ fn test_run_multiple_statements_last_value() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // All programs exit with 0 (success)
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Multiple statements should exit with 0"
-    );
 }
 
 #[test]
@@ -228,9 +263,6 @@ fn test_run_division_by_constant() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
@@ -242,9 +274,6 @@ fn test_run_subtraction() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
@@ -256,10 +285,6 @@ fn test_run_parenthesized_expression() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // (10 + 5) * 2 = 15 * 2 = 30 (computed), but exit code is 0
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
@@ -271,12 +296,6 @@ fn test_run_with_type_annotation() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should correctly compile typed variable and exit with 0"
-    );
 }
 
 #[test]
@@ -288,12 +307,6 @@ fn test_run_mutable_variable() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should correctly compile mutable variable and exit with 0"
-    );
 }
 
 #[test]
@@ -305,10 +318,6 @@ fn test_run_negation_operator() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // All programs exit with 0 (success)
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 // ---------- ryo ir --emit=... ----------
