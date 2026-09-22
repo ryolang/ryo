@@ -2845,6 +2845,14 @@ Adding M:N threading has **specification impacts** that require changes to earli
 
 - `async` and `await` are **reserved** (unused) to prevent breaking changes if design evolves
 
+**5. Duration Literals**
+
+- **Goal:** Time literals (`1d`, `60s`, `2w`) for timeouts, sleeps, and deadlines
+- **Why:** The spec already assumes the syntax — `task.timeout(5s, fut)` (spec §9), `task.sleep(100ms)`, `task.timeout(1s)` — with no literal form to back it
+- **Design:** Builtin `duration` type (lowercase, per builtin convention), int64 nanoseconds, distinct from `int` (no implicit mixing). Suffixes: `ns us ms s m h d w` only — months/years excluded (calendar-dependent). Checked arithmetic per spec §18. Lexer uses longest-match alternation (`ms` before `m`); `m` for minutes is safe (no meters in Ryo)
+- **Approval:** New syntax — pending explicit human approval at v0.4 scoping (design change escalation)
+- **Deferred:** Byte-size literals (`kB`/`MB` SI vs `KiB`/`MiB` IEC) — worth it eventually, not in scope here
+
 **Runtime Architecture:**
 
 - **M:N Threading:** M green threads on N OS threads (N = CPU cores)
