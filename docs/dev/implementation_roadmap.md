@@ -3026,6 +3026,14 @@ fn main():
   printf(c"Length: %d\n", len)
 ```
 
+**Design reference:** [CO3](https://mversic.github.io/co3/) — a Rust FFI framework whose semantics validate and sharpen several choices Ryo already made or will face at this milestone. Not usable from Ryo (it's a Rust library); reference for design only:
+
+- **Ownership transfer is opt-in** — values are borrowed and cloned on import unless marked `move`. Independent confirmation of Ryo's Rule 2 (parameters borrow by default, `move` opts into transfer).
+- **Soundness beats zero-cost by default** — references that can't convert in place (trap-representable pointees, e.g. `&mut bool`) go through explicit `#[soft]` temporary-storage + writeback conversion. The pattern Ryo needs for `inout` params across FFI where the foreign side can write invalid bit patterns.
+- **Runtime-tagged dispatch for erased handles** — `#[tag(u8, N)]` opaque types + tag-dispatched calls, checked at compile time behind a safe interface. The standard C handle+tag pattern (sqlite-style contexts) with the dispatch table verified rather than hand-rolled.
+- **Generics across FFI via monomorphization with symbol-name interpolation** (`image_hash_{Algorithm}`) — the answer if Ryo ever exports generic functions to C, where each instantiation needs a distinct symbol.
+- **`rust-spec` type classification** (Layout / Size / Alignment / Trap / Niche axes) — a ready-made checklist for deciding which Ryo types are FFI-lowerable and what validation each crossing needs.
+
 **Timeline:** v1.6 (12-18 months after v0.1.0)
 
 ### Traits & Generics System
