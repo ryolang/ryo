@@ -286,6 +286,9 @@ Add a match arm in `compile_function()` where `TirInst` variants are dispatched.
 cargo test
 ```
 
+### 9. Update the Tree-sitter Grammar
+Language-grammar changes (new keywords, literals, operators, statement forms) must also land in the editor grammar: the `tree-sitter-ryo` repo (standalone sibling checkout — regenerate the parser, extend `queries/highlights.scm`, add corpus tests). Without this, editor highlighting silently drifts from the language.
+
 ## Error Handling
 
 Middle-end stages emit structured `Diag` values (see `ryo-core/src/diag.rs`). `astgen::generate` and `sema::analyze` accumulate diagnostics through a `DiagSink` so analysis can continue past the first error; `parse_source` (in `ryo-driver/src/pipeline.rs`) builds `Diag` values directly from `chumsky::error::Rich` and renders them inline (no sink — the parser stops at the first round of errors anyway). All three converge on the same Ariadne-backed `render_diags` and surface as a single `CompilerError::Diagnostics(Vec<Diag>)` from the passes that use the sink (and from `parse_source` when parsing fails). Other stages still use string-typed `CompilerError` variants: `IoError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`.
