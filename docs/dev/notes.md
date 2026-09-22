@@ -1,5 +1,12 @@
 # TODO
 
+- compare ryo with bend https://github.com/bendlang/bend/blob/main/guide/GUIDE.md
+- gaming ffi, write a pong
+- missing operators shift, <<, >>, binary &, |, etc
+- missing time type, 1d, 60s, 2w, etc
+- sentinel type??
+- benchmarks <https://github.com/kostya/benchmarks>
+- ryo profiler as the python 3.15 one tachyon, with frame pointers by default
 - [cargo crap rules](https://minikin.me/blog/cargo-crap):
 
   ```sh
