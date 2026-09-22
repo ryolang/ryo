@@ -2687,6 +2687,7 @@ Available commands:
 - State management for incremental definitions
 - Error recovery (syntax errors don't crash REPL)
 - Integration with readline/rustyline for input editing
+- If the REPL outgrows JIT-per-line into a real interpreter, [wasmi 2.0](https://wasmi-labs.github.io/blog/posts/wasmi-v2.0/) is the design reference: accumulator registers over pure stack slots (operands/results live in hardware registers, no decode-load-store per op), op-code fusion to eliminate the copy instructions accumulators introduce, and fixed-width 64-bit stack cells.
 
 **Timeline:** v1.4 (3-6 months after v0.1.0)
 **Effort:** 2-3 weeks
