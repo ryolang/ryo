@@ -85,16 +85,19 @@ JIT and AOT land within noise of each other (~1.42–1.43×) because both share 
 
 * **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field. Ryo AOT currently beats Rust and Go here; only Swift's small-string optimization keeps it ahead.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Highlights:** After the SSO rework (2026-09-14) Ryo AOT is the **fastest arm** at 11.4 ms — ahead of Swift (12.1 ms), Rust (24.8 ms), and Go (26.0 ms) — at the lightest RSS of the suite (1.36 MB). With every name ≤ 23 bytes living inline in the record, the per-round heap alloc/free is gone; Ryo runs 11.6x faster than Python with ~11x less memory.
 
 ### 11. [Struct Records Reuse Benchmark](./struct_records_reuse/)
 
 * **Focus:** The keep-original record update — same record, but the caller uses `p` again after `birthday`, so the update cannot consume it. Rust and Ryo pay an explicit clone, Swift/Go/Python share cheaply; tracking measure for the record-update ergonomics gap (I-172) and what `shared[T]` or a small-string optimization would buy.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Highlights:** Post-SSO (2026-09-14) Ryo AOT is **second behind Swift** at 14.7 ms — ahead of Go (25.8 ms) and Rust (32.3 ms) — with the manual `p.name + ""` clone now an inline-to-inline concat that never touches the heap. The residual gap to Swift is the clone-ergonomics story (I-172: `Clone` trait or `shared[T]`), not string allocation; Ryo runs 10.2x faster than Python at the lightest RSS of the suite (1.36 MB).
 
 ### 12. [Struct Records Inout Benchmark](./struct_records_inout/)
 
 * **Focus:** Imperative update-in-place through a mutable borrow (`inout` / `&mut` / pointer / attribute store) — no new record, no clone, no sret. Verifies that choosing between inout and the consuming move+return form costs nothing, so the idiom choice can be driven by intent.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Highlights:** Post-SSO (2026-09-14) Ryo AOT is the **fastest arm** at 11.1 ms — ahead of Swift (12.3 ms), Rust (25.5 ms), and Go (25.9 ms) — and the design claim holds at the new level: inout matches the consuming update (11.1 ms vs 11.4 ms in `struct_records`), so the choice between the two idioms remains free. Ryo runs 10.1x faster than Python at the lightest RSS (1.36 MB).
 
 ---
 
