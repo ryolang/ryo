@@ -381,13 +381,14 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
 
     let want = if emit.is_empty() {
-        // Legacy default: AST + Cranelift IR. Anyone who wants
-        // UIR / TIR opts in explicitly via `--emit=...`. We can
-        // flip to "all four" once the docs advertise it.
+        // Default: all four sections, in pipeline order. (Until
+        // 2026-09 this was AST + CLIF only, a leftover from when
+        // those were the only two dumps.)
         EmitSet {
             ast: true,
+            uir: true,
+            tir: true,
             clif: true,
-            ..Default::default()
         }
     } else {
         EmitSet::from_args(emit)

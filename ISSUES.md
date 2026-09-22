@@ -34,12 +34,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Hand-rolled `enum CompilerError` with manual `Display` and `From<io::Error>` impls. `thiserror` would cut ~20 lines and make variants more uniform.
 **Resolution:** Add `thiserror`, derive `Error` and `Display`, drop the hand-written impls.
 
-### I-013 — `--emit` flag surface is fragmented across subcommands
-
-**Files:** `ryo/src/main.rs`, `ryo-driver/src/pipeline.rs`
-**Summary:** `lex`, `parse`, `ir` are separate subcommands. Each stage already exists and is wired up; users would benefit from a single `ryo build --emit=tokens|ast|hir|clif|obj` surface (mirroring `zig build-exe -femit-…`).
-**Resolution:** Unify under one subcommand with an `--emit` flag.
-
 ### I-018 — `TypeId` is a newtype, not a typed enum
 
 **Files:** `ryo-core/src/types.rs` (`TypeId`)

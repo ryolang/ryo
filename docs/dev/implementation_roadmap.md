@@ -2457,13 +2457,14 @@ Test result: ok. 2 passed; 0 failed
    - Auto-downloads pinned Zig version on first use to `~/.ryo/toolchain/zig-{version}/`
    - No system Zig dependency — fully managed by the compiler
 
-4. **Self-Update Command:**
+4. **Self-Update Command & CLI Additions:**
    - Implement `ryo upgrade` command
    - Check latest release from GitHub/CDN
    - Download and replace binary in `~/.ryo/bin/`
    - Version pinning support (future): `ryo upgrade v0.2.0`
    - Scope: only manages binaries installed by `install.sh` into `~/.ryo/bin/`; package-manager installs (brew/winget) upgrade via their package manager
    - Windows caveat: a running `.exe` cannot replace itself — needs a swap/helper strategy
+   - Implement `ryo check` (type-check only, no codegen — the pipeline already supports stopping after sema + ownership): the standard third command every compiled language has, and the fast path editors/CI will want before `ryo build`
 
 5. **Landing Page:**
    - Simple static page at `ryolang.org`

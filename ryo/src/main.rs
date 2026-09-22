@@ -30,9 +30,8 @@ enum Commands {
     ///
     /// `--emit` selects which IR sections to print. Sections always
     /// appear in pipeline order (AST → UIR → TIR → CLIF) regardless
-    /// of the order given on the command line. With no flag the
-    /// command preserves its pre-Phase-5 behaviour: AST + Cranelift
-    /// IR.
+    /// of the order given on the command line. With no flag all four
+    /// sections are printed.
     Ir {
         /// Input file to generate IR for
         file: PathBuf,

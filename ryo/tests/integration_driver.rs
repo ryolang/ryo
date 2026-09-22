@@ -394,9 +394,9 @@ fn ir_emit_tir_dumps_typed_listing() {
 }
 
 #[test]
-fn ir_emit_default_is_ast_and_clif() {
-    // Bare `ryo ir <file>` preserves the pre-Phase-5 default of
-    // AST + Cranelift IR so existing scripts keep working.
+fn ir_emit_default_is_all_sections() {
+    // Bare `ryo ir <file>` prints every section (AST + UIR + TIR +
+    // CLIF), in pipeline order.
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "default.ryo", "x = 42\n");
 
@@ -409,19 +409,11 @@ fn ir_emit_default_is_ast_and_clif() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(stdout.contains("[AST]"), "missing [AST]: {}", stdout);
+    assert!(stdout.contains("[UIR]"), "missing [UIR]: {}", stdout);
+    assert!(stdout.contains("[TIR]"), "missing [TIR]: {}", stdout);
     assert!(
         stdout.contains("[Cranelift IR]"),
         "missing CLIF: {}",
-        stdout
-    );
-    assert!(
-        !stdout.contains("[UIR]"),
-        "UIR leaked into default: {}",
-        stdout
-    );
-    assert!(
-        !stdout.contains("[TIR]"),
-        "TIR leaked into default: {}",
         stdout
     );
 }
