@@ -2,11 +2,7 @@
 
 - compare ryo with bend https://github.com/bendlang/bend/blob/main/guide/GUIDE.md
 - gaming ffi, write a pong
-- missing operators shift, <<, >>, binary &, |, etc
-- missing time type, 1d, 60s, 2w, etc
-- sentinel type??
 - benchmarks <https://github.com/kostya/benchmarks>
-- ryo profiler as the python 3.15 one tachyon, with frame pointers by default
 - [cargo crap rules](https://minikin.me/blog/cargo-crap):
 
   ```sh
@@ -15,7 +11,6 @@
   ```
 
 - [ ] https://github.com/ludo-technologies/polyscan `npx polyscan analyze .`
-- [ ] Set Up Miri <https://github.com/rust-lang/miri>
 - [ ] <https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md>
 - [ ] FFI tests: sqlite(included), raylib(external)
 - [ ] [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)
