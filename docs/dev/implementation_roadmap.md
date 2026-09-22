@@ -398,7 +398,7 @@ fn main() -> int:
    - `docs/dev/design_issues.md`: Comprehensive design rationale and trade-off analysis
    - Module tutorial examples in `examples/future/modules/`
    - `examples/future/modules/`: 6 practical examples demonstrating all features
-   - `CLAUDE.md`: Module system design added to Key Design Decisions
+   - `AGENTS.md`: Module system design added to Key Design Decisions
 
 5. **Practical Examples** (6 comprehensive examples):
    - `01-simple-module/`: Basic module creation and imports
@@ -536,7 +536,7 @@ The module system will be **implemented** in:
 - `docs/dev/proposals.md` - Future enhancements
 - `examples/future/modules/` - Practical examples
 - `docs/getting_started.md` - Installation and first program
-- `CLAUDE.md` - Architecture guidelines
+- `AGENTS.md` - Architecture guidelines
 
 **Next Steps:**
 
@@ -634,7 +634,7 @@ remainder = a % b     # 1
 
 ---
 
-> **Note:** Review the workspace crate layout (see root `CLAUDE.md`) and make the first split before M8.
+> **Note:** Review the workspace crate layout (see root `AGENTS.md`) and make the first split before M8.
 
 ### Milestone 8: Control Flow & Booleans [alpha]
 
@@ -1060,7 +1060,7 @@ fn main():
 > - **`ryo-driver`**: Orchestrates compiler pipeline execution.
 > - **`ryo`**: The CLI binary executable.
 >
-> For future milestones (from Milestone 8.2 onwards), development tasks, modules, and tests are structured within this Cargo workspace rather than a flat `src/` directory. For up-to-date guidelines on adding compiler features under this architecture, see the root `CLAUDE.md`.
+> For future milestones (from Milestone 8.2 onwards), development tasks, modules, and tests are structured within this Cargo workspace rather than a flat `src/` directory. For up-to-date guidelines on adding compiler features under this architecture, see the root `AGENTS.md`.
 
 ### Milestone 8.2: Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE
 

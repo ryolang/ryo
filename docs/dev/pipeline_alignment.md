@@ -2,7 +2,7 @@
 
 # Pipeline Alignment with Zig: Remaining Work
 
-The multi-phase plan that moved Ryo's middle-end onto the Zig-style pipeline is **complete**: structured diagnostics (`ryo-core/src/diag.rs`), the deepened `InternPool` (`types.rs`), the UIR/TIR split (`uir.rs`, `tir.rs`, `astgen.rs`, `sema/`), and the lazy worklist Sema driver (`DeclState`: `Unresolved → InProgress → Resolved/Failed`, with cycle detection) have all shipped. The compiler today runs `Lexer → Indent → Parser → AstGen → UIR → Sema → TIR → Ownership → Codegen` — see the root `CLAUDE.md` for the authoritative pipeline map. The original phase-by-phase plan text has been removed; git history preserves it.
+The multi-phase plan that moved Ryo's middle-end onto the Zig-style pipeline is **complete**: structured diagnostics (`ryo-core/src/diag.rs`), the deepened `InternPool` (`types.rs`), the UIR/TIR split (`uir.rs`, `tir.rs`, `astgen.rs`, `sema/`), and the lazy worklist Sema driver (`DeclState`: `Unresolved → InProgress → Resolved/Failed`, with cycle detection) have all shipped. The compiler today runs `Lexer → Indent → Parser → AstGen → UIR → Sema → TIR → Ownership → Codegen` — see the root `AGENTS.md` for the authoritative pipeline map. The original phase-by-phase plan text has been removed; git history preserves it.
 
 ## Pending
 
@@ -45,7 +45,7 @@ These remain roadmap or future considerations, not part of any shipped phase:
 
 ## References
 
-- Dev: root `CLAUDE.md` — authoritative map of the shipped pipeline. `pl_references/mojo.md` (ownership pass), `arc_optimizer.md` (planned pre-codegen optimization), `pl_references/zig.md` (upstream design borrowed from).
+- Dev: root `AGENTS.md` — authoritative map of the shipped pipeline. `pl_references/mojo.md` (ownership pass), `arc_optimizer.md` (planned pre-codegen optimization), `pl_references/zig.md` (upstream design borrowed from).
 - Milestone/Roadmap: *Compile-time Execution (comptime)* and *Full Generics System* — [implementation_roadmap.md](implementation_roadmap.md) (Phase 5, v0.2+).
 - Issues: [../../ISSUES.md](../../ISSUES.md) — I-018 (`TypeId` enum re-attempt).
 - Inspiration: Zig's `src/InternPool.zig` (sidecar `extra` array, single pool for types/strings/values), `src/AstGen.zig` → `src/Sema.zig` separation, `src/Zir.zig` / `src/Air.zig` shapes, `src/Module.zig`'s decl worklist.

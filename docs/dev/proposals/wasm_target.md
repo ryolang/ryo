@@ -139,5 +139,5 @@ The pointer-width audit motivation outlives the WASM target — it applies to an
 - Dev: [concurrency.md](../concurrency.md) — WasmFX future direction for concurrency-on-WASM
 - Dev: [arc_optimizer.md](../arc_optimizer.md) — target-agnostic ARC pass remains correct under any backend
 - Milestone: None active. Proposal is deferred; revival would slot as a new "WASM Backend" milestone after M27 (Core Language Complete) in [implementation_roadmap.md](../implementation_roadmap.md).
-- Spike record: working notes kept locally under `docs/analysis/` (gitignored per [docs/CLAUDE.md](../../CLAUDE.md) — scratch/uncommitted); the substantive findings are inlined above under "Why this is deferred."
+- Spike record: working notes kept locally under `docs/analysis/` (gitignored per [docs/AGENTS.md](../../AGENTS.md) — scratch/uncommitted); the substantive findings are inlined above under "Why this is deferred."
 - External: [wasm-encoder source](https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder), [WASI preview 1](https://github.com/WebAssembly/WASI/tree/main/legacy/preview1), [WasmFX](https://wasmfx.dev/)

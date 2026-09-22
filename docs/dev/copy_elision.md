@@ -133,7 +133,7 @@ before codegen):
    storage survives the rewrite.
 
 This pass integrates with the compilation pipeline described in the
-root `CLAUDE.md` — it runs between TIR construction (Sema) and
+root `AGENTS.md` — it runs between TIR construction (Sema) and
 Cranelift IR generation (codegen).
 
 ## Interaction with Ownership Lite
@@ -157,5 +157,5 @@ substitutes storage locations, not ownership semantics.
 ## References
 - Spec: Section 5.9 (user-facing guarantees)
 - Spec: Section 5.4 (Drop / RAII)
-- Dev: compilation pipeline — see root `CLAUDE.md`
+- Dev: compilation pipeline — see root `AGENTS.md`
 - Milestone: Copy Elision & NRVO (Phase 5, v0.2+) — see implementation_roadmap.md
