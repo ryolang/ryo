@@ -89,6 +89,12 @@ JIT and AOT land within noise of each other (~1.42–1.43×) because both share 
 * **Focus:** Imperative update-in-place through a mutable borrow (`inout` / `&mut` / pointer / attribute store) — no new record, no clone, no sret. Verifies that choosing between inout and the consuming move+return form costs nothing, so the idiom choice can be driven by intent.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
 
+### 13. [JSON Validate Benchmark](./json_validate/)
+
+* **Focus:** Byte-scanning recursive-descent parsing — a full JSON grammar validator over a `bytesview` / `&[u8]` / `bytes` (structure only, values discarded; a value-tree parser is blocked on enums M11, pattern matching M12, collections M22, error unions M13). 30,000-record document generated in-program, then validated 12 times.
+* **Languages compared:** Rust, Python, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT runs **23.9x faster than Python** (97 ms vs 2,314 ms) with ~3x less memory, but trails Rust by 19.4x — far wider than byte_slicing's 1.7x on a flat scan. The deep per-byte call tree (no Cranelift inliner) plus §18 checked-arithmetic guards on every position update compound where a flat loop amortized them.
+
 ---
 
 ## General Prerequisites
