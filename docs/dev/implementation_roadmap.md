@@ -79,6 +79,8 @@ Deferred features tracked separately — see Phase 5 section for the full list (
 | Volatile MMIO intrinsics | v0.2 | GAP-3; `core` profile intrinsic package |
 | `#[repr(packed)]` | v0.2 | GAP-4; rides with FFI |
 | Scoped task borrows + stdlib `par_*` | v0.4 | D5; concurrency runtime |
+| Retaining views (`shared[T]`-backed views that escape calls) | v0.2–v0.3 | spec §5.7 + Rule 5/6 exceptions; **blocked on the `shared[T]` refcount runtime** (same substrate as `sbytes` above); unlocks zero-copy parser libraries |
+| `std.slice.split_mut` (disjoint mutable chunks for `task.scope` children) | v0.4 | spec §9.2.1; **blocked on the concurrency runtime**; stdlib-internal `unsafe` is the disjointness proof; enables parallel in-place mutation — rides with the scoped-task-borrows row |
 | Context propagation & cancellation deadlines | v0.4 | GAP-1; must land **with** the scheduler (see `ryo-context-and-otel-proposal.md`) |
 | Binary pattern matching (if adopted) | post-v0.4 | deferred; stdlib parser facility first |
 | GUI Phase 1 (immediate-mode toolkit PoC) | post-v0.2 | ecosystem, not language; D4 + `ryo-bindgen` |
