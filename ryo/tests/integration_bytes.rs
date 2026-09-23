@@ -273,3 +273,79 @@ fn test_bytes_conditional_reassign_dead_drop() {
         "fn main():\n\tmut b = \"AB\".to_bytes()\n\tflag = false\n\tif flag:\n\t\tb = \"CD\".to_bytes()\n",
     );
 }
+
+// ---------------------------------------------------------------------------
+// W0004 RedundantToBytes: a bound `to_bytes()` result that is never mutated
+// and never escapes should be `as_bytes()`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_w0004_read_only_copy_warns_jit() {
+    // The json_validate shape: bound copy, only borrow-passed to a
+    // `bytesview` parameter. Warning-only — the run still succeeds.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn validate(b: bytesview) -> int:\n\treturn b.len()\n\nfn main():\n\ts = \"{}\"\n\traw = s.to_bytes()\n\tprint(int_to_str(validate(raw)))\n";
+    let test_file = create_test_file(temp_dir.path(), "w4_warn.ryo", code);
+    let output = run_ryo_command(&["run", "w4_warn.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("W0004").count(),
+        1,
+        "expected exactly one W0004 warning: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("use `as_bytes()` (zero-copy view) instead of `to_bytes()`"),
+        "expected the fix message: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_w0004_mutated_or_escaping_copy_silent() {
+    // Mutated (`bytes_push`), returned, and move-passed copies are all
+    // legitimate owned uses — no W0004 anywhere.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn make() -> bytes:\n\tb = \"ab\".to_bytes()\n\treturn b\n\nfn eat(move b: bytes):\n\tprint(int_to_str(b.len()))\n\nfn main():\n\tmut a = \"xy\".to_bytes()\n\tbytes_push(&a, 122)\n\teat(make())\n\tprint(int_to_str(a.len()))\n";
+    let test_file = create_test_file(temp_dir.path(), "w4_silent.ryo", code);
+    let output = run_ryo_command(&["run", "w4_silent.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("W0004"), "unexpected W0004: {}", stderr);
+}
+
+#[test]
+fn test_w0004_fires_on_aot_build() {
+    // The lint lives in the ownership pass, shared by JIT and AOT —
+    // pin that `ryo build` emits it too (and still builds).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\ts = \"ab\"\n\traw = s.to_bytes()\n\tprint(int_to_str(raw.len()))\n";
+    let test_file = create_test_file(temp_dir.path(), "w4_aot.ryo", code);
+    let build = run_ryo_command(&["build", "w4_aot.ryo"], &test_file).expect("ryo build");
+    assert!(
+        build.status.success(),
+        "build stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("W0004"),
+        "expected W0004 on the AOT path: {}",
+        stderr
+    );
+    let exe = exe_path(temp_dir.path(), "w4_aot");
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run built binary");
+    assert!(run.status.success());
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "2");
+}

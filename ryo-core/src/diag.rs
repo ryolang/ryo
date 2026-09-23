@@ -115,6 +115,14 @@ pub enum DiagCode {
     /// fires when the copy can outlive or outlast its view.
     RedundantMaterialize,
 
+    /// A bound `to_bytes()` result is never mutated and never escapes:
+    /// the owned copy is an O(n) allocation + copy that `as_bytes()` —
+    /// a zero-copy `bytesview` projection of the same bytes — serves
+    /// for free (ownership). Heuristic warning only, conservative
+    /// toward silence: any move into an escaping position, mutation,
+    /// or `inout` pass suppresses it.
+    RedundantToBytes,
+
     /// Integer division or modulo with a literal zero divisor
     /// (`x / 0`, `x % 0`, `x /= 0`, `x %= 0`). Always panics at
     /// runtime, so it is rejected at compile time. Non-literal

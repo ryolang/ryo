@@ -78,3 +78,10 @@ pub(super) fn w0003_count(diags: &[Diag]) -> usize {
         .filter(|d| d.code == DiagCode::RedundantMaterialize)
         .count()
 }
+
+pub(super) fn w0004_count(diags: &[Diag]) -> usize {
+    diags
+        .iter()
+        .filter(|d| d.code == DiagCode::RedundantToBytes)
+        .count()
+}
