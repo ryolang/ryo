@@ -1,0 +1,1228 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ownership Lite — Ryo's memory model, interactively · Ryo</title>
+    <meta
+      name="description"
+      content="An interactive walkthrough of Ryo's ownership model: borrow-by-default for functions, move-by-default for assignment, no lifetimes, no garbage collector. See real ownership errors and the three ways to fix them."
+    />
+    <meta name="theme-color" content="#FFC300" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0B0B0F" media="(prefers-color-scheme: dark)" />
+
+    <link rel="canonical" href="https://ryolang.org/ownership.html" />
+    <link rel="icon" type="image/svg+xml" href="img/ryo.svg" />
+    <link rel="icon" type="image/png" href="img/ryo.png" />
+    <link rel="apple-touch-icon" href="img/ryo.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Ryo" />
+    <meta property="og:url" content="https://ryolang.org/ownership.html" />
+    <meta property="og:title" content="Ownership Lite — Ryo's memory model, interactively" />
+    <meta
+      property="og:description"
+      content="Rust-level memory safety without lifetimes. An interactive walkthrough: one broken program, three fixes."
+    />
+    <meta property="og:image" content="https://ryolang.org/img/og-image.png" />
+
+    <link rel="stylesheet" href="assets/styles.css" />
+    <link rel="stylesheet" href="assets/reference.css" />
+    <style>
+      /* ---- Ownership walkthrough page specifics ---- */
+      .own-hero {
+        position: relative;
+        overflow: hidden;
+        padding: 4rem 1.25rem 2.5rem;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .own-hero-inner {
+        position: relative;
+        max-width: 52rem;
+        margin: 0 auto;
+      }
+      .own-hero-inner h1 {
+        margin-top: 0;
+        margin-bottom: 0.5rem;
+      }
+      .own-subtitle {
+        font-size: 1.15rem;
+        color: var(--text-muted);
+        margin-top: 0;
+      }
+      .own-main {
+        max-width: 52rem;
+        margin: 0 auto;
+        padding: 2.5rem 1.25rem 5rem;
+      }
+      .own-eyebrow {
+        font-size: 0.8rem;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--color-primary-500);
+        margin-bottom: 0.75rem;
+      }
+      .own-step {
+        margin-top: 3.5rem;
+        padding-top: 2.5rem;
+        border-top: 1px solid var(--border-subtle);
+      }
+      .own-step-num,
+      .rule-num {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        background: var(--color-primary-500);
+        color: #0f172a;
+        font-weight: 700;
+      }
+      .own-step-num {
+        width: 1.75rem;
+        height: 1.75rem;
+        font-size: 0.9rem;
+        margin-right: 0.5rem;
+      }
+      .own-step h2 {
+        display: flex;
+        align-items: center;
+        margin-top: 0;
+      }
+
+      /* Terminal output block (compiler diagnostics) */
+      .term {
+        --term-head-bg: var(--code-header-bg);
+        --term-head-fg: var(--syn-cmt);
+        --term-head-border: var(--border-subtle);
+        --term-bg: var(--bg-elevated);
+        --term-fg: var(--text-base);
+        --term-err: var(--syn-kw);
+        --term-warn: var(--syn-ty);
+        --term-note: var(--syn-cmt);
+        --term-ok: var(--syn-num);
+        margin-top: 1rem;
+        border-radius: 10px;
+        overflow: hidden;
+        border: 1px solid var(--border-subtle);
+      }
+      .dark .term {
+        --term-head-bg: #16161e;
+        --term-head-fg: #9a9aa5;
+        --term-head-border: #2a2a35;
+        --term-bg: #101017;
+        --term-fg: #d8d8e2;
+        --term-err: #ff6b6b;
+        --term-warn: #f0b429;
+        --term-note: #8a8a96;
+        --term-ok: #51cf66;
+      }
+      .term-head {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.45rem 0.9rem;
+        font-size: 0.75rem;
+        color: var(--term-head-fg);
+        background: var(--term-head-bg);
+        border-bottom: 1px solid var(--term-head-border);
+      }
+      .term-dot {
+        width: 0.6rem;
+        height: 0.6rem;
+        border-radius: 999px;
+      }
+      .term pre {
+        margin: 0;
+        padding: 1rem 1.1rem;
+        background: var(--term-bg);
+        color: var(--term-fg);
+        font-size: 0.82rem;
+        line-height: 1.55;
+        overflow-x: auto;
+      }
+      .term a {
+        color: var(--syn-ctl);
+      }
+      .term .t-err {
+        color: var(--term-err);
+        font-weight: 700;
+      }
+      .term .t-warn {
+        color: var(--term-warn);
+        font-weight: 700;
+      }
+      .term .t-note {
+        color: var(--term-note);
+      }
+      .term .t-ok {
+        color: var(--term-ok);
+      }
+
+      /* Fix cards */
+      .fix-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+        gap: 0.9rem;
+        margin-top: 1.25rem;
+      }
+      .fix-card {
+        text-align: left;
+        padding: 1rem 1.1rem;
+        border: 1px solid var(--border-subtle);
+        border-radius: 12px;
+        background: var(--bg-elevated);
+        cursor: pointer;
+        font: inherit;
+        color: inherit;
+        transition:
+          border-color 0.15s ease,
+          transform 0.15s ease;
+      }
+      .fix-card:hover {
+        border-color: var(--color-primary-500);
+        transform: translateY(-2px);
+      }
+      .fix-card[aria-expanded="true"] {
+        border-color: var(--color-primary-500);
+        box-shadow: 0 0 0 1px var(--color-primary-500);
+      }
+      .fix-card .fix-name {
+        font-weight: 700;
+        margin-bottom: 0.25rem;
+      }
+      .fix-card .fix-when {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+      }
+      .fix-panel {
+        display: none;
+        margin-top: 1.25rem;
+      }
+      .fix-panel.open {
+        display: block;
+      }
+      .why {
+        margin-top: 0.9rem;
+        padding: 0.9rem 1.1rem;
+        border-left: 3px solid var(--color-primary-500);
+        background: var(--bg-base);
+        border-radius: 0 8px 8px 0;
+        font-size: 0.95rem;
+      }
+      .why-title {
+        display: block;
+        margin-bottom: 0.3rem;
+      }
+      .run-btn {
+        margin-top: 1rem;
+      }
+      .hidden {
+        display: none;
+      }
+      /* Copy vs Move comparison grid */
+      .cm-grid {
+        display: grid;
+        gap: 1rem;
+        margin-top: 1rem;
+      }
+      @media (min-width: 720px) {
+        .cm-grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+      .cm-tag {
+        display: inline-block;
+        margin-bottom: 0.5rem;
+        padding: 0.2rem 0.65rem;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 700;
+        border: 1px solid currentColor;
+      }
+      .cm-tag-ok {
+        color: var(--syn-num);
+        background: color-mix(in srgb, var(--syn-num) 8%, transparent);
+      }
+      .cm-tag-err {
+        color: var(--syn-kw);
+        background: color-mix(in srgb, var(--syn-kw) 8%, transparent);
+      }
+
+      /* Why-no-GC value cells */
+      .why-grid {
+        display: grid;
+        gap: 0.8rem;
+        margin-top: 1.25rem;
+      }
+      @media (min-width: 720px) {
+        .why-grid {
+          grid-template-columns: repeat(3, 1fr);
+        }
+      }
+      .why-cell {
+        padding: 0.9rem 1.1rem;
+        border: 1px solid var(--border-subtle);
+        border-radius: 12px;
+        background: var(--bg-elevated);
+        font-size: 0.9rem;
+      }
+      .why-cell-title {
+        font-weight: 700;
+        margin-bottom: 0.35rem;
+        color: var(--color-primary-600);
+      }
+      .dark .why-cell-title {
+        color: var(--color-primary-400);
+      }
+      .limit-cell {
+        border-left: 3px solid var(--syn-kw);
+        background: color-mix(in srgb, var(--syn-kw) 4%, var(--bg-elevated));
+      }
+      .status-pill {
+        display: inline-block;
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 0.12rem 0.55rem;
+        border-radius: 999px;
+        margin: 0.35rem 0;
+      }
+      .status-pill--now {
+        color: var(--syn-num);
+        background: color-mix(in srgb, var(--syn-num) 10%, transparent);
+        border: 1px solid color-mix(in srgb, var(--syn-num) 35%, transparent);
+      }
+      .status-pill--planned {
+        color: var(--syn-fn);
+        background: color-mix(in srgb, var(--syn-fn) 10%, transparent);
+        border: 1px solid color-mix(in srgb, var(--syn-fn) 35%, transparent);
+      }
+      @media (min-width: 720px) {
+        #limits .why-grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+
+      /* Seven rules table */
+      .rules-table td:first-child {
+        width: 2.5rem;
+      }
+      .rule-num {
+        width: 1.5rem;
+        height: 1.5rem;
+        font-size: 0.8rem;
+      }
+      .rule-row-hl {
+        background: color-mix(in srgb, var(--syn-kw) 6%, transparent);
+      }
+      .rule-row-hl .rule-num {
+        background: var(--syn-kw);
+        color: #fff;
+      }
+      .rules-table tr:target {
+        background: color-mix(in srgb, var(--color-primary-500) 12%, transparent);
+      }
+
+      .rule-q {
+        margin-top: 1.25rem;
+        padding: 1rem 1.25rem;
+        text-align: center;
+        font-size: 1.1rem;
+        font-weight: 700;
+        border: 1.5px solid var(--color-primary-500);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--color-primary-500) 8%, transparent);
+      }
+      .rule-cols {
+        display: grid;
+        gap: 1rem;
+        margin-top: 0.75rem;
+      }
+      @media (min-width: 720px) {
+        .rule-cols {
+          grid-template-columns: 3fr 2fr;
+        }
+      }
+      .fork {
+        display: block;
+        margin-bottom: 0.6rem;
+        font-size: 0.8rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+      .fork-no {
+        color: var(--syn-num);
+      }
+      .fork-yes {
+        color: var(--syn-kw);
+      }
+      .rule-group {
+        display: grid;
+        gap: 0.8rem;
+      }
+      @media (min-width: 720px) {
+        .rule-group {
+          grid-template-columns: 1fr 1fr;
+        }
+        .rule-group .rule-card:last-child:nth-child(odd) {
+          grid-column: 1 / -1;
+        }
+      }
+      .rule-group-yes {
+        grid-template-columns: 1fr;
+      }
+      .rule-card {
+        --rc-mix: 5%;
+        padding: 0.9rem 1.1rem;
+        border-radius: 12px;
+        border: 1px solid var(--border-subtle);
+        border-left: 4px solid var(--rc);
+        background: color-mix(
+          in srgb,
+          var(--rc) var(--rc-mix),
+          var(--bg-elevated)
+        );
+      }
+      .rc-borrow {
+        --rc: var(--syn-num);
+      }
+      .rc-inout {
+        --rc: var(--syn-ctl);
+      }
+      .rc-restructure {
+        --rc: var(--syn-cmt);
+        --rc-mix: 7%;
+      }
+      .rc-move {
+        --rc: var(--syn-kw);
+      }
+      .rule-head {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+      }
+      .rule-head svg {
+        width: 18px;
+        height: 18px;
+        flex-shrink: 0;
+      }
+      .rule-head svg,
+      .rule-chip {
+        color: var(--rc);
+      }
+      .rule-need {
+        font-weight: 700;
+        flex: 1;
+      }
+      .rule-chip {
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        padding: 0.15rem 0.5rem;
+        border-radius: 999px;
+        border: 1px solid currentColor;
+      }
+      .rule-body {
+        margin-top: 0.45rem;
+        font-size: 0.92rem;
+      }
+      .rule-foot {
+        margin-top: 0.45rem;
+        font-size: 0.85rem;
+        color: var(--text-muted);
+      }
+      .rule-mnem {
+        margin-top: 0.5rem;
+        font-size: 0.85rem;
+        font-style: italic;
+        color: var(--text-muted);
+      }
+    </style>
+    <script>
+      // Apply theme before paint to avoid flash
+      (function () {
+        const saved = localStorage.getItem("theme");
+        const prefersDark = window.matchMedia(
+          "(prefers-color-scheme: dark)",
+        ).matches;
+        if (saved === "dark" || (!saved && prefersDark)) {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <!-- Navbar -->
+    <nav class="navbar">
+      <div class="nav-inner">
+        <div class="brand">
+          <a href="./" class="brand" style="text-decoration: none">
+            <div class="brand-logo" aria-hidden="true">
+              <img src="img/ryo.svg" alt="" width="20" height="20" />
+            </div>
+            <span class="brand-name">ryo</span>
+          </a>
+        </div>
+        <div class="nav-links">
+          <a href="./#features">Features</a>
+          <a href="reference/">Reference</a>
+          <a href="ownership.html" style="color: var(--text-base); font-weight: 600"
+            >Ownership</a
+          >
+        </div>
+        <div class="nav-actions">
+          <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">
+            <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
+            <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><circle cx="12" cy="4" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></svg>
+          </button>
+        </div>
+      </div>
+    </nav>
+
+    <header class="own-hero">
+      <div class="hero-grid-bg"></div>
+      <div class="orb orb-1"></div>
+      <div class="own-hero-inner">
+        <p class="own-eyebrow">Interactive walkthrough</p>
+        <h1>Ownership Lite</h1>
+        <p class="own-subtitle">
+          Three ways to fix any ownership error — and the one rule behind
+          them.
+        </p>
+        <p>
+          Ryo gives you Rust-level memory safety — no dangling pointers, no
+          use-after-free, no garbage collector — <em>without</em> lifetime
+          annotations. The whole model fits in one sentence:
+        </p>
+        <p>
+          <strong
+            >Functions borrow by default; assignment and return move by
+            default.</strong
+          >
+        </p>
+        <p>
+          Because borrows live only for the duration of a single call, the
+          compiler always knows when they end — so there are no lifetimes to
+          write, and most of the fights people have with Rust's borrow checker
+          simply never happen. But you will still meet the compiler's ownership
+          rules, and when you do, there are three ways to fix it. Let's walk
+          through one real error and all three fixes. Every example below is
+          verified against the actual compiler.
+        </p>
+      </div>
+    </header>
+
+    <main class="own-main">
+      <!-- ================= Step 1 ================= -->
+      <section class="own-step" id="broken">
+        <h2><span class="own-step-num">1</span> A program that doesn't compile</h2>
+        <p>
+          This looks innocent. We create a string, hand it to another
+          variable, and print it:
+        </p>
+        <div class="code-block">
+          <div class="code-block-head">
+            <span class="filename">broken.ryo</span>
+            <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+          </div>
+          <pre><code class="language-ryo">fn main():
+	msg = "hello"
+	other = msg
+	print(msg)</code></pre>
+        </div>
+        <button class="btn btn-primary run-btn" id="compile-btn" type="button">
+          Compile it →
+        </button>
+        <div class="term hidden" id="diag">
+          <div class="term-head">
+            <span class="term-dot" style="background: #ff5f57"></span>
+            <span class="term-dot" style="background: #febc2e"></span>
+            <span class="term-dot" style="background: #28c840"></span>
+            <span>ryo run broken.ryo</span>
+          </div>
+          <pre><span class="t-err">[E0020] Error:</span> use of moved value `msg`
+   ╭─[ broken.ryo:4:8 ]
+   │
+ 4 │     print(msg)
+   │           ─┬─
+   │            ╰── use of moved value
+   │
+ 3 │     other = msg
+   │             ─┬─
+   │              ╰── value moved here
+   │
+   <span class="t-note">Note: help: consider using the value before the move, or pass by default (borrow) instead of `move`</span></pre>
+        </div>
+        <div class="why hidden" id="diag-why">
+          <strong class="why-title">What just happened?</strong>
+          <code>str</code> is an <em>ownership type</em>: it manages a heap
+          buffer. Assignment of an ownership type <strong>moves</strong> it —
+          <code>other = msg</code> transfers ownership of the string to
+          <code>other</code>, and <code>msg</code> is left empty. Printing it
+          afterwards would be a use-after-free, so the compiler stops you at
+          compile time.
+        </div>
+        <p style="margin-top: 1.5rem">
+          Which types move and which don't? Only types that manage a resource
+          move. Everything else is a <strong>Copy type</strong> — assignment
+          just copies the bits, and both bindings stay valid:
+        </p>
+        <div class="cm-grid">
+          <div class="cm-col">
+            <div class="cm-tag cm-tag-ok">Copy types — int, float, bool</div>
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">copies.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn main():
+	mut n = 42
+	m = n
+	print(int_to_str(n))
+	print(int_to_str(m))</code></pre>
+            </div>
+            <div class="term">
+              <div class="term-head"><span>output</span></div>
+              <pre><span class="t-ok">4242</span></pre>
+            </div>
+          </div>
+          <div class="cm-col">
+            <div class="cm-tag cm-tag-err">Move types — str, list[T], map[K, V]</div>
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">broken.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn main():
+	msg = "hello"
+	other = msg
+	print(msg)</code></pre>
+            </div>
+            <div class="term">
+              <div class="term-head"><span>compiler</span></div>
+              <pre><span class="t-err">[E0020]</span> use of moved value `msg`</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= Step 2 ================= -->
+      <section class="own-step" id="fixes">
+        <h2><span class="own-step-num">2</span> Pick a fix</h2>
+        <p>
+          The right fix depends on one question:
+          <strong>does ownership of the value need to leave the caller?</strong>
+          Pick a card — each shows the corrected program and why it works.
+        </p>
+        <div class="fix-grid" role="group" aria-label="Fix choices">
+          <button class="fix-card" data-fix="borrow" aria-expanded="false">
+            <div class="fix-name">1 · Let it borrow</div>
+            <div class="fix-when">
+              You just wanted to share the value. Usually the fix is deleting
+              code.
+            </div>
+          </button>
+          <button class="fix-card" data-fix="inout" aria-expanded="false">
+            <div class="fix-name">2 · Borrow it mutably</div>
+            <div class="fix-when">
+              The callee should modify the value and you keep it.
+            </div>
+          </button>
+          <button class="fix-card" data-fix="move" aria-expanded="false">
+            <div class="fix-name">3 · Move it</div>
+            <div class="fix-when">
+              The callee should own the value from now on. Say so out loud.
+            </div>
+          </button>
+        </div>
+
+        <div class="fix-panel" id="fix-borrow">
+          <div class="code-block">
+            <div class="code-block-head">
+              <span class="filename">fix_1_borrow.ryo</span>
+              <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+            </div>
+            <pre><code class="language-ryo">fn print_twice(text: str):
+	print(text)
+	print(text)
+
+fn main():
+	msg = "hello"
+	print_twice(msg)
+	print(msg)</code></pre>
+          </div>
+          <div class="term">
+            <div class="term-head"><span>output</span></div>
+            <pre><span class="t-ok">hellohellohello</span></pre>
+          </div>
+          <div class="why">
+            <strong class="why-title">Why it works</strong>
+            Function parameters <strong>borrow by default</strong> — no
+            annotation, no <code>&</code>, no lifetime. <code>msg</code> is
+            lent to <code>print_twice</code> for the duration of the call and
+            is fully yours again when it returns. This is the fix most of the
+            time: in Rust you'd reach for <code>&amp;str</code> here, and the
+            borrow checker would fight you about it later. In Ryo the borrow
+            is scoped to the call, so the fight never starts.
+          </div>
+        </div>
+
+        <div class="fix-panel" id="fix-inout">
+          <div class="code-block">
+            <div class="code-block-head">
+              <span class="filename">fix_2_inout.ryo</span>
+              <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+            </div>
+            <pre><code class="language-ryo">fn add_suffix(inout text: str):
+	text = text + "!"
+
+fn main():
+	mut msg = "hello"
+	add_suffix(&amp;msg)
+	print(msg)</code></pre>
+          </div>
+          <div class="term">
+            <div class="term-head"><span>output</span></div>
+            <pre><span class="t-ok">hello!</span></pre>
+          </div>
+          <div class="why">
+            <strong class="why-title">Why it works</strong>
+            When the callee needs to <em>modify</em> your value, borrow it
+            mutably with <code>inout</code> in the signature and
+            <code>&amp;</code> at the call site. The binding must be declared
+            <code>mut</code> — mutability is always visible. Ownership never
+            moves: <code>msg</code> is still yours afterwards, now with a
+            <code>!</code> attached. Under the hood this passes a pointer —
+            no copy of the string is made.
+          </div>
+        </div>
+
+        <div class="fix-panel" id="fix-move">
+          <div class="code-block">
+            <div class="code-block-head">
+              <span class="filename">fix_3_move.ryo</span>
+              <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+            </div>
+            <pre><code class="language-ryo">fn consume(move text: str):
+	print(text)
+
+fn main():
+	msg = "hello"
+	consume(msg)</code></pre>
+          </div>
+          <div class="term">
+            <div class="term-head"><span>output</span></div>
+            <pre><span class="t-ok">hello</span></pre>
+          </div>
+          <div class="why">
+            <strong class="why-title">Why it works</strong>
+            Sometimes ownership really should change hands — the callee
+            stores the value, sends it elsewhere, or consumes it to build
+            something new. Mark the parameter <code>move</code> in the
+            signature and the transfer is explicit and deliberate: the caller
+            can see it, and the compiler enforces that the old binding is
+            never touched again. If you add <code>print(msg)</code> after
+            this call, you get the same E0020 — on purpose.
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= Step 3 ================= -->
+      <section class="own-step" id="aliasing">
+        <h2><span class="own-step-num">3</span> A second error: two borrows collide</h2>
+        <p>
+          Use-after-move is one error family. The other is
+          <strong>aliasing</strong> — two borrows of the same value fighting
+          inside a single call. Say we have a point and want to clamp both
+          coordinates in one go:
+        </p>
+        <div class="code-block">
+          <div class="code-block-head">
+            <span class="filename">alias_broken.ryo</span>
+            <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+          </div>
+          <pre><code class="language-ryo">struct Point:
+	x: int
+	y: int
+
+fn clamp2(inout a: int, inout b: int, hi: int):
+	if a > hi:
+		a = hi
+	if b > hi:
+		b = hi
+
+fn main():
+	mut p = Point{x=5, y=9}
+	clamp2(&amp;p.x, &amp;p.y, 10)
+	print(int_to_str(p.x))</code></pre>
+        </div>
+        <button class="btn btn-primary run-btn" id="alias-compile-btn" type="button">
+          Compile it →
+        </button>
+        <div class="term hidden" id="alias-diag">
+          <div class="term-head">
+            <span class="term-dot" style="background: #ff5f57"></span>
+            <span class="term-dot" style="background: #febc2e"></span>
+            <span class="term-dot" style="background: #28c840"></span>
+            <span>ryo run alias_broken.ryo</span>
+          </div>
+          <pre><span class="t-err">[E0032] Error:</span> cannot borrow `p` as mutable more than once in the same call
+    ╭─[ alias_broken.ryo:13:2 ]
+    │
+ 13 │     clamp2(&amp;p.x, &amp;p.y, 10)
+    │     ─────────┬─────┬──────
+    │              ╰────────────── first mutable borrow here
+    │                    ╰──────── second mutable borrow here
+    │
+    <span class="t-note">Note: help: a value can have one mutable borrow OR many immutable borrows in a call, never both (<a href="#rule-7">Rule 7</a>)</span></pre>
+        </div>
+        <div class="why hidden" id="alias-why">
+          <strong class="why-title">What just happened?</strong>
+          Borrows in Ryo are <em>whole-value</em> and <em>call-scoped</em>:
+          <code>&amp;p.x</code> borrows all of <code>p</code> for the duration
+          of the call, so <code>&amp;p.y</code> in the same call collides with
+          it. Rust's borrow checker splits field borrows and would allow this;
+          Ryo deliberately keeps the rule coarse — the compiler stays simple,
+          and the fix is always mechanical.
+        </div>
+        <div class="fix-panel" id="alias-fix" style="display: block">
+          <div class="code-block">
+            <div class="code-block-head">
+              <span class="filename">alias_fixed.ryo</span>
+              <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+            </div>
+            <pre><code class="language-ryo">fn clamp(inout v: int, hi: int):
+	if v > hi:
+		v = hi
+
+fn main():
+	mut p = Point{x=5, y=9}
+	clamp(&amp;p.x, 10)
+	clamp(&amp;p.y, 10)
+	print(int_to_str(p.x))
+	print(int_to_str(p.y))</code></pre>
+          </div>
+          <div class="term">
+            <div class="term-head"><span>output</span></div>
+            <pre><span class="t-ok">59</span></pre>
+          </div>
+          <div class="why">
+            <strong class="why-title">Why it works</strong>
+            A borrow dies the moment its call returns — so splitting one call
+            into two splits the borrows. The same trick handles the read/write
+            overlap: when a call needs to read a value it also borrows
+            mutably, hoist the read into its own statement first. One mutable
+            borrow <em>or</em> many immutable borrows per call — never both —
+            and the borrow never outlives the call.
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= Step 4 ================= -->
+      <section class="own-step" id="restructure">
+        <h2><span class="own-step-num">4</span> Or just restructure</h2>
+        <p>
+          The compiler's own note points at a fourth option, and it's often
+          the best one: <strong>use the value before you move it.</strong>
+        </p>
+        <div class="code-block">
+          <div class="code-block-head">
+            <span class="filename">fix_4_restructure.ryo</span>
+            <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+          </div>
+          <pre><code class="language-ryo">fn main():
+	msg = "hello"
+	print(msg)
+	other = msg
+	print(other)</code></pre>
+        </div>
+        <div class="term">
+          <div class="term-head"><span>output</span></div>
+          <pre><span class="t-ok">hellohello</span></pre>
+        </div>
+        <div class="why">
+          <strong class="why-title">Why it works</strong>
+          Ownership errors are about <em>order</em>, so reordering is a
+          legitimate fix. Print while you still own the value, then move it.
+          The same trick scales up: when one call borrows part of a value and
+          another part needs mutating, hoist the read into its own statement
+          first — borrows end at the end of each call, so splitting
+          statements splits the borrows.
+        </div>
+      </section>
+
+      <!-- ================= Step 5 ================= -->
+      <section class="own-step" id="why">
+        <h2><span class="own-step-num">5</span> Why bother? No GC, ever</h2>
+        <p>
+          All of this ceremony buys one thing: <strong>deterministic
+          destruction</strong>. Every value's resources — heap buffers,
+          sockets, file handles — are released at a point the compiler can
+          see: at last use, or at the end of the scope. There is no garbage
+          collector to pause your program, no finalizer running late, no
+          refcount traffic on the hot path.
+        </p>
+        <div class="why-grid">
+          <div class="why-cell">
+            <div class="why-cell-title">No GC pauses</div>
+            Memory is freed where and when the code says it is — performance
+            stays predictable from run to run.
+          </div>
+          <div class="why-cell">
+            <div class="why-cell-title">No runtime safety tax</div>
+            Every rule on this page is enforced at compile time. The ownership
+            checks cost nothing at runtime — moves and borrows compile to plain
+            pointer passes.
+          </div>
+          <div class="why-cell">
+            <div class="why-cell-title">Shared only on request</div>
+            <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+            When a value genuinely needs more than one owner, you opt in with
+            <code>shared[T]</code> — refcounting is a tool you reach for, not
+            a tax you always pay. (Written into the spec; the refcount
+            runtime is still being built.)
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= Step 6 ================= -->
+      <section class="own-step" id="limits">
+        <h2><span class="own-step-num">6</span> Where Ownership Lite draws the line</h2>
+        <p>
+          Honesty time: the same rules that delete the lifetime vocabulary also
+          forbid one fundamental capability —
+          <strong>a borrow that outlives the call it was created in</strong>.
+          It can't be returned, stored, or sent anywhere. Four shapes of
+          programs are unbuildable in the safe model because of exactly that
+          one sentence — and for each, here's what's enforced in the compiler
+          <em>today</em> versus what's already written into the spec as the
+          planned way out:
+        </p>
+        <p>
+          <span class="status-pill status-pill--now">Enforced today</span>
+          the compiler rejects this code right now.
+          <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+          designed and specified, but not yet implemented — the blocker is
+          named on each card.
+        </p>
+        <div class="why-grid">
+          <div class="why-cell limit-cell">
+            <div class="why-cell-title">Zero-copy parsers over owned input</div>
+            <span class="status-pill status-pill--now">Enforced today</span>
+            <p>
+              The parser-combinator shape — <code>fn parse(input: strview) -&gt; (strview, strview)</code> —
+              can't exist: free functions can't return views of owned values
+              (Rule 5). Parsing a huge file zero-copy works <em>inside</em>
+              one call; the results can't come back to you as borrows.
+            </p>
+            <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+            <p>
+              <strong>Retaining views</strong> (spec §5.7): a view sliced from
+              a <code>shared[T]</code> store keeps the buffer alive, so a
+              parser library <em>will</em> hand borrowed results back — and
+              structs <em>will</em> be able to hold them. Blocked on the
+              <code>shared[T]</code> refcount runtime. Cost: a frozen input
+              and one atomic retain per view.
+            </p>
+          </div>
+          <div class="why-cell limit-cell">
+            <div class="why-cell-title">Stored lazy pipelines</div>
+            <span class="status-pill status-pill--now">Enforced today</span>
+            <p>
+              An iterator/filter chain saved in a struct and consumed later
+              holds a borrow across arbitrary time. Ryo's views are tied to
+              their owner's scope and can't be stored — pipelines are
+              callback-shaped instead.
+            </p>
+            <span class="status-pill status-pill--now">Rewrite available today</span>
+            <p>
+              No language escape is planned — sugar can't extend a borrow's
+              life, and the general fix is the lifetime machinery Ownership
+              Lite exists to avoid. The mechanical rewrite works now: chain
+              adaptors in one statement and <code>collect()</code>, or store
+              a closure over <em>owned</em> data and run it on consumption.
+              Streaming stages over a channel arrive with the concurrency
+              runtime.
+            </p>
+          </div>
+          <div class="why-cell limit-cell">
+            <div class="why-cell-title">Mutable stack-lending parallelism</div>
+            <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+            <p>
+              Read-only stack lending <em>is</em> in the spec: inside a
+              <code>task.scope</code>, child tasks may capture by immutable
+              borrow — the scope joins every child before your frame ends, so
+              the borrow provably never outlives it. That's Rust's
+              <code>thread::scope</code> shape for readers. Blocked on the
+              concurrency runtime.
+            </p>
+            <span class="status-pill status-pill--planned">Deliberate non-goal + one exception</span>
+            <p>
+              <em>Mutable</em> lending (rayon-style <code>par_iter</code>
+              writing into disjoint chunks) stays out — proving disjointness
+              across tasks is full borrow checking. The single blessed
+              exception is <code>std.slice.split_mut</code>: disjoint chunks
+              by construction, stdlib-internal <code>unsafe</code> as the
+              proof, each <code>task.scope</code> child capturing one chunk.
+            </p>
+          </div>
+          <div class="why-cell limit-cell">
+            <div class="why-cell-title">Self-referential types</div>
+            <span class="status-pill status-pill--now">Enforced today</span>
+            <p>
+              A struct that owns a buffer and holds views into itself (editor
+              piece tables, arena+reference designs). Rules 5 and 6 together
+              forbid it — a retaining view's owner is always an external
+              <code>shared[T]</code> cell, never the struct itself.
+            </p>
+            <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+            <p>
+              The escape hatch is manifest-gated <code>unsafe</code> blocks
+              (spec §17) — the same tool Rust requires (<code>Pin</code> +
+              <code>unsafe</code>) for most of these types. Lands with the
+              FFI/unsafe work. The common case has a safe rewrite: IDs or
+              handles into a <code>shared[T]</code>-owned buffer.
+            </p>
+          </div>
+        </div>
+        <p style="margin-top: 1.25rem">
+          Not on this list: disjoint field borrows, borrowed graph edges,
+          interior mutability. Those change <em>how</em> you write the
+          program — split the call, use IDs, opt into <code>shared[T]</code> —
+          never <em>whether</em> you can. Every application has a mechanical
+          rewrite; there is always an escape hatch for the rest.
+        </p>
+        <div class="callout callout--warn">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path
+              d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+            />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <div>
+            <p class="callout-title">The one real casualty — and its rescue plan</p>
+            <p>
+              Applications can always be restructured, so Ryo can build any of
+              them. The hard case is the <strong>zero-copy parsing library
+              ecosystem</strong> — libraries where the borrowed result
+              <em>is</em> the product. That shape is impossible over owned
+              input today — but it isn't abandoned: retaining views (spec
+              §5.7) bring it back over <code>shared[T]</code> input, at the
+              price of a frozen buffer and one retain per view. Until the
+              refcount runtime lands, that ecosystem waits — by design, not
+              by oversight.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= Step 7 ================= -->
+      <section class="own-step" id="recap">
+        <h2><span class="own-step-num">7</span> The decision rule</h2>
+        <p>
+          Everything above collapses into one question:
+        </p>
+        <div class="rule-q">
+          Does ownership of the value need to <em>leave the caller</em>?
+        </div>
+        <div class="rule-cols">
+          <div class="rule-col">
+            <div class="fork fork-no">No — it stays with you</div>
+            <div class="rule-group">
+          <div class="rule-card rc-borrow">
+            <div class="rule-head">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+              <span class="rule-need">Read or share the value</span>
+              <code class="rule-chip">default</code>
+            </div>
+            <div class="rule-body">
+              No annotation — parameters borrow by default, and the borrow
+              dies when the call returns.
+            </div>
+            <div class="rule-foot">Caller afterwards: <strong>valid, unchanged</strong></div>
+            <div class="rule-mnem">If in doubt, do nothing.</div>
+          </div>
+
+          <div class="rule-card rc-inout">
+            <div class="rule-head">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
+              <span class="rule-need">Modify in place, caller keeps it</span>
+              <code class="rule-chip">inout</code>
+            </div>
+            <div class="rule-body">
+              <code>inout</code> in the signature, <code>&amp;x</code> at the
+              call site, and the binding declared <code>mut</code> — mutation
+              is always visible.
+            </div>
+            <div class="rule-foot">Caller afterwards: <strong>valid, possibly modified</strong></div>
+            <div class="rule-mnem">Mutation is a borrow, not a transfer.</div>
+          </div>
+
+          <div class="rule-card rc-restructure">
+            <div class="rule-head">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8" /><line x1="4" y1="20" x2="21" y2="3" /><polyline points="21 16 21 21 16 21" /><line x1="15" y1="15" x2="21" y2="21" /><line x1="4" y1="4" x2="9" y2="9" /></svg>
+              <span class="rule-need">Use it <em>and</em> pass it on</span>
+              <code class="rule-chip">reorder</code>
+            </div>
+            <div class="rule-body">
+              Ownership errors are about order: use the value first, move it
+              second. Borrows end at each call, so splitting statements splits
+              the borrows.
+            </div>
+            <div class="rule-foot">Caller afterwards: <strong>valid until the move</strong></div>
+            <div class="rule-mnem">Ownership errors are about order.</div>
+          </div>
+            </div>
+          </div>
+
+          <div class="rule-col">
+            <div class="fork fork-yes">Yes — it changes hands</div>
+            <div class="rule-group rule-group-yes">
+          <div class="rule-card rc-move">
+            <div class="rule-head">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>
+              <span class="rule-need">Ownership leaves for good</span>
+              <code class="rule-chip">move</code>
+            </div>
+            <div class="rule-body">
+              <code>move</code> in the signature — store it, send it, consume
+              it. The call site stays plain; the transfer is explicit and the
+              compiler enforces it.
+            </div>
+            <div class="rule-foot">Caller afterwards: <strong>invalidated — use-after-move is E0020</strong></div>
+            <div class="rule-mnem">Say it in the signature, never at the call.</div>
+            </div>
+            </div>
+          </div>
+        </div>
+        <p style="margin-top: 1.5rem">
+          No lifetimes appear anywhere in this page — not because we're
+          hiding them, but because they can't occur: borrows never escape a
+          call, so there's nothing to annotate. When you need shared
+          ownership that outlives a call, that's what <code>shared[T]</code>
+          (reference counting) is for
+          <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+        </p>
+        <p>
+          Next steps:
+          <a href="reference/">the language reference</a>, or the
+          <a
+            href="https://github.com/ryolang/ryo/blob/main/docs/specification.md"
+            >ownership chapter of the spec (§5)</a
+          >.
+        </p>
+      </section>
+
+      <!-- ================= The seven rules ================= -->
+      <section class="own-step" id="rules">
+        <h2>The seven rules</h2>
+        <p>
+          Everything on this page is an instance of seven formal rules from
+          the <a
+            href="https://github.com/ryolang/ryo/blob/main/docs/specification.md"
+            >spec (§5.3)</a
+          >. Rule 7 is the one the aliasing error cites:
+        </p>
+        <div class="ref-table-wrap">
+          <table class="rules-table">
+            <thead>
+              <tr><th></th><th>Rule</th><th>In one line</th></tr>
+            </thead>
+            <tbody>
+              <tr id="rule-1">
+                <td><span class="rule-num">1</span></td>
+                <td>Assignment and return default to <strong>move</strong></td>
+                <td>Owning types invalidate the source binding — E0020</td>
+              </tr>
+              <tr id="rule-2">
+                <td><span class="rule-num">2</span></td>
+                <td>Parameters default to <strong>immutable borrow</strong></td>
+                <td>No annotation anywhere; the caller's binding stays valid</td>
+              </tr>
+              <tr id="rule-3">
+                <td><span class="rule-num">3</span></td>
+                <td>Mutable borrows are always <strong>explicit</strong></td>
+                <td><code>inout</code> in the signature, <code>&amp;</code> at the call site, <code>mut</code> binding</td>
+              </tr>
+              <tr id="rule-4">
+                <td><span class="rule-num">4</span></td>
+                <td><code>move</code> parameters override the default</td>
+                <td>The transfer is declared in the signature; the caller's binding dies</td>
+              </tr>
+              <tr id="rule-5">
+                <td><span class="rule-num">5</span></td>
+                <td>Functions cannot return borrows</td>
+                <td>Returns are always owned — retaining views over <code>shared[T]</code> excepted (spec'd)</td>
+              </tr>
+              <tr id="rule-6">
+                <td><span class="rule-num">6</span></td>
+                <td>Structs cannot contain references</td>
+                <td>Fields are owned, <code>shared[T]</code>, retaining views, or IDs — never <code>&amp;T</code></td>
+              </tr>
+              <tr id="rule-7" class="rule-row-hl">
+                <td><span class="rule-num">7</span></td>
+                <td>One writer <strong>or</strong> many readers — borrows scoped to calls</td>
+                <td>One <code>inout</code> or many borrows per call, never both — E0032</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="assets/highlight.min.js"></script>
+    <script src="assets/ryo-highlight.js"></script>
+    <script src="assets/script.js"></script>
+    <script>
+      (function () {
+        // Step 1: reveal the diagnostic.
+        var compileBtn = document.getElementById("compile-btn");
+        compileBtn.addEventListener("click", function () {
+          document.getElementById("diag").classList.remove("hidden");
+          document.getElementById("diag-why").classList.remove("hidden");
+          compileBtn.classList.add("hidden");
+        });
+
+        // Step 3: reveal the aliasing diagnostic.
+        var aliasBtn = document.getElementById("alias-compile-btn");
+        aliasBtn.addEventListener("click", function () {
+          document.getElementById("alias-diag").classList.remove("hidden");
+          document.getElementById("alias-why").classList.remove("hidden");
+          aliasBtn.classList.add("hidden");
+        });
+
+        // Step 2: fix cards toggle their panels (accordion — one open).
+        var cards = Array.prototype.slice.call(
+          document.querySelectorAll(".fix-card"),
+        );
+        cards.forEach(function (card) {
+          card.addEventListener("click", function () {
+            var id = "fix-" + card.dataset.fix;
+            var panel = document.getElementById(id);
+            var isOpen = panel.classList.contains("open");
+            cards.forEach(function (c) {
+              c.setAttribute("aria-expanded", "false");
+            });
+            document.querySelectorAll(".fix-panel").forEach(function (p) {
+              p.classList.remove("open");
+            });
+            if (!isOpen) {
+              panel.classList.add("open");
+              card.setAttribute("aria-expanded", "true");
+              panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            }
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

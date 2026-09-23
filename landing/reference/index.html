@@ -1162,6 +1162,28 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
               on the parameter, and the compiler enforces the rules. The design
               is inspired by Rust's borrow checker and Mojo's eager destruction.
             </p>
+            <div class="callout callout--info">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="16" x2="12" y2="12"></line>
+                <line x1="12" y1="8" x2="12.01" y2="8"></line>
+              </svg>
+              <div>
+                <p class="callout-title">New to ownership?</p>
+                <p>
+                  Walk through a real ownership error and the three ways to fix
+                  it in the
+                  <a href="../ownership.html">interactive Ownership Lite tutorial</a>.
+                </p>
+              </div>
+            </div>
             <p>
               There are three parameter <em>modes</em>, chosen by a keyword
               between the colon and the type:
