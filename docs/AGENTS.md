@@ -31,9 +31,9 @@ error DivisionByZero
 error InvalidInput(str)
 
 fn divide(a: int, b: int) -> DivisionByZero!int:
-    if b == 0:
-        return DivisionByZero
-    return a / b
+	if b == 0:
+		return DivisionByZero
+	return a / b
 
 # Optional types
 user: ?User = none
@@ -45,7 +45,7 @@ type Port = int(1..65535)
 # Contracts
 #[pre(x > 0)]
 fn double(x: int) -> int:
-    return x * 2
+	return x * 2
 ```
 
 ---

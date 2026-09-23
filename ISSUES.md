@@ -354,7 +354,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-168 — Hyphenated `ryo-*.md` doc names violate the lowercase-underscore convention
 
 **Files:** `docs/dev/` (`ryo-incremental-compilation.md`, `ryo-context-and-otel-proposal.md`, `ryo-std-data-proposal.md`, `ryo-proposal-review-issues.md`, `ryo-missing-features-and-gaps.md`, `ryo-view-materialization.md`, `ryo-slicing-and-memory-model-final-spec.md`, `ryo-compiler-llm-instructions.md`), plus every doc that links to them
-**Summary:** The repo convention is lowercase with underscores for docs (special files like `README.md` excepted). The eight `ryo-*-*.md` files under `docs/dev/` use hyphens instead. `NOTES.md` was renamed to `notes.md` as the cheap half of this cleanup; the hyphenated set was scoped out because each rename must also update every inbound link (`AGENTS.md`, `ISSUES.md`, the roadmap, and the docs/dev README index at minimum).
+**Summary:** The repo convention is lowercase with underscores for docs (special files like `README.md` excepted). The eight `ryo-*-*.md` files under `docs/dev/` use hyphens instead. `notes.md` was renamed to `NOTES.md` as the cheap half of this cleanup; the hyphenated set was scoped out because each rename must also update every inbound link (`AGENTS.md`, `ISSUES.md`, the roadmap, and the docs/dev README index at minimum).
 **Resolution:** One sweep: `git mv` each `ryo-*.md` to its underscore form, then repo-wide grep for each old basename to update links. Verify no residual references with a final grep for `ryo-.*\.md` across tracked markdown.
 
 ### I-172 — Consuming struct update has no ergonomic form: move + mutate + return dance, no update sugar, no clone

@@ -460,7 +460,7 @@ The `go fmt` command wraps gofmt and applies it to packages.
 - `loopclosure` – Loop variable capture in closures
 - `structtag` – Invalid struct field tags
 - `unreachable` – Dead code detection
-- `stdversion` – Standard-library symbols too new for the Go version in force (Go 1.27; runs by default in `go test`)
+- `stdversion` – Standard-library symbols too new for the Go version in force for the referring file, as determined by the `go` directive in `go.mod` and build tags (runs by default in `go test` since Go 1.27)
 
 Vet uses the `golang.org/x/tools/go/analysis` framework. Each analyzer is a pluggable module that can be enabled/disabled individually.
 

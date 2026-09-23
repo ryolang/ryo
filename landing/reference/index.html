@@ -1095,7 +1095,11 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
                   </tr>
                   <tr>
                     <td><code>float_to_str(x: float) -&gt; str</code></td>
-                    <td>Convert a float to its shortest string form.</td>
+                    <td>
+                      Convert a float to its shortest string form;
+                      non-finite inputs produce <code>"nan"</code>,
+                      <code>"inf"</code>, or <code>"-inf"</code>.
+                    </td>
                   </tr>
                   <tr>
                     <td><code>bool_to_str(b: bool) -&gt; str</code></td>
@@ -1137,7 +1141,8 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
                 <p>
                   Passing an <code>int</code>, <code>float</code>, or
                   <code>bool</code> is a compile error. Convert numbers with
-                  <code>int_to_str()</code> or <code>float_to_str()</code>
+                  <code>int_to_str()</code> or <code>float_to_str()</code>,
+                  and booleans with <code>bool_to_str()</code>,
                   first.
                 </p>
               </div>
