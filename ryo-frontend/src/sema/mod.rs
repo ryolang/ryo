@@ -502,8 +502,10 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         sema.sink.emit(Diag::error(
             body.span,
             DiagCode::ReturnBorrowedValue,
-            "functions cannot return views (`strview`) — return an owned `str` instead (Rule 5)"
-                .to_string(),
+            format!(
+                "functions cannot return views (`{}`) — return an owned value instead (Rule 5)",
+                sema.pool.display(body.return_type)
+            ),
         ));
     }
 

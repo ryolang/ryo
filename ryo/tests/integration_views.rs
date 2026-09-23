@@ -418,3 +418,117 @@ fn test_str_materialize_rejects_owned_str() {
         stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// `str`/`strview`.as_bytes(): zero-copy bytesview projection — the mirror
+// of `to_bytes()` (no allocation, no runtime call). View rules apply
+// unchanged: P2 freeze, P4 last-use lifting, E1/E2 non-escaping.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_as_bytes_scan_and_len() {
+    // The headline use: hand a string's bytes to a `bytesview` parameter
+    // and scan/index them without any copy.
+    assert_ryo_runs(
+        "as_bytes_scan.ryo",
+        "fn count_h(b: bytesview) -> int:\n\tmut n = 0\n\tmut i = 0\n\twhile i < b.len():\n\t\tif b[i] == 104:\n\t\t\tn += 1\n\t\ti += 1\n\treturn n\n\nfn main():\n\ts = \"hello, heap\"\n\tv = s.as_bytes()\n\tassert(v.len() == 11, \"len\")\n\tassert(v[0] == 104, \"first byte\")\n\tassert(count_h(v) == 2, \"scan\")\n\tprint(s)\n\tprint(\"ok\")\n",
+    );
+}
+
+#[test]
+fn test_as_bytes_multibyte_utf8() {
+    // The projection exposes the raw UTF-8 encoding: `é` is 0xC3 0xA9.
+    assert_ryo_runs(
+        "as_bytes_utf8.ryo",
+        "fn main():\n\ts = \"é\"\n\tv = s.as_bytes()\n\tassert(v.len() == 2, \"len\")\n\tassert(v[0] == 195, \"byte 0\")\n\tassert(v[1] == 169, \"byte 1\")\n\tw = \"héllo\"[1:3].as_bytes()\n\tassert(w.len() == 2, \"strview receiver\")\n\tassert(w[0] == 195, \"strview byte 0\")\n\tprint(\"ok\")\n",
+    );
+}
+
+#[test]
+fn test_as_bytes_transient_and_borrowed_param() {
+    // Unbound (transient) projections and projections of a borrowed
+    // `str` parameter (promote-on-view path) both work.
+    assert_ryo_output(
+        "as_bytes_transient.ryo",
+        "fn scan(s: str) -> int:\n\treturn s.as_bytes().len()\n\nfn main():\n\tprint(int_to_str(\"banana\".as_bytes().len()))\n\tx = \"ab\" + int_to_str(1)\n\tprint(int_to_str(scan(x)))\n",
+        "63",
+    );
+}
+
+#[test]
+fn test_as_bytes_freeze_lifts_at_last_use() {
+    // P4: after the view's last read the owner is mutable again.
+    assert_ryo_output(
+        "as_bytes_lift.ryo",
+        "fn main():\n\tmut s = \"hi\"\n\tv = s.as_bytes()\n\tprint(int_to_str(v.len()))\n\tstr_push(&s, \"!\")\n\tprint(s)\n",
+        "2hi!",
+    );
+}
+
+#[test]
+fn test_as_bytes_freeze_move_diag() {
+    // P2 freeze via as_bytes: same E0035 as a slice.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn eat(move s: str):\n\tprint(s)\n\nfn main():\n\ts = \"hi\"\n\tv = s.as_bytes()\n\teat(s)\n\tprint(int_to_str(v.len()))\n";
+    let test_file = create_test_file(temp_dir.path(), "as_bytes_move.ryo", code);
+    let output = run_ryo_command(&["run", "as_bytes_move.ryo"], &test_file).expect("run");
+    assert!(!output.status.success(), "expected compile error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0035"), "expected E0035: {}", stderr);
+    assert!(
+        stderr.contains("cannot move `s` while a slice of it is live"),
+        "expected freeze message: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_as_bytes_freeze_inout_diag() {
+    // P2 freeze on mutation: `str_push(&s, ...)` while the view is live.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tmut s = \"hi\"\n\tv = s.as_bytes()\n\tstr_push(&s, \"!\")\n\tprint(int_to_str(v.len()))\n";
+    let test_file = create_test_file(temp_dir.path(), "as_bytes_inout.ryo", code);
+    let output = run_ryo_command(&["run", "as_bytes_inout.ryo"], &test_file).expect("run");
+    assert!(!output.status.success(), "expected compile error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0035"), "expected E0035: {}", stderr);
+    assert!(
+        stderr.contains("cannot mutate `s` while a slice of it is live"),
+        "expected freeze message: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_as_bytes_return_diag() {
+    // E1: the as_bytes result is a view — returning it is rejected at
+    // the signature (E0022) and backstopped in ownership (E0034).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn bad(s: str) -> bytesview:\n\treturn s.as_bytes()\n";
+    let test_file = create_test_file(temp_dir.path(), "as_bytes_return.ryo", code);
+    let output = run_ryo_command(&["run", "as_bytes_return.ryo"], &test_file).expect("run");
+    assert!(!output.status.success(), "expected compile error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0022"), "expected E0022: {}", stderr);
+    assert!(
+        stderr.contains("cannot return views"),
+        "expected view-return message: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_as_bytes_on_bytes_diag() {
+    // Wrong-family receiver: `bytes` already IS bytes — no `as_bytes`.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tb = b\"\\x61\"\n\tv = b.as_bytes()\n";
+    let test_file = create_test_file(temp_dir.path(), "as_bytes_bytes.ryo", code);
+    let output = run_ryo_command(&["run", "as_bytes_bytes.ryo"], &test_file).expect("run");
+    assert!(!output.status.success(), "expected compile error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bytes has no method 'as_bytes'"),
+        "expected no-method message: {}",
+        stderr
+    );
+}

@@ -423,6 +423,48 @@ fn bridging_methods_take_no_arguments() {
 }
 
 #[test]
+fn as_bytes_types_on_str_and_strview() {
+    // `as_bytes()` is the zero-copy mirror of `to_bytes()`: it lowers to
+    // a `ToView` conversion typed `bytesview` — no runtime call, so the
+    // `__ryo_str_to_bytes` callee must not even be interned.
+    let (tirs, pool) =
+        run("fn main():\n\ts = \"ab\"\n\tv = s.as_bytes()\n\tw = s[0:1]\n\tu = w.as_bytes()\n")
+            .expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    let projections = main
+        .instructions
+        .iter()
+        .filter(|i| i.tag == TirTag::ToView && i.ty == pool.bytes_view())
+        .count();
+    assert_eq!(
+        projections, 2,
+        "both as_bytes() calls must lower to bytesview-typed ToView"
+    );
+    assert!(
+        pool.find_str("__ryo_str_to_bytes").is_none(),
+        "as_bytes must not reference the to_bytes runtime callee"
+    );
+}
+
+#[test]
+fn as_bytes_on_bytes_keeps_no_method_diagnostic() {
+    // Same diagnostic shape as the other wrong-family bridge methods.
+    let (_, diags, _) = run_with_errors("fn main():\n\tb = b\"\\x61\"\n\tx = b.as_bytes()\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::UndefinedFunction
+            && d.message.contains("bytes has no method 'as_bytes'")),
+        "got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn as_bytes_takes_no_arguments() {
+    let (_, diags, _) = run_with_errors("fn main():\n\ts = \"ab\"\n\tv = s.as_bytes(1)\n");
+    assert!(any_code(&diags, DiagCode::ArityMismatch));
+}
+
+#[test]
 fn bytes_index_yields_int() {
     let (tirs, pool) = run("fn main():\n\tb = b\"\\x01\"\n\tx = b[0]\n\tv = b[0:1]\n\ty = v[0]\n")
         .expect("sema ok");

@@ -680,7 +680,15 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
               rule, so scalar indexing (<code>b[i]</code>) is allowed.
               Bridging to text is explicit: <code>raw.to_str()</code>
               validates UTF-8; <code>text.to_bytes()</code> makes an owned
-              copy. Concatenate with <code>+</code>, append a byte with
+              copy; <code>text.as_bytes()</code> is the zero-copy mirror —
+              a <code>bytesview</code> over the string's UTF-8 bytes, with
+              the usual view rules (non-escaping, freezes the owner while
+              live). Choosing between them: reach for
+              <code>as_bytes()</code> when you only read the bytes within
+              the current scope (scanning, parsing, hashing); reach for
+              <code>to_bytes()</code> when the bytes must outlive the call
+              or become an owned, mutable buffer that diverges from the
+              string. Concatenate with <code>+</code>, append a byte with
               <code>bytes_push(&amp;b, x)</code>; printing renders the escaped
               <code>b"..."</code> form.
             </p>
