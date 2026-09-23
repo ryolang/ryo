@@ -1,5 +1,8 @@
 # TODO
 
+- compare ryo with bend https://github.com/bendlang/bend/blob/main/guide/GUIDE.md
+- gaming ffi, write a pong
+- benchmarks <https://github.com/kostya/benchmarks>
 - [cargo crap rules](https://minikin.me/blog/cargo-crap):
 
   ```sh
@@ -8,7 +11,6 @@
   ```
 
 - [ ] https://github.com/ludo-technologies/polyscan `npx polyscan analyze .`
-- [ ] Set Up Miri <https://github.com/rust-lang/miri>
 - [ ] <https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md>
 - [ ] FFI tests: sqlite(included), raylib(external)
 - [ ] [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)

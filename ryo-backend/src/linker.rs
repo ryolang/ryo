@@ -14,6 +14,14 @@ pub fn link_executable(
     cmd.arg("cc").arg("-o").arg(exe_file).arg(obj_file);
     cmd.arg(runtime_lib.as_os_str());
 
+    // Static musl on Linux: produced binaries run on any Linux regardless
+    // of host glibc version. zig cc bundles musl for every target, so this
+    // needs no host libc development files. See the std.net DNS caveat in
+    // implementation_roadmap.md (musl's resolver skips NSS plugins).
+    #[cfg(target_os = "linux")]
+    cmd.arg("-target")
+        .arg(format!("{}-linux-musl", std::env::consts::ARCH));
+
     let output = cmd
         .output()
         .map_err(|e| CompilerError::LinkError(format!("Failed to run zig cc: {e}")))?;

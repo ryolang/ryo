@@ -199,6 +199,12 @@
               <nav class="ref-nav-list">
                 <a href="#ownership">Ownership Lite</a>
                 <a href="#borrow-modes">Borrow Modes</a>
+              </nav>
+            </div>
+
+            <div class="ref-nav-group">
+              <p class="ref-nav-title">Roadmap</p>
+              <nav class="ref-nav-list">
                 <a href="#whats-next">What's Next</a>
               </nav>
             </div>
@@ -1088,6 +1094,18 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
                     <td>Convert an integer to its decimal string form.</td>
                   </tr>
                   <tr>
+                    <td><code>float_to_str(x: float) -&gt; str</code></td>
+                    <td>
+                      Convert a float to its shortest string form;
+                      non-finite inputs produce <code>"nan"</code>,
+                      <code>"inf"</code>, or <code>"-inf"</code>.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>bool_to_str(b: bool) -&gt; str</code></td>
+                    <td>Convert a boolean to <code>"true"</code> or <code>"false"</code>.</td>
+                  </tr>
+                  <tr>
                     <td><code>bytes_push(inout b: bytes, x: int)</code></td>
                     <td>
                       Append byte <code>x</code> (0–255, panics out of
@@ -1123,8 +1141,9 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
                 <p>
                   Passing an <code>int</code>, <code>float</code>, or
                   <code>bool</code> is a compile error. Convert numbers with
-                  <code>int_to_str()</code> first; a
-                  <code>float</code>-to-string helper is not yet available.
+                  <code>int_to_str()</code> or <code>float_to_str()</code>,
+                  and booleans with <code>bool_to_str()</code>,
+                  first.
                 </p>
               </div>
             </div>
@@ -1143,6 +1162,28 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
               on the parameter, and the compiler enforces the rules. The design
               is inspired by Rust's borrow checker and Mojo's eager destruction.
             </p>
+            <div class="callout callout--info">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="16" x2="12" y2="12"></line>
+                <line x1="12" y1="8" x2="12.01" y2="8"></line>
+              </svg>
+              <div>
+                <p class="callout-title">New to ownership?</p>
+                <p>
+                  Walk through a real ownership error and the three ways to fix
+                  it in the
+                  <a href="../ownership.html">interactive Ownership Lite tutorial</a>.
+                </p>
+              </div>
+            </div>
             <p>
               There are three parameter <em>modes</em>, chosen by a keyword
               between the colon and the type:

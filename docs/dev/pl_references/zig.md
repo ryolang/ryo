@@ -522,5 +522,5 @@ The test runner supports filtering by name and can be seeded for reproducible fu
 
 ## References
 - Dev: `docs/dev/pipeline_alignment.md` (Ryo's UIR/TIR pipeline modelled on Zig's ZIR/AIR)
-- Root `CLAUDE.md` (compiler-architecture Zig mapping)
+- Root `AGENTS.md` (compiler-architecture Zig mapping)
 - Upstream: <https://github.com/ziglang/zig>

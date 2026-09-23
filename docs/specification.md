@@ -402,7 +402,7 @@ match point:
 
 ### 4.4 Slice Types (Scope-Locked Views)
 
-Slices are lightweight borrowed views into owned data. They are **scope-locked**: a slice may be bound to a local variable whose uses remain within the current function; a slice cannot be stored in a variable, field, or container that outlives that function (see §5.7 and Rule 5).
+Slices are lightweight borrowed views into owned data. They are **scope-locked**: a slice may be bound to a local variable whose uses remain within the current function; a slice cannot be stored in a variable, field, or container that outlives that function (see §5.7 and Rule 5). The one exception: a slice of a `shared[T]` backing store is a **retaining view** and may escape (see "Retaining Views", §5.7).
 
 - `strview` (`str` slice): Immutable UTF-8 view (pointer + byte length). Created via `my_str[start:end]` or string slicing operations. Supports shorthand: `s[:end]` (from start), `s[start:]` (to end).
 - `slice[T]` (`list[T]` slice): Immutable view of `T` elements (pointer + element length). Created via `my_list[start:end]`. Supports shorthand: `items[:3]`, `items[2:]`.
@@ -426,7 +426,7 @@ fn mutate_list(inout items: list[int]): # Explicit mutable borrow
 	# ... modify items ...                # caller writes `mutate_list(&my_list)`
 ```
 
-*(Rationale: Mutable borrows remain a parameter-passing convention, not a type. Immutable views (`strview`, `slice[T]`, `bytesview`) are a narrow exception: they are first-class types that may be bound and passed, but they are non-escaping — they cannot be returned, moved, or stored in aggregates — so they cannot play the role of general-purpose reference types. This eliminates the need for lifetime annotations while preserving zero-copy performance within expression chains.)*
+*(Rationale: Mutable borrows remain a parameter-passing convention, not a type. Immutable views (`strview`, `slice[T]`, `bytesview`) are a narrow exception: they are first-class types that may be bound and passed, but they are non-escaping — they cannot be returned, moved, or stored in aggregates — so they cannot play the role of general-purpose reference types. Retaining views over `shared[T]` backing stores are the escape exception (§5.7). This eliminates the need for lifetime annotations while preserving zero-copy performance within expression chains.)*
 
 - **Materialization:** `str(view)` produces an owned `str` copy of a `strview` (allocates + copies) — the escape hatch for returning, storing, or moving viewed data past its owner. The argument must be a `strview`; anything else, including an owned `str`, is a type error. Materialization is never implicit: `x: str = view` stays a type error, while `x: str = str(view)` is the explicit, legal form. Warning **W0003** (`RedundantMaterialize`) flags materializations at argument positions the call-scoped re-borrow or a view-accepting builtin already serves, and copies that never escape while their source is never mutated — heuristically, and never as an error. `bytes(bview)` is the exact mirror for `bytesview` — an owned `bytes` copy, explicit-only, with W0003 applying to both shapes.
 
@@ -1284,9 +1284,11 @@ fn longest(a: str, b: str) -> str:
 
 **Exception — method views:** Methods on `self` may return lightweight views (e.g., iterating over a collection) that are implicitly tied to `self`'s scope. These views cannot be stored or returned — they exist only within the expression or block where they're used. See section 5.7 for details.
 
+**Exception — retaining views:** A view whose backing store is a `shared[T]` value holds a reference-counted retain on that store (see "Retaining Views", section 5.7). Because `shared[T]` is deeply immutable (§5.6) and sendable across tasks, such a view cannot dangle: it may be returned from functions, stored in variables and struct fields, and sent across task boundaries. This is the one shape that supports zero-copy library APIs — e.g., a parser that takes `shared[bytes]` and returns views into the parsed document — at the cost of one retain per view and a frozen input. Views of owned (non-`shared`) values remain scope-locked with no exceptions.
+
 #### Rule 6: Structs Cannot Contain References
 
-Struct fields must be **owned values**, `shared[T]`, or IDs — never `&T`. This eliminates the need for lifetime parameters on types.
+Struct fields must be **owned values**, `shared[T]`, retaining views, or IDs — never plain borrows (`&T`) or scope-locked views. Retaining views (§5.7) are the one view exception: their `shared[T]` retain makes storing them as safe as storing `shared[T]` itself, which is what lets a parsed document keep zero-copy pieces (e.g., AST nodes holding views into a `shared[bytes]` source). This eliminates the need for lifetime parameters on types.
 
 ```ryo
 # NOT allowed — reference fields need lifetime tracking
@@ -1483,6 +1485,7 @@ fn process(items: list[int]):
 
 - Views **cannot be stored** in variables that outlive the current block (iterator views); string slices are slightly wider — usable anywhere within the current function (§4.4).
 - Views **cannot be returned** from functions (follows Rule 5).
+- Retaining views over a `shared[T]` backing store are the exception to both rules — see "Retaining Views" below.
 - Views **cannot be passed to other functions** that would store them.
 - The compiler enforces that the source collection is not mutated while a view exists (follows Rule 7).
 
@@ -1501,6 +1504,28 @@ fn get_evens(items: list[int]) -> list[int]:
 
 *(Rationale: Lazy iterators are important for performance in chains like `filter -> map -> collect`. By scope-locking them, Ryo gets the performance benefit without lifetime annotations. The compiler can verify safety using the same lexical scope analysis used for function borrows — no new mechanism needed.)*
 
+#### Retaining Views (Shared-Backed Views)
+
+A view derived from a `shared[T]` backing store is **retaining**: it holds its own reference-counted retain on the store. Since a `shared[T]` value is deeply immutable (§5.6) and safe to send across tasks, a retaining view cannot dangle no matter where it flows. Retaining views may be returned from functions (the Rule 5 exception), stored in variables and struct fields (the Rule 6 exception), and sent across task boundaries.
+
+```ryo
+# A zero-copy parser API — possible because the views retain the source
+struct Header:
+	method: strview
+	path: strview
+
+fn parse_header(doc: shared[str]) -> Header:
+	# views into `doc` keep the buffer alive; no copy of the document
+	return Header(method=doc[0:7], path=doc[7:])
+
+doc = shared(read_file("request.txt"))
+header = parse_header(doc)
+# `doc` may be dropped here — `header`'s views keep the buffer alive
+print(header.method)
+```
+
+Ordinary views of owned values (the common case) remain scope-locked with no change. A retaining view is created only by slicing a `shared[T]` value; slicing an owned value always produces a scope-locked view. The cost of the escape hatch is explicit: the input must be frozen into `shared[T]` first, and every retaining view pays one atomic retain/release pair.
+
 ### 5.8 Summary
 
 The Ryo Ownership Model is a four-layered system:
@@ -1517,6 +1542,20 @@ flowchart TD
 **The trade-off, stated honestly:** Ryo trades lifetime annotations for simplicity. Where Rust would return a borrowed `&str` slice tied to the caller's scope, Ryo returns an owned `str` — but most returns are free thanks to NRVO and move semantics (see Section 5.9). Actual clones are limited to cases where the caller genuinely needs an independent copy. For shared-state scenarios, Ryo's `shared[mutex[T]]` is comparable in ceremony to Rust's `Arc<Mutex<T>>` — neither language makes concurrent mutation invisible. For web backends, CLI tools, and scripts, these costs are negligible. For performance-critical inner loops, manifest-gated `unsafe` blocks (Section 17) provide an auditable escape hatch to raw pointers.
 
 All four layers work together to deliver Ryo's promise: **memory safety that feels like Python.**
+
+#### What the Ownership Rules Cannot Express
+
+The restrictions that eliminate lifetime annotations (Rules 5–7) share one root: **a borrow cannot outlive the call that created it** — it cannot be returned, stored, or sent across a task boundary. Two narrow exceptions are built into the rules: retaining views over `shared[T]` (§5.7), and the scoped immutable borrows of `task.scope` (§9.2.1), which are joined before the scope exits. Four program shapes are inexpressible in the safe model as a direct consequence:
+
+1. **Zero-copy parsers over owned input.** A free function that takes a view *of an owned value* and returns sub-views cannot exist — views of owned values cannot escape the call (Rule 5). The parser-library shape is recovered by retaining views (§5.7): a parser that takes `shared[bytes]` and returns views into the document can be written, and can store those views in structs, at the cost of one retain per view and a frozen, reference-counted input. Parse-and-process inside a single function remains the zero-retain option.
+
+2. **Stored lazy pipelines.** Iterator/filter chains stored in aggregates and consumed later hold a borrow across arbitrary time. Iterators and views are scope-locked (Section 5.7); pipelines over borrowed data are callback-shaped instead. **Instead:** chain adaptors in a single statement and `collect()` (the whole chain dies at statement end); store a closure over *owned* data and invoke it at consumption time; or express stages as tasks passing owned chunks over a channel (§9.2.2) when stages should stream or run in parallel.
+
+3. **Mutable stack-lending parallelism.** Spawning workers that *mutably* borrow the caller's stack frame and join before it ends (rayon-style `par_iter` writing into disjoint chunks). Immutable borrows do cross task boundaries in the narrow scoped form of §9.2.1 (`task.scope` children, joined before the scope exits); general mutable lending does not — disjointness across tasks cannot be verified without full borrow checking. **Instead:** parallel map/reduce — `task.scope` children capture by immutable borrow, compute, and return owned results the parent combines. Parallel in-place mutation of one buffer uses the blessed `std.slice.split_mut` primitive (§9.2.1); until it ships, manifest-gated `unsafe` (Section 17) is the escape hatch.
+
+4. **Self-referential types.** A type that owns a buffer and holds views into itself. Rules 5 and 6 together forbid it (a retaining view's owner is always an external `shared[T]` cell, never the struct itself). **Instead:** restructure to IDs or handles into a `shared[T]`-owned buffer, or isolate the self-referential core behind manifest-gated `unsafe` (Section 17) — the same tool Rust requires (`Pin` + `unsafe`) for most of these types.
+
+Everything else the rules restrict has a mechanical rewrite, not an impossibility: disjoint field borrows become split calls or hoisted reads; borrowed graph edges become IDs; interior mutability becomes `shared[T]`. The most significant consequence falls on library design rather than application design: zero-copy parsing requires the `shared[T]`-backed shape (retaining views), not the raw borrowed-output shape.
 
 ### 5.9 Avoiding Unnecessary Copies
 
@@ -2835,6 +2874,9 @@ Tasks are Ryo's lightweight, non-OS-thread concurrency unit (like Go's goroutine
 | **Await** | `fut.await` | **`future[T]`** | **Suspends the current green thread** until the value is ready. Does NOT block the OS thread. |
 
 **Ownership Safety:** Task closures implicitly capture by **move** — the compiler enforces this because tasks may outlive the spawning scope (see §6.2.2). To share data across tasks, use `shared[T]` — assignment retains the handle (§5.6); there is no explicit `.clone()`. **Exception (scoped task borrows):** inside a `task.scope` body — structured concurrency, where the scope joins all children before exiting — child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as §4.4) and that no capture escapes the scope. Projections (`strview`, `slice[T]`, `bytesview`) may be captured too: the scope join is lexically inside the defining function, so the view still cannot escape it — the owner's freeze extends to the end of the `task.scope` block. `task.run` and `task.spawn_detached` are unchanged: implicit move capture, enforced.
+
+**Mutable lending is a deliberate non-goal.** `task.scope` children may capture by immutable borrow only. General mutable borrows across tasks would require proving the borrowed regions disjoint — full borrow-checker machinery, which Ownership Lite exists to avoid. The single blessed exception is `std.slice.split_mut`: it splits a mutable slice into `n` disjoint mutable chunks, returned as scope-locked handles. Disjointness holds by construction, so each `task.scope` child may capture one chunk mutably; the scope join still guarantees every chunk borrow ends before the enclosing frame. Outside that primitive, data crossing tasks is `move`d, `shared[T]`, or immutably borrowed within a scope.
+
 **FFI Warning:** Calling blocking C functions (like `sleep`) from a task will block that task's execution. Mark such FFI imports with the `#[blocking]` attribute.
 
 **Task Handles (`handle[T]`):** Detached tasks outlive any scope, so a `future[T]` cannot represent them — dropping a future cancels the task, and identity must not imply ownership. `handle[T]` is an **identity-only token**: sendable across tasks, comparable for equality, with **no dereference** — all interaction with the task happens through channels. Dropping a `handle[T]` does **not** cancel the task; a `handle[T]` keeps no task alive either (detached tasks are cancelled on process exit regardless). Handles are how supervisors, registries, watchdogs, and cancellation tokens refer to long-lived tasks. FFI pointers (`FILE*`, window handles, connection handles) follow the same shape. *(Rationale: Pony's `tag` capability is the proven precedent — identity without access is sufficient for supervision and never entangles lifetimes.)*

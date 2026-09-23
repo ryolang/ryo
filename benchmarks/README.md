@@ -43,51 +43,61 @@ JIT and AOT land within noise of each other (~1.42–1.43×) because both share 
 
 * **Focus:** Runtime string ABI + eager destruction — concat over 50,000 iterations; the direct before/after measure for the packed-`u128` runtime ABI.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** After the SSO + consuming-concat rework (2026-09-14) Ryo AOT runs at **Rust parity** (1.6 ms vs 1.5 ms) at the lightest RSS — the pre-rework 12.33x gap was allocation policy (a fresh exact-size buffer per concat), not codegen. See the benchmark's README for the full before/after story.
 
 ### 4. [String Slicing Benchmark](./string_slicing/)
 
 * **Focus:** Zero-copy string views — scan a 688 KiB in-program-generated string counting substring matches through string-semantic slices (`strview` / `&str` with boundary validation / `String.UTF8View`), copying and storing nothing.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT (3.4 ms, 1.89x slower than Rust) sits **far ahead of Swift** (17.6 ms, 9.78x) — the scan loop makes **zero runtime calls** after slice/compare inlining. The residual gap to Rust is §18 checked-arithmetic guards, the promote-on-view spill (I-184), and Cranelift mid-end quality.
 
 ### 5. [Byte Slicing Benchmark](./byte_slicing/)
 
 * **Focus:** The same scan workload on raw bytes — `bytesview` / `&[u8]` / `[UInt8]` slices with no UTF-8 char-boundary validation anywhere. Split out of string_slicing (2026-09-17) so each suite compares like with like; the delta between the two isolates Ryo's `str` boundary-validation cost.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT (2.7 ms) lands **within noise of Swift** (2.5 ms) at 1.70x behind Rust; the ~0.6–0.7 ms delta against Ryo's string_slicing row is exactly the UTF-8 char-boundary validation cost.
 
 ### 6. [Mandelbrot Benchmark](./mandelbrot/)
 
 * **Focus:** Float codegen — 401×501 grid, max 80 iterations per pixel; no overflow guards in play, the cleanest Cranelift readout.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT is **1.11x slower than Rust** (14.6 vs 13.2 ms) — with no overflow guards in play for floats, this is the cleanest readout of Cranelift floating-point codegen and it is near parity.
 
 ### 7. [Collatz Benchmark](./collatz/)
 
 * **Focus:** Integer loop/branch — total stopping time for seeds 1..1,000,000; a hot flat loop complementing fibonacci's recursion profile.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT runs at **2.07x Rust** (216 ms), decomposed by disassembly diff into ~1.6x the spec §18 checked-arithmetic policy (equally-checked Rust measures 1.61x, on par with Swift's 1.58x) plus ~1.3x Cranelift aarch64 lowering gaps (unfolded `srem x, 2`, unfused overflow branches per I-165, unstrength-reduced `mul x, 3`). See the benchmark's README for the breakdown.
 
 ### 8. [Doubling Concat Benchmark](./doubling_concat/)
 
 * **Focus:** Runtime allocation strategy — `s = s + s` exponential growth to 16 MiB, stressing `ryo_str_alloc` / `ryo_str_concat`.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT is the **fastest arm, tied with Rust** at 3.7 ms (1.01x, within noise) at the lowest RSS (33.4 MB) — eager destruction keeps live string memory bounded at ~1.5x the final size through the doublings.
 
 ### 9. [Many Small Strings Benchmark](./many_small_strings/)
 
 * **Focus:** Flat-loop alloc/free churn — 500,000 short strings built and dropped, complementing eager_destruction's recursion angle.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** After the SSO rework (2026-09-14) Ryo AOT is the **fastest arm** (9.6 ms vs Rust 10.5, Swift 10.6) at the lightest RSS (1.34 MB) — ≤ 23-byte strings are inline slots, so the per-iteration string never touches the heap.
 
 ### 10. [Struct Records Benchmark](./struct_records/)
 
 * **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field. Ryo AOT currently beats Rust and Go here; only Swift's small-string optimization keeps it ahead.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Highlights:** After the SSO rework (2026-09-14) Ryo AOT is the **fastest arm** at 11.4 ms — ahead of Swift (12.1 ms), Rust (24.8 ms), and Go (26.0 ms) — at the lightest RSS of the suite (1.36 MB). With every name ≤ 23 bytes living inline in the record, the per-round heap alloc/free is gone; Ryo runs 11.6x faster than Python with ~11x less memory.
 
 ### 11. [Struct Records Reuse Benchmark](./struct_records_reuse/)
 
 * **Focus:** The keep-original record update — same record, but the caller uses `p` again after `birthday`, so the update cannot consume it. Rust and Ryo pay an explicit clone, Swift/Go/Python share cheaply; tracking measure for the record-update ergonomics gap (I-172) and what `shared[T]` or a small-string optimization would buy.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Highlights:** Post-SSO (2026-09-14) Ryo AOT is **second behind Swift** at 14.7 ms — ahead of Go (25.8 ms) and Rust (32.3 ms) — with the manual `p.name + ""` clone now an inline-to-inline concat that never touches the heap. The residual gap to Swift is the clone-ergonomics story (I-172: `Clone` trait or `shared[T]`), not string allocation; Ryo runs 10.2x faster than Python at the lightest RSS of the suite (1.36 MB).
 
 ### 12. [Struct Records Inout Benchmark](./struct_records_inout/)
 
 * **Focus:** Imperative update-in-place through a mutable borrow (`inout` / `&mut` / pointer / attribute store) — no new record, no clone, no sret. Verifies that choosing between inout and the consuming move+return form costs nothing, so the idiom choice can be driven by intent.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Highlights:** Post-SSO (2026-09-14) Ryo AOT is the **fastest arm** at 11.1 ms — ahead of Swift (12.3 ms), Rust (25.5 ms), and Go (25.9 ms) — and the design claim holds at the new level: inout matches the consuming update (11.1 ms vs 11.4 ms in `struct_records`), so the choice between the two idioms remains free. Ryo runs 10.1x faster than Python at the lightest RSS (1.36 MB).
 
 ---
 
