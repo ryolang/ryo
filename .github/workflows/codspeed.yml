@@ -118,6 +118,7 @@ jobs:
           ./target/release/ryo build benchmarks/struct_records/struct_records.ryo
           ./target/release/ryo build benchmarks/struct_records_reuse/struct_records_reuse.ryo
           ./target/release/ryo build benchmarks/struct_records_inout/struct_records_inout.ryo
+          ./target/release/ryo build benchmarks/json_validate/json_validate.ryo
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:
@@ -168,6 +169,7 @@ jobs:
           ./target/release/ryo build benchmarks/struct_records/struct_records.ryo
           ./target/release/ryo build benchmarks/struct_records_reuse/struct_records_reuse.ryo
           ./target/release/ryo build benchmarks/struct_records_inout/struct_records_inout.ryo
+          ./target/release/ryo build benchmarks/json_validate/json_validate.ryo
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:
