@@ -14,9 +14,11 @@ fn test_print_hello_world() {
         run_ryo_command(&["run", "hello.ryo"], &test_file).expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Hello, World!",
+        "print should emit exactly the string, no added newline"
+    );
 }
 
 #[test]
@@ -28,9 +30,7 @@ fn test_print_with_newline() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Line\n");
 }
 
 #[test]
@@ -46,9 +46,10 @@ fn test_multiple_print_calls() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "First\nSecond\nThird\n"
+    );
 }
 
 #[test]
@@ -60,9 +61,7 @@ fn test_print_empty_string() {
         run_ryo_command(&["run", "empty.ryo"], &test_file).expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }
 
 // ============================================================================
@@ -85,13 +84,6 @@ fn test_fn_main_empty() {
         output.status.success(),
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "void main always exits with 0, got: {}",
-        stdout
     );
 }
 
@@ -142,8 +134,6 @@ fn test_fn_with_variable() {
         run_ryo_command(&["run", "fn_var.ryo"], &test_file).expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
 }
 
 #[test]
@@ -162,8 +152,6 @@ fn test_fn_add_two_functions() {
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
 }
 
 #[test]
@@ -179,13 +167,6 @@ fn test_expression_statement_print() {
         output.status.success(),
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0, got: {}",
-        stdout
     );
 }
 
@@ -203,13 +184,6 @@ fn test_backward_compat_flat_program() {
         "Flat programs should still work. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Flat programs should exit with 0, got: {}",
-        stdout
-    );
 }
 
 #[test]
@@ -222,13 +196,10 @@ fn test_forward_reference() {
     let output = run_ryo_command(&["run", "forward_ref.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("[Result] => 0"),
-        "Forward reference should work, got stdout: {}\nstderr: {}",
-        stdout,
-        stderr
+        output.status.success(),
+        "Forward reference should work, got stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -241,13 +212,10 @@ fn test_multiple_params() {
     let output = run_ryo_command(&["run", "multi_params.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("[Result] => 0"),
-        "sum3(10, 20, 30) should compile and exit 0, got stdout: {}\nstderr: {}",
-        stdout,
-        stderr
+        output.status.success(),
+        "sum3(10, 20, 30) should compile and exit 0, got stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -260,13 +228,10 @@ fn test_nested_calls() {
     let output = run_ryo_command(&["run", "nested_calls.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("[Result] => 0"),
-        "double(double(3)) should compile and exit 0, got stdout: {}\nstderr: {}",
-        stdout,
-        stderr
+        output.status.success(),
+        "double(double(3)) should compile and exit 0, got stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -279,13 +244,10 @@ fn test_arithmetic_in_function() {
     let output = run_ryo_command(&["run", "fn_arith.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("[Result] => 0"),
-        "compute(5, 7) should compile and exit 0, got stdout: {}\nstderr: {}",
-        stdout,
-        stderr
+        output.status.success(),
+        "compute(5, 7) should compile and exit 0, got stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -346,13 +308,6 @@ fn bool_program_compiles_and_runs() {
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0, got: {}",
-        stdout
-    );
 }
 
 // ============================================================================
@@ -373,12 +328,6 @@ fn float_program_compiles_and_runs() {
         output.status.success(),
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[Result] => 0"),
-        "Should exit with code 0, got: {}",
-        stdout
     );
 }
 
@@ -415,8 +364,6 @@ fn integer_division_and_modulo_compile_and_run() {
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
 }
 
 // ============================================================================
@@ -437,8 +384,6 @@ fn test_if_elif_else_classify() {
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
 }
 
 #[test]
@@ -455,8 +400,6 @@ fn test_and_short_circuit_in_range() {
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
 }
 
 #[test]
@@ -473,8 +416,6 @@ fn test_not_operator_codegen() {
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
 }
 
 #[test]
@@ -491,8 +432,6 @@ fn test_simple_if_else() {
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
 }
 
 #[test]
@@ -509,8 +448,6 @@ fn test_if_without_else() {
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
 }
 
 #[test]
@@ -527,8 +464,6 @@ fn test_nested_if() {
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
 }
 
 #[test]
@@ -545,8 +480,6 @@ fn test_combined_logical_and_conditional() {
         "ryo run should succeed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[Result] => 0"));
 }
 
 // ============================================================================
@@ -985,7 +918,6 @@ fn test_str_variable_print() {
         "Output should contain 'Hello', got: {}",
         stdout
     );
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
@@ -1010,7 +942,6 @@ fn test_str_concat() {
         "Output should contain 'Hello, World!', got: {}",
         stdout
     );
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
@@ -1034,7 +965,6 @@ fn test_str_concat_chained() {
         "Output should contain 'abc', got: {}",
         stdout
     );
-    assert!(stdout.contains("[Result] => 0"), "Should exit with code 0");
 }
 
 #[test]
@@ -1149,9 +1079,8 @@ fn test_float_to_str_large_number() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Extract the float value: it's after "[Codegen]" and before "[Result]"
-    let after_codegen = stdout.split("[Codegen]").nth(1).unwrap();
-    let float_str = after_codegen.split("[Result]").next().unwrap().trim();
+    // stdout is exactly the program's own output: the printed float.
+    let float_str = stdout.trim();
     let parsed: f64 = float_str.parse().unwrap();
     assert_eq!(parsed, 1.8e19);
 }
@@ -1172,9 +1101,8 @@ fn test_float_to_str_small_decimal() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Extract the float value: it's after "[Codegen]" and before "[Result]"
-    let after_codegen = stdout.split("[Codegen]").nth(1).unwrap();
-    let float_str = after_codegen.split("[Result]").next().unwrap().trim();
+    // stdout is exactly the program's own output: the printed float.
+    let float_str = stdout.trim();
     let parsed: f64 = float_str.parse().unwrap();
     assert_eq!(parsed, 0.1);
 }
@@ -1364,17 +1292,7 @@ fn test_str_shadowed_by_int_assignment_does_not_panic() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Assert on the program's runtime output only (the slice after the
-    // "[Codegen]" marker), not the full stdout.
-    let runtime = stdout.split("[Codegen]").nth(1).unwrap();
-    assert!(
-        runtime.contains("2"),
-        "Output should contain '2', got: {}",
-        runtime
-    );
-    assert!(
-        runtime.contains("hello"),
-        "Output should contain 'hello', got: {}",
-        runtime
-    );
+    // stdout is exactly the program's own output: the shadowed int
+    // prints "2", then the outer str prints "hello".
+    assert_eq!(stdout, "2hello");
 }

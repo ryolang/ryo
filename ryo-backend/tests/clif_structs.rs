@@ -57,7 +57,7 @@ fn object_bytes(src: &str) -> Vec<u8> {
     let (tirs, pool, sidecar) = analyze(src);
     let mut codegen = Codegen::new_aot(Triple::host()).expect("AOT codegen should initialize");
     codegen
-        .compile(&tirs, &pool, &sidecar)
+        .compile(&tirs, &pool, &sidecar, false)
         .expect("compile should succeed");
     codegen.finish().expect("object emission should succeed")
 }

@@ -73,7 +73,7 @@ Questions, bugs, and proposals go through the [issue tracker](https://github.com
 - [Compilation Pipeline](docs/dev/pipeline_alignment.md) — How the compiler works
 - [Proposals](docs/dev/proposals.md) — Future features
 - [Design Issues](docs/dev/design_issues.md) — Open design decisions
-- [CLAUDE.md](CLAUDE.md) — Project context for AI assistants and contributors
+- [AGENTS.md](AGENTS.md) — Project context for AI assistants and contributors
 
 ## License
 

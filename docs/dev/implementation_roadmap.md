@@ -79,6 +79,8 @@ Deferred features tracked separately — see Phase 5 section for the full list (
 | Volatile MMIO intrinsics | v0.2 | GAP-3; `core` profile intrinsic package |
 | `#[repr(packed)]` | v0.2 | GAP-4; rides with FFI |
 | Scoped task borrows + stdlib `par_*` | v0.4 | D5; concurrency runtime |
+| Retaining views (`shared[T]`-backed views that escape calls) | v0.2–v0.3 | spec §5.7 + Rule 5/6 exceptions; **blocked on the `shared[T]` refcount runtime** (same substrate as `sbytes` above); unlocks zero-copy parser libraries |
+| `std.slice.split_mut` (disjoint mutable chunks for `task.scope` children) | v0.4 | spec §9.2.1; **blocked on the concurrency runtime**; stdlib-internal `unsafe` is the disjointness proof; enables parallel in-place mutation — rides with the scoped-task-borrows row |
 | Context propagation & cancellation deadlines | v0.4 | GAP-1; must land **with** the scheduler (see `ryo-context-and-otel-proposal.md`) |
 | Binary pattern matching (if adopted) | post-v0.4 | deferred; stdlib parser facility first |
 | GUI Phase 1 (immediate-mode toolkit PoC) | post-v0.2 | ecosystem, not language; D4 + `ryo-bindgen` |
@@ -398,7 +400,7 @@ fn main() -> int:
    - `docs/dev/design_issues.md`: Comprehensive design rationale and trade-off analysis
    - Module tutorial examples in `examples/future/modules/`
    - `examples/future/modules/`: 6 practical examples demonstrating all features
-   - `CLAUDE.md`: Module system design added to Key Design Decisions
+   - `AGENTS.md`: Module system design added to Key Design Decisions
 
 5. **Practical Examples** (6 comprehensive examples):
    - `01-simple-module/`: Basic module creation and imports
@@ -536,7 +538,7 @@ The module system will be **implemented** in:
 - `docs/dev/proposals.md` - Future enhancements
 - `examples/future/modules/` - Practical examples
 - `docs/getting_started.md` - Installation and first program
-- `CLAUDE.md` - Architecture guidelines
+- `AGENTS.md` - Architecture guidelines
 
 **Next Steps:**
 
@@ -634,7 +636,7 @@ remainder = a % b     # 1
 
 ---
 
-> **Note:** Review the workspace crate layout (see root `CLAUDE.md`) and make the first split before M8.
+> **Note:** Review the workspace crate layout (see root `AGENTS.md`) and make the first split before M8.
 
 ### Milestone 8: Control Flow & Booleans [alpha]
 
@@ -1060,7 +1062,7 @@ fn main():
 > - **`ryo-driver`**: Orchestrates compiler pipeline execution.
 > - **`ryo`**: The CLI binary executable.
 >
-> For future milestones (from Milestone 8.2 onwards), development tasks, modules, and tests are structured within this Cargo workspace rather than a flat `src/` directory. For up-to-date guidelines on adding compiler features under this architecture, see the root `CLAUDE.md`.
+> For future milestones (from Milestone 8.2 onwards), development tasks, modules, and tests are structured within this Cargo workspace rather than a flat `src/` directory. For up-to-date guidelines on adding compiler features under this architecture, see the root `AGENTS.md`.
 
 ### Milestone 8.2: Implicit Borrow Liveness & Ownership Pass Refactors [alpha] ✅ COMPLETE
 
@@ -1684,6 +1686,8 @@ fn main():
    - Default values, named args, `_` positional params
    - Mixing positional + named args
    - Error cases: wrong name, positional for non-`_` param, positional after named, missing required arg, duplicate arg
+
+**Design note — sentinels (from Python 3.15's `sentinel`, PEP 661):** default parameters reopen the "not provided vs explicitly `none`" question for optional params. Ryo's static types mostly cover sentinel needs (a dedicated enum variant *is* a sentinel, with exhaustiveness checking), but stdlib APIs with `?T` defaults need a uniform idiom. Decide at scoping: builtin `sentinel` type vs an enum-variant convention.
 
 **Visible Progress:** Functions with defaults and named arguments work. Clear compile errors for argument misuse.
 
@@ -2440,6 +2444,7 @@ Test result: ok. 2 passed; 0 failed
      - `x86_64-pc-windows-msvc` (Windows)
    - Automated release artifact creation
    - Binary signing and checksums
+   - ✅ Done: AOT-produced Linux programs link static musl (`-target <arch>-linux-musl` in `ryo-backend/src/linker.rs`) — they run on any Linux regardless of host glibc version. Caveat carried to the concurrency milestone: musl's resolver skips NSS plugins, so `std.net` needs a resolver decision before it ships. A `--link=glibc|musl` escape hatch remains open.
 
 2. **Installation Scripts:**
    - `install.sh` for Unix-like systems: ✅ Done (repo root)
@@ -2457,13 +2462,14 @@ Test result: ok. 2 passed; 0 failed
    - Auto-downloads pinned Zig version on first use to `~/.ryo/toolchain/zig-{version}/`
    - No system Zig dependency — fully managed by the compiler
 
-4. **Self-Update Command:**
+4. **Self-Update Command & CLI Additions:**
    - Implement `ryo upgrade` command
    - Check latest release from GitHub/CDN
    - Download and replace binary in `~/.ryo/bin/`
    - Version pinning support (future): `ryo upgrade v0.2.0`
    - Scope: only manages binaries installed by `install.sh` into `~/.ryo/bin/`; package-manager installs (brew/winget) upgrade via their package manager
    - Windows caveat: a running `.exe` cannot replace itself — needs a swap/helper strategy
+   - Implement `ryo check` (type-check only, no codegen — the pipeline already supports stopping after sema + ownership): the standard third command every compiled language has, and the fast path editors/CI will want before `ryo build`
 
 5. **Landing Page:**
    - Simple static page at `ryolang.org`
@@ -2685,6 +2691,7 @@ Available commands:
 - State management for incremental definitions
 - Error recovery (syntax errors don't crash REPL)
 - Integration with readline/rustyline for input editing
+- If the REPL outgrows JIT-per-line into a real interpreter, [wasmi 2.0](https://wasmi-labs.github.io/blog/posts/wasmi-v2.0/) is the design reference: accumulator registers over pure stack slots (operands/results live in hardware registers, no decode-load-store per op), op-code fusion to eliminate the copy instructions accumulators introduce, and fixed-width 64-bit stack cells.
 
 **Timeline:** v1.4 (3-6 months after v0.1.0)
 **Effort:** 2-3 weeks
@@ -2845,6 +2852,14 @@ Adding M:N threading has **specification impacts** that require changes to earli
 
 - `async` and `await` are **reserved** (unused) to prevent breaking changes if design evolves
 
+**5. Duration Literals**
+
+- **Goal:** Time literals (`1d`, `60s`, `2w`) for timeouts, sleeps, and deadlines
+- **Why:** The spec already assumes the syntax — `task.timeout(5s, fut)` (spec §9), `task.sleep(100ms)`, `task.timeout(1s)` — with no literal form to back it
+- **Design:** Builtin `duration` type (lowercase, per builtin convention), int64 nanoseconds, distinct from `int` (no implicit mixing). Suffixes: `ns us ms s m h d w` only — months/years excluded (calendar-dependent). Checked arithmetic per spec §18. Lexer uses longest-match alternation (`ms` before `m`); `m` for minutes is safe (no meters in Ryo)
+- **Approval:** New syntax — pending explicit human approval at v0.4 scoping (design change escalation)
+- **Deferred:** Byte-size literals (`kB`/`MB` SI vs `KiB`/`MiB` IEC) — worth it eventually, not in scope here
+
 **Runtime Architecture:**
 
 - **M:N Threading:** M green threads on N OS threads (N = CPU cores)
@@ -2858,7 +2873,7 @@ Adding M:N threading has **specification impacts** that require changes to earli
 - `std.task` - Task spawning, scheduling, scopes, timeouts
 - `std.channel` - Channel creation, sender/receiver types
 - `std.sync` - Mutex, RwLock, Atomic primitives
-- `std.net` - Async network I/O (TCP, UDP, HTTP)
+- `std.net` - Async network I/O (TCP, UDP, HTTP). **DNS gate:** produced Linux binaries link static musl, whose resolver skips NSS plugins — decide the resolver story before shipping (pure-Ryo resolver, or document a dynamic-glibc link recommendation for NSS-heavy environments; Go was forced into its own resolver by exactly this)
 
 **Example (Full Workflow):**
 
@@ -3014,6 +3029,14 @@ fn main():
   len = strlen(c"Hello")
   printf(c"Length: %d\n", len)
 ```
+
+**Design reference:** [CO3](https://mversic.github.io/co3/) — a Rust FFI framework whose semantics validate and sharpen several choices Ryo already made or will face at this milestone. Not usable from Ryo (it's a Rust library); reference for design only:
+
+- **Ownership transfer is opt-in** — values are borrowed and cloned on import unless marked `move`. Independent confirmation of Ryo's Rule 2 (parameters borrow by default, `move` opts into transfer).
+- **Soundness beats zero-cost by default** — references that can't convert in place (trap-representable pointees, e.g. `&mut bool`) go through explicit `#[soft]` temporary-storage + writeback conversion. The pattern Ryo needs for `inout` params across FFI where the foreign side can write invalid bit patterns.
+- **Runtime-tagged dispatch for erased handles** — `#[tag(u8, N)]` opaque types + tag-dispatched calls, checked at compile time behind a safe interface. The standard C handle+tag pattern (sqlite-style contexts) with the dispatch table verified rather than hand-rolled.
+- **Generics across FFI via monomorphization with symbol-name interpolation** (`image_hash_{Algorithm}`) — the answer if Ryo ever exports generic functions to C, where each instantiation needs a distinct symbol.
+- **`rust-spec` type classification** (Layout / Size / Alignment / Trap / Niche axes) — a ready-made checklist for deciding which Ryo types are FFI-lowerable and what validation each crossing needs.
 
 **Timeline:** v1.6 (12-18 months after v0.1.0)
 
@@ -3374,6 +3397,8 @@ ContractViolation: precondition failed: amount > 0
   contract defined at src/bank.ryo:1
 ```
 
+**Design reference:** [Verus](https://www.amazon.science/blog/developing-provably-correct-rust-code-with-verus) — the most ergonomic existence proof for how contracts should feel: specs (`requires`/`ensures`/invariants) live in the same file as the code, violations render as source-level errors, feedback is fast enough for a red-squiggles loop. Ryo's `#[pre]`/`#[post]` semantics (what's enforceable, diagnostic shape, spec/code drift) should be designed against this model. Verus itself is also the fallback if the runtime's unsafe FFI invariants (string/bytes ABI tag bits, `len ≤ cap`, concat/realloc bounds) ever need machine-checked *all-inputs* guarantees — Miri (CI'd) covers the dynamic side, Verus the static one; adopt only if runtime UB actually ships.
+
 **Effort:** ~1-2 weeks (once attribute system exists from `#[test]` milestone)
 **Dependencies:** Attribute system (Milestone 26), functions (M4), boolean expressions (M8), panic (M25)
 **Timeline:** v0.2 (ships alongside attribute system)
@@ -3541,6 +3566,16 @@ create_user("Alice", 30, "admin")                   # compile error
 - **Package Registry:** Central repository (crates.io-like) with version resolution
 - **Workspaces:** Multi-package projects with shared dependencies
 - **Build Caching:** Incremental compilation and artifact caching
+- **Built-in Profiler (`ryo profile`):** Wrap an external statistical sampler (`samply`/`perf`) into one DX-clean workflow — frame pointers (already emitted via Cranelift) are the enabler, mirroring Python 3.15's Tachyon + PEP 831 framing. Sits next to Benchmarking & Doc Generation and PGO; the collatz codegen-gap diagnosis is the motivating use case (manual disassembly diffing is what this automates)
+
+**Language Server Protocol (LSP) — scoping notes:**
+
+Reference: [Why building a Rust LSP is hard](https://rust-glancer.github.io/blog/why-lsp-is-hard/) — architectural lessons from rust-analyzer and Rust Glancer. The core mindset shift: a compiler has a binary definition of done; an LSP must produce useful answers from partial, often-broken information, immediately, and keep answering while the user types.
+
+- **Sequence features by required analysis depth** — each layer enables the next: document symbols/folding from a CST of the open file alone → hover needs an item tree + definition maps → inlay hints need body analysis + type inference → references need workspace-wide body search seeded by text matching. Ship in that order.
+- **Error-tolerant parsing is a prerequisite Ryo doesn't have yet.** The batch parser stops at the first round of errors; an LSP needs a CST that always parses (the code is permanently broken while typing). The `tree-sitter-ryo` grammar already provides this layer for structural queries; semantic layers need a non-failing mode of the compiler crates (already a library).
+- **Indexing strategy is *the* architecture decision** — lazy incremental query-based (rust-analyzer/salsa: compute only what's asked, invalidate precisely on change) vs. eager index persisted to disk (Rust Glancer: low RAM, instant restarts). Pick deliberately; it shapes everything downstream.
+- **LSP leaks into architecture** — UTF-16 position conversion with line indexes, per-file line-ending detection, a virtual filesystem with source generations, parallel read queries cancelled on state change. Budget for this infrastructure; the protocol is not a thin wrapper.
 
 **Advanced Language Features:**
 
@@ -3549,6 +3584,25 @@ create_user("Alice", 30, "admin")                   # compile error
 - **Inline Assembly:** For performance-critical code and kernel development
 - **Cross-Compilation:** Easy targeting of different platforms
 - **Profile-Guided Optimization (PGO):** Runtime profiling for better optimization
+
+**Bitwise Operators — Open Decision:**
+
+Shifts and bitwise AND/OR/XOR/NOT for `int` (hashing, checksums, binary protocols, flag sets, bit-trick inner loops). Python familiarity matters (target audience), but `&` and `|` are already assigned in Ryo (borrow, error unions). Three options on the table — **no decision yet**:
+
+| Operation | Contextual symbols (Rust model) | All-words (Erlang/OCaml model) | Mixed |
+|---|---|---|---|
+| borrow / bitand | `&x` / `a & b` | `&x` / `a band b` | `&x` / `a band b` |
+| error union / bitor | `A \| B` / `a \| b` | `A \| B` / `a bor b` | `A \| B` / `a bor b` |
+| shift left / right | `<<` / `>>` | `shl` / `shr` | `<<` / `>>` |
+| xor / bitwise not | `^` / `~` | `bxor` / `bnot` | `^` / `~` |
+
+- **Contextual symbols** — max Python familiarity. Disambiguation is parse-level, not a real collision: `&` prefix = borrow vs `&` infix = bitand; `|` type position = error union vs `|` expression = bitor (Rust does exactly this). Cost: amends the spec's "each operator has exactly one meaning" rule to "one meaning per syntactic role", and infix `&`/`|` bring back the C/Python precedence trap (`a & b == 0`) unless Rust's precedence (bitwise tighter than comparisons) is adopted.
+- **All-words** — one rule covers the set: logical and bitwise operators are words (`and`/`or`/`not` precedent), arithmetic and comparison are symbols. No spec amendment, no reader ambiguity in borrow-heavy code (`f(&a & b)` vs `f(&a band b)`). Precedent: Erlang (`band`/`bor`/`bxor`/`bnot`/`bsl`/`bsr`), OCaml (`land`/`lor`/`lxor`/`lnot`; `lsr` vs `asr` distinguishes logical vs arithmetic right shift — worth stealing), Ada/Pascal/Delphi/VHDL (words type-dispatched to bitwise), Fortran (`.AND.` + `IAND`/`IOR` intrinsics). Cost: zero glyph familiarity for the Python/C mainstream.
+- **Mixed** — Python spellings where symbols are free, words where taken. Rejected: mixing glyph and word operators in one expression (`a << 2 band mask`) has no principle behind it, just availability.
+- Symbol camp, for contrast: C, C++, Go, Rust, Swift, JS, Python, Lua, Zig all use glyphs.
+- Whichever option lands, pin right-shift semantics on negative ints (arithmetic vs logical) explicitly instead of inheriting Cranelift defaults.
+
+**Approval:** new operators — and for contextual symbols, a spec one-meaning-rule amendment — pending explicit human approval.
 
 **Standard Library Expansion:**
 

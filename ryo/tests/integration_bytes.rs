@@ -10,11 +10,9 @@ use tempfile::TempDir;
 // ---------------------------------------------------------------------------
 
 /// Compile-and-run asserting the program's exact stdout (the `print`
-/// path). JIT `run` wraps program output in `[Input Source]` / `[AST]`
-/// / `[Codegen]` dumps and a trailing `[Result] => 0` line, and `print`
-/// is a raw write (no trailing newline), so the program output is
-/// extracted between the markers — the same pattern as
-/// `integration_views.rs::test_str_materialize_escape_and_independence`.
+/// path). In default mode stdout IS the program's own output — the
+/// compiler prints nothing else — and `print` is a raw write (no
+/// trailing newline), so the expected string is compared verbatim.
 fn assert_ryo_prints(test_name: &str, code: &str, expected_stdout: &str) {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), test_name, code);
@@ -26,13 +24,7 @@ fn assert_ryo_prints(test_name: &str, code: &str, expected_stdout: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let program_out = stdout
-        .split("[Codegen]")
-        .nth(1)
-        .and_then(|s| s.split("[Result]").next())
-        .expect("run output must carry [Codegen] and [Result] markers")
-        .trim();
-    assert_eq!(program_out, expected_stdout, "stdout mismatch");
+    assert_eq!(stdout, expected_stdout, "stdout mismatch");
 }
 
 #[test]

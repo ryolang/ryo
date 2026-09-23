@@ -154,6 +154,32 @@ jobs:
         run: cargo run -- toolchain install
       - run: cargo test --test asan_smoke
 
+  miri:
+    name: Miri (runtime)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: miri
+      # rust-toolchain.toml pins stable, and rustup's directory override
+      # beats the action's `rustup default nightly` — so select the
+      # toolchain explicitly with `+nightly`.
+      - run: cargo +nightly miri setup
+      # UB detection (aliasing, intra-allocation OOB, misalignment) plus leak
+      # detection for the runtime's raw-pointer FFI — the classes ASan and
+      # Valgrind cannot see. Scoped to `runtime`: the compiler crates have
+      # almost no `unsafe`, and Miri's interpreter overhead rules out
+      # compile-and-run integration tests.
+      - run: cargo +nightly miri test -p ryo-runtime
+
   valgrind:
     name: Valgrind leak check
     runs-on: ubuntu-latest
