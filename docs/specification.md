@@ -1514,7 +1514,7 @@ struct Header:
 	method: strview
 	path: strview
 
-fn parse_header(doc: shared[bytes]) -> Header:
+fn parse_header(doc: shared[str]) -> Header:
 	# views into `doc` keep the buffer alive; no copy of the document
 	return Header(method=doc[0:7], path=doc[7:])
 
@@ -2875,7 +2875,7 @@ Tasks are Ryo's lightweight, non-OS-thread concurrency unit (like Go's goroutine
 
 **Ownership Safety:** Task closures implicitly capture by **move** — the compiler enforces this because tasks may outlive the spawning scope (see §6.2.2). To share data across tasks, use `shared[T]` — assignment retains the handle (§5.6); there is no explicit `.clone()`. **Exception (scoped task borrows):** inside a `task.scope` body — structured concurrency, where the scope joins all children before exiting — child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as §4.4) and that no capture escapes the scope. Projections (`strview`, `slice[T]`, `bytesview`) may be captured too: the scope join is lexically inside the defining function, so the view still cannot escape it — the owner's freeze extends to the end of the `task.scope` block. `task.run` and `task.spawn_detached` are unchanged: implicit move capture, enforced.
 
-**Mutable lending is a deliberate non-goal.** `task.scope` children may capture by immutable borrow only. General mutable borrows across tasks would require proving the borrowed regions disjoint — full borrow-checker machinery, which Ownership Lite exists to avoid. The single blessed exception is `std.slice.split_mut`: it splits a mutable slice into `n` disjoint mutable chunks, returned as scope-locked handles. Disjointness holds by construction (the stdlib's internal `unsafe` is the proof — the same status as Rust's `slice::split_at_mut`), so each `task.scope` child may capture one chunk mutably; the scope join still guarantees every chunk borrow ends before the enclosing frame. Outside that primitive, data crossing tasks is `move`d, `shared[T]`, or immutably borrowed within a scope.
+**Mutable lending is a deliberate non-goal.** `task.scope` children may capture by immutable borrow only. General mutable borrows across tasks would require proving the borrowed regions disjoint — full borrow-checker machinery, which Ownership Lite exists to avoid. The single blessed exception is `std.slice.split_mut`: it splits a mutable slice into `n` disjoint mutable chunks, returned as scope-locked handles. Disjointness holds by construction, so each `task.scope` child may capture one chunk mutably; the scope join still guarantees every chunk borrow ends before the enclosing frame. Outside that primitive, data crossing tasks is `move`d, `shared[T]`, or immutably borrowed within a scope.
 
 **FFI Warning:** Calling blocking C functions (like `sleep`) from a task will block that task's execution. Mark such FFI imports with the `#[blocking]` attribute.
 

@@ -29,7 +29,7 @@ Every dev doc MUST include a "References" footer linking to the spec sections it
 Example:
 ```markdown
 ## References
-- Spec: Section 5.9 (copy elision guarantees)
+- Spec: [Section 5.9](../specification.md) (copy elision guarantees)
 - Dev: pipeline_alignment.md
 - Milestone: Copy Elision & NRVO (Phase 5, v0.2+) — see implementation_roadmap.md
 ```

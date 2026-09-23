@@ -36,7 +36,7 @@ Non-member repository areas (not part of the Cargo workspace):
 
 **⚠️ CRITICAL: Python-Style Syntax is MANDATORY**
 
-All Ryo code examples **must** use Python-style colons and indentation, **NOT** curly braces. Braces are ONLY for f-strings.
+All Ryo code examples **must** use Python-style colons and indentation, **NOT** curly braces. Braces appear ONLY in f-strings and struct literals (`Point{x=5, y=9}`) — never for blocks.
 
 **Tab Indentation:** Use TABS (not spaces). Mixing tabs/spaces is a compile-time error. One tab = one indentation level.
 

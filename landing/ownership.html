@@ -792,7 +792,11 @@ fn main():
               <span class="filename">alias_fixed.ryo</span>
               <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
             </div>
-            <pre><code class="language-ryo">fn clamp(inout v: int, hi: int):
+            <pre><code class="language-ryo">struct Point:
+	x: int
+	y: int
+
+fn clamp(inout v: int, hi: int):
 	if v > hi:
 		v = hi
 
@@ -935,11 +939,11 @@ fn main():
               their owner's scope and can't be stored — pipelines are
               callback-shaped instead.
             </p>
-            <span class="status-pill status-pill--now">Rewrite available today</span>
+            <span class="status-pill status-pill--planned">Rewrite spec'd · ships with iterators</span>
             <p>
               No language escape is planned — sugar can't extend a borrow's
               life, and the general fix is the lifetime machinery Ownership
-              Lite exists to avoid. The mechanical rewrite works now: chain
+              Lite exists to avoid. The mechanical rewrite is spec'd: chain
               adaptors in one statement and <code>collect()</code>, or store
               a closure over <em>owned</em> data and run it on consumption.
               Streaming stages over a channel arrive with the concurrency

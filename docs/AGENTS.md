@@ -21,7 +21,7 @@ Use mermaid for diagrams.
 
 ## Syntax in Code Examples
 
-All code examples follow the rules in root `AGENTS.md` (Python-style colons + indentation, tabs, no braces except f-strings). See `docs/specification.md` for the full syntax reference.
+All code examples follow the rules in root `AGENTS.md` (Python-style colons + indentation, tabs, no braces except f-strings and struct literals). See `docs/specification.md` for the full syntax reference.
 
 Key patterns that come up often in docs:
 
