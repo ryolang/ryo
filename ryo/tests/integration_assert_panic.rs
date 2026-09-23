@@ -17,10 +17,10 @@ fn panic_exits_with_101_jit() {
     let output = run_ryo_command(&["run", "panic_basic.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
-        Some(0),
-        "panic() should exit nonzero. stdout: {}, stderr: {}",
+        Some(101),
+        "panic() should exit 101. stdout: {}, stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -59,10 +59,10 @@ fn assert_false_exits_with_101_jit() {
     let output = run_ryo_command(&["run", "assert_false.ryo"], &test_file)
         .expect("Failed to run ryo run command");
 
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
-        Some(0),
-        "assert(false) should exit nonzero. stdout: {}, stderr: {}",
+        Some(101),
+        "assert(false) should exit 101. stdout: {}, stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

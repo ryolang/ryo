@@ -14,6 +14,11 @@ fn test_print_hello_world() {
         run_ryo_command(&["run", "hello.ryo"], &test_file).expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Hello, World!",
+        "print should emit exactly the string, no added newline"
+    );
 }
 
 #[test]
@@ -25,6 +30,7 @@ fn test_print_with_newline() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Line\n");
 }
 
 #[test]
@@ -40,6 +46,10 @@ fn test_multiple_print_calls() {
         .expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "First\nSecond\nThird\n"
+    );
 }
 
 #[test]
@@ -51,6 +61,7 @@ fn test_print_empty_string() {
         run_ryo_command(&["run", "empty.ryo"], &test_file).expect("Failed to run ryo run command");
 
     assert!(output.status.success(), "ryo run should succeed");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }
 
 // ============================================================================
