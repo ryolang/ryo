@@ -1839,3 +1839,78 @@ fn w0004_as_bytes_and_plain_bytes_do_not_warn() {
     );
     assert_eq!(w0004_count(&diags), 0, "got: {diags:?}");
 }
+
+#[test]
+fn w0004_receiver_mutated_after_copy_does_not_warn() {
+    // `to_bytes()` snapshots; `as_bytes()` is a live view that freezes
+    // its owner. Mutating the source AFTER the copy while the copy is
+    // still live makes the suggested rewrite fail to compile (P2
+    // freeze) — suppress.
+    let diags = check_src(
+        "fn main():\n\tmut s = \"hello\"\n\tb = s.to_bytes()\n\tstr_push(&s, \"!\")\n\tprint(int_to_str(b.len()))\n",
+    );
+    assert_eq!(
+        w0004_count(&diags),
+        0,
+        "receiver mutated after the copy must not warn; got: {diags:?}"
+    );
+}
+
+#[test]
+fn w0004_receiver_moved_after_copy_does_not_warn() {
+    // Moving the source after the copy is legal for the snapshot but
+    // not for the live view — suppress.
+    let diags = check_src(
+        "fn eat(move s: str):\n\tprint(s)\n\nfn main():\n\ts = \"hello\"\n\tb = s.to_bytes()\n\teat(s)\n\tprint(int_to_str(b.len()))\n",
+    );
+    assert_eq!(
+        w0004_count(&diags),
+        0,
+        "receiver moved after the copy must not warn; got: {diags:?}"
+    );
+}
+
+#[test]
+fn w0004_receiver_mutated_before_copy_still_warns() {
+    // Ordering matters: mutations BEFORE the copy are fine — the view
+    // created after them sees the same bytes the snapshot did (the
+    // benchmarks/json_validate main shape: build a string with
+    // str_push, then view it).
+    let diags = check_src(
+        "fn validate(b: bytesview) -> int:\n\treturn b.len()\n\nfn main():\n\tmut s = \"[\"\n\tfor i in range(0, 3):\n\t\tstr_push(&s, int_to_str(i))\n\traw = s.to_bytes()\n\tprint(int_to_str(validate(raw)))\n",
+    );
+    assert_eq!(
+        w0004_count(&diags),
+        1,
+        "pre-copy mutations must not suppress; got: {diags:?}"
+    );
+}
+
+#[test]
+fn w0004_strview_receiver_root_hazarded_after_copy_does_not_warn() {
+    // View receiver: the hazard that suppresses is on the view's ROOT
+    // owner (the `str` behind the `strview`), resolved transitively.
+    let diags = check_src(
+        "fn main():\n\tmut s = \"abcdef\"\n\tw = s[0:2]\n\tb = w.to_bytes()\n\tstr_push(&s, \"!\")\n\tprint(int_to_str(b.len()))\n",
+    );
+    assert_eq!(
+        w0004_count(&diags),
+        0,
+        "root of a view receiver hazarded after the copy must not warn; got: {diags:?}"
+    );
+}
+
+#[test]
+fn w0004_receiver_mutated_in_shared_loop_does_not_warn() {
+    // A hazard inside a loop that also contains the copy re-executes
+    // between iterations regardless of source order — suppress
+    // (same shared-loop clause as W0003 case B's defensive check).
+    let diags = check_src(
+        "fn main():\n\tmut s = \"ab\"\n\tmut i = 0\n\twhile i < 3:\n\t\tb = s.to_bytes()\n\t\tstr_push(&s, \"!\")\n\t\tprint(int_to_str(b.len()))\n\t\ti += 1\n",
+    );
+    assert_eq!(
+        w0004_count(&diags),
+        0,
+        "shared-loop receiver mutation must not warn; got: {diags:?}"
+    );
+}

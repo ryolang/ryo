@@ -335,6 +335,7 @@ pub(crate) fn warn_redundant_to_bytes(
     tir: &Tir,
     pool: &InternPool,
     own: &Ownership,
+    order: &[u32],
     sink: &mut DiagSink,
 ) {
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
@@ -344,14 +345,44 @@ pub(crate) fn warn_redundant_to_bytes(
         &|t, r| is_to_bytes_call(t, pool, r),
         &mut sites,
     );
+    let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
     for (decl, call) in sites {
-        if copy_chain_clean(own, tir, Owner::Inst(call), decl) {
-            sink.emit(Diag::warning(
-                tir.span(call),
-                DiagCode::RedundantToBytes,
-                "this `bytes` is never mutated and never escapes — use `as_bytes()` (zero-copy view) instead of `to_bytes()`".to_string(),
-            ));
+        if !copy_chain_clean(own, tir, Owner::Inst(call), decl) {
+            continue;
         }
+        // Receiver-root hazard check: `to_bytes()` SNAPSHOTS the
+        // source's bytes, while the suggested `as_bytes()` is a live
+        // view that freezes its root owner. A mutation, move, or
+        // consume of the root AFTER the copy makes the rewrite either
+        // fail to compile (P2 freeze) or observe different bytes.
+        // Same ordering shape as W0003 case B's defensive-copy check:
+        // a later hazard suppresses, and a hazard inside a shared loop
+        // re-executes between iterations regardless of source order.
+        // Hazards BEFORE the copy are fine — the view created after
+        // them sees the same bytes the snapshot did. A receiver with
+        // no local root (a view of caller storage) cannot be hazarded
+        // by anything this function does.
+        let receiver = tir.call_view(call).args[0];
+        if let Some(root) = projection_root(own, tir, pool, receiver) {
+            let copy_rank = rank(call);
+            let hazarded = own.owner_hazards.iter().any(|&(o, site)| {
+                o == root
+                    && (rank(site) > copy_rank
+                        || own.loop_nesting.ancestors_innermost_first(site).any(|l| {
+                            own.loop_nesting
+                                .ancestors_innermost_first(call)
+                                .any(|m| m == l)
+                        }))
+            });
+            if hazarded {
+                continue;
+            }
+        }
+        sink.emit(Diag::warning(
+            tir.span(call),
+            DiagCode::RedundantToBytes,
+            "this `bytes` is never mutated and never escapes — use `as_bytes()` (zero-copy view) instead of `to_bytes()`".to_string(),
+        ));
     }
 }
 
