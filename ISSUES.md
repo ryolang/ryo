@@ -383,6 +383,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** When a view's base owner was promoted (heap-buffered for aliasing), every slice/view derivation re-emits the spill sequence: store the owner (ptr, len, cap) triple plus a spilled flag into a stack slot, then load and branch on the flag — even when the base is loop-invariant and the slot contents never change. In `benchmarks/string_slicing`'s `count_fox` this is ~12 extra aarch64 instructions per scan iteration (measured by disassembly, 2026-09-17), a large share of the remaining gap to Rust after the slice/eq inlining work.
 **Resolution:** Hoist the promo-slot spill and flag initialization out of loops (loop-invariant-code-motion on the spill sequence), or skip the slot write entirely on the heap/static fast path and keep the owner triple in registers when its liveness allows.
 
+### I-185 — Call-heavy workloads pay full call+guard overhead per token; no inlining anywhere in the backend
+
+**Files:** `ryo-backend/src/codegen.rs` (function-call emission), `benchmarks/json_validate/` (evidence)
+**Summary:** `benchmarks/json_validate` (recursive-descent JSON validator; 2.95 MB document, 12 validation passes; measured 2026-09-23, M3 Pro): Rust 5.0 ms, Go 41.0 ms, Swift 58.2 ms, Ryo AOT 98.4 ms (19.7x vs Rust), Ryo JIT 118.2 ms, Python 2350 ms — same byte-identical algorithm in all languages. The validator is a deep per-token call tree (`parse_value` → `parse_object`/`parse_array` → `parse_value` …) and Cranelift has no inliner, so every byte pays a real call+return, and each position update additionally pays the spec §18 checked-arithmetic guard (which lowers unfused per I-165). Flat-loop benchmarks amortize both costs (`string_slicing` sits at ~1.7x vs Rust); call-heavy workloads compound them. The measured ordering (Rust < Go < Swift < Ryo) tracks inlining capability exactly.
+**Resolution:** Two independent levers: (1) the flag-fusion fix of I-165 removes the per-guard waste; (2) reduce call overhead — a small inlining pass for hot leaf helpers (the `skip_ws`/`match_lit`/digit-check class), either on TIR before codegen or as a Cranelift-level pass, or a cheaper internal calling convention when the callee's shape is known (no destination-slot discipline). Re-run `benchmarks/json_validate` after each lever and record the multiple in its README.
+
 ---
 
 ## Cross-References
