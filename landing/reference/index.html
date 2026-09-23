@@ -688,7 +688,11 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
               the current scope (scanning, parsing, hashing); reach for
               <code>to_bytes()</code> when the bytes must outlive the call
               or become an owned, mutable buffer that diverges from the
-              string. Concatenate with <code>+</code>, append a byte with
+              string. A <code>to_bytes()</code> copy that is never
+              mutated and never escapes draws warning
+              <code>W0004</code> (<code>RedundantToBytes</code>) — the
+              compiler's nudge toward <code>as_bytes()</code>.
+              Concatenate with <code>+</code>, append a byte with
               <code>bytes_push(&amp;b, x)</code>; printing renders the escaped
               <code>b"..."</code> form.
             </p>

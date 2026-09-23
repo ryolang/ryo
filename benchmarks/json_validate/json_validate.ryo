@@ -179,12 +179,10 @@ fn validate(b: bytesview) -> bool:
 	return skip_ws(b, p) == b.len()
 
 fn check_valid(s: str):
-	raw = s.to_bytes()
-	assert(validate(raw), "expected valid")
+	assert(validate(s.as_bytes()), "expected valid")
 
 fn check_invalid(s: str):
-	raw = s.to_bytes()
-	assert(not validate(raw), "expected invalid")
+	assert(not validate(s.as_bytes()), "expected invalid")
 
 fn main():
 	check_valid("{}")
@@ -225,11 +223,11 @@ fn main():
 		str_push(&s, "\", \"tags\": [\"a\", \"b\"], \"active\": true, \"score\": 1.5, \"misc\": null}")
 	str_push(&s, "]")
 
-	raw = s.to_bytes()
+	doc = s.as_bytes()
 
 	mut ok = true
 	for pass in range(0, 12):
-		if not validate(raw):
+		if not validate(doc):
 			ok = false
 	assert(ok, "json_validate big document")
 	print("assert passed, json_validate is correct\n")

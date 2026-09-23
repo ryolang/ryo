@@ -14,14 +14,16 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 
 | Candidate | Version | Mean time | vs fastest | Max RSS |
 |---|---|---|---|---|
-| **Rust** | 1.98.0 | 5.0 ms ± 0.3 ms | 1.00x | 5.91 MB |
-| **Go** | 1.27.1 | 41.0 ms ± 2.7 ms | 8.20x slower | 12.31 MB |
-| **Swift** | 6.3.3 | 58.2 ms ± 0.9 ms | 11.63x slower | 10.44 MB |
-| **Ryo (AOT)** | 0.1.0-dev.20260923+f823189 | 98.4 ms ± 5.1 ms | 19.66x slower | 8.52 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260923+f823189 | 118.2 ms ± 1.7 ms | 23.62x slower | 14.45 MB |
-| **Python** | 3.14.7 | 2350 ms ± 30 ms | 469.43x slower | 25.36 MB |
+| **Rust** | 1.98.0 | 5.0 ms ± 0.2 ms | 1.00x | 5.91 MB |
+| **Go** | 1.27.1 | 40.0 ms ± 0.6 ms | 7.98x slower | 12.31 MB |
+| **Swift** | 6.3.3 | 58.0 ms ± 0.9 ms | 11.59x slower | 10.44 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260923 | 100.2 ms ± 3.0 ms | 20.00x slower | 5.69 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260923 | 122.5 ms ± 8.7 ms | 24.46x slower | 11.39 MB |
+| **Python** | 3.14.7 | 2358 ms ± 47 ms | 470.91x slower | 25.36 MB |
 
-Ryo AOT runs **23.9x faster than Python** with ~3x less memory, and at 8.52 MB has the lightest RSS after Rust. Rust's 5.91 MB is one document buffer and nothing else — `as_bytes()` borrows the `String` zero-copy; Ryo's `to_bytes()` is an owned copy, and at the copy's peak both the source `str` (grown by `str_push` doubling, so its capacity overshoots the 2.95 MB document) and the new `bytes` buffer are live. Ryo can't borrow-scan a `str` today because `strview` has no integer indexing — only `bytes`/`bytesview` support `b[i] -> int`. The 19.7x gap to Rust is far wider than in byte_slicing (1.7x): Rust reaches ~7 GB/s per validation pass while Ryo sits at ~0.4 GB/s. Unlike byte_slicing's flat scan, this workload is a deep call tree — every byte goes through `skip_ws` / `parse_value` dispatch and nested `parse_object` / `parse_array` / `parse_string` / `parse_number` calls, and Cranelift has no inliner, so per-byte call overhead and the §18 checked-arithmetic guards on every position update compound instead of amortizing (tracked as I-185; the unfused-guard half is I-165). Go (8.2x) and Swift (11.6x) sit between — their optimizers inline the hot parse functions but pay bounds checks / UTF-8-view bridging of their own. The JIT row also carries compiler startup and this branch's IR-dump printing.
+Ryo AOT runs **23.5x faster than Python** and has the **lightest RSS of all six arms** at 5.69 MB — below Rust's 5.91 MB. That wasn't the original result: the first version of this benchmark used `to_bytes()` (an owned copy), holding two document buffers at the peak for 8.52 MB. The compiler's W0004 lint (`RedundantToBytes`) flagged the benchmark's own `to_bytes()` sites as never-mutated, never-escaping, and switching them to `as_bytes()` — a zero-copy `bytesview` projection of the string, added alongside the lint — removed the copy entirely. Rust's 5.91 MB is likewise one document buffer (`as_bytes()` borrows the `String`), and both sides carry the same doubling-growth capacity overshoot from building the document.
+
+The time gap tells a different story: Rust reaches ~7 GB/s per validation pass while Ryo sits at ~0.4 GB/s — a 20x gap, far wider than byte_slicing's 1.7x. Unlike byte_slicing's flat scan, this workload is a deep call tree — every byte goes through `skip_ws` / `parse_value` dispatch and nested `parse_object` / `parse_array` / `parse_string` / `parse_number` calls, and Cranelift has no inliner, so per-byte call overhead and the §18 checked-arithmetic guards on every position update compound instead of amortizing (tracked as I-185; the unfused-guard half is I-165). Go (8.0x) and Swift (11.6x) sit between — their optimizers inline the hot parse functions but pay bounds checks / UTF-8-view bridging of their own. The JIT row also carries compiler startup and this branch's IR-dump printing.
 
 ## How to Run
 
