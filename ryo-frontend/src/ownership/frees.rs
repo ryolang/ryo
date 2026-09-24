@@ -336,6 +336,7 @@ pub(crate) fn warn_redundant_to_bytes(
     pool: &InternPool,
     own: &Ownership,
     order: &[u32],
+    last_use: &HashMap<TirRef, TirRef>,
     sink: &mut DiagSink,
 ) {
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
@@ -354,11 +355,13 @@ pub(crate) fn warn_redundant_to_bytes(
         // source's bytes, while the suggested `as_bytes()` is a live
         // view that freezes its root owner. A mutation, move, or
         // consume of the root AFTER the copy makes the rewrite either
-        // fail to compile (P2 freeze) or observe different bytes.
-        // Same ordering shape as W0003 case B's defensive-copy check:
-        // a later hazard suppresses, and a hazard lexically BEFORE the
-        // copy inside a shared loop re-executes after the copy on the
-        // next iteration. That back-edge collision only materializes
+        // fail to compile (P2 freeze) or observe different bytes — but
+        // only while the replacement view would still be LIVE, i.e. up
+        // to the chain's last read. A hazard past the last read touches
+        // a view that no longer exists, so the straight-line
+        // `copy … read … mutate` shape warns. A hazard lexically BEFORE
+        // the copy inside a shared loop re-executes after the copy on
+        // the next iteration. That back-edge collision only materializes
         // when the replacement view would still be LIVE at the next
         // hazard — a copy fully consumed within the loop body (bound
         // and read only inside it) dies before the back-edge and the
@@ -369,9 +372,21 @@ pub(crate) fn warn_redundant_to_bytes(
         let receiver = tir.call_view(call).args[0];
         if let Some(root) = projection_root(own, tir, pool, receiver) {
             let copy_rank = rank(call);
+            // Latest read of any chain link: the point where the
+            // replacement view dies. Chain owners with no recorded read
+            // are unreachable here (`copy_chain_clean` rejects
+            // never-read owners), so the fallback only covers
+            // degenerate shapes.
+            let chain_last_use = chain
+                .iter()
+                .filter_map(|o| o.inst_tirref())
+                .filter_map(|r| last_use.get(&r))
+                .map(|r| rank(*r))
+                .max()
+                .unwrap_or(copy_rank);
             let hazarded = own.owner_hazards.iter().any(|&(o, site)| {
                 o == root
-                    && (rank(site) > copy_rank
+                    && ((rank(site) > copy_rank && rank(site) <= chain_last_use)
                         || own.loop_nesting.ancestors_innermost_first(site).any(|l| {
                             own.loop_nesting
                                 .ancestors_innermost_first(call)

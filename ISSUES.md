@@ -389,11 +389,11 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-189 — W0004 receiver-hazard check is coarser than view liveness in two shapes
+### I-189 — W0004 shared-loop clause matches post-loop reads by name
 
-**Files:** `ryo-frontend/src/ownership/frees.rs` (`warn_redundant_to_bytes`, `chain_outlives_loop_iteration`)
-**Summary:** Two known conservative misses in the `RedundantToBytes` lint's receiver check, both resolving toward no-warning (the lint's stated philosophy), so users merely miss a valid `as_bytes()` hint: (1) a straight-line receiver hazard ranked *after* the copy suppresses even when the copy's last use precedes the hazard (`b = s.to_bytes(); print(b.len()); str_push(&s, "!")` — the replacement view would be dead at the mutation, so the rewrite is sound); (2) `chain_outlives_loop_iteration` matches post-loop reads of the binding by NAME, so a same-named shadowed binding read after the loop also suppresses.
-**Resolution:** Rank receiver hazards against the copy chain's last-use/free point rather than the call site (reusing the walk's free-point tables), and resolve post-loop `Var` reads through scope-aware binding resolution instead of name matching. Extend the shared-loop regression tests when either lands.
+**Files:** `ryo-frontend/src/ownership/frees.rs` (`chain_outlives_loop_iteration`)
+**Summary:** Conservative miss in the `RedundantToBytes` lint's shared-loop clause, resolving toward no-warning (the lint's stated philosophy), so users merely miss a valid `as_bytes()` hint: `chain_outlives_loop_iteration` matches post-loop reads of the binding by NAME, so a same-named shadowed binding read after the loop also suppresses (in-loop copy `b = s.to_bytes()` read only inside the loop, then a fresh `b` declared and read after it). The name match is load-bearing — dropping it breaks the legitimate `mut`-binding-reassigned-in-loop suppression because the loop merge seats the post-loop read on a different owner than the in-loop copy chain (same reseating imprecision as the loop-merge owner work). (The entry's other half — a straight-line receiver hazard ranked after the copy's last use — is fixed: hazards now suppress only up to the chain's last read.)
+**Resolution:** Resolve post-loop `Var` reads through scope-aware binding identity instead of name matching; this needs the loop merge to preserve per-binding owner provenance (I-183 territory), not a local lint tweak. Extend the shared-loop regression tests when it lands.
 
 ---
 

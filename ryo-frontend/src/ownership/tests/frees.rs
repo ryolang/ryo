@@ -1857,6 +1857,22 @@ fn w0004_receiver_mutated_after_copy_does_not_warn() {
 }
 
 #[test]
+fn w0004_receiver_mutated_after_last_use_warns() {
+    // The copy's last read PRECEDES the mutation, so the replacement
+    // view is already dead when the freeze would bite — the rewrite is
+    // sound (verified: the `as_bytes()` form compiles and runs). Only
+    // a hazard between the copy and the chain's last use suppresses.
+    let diags = check_src(
+        "fn main():\n\tmut s = \"hello\"\n\tb = s.to_bytes()\n\tprint(int_to_str(b.len()))\n\tstr_push(&s, \"!\")\n",
+    );
+    assert_eq!(
+        w0004_count(&diags),
+        1,
+        "receiver mutated after the copy's last use must warn; got: {diags:?}"
+    );
+}
+
+#[test]
 fn w0004_receiver_moved_after_copy_does_not_warn() {
     // Moving the source after the copy is legal for the snapshot but
     // not for the live view — suppress.
