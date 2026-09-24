@@ -119,6 +119,12 @@ func parseNumber(b []byte, p int) int {
 	return i
 }
 
+var (
+	litTrue  = []byte("true")
+	litFalse = []byte("false")
+	litNull  = []byte("null")
+)
+
 func matchLit(b []byte, p int, lit []byte) int {
 	n := len(lit)
 	if p+n > len(b) {
@@ -148,13 +154,13 @@ func parseValue(b []byte, p int) int {
 		return parseString(b, i)
 	}
 	if c == 116 {
-		return matchLit(b, i, []byte("true"))
+		return matchLit(b, i, litTrue)
 	}
 	if c == 102 {
-		return matchLit(b, i, []byte("false"))
+		return matchLit(b, i, litFalse)
 	}
 	if c == 110 {
-		return matchLit(b, i, []byte("null"))
+		return matchLit(b, i, litNull)
 	}
 	if c == 45 || (c >= 48 && c <= 57) {
 		return parseNumber(b, i)

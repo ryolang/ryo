@@ -81,6 +81,10 @@ func parseNumber(_ b: [UInt8], _ p: Int) -> Int {
     return i
 }
 
+let litTrue = Array("true".utf8)
+let litFalse = Array("false".utf8)
+let litNull = Array("null".utf8)
+
 func matchLit(_ b: [UInt8], _ p: Int, _ lit: [UInt8]) -> Int {
     let n = lit.count
     if p + n > b.count { return -1 }
@@ -97,9 +101,9 @@ func parseValue(_ b: [UInt8], _ p: Int) -> Int {
     if c == 123 { return parseObject(b, i) }
     if c == 91 { return parseArray(b, i) }
     if c == 34 { return parseString(b, i) }
-    if c == 116 { return matchLit(b, i, Array("true".utf8)) }
-    if c == 102 { return matchLit(b, i, Array("false".utf8)) }
-    if c == 110 { return matchLit(b, i, Array("null".utf8)) }
+    if c == 116 { return matchLit(b, i, litTrue) }
+    if c == 102 { return matchLit(b, i, litFalse) }
+    if c == 110 { return matchLit(b, i, litNull) }
     if c == 45 || (c >= 48 && c <= 57) { return parseNumber(b, i) }
     return -1
 }

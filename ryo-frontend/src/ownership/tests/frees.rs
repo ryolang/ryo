@@ -1914,3 +1914,18 @@ fn w0004_receiver_mutated_in_shared_loop_does_not_warn() {
         "shared-loop receiver mutation must not warn; got: {diags:?}"
     );
 }
+
+#[test]
+fn w0004_receiver_hazard_before_copy_in_shared_loop_does_not_warn() {
+    // The hazard ranks BEFORE the copy in program order here, so the
+    // rank rule alone would not suppress — only the shared-loop clause
+    // does (iteration n+1's push executes after iteration n's copy).
+    let diags = check_src(
+        "fn main():\n\tmut s = \"ab\"\n\tmut i = 0\n\twhile i < 3:\n\t\tstr_push(&s, \"!\")\n\t\tb = s.to_bytes()\n\t\tprint(int_to_str(b.len()))\n\t\ti += 1\n",
+    );
+    assert_eq!(
+        w0004_count(&diags),
+        0,
+        "pre-copy hazard in a shared loop must not warn; got: {diags:?}"
+    );
+}
