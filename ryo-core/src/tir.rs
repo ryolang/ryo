@@ -254,7 +254,10 @@ pub enum TirTag {
     /// inserted by sema at view-parameter call sites and mixed
     /// owner/view equality operands. Operand in `data.un_op`. Owner
     /// pairs come from the pool's `owner_view` table: `str → strview`
-    /// (M8.4), `bytes → bytesview` (M8.4.2).
+    /// (M8.4), `bytes → bytesview` (M8.4.2). One cross-family use:
+    /// `str`/`strview`.as_bytes() lowers to a `ToView` typed
+    /// `bytesview` — the representation conversion (drop `cap`,
+    /// promote-on-view) is identical, only the projected type differs.
     ToView,
     /// View → owner re-borrow (final spec P6'): materializes the cap=0
     /// fat triple — no allocation, call-scoped. Inserted by sema when a
@@ -784,7 +787,9 @@ impl TirBuilder {
     /// Explicit owner → view representation conversion (final spec
     /// §3.4): drops the `cap` word. Inserted by sema at view-parameter
     /// call sites and on the owned side of mixed owner/view equality.
-    /// `view_ty` comes from the pool's `owner_view` table.
+    /// `view_ty` comes from the pool's `owner_view` table — except for
+    /// `as_bytes()`, which crosses families (`str`/`strview` →
+    /// `bytesview`); the representation conversion is the same.
     pub fn to_view(&mut self, inner: TirRef, view_ty: TypeId, span: Span) -> TirRef {
         self.push(TirTag::ToView, view_ty, TirData::UnOp(inner), span)
     }

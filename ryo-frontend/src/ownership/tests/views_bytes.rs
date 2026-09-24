@@ -107,3 +107,84 @@ fn w0003_case_b_str_message_unchanged() {
         diags.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn as_bytes_projection_freezes_owner() {
+    // P2: an `as_bytes()` view freezes its `str` owner against mutation
+    // exactly like a slice projection does.
+    let diags = check_src(
+        "fn main():\n\tmut s = \"ab\"\n\tv = s.as_bytes()\n\tstr_push(&s, \"c\")\n\tprint(int_to_str(v.len()))\n",
+    );
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::SourceProjected),
+        "expected SourceProjected, got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn as_bytes_projection_freezes_owner_against_move() {
+    // P2: moving the owner while the view is live is the same freeze.
+    let diags = check_src(
+        "fn eat(move s: str):\n\tprint(s)\n\nfn main():\n\ts = \"ab\"\n\tv = s.as_bytes()\n\teat(s)\n\tprint(int_to_str(v.len()))\n",
+    );
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::SourceProjected),
+        "expected SourceProjected, got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn as_bytes_freeze_lifts_at_last_use() {
+    // P4: the freeze ends at the view's last read — mutating the owner
+    // afterwards is legal.
+    let diags = check_src(
+        "fn main():\n\tmut s = \"ab\"\n\tv = s.as_bytes()\n\tprint(int_to_str(v.len()))\n\tstr_push(&s, \"c\")\n",
+    );
+    assert!(
+        diags.is_empty(),
+        "unexpected diags: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn as_bytes_of_strview_projects_root_owner() {
+    // P3: `as_bytes()` on a `strview` (itself a slice) re-projects the
+    // root `str` owner — the freeze still reaches it.
+    let diags = check_src(
+        "fn main():\n\tmut s = \"abc\"\n\tw = s[0:2]\n\tv = w.as_bytes()\n\ts = \"zz\"\n\tprint(int_to_str(v.len()))\n",
+    );
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::SourceProjected),
+        "expected SourceProjected, got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn as_bytes_of_view_param_needs_no_tracking() {
+    // A `strview` parameter's buffer belongs to the caller: projecting
+    // it registers nothing, so nothing freezes and nothing is dropped.
+    let diags = check_src(
+        "fn scan(v: strview) -> int:\n\tb = v.as_bytes()\n\treturn b.len()\n\nfn main():\n\ts = \"ab\"\n\tprint(int_to_str(scan(s)))\n",
+    );
+    assert!(
+        diags.is_empty(),
+        "unexpected diags: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn as_bytes_return_is_view_escape() {
+    // E1 backstop: the result is a view, so returning it is ViewEscape
+    // (sema's Rule-5 signature rejection fires alongside).
+    let diags = check_src("fn bad(s: str) -> bytesview:\n\treturn s.as_bytes()\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::ViewEscape),
+        "expected ViewEscape, got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}

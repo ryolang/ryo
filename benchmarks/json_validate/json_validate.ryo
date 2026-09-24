@@ -1,0 +1,233 @@
+# json_validate — recursive-descent JSON validator over a bytesview.
+# Validates structure and discards values: every parse function returns
+# the next position after the consumed token, or -1 on error.
+
+fn skip_ws(b: bytesview, p: int) -> int:
+	mut i = p
+	while i < b.len():
+		c = b[i]
+		if c == 32 or c == 9 or c == 10 or c == 13:
+			i += 1
+		else:
+			return i
+	return i
+
+fn is_hex_digit(c: int) -> bool:
+	if c >= 48 and c <= 57:
+		return true
+	if c >= 65 and c <= 70:
+		return true
+	if c >= 97 and c <= 102:
+		return true
+	return false
+
+fn parse_string(b: bytesview, p: int) -> int:
+	if p >= b.len() or b[p] != 34:
+		return -1
+	mut i = p + 1
+	while i < b.len():
+		c = b[i]
+		if c == 34:
+			return i + 1
+		elif c == 92:
+			if i + 1 >= b.len():
+				return -1
+			e = b[i + 1]
+			if e == 34 or e == 92 or e == 47 or e == 98 or e == 102 or e == 110 or e == 114 or e == 116:
+				i += 2
+			elif e == 117:
+				if i + 6 > b.len():
+					return -1
+				mut ok = true
+				for k in range(1, 5):
+					if not is_hex_digit(b[i + 1 + k]):
+						ok = false
+				if not ok:
+					return -1
+				i += 6
+			else:
+				return -1
+		elif c < 32:
+			return -1
+		else:
+			i += 1
+	return -1
+
+fn parse_number(b: bytesview, p: int) -> int:
+	mut i = p
+	n = b.len()
+	if i < n and b[i] == 45:
+		i += 1
+	if i >= n:
+		return -1
+	if b[i] == 48:
+		i += 1
+	elif b[i] >= 49 and b[i] <= 57:
+		while i < n and b[i] >= 48 and b[i] <= 57:
+			i += 1
+	else:
+		return -1
+	if i < n and b[i] == 46:
+		i += 1
+		if i >= n or not (b[i] >= 48 and b[i] <= 57):
+			return -1
+		while i < n and b[i] >= 48 and b[i] <= 57:
+			i += 1
+	if i < n and (b[i] == 101 or b[i] == 69):
+		i += 1
+		if i < n and (b[i] == 43 or b[i] == 45):
+			i += 1
+		if i >= n or not (b[i] >= 48 and b[i] <= 57):
+			return -1
+		while i < n and b[i] >= 48 and b[i] <= 57:
+			i += 1
+	return i
+
+fn match_lit(b: bytesview, p: int, lit: bytes) -> int:
+	n = lit.len()
+	if p + n > b.len():
+		return -1
+	for k in range(0, n):
+		if b[p + k] != lit[k]:
+			return -1
+	return p + n
+
+fn parse_value(b: bytesview, p: int) -> int:
+	i = skip_ws(b, p)
+	if i >= b.len():
+		return -1
+	c = b[i]
+	if c == 123:
+		return parse_object(b, i)
+	if c == 91:
+		return parse_array(b, i)
+	if c == 34:
+		return parse_string(b, i)
+	if c == 116:
+		return match_lit(b, i, b"true")
+	if c == 102:
+		return match_lit(b, i, b"false")
+	if c == 110:
+		return match_lit(b, i, b"null")
+	if c == 45 or (c >= 48 and c <= 57):
+		return parse_number(b, i)
+	return -1
+
+fn parse_array(b: bytesview, p: int) -> int:
+	mut i = skip_ws(b, p + 1)
+	if i < b.len() and b[i] == 93:
+		return i + 1
+	i = parse_value(b, i)
+	if i < 0:
+		return -1
+	mut done = false
+	while not done:
+		i = skip_ws(b, i)
+		if i >= b.len():
+			return -1
+		c = b[i]
+		if c == 44:
+			i = parse_value(b, i + 1)
+			if i < 0:
+				return -1
+		elif c == 93:
+			return i + 1
+		else:
+			return -1
+	return -1
+
+fn parse_object(b: bytesview, p: int) -> int:
+	mut i = skip_ws(b, p + 1)
+	if i < b.len() and b[i] == 125:
+		return i + 1
+	i = parse_string(b, i)
+	if i < 0:
+		return -1
+	i = skip_ws(b, i)
+	if i >= b.len() or b[i] != 58:
+		return -1
+	i = parse_value(b, i + 1)
+	if i < 0:
+		return -1
+	mut done = false
+	while not done:
+		i = skip_ws(b, i)
+		if i >= b.len():
+			return -1
+		c = b[i]
+		if c == 44:
+			i = skip_ws(b, i + 1)
+			i = parse_string(b, i)
+			if i < 0:
+				return -1
+			i = skip_ws(b, i)
+			if i >= b.len() or b[i] != 58:
+				return -1
+			i = parse_value(b, i + 1)
+			if i < 0:
+				return -1
+		elif c == 125:
+			return i + 1
+		else:
+			return -1
+	return -1
+
+fn validate(b: bytesview) -> bool:
+	p = parse_value(b, 0)
+	if p < 0:
+		return false
+	return skip_ws(b, p) == b.len()
+
+fn check_valid(s: str):
+	assert(validate(s.as_bytes()), "expected valid")
+
+fn check_invalid(s: str):
+	assert(not validate(s.as_bytes()), "expected invalid")
+
+fn main():
+	check_valid("{}")
+	check_valid("[]")
+	check_valid(" {\"a\": [1, 2.5e-3, true, null], \"b\": \"x\"} ")
+	check_valid("{\"esc\": \"a\\\"b\\\\c\\/\\b\\f\\n\\r\\t\"}")
+	check_valid("\"Aé\"")
+	check_valid("[0, -1, 3.14, 1e10, 2.5E-3, -0.5e+2]")
+	check_valid("{\"a\": {\"b\": {\"c\": [true, [false, [null]]]}}}")
+	check_valid("123")
+
+	check_invalid("")
+	check_invalid(" ")
+	check_invalid("{\"a\":}")
+	check_invalid("[1,]")
+	check_invalid("{\"a\" 1}")
+	check_invalid("01")
+	check_invalid("\"abc")
+	check_invalid("{\"a\": 1}]")
+	check_invalid("\"\\x\"")
+	check_invalid("[1 2]")
+	check_invalid("tru")
+	check_invalid("nulll")
+	check_invalid("{a: 1}")
+	check_invalid("\"a	b\"")
+	check_invalid("1.")
+	check_invalid("1e")
+	check_invalid("-")
+
+	mut s: str = "["
+	for i in range(0, 30000):
+		if i > 0:
+			str_push(&s, ",")
+		str_push(&s, "{\"id\": ")
+		str_push(&s, int_to_str(i))
+		str_push(&s, ", \"name\": \"user")
+		str_push(&s, int_to_str(i))
+		str_push(&s, "\", \"tags\": [\"a\", \"b\"], \"active\": true, \"score\": 1.5, \"misc\": null}")
+	str_push(&s, "]")
+
+	doc = s.as_bytes()
+
+	mut ok = true
+	for pass in range(0, 12):
+		if not validate(doc):
+			ok = false
+	assert(ok, "json_validate big document")
+	print("assert passed, json_validate is correct\n")

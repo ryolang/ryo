@@ -365,6 +365,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** When a view's base owner was promoted (heap-buffered for aliasing), every slice/view derivation re-emits the spill sequence: store the owner (ptr, len, cap) triple plus a spilled flag into a stack slot, then load and branch on the flag — even when the base is loop-invariant and the slot contents never change. In `benchmarks/string_slicing`'s `count_fox` this is ~12 extra aarch64 instructions per scan iteration (measured by disassembly, 2026-09-17), a large share of the remaining gap to Rust after the slice/eq inlining work.
 **Resolution:** Hoist the promo-slot spill and flag initialization out of loops (loop-invariant-code-motion on the spill sequence), or skip the slot write entirely on the heap/static fast path and keep the owner triple in registers when its liveness allows.
 
+### I-188 — Call-heavy workloads pay full call+guard overhead per token; no inlining anywhere in the backend
+
+**Files:** `ryo-backend/src/codegen.rs` (function-call emission), `benchmarks/json_validate/` (evidence)
+**Summary:** `benchmarks/json_validate` (recursive-descent JSON validator; 2.95 MB document, 12 validation passes; measured 2026-09-23, M3 Pro): Rust 5.0 ms, Go 41.0 ms, Swift 58.2 ms, Ryo AOT 98.4 ms (19.7x vs Rust), Ryo JIT 118.2 ms, Python 2350 ms — same byte-identical algorithm in all languages. The validator is a deep per-token call tree (`parse_value` → `parse_object`/`parse_array` → `parse_value` …) and Cranelift has no inliner, so every byte pays a real call+return, and each position update additionally pays the spec §18 checked-arithmetic guard (which lowers unfused per I-165). Flat-loop benchmarks amortize both costs (`string_slicing` sits at ~1.7x vs Rust); call-heavy workloads compound them. The measured ordering (Rust < Swift < Go < Ryo) tracks inlining capability exactly.
+**Resolution:** Two independent levers: (1) the flag-fusion fix of I-165 removes the per-guard waste; (2) reduce call overhead — a small inlining pass for hot leaf helpers (the `skip_ws`/`match_lit`/digit-check class), either on TIR before codegen or as a Cranelift-level pass, or a cheaper internal calling convention when the callee's shape is known (no destination-slot discipline). Re-run `benchmarks/json_validate` after each lever and record the multiple in its README.
+
 ---
 
 ### I-185 — `x % 2^k == 0` comparisons lower through the full signed-remainder sequence
@@ -380,6 +386,14 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-frontend/src/` (TIR-level inlining pass, post-sema alongside ownership), `ryo-backend/src/codegen/mod.rs` (call sites)
 **Summary:** Cranelift has no inliner by design, so every Ryo function call is a real call. In `benchmarks/collatz`, `collatz_steps` is called once per seed (1M calls), each paying an `stp x29, x30` frame setup/teardown that Rust and LLVM eliminate by inlining the callee into the caller's loop (disassembly, 2026-09-22). Minor for collatz (~ms), but it also blocks cross-function constant propagation and guard elision in general.
 **Resolution:** Add a TIR-level inlining pass for small functions (size threshold, e.g. single-block bodies), cloning the per-function TIR arena into the caller before codegen — the per-function arena design makes this a `Tir::clone` plus `TirRef` remapping. Verify by disassembly that `collatz_steps` disappears into `main` and the collatz ratio improves.
+
+---
+
+### I-189 — W0004 shared-loop clause matches post-loop reads by name
+
+**Files:** `ryo-frontend/src/ownership/frees.rs` (`chain_outlives_loop_iteration`)
+**Summary:** Conservative miss in the `RedundantToBytes` lint's shared-loop clause, resolving toward no-warning (the lint's stated philosophy), so users merely miss a valid `as_bytes()` hint: `chain_outlives_loop_iteration` matches post-loop reads of the binding by NAME, so a same-named shadowed binding read after the loop also suppresses (in-loop copy `b = s.to_bytes()` read only inside the loop, then a fresh `b` declared and read after it). The name match is load-bearing — dropping it breaks the legitimate `mut`-binding-reassigned-in-loop suppression because the loop merge seats the post-loop read on a different owner than the in-loop copy chain (same reseating imprecision as the loop-merge owner work). (The entry's other half — a straight-line receiver hazard ranked after the copy's last use — is fixed: hazards now suppress only up to the chain's last read.)
+**Resolution:** Resolve post-loop `Var` reads through scope-aware binding identity instead of name matching; this needs the loop merge to preserve per-binding owner provenance (I-183 territory), not a local lint tweak. Extend the shared-loop regression tests when it lands.
 
 ---
 

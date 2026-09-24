@@ -297,6 +297,14 @@ pub(crate) fn analyze_expr_allow_never(
                     receiver_ty,
                     span,
                 ),
+                "as_bytes" => as_bytes_projection(
+                    sema,
+                    fcx,
+                    view.args.is_empty(),
+                    receiver_tir,
+                    receiver_ty,
+                    span,
+                ),
                 _ => {
                     sema.sink.emit(Diag::error(
                         span,
@@ -684,6 +692,51 @@ fn bridge_method_call(
     let callee = sema.pool.intern_str(callee_name);
     fcx.builder
         .call(callee, &[receiver_tir], &[ParamMode::Borrow], ret_ty, span)
+}
+
+/// `str`/`strview`.as_bytes(): a zero-copy projection of the string's
+/// UTF-8 bytes as a `bytesview` — the mirror of `to_bytes()`, which
+/// allocates and copies. Lowers to a `ToView` conversion typed
+/// `bytesview` over the receiver: no runtime callee is involved, so no
+/// `builtins.rs` ABI entry — codegen's view lowering re-packages the
+/// receiver's `(ptr, len)` (promote-on-view for inline strings, exactly
+/// like a full-range slice). The result being view-typed routes it
+/// through the generic projection machinery (P2 freeze, P4 last-use
+/// lifting, E1/E2 escape diagnostics) with no ownership-pass changes.
+/// Wrong-family receivers keep the generalized "X has no method 'Y'"
+/// diagnostic.
+fn as_bytes_projection(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    args_empty: bool,
+    receiver_tir: TirRef,
+    receiver_ty: TypeId,
+    span: Span,
+) -> TirRef {
+    if !args_empty {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            "as_bytes() takes no arguments".to_string(),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if !matches!(
+        sema.pool.kind(receiver_ty),
+        TypeKind::Str | TypeKind::View(ViewKind::Str)
+    ) {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::UndefinedFunction,
+            format!(
+                "{} has no method 'as_bytes'",
+                sema.pool.display(receiver_ty)
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    fcx.builder
+        .to_view(receiver_tir, sema.pool.bytes_view(), span)
 }
 
 /// Type-check one slice bound (`start` / `end`): §3.1 requires

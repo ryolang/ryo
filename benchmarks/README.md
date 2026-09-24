@@ -99,6 +99,12 @@ JIT and AOT land within noise of each other (~1.42–1.43×) because both share 
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
 * **Highlights:** Post-SSO (2026-09-14) Ryo AOT is the **fastest arm** at 11.1 ms — ahead of Swift (12.3 ms), Rust (25.5 ms), and Go (25.9 ms) — and the design claim holds at the new level: inout matches the consuming update (11.1 ms vs 11.4 ms in `struct_records`), so the choice between the two idioms remains free. Ryo runs 10.1x faster than Python at the lightest RSS (1.36 MB).
 
+### 13. [JSON Validate Benchmark](./json_validate/)
+
+* **Focus:** Byte-scanning recursive-descent parsing — a full JSON grammar validator over a `bytesview` / `&[u8]` / `[UInt8]` / `[]byte` / `bytes` (structure only, values discarded; a value-tree parser is blocked on enums M11, pattern matching M12, collections M22, error unions M13). 30,000-record document generated in-program, then validated 12 times.
+* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT runs **22.4x faster than Python** (102 ms vs 2,290 ms) and at 5.69 MB has the **lightest RSS of all six arms** — after the W0004 lint (`RedundantToBytes`) flagged the benchmark's own `to_bytes()` copies and they were switched to the zero-copy `as_bytes()` view. On time it trails Rust by 21x — far wider than byte_slicing's 1.7x on a flat scan: the deep per-byte call tree (no Cranelift inliner) plus §18 checked-arithmetic guards on every position update compound where a flat loop amortized them (tracked as I-188; guard fusion is I-165).
+
 ---
 
 ## General Prerequisites

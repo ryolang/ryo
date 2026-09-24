@@ -21,3 +21,5 @@ benchmarks:
     exec: ./benchmarks/struct_records_reuse/struct_records_reuse
   - name: struct-records-inout-aot
     exec: ./benchmarks/struct_records_inout/struct_records_inout
+  - name: json-validate-aot
+    exec: ./benchmarks/json_validate/json_validate

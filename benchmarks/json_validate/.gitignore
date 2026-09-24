@@ -1,0 +1,6 @@
+json_validate
+json_validate_rs
+json_validate_go
+json_validate_swift
+__pycache__/
+.pyscn/

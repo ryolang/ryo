@@ -888,6 +888,12 @@ fn analyze_function(
     // lattice states plus the hazard log — is complete.
     warn_redundant_materialize(tir, pool, &own, &order, sink);
 
+    // W0004: bound `to_bytes()` copies that never mutate nor escape.
+    // Same post-walk shape as W0003 case B, plus the last-use map to
+    // bound the window where a receiver hazard collides with the
+    // suggested view.
+    warn_redundant_to_bytes(tir, pool, &own, &order, &last_use, sink);
+
     // Convert honored reseat records into arm-gated
     // `ConditionalDeadDrop`s. A record is honored when a pending entry
     // for one of its reseated owners survived to the drain — i.e. the

@@ -1,6 +1,7 @@
 mod common;
 mod concat;
 mod frees;
+mod frees_w0004;
 mod inout;
 mod loops;
 mod merge;
