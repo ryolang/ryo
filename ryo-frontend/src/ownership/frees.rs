@@ -347,21 +347,25 @@ pub(crate) fn warn_redundant_to_bytes(
     );
     let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
     for (decl, call) in sites {
-        if !copy_chain_clean(own, tir, Owner::Inst(call), decl) {
+        let Some(chain) = copy_chain_clean(own, tir, Owner::Inst(call), decl) else {
             continue;
-        }
+        };
         // Receiver-root hazard check: `to_bytes()` SNAPSHOTS the
         // source's bytes, while the suggested `as_bytes()` is a live
         // view that freezes its root owner. A mutation, move, or
         // consume of the root AFTER the copy makes the rewrite either
         // fail to compile (P2 freeze) or observe different bytes.
         // Same ordering shape as W0003 case B's defensive-copy check:
-        // a later hazard suppresses, and a hazard inside a shared loop
-        // re-executes between iterations regardless of source order.
-        // Hazards BEFORE the copy are fine — the view created after
-        // them sees the same bytes the snapshot did. A receiver with
-        // no local root (a view of caller storage) cannot be hazarded
-        // by anything this function does.
+        // a later hazard suppresses, and a hazard lexically BEFORE the
+        // copy inside a shared loop re-executes after the copy on the
+        // next iteration. That back-edge collision only materializes
+        // when the replacement view would still be LIVE at the next
+        // hazard — a copy fully consumed within the loop body (bound
+        // and read only inside it) dies before the back-edge and the
+        // rewrite is sound, so the clause defers to
+        // `chain_outlives_loop_iteration`. A receiver with no local
+        // root (a view of caller storage) cannot be hazarded by
+        // anything this function does.
         let receiver = tir.call_view(call).args[0];
         if let Some(root) = projection_root(own, tir, pool, receiver) {
             let copy_rank = rank(call);
@@ -372,6 +376,9 @@ pub(crate) fn warn_redundant_to_bytes(
                             own.loop_nesting
                                 .ancestors_innermost_first(call)
                                 .any(|m| m == l)
+                                && chain_outlives_loop_iteration(
+                                    tir, own, &chain, decl, call, l, &rank,
+                                )
                         }))
             });
             if hazarded {
@@ -386,17 +393,73 @@ pub(crate) fn warn_redundant_to_bytes(
     }
 }
 
-/// W0004 classification: true when `owner` — a `to_bytes()` result or
-/// a local it moved into — is only ever read / borrow-passed. Follows
-/// moves across fresh local bindings (`c = b`): the walk models the
-/// move as a consume hazard anchored at the target's `VarDecl`, whose
-/// initializer becomes the value's new owner; a chain that ends in a
-/// binding that itself never escapes still warns. Any other hazard
-/// site — `Return`, a `move` call argument, an `inout` pass
-/// (`bytes_push`), an `Assign` (move-into-`mut` or reassign-drop), an
-/// aggregate store — is a legitimate use of the owned copy and
-/// suppresses the warning.
-fn copy_chain_clean(own: &Ownership, tir: &Tir, start: Owner, decl: TirRef) -> bool {
+/// W0004 shared-loop refinement: with the hazard lexically before the
+/// copy inside loop `l`, the next iteration's hazard collides with the
+/// replacement view only if that view is still live at the back-edge.
+/// True (suppress) when the chain outlives one iteration:
+///
+///  - the binding statement lies outside `l`'s subtree (the value
+///    predates the loop, so the view spans iterations), or
+///  - the binding's NAME is read outside `l`'s subtree after the copy
+///    (e.g. a `mut` binding declared before the loop, reassigned inside
+///    it, read after it — the last iteration's view is live at the
+///    post-loop read). Owner-based matching would miss this: the loop
+///    merge may seat the post-loop read on a different owner than the
+///    in-loop copy.
+///
+/// A copy bound and read only within the loop body dies at its last
+/// in-iteration use, so the next iteration's earlier-lexical hazard is
+/// fine and the warning stands.
+fn chain_outlives_loop_iteration(
+    tir: &Tir,
+    own: &Ownership,
+    chain: &[Owner],
+    decl: TirRef,
+    call: TirRef,
+    loop_ref: TirRef,
+    rank: &dyn Fn(TirRef) -> u32,
+) -> bool {
+    let mut subtree: HashSet<TirRef> = HashSet::new();
+    tir.collect_reachable(loop_ref, &mut subtree);
+    if !subtree.contains(&decl) {
+        return true;
+    }
+    let name = match tir.inst(decl).tag {
+        TirTag::VarDecl => tir.var_decl_view(decl).name,
+        TirTag::Assign => tir.assign_view(decl).name,
+        _ => return true,
+    };
+    let copy_rank = rank(call);
+    (1..tir.instructions.len()).any(|i| {
+        let r = TirRef::from_raw(u32::try_from(i).expect("TIR arena index fits u32"));
+        if subtree.contains(&r) || rank(r) <= copy_rank {
+            return false;
+        }
+        // A `Var` read of the binding's name, or any read the walk
+        // anchored on a chain owner (covers move-chain targets).
+        match tir.inst(r).data {
+            TirData::Var(n) => {
+                n == name
+                    || Ownership::dense_get(&own.owner_at_read, r)
+                        .is_some_and(|o| chain.contains(&o))
+            }
+            _ => false,
+        }
+    })
+}
+
+/// W0004 classification: `Some(chain)` when `owner` — a `to_bytes()`
+/// result or a local it moved into — is only ever read / borrow-passed,
+/// where `chain` is every owner the value flowed through (the copy plus
+/// move targets). Follows moves across fresh local bindings (`c = b`):
+/// the walk models the move as a consume hazard anchored at the
+/// target's `VarDecl`, whose initializer becomes the value's new owner;
+/// a chain that ends in a binding that itself never escapes still
+/// warns. Any other hazard site — `Return`, a `move` call argument, an
+/// `inout` pass (`bytes_push`), an `Assign` (move-into-`mut` or
+/// reassign-drop), an aggregate store — is a legitimate use of the
+/// owned copy and yields `None`.
+fn copy_chain_clean(own: &Ownership, tir: &Tir, start: Owner, decl: TirRef) -> Option<Vec<Owner>> {
     let mut work = vec![(start, decl)];
     let mut seen: HashSet<Owner> = HashSet::new();
     while let Some((owner, binding_site)) = work.pop() {
@@ -405,7 +468,7 @@ fn copy_chain_clean(own: &Ownership, tir: &Tir, start: Owner, decl: TirRef) -> b
         }
         // Never read at all: W0001 dead-store's jurisdiction, not W0004's.
         if own.pending_dead_store.contains_key(&owner) {
-            return false;
+            return None;
         }
         for &(o, site) in &own.owner_hazards {
             // The hazard at `site == binding_site` is the binding's own
@@ -417,11 +480,11 @@ fn copy_chain_clean(own: &Ownership, tir: &Tir, start: Owner, decl: TirRef) -> b
                 TirTag::VarDecl => {
                     work.push((Owner::Inst(tir.var_decl_view(site).initializer), site));
                 }
-                _ => return false,
+                _ => return None,
             }
         }
     }
-    true
+    Some(seen.into_iter().collect())
 }
 
 /// Every `Return`/`ReturnVoid` statement in `stmts` (any depth), in

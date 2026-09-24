@@ -1916,16 +1916,40 @@ fn w0004_receiver_mutated_in_shared_loop_does_not_warn() {
 }
 
 #[test]
-fn w0004_receiver_hazard_before_copy_in_shared_loop_does_not_warn() {
-    // The hazard ranks BEFORE the copy in program order here, so the
-    // rank rule alone would not suppress — only the shared-loop clause
-    // does (iteration n+1's push executes after iteration n's copy).
+fn w0004_receiver_hazard_before_copy_in_shared_loop_warns() {
+    // The hazard ranks BEFORE the copy in program order, so the rank
+    // rule does not fire — only the shared-loop clause could suppress.
+    // It must not: the copy is bound and read entirely within the loop
+    // body, so the replacement view dies before the back-edge and the
+    // next iteration's push collides with nothing. Verified against
+    // the compiler: the `as_bytes()` form of this shape compiles and
+    // runs.
     let diags = check_src(
         "fn main():\n\tmut s = \"ab\"\n\tmut i = 0\n\twhile i < 3:\n\t\tstr_push(&s, \"!\")\n\t\tb = s.to_bytes()\n\t\tprint(int_to_str(b.len()))\n\t\ti += 1\n",
     );
     assert_eq!(
         w0004_count(&diags),
+        1,
+        "pre-copy hazard in a shared loop with an iteration-local copy must warn; got: {diags:?}"
+    );
+}
+
+#[test]
+fn w0004_escaping_chain_in_shared_loop_does_not_warn() {
+    // Probe B: the copy is reassigned into a `mut` binding declared
+    // BEFORE the loop and read AFTER it — the last iteration's
+    // replacement view would still be live at the next iteration's
+    // push (and at the post-loop read), so the rewrite is invalid
+    // (verified: the `as_bytes()` form fails with E0035). Both
+    // to_bytes sites must stay silent: the outer one via the
+    // reassign-drop hazard, the in-loop one via the refined
+    // shared-loop clause.
+    let diags = check_src(
+        "fn main():\n\tmut s = \"ab\"\n\tmut b = s.to_bytes()\n\tmut i = 0\n\twhile i < 3:\n\t\tstr_push(&s, \"!\")\n\t\tb = s.to_bytes()\n\t\tprint(int_to_str(b.len()))\n\t\ti += 1\n\tprint(int_to_str(b.len()))\n",
+    );
+    assert_eq!(
+        w0004_count(&diags),
         0,
-        "pre-copy hazard in a shared loop must not warn; got: {diags:?}"
+        "a chain whose binding is read after the loop must not warn; got: {diags:?}"
     );
 }
