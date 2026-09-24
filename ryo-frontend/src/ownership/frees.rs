@@ -366,8 +366,14 @@ pub(crate) fn warn_redundant_to_bytes(
         // hazard — a copy fully consumed within the loop body (bound
         // and read only inside it) dies before the back-edge and the
         // rewrite is sound, so the clause defers to
-        // `chain_outlives_loop_iteration`. A receiver with no local
-        // root (a view of caller storage) cannot be hazarded by
+        // `chain_outlives_loop_iteration`. The mirror image also
+        // collides: a hazard inside a loop that encloses a chain READ
+        // but not the copy — the copy predates the loop and is re-read
+        // every iteration, so the replacement view lives through the
+        // whole loop (the same cyclic liveness `view_defer_loop`
+        // models) and any in-loop hazard freezes it regardless of
+        // lexical order against the last read. A receiver with no
+        // local root (a view of caller storage) cannot be hazarded by
         // anything this function does.
         let receiver = tir.call_view(call).args[0];
         if let Some(root) = projection_root(own, tir, pool, receiver) {
@@ -394,7 +400,8 @@ pub(crate) fn warn_redundant_to_bytes(
                                 && chain_outlives_loop_iteration(
                                     tir, own, &chain, decl, call, l, &rank,
                                 )
-                        }))
+                        })
+                        || loop_encloses_chain_read_not_copy(tir, own, &chain, call, site))
             });
             if hazarded {
                 continue;
@@ -460,6 +467,41 @@ fn chain_outlives_loop_iteration(
             }
             _ => false,
         }
+    })
+}
+
+/// W0004 loop-liveness clause (mirror of the shared-loop refinement):
+/// true when the hazard at `site` sits inside a loop that does NOT
+/// enclose the copy but DOES enclose a read of a chain owner. The copy
+/// then predates the loop and is re-read every iteration, so the
+/// replacement view stays live for the whole loop (the same cyclic
+/// liveness `view_defer_loop` models) and collides with the hazard no
+/// matter where in the body it sits lexically. Owner-based matching
+/// suffices here: the read sits inside the loop while the owner lives
+/// outside it, so no loop merge re-seats it mid-chain.
+fn loop_encloses_chain_read_not_copy(
+    tir: &Tir,
+    own: &Ownership,
+    chain: &[Owner],
+    call: TirRef,
+    site: TirRef,
+) -> bool {
+    own.loop_nesting.ancestors_innermost_first(site).any(|l| {
+        if own
+            .loop_nesting
+            .ancestors_innermost_first(call)
+            .any(|m| m == l)
+        {
+            return false;
+        }
+        let mut subtree: HashSet<TirRef> = HashSet::new();
+        tir.collect_reachable(l, &mut subtree);
+        (1..tir.instructions.len()).any(|i| {
+            let r = TirRef::from_raw(u32::try_from(i).expect("TIR arena index fits u32"));
+            subtree.contains(&r)
+                && matches!(tir.inst(r).data, TirData::Var(_))
+                && Ownership::dense_get(&own.owner_at_read, r).is_some_and(|o| chain.contains(&o))
+        })
     })
 }
 
