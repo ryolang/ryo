@@ -785,6 +785,26 @@ fn main():
 \tprint(\"\\n\")
 ",
     ),
+    (
+        // A loop-LOCAL mut str reassigned inside the body (concat
+        // crossing the 23-byte inline boundary) and broken out of
+        // while live. Loop-local bindings are NOT loop-carried: the
+        // break-exit Free must still fire — pre-fix the two
+        // definitions of "loop-carried" disagreed and this leaked
+        // the final iteration's buffer on the break path.
+        "loop_local_reassign_break_leak",
+        "\
+fn main():
+\tmut i = 0
+\twhile i < 3:
+\t\tmut s = \"ab\"
+\t\ts = s + \"🦊🦊🦊🦊🦊🦊\"
+\t\ti += 1
+\t\tif i == 2:
+\t\t\tbreak
+\tprint(\"ok\\n\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's

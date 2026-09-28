@@ -2,12 +2,12 @@
 
 use super::{
     BranchState, Owner, OwnerState, Ownership, PromoCandidate, ReseatDrop, analyze_for_range,
-    analyze_while_loop, body_may_jump_out, body_may_return, check_field_move_out,
-    check_field_target_projected, check_source_projected, consume_struct_lit_fields,
-    consumed_binding_name, drain_dying_views, field_path_of, format_binding, needs_tracking,
-    owner_name_for_diag, owner_sort_key, param_idx, projection_root, prune_branch_dead_projections,
-    push_unique, record_return_epilogue, refine_view_liveness_for_arm, register_projection,
-    resolve_view_alias, restore_view_last_use, rule7_owner_name, struct_base_name, struct_root,
+    analyze_while_loop, body_must_terminate, check_field_move_out, check_field_target_projected,
+    check_source_projected, consume_struct_lit_fields, consumed_binding_name, drain_dying_views,
+    field_path_of, format_binding, needs_tracking, owner_name_for_diag, owner_sort_key, param_idx,
+    projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
+    refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
+    rule7_owner_name, struct_base_name, struct_root,
 };
 use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
@@ -620,13 +620,17 @@ pub(crate) fn analyze_if_stmt(
     r: TirRef,
 ) {
     let view = tir.if_stmt_view(r);
-    // An arm whose end-state terminates in Return/Break/Continue never
-    // reaches the merge block, so its Moved state is path-local to an
-    // exit (the return epilogue / loop-exit passes own destruction on
-    // those paths) and must not contribute to the join merge. Same
-    // structural predicates as `if_may_fall_through` (loops.rs).
-    let arm_falls_through =
-        |body: &[TirRef]| !body_may_return(tir, body) && !body_may_jump_out(tir, body);
+    // An arm whose end-state terminates on EVERY path (Return/Break/
+    // Continue, or an if whose arms all terminate) never reaches the
+    // merge block, so its Moved state is path-local to an exit (the
+    // return epilogue / loop-exit passes own destruction on those
+    // paths) and must not contribute to the join merge. The exemption
+    // must be must-terminate, not may-exit: an arm that merely
+    // CONTAINS a nested return but also falls through reaches the
+    // merge on that path, and its Moved state must keep contributing
+    // (otherwise a conditional move + post-if use slips past E0020).
+    // Same structural predicate as `if_may_fall_through` (loops.rs).
+    let arm_falls_through = |body: &[TirRef]| !body_must_terminate(tir, body);
     let mut arm_falls_through_flags: Vec<bool> = Vec::with_capacity(2 + view.elif_branches.len());
     visit_expr(tir, pool, own, sink, sidecar, view.cond);
     // P4 lift (final spec §3.2): a projection whose last use is the

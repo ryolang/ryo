@@ -253,3 +253,60 @@ fn move_on_fallthrough_arm_still_e0020() {
         diags[0].code
     );
 }
+
+#[test]
+fn nested_conditional_return_with_fallthrough_move_still_e0020() {
+    // The join exemption must be MUST-terminate, not may-exit. The
+    // then-arm below CONTAINS a return (nested under `if c`) but also
+    // falls through with `x` moved, so it reaches the merge on the
+    // c-is-false path and its Moved state must contribute: the
+    // post-`if` `print(x)` is a use of a conditionally-moved value
+    // and must trip E0020. A may-style predicate (any return at any
+    // depth disqualifies the arm) silently drops the Moved state from
+    // the join and the use-after-move compiles — the unsoundness this
+    // test pins.
+    //   fn f(move x: str, d: bool, c: bool) -> str:
+    //       if d:
+    //           if c:
+    //               return x
+    //           consume(x)
+    //       print(x)
+    //       return "done"
+    let diags = check_src(
+        "fn consume(move s: str):\n\tm = s + \"!\"\n\tprint(m)\n\nfn f(move x: str, d: bool, c: bool) -> str:\n\tif d:\n\t\tif c:\n\t\t\treturn x\n\t\tconsume(x)\n\tprint(x)\n\treturn \"done\"\n",
+    );
+    assert_eq!(
+        diags.len(),
+        1,
+        "expected exactly one diagnostic; got: {diags:?}"
+    );
+    assert!(
+        matches!(diags[0].code, DiagCode::UseAfterMove),
+        "expected UseAfterMove; got: {:?}",
+        diags[0].code
+    );
+}
+
+#[test]
+fn all_terminating_nested_if_arm_does_not_poison_join() {
+    // Positive guard pairing with the test above: when the then-arm's
+    // last statement is an if whose arms ALL terminate (both return),
+    // the arm never reaches the merge, so the moves inside it are
+    // path-local to the returns and a post-`if` use must NOT trip
+    // E0020. Pins the recursive must-terminate predicate.
+    //   fn g(move x: str, d: bool, c: bool) -> str:
+    //       if d:
+    //           if c:
+    //               return x
+    //           else:
+    //               return x + "!"
+    //       print(x)
+    //       return "done"
+    let diags = check_src(
+        "fn g(move x: str, d: bool, c: bool) -> str:\n\tif d:\n\t\tif c:\n\t\t\treturn x\n\t\telse:\n\t\t\treturn x + \"!\"\n\tprint(x)\n\treturn \"done\"\n",
+    );
+    assert!(
+        diags.is_empty(),
+        "an all-terminating arm contributes no Moved state to the join; got: {diags:?}"
+    );
+}

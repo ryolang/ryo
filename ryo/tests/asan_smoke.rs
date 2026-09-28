@@ -309,3 +309,11 @@ fn asan_int_to_str_with_long_live_str() {
         "int_to_str_with_long_live_str",
     );
 }
+
+#[test]
+fn asan_loop_local_reassign_break_no_leak() {
+    run_asan_smoke(
+        common::find_fixture("loop_local_reassign_break_leak"),
+        "loop_local_reassign_break_leak",
+    );
+}

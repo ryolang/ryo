@@ -11,17 +11,15 @@ use common::*;
 use std::io::Write;
 use std::process::Output;
 
-/// JIT-run an inlined repro source from a temp file.
+/// JIT-run an inlined repro source from a private temp dir.
 fn run_bug_report(name: &str, src: &str) -> Output {
-    let dir = std::env::temp_dir();
-    // PID-guarded: concurrent cargo test processes must not share the
-    // path (the file is deleted after the run).
-    let path = dir.join(format!("ryo_test_{}_{name}.ryo", std::process::id()));
+    // TempDir keeps the path exclusive across concurrent test processes
+    // and is removed on drop (the DirTemp outlives the command below).
+    let dir = tempfile::TempDir::new().expect("create repro temp dir");
+    let path = dir.path().join(format!("{name}.ryo"));
     let mut f = std::fs::File::create(&path).expect("write repro temp file");
     f.write_all(src.as_bytes()).expect("write repro temp file");
-    let out = run_ryo_command(&["run", "name"], &path).expect("run ryo");
-    std::fs::remove_file(&path).ok();
-    out
+    run_ryo_command(&["run", "name"], &path).expect("run ryo")
 }
 
 fn assert_success(output: &Output, name: &str) {
