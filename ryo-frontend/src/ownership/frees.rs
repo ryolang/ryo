@@ -585,7 +585,13 @@ pub(crate) fn collect_return_stmts(tir: &Tir, stmts: &[TirRef], out: &mut Vec<Ti
 /// schedule a Free the return's path never needs (and codegen cannot
 /// lower, since the producer is never materialized on that path).
 pub(crate) fn record_return_epilogue(tir: &Tir, own: &mut Ownership, return_stmt: TirRef) {
-    let order = program_order(tir);
+    // Rank table, built once per function and cached on `Ownership` —
+    // loop convergence re-walks Returns, and rebuilding the per-
+    // function Vec for each one is pure waste.
+    if own.order.is_empty() {
+        own.order = program_order(tir);
+    }
+    let order = &own.order;
     let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
     // The return "completes" only after its own operand subtree has
     // evaluated, and `program_order` ranks a statement BEFORE its

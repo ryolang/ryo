@@ -132,6 +132,12 @@ pub(crate) fn param_idx(param_index: &HashMap<StringId, usize>, name: StringId) 
 pub(crate) struct Ownership {
     pub states: HashMap<Owner, OwnerState>,
     pub current_owner: HashMap<StringId, Owner>,
+    /// Lazily-built [`program_order`] rank table, cached so
+    /// `record_return_epilogue` does not rebuild the per-function Vec
+    /// on every Return (loop convergence re-walks returns several
+    /// times). `program_order` never returns an empty table, so
+    /// `is_empty` is a safe "not built yet" sentinel.
+    pub order: Vec<u32>,
     /// Dense per-instruction table indexed by `TirRef::index()`, sized
     /// to `tir.instructions.len()` in `analyze_function` (slot 0, the
     /// reserved sentinel, stays empty). Outer `None` = no entry; the
