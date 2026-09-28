@@ -1231,6 +1231,71 @@ fn return_epilogue_covers_move_param() {
 }
 
 #[test]
+fn return_epilogue_ignores_loop_local_declared_after_return() {
+    // An early return lexically BEFORE a loop-local's declaration must
+    // not receive an epilogue Free for that local: loop fixed-point
+    // seeding leaves the owner `Valid` at the return even though its
+    // producer is unreachable from it, and the epilogue covered-dedup
+    // cannot see the real last-use Free (anchored later, inside the
+    // loop body). Scheduling that Free made codegen abort with "no
+    // ValueRepr cached" (bug_reports/bug_codegen_free_no_valuerepr.ryo).
+    let src = "fn adv(inout p: int):\n\tp += 1\n\nfn f(s: str) -> str:\n\tmut p = 0\n\twhile true:\n\t\tif p >= 10:\n\t\t\treturn \"<none>\"\n\t\tk = str(s[0:2])\n\t\tadv(&p)\n\t\tif k == s:\n\t\t\treturn k\n\treturn \"<none>\"\n";
+    let (diags, sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected; got: {diags:?}"
+    );
+    let f_idx = tirs
+        .iter()
+        .position(|t| {
+            t.body_stmts()
+                .iter()
+                .any(|&s| t.inst(s).tag == ryo_core::tir::TirTag::WhileLoop)
+        })
+        .expect("function with a while loop");
+    let tir = &tirs[f_idx];
+    let loop_stmt = tir
+        .body_stmts()
+        .iter()
+        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::WhileLoop)
+        .copied()
+        .expect("while loop stmt");
+    let loop_body = tir.while_loop_view(loop_stmt).body;
+    // The bounds-guard if's then-arm holds the early return.
+    let early_return = loop_body
+        .iter()
+        .find_map(|&s| {
+            if tir.inst(s).tag != ryo_core::tir::TirTag::IfStmt {
+                return None;
+            }
+            let v = tir.if_stmt_view(s);
+            v.then_stmts
+                .first()
+                .copied()
+                .filter(|&r| tir.inst(r).tag == ryo_core::tir::TirTag::Return)
+        })
+        .expect("guard if with early return");
+    let k_init = loop_body
+        .iter()
+        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
+        .map(|&s| tir.var_decl_view(s).initializer)
+        .expect("var_decl for k");
+    let schedule = &sidecar.functions[f_idx].free_schedule;
+    assert!(
+        !schedule
+            .iter()
+            .any(|fp| fp.after == early_return && fp.target == k_init),
+        "no epilogue Free for a loop-local declared after the return; schedule = {schedule:?}"
+    );
+    assert!(
+        schedule.iter().any(|fp| fp.target == k_init),
+        "k's real last-use Free must still exist; schedule = {schedule:?}"
+    );
+}
+
+#[test]
 fn temp_last_use_inside_loop_not_reanchored() {
     // Guard: an anonymous temp consumed inside the loop body must
     // keep its per-iteration Free (each iteration allocates a fresh

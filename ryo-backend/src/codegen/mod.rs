@@ -391,6 +391,20 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// fat-param sentinel refs.
     free_binding_names: Vec<Option<StringId>>,
     free_binding_param_names: Vec<Option<StringId>>,
+    /// Binding name → its most recent write in program order (VarDecl
+    /// initializer or `Assign` value; fat params map to their sentinel
+    /// ref), built alongside `free_binding_names`. `emit_frees` only
+    /// takes the binding-path redirect when the FreePoint's target IS
+    /// this write — a stale/superseded target would free the binding's
+    /// current value instead of its own buffer.
+    binding_last_write: HashMap<StringId, TirRef>,
+    /// Every `FreePoint` target in this function's schedule. `emit_frees`
+    /// consults it to distinguish a superseded redirect target whose
+    /// most recent write IS freed elsewhere (loop-carried reassign: do
+    /// not redirect — the write's own Free owns the home slot) from the
+    /// branch-divergent reseat (the write has no Free: the pre-branch
+    /// owner's Free must redirect to cover the path-correct buffer).
+    all_free_targets: std::collections::HashSet<TirRef>,
     /// M8.3 inout parameters: for each inout param's name, the
     /// caller-provided slot address (a function-entry block param)
     /// and its pointee `TypeId`. The write-back chokepoint stores each
@@ -1088,7 +1102,7 @@ impl<M: Module> Codegen<M> {
                 free_by_after[fp.after.index()].push(idx);
             }
             let pending_sweep: Vec<usize> = (0..func_sidecar.free_schedule.len()).collect();
-            let (free_binding_names, free_binding_param_names) =
+            let (free_binding_names, free_binding_param_names, binding_last_write) =
                 Self::build_free_binding_names(tir, pool);
             let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, pool);
 
@@ -1149,6 +1163,12 @@ impl<M: Module> Codegen<M> {
                 struct_locals_undo,
                 free_binding_names,
                 free_binding_param_names,
+                binding_last_write,
+                all_free_targets: func_sidecar
+                    .free_schedule
+                    .iter()
+                    .map(|fp| fp.target)
+                    .collect(),
                 inout_ptrs,
                 sret_ptr,
                 sidecar: func_sidecar,

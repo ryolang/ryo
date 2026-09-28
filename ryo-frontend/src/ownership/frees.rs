@@ -6,7 +6,7 @@ use super::{
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ChildKind, Tir, TirData, TirRef, TirTag};
-use ryo_core::types::InternPool;
+use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
 
 /// Assign every instruction in the function a monotonic rank in
@@ -577,11 +577,41 @@ pub(crate) fn collect_return_stmts(tir: &Tir, stmts: &[TirRef], out: &mut Vec<Ti
 /// The returned value itself is already `Moved` by `analyze_return`,
 /// so it is naturally excluded; inout-escape owners are excluded too —
 /// they leave through the write-back pointer, not through destruction.
-pub(crate) fn record_return_epilogue(own: &mut Ownership, return_stmt: TirRef) {
+/// Owners whose producer is ranked AFTER the return's own expression
+/// subtree are also dropped: a value produced lexically later than the
+/// return cannot exist when it executes. Such owners only appear `Valid`
+/// here because loop convergence re-walks seed body-local owners from
+/// the backedge state (`merge_non_monotone`) — recording them would
+/// schedule a Free the return's path never needs (and codegen cannot
+/// lower, since the producer is never materialized on that path).
+pub(crate) fn record_return_epilogue(tir: &Tir, own: &mut Ownership, return_stmt: TirRef) {
+    let order = program_order(tir);
+    let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
+    // The return "completes" only after its own operand subtree has
+    // evaluated, and `program_order` ranks a statement BEFORE its
+    // operands — so producers inside that subtree rank after the
+    // Return yet can still be live at it. Rank the return by the max
+    // over its subtree, not by the Return statement alone.
+    let mut ret_rank = rank(return_stmt);
+    let mut stack: Vec<TirRef> = Vec::new();
+    tir.walk_operands(return_stmt, &mut |_, child, _| stack.push(child));
+    while let Some(r) = stack.pop() {
+        ret_rank = ret_rank.max(rank(r));
+        tir.walk_operands(r, &mut |_, child, _| stack.push(child));
+    }
     let mut live: Vec<Owner> = own
         .states
         .iter()
-        .filter(|(o, s)| matches!(s, OwnerState::Valid) && !inout_escape_owner(own, **o))
+        .filter(|(o, s)| {
+            if !matches!(s, OwnerState::Valid) || inout_escape_owner(own, **o) {
+                return false;
+            }
+            match o {
+                // Params predate every statement.
+                Owner::Param(_) => true,
+                Owner::Inst(r) => rank(*r) <= ret_rank,
+            }
+        })
         .map(|(o, _)| *o)
         .collect();
     // Sorted for deterministic sidecar emission order.
@@ -607,6 +637,7 @@ pub(crate) fn collect_last_uses(
     own: &Ownership,
     r: TirRef,
     last_use: &mut HashMap<TirRef, TirRef>,
+    last_read_by_name: &mut HashMap<StringId, TirRef>,
 ) {
     let inst = *tir.inst(r);
     // Record this instruction's own `Var` read, if any. Resolve via
@@ -618,20 +649,27 @@ pub(crate) fn collect_last_uses(
     // the owner that was live *at that read*, regardless of any
     // subsequent rebinds.
     if let TirTag::Var = inst.tag
-        && let TirData::Var(_) = inst.data
+        && let TirData::Var(name) = inst.data
         && (needs_tracking(inst.ty, pool) || pool.is_view(inst.ty))
-        && let Some(owner) = Ownership::dense_get(&own.owner_at_read, r)
     {
-        // Overwriting insert: latest forward-order read wins =
-        // last source-order read. `Owner::tirref` keys a `Param`
-        // owner under its sentinel ref, so reads of a param-owned
-        // binding register a last use for the param too — the
-        // last-use pass can then anchor its Free after the param's
-        // true last read instead of the last body statement.
-        last_use.insert(owner.tirref(&own.param_index), r);
+        // By NAME, latest forward-order read wins — the last-use
+        // anchor for a LOOP-CARRIED owner (whose value survives the
+        // loop because the binding is read again after it) must see
+        // the post-loop read even when that read resolved to a
+        // different owner in the `owner_at_read` snapshot.
+        last_read_by_name.insert(name, r);
+        if let Some(owner) = Ownership::dense_get(&own.owner_at_read, r) {
+            // Overwriting insert: latest forward-order read wins =
+            // last source-order read. `Owner::tirref` keys a `Param`
+            // owner under its sentinel ref, so reads of a param-owned
+            // binding register a last use for the param too — the
+            // last-use pass can then anchor its Free after the param's
+            // true last read instead of the last body statement.
+            last_use.insert(owner.tirref(&own.param_index), r);
+        }
     }
     tir.walk_operands(r, &mut |_parent, operand, _kind| {
-        collect_last_uses(tir, pool, own, operand, last_use);
+        collect_last_uses(tir, pool, own, operand, last_use, last_read_by_name);
     });
 }
 

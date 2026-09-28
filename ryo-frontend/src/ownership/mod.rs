@@ -205,7 +205,12 @@ pub(crate) struct Ownership {
     /// passes (which run at function exit) anchor their Frees on OTHER
     /// paths or program points the early return never reaches.
     /// Monotone-accumulating; loop convergence re-walks may record the
-    /// same return twice — deduped at scheduling time.
+    /// same return twice — deduped at scheduling time. Only owners
+    /// whose producer is ranked at or before the return in program
+    /// order are recorded (`record_return_epilogue`): loop fixed-point
+    /// seeding can leave a body-local owner `Valid` at a return it
+    /// lexically precedes, and such a value cannot exist on the
+    /// return's path.
     pub return_epilogue: Vec<(TirRef, Vec<Owner>)>,
 
     /// P3 (final spec §3.2): each bound view → the root owner it
@@ -439,9 +444,17 @@ fn analyze_function(
     // owner of a rebound binding), the final-state filter below skips it.
     let body_stmts = tir.body_stmts();
     let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
+    // Binding name → its latest read anywhere (same traversal order as
+    // `last_use`). Used to re-anchor a LOOP-CARRIED owner's Free: the
+    // value survives the loop when the binding is read again after it,
+    // so the loop exit is not its death point — the free belongs after
+    // the binding's true last read (codegen's binding-path redirect
+    // frees the path-correct buffer there).
+    let mut last_read_by_name: HashMap<StringId, TirRef> = HashMap::new();
     for &stmt in &body_stmts {
-        collect_last_uses(tir, pool, &own, stmt, &mut last_use);
+        collect_last_uses(tir, pool, &own, stmt, &mut last_use, &mut last_read_by_name);
     }
+    let loop_carried_owners: HashSet<TirRef> = collect_loop_carried_owners(tir);
     // P5 (final spec §3.2): root owner → every view that ever
     // projected it (sorted for deterministic iteration).
     // Program-order ranks, built once per function and shared by the
@@ -507,28 +520,19 @@ fn analyze_function(
                     // the last use of any projection of this owner.
                     let after = defer_anchor(after, owner, &projections_of, &last_use, &order);
                     // Conditional last use: a named binding whose LAST
-                    // READ is inside a branch is freed at the branch's
-                    // exit — the earliest point where the value is dead
-                    // on ALL paths. Anchoring after the read itself
-                    // fires per-iteration in loops (UAF on later reads)
-                    // and never fires on not-taken arms (leak). Arms
-                    // that `return` never reach the branch exit, but
-                    // the return epilogue owns those paths: its
-                    // covered-check excludes ancestor branches, so the
-                    // exit anchor does not suppress the epilogue Free.
-                    // Skip the re-anchor only for temps / branch-local
-                    // bindings (their values don't exist on every exit
-                    // path).
-                    let anchor = match outermost_branch_of(tir, after) {
-                        Some(branch_stmt)
-                            if owner_binding_name(tir, *r).is_some_and(|name| {
-                                declared_before_stmt(tir, name, branch_stmt)
-                            }) =>
-                        {
-                            branch_stmt
-                        }
-                        _ => after,
-                    };
+                    // READ is inside a branch/loop is re-anchored by
+                    // `last_use_anchor` (see loops.rs) — normally to
+                    // the branch exit, the earliest point where the
+                    // value is dead on ALL paths, EXCEPT a loop-carried
+                    // owner whose binding is read again after the loop.
+                    let anchor = last_use_anchor(
+                        tir,
+                        *r,
+                        after,
+                        &order,
+                        &last_read_by_name,
+                        &loop_carried_owners,
+                    );
                     sidecar.free_schedule.push(FreePoint {
                         after: anchor,
                         target: *r,

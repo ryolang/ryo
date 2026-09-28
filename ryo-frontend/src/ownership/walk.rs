@@ -2,12 +2,12 @@
 
 use super::{
     BranchState, Owner, OwnerState, Ownership, PromoCandidate, ReseatDrop, analyze_for_range,
-    analyze_while_loop, check_field_move_out, check_field_target_projected, check_source_projected,
-    consume_struct_lit_fields, consumed_binding_name, drain_dying_views, field_path_of,
-    format_binding, needs_tracking, owner_name_for_diag, owner_sort_key, param_idx,
-    projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
-    refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
-    rule7_owner_name, struct_base_name, struct_root,
+    analyze_while_loop, body_may_jump_out, body_may_return, check_field_move_out,
+    check_field_target_projected, check_source_projected, consume_struct_lit_fields,
+    consumed_binding_name, drain_dying_views, field_path_of, format_binding, needs_tracking,
+    owner_name_for_diag, owner_sort_key, param_idx, projection_root, prune_branch_dead_projections,
+    push_unique, record_return_epilogue, refine_view_liveness_for_arm, register_projection,
+    resolve_view_alias, restore_view_last_use, rule7_owner_name, struct_base_name, struct_root,
 };
 use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
@@ -34,9 +34,9 @@ pub(crate) fn analyze_stmt(
         TirTag::Assign => analyze_assign(tir, pool, own, sink, sidecar, stmt),
         TirTag::Return => {
             analyze_return(tir, pool, own, sink, sidecar, stmt);
-            record_return_epilogue(own, stmt);
+            record_return_epilogue(tir, own, stmt);
         }
-        TirTag::ReturnVoid => record_return_epilogue(own, stmt),
+        TirTag::ReturnVoid => record_return_epilogue(tir, own, stmt),
         TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, sidecar, stmt),
         TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, sidecar, stmt),
         TirTag::ForRange => analyze_for_range(tir, pool, own, sink, sidecar, stmt),
@@ -606,10 +606,11 @@ pub(crate) fn stmts_subtree(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
 /// guarantee that conditionally-moved values are not safe to use
 /// after the join. Snapshot the lattice before each branch, walk
 /// each branch from the snapshot independently, then merge. If any
-/// branch left a value `Moved`, the post-`if` state is `Moved`;
-/// when no `else` is present, the implicit fall-through branch is
-/// the pre-`if` snapshot itself, so an unconsumed pre-`if` value
-/// stays usable after the join.
+/// branch that REACHES the merge left a value `Moved`, the post-`if`
+/// state is `Moved`; a branch that exits (Return/Break/Continue)
+/// contributes nothing. When no `else` is present, the implicit
+/// fall-through branch is the pre-`if` snapshot itself, so an
+/// unconsumed pre-`if` value stays usable after the join.
 pub(crate) fn analyze_if_stmt(
     tir: &Tir,
     pool: &InternPool,
@@ -619,6 +620,14 @@ pub(crate) fn analyze_if_stmt(
     r: TirRef,
 ) {
     let view = tir.if_stmt_view(r);
+    // An arm whose end-state terminates in Return/Break/Continue never
+    // reaches the merge block, so its Moved state is path-local to an
+    // exit (the return epilogue / loop-exit passes own destruction on
+    // those paths) and must not contribute to the join merge. Same
+    // structural predicates as `if_may_fall_through` (loops.rs).
+    let arm_falls_through =
+        |body: &[TirRef]| !body_may_return(tir, body) && !body_may_jump_out(tir, body);
+    let mut arm_falls_through_flags: Vec<bool> = Vec::with_capacity(2 + view.elif_branches.len());
     visit_expr(tir, pool, own, sink, sidecar, view.cond);
     // P4 lift (final spec §3.2): a projection whose last use is the
     // condition is dead before any arm runs — drain now so every arm
@@ -666,6 +675,7 @@ pub(crate) fn analyze_if_stmt(
     restore_view_last_use(own, saved);
     let mut branch_results: Vec<BranchState> = Vec::with_capacity(2 + view.elif_branches.len());
     branch_results.push(own.take_branch(snap.clone()));
+    arm_falls_through_flags.push(arm_falls_through(&view.then_stmts));
 
     for (elif_index, elif) in view.elif_branches.iter().enumerate() {
         visit_expr(tir, pool, own, sink, sidecar, elif.cond);
@@ -680,6 +690,7 @@ pub(crate) fn analyze_if_stmt(
         }
         restore_view_last_use(own, saved);
         branch_results.push(own.take_branch(snap.clone()));
+        arm_falls_through_flags.push(arm_falls_through(&elif.body));
     }
 
     if let Some(else_stmts) = &view.else_stmts {
@@ -696,28 +707,38 @@ pub(crate) fn analyze_if_stmt(
         }
         restore_view_last_use(own, saved);
         branch_results.push(own.take_branch(snap.clone()));
+        arm_falls_through_flags.push(arm_falls_through(else_stmts));
     } else {
         // Else-less fall-through pseudo-arm: the pre-if state.
         branch_results.push(snap.clone());
+        arm_falls_through_flags.push(true);
     }
 
     // Schedule branch-gated Frees for owners that diverge across
     // arms (Valid in some, Moved in others). For each Valid arm,
     // anchor a Free after that arm's last body statement and gate
     // it on the arm's BranchId. The post-merge state below stamps
-    // such owners as `Moved` (any-Moved-wins), so the function-exit
-    // last-use pass will skip them — without these conditional
-    // Frees the Valid-arm allocation would leak.
+    // such owners as `Moved` (any-Moved-wins over the arms that
+    // REACH the merge), so the function-exit last-use pass will skip
+    // them — without these conditional Frees the Valid-arm
+    // allocation would leak.
     //
     // The `else_stmts.is_none()` path pushes the pre-if snapshot
     // into `branch_results` for the implicit fall-through. We
     // deliberately don't schedule conditional Frees against that
     // pseudo-arm: the post-if last-use pass already covers any
     // owner whose state remains `Valid` at function exit.
+    //
+    // Only arms that fall through participate: an arm that ends in
+    // Return/Break/Continue contributes no Moved state to the merge,
+    // so the merged state stays `Valid` and the last-use pass owns
+    // the Free — scheduling a branch-gated Free for the sibling arm
+    // here as well would double-free.
     struct ArmInfo<'a> {
         branch_id: BranchId,
         last_stmt: Option<TirRef>,
         state: &'a BranchState,
+        falls_through: bool,
     }
 
     let mut arms: Vec<ArmInfo> = Vec::with_capacity(branch_results.len());
@@ -725,12 +746,14 @@ pub(crate) fn analyze_if_stmt(
         branch_id: then_branch,
         last_stmt: view.then_stmts.last().copied(),
         state: &branch_results[0],
+        falls_through: arm_falls_through_flags[0],
     });
     for (i, elif) in view.elif_branches.iter().enumerate() {
         arms.push(ArmInfo {
             branch_id: elif_branches[i],
             last_stmt: elif.body.last().copied(),
             state: &branch_results[1 + i],
+            falls_through: arm_falls_through_flags[1 + i],
         });
     }
     if let Some(else_stmts) = &view.else_stmts {
@@ -740,6 +763,9 @@ pub(crate) fn analyze_if_stmt(
             state: branch_results
                 .last()
                 .expect("else snapshot pushed by analyze_if_stmt"),
+            falls_through: *arm_falls_through_flags
+                .last()
+                .expect("else fall-through flag pushed"),
         });
     }
 
@@ -763,11 +789,12 @@ pub(crate) fn analyze_if_stmt(
         }
         let any_moved = arms
             .iter()
+            .filter(|a| a.falls_through)
             .any(|a| matches!(a.state.states.get(&owner), Some(OwnerState::Moved { .. })));
         if !any_moved {
             continue;
         }
-        for arm in &arms {
+        for arm in arms.iter().filter(|a| a.falls_through) {
             if matches!(arm.state.states.get(&owner), Some(OwnerState::Valid))
                 && let Some(after) = arm.last_stmt
             {
@@ -851,7 +878,9 @@ pub(crate) fn analyze_if_stmt(
 
     // `own` already holds the pre-if non-monotone fields (installed by
     // the last take_branch) — merge every arm's end state into them.
-    own.merge_branches(branch_results);
+    // Arms that end in Return/Break/Continue contribute no Moved state
+    // (see merge_branches).
+    own.merge_branches(branch_results, &arm_falls_through_flags);
     // P4 (final spec §3.2): a view whose last use is inside this if is
     // dead at the join on every path — prune it from the merged freeze
     // ranges (see prune_branch_dead_projections).

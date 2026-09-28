@@ -407,6 +407,61 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
     walk(tir, &tir.body_stmts(), target, &mut Vec::new())
 }
 
+/// Last-use Free anchor for a named-binding owner whose raw last read
+/// (`after`) sits inside a branch or loop. The default re-anchor is the
+/// OUTERMOST branch/loop statement's exit — the earliest point where
+/// the value is dead on ALL paths: anchoring after the read itself
+/// fires per-iteration in loops (UAF on later reads) and never fires
+/// on not-taken arms (leak). Arms that `return` never reach the branch
+/// exit, but the return epilogue owns those paths: its covered-check
+/// excludes ancestor branches, so the exit anchor does not suppress
+/// the epilogue Free. Temps / branch-local bindings skip the
+/// re-anchor (their values don't exist on every exit path).
+///
+/// EXCEPTION — loop-carried owner read again after the loop: a value
+/// assigned inside the loop to a pre-loop binding survives the loop,
+/// so the loop exit is NOT its death point. Anchoring there frees the
+/// binding's current buffer before the post-loop read (garbage output
+/// / UAF). Anchor after the binding's true last read (by name) instead;
+/// codegen's binding-path redirect frees the path-correct buffer there
+/// (the final iteration's value, or the pre-loop value on the
+/// zero-iteration path).
+pub(crate) fn last_use_anchor(
+    tir: &Tir,
+    owner: TirRef,
+    after: TirRef,
+    order: &[u32],
+    last_read_by_name: &HashMap<StringId, TirRef>,
+    loop_carried_owners: &HashSet<TirRef>,
+) -> TirRef {
+    match outermost_branch_of(tir, after) {
+        Some(branch_stmt)
+            if owner_binding_name(tir, owner)
+                .is_some_and(|name| declared_before_stmt(tir, name, branch_stmt)) =>
+        {
+            if matches!(
+                tir.inst(branch_stmt).tag,
+                TirTag::WhileLoop | TirTag::ForRange
+            ) && loop_carried_owners.contains(&owner)
+                && owner_binding_name(tir, owner).is_some_and(|name| {
+                    last_read_by_name.get(&name).is_some_and(|read| {
+                        read != &after
+                            && order.get(read.index()).copied().unwrap_or(0)
+                                > order.get(branch_stmt.index()).copied().unwrap_or(0)
+                    })
+                })
+            {
+                owner_binding_name(tir, owner)
+                    .and_then(|name| last_read_by_name.get(&name).copied())
+                    .unwrap_or(branch_stmt)
+            } else {
+                branch_stmt
+            }
+        }
+        _ => after,
+    }
+}
+
 /// All branch statements (`IfStmt`/`WhileLoop`/`ForRange`) containing
 /// `target`, outermost first. A Free anchored after any of these never
 /// fires on a return path that exits through `target` — the branch
@@ -715,6 +770,18 @@ pub(crate) fn analyze_loop_body(
     // divergent bodies (move-without-rebind) converge by the second
     // walk's comparison and break early; oscillating bodies stop at
     // the cap with the same merged state the old re-walk started from.
+    // A body whose last statement is an unconditional `return` never
+    // flows off its end: the post-body state reaches neither the
+    // back-edge nor the post-loop join, so its Moved entries must not
+    // enter the (entry ⊔ post-body) merge (merge_non_monotone drops
+    // them). `break`/`continue` end-states still flow to the join /
+    // back-edge and keep contributing. Structural, whole-body test —
+    // never per-owner.
+    let after_flows_off_end = !matches!(
+        body.last().map(|r| tir.inst(*r).tag),
+        Some(TirTag::Return | TirTag::ReturnVoid)
+    );
+
     const MAX_PROPAGATE_PASSES: usize = 2;
     let mut entry = snap.clone();
     for _ in 0..MAX_PROPAGATE_PASSES {
@@ -742,7 +809,7 @@ pub(crate) fn analyze_loop_body(
         // Always merge (entry ⊔ post-body) into `own`; on convergence
         // post-body == entry so the merge is a no-op and `own` already
         // holds the converged entry state Phase 2 starts from.
-        merge_non_monotone(own, entry, after);
+        merge_non_monotone(own, entry, after, after_flows_off_end);
         if !differ {
             break;
         }
@@ -756,7 +823,7 @@ pub(crate) fn analyze_loop_body(
     // Final merge with the loop-entry snapshot: the loop may execute
     // zero times, so post-loop state = entry ⊔ post-check-pass.
     let after = own.take_branch(BranchState::default());
-    merge_non_monotone(own, snap, after);
+    merge_non_monotone(own, snap, after, after_flows_off_end);
 }
 
 /// Fixed-point ownership analysis for `while`, in the
@@ -844,15 +911,113 @@ pub(crate) fn analyze_for_range(
 ///   top-level body statement that contains it (the first container in
 ///   source order wins). Turns "which body stmt reaches the jump" into
 ///   one lookup instead of a per-stmt containment walk of the body.
+/// * `loop_carried_owners` — values assigned (via `Assign`) inside the
+///   loop to a binding that is still live post-walk (its name is in the
+///   post-walk `current_owner`). Such a value is a loop-carried
+///   binding's current owner: it survives the jump, so a jump-anchored
+///   Free would free memory the binding still owns (codegen resolves
+///   the free through the binding's home slot, and the last-use pass
+///   independently schedules the legitimate Free after the final
+///   read). Note the post-walk `current_owner` itself is NOT a usable
+///   proxy here: the loop merge is first-wins, so a loop-carried
+///   binding maps back to its PRE-LOOP owner after the walk. Computed
+///   once per loop, shared by every jump in it.
 pub(crate) struct LoopExitCtx {
     body: Vec<TirRef>,
     inside_loop: HashSet<TirRef>,
     has_any: HashSet<TirRef>,
     top_level: HashMap<TirRef, TirRef>,
+    loop_carried_owners: HashSet<TirRef>,
+}
+
+/// Collect every `Assign` (name, value) pair reachable from `stmts`,
+/// descending through if/loop bodies. Values only; `VarDecl`s are not
+/// loop-carried writes (a loop-local declaration dies with the loop and
+/// still needs its jump-anchored Free).
+pub(crate) fn collect_assign_writes(
+    tir: &Tir,
+    stmts: &[TirRef],
+    out: &mut Vec<(StringId, TirRef)>,
+) {
+    for &r in stmts {
+        match tir.inst(r).tag {
+            TirTag::Assign => {
+                let view = tir.assign_view(r);
+                out.push((view.name, view.value));
+            }
+            TirTag::IfStmt => {
+                let view = tir.if_stmt_view(r);
+                collect_assign_writes(tir, &view.then_stmts, out);
+                for elif in &view.elif_branches {
+                    collect_assign_writes(tir, &elif.body, out);
+                }
+                if let Some(else_stmts) = &view.else_stmts {
+                    collect_assign_writes(tir, else_stmts, out);
+                }
+            }
+            TirTag::WhileLoop => {
+                collect_assign_writes(tir, &tir.while_loop_view(r).body, out);
+            }
+            TirTag::ForRange => {
+                collect_assign_writes(tir, &tir.for_range_view(r).body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every in-loop `Assign` value whose binding is declared BEFORE the
+/// enclosing loop — i.e. loop-carried owners: values a live binding
+/// holds at the loop's exit, on both the iterated paths (the value
+/// written this iteration) and, via the binding's home slot, the
+/// zero-iteration path is NOT included (the home then holds the
+/// pre-loop owner, a different ref). Jump-exit and last-use anchoring
+/// both need this set to avoid freeing a loop-carried value while the
+/// binding is still live.
+pub(crate) fn collect_loop_carried_owners(tir: &Tir) -> HashSet<TirRef> {
+    fn walk(tir: &Tir, stmts: &[TirRef], out: &mut HashSet<TirRef>) {
+        for &r in stmts {
+            match tir.inst(r).tag {
+                TirTag::WhileLoop | TirTag::ForRange => {
+                    let body = match tir.inst(r).tag {
+                        TirTag::WhileLoop => tir.while_loop_view(r).body,
+                        _ => tir.for_range_view(r).body,
+                    };
+                    let mut writes = Vec::new();
+                    collect_assign_writes(tir, &body, &mut writes);
+                    for (name, value) in writes {
+                        if declared_before_stmt(tir, name, r) {
+                            out.insert(value);
+                        }
+                    }
+                    walk(tir, &body, out);
+                }
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(r);
+                    walk(tir, &view.then_stmts, out);
+                    for elif in &view.elif_branches {
+                        walk(tir, &elif.body, out);
+                    }
+                    if let Some(else_stmts) = &view.else_stmts {
+                        walk(tir, else_stmts, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    walk(tir, &tir.body_stmts(), &mut out);
+    out
 }
 
 impl LoopExitCtx {
-    fn new(tir: &Tir, sidecar: &FunctionSidecar, loop_inst: TirRef) -> Option<Self> {
+    fn new(
+        tir: &Tir,
+        own: &Ownership,
+        sidecar: &FunctionSidecar,
+        loop_inst: TirRef,
+    ) -> Option<Self> {
         let body = tir.loop_body(loop_inst)?;
         let mut inside_loop: HashSet<TirRef> = HashSet::new();
         tir.collect_loop_body_refs(loop_inst, &mut inside_loop);
@@ -865,11 +1030,22 @@ impl LoopExitCtx {
                 top_level.entry(r).or_insert(stmt);
             }
         }
+        // A value assigned inside the loop to a name that is still a
+        // live binding post-walk is loop-carried: it is the binding's
+        // owner at the jump and stays live after the loop.
+        let mut writes = Vec::new();
+        collect_assign_writes(tir, &body, &mut writes);
+        let loop_carried_owners: HashSet<TirRef> = writes
+            .into_iter()
+            .filter(|(name, _)| own.current_owner.contains_key(name))
+            .map(|(_, value)| value)
+            .collect();
         Some(Self {
             body,
             inside_loop,
             has_any,
             top_level,
+            loop_carried_owners,
         })
     }
 }
@@ -904,7 +1080,7 @@ pub(crate) fn schedule_loop_exit_frees_in(
                 // The loop-body reachability and scheduled-Free index
                 // are invariant across jumps in the same loop — compute
                 // them once here, not per break/continue.
-                if let Some(ctx) = LoopExitCtx::new(tir, sidecar, r) {
+                if let Some(ctx) = LoopExitCtx::new(tir, own, sidecar, r) {
                     schedule_loop_exit_frees_in(tir, own, sidecar, &ctx.body, Some(&ctx));
                 }
             }
@@ -927,7 +1103,12 @@ pub(crate) fn schedule_loop_exit_frees_in(
 /// that fires on the jump's path.
 ///
 /// Inside-loop owners (in `inside_loop`) — schedule iff no scheduled
-/// Free is anchored on the path that reaches this jump. The next
+/// Free is anchored on the path that reaches this jump, EXCEPT
+/// loop-carried owners (`ctx.loop_carried_owners`: values assigned
+/// inside the loop to a live binding). A loop-carried value survives
+/// the jump, so a jump-anchored Free would free memory the binding
+/// still owns — the last-use pass schedules the legitimate Free after
+/// the final read instead. For all other inside-loop owners the next
 /// iteration allocates a fresh buffer, so jump-side Frees are safe.
 ///
 /// Pre-loop owners — schedule defensively iff NO Free is scheduled
@@ -1016,9 +1197,19 @@ pub(crate) fn schedule_break_continue_frees(
         }
 
         if inside_loop.contains(&r) {
-            // Inside-loop owner: each iteration allocates fresh, so
-            // a jump-anchored Free is safe. Schedule iff no Free
-            // already fires on this jump's path.
+            // Inside-loop owner. Each iteration allocates fresh, so a
+            // jump-anchored Free is safe — UNLESS the owner is
+            // loop-carried (a live binding's value assigned inside the
+            // loop): it survives the jump, and codegen's binding-path
+            // redirect would free the binding's current home-slot
+            // contents while the last-use pass independently frees the
+            // same buffer after the final read (double free /
+            // read-after-free). The last-use pass owns that owner's
+            // lifetime (its post-loop anchor fires on every exit path);
+            // skip it here.
+            if ctx.loop_carried_owners.contains(&r) {
+                continue;
+            }
             if covers_this_jump.contains(&r) {
                 continue;
             }
