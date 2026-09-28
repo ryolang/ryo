@@ -731,6 +731,60 @@ fn main():
 \tprint(\"done\")
 ",
     ),
+    (
+        // Loop-carried str concat past the 23-byte inline boundary with
+        // an immediate `break` (dead conditional after it, as in the
+        // original repro): the loop-exit anchor must not free the
+        // loop-carried owner a second time — pre-fix this double-freed
+        // (glibc "double free", macOS SIGTRAP/SIGABRT) and the print
+        // past the inline boundary emitted garbage.
+        "loop_carried_concat_break",
+        "\
+fn main():
+\tmut total = \"😀😀😀😀😀😀😀\"
+\twhile true:
+\t\ttotal = total + \"🦊\"
+\t\tbreak
+\t\tif total.len() > 5000:
+\t\t\tbreak
+\tprint(total)
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // Same family with a live conditional exit: the accumulator
+        // grows past 5000 bytes over many iterations, so each
+        // superseded buffer drops exactly once (in-loop reassign) and
+        // the final buffer drops exactly once at the last use.
+        "loop_carried_concat_in_loop",
+        "\
+fn main():
+\tmut total = \"😀😀😀😀😀😀😀\"
+\twhile true:
+\t\ttotal = total + \"🦊\"
+\t\tif total.len() > 5000:
+\t\t\tbreak
+\tprint(total)
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // int_to_str formatting while a >23-byte str is live: the
+        // formatted buffer's length field must not pick up the live
+        // string's state — pre-fix print emitted ~32 garbage bytes
+        // after the digits and the process double-freed at exit.
+        "int_to_str_with_long_live_str",
+        "\
+fn main():
+\tmut total = \"😀😀😀😀😀😀😀\"
+\twhile true:
+\t\ttotal = total + \"🦊\"
+\t\tbreak
+\tprint(int_to_str(total.len()))
+\tprint(total)
+\tprint(\"\\n\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's

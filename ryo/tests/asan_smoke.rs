@@ -285,3 +285,27 @@ fn asan_self_assign_struct_no_double_free() {
         "self_assign_struct",
     );
 }
+
+#[test]
+fn asan_loop_carried_concat_break_no_double_free() {
+    run_asan_smoke(
+        common::find_fixture("loop_carried_concat_break"),
+        "loop_carried_concat_break",
+    );
+}
+
+#[test]
+fn asan_loop_carried_concat_in_loop_no_double_free() {
+    run_asan_smoke(
+        common::find_fixture("loop_carried_concat_in_loop"),
+        "loop_carried_concat_in_loop",
+    );
+}
+
+#[test]
+fn asan_int_to_str_with_long_live_str() {
+    run_asan_smoke(
+        common::find_fixture("int_to_str_with_long_live_str"),
+        "int_to_str_with_long_live_str",
+    );
+}
