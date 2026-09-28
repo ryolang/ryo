@@ -71,7 +71,7 @@
   - **Python-like Ergonomics:** Clean, readable, minimal syntax. Easy to learn, especially for Python developers. Reduce boilerplate.
   - **Rust-like Safety (Simplified):** Memory safe by default via ownership and borrowing, without GC. Compile-time checks prevent dangling pointers, data races, use-after-free. Simplified borrowing model compared to Rust (no manual lifetimes).
   - **Go-Inspired Simplicity:** Minimal keyword set, straightforward core concepts, avoid unnecessary feature creep. Focus on providing essential, orthogonal features. Simpler than Rust, more expressive than Go — the right trade-off for Ryo's target audience.
-  - **Native Performance:** Compiled to native code. No GC pauses. Deterministic resource management. Performance comparable to Go — faster than Python, Node.js, or Ruby. Note: Ryo includes automatic debugging features (stack traces, error context) that add ~5-10% runtime overhead but significantly improve developer experience.
+  - **Native Performance:** Compiled to native code. No GC pauses. Deterministic resource management. Performance comparable to Go — faster than Python, Node.js, or Ruby. Note: Ryo includes automatic debugging features (stack traces, error context) that trade a small, configurable runtime cost for significantly improved developer experience.
   - **Effective Concurrency:** Simple and safe concurrency using Task/Future/Channel patterns with a concurrent runtime.
   - **Compile-Time Power:** Integrated compile-time function execution (`comptime`) for metaprogramming, configuration, and optimization.
     *.  **Excellent Tooling:** Provide a seamless experience out-of-the-box, including a fast compiler, integrated package manager, REPL, and testing framework.
@@ -98,12 +98,12 @@ Ryo explicitly prioritizes **developer experience and debugging capability over 
 
 | Feature | Runtime Overhead | Binary Size Impact | DX Benefit | Rationale |
 | --------- | ------------------ | ------------------- | ------------ | ----------- |
-| **Automatic error stack traces** | ~5-10% (at error creation) | - | Complete error origin tracking with file/line/function | Eliminates hours of debugging; worth the cost for most applications |
-| **Stack frame capture at `try`** | ~5-10% cumulative (at each propagation) | - | Full error propagation chain | Shows exactly how errors bubble through call stack |
-| **Panic stack traces** | ~5-10% always-on | - | Post-mortem analysis without debugger | Critical for production debugging |
-| **Debug symbols in binaries** | - | +20-30% | Resolve stack traces to source code | Use `--strip` flag for production if needed |
+| **Automatic error stack traces** | Small, paid only at error creation | - | Complete error origin tracking with file/line/function | Eliminates hours of debugging; worth the cost for most applications |
+| **Stack frame capture at `try`** | Small, paid per propagation | - | Full error propagation chain | Shows exactly how errors bubble through call stack |
+| **Panic stack traces** | Small, always-on | - | Post-mortem analysis without debugger | Critical for production debugging |
+| **Debug symbols in binaries** | - | Larger binaries | Resolve stack traces to source code | Use `--strip` flag for production if needed |
 
-**Total Estimated Overhead:** ~5-10% for error-heavy workloads, negligible for error-free paths.
+**Total Overhead:** Paid only where errors are created or propagated — error-free paths are unaffected. The exact cost varies with workload and trace configuration; measure before tuning.
 
 **When Ryo Is/Isn't Appropriate:**
 
@@ -120,14 +120,14 @@ Ryo explicitly prioritizes **developer experience and debugging capability over 
 - Ultra-low-latency systems (HFT, real-time audio/video)
 - Bare-metal embedded systems with tight resource constraints
 - Applications where every microsecond matters
-- Systems that cannot afford 5-10% overhead
+- Systems that cannot afford any tracing overhead
 
 **Comparison to Other Languages:**
 
-- **Rust:** Zero-overhead tracing (opt-in via `RUST_BACKTRACE`). Fastest, but harder to debug by default.
-- **Go:** Built-in stack traces with moderate overhead. Simpler than Ryo, but less detailed.
-- **Zig:** Near-zero overhead with opt-in tracing. Maximum control, minimal automation.
-- **Ryo:** Rich debugging by default, trades performance for DX. Better out-of-box experience than Go, more overhead than Rust/Zig.
+- **Rust:** Tracing is opt-in (`RUST_BACKTRACE`) and off by default. Fastest default, but harder to debug out of the box.
+- **Go:** Built-in stack traces, always available. Simpler than Ryo's, but less detailed.
+- **Zig:** Opt-in tracing with maximum control and minimal automation.
+- **Ryo:** Rich debugging by default, trading some runtime performance for DX. Better out-of-box experience than Go; Rust and Zig stay cheaper when traces are off.
 
 *Rationale: Most applications spend more engineering time debugging than optimizing. Ryo chooses to save developer time at the cost of runtime performance, making it ideal for the 95% of applications where developer productivity matters more than the last 10% of performance.*
 
@@ -138,9 +138,9 @@ True DX means **smart defaults + user choice**, not mandatory overhead. Ryo prov
 **Build-time control (compiler flags):**
 
 ```bash
-ryo build                        # Default: full traces (~5-10% overhead)
-ryo build --error-traces=minimal # Location only (~2-3% overhead)
-ryo build --error-traces=off     # No capture (0% overhead)
+ryo build                        # Default: full traces
+ryo build --error-traces=minimal # Location only
+ryo build --error-traces=off     # No capture
 ```
 
 **Profile-based defaults:**
@@ -341,7 +341,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 - **Closures:** Anonymous functions with capture semantics.
   - Single-line: `fn(args): expression`
   - Multi-line: `fn(args):` followed by indented block (tab-based)
-  - Move capture: `move fn(args): ...`
+  - Capture semantics follow assignment: Copy types are copied, owning types are moved (Section 6.2.2)
   - See Section 6.2 for complete closure specification including capture semantics and examples.
 - **Tuple Destructuring:** `(a, b) = my_tuple`.
 - **Type Conversion Syntax:** Uses function-call style `TargetType(value)` for explicit, safe conversions (primarily numeric and compatible types). *(Rationale: Explicit, uses type name directly like Go, avoids `as` keyword ambiguity, separates safe/unsafe casts clearly).*
@@ -756,8 +756,8 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 ### 4.10 Error Trait and Message Handling
 
-- **Error Creation:** When an error value is created (`return MyError(...)`), the compiler automatically captures the full call stack at that moment, storing it as the initial stack trace. **Performance Note:** Stack capture incurs ~5-10% overhead at error creation, but only when errors actually occur (error-free code paths have no overhead). See Section 1.1 for DX vs. performance trade-off rationale.
-- **Error Propagation (`try`):** When an error is propagated via try, the compiler appends a new frame to the error's stack trace. This new frame contains the location (file, line, function) of the try expression itself. **Performance Note:** Each propagation adds ~5-10% overhead at that specific `try` site when an error is being propagated (no overhead on success path).
+- **Error Creation:** When an error value is created (`return MyError(...)`), the compiler automatically captures the full call stack at that moment, storing it as the initial stack trace. **Performance Note:** Stack capture incurs a runtime cost only when errors are actually created; error-free code paths pay nothing. See Section 1.1 for DX vs. performance trade-off rationale.
+- **Error Propagation (`try`):** When an error is propagated via try, the compiler appends a new frame to the error's stack trace. This new frame contains the location (file, line, function) of the try expression itself. **Performance Note:** Each propagation adds a small cost at that specific `try` site, only while an error is being propagated (the success path is unaffected).
 - **Result:** The final `.stack_trace()` provides a complete, easy-to-read "story" of the failure, starting with the original error and showing every function that propagated it. This rich debugging information is a core part of Ryo's DX-first philosophy.
 
 - **Error Trait:** All error types automatically implement the `Error` trait:
@@ -1130,7 +1130,7 @@ fn add_header(inout buf: str, header: str):
 
    ```ryo
    fn store(move item: Item):
-   	self.items.append(move item)
+   	self.items.append(item)
    ```
 
 2. **Type transformation.** Consuming one type to produce another.
@@ -1824,63 +1824,54 @@ result = validator(42)  # true
 
 #### 6.2.2 Capture Semantics
 
-Closures can capture variables from their enclosing scope in three ways:
-
-**1. Default Immutable Borrow**
-
-By default, closures capture variables by immutable reference. The original variable remains valid after closure creation.
+Closures capture variables from their enclosing scope **the same way assignment does** (Section 5.1): Copy types (`int`, `float`, `bool`, `char`, and Copy structs) are copied into the closure's environment; owning types (`str`, `list[T]`, and so on) are moved, invalidating the original binding.
 
 ```ryo
 counter = 10
-read_counter = fn(): counter + 1
+read_counter = fn(): counter + 1   # int is a Copy type: counter stays valid
 print(read_counter())  # 11
-print(counter)         # 10 (still valid)
-```
+print(counter)         # 10
 
-**2. Explicit Move Capture**
-
-Use the `move` keyword to transfer ownership of captured variables into the closure's environment. The original variables become invalid after the move.
-
-```ryo
 name = "Alice"
-greeter = move fn(): f"Hello, {name}"
-# name is now moved - cannot be used here
-print(greeter())  # "Hello, Alice"
+greeter = fn(): f"Hello, {name}"   # str is an owning type: name moves in
+# print(name)          # compile error: `name` was moved
+print(greeter())       # "Hello, Alice"
 ```
 
-> **Task closures:** Closures passed to `task.run`, `task.scope`, or `task.spawn_detached` implicitly capture by move — no `move` keyword needed. The compiler enforces this because tasks may outlive the spawning scope. To share data across tasks, clone a `shared[T]` handle before the closure. Writing `move` explicitly on a task closure is accepted but redundant.
+Because every capture is owned by the closure, a closure value is always self-contained: it can be stored in a variable, returned from a function, or sent to a task without escape analysis or lifetime tracking. This keeps closures fully consistent with Rules 5 and 6 — there are no hidden borrows living inside values.
 
-**3. Mutable Capture (Inferred)**
+**Mutable Capture**
 
-When a closure mutates a captured variable, the compiler infers a mutable borrow. The original variable must be declared `mut`.
+A closure that mutates a captured variable mutates its **own environment**. The change is visible across calls to that closure, never to the original binding, and the closure binding itself must be declared `mut`.
 
 ```ryo
-mut total = 0
-add = fn(x: int):
-	total += x  # Inferred mutable capture
+total = 0
+mut add = fn(x: int):
+	total += x  # mutates the closure's own copy of total
 	return total
 
 print(add(5))   # 5
 print(add(10))  # 15
-print(total)    # 15
+print(total)    # 0 — the caller's binding was copied, not shared
 ```
 
 **Ownership Rules:**
 
-- **Move capture** invalidates the original variable (use-after-move is a compile error)
-- **Only one mutable borrow** at a time (prevents data races)
-- **No simultaneous mutable and immutable borrows** (enforced by borrow checker)
+- Capturing an owning type **moves** it — use-after-move is a compile error
+- A closure that mutates its captures must be bound with `mut`
+- To share data between a closure and its creator — or between tasks — use `shared[T]` (Section 5.6)
 - Compiler enforces these rules at closure creation time (no runtime overhead)
+
+> **Task closures:** Closures passed to `task.run`, `task.scope`, or `task.spawn_detached` capture by the same move/copy rule — owned captures are exactly what makes it safe for tasks to outlive the spawning scope. **Exception (scoped task borrows):** inside a `task.scope` body, child closures may capture by immutable borrow, because the scope joins all children before the frame ends (Section 9).
 
 #### 6.2.3 Conceptual Types
 
 Closures are categorized by their capture behavior for type checking purposes:
 
-| Type | Capture Mode | Can Call Multiple Times? | Use Case |
+| Type | Environment | Can Call Multiple Times? | Use Case |
 | ------ | -------------- | -------------------------- | ---------- |
-| **`Fn`** | Immutable borrow | Yes | Read-only operations, pure functions |
-| **`FnMut`** | Mutable borrow | Yes (requires mut) | Stateful operations, accumulators |
-| **`FnMove`** | Move ownership | No (consumes closure) | Transfer ownership, one-time use |
+| **`Fn`** | Read-only captures | Yes | Read-only operations, pure functions |
+| **`FnMut`** | Mutates its captures | Yes (binding must be `mut`) | Stateful operations, accumulators |
 
 *(Rationale: These conceptual types guide type checking for functions accepting closures without requiring full trait complexity initially. They describe closure behavior and capabilities without implementing the complete trait system).*
 
@@ -1963,27 +1954,26 @@ result = try process_items([1, 2, 3], fn(n):
 ```ryo
 fn make_counter(start: int) -> fn() -> int:
 	mut count = start
-	# Return closure that captures count mutably
+	# count moves into the closure, which mutates its own environment
 	return fn():
 		count += 1
 		return count
 
-counter = make_counter(0)
+mut counter = make_counter(0)
 print(counter())  # 1
 print(counter())  # 2
 print(counter())  # 3
 ```
 
-**Example 4: Move capture for ownership transfer**
+**Example 4: Capturing an owning type**
 
 ```ryo
 fn create_greeter(name: str) -> fn() -> str:
-	# Move name into the closure's environment
-	# name is owned by the returned closure
-	return move fn(): f"Hello, {name}!"
+	# name (a str, an owning type) moves into the closure's environment
+	return fn(): f"Hello, {name}!"
 
 greeter = create_greeter("Bob")
-# name is moved into closure, owned by closure's environment
+# the closure owns its capture; the parameter binding died at the move
 message = greeter()  # "Hello, Bob!"
 ```
 
@@ -2006,7 +1996,7 @@ results = [validator(10), validator(-5), validator(42), validator(105)]
 # results = [Some(20), none, Some(84), none]
 ```
 
-*(Rationale: Closures provide essential functional programming capabilities. Explicit move semantics prevent accidental data races in concurrent contexts. Python-like syntax with colon-indentation maintains consistency. Borrow checker ensures capture safety without runtime overhead. Closures are crucial for callbacks, higher-order functions, and future concurrency primitives. The `fn(args):` form is the sole lambda syntax — no sigil shorthand (such as Rust's `|args|`) is provided, so one consistent shape serves typed and inferred, single- and multi-line closures).*
+*(Rationale: Closures provide essential functional programming capabilities. Move/copy-by-default capture keeps closures self-contained — no hidden borrows, no escape analysis — and prevents accidental data races in concurrent contexts. Python-like syntax with colon-indentation maintains consistency. Capture safety is enforced at closure creation time without runtime overhead. Closures are crucial for callbacks, higher-order functions, and future concurrency primitives. The `fn(args):` form is the sole lambda syntax — no sigil shorthand (such as Rust's `|args|`) is provided, so one consistent shape serves typed and inferred, single- and multi-line closures).*
 
 ## 7. Error Handling
 
@@ -2099,7 +2089,7 @@ fn flexible_operation() -> !Data:
 
 ### 7.3 Error Propagation (`try`)
 
-**Error Context Preservation (DX Priority):** When `try` propagates an error, it captures the current execution context (file, line, function name) and appends this frame to the error's internal stack trace. **Performance Impact:** This process incurs approximately **5-10% runtime overhead** (due to memory allocation and stack frame capture) at every propagation boundary where an error is actually being propagated. The success path (no error) has no overhead. Ryo prioritizes complete debugging information over raw performance; see Section 1.1 for trade-off rationale. The final stack trace shows the complete chain of propagation.
+**Error Context Preservation (DX Priority):** When `try` propagates an error, it captures the current execution context (file, line, function name) and appends this frame to the error's internal stack trace. **Performance Impact:** This process incurs a runtime cost (memory allocation and stack frame capture) at every propagation boundary where an error is actually being propagated. The success path (no error) is unaffected. Ryo prioritizes complete debugging information over raw performance; see Section 1.1 for trade-off rationale. The final stack trace shows the complete chain of propagation.
 
 The `try` keyword unwraps success or propagates the error early:
 
@@ -2309,7 +2299,7 @@ note: Set RYOLANG_BACKTRACE=full for more verbose output
 
 - Stack traces automatically captured for all panics
 - Debug symbols included (DWARF format)
-- Binary size impact: +20-30%
+- Binary size impact: binaries grow with embedded debug information
 
 **Configuration options:**
 
@@ -2317,8 +2307,8 @@ note: Set RYOLANG_BACKTRACE=full for more verbose output
 
 ```bash
 ryo build                        # Default: full traces
-ryo build --error-traces=minimal # Location only (~2-3% overhead)
-ryo build --error-traces=off     # No automatic capture (0% overhead)
+ryo build --error-traces=minimal # Location only
+ryo build --error-traces=off     # No automatic capture
 ryo build --strip                # Remove debug symbols (production)
 ```
 
@@ -2340,7 +2330,7 @@ RYOLANG_ERROR_TRACES=off     # Only error message
 
 Panic stack traces incur runtime overhead even when no panic occurs (in `full` mode):
 
-- **Runtime overhead** - ~5-10% estimated (varies by workload) for stack frame maintenance
+- **Runtime overhead** - An always-on cost for stack frame maintenance; the exact amount varies by workload
 - **Memory overhead** - Maintaining stack frame information uses additional memory
 - **Configurable** - Use `--error-traces=minimal` or `=off` to reduce/eliminate overhead (see Section 7.10)
 
@@ -2348,7 +2338,7 @@ Panic stack traces incur runtime overhead even when no panic occurs (in `full` m
 
 - Ultra-low-latency systems → Use `--error-traces=off`
 - Performance-sensitive services → Use `--error-traces=minimal`
-- Most applications → Use defaults (debugging capability > 5-10% overhead)
+- Most applications → Use defaults (debugging capability outweighs the tracing cost)
 
 **Mitigation strategies:**
 
@@ -2450,7 +2440,7 @@ Ryo provides comprehensive stack trace and debugging information to help diagnos
 **Default behavior (DX-first):**
 
 - Stack traces automatically captured for all panics and errors
-- ~5-10% runtime overhead in default mode
+- A small runtime cost in default mode
 - Can be configured at build-time or runtime
 
 **Configuration tiers:**
@@ -2511,7 +2501,7 @@ fn main():
 #### **Debug Symbols and Build Information**
 
 - **Debug symbols always included by default** - DWARF format
-- **Binary size impact** - Approximately 20-30% larger due to debug information
+- **Binary size impact** - Binaries are larger due to debug information
 - **`--strip` compiler flag** - Remove debug symbols from production binaries if size is critical
 - **Trade-off confirmed** - Size cost justified by debugging capability
 
@@ -2542,12 +2532,12 @@ Understanding how Ryo's debugging approach compares to alternatives:
 
 | Language | Stack Trace Approach | Overhead | DX Rating | When to Choose |
 | ---------- | --------------------- | ---------- | ----------- | ---------------- |
-| **Ryo** | Always-on, automatic, rich context | ~TBD% always | ⭐⭐⭐⭐⭐ Excellent | When debugging ease > raw performance |
-| **Rust** | Optional (`RUST_BACKTRACE=1`), opt-in | ~0% default, ~3-5% when enabled | ⭐⭐⭐ Good (requires env var) | When performance > debugging ease |
-| **Go** | Always-on, simpler traces | ~1-3% | ⭐⭐⭐⭐ Very good (less detail) | Balanced, but less detail than Ryo |
-| **Zig** | Optional, manual stack walking | ~0% default | ⭐⭐ Fair (manual effort) | Maximum control, minimal overhead |
+| **Ryo** | Always-on, automatic, rich context | Small always-on cost | ⭐⭐⭐⭐⭐ Excellent | When debugging ease > raw performance |
+| **Rust** | Optional (`RUST_BACKTRACE=1`), opt-in | None by default | ⭐⭐⭐ Good (requires env var) | When performance > debugging ease |
+| **Go** | Always-on, simpler traces | Small always-on cost | ⭐⭐⭐⭐ Very good (less detail) | Balanced, but less detail than Ryo |
+| **Zig** | Optional, manual stack walking | None by default | ⭐⭐ Fair (manual effort) | Maximum control, minimal overhead |
 | **Python** | Always-on, interpreter traces | High (GC+interpreter) | ⭐⭐⭐⭐⭐ Excellent | Prototyping, development |
-| **C/C++** | Debugger-only, no built-in traces | ~0% | ⭐ Poor (debugger required) | Maximum performance, embedded |
+| **C/C++** | Debugger-only, no built-in traces | None | ⭐ Poor (debugger required) | Maximum performance, embedded |
 
 **Key Takeaway:** Ryo sits between Python (maximum DX, high overhead) and Rust (maximum performance, manual DX). Ryo chooses mandatory rich debugging at a measurable but acceptable cost for most applications.
 
@@ -2596,11 +2586,11 @@ Ryo provides flexible configuration for error stack traces, balancing DX with pe
 
 Compiler flag: `--error-traces=LEVEL`
 
-| Level | Creation Overhead | Propagation Overhead | Total | Use Case |
-| ------- | ------------------- | ---------------------- | ------- | ---------- |
-| `full` (default) | ~5-10% | ~5-10% cumulative | ~5-10% | Development, most production |
-| `minimal` | ~2-3% | 0% | ~2-3% | Performance-sensitive services |
-| `off` | 0% | 0% | 0% | HFT, real-time, embedded |
+| Level | Creation Overhead | Propagation Overhead | Use Case |
+| ------- | ------------------- | ---------------------- | ---------- |
+| `full` (default) | Small, per error created | Small, per propagation | Development, most production |
+| `minimal` | Location record only | None | Performance-sensitive services |
+| `off` | None | None | HFT, real-time, embedded |
 
 **Examples:**
 
@@ -2873,7 +2863,7 @@ Tasks are Ryo's lightweight, non-OS-thread concurrency unit (like Go's goroutine
 | **Spawn Detached** | `task.spawn_detached: ...` | `fn(f: fn() -> T) -> handle[T]` | **Fire-and-forget (explicit opt-out)**. Returns a `handle[T]` — an identity token, not a future (see below). The task's result is discarded; errors are logged to stderr. Cancelled on process exit. |
 | **Await** | `fut.await` | **`future[T]`** | **Suspends the current green thread** until the value is ready. Does NOT block the OS thread. |
 
-**Ownership Safety:** Task closures implicitly capture by **move** — the compiler enforces this because tasks may outlive the spawning scope (see §6.2.2). To share data across tasks, use `shared[T]` — assignment retains the handle (§5.6); there is no explicit `.clone()`. **Exception (scoped task borrows):** inside a `task.scope` body — structured concurrency, where the scope joins all children before exiting — child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as §4.4) and that no capture escapes the scope. Projections (`strview`, `slice[T]`, `bytesview`) may be captured too: the scope join is lexically inside the defining function, so the view still cannot escape it — the owner's freeze extends to the end of the `task.scope` block. `task.run` and `task.spawn_detached` are unchanged: implicit move capture, enforced.
+**Ownership Safety:** Task closures capture by **move/copy**, like all closures (§6.2.2) — owned captures are what make it safe for tasks to outlive the spawning scope. To share data across tasks, use `shared[T]` — assignment retains the handle (§5.6); there is no explicit `.clone()`. **Exception (scoped task borrows):** inside a `task.scope` body — structured concurrency, where the scope joins all children before exiting — child closures **may capture by immutable borrow**. The compiler verifies the captured data is not mutated for the scope's duration (same freeze machinery as §4.4) and that no capture escapes the scope. Projections (`strview`, `slice[T]`, `bytesview`) may be captured too: the scope join is lexically inside the defining function, so the view still cannot escape it — the owner's freeze extends to the end of the `task.scope` block. `task.run` and `task.spawn_detached` allow no captures by borrow: move/copy only, enforced.
 
 **Mutable lending is a deliberate non-goal.** `task.scope` children may capture by immutable borrow only. General mutable borrows across tasks would require proving the borrowed regions disjoint — full borrow-checker machinery, which Ownership Lite exists to avoid. The single blessed exception is `std.slice.split_mut`: it splits a mutable slice into `n` disjoint mutable chunks, returned as scope-locked handles. Disjointness holds by construction, so each `task.scope` child may capture one chunk mutably; the scope join still guarantees every chunk borrow ends before the enclosing frame. Outside that primitive, data crossing tasks is `move`d, `shared[T]`, or immutably borrowed within a scope.
 
@@ -4026,7 +4016,7 @@ Even though Ryo does not use `async`/`await` syntax, these keywords are **reserv
 - `select` - Non-deterministic operation selection
 - `case` - Branch in `select` statement
 - `default` - Non-blocking fallback in `select` statement
-- `move` - Move capture for closures (redundant but accepted in task closures, which implicitly move)
+- `move` - Parameter mode that transfers ownership into a function (Section 5.2)
 
 **Standard Library Modules:**
 

@@ -89,7 +89,9 @@ docs/dev/*.md             (how the compiler/stdlib delivers — links back to sp
 
 ## Gotchas
 
-**Task closures move implicitly.** In Section 9, closures passed to `task.run`/`task.scope`/`task.spawn_detached` capture by move automatically. Writing `move` on them is accepted but redundant. Elsewhere, `move` is always explicit.
+**Closure captures are move/copy by default.** Closures capture like assignment (§6.2.2): Copy types are copied in, owning types are moved in — there is no `move fn` syntax. The single borrow exception is `task.scope` child closures, which may capture by immutable borrow (the scope joins all children before the frame ends). `move` appears only in parameter position, never at call sites.
+
+**No unmeasured numbers.** Performance costs are stated qualitatively ("small, paid at error creation") unless a benchmark in the repo produced the figure. This applies to other languages' costs too.
 
 **`inout` and `move` are the same cost.** Under NRVO, both compile to a pointer pass. See Section 5.2.1. (Note: spec switched from `&mut Type` + `&mut x` to the `inout` parameter mode + `&x` for the Swift/Mojo idiom — the mode is a prefix on the parameter name, uniform with `move` (`inout x: Type`, `move x: Type`) — see Section 5.3 Rule 3 rationale.)
 

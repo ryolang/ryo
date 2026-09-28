@@ -2961,34 +2961,34 @@ result = apply(5, square)
 **2. Capture Analysis (originally M15.5):**
 
 ```ryo
-# Move capture (explicit)
+# Owning-type capture — moved in (like assignment)
 name = "Alice"
-greeter = move fn(): f"Hello, {name}"
+greeter = fn(): f"Hello, {name}"
 # name is moved, cannot be used here
 
-# Mutable capture (inferred)
-mut counter = 0
-increment = fn():
+# Mutable capture — the closure mutates its own environment
+counter = 0
+mut increment = fn():
  counter += 1
  return counter
 
-# Borrow capture (default)
-data = [1, 2, 3]
-printer = fn(): print(data.len())  # immutable borrow of data
+# Copy-type capture — copied in, original stays valid
+data_len = 3
+printer = fn(): print(int_to_str(data_len))  # data_len copied (int is Copy)
 ```
 
-- Capture modes: immutable borrow (default), mutable borrow (inferred from mutation), move (`move fn(...)` opt-in)
-- Borrow checker enforces capture rules at compile time (no runtime overhead)
-- Closure types (`Fn`, `FnMut`, `FnMove`) start as compiler concepts; promoted to real traits once the trait system supports it
+- Capture semantics follow assignment: Copy types are copied, owning types are moved (§6.2.2); closures that mutate their captures require a `mut` binding
+- Capture rules enforced at closure creation time (no runtime overhead, no escape analysis)
+- Closure types (`Fn`, `FnMut`) start as compiler concepts; promoted to real traits once the trait system supports it
 - See [closure_representation.md](closure_representation.md) for memory layout and ABI details
 
 **Dependencies:**
 
 - Milestone 8 (Control Flow & Booleans) — required for closure bodies
-- Milestone 8.2 (Immutable Borrows) and Milestone 8.3 (Mutable Borrows) — required for capture-mode inference
-- Milestone 8.1 (Heap-Allocated `str` & Move Semantics) — required for `move` captures
+- Milestone 8.2 (Immutable Borrows) and Milestone 8.3 (Mutable Borrows) — required for `task.scope` scoped-borrow captures
+- Milestone 8.1 (Heap-Allocated `str` & Move Semantics) — required for owning-type captures
 
-**Effort:** ~3 weeks (closure syntax: 1 week, capture analysis & borrow integration: 2 weeks)
+**Effort:** ~3 weeks (closure syntax: 1 week, capture analysis & environment layout: 2 weeks)
 **Timeline:** v0.2 (early post-v0.1.0)
 
 **Future Enhancements** (post-v0.2):
