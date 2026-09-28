@@ -1804,7 +1804,9 @@ print("hello", "")          # compile error — end is keyword-only
 
 > **Why after M13:** reads fail (I/O error, invalid UTF-8, EOF). Shipping stdin before error unions would force a panic-on-error interim — the same trap M13 already has to unwind for `bytes.to_str()`. Waiting one milestone means the signature is final from day one. File I/O deliberately stays in M24 (needs the module system for organization).
 
-**Open design decision (resolve at implementation time):** the error type must be compiler-known, because the `io` module needs M6 (Phase 4 — later than this milestone). Options: a compiler-intrinsic `IoError` error definition (mirroring the `.message()` compiler-known interface from M13), later re-exported by the `io` module; or reuse a generic compiler-known error. Also decide EOF behavior: empty-`str` sentinel vs a dedicated `IoError` variant.
+**Open design decision (resolve at implementation time):** the error type must be compiler-known, because the `io` module needs M6 (Phase 4 — later than this milestone). Options: a compiler-intrinsic `IoError` error definition (mirroring the `.message()` compiler-known interface from M13), later re-exported by the `io` module; or reuse a generic compiler-known error.
+
+**EOF (decided 2026-09):** at this milestone, EOF is a dedicated `IoError` variant — the only option available before `?T` exists. M16 migrates the signature to the final form `read_line() -> IoError!?str` (clean EOF → `none`, errors reserved for real failures: read errors, invalid UTF-8, unexpected truncation). That migration is a deliberate breaking change, acceptable pre-alpha. The final form follows the cross-language consensus that EOF is graceful termination, not a failure: Swift's `readLine() -> String?`, Rust's `Ok(0)`/iterator `None`, Go's Scanner ("first non-EOF error"; `io.EOF` documents "functions should return EOF only to signal a graceful end of input"), and Kotlin adding `readlnOrNull()` because the throwing `readln()` forced boilerplate on the canonical read-until-EOF loop.
 
 **Tasks:**
 
@@ -1929,6 +1931,7 @@ fn main():
 - `none` is **not null** (different representation, type-safe)
 - Smart casting narrows types in control flow
 - Chaining returns `?T` (must handle with `orelse` or check)
+- Migrate `read_line` to its final signature `read_line() -> IoError!?str`: clean EOF becomes `none`, replacing the interim `IoError` EOF variant shipped at M13.6 (deliberate breaking change — pre-alpha; matches the Swift `readLine() -> String?` / Rust `None` / Go Scanner consensus that EOF is graceful termination, not a failure)
 - Dependencies: Milestone 11 (enums provide foundation for tagged unions)
 
 ### Milestone 17: Method Implementations
