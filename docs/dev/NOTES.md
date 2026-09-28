@@ -1,8 +1,20 @@
 # TODO
 
 - compare ryo with bend https://github.com/bendlang/bend/blob/main/guide/GUIDE.md
+- slog
+- create a nightly release
+- warnings:
+	- unused vars do not produce warnings
+- ariadne report lost: with the new ryo (#156, deployed), the assert example's failure is
+   now a plain assertion failed at main.ryo:2:2 in main(): math is broken line instead of an ariadne [E####] box — it
+   still renders in the diagnostics window via the untagged-lines bucket, but if you'd rather keep the fancy box for
+   runtime failures, that's a ryo-side change, not playground.
+- ir --emit, add support, should we support asm too?
+- fix: build, add -o argument
+- documentation on functions and for the IDE
 - gaming ffi, write a pong
 - benchmarks <https://github.com/kostya/benchmarks>
+- github support https://github.com/github-linguist/linguist/blob/main/CONTRIBUTING.md#language-extension-and-filename-usage-requirements
 - [cargo crap rules](https://minikin.me/blog/cargo-crap):
 
   ```sh
