@@ -32,16 +32,16 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha] ✅ COMPLETE](#milestone-842-bytes-type--bytesview-alpha--complete)
 - [x] [Milestone 9 — Structs ✅ COMPLETE](#milestone-9-structs--complete)
 - [ ] [Milestone 9.1 — Synthesized Eq & Debug for Structs](#milestone-91-synthesized-eq--debug-for-structs)
-- [ ] [Milestone 9.2 — Basic CLI Builtins (`exit`, `eprint`, `argc`/`argv`)](#milestone-92-basic-cli-builtins-exit-eprint-argcargv) *(no dependencies; slots in alongside the core cluster)*
+- [ ] [Milestone 9.2 — Throwaway CLI Intrinsics (`process_*`, `io_*`)](#milestone-92-throwaway-cli-intrinsics-process_-io_) *(no dependencies; slots in alongside the core cluster)*
 - [ ] [Milestone 10 — Tuples](#milestone-10-tuples)
 - [ ] [Milestone 11 — Enums (Algebraic Data Types) [alpha]](#milestone-11-enums-algebraic-data-types-alpha)
 - [ ] [Milestone 12 — Pattern Matching [alpha]](#milestone-12-pattern-matching-alpha)
 - [ ] [Milestone 13 — Error Types & Unions [alpha]](#milestone-13-error-types--unions-alpha)
 - [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
-- [ ] [Milestone 13.6 — Fallible stdin (`read_line`)](#milestone-136-fallible-stdin-read_line) *(lands directly after M13)*
+- [ ] [Milestone 13.6 — `io_read_line` Gains Error Unions](#milestone-136-io_read_line-gains-error-unions) *(lands directly after M13)*
 - [ ] [Milestone 13.7 — Literal Completeness (Hex/Octal/Binary Ints, Escapes)](#milestone-137-literal-completeness-hexoctalbinary-ints-escapes) *(deferred — no dependencies; slots in anywhere)*
 
-> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M13.5 and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (basic CLI builtins)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.6 (fallible stdin)** lands directly after M13, before M16, so its `read_line` signature uses real error unions from day one.
+> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M13.5 and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.6** lands directly after M13, before M16, migrating the M9.2 `io_read_line` placeholder to real error unions.
 
 ### Phase 3: Type System & Memory Safety
 
@@ -1420,61 +1420,75 @@ fn main():
 - Enums (M11) get the same derive/Debug treatment as a follow-up; out of scope here
 - Dependencies: Milestone 9 (structs)
 
-### Milestone 9.2: Basic CLI Builtins (`exit`, `eprint`, `argc`/`argv`)
+### Milestone 9.2: Throwaway CLI Intrinsics (`process_*`, `io_*`)
 
-**Goal:** Minimum viable CLI surface — scriptable exit codes, stderr, and command-line arguments — as compiler-known builtins backed by `ryo_*` runtime exports (the `print()` pattern: sema builtin arm → codegen call to a runtime export → libc inside the runtime crate). Not blocked on M6 modules, M13 errors, M22 collections, or the v0.2 FFI layer.
+**Goal:** Make CLIs usable now — exit codes, stderr, args, env, stdin — via a **temporary** compiler-intrinsic layer named to mirror the future module paths (`process.*`, `io.*` per [docs/std.md](../std.md)), so the eventual migration is a mechanical `prefix_name` → `prefix.name` swap. Nothing is added to the prelude: `print` stays the only I/O prelude builtin.
 
-**Status:** ⏳ Planned
+**Status:** ⏳ Planned — ships in two PRs: PR1 (`process_exit`, `io_eprint`), PR2 (`process_argc`/`process_argv`, `process_env`, `io_read_line`, plus the runtime entry shim).
 
-> **Split rationale (2026-09):** stdin is deferred to M13.6 because reads fail and need `IoError!str`; everything here is infallible by construction (`exit` never returns, `eprint` ignores write errors like `print`, `argc`/`argv` cannot fail). These builtins are the *final* form, not an interim: no major language routes basic I/O through its general FFI layer — Go (`fmt`/`os` over the runtime's private syscalls), Rust (`std::io::_print` / `std::process::exit` over libc), Swift (`print` over `fwrite`), and Python (`print` builtin implemented in the runtime) all give the runtime its own syscall channel. The v0.2 FFI layer is for user C interop; M24's module versions (`os.exit`, `io.eprint`, `os.args`) become thin wrappers over these builtins. Unlike Go's bootstrapping builtins ("not guaranteed to stay in the language"), these are permanent, spec-documented language surface.
+> **Why throwaway (2026-09):** the real implementations are the module functions from [docs/std.md](../std.md) (`process.exit`, `io.eprint`, …), built on the `std.sys` → `std.io` → `std.mem` stack ([docs/dev/std.md](std.md)) — all gated behind the module system (M6), which is far away. This layer makes CLIs work today with placeholder return types that **will** change (documented breaking changes, acceptable pre-alpha). The intrinsics are deliberately **not spec surface** — the spec documents only the final `process.*` / `io.*` API. No major language routes basic I/O through its general FFI layer (Go/Rust/Swift/Python all give the runtime its own syscall channel), so these are compiler-known builtins backed by `ryo_*` runtime exports — the `print()` pattern — with no `extern "C"`, no allocator, and no module system.
 
-**Tasks:**
+**Placeholder semantics & migration map** (the return type changes, not just the name):
 
-- `exit(code: int) -> never`
+| Interim (M9.2) | Final | Lands |
+|---|---|---|
+| `process_exit(code: int) -> never` | `process.exit(code: int) -> never` | M24 (modules) |
+| `io_eprint(s: str) -> void` | `io.eprint(s: str) -> void` | M24 |
+| `process_argc() -> int`, `process_argv(i: int) -> str` | `process.args() -> list[str]` | M22 |
+| `process_env(key: str) -> str` (empty = unset) | `process.env(key: str) -> ?str` (none = unset) | M16 |
+| `io_read_line() -> str` (empty = EOF) | `io.read_line() -> IoError!str` | M13.6 → `IoError!?str` at M16 |
+
+**Deprecation plan (documented, not built here):** when modules + `std.io` land, the intrinsics move into `std` as `process.*` / `io.*` with the final signatures; the `process_*` / `io_*` intrinsics remain as deprecated aliases that emit a warning for exactly one release, then are removed.
+
+**Tasks — PR1 (exit + stderr):**
+
+- `process_exit(code: int) -> never`
   - `ryo-frontend/src/builtins.rs`: `BUILTINS` entry with `BuiltinReturn::Never` (same mold as `panic`)
   - `ryo-frontend/src/sema/builtins.rs`: arm in `emit_builtin_call` — arity 1, argument must be `int`
   - `ryo-backend/src/codegen/expr.rs`: arm in `emit_call_slot` mirroring the `__ryo_panic` arm: declare `ryo_exit(int_type)`, call, then emit trap (unreachable)
   - `runtime/src/lib.rs`: `ryo_exit(code)` wrapping the libc `exit` extern already declared there
   - `ryo-backend/src/codegen/mod.rs`: add row to `runtime_symbols()` and bump the array size
-- `eprint(s) -> void` accepting `str | bytes | strview | bytesview`
+- `io_eprint(s) -> void` accepting `str | bytes | strview | bytesview`
   - Twin of the `print` chain: share `check_print_args`; opt into the W0003 redundant-materialize warning like `print`
   - Codegen arm mirroring the `print` arm → `ryo_eprint`
   - Runtime: `write_all(STDERR_FD, …)` — the fd plumbing already exists (including the Windows `_write` path)
-- `argc() -> int` and `argv(i: int) -> str` (interim for `os.args() -> list[str]`, which is blocked on M22 collections)
-  - Runtime startup cooperation: the C-ABI `main` shim currently discards argc/argv — codegen emits a `ryo_rt_init(argc, argv)` call at shim entry; the runtime stores them in globals
-  - `argv(i)` is bounds-checked and panics on out-of-range; returns an owned `str` copy
-  - Str-producing builtin: update the duplicate `max_output_len` table in `ryo-backend/src/codegen/frees.rs` (the agreement test in codegen tests will fail otherwise)
-- Write tests:
-  - Unit: arity/type errors for each builtin; `exit` usable in expression position as `never`
-  - Integration: exit code observed by the OS; `eprint` bytes arrive on fd 2, not fd 1; `argc`/`argv` against real process arguments; `argv` out-of-range panics with code 101
 
-**Visible Progress:** scripts can fail loudly and take arguments:
+**Tasks — PR2 (args + env + stdin):**
+
+- `process_argc() -> int`, `process_argv(i: int) -> str`
+  - Runtime entry shim: `main` is currently emitted C-ABI with an int return but **zero params** (`build_signature` in codegen) — add the two `AbiParam`s under the main special-case and emit a `ryo_rt_init(argc, argv)` call at function entry; the runtime stores them (new pattern: the runtime has no mutable globals today — use atomics; falls under the I-167 FFI-boundary audit)
+  - JIT: `Codegen::execute` calls main as `fn() -> isize` with no argv, and `ryo run` has no trailing-arg capture — add a clap `trailing_var_arg` to `run`, thread it through `pipeline::run_file` → `execute`, and build the argv array there
+  - `process_argv(i)` is bounds-checked and panics (exit 101) on out-of-range; returns an owned `str` copy via the slot-out ABI (below)
+- `process_env(key: str) -> str` — empty string = unset (placeholder for `?str` at M16); needs a new libc `getenv` extern in the runtime (which is `#![no_std]` under the staticlib feature, so `std::env` is unavailable; on Windows decide `_wgetenv` vs `getenv`, mirroring the `_write`/`write` split)
+- `io_read_line() -> str` — read fd 0 up to `\n`, strip it; empty string on EOF (placeholder for `IoError!str` at M13.6); needs a new `read`/`_read` extern; build on a growable `bytes` buffer
+- Str-producing builtins (`process_argv`, `process_env`, `io_read_line`) use the slot-out ABI: sema arm returning `str`, codegen arm calling `emit_slot_out_call` (the `int_to_str` pattern), runtime export writing through `write_str_slot` (SSO ≤23B inline, else heap). No ownership-pass changes needed — the pass seeds any str-returning `Call` as a fresh owner generically. Unbounded outputs → no `max_output_len` entries
+- Mark every interim call form in code with `TODO(M13/M16/M22)` noting what replaces it
+
+**Tests** (`.ryo` files use TAB indentation; patterns from `integration_assert_panic.rs` — `run_ryo_command` captures status/stdout/stderr, `panic_exits_with_101_jit` asserts exit codes, the AOT pattern passes program args via `Command::args`):
+
+- `cli_exit.ryo`: `process_exit(3)` → process exit code is 3
+- `cli_stderr.ryo`: `io_eprint("err\n")` → text on stderr, not stdout
+- `cli_args.ryo`: print `process_argc()` and echo each `process_argv(i)`; verify via AOT binary args and the new `ryo run` forwarding
+- `cli_env.ryo`: `process_env("HOME")` non-empty; an unset key → `""`
+- `cli_echo.ryo`: `io_read_line()` echoes a piped stdin line; empty-on-EOF covered
+
+**Visible Progress:** scripts can fail loudly, take arguments, and read pipes:
 
 ```ryo
 fn main():
-	if argc() < 2:
-		eprint("usage: prog <file>")
-		exit(1)
-```
-
-**Example:**
-
-```ryo
-fn main():
-	if argc() < 2:
-		eprint("usage: greet <name>")
-		exit(1)
-	name = argv(1)
+	if process_argc() < 2:
+		io_eprint("usage: greet <name>\n")
+		process_exit(1)
+	name = process_argv(1)
 	print("hello, " + name)
-	if name == "nobody":
-		exit(2)
 ```
 
 **Implementation Notes:**
 
-- While touching builtin dispatch, fold in I-034 (intern builtin-name lookup instead of per-call string compare) — adding four builtins widens the cost it describes
-- Windows: `eprint` rides the existing `_write` shim; argv capture uses the C `main` parameters on every platform — no new syscalls or externs beyond libc `exit` (already declared)
-- `argv` returning an owned `str` copy keeps the runtime's C strings out of the ownership model; the copy is freed by the normal `str` rules
+- While touching builtin dispatch, fold in I-034 (intern builtin-name lookup instead of per-call string compare) — adding six intrinsics widens the cost it describes
+- Constraints: compiler intrinsics only — no `extern "C"` in Ryo (`std.sys` is the v0.2 design), no allocator, no modules, no `fs.*` (file I/O waits for M13 error unions, per the std design)
+- Returned `str`s are proper owned heap strings (SSO slot via `write_str_slot`); verify no leaks/double-frees under the existing ASan/Valgrind integration tests
+- Out of scope: general stdin buffering/iteration, UTF-8/encoding error handling, process spawning, the FFI layer
 - Dependencies: none beyond what exists today (`never` type, `void`, and the extern runtime ABI all shipped)
 
 ### Milestone 10: Tuples (Tuple Sugar over Anonymous Structs)
@@ -1796,54 +1810,53 @@ print("hello", "")          # compile error — end is keyword-only
 
 > **Note:** Closures and lambda expressions were originally planned as Milestone 8.6 but have been **deferred to v0.2** (see Phase 5: Closures & Lambda Expressions). Closures are not strictly required for the v0.1.0 core language; named functions plus the standard library cover every v0.1 use case, and deferring capture analysis (originally M15.5) lets the v0.1 borrow checker stay focused on let/struct/method bindings.
 
-### Milestone 13.6: Fallible stdin (`read_line`)
+### Milestone 13.6: `io_read_line` Gains Error Unions
 
-**Goal:** `read_line() -> IoError!str` — read one line from stdin (fd 0, newline stripped), with errors as values from day one. Completes the minimum viable CLI surface started in M9.2 (`exit`, `eprint`, `argc`/`argv`).
+**Goal:** Migrate the M9.2 placeholder `io_read_line() -> str` (empty = EOF) to `io_read_line() -> IoError!str` — errors as values. The name swap to `io.read_line` itself waits for M24 (modules); this milestone changes only the return type.
 
 **Status:** ⏳ Planned — lands directly after M13, before M16.
 
-> **Why after M13:** reads fail (I/O error, invalid UTF-8, EOF). Shipping stdin before error unions would force a panic-on-error interim — the same trap M13 already has to unwind for `bytes.to_str()`. Waiting one milestone means the signature is final from day one. File I/O deliberately stays in M24 (needs the module system for organization).
+> **Why this milestone exists:** M9.2 ships stdin early with a placeholder return type (plain `str`, empty-on-EOF) so CLIs work before error unions exist. That placeholder is deliberately temporary — this milestone replaces it as soon as M13's error unions land, mirroring how M13 converts the `bytes.to_str()` panicking stopgap to `Utf8Error!str`.
 
 **Open design decision (resolve at implementation time):** the error type must be compiler-known, because the `io` module needs M6 (Phase 4 — later than this milestone). Options: a compiler-intrinsic `IoError` error definition (mirroring the `.message()` compiler-known interface from M13), later re-exported by the `io` module; or reuse a generic compiler-known error.
 
-**EOF (decided 2026-09):** at this milestone, EOF is a dedicated `IoError` variant — the only option available before `?T` exists. M16 migrates the signature to the final form `read_line() -> IoError!?str` (clean EOF → `none`, errors reserved for real failures: read errors, invalid UTF-8, unexpected truncation). That migration is a deliberate breaking change, acceptable pre-alpha. The final form follows the cross-language consensus that EOF is graceful termination, not a failure: Swift's `readLine() -> String?`, Rust's `Ok(0)`/iterator `None`, Go's Scanner ("first non-EOF error"; `io.EOF` documents "functions should return EOF only to signal a graceful end of input"), and Kotlin adding `readlnOrNull()` because the throwing `readln()` forced boilerplate on the canonical read-until-EOF loop.
+**EOF (decided 2026-09):** at this milestone, EOF is a dedicated `IoError` variant — the only option available before `?T` exists. M16 migrates the signature to the final form `io_read_line() -> IoError!?str` (clean EOF → `none`, errors reserved for real failures: read errors, invalid UTF-8, unexpected truncation). That migration is a deliberate breaking change, acceptable pre-alpha. The final form follows the cross-language consensus that EOF is graceful termination, not a failure: Swift's `readLine() -> String?`, Rust's `Ok(0)`/iterator `None`, Go's Scanner ("first non-EOF error"; `io.EOF` documents "functions should return EOF only to signal a graceful end of input"), and Kotlin adding `readlnOrNull()` because the throwing `readln()` forced boilerplate on the canonical read-until-EOF loop.
 
 **Tasks:**
 
-- Runtime: declare the `read`/`_read` externs (only `write` is declared in `runtime/src/lib.rs` today); read fd 0 into a growable `bytes` buffer up to `\n`, then UTF-8-validate via the existing `__ryo_bytes_to_str` machinery — read is byte-oriented, str decoding layered on top (reuses M8.4.2)
-- Sema: arm in `emit_builtin_call` returning the error-union `TypeId` (M13 machinery)
-- Codegen: string-returning ABI like `int_to_str`; add the runtime symbol to the JIT table
+- Sema: change the `io_read_line` arm to return the error-union `TypeId` (M13 machinery); the runtime `read` path and slot-out ABI already exist from M9.2 — only the signature and error construction change
+- UTF-8 validation failures become `IoError` values (reuses the M8.4.2 `__ryo_bytes_to_str` machinery and its M13 `Utf8Error!str` conversion)
+- Update M9.2-era call sites and examples: empty-string checks become `catch`/`match` handling
 - Write tests:
-  - Unit: arity (zero args), result usable only through `catch`/`match` like any error union
-  - Integration: piped stdin — line read round-trip, EOF behavior, invalid UTF-8 yields an `IoError` (not a panic)
+  - Unit: result usable only through `catch`/`match` like any error union
+  - Integration: piped stdin — line read round-trip, EOF yields the `IoError` EOF variant (not `""`), invalid UTF-8 yields an `IoError` (not a panic)
 
-**Visible Progress:** interactive and piped CLI programs work end-to-end:
+**Visible Progress:** stdin failures are values, not sentinels:
 
 ```ryo
-name = read_line() catch as e:
-	eprint("read failed: " + e.message())
-	exit(1)
+name = io_read_line() catch as e:
+	io_eprint("read failed: " + e.message() + "\n")
+	process_exit(1)
 ```
 
 **Example:**
 
 ```ryo
 fn main():
-	eprint("name? ")
-	line = read_line() catch as e:
-		eprint("read failed: " + e.message())
-		exit(1)
+	io_eprint("name? ")
+	line = io_read_line() catch as e:
+		io_eprint("read failed: " + e.message() + "\n")
+		process_exit(1)
 	if line == "":
-		eprint("empty input")
-		exit(2)
+		io_eprint("empty input\n")
+		process_exit(2)
 	print("hello, " + line)
 ```
 
 **Implementation Notes:**
 
-- Windows: add the `_read` twin alongside the existing `_write` shim
 - The returned `str` is owned by the caller under the normal rules; the runtime buffer is scratch
-- Dependencies: Milestone 13 (error types & unions); pairs with M9.2 (the infallible CLI builtins)
+- Dependencies: Milestone 13 (error types & unions), Milestone 9.2 (the placeholder being replaced)
 
 ### Milestone 13.7: Literal Completeness (Hex/Octal/Binary Ints, Escapes)
 
@@ -1931,7 +1944,8 @@ fn main():
 - `none` is **not null** (different representation, type-safe)
 - Smart casting narrows types in control flow
 - Chaining returns `?T` (must handle with `orelse` or check)
-- Migrate `read_line` to its final signature `read_line() -> IoError!?str`: clean EOF becomes `none`, replacing the interim `IoError` EOF variant shipped at M13.6 (deliberate breaking change — pre-alpha; matches the Swift `readLine() -> String?` / Rust `None` / Go Scanner consensus that EOF is graceful termination, not a failure)
+- Migrate `io_read_line` to its final signature `io_read_line() -> IoError!?str`: clean EOF becomes `none`, replacing the interim `IoError` EOF variant from M13.6 (deliberate breaking change — pre-alpha; matches the Swift `readLine() -> String?` / Rust `None` / Go Scanner consensus that EOF is graceful termination, not a failure)
+- Migrate `process_env(key: str) -> str` (M9.2 placeholder, empty = unset) to `process_env(key: str) -> ?str` (`none` = unset); the final `process.env` name swap waits for M24
 - Dependencies: Milestone 11 (enums provide foundation for tagged unions)
 
 ### Milestone 17: Method Implementations
@@ -2312,8 +2326,8 @@ fn main():
 - Implement `io` module:
   - `print(str) -> void`: Print to stdout (already in M3.5 as builtin)
   - `println(str) -> void`: Print with newline
-  - `eprint(str) -> void`, `eprintln(str) -> void`: Print to stderr. **Update (2026-09):** `eprint` lands as a builtin in M9.2; the `io` version wraps it
-  - `read_line() -> IoError!str`: Read from stdin. **Update (2026-09):** lands as a builtin in M13.6; the `io` version wraps it under the same name
+  - `eprint(str) -> void`, `eprintln(str) -> void`: Print to stderr. **Update (2026-09):** `io_eprint` lands as a throwaway intrinsic in M9.2; `io.eprint` is its final form (mechanical `io_eprint` → `io.eprint` swap)
+  - `read_line() -> IoError!str`: Read from stdin. **Update (2026-09):** `io_read_line` lands as a placeholder intrinsic in M9.2 and gains error unions in M13.6; `io.read_line` is the final name (M16 takes the signature to `IoError!?str`)
   - `read_file(path: strview) -> io.Error!str`: Read file contents
   - `write_file(path: strview, content: strview) -> io.Error!void`: Write to file
   - `append_file(path: strview, content: strview) -> io.Error!void`: Append to file
@@ -2331,10 +2345,10 @@ fn main():
   - `sqrt(x: float) -> float`
   - `pow(base: float, exp: float) -> float`
   - Constants: `PI`, `E`
-- Implement `os` module:
-  - `args() -> list[str]`: Command-line arguments. **Update (2026-09):** the `argc()`/`argv(i)` builtins land in M9.2; `os.args()` collects them into a `list[str]`
-  - `env(key: strview) -> ?str`: Environment variables
-  - `exit(code: int)`: Exit program. **Update (2026-09):** lands as a builtin in M9.2; `os.exit` wraps it
+- Implement `process` module (per [docs/std.md](../std.md) §1 — the `os` naming was superseded):
+  - `args() -> list[str]`: Command-line arguments. **Update (2026-09):** the `process_argc()`/`process_argv(i)` intrinsics land in M9.2; `process.args()` collects them into a `list[str]`
+  - `env(key: strview) -> ?str`: Environment variables. **Update (2026-09):** `process_env` lands as a placeholder (`str`, empty = unset) in M9.2 and becomes `?str` at M16
+  - `exit(code: int)`: Exit program. **Update (2026-09):** `process_exit` lands as an intrinsic in M9.2; `process.exit` is its final form
 - Write comprehensive tests for stdlib
 
 **Visible Progress:** Can write real programs with I/O, string processing, and file operations
@@ -2345,13 +2359,13 @@ fn main():
 import io
 import string
 import collections
-import os
+import process
 
 fn main():
- args = os.args()
+ args = process.args()
  if args.len() < 2:
   io.println("Usage: program <file>")
-  os.exit(1)
+  process.exit(1)
 
  filename = args[1]
  # v0.1: explicit error propagation via match (try/catch is v0.2)
@@ -2359,7 +2373,7 @@ fn main():
   Ok(c): c
   Err(e):
    io.println("Error reading file: " + e.message())
-   os.exit(1)
+   process.exit(1)
 
  words = string.split(content, " ")
  io.println("Word count: " + int_to_str(words.len()))  # v0.1: concat (f-strings v0.2)
@@ -2374,11 +2388,11 @@ fn main():
   - Add comprehensive platform detection and conditional compilation
   - Abstract platform differences in standard library
 - Standard library is **written in Ryo** (using FFI for OS calls)
-- The fd-level primitives are compiler-known builtins, not FFI: `exit`/`eprint`/`argc`/`argv` land in M9.2 and `read_line` in M13.6 (matching the Go/Rust/Swift/Python pattern where the runtime has its own syscall channel); the `io`/`os` module functions here are thin wrappers over them
+- The fd-level primitives are compiler-known intrinsics, not FFI: `process_exit`/`io_eprint`/`process_argc`/`process_argv`/`process_env`/`io_read_line` land in M9.2 (matching the Go/Rust/Swift/Python pattern where the runtime has its own syscall channel); the `io`/`process` module functions here are their final named forms — a mechanical `prefix_name` → `prefix.name` swap, with the intrinsics kept as deprecated aliases for one release
 - Error types defined in respective modules (e.g., `io.Error`)
 - All I/O operations return error unions (explicit error handling)
 - UTF-8 string support throughout
-- Platform-specific code isolated to `os` module
+- Platform-specific code isolated to the `process` module
 - Dependencies: Milestone 6 (modules for stdlib organization)
 
 ### Milestone 25: Panic & Debugging Support [alpha: partial]

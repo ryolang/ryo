@@ -2173,7 +2173,7 @@ config = load_and_parse("app.toml") catch as e:
 
 		ParseError.InvalidSyntax(line, col):
 			print(f"Syntax error at {line}:{col}")
-			exit(1)
+			process.exit(1)
 ```
 
 - **Syntax:** `expr catch as e: handle_error(e)` binds the error to `e`; use `expr catch:` (no `as` clause) to handle without binding. `as` is Ryo's binding keyword — the same gesture as `with EXPR as NAME:` — and is *not* used for type conversion (which uses `TargetType(value)`).
@@ -3713,10 +3713,11 @@ fn main():
   - **Ryo Standard Library (`std`):** High-level APIs written in Ryo, wrapping the runtime via internal FFI.
 - **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
 - **Core Packages (Initial):**
-  - `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `eprint`, `panic`, `assert`, `exit`, `argc`, `argv`, `read_line`, `range`), error and optional type support. **`print` accepts exactly one value argument plus an optional keyword-only `end` (default `"\n"`)** — there are no variadic forms (see Section 6.1.2). The value argument is a `str` (or `strview` via re-borrow) or binary data (`bytes` / `bytesview`, printed as an escaped repr mirroring the literal syntax). For other non-string values, use an f-string: `print(f"x = {x}")`. `eprint` mirrors `print` (same argument rules) but writes to standard error. `exit(code: int) -> never` terminates the process with the given exit code. `argc() -> int` and `argv(i: int) -> str` expose the command-line arguments; `argv` panics on an out-of-range index. `read_line() -> IoError!?str` reads one line from standard input, newline stripped; returns `none` at end of input, so errors are reserved for real failures.
+  - `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `panic`, `assert`, `range`), error and optional type support. **`print` accepts exactly one value argument plus an optional keyword-only `end` (default `"\n"`)** — there are no variadic forms (see Section 6.1.2). The value argument is a `str` (or `strview` via re-borrow) or binary data (`bytes` / `bytesview`, printed as an escaped repr mirroring the literal syntax). For other non-string values, use an f-string: `print(f"x = {x}")`.
+  - `process`: Execution environment — `process.exit(code: int) -> never` terminates the process with the given exit code, `process.args() -> list[str]` returns the command-line arguments, `process.env(key: str) -> ?str` reads an environment variable (`none` when unset).
   - `template`: Native support for parsing and evaluating `t"..."` strings. Includes builder traits and HTML/SQL sanitization utilities (similar to Dave Peck's `tdom` concept for Python) to safely construct DOM trees or queries from Template types.
     - Includes `template.include("path")`: A compiler-backed function that reads an external file (like `.html` or `.sql`) at compile-time and treats it as an inline `t-string`. This allows designers to edit plain HTML files without logic, while the Ryo compiler statically checks and interpolates variables into the Template object at compile-time with zero runtime parsing cost. Control flow (loops/conditionals) must be handled in Ryo via component composition (joining multiple Templates) to maintain strict MVC separation.
-  - `io`: Console (`read_line`), Files (`File`), Buffering (functions return `IoError!T`), implements `Drop`.
+  - `io`: Console (`eprint`, `read_line`), Files (`File`), Buffering (functions return `IoError!T`), implements `Drop`.
   - `string`: `str`/`strview` manipulation, parsing (functions return `ParseError!T`).
   - `collections`: `list[T]`, `map[K, V]` types and methods.
   - `math`: Functions, constants, explicit overflow methods.
