@@ -103,7 +103,7 @@ Ryo explicitly prioritizes **developer experience and debugging capability over 
 | **Panic stack traces** | Small, always-on | - | Post-mortem analysis without debugger | Critical for production debugging |
 | **Debug symbols in binaries** | - | Larger binaries | Resolve stack traces to source code | Use `--strip` flag for production if needed |
 
-**Total Overhead:** Paid only where errors are created or propagated — error-free paths are unaffected. The exact cost varies with workload and trace configuration; measure before tuning.
+**Total Overhead:** Error-trace costs are paid only where errors are created or propagated; panic tracing carries a small always-on cost. The exact overhead varies with workload and trace configuration; measure before tuning.
 
 **When Ryo Is/Isn't Appropriate:**
 
@@ -1954,7 +1954,8 @@ result = try process_items([1, 2, 3], fn(n):
 ```ryo
 fn make_counter(start: int) -> fn() -> int:
 	mut count = start
-	# count moves into the closure, which mutates its own environment
+	# count (a Copy int) is copied into the closure's environment;
+	# the closure mutates its own copy
 	return fn():
 		count += 1
 		return count
@@ -1968,7 +1969,7 @@ print(counter())  # 3
 **Example 4: Capturing an owning type**
 
 ```ryo
-fn create_greeter(name: str) -> fn() -> str:
+fn create_greeter(move name: str) -> fn() -> str:
 	# name (a str, an owning type) moves into the closure's environment
 	return fn(): f"Hello, {name}!"
 

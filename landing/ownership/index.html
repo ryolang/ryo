@@ -193,9 +193,11 @@
           compile time.
         </div>
         <p style="margin-top: 1.5rem">
-          Which types move and which don't? Only types that manage a resource
-          move. Everything else is a <strong>Copy type</strong> — assignment
-          just copies the bits, and both bindings stay valid:
+          Which types move and which don't? Copy is a property of the type:
+          <code>int</code>, <code>float</code>, <code>bool</code> — and small
+          structs containing only Copy types — are <strong>Copy types</strong>.
+          Assignment just copies the bits, and both bindings stay valid.
+          Everything else moves:
         </p>
         <div class="cm-grid">
           <div class="cm-col">
