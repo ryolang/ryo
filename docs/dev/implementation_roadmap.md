@@ -1448,7 +1448,14 @@ fn main():
   - Unit: arity/type errors for each builtin; `exit` usable in expression position as `never`
   - Integration: exit code observed by the OS; `eprint` bytes arrive on fd 2, not fd 1; `argc`/`argv` against real process arguments; `argv` out-of-range panics with code 101
 
-**Visible Progress:** `fn main(): if argc() < 2: eprint("usage: prog <file>"); exit(1)` compiles and runs; scripts can fail loudly and take arguments.
+**Visible Progress:** scripts can fail loudly and take arguments:
+
+```ryo
+fn main():
+	if argc() < 2:
+		eprint("usage: prog <file>")
+		exit(1)
+```
 
 **Example:**
 
@@ -1808,7 +1815,13 @@ print("hello", "")          # compile error — end is keyword-only
   - Unit: arity (zero args), result usable only through `catch`/`match` like any error union
   - Integration: piped stdin — line read round-trip, EOF behavior, invalid UTF-8 yields an `IoError` (not a panic)
 
-**Visible Progress:** Interactive and piped CLI programs work end-to-end: `name = read_line() catch as e: eprint("read failed: " + e.message()); exit(1)`.
+**Visible Progress:** interactive and piped CLI programs work end-to-end:
+
+```ryo
+name = read_line() catch as e:
+	eprint("read failed: " + e.message())
+	exit(1)
+```
 
 **Example:**
 

@@ -1838,7 +1838,7 @@ greeter = fn(): f"Hello, {name}"   # str is an owning type: name moves in
 print(greeter())       # "Hello, Alice"
 ```
 
-Because every capture is owned by the closure, a closure value is always self-contained: it can be stored in a variable, returned from a function, or sent to a task without escape analysis or lifetime tracking. This keeps closures fully consistent with Rules 5 and 6 — there are no hidden borrows living inside values.
+Because every capture is owned by the closure, a closure value is self-contained: it can be stored in a variable, returned from a function, or sent to a task without escape analysis or lifetime tracking. This keeps closures fully consistent with Rules 5 and 6 — there are no hidden borrows living inside values. The single exception is the scoped-borrow `task.scope` child closure (§9.2.1): it may capture by immutable borrow, so it is *not* self-contained and cannot escape or outlive its scope — the scope joins all children before the frame ends.
 
 **Mutable Capture**
 
