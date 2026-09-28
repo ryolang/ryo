@@ -420,3 +420,11 @@ fn valgrind_loop_local_reassign_break_no_leak() {
         "loop_local_reassign_break_leak",
     );
 }
+
+#[test]
+fn valgrind_early_return_owned_value_from_loop() {
+    run_valgrind_smoke(
+        common::find_fixture("early_return_owned_value_from_loop"),
+        "early_return_owned_value_from_loop",
+    );
+}

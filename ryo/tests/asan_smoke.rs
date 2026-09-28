@@ -317,3 +317,11 @@ fn asan_loop_local_reassign_break_no_leak() {
         "loop_local_reassign_break_leak",
     );
 }
+
+#[test]
+fn asan_early_return_owned_value_from_loop() {
+    run_asan_smoke(
+        common::find_fixture("early_return_owned_value_from_loop"),
+        "early_return_owned_value_from_loop",
+    );
+}

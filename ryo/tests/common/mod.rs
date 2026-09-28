@@ -786,6 +786,41 @@ fn main():
 ",
     ),
     (
+        // Two owned str locals inside a loop body with an inout call
+        // between them and an early `return v` of one from the loop.
+        // Pins: the return epilogue frees only owners live on the
+        // return's path (pre-fix codegen aborted "no ValueRepr cached"
+        // on the loop-local recorded by the backedge-seeded state), and
+        // both buffers are freed exactly once on every path.
+        "early_return_owned_value_from_loop",
+        "\
+fn adv(inout p: int):
+\tp += 1
+
+fn slice_at(s: str, at: int) -> str:
+\treturn str(s[at:at + 2])
+
+fn find(b: bytesview, s: str, key: str) -> str:
+\tmut p = 0
+\twhile true:
+\t\tif p >= b.len():
+\t\t\treturn \"<none>\"
+\t\tk = slice_at(s, p)
+\t\tadv(&p)
+\t\tv = slice_at(s, p)
+\t\tif k == key:
+\t\t\treturn v
+\t\tadv(&p)
+\treturn \"<none>\"
+
+fn main():
+\tdoc = \"hello world\"
+\tb = doc.as_bytes()
+\tprint(find(b, doc, \"he\"))
+\tprint(\"\\n\")
+",
+    ),
+    (
         // A loop-LOCAL mut str reassigned inside the body (concat
         // crossing the 23-byte inline boundary) and broken out of
         // while live. Loop-local bindings are NOT loop-carried: the
