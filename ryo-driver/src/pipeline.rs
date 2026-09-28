@@ -10,6 +10,30 @@ pub enum EmitKind {
     Clif,
 }
 
+/// Libc to link a produced Linux binary against (the `ryo build
+/// --link` flag). Accepted on every host; on non-Linux hosts it has no
+/// effect because zig cc already links natively there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum LinkMode {
+    /// Static musl: the binary runs on any Linux regardless of host
+    /// glibc version (the default).
+    #[default]
+    Musl,
+    /// Link natively against the host glibc. Binaries are only as
+    /// portable as the build host's glibc, but they get the host's
+    /// full NSS/getaddrinfo stack.
+    Glibc,
+}
+
+impl From<LinkMode> for linker::LinkMode {
+    fn from(mode: LinkMode) -> Self {
+        match mode {
+            LinkMode::Musl => linker::LinkMode::Musl,
+            LinkMode::Glibc => linker::LinkMode::Glibc,
+        }
+    }
+}
+
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::error::{Rich, RichPattern, RichReason};
 use chumsky::span::Span as _;
@@ -624,8 +648,9 @@ pub fn run_file(file: &Path, emit: &[EmitKind]) -> Result<i32, CompilerError> {
 /// AOT-compile `file` to a standalone binary next to the source.
 /// Silent on success unless `--emit` requests IR sections (same
 /// rendering and pipeline order as `ryo ir`; CLIF prints after
-/// codegen, before linking).
-pub fn build_file(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
+/// codegen, before linking). `link` selects the libc zig cc links
+/// against on Linux (musl default); it is a no-op on other hosts.
+pub fn build_file(file: &Path, emit: &[EmitKind], link: LinkMode) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
@@ -668,7 +693,8 @@ pub fn build_file(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     let runtime_path = runtime_lib::extract_runtime_to_temp()
         .map_err(|e| CompilerError::LinkError(format!("Failed to extract runtime: {e}")))?;
 
-    let link_result = linker::link_executable(&obj_filename, &exe_filename, &runtime_path);
+    let link_result =
+        linker::link_executable(&obj_filename, &exe_filename, &runtime_path, link.into());
 
     runtime_lib::cleanup_runtime_temp(&runtime_path);
     // Default: clean up the intermediate object file. Set
