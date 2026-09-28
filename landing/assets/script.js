@@ -111,3 +111,33 @@
 		} catch (e) {}
 	});
 })();
+
+// ----- Sidebar nav (reference-style pages): mobile toggle + scroll-spy -----
+(() => {
+	const sidebar = document.getElementById("ref-sidebar");
+	const toggle = document.querySelector(".ref-nav-toggle");
+	if (toggle && sidebar) {
+		toggle.addEventListener("click", () => {
+			const open = sidebar.classList.toggle("open");
+			toggle.setAttribute("aria-expanded", String(open));
+		});
+	}
+
+	// Scroll-spy: highlight the current section in the sidebar.
+	const links = Array.from(document.querySelectorAll(".ref-nav-list a")).filter(
+		(a) => a.getAttribute("href").startsWith("#"),
+	);
+	const pairs = links
+		.map((a) => [a, document.getElementById(a.getAttribute("href").slice(1))])
+		.filter(([, sec]) => sec);
+	if (!pairs.length) return;
+	const spy = () => {
+		let current = pairs[0][1];
+		pairs.forEach(([, sec]) => {
+			if (sec.getBoundingClientRect().top <= 160) current = sec;
+		});
+		pairs.forEach(([a, sec]) => a.classList.toggle("is-active", sec === current));
+	};
+	window.addEventListener("scroll", spy, { passive: true });
+	spy();
+})();

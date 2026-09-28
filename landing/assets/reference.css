@@ -427,3 +427,107 @@ body {
 	background: var(--bg-elevated);
 	vertical-align: middle;
 }
+
+/* ----- Value cells & limits (Ownership Lite rationale) ----- */
+.hidden {
+	display: none;
+}
+.why-grid {
+	display: grid;
+	gap: 0.8rem;
+	margin-top: 1.25rem;
+}
+@media (min-width: 720px) {
+	.why-grid {
+		grid-template-columns: repeat(3, 1fr);
+	}
+	#limits .why-grid {
+		grid-template-columns: 1fr 1fr;
+	}
+}
+.why-cell {
+	padding: 0.9rem 1.1rem;
+	border: 1px solid var(--border-subtle);
+	border-radius: 12px;
+	background: var(--bg-elevated);
+	font-size: 0.9rem;
+}
+.why-cell-title {
+	font-weight: 700;
+	margin-bottom: 0.35rem;
+	color: var(--color-primary-600);
+}
+.dark .why-cell-title {
+	color: var(--color-primary-400);
+}
+.limit-cell {
+	border-left: 3px solid var(--syn-kw);
+	background: color-mix(in srgb, var(--syn-kw) 4%, var(--bg-elevated));
+}
+.status-pill {
+	display: inline-block;
+	font-size: 0.68rem;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	padding: 0.12rem 0.55rem;
+	border-radius: 999px;
+	margin: 0.35rem 0;
+}
+.status-pill--now {
+	color: var(--syn-num);
+	background: color-mix(in srgb, var(--syn-num) 10%, transparent);
+	border: 1px solid color-mix(in srgb, var(--syn-num) 35%, transparent);
+}
+.status-pill--planned {
+	color: var(--syn-fn);
+	background: color-mix(in srgb, var(--syn-fn) 10%, transparent);
+	border: 1px solid color-mix(in srgb, var(--syn-fn) 35%, transparent);
+}
+.limit-toggle {
+	font: inherit;
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--color-primary-600);
+	background: none;
+	border: none;
+	padding: 0;
+	margin-top: 0.45rem;
+	cursor: pointer;
+}
+.dark .limit-toggle {
+	color: var(--color-primary-400);
+}
+.limit-toggle::after {
+	content: " ▸";
+}
+.limit-toggle[aria-expanded="true"]::after {
+	content: " ▾";
+}
+.limit-rescue p {
+	margin: 0.35rem 0 0;
+}
+
+/* ----- Seven rules table ----- */
+.rules-table td:first-child {
+	width: 2.5rem;
+}
+.rule-num {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.5rem;
+	height: 1.5rem;
+	border-radius: 999px;
+	background: var(--color-primary-500);
+	color: #0f172a;
+	font-size: 0.8rem;
+	font-weight: 700;
+}
+.rules-table tr:target {
+	background: color-mix(in srgb, var(--color-primary-500) 12%, transparent);
+}
+.rules-table tr:target .rule-num {
+	background: var(--syn-kw);
+	color: #fff;
+}
