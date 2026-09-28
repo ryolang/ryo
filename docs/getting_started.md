@@ -1,6 +1,6 @@
 # Getting Started with Ryo
 
-This guide covers installation, your first program, and basic syntax. For the complete language design, see the [Language Specification](specification.md).
+This guide covers installation, your first program, and inspecting the compiler. To learn the language itself, see the [Language Reference](https://ryolang.org/reference/) — or try Ryo without installing anything in the [playground](https://play.ryolang.org/).
 
 ## Installation
 
@@ -26,7 +26,7 @@ cargo build --release
 
 - Ryo compiler in `~/.ryo/bin/`
 - Zig linker (auto-downloaded) in `~/.ryo/toolchain/`
-- Tools: `ryo run` (JIT), `ryo build` (AOT), `ryo lex`, `ryo parse`, `ryo ir`
+- Tools: `ryo run` (JIT), `ryo build` (AOT), `ryo lex`, `ryo parse`, `ryo ir`, `ryo toolchain`
 
 ### Uninstalling
 
@@ -74,62 +74,11 @@ ryo ir --emit=tir hello.ryo   # View typed IR
 ryo ir --emit=clif hello.ryo  # View Cranelift IR
 ```
 
-## Basic Syntax
+## Learning the Language
 
-### Variables
-
-Variables are immutable by default. No declaration keyword needed — the compiler infers types.
-
-```ryo
-fn main():
-	name = "Alice"          # inferred as str, immutable
-	count: int = 10         # explicit type annotation
-	mut total = 0           # mutable variable
-	total = total + count
-```
-
-### Functions
-
-```ryo
-fn add(x: int, y: int) -> int:
-	return x + y
-
-fn main():
-	result = add(3, 4)
-	print("done\n")
-```
-
-Function signatures require type annotations. Return types can be omitted for functions that return nothing.
-
-### Control Flow
-
-```ryo
-fn classify(n: int) -> str:
-	if n > 0:
-		return "positive"
-	elif n == 0:
-		return "zero"
-	else:
-		return "negative"
-```
-
-### Comments
-
-```ryo
-# Single-line comments start with #
-x = 42  # inline comment
-```
-
-### Naming Conventions
-
-| Convention | Used for | Examples |
-|---|---|---|
-| `snake_case` | Variables, functions, modules | `user_name`, `get_config` |
-| `PascalCase` | Structs, enums, traits | `UserProfile`, `TempScale` |
-| Lowercase | Built-in types | `int`, `str`, `float`, `bool` |
-
-## Next Steps
-
-- **[Examples](https://github.com/ryolang/ryo/tree/main/examples)** — Working programs you can compile and run today
-- **[Language Specification](specification.md)** — Complete language design
-- **[Implementation Roadmap](https://github.com/ryolang/ryo/blob/main/docs/dev/implementation_roadmap.md)** — Development milestones
+- **[Language Reference](https://ryolang.org/reference/)** — Types, variables, control flow, functions, built-ins, and the ownership model, documented as implemented. Every example compiles today.
+- **[Ownership Lite walkthrough](https://ryolang.org/ownership/)** — Interactive tour of the memory model: the error, the four fixes, and the one rule behind them.
+- **[Playground](https://play.ryolang.org/)** — Run Ryo in your browser.
+- **[Examples](https://github.com/ryolang/ryo/tree/main/examples)** — Working programs you can compile and run today.
+- **[Language Specification](specification.md)** — The complete language design, including features not yet implemented.
+- **[Implementation Roadmap](https://github.com/ryolang/ryo/blob/main/docs/dev/implementation_roadmap.md)** — Development milestones.

@@ -12,11 +12,12 @@ This section specifies the memory representation and calling conventions for clo
 | Closure Category | Layout | Size | Notes |
 |---|---|---|---|
 | No captures | Thin function pointer | 1 pointer | Identical to a C function pointer. No environment allocated. |
-| Immutable captures (`Fn`) | Environment struct + function pointer | 2 pointers (fat pointer) | Environment is stack-allocated when closure does not escape; heap-allocated (via ownership transfer) when it does. |
-| Mutable captures (`FnMut`) | Environment struct + function pointer | 2 pointers (fat pointer) | Requires exclusive (`inout`) access to the environment on each call. |
-| Move captures (`FnMove`) | Owned environment struct + function pointer | 2 pointers (fat pointer) | Environment is consumed on call. Single-use unless the compiler can prove otherwise. |
+| Captures, read-only (`Fn`) | Owned environment struct + function pointer | 2 pointers (fat pointer) | Environment is stack-allocated when closure does not escape; heap-allocated (via ownership transfer) when it does. |
+| Captures, mutating (`FnMut`) | Owned environment struct + function pointer | 2 pointers (fat pointer) | Requires exclusive (`inout`) access to the environment on each call; the closure binding must be `mut`. |
 
-The **environment struct** is an anonymous, compiler-generated struct containing each captured variable (or a reference to it) in declaration order. Field alignment follows platform ABI rules (same as user-defined structs with `#[repr(C)]` layout).
+The **environment struct** is an anonymous, compiler-generated struct containing each captured variable as an **owned value** (moved or copied in, per §6.2.2) in declaration order. The only case where an environment may hold a reference instead is the `task.scope` scoped-borrow exception (see Task Closure Interaction below). Field alignment follows platform ABI rules (same as user-defined structs with `#[repr(C)]` layout).
+
+The environment must remain intact for the closure's whole lifetime: moving a capture *out* of the environment (returning it, or moving it into another value) is a compile error — there is no single-use (`FnOnce`) category (§6.2.3). Codegen can therefore always assume every environment field is valid on every call.
 
 > **Design Choice:** Should the environment struct preserve capture declaration order, or should the compiler reorder fields for optimal packing? Declaration order aids debuggability; reordering reduces padding. *Resolution deferred to implementation phase.*
 
@@ -52,7 +53,7 @@ FFI interoperability (v0.2+) imposes the following rules on closures crossing la
 2. **Closures with captures** cannot cross FFI boundaries directly. They require an explicit wrapper:
    - A `#[callback]` attribute (future) that packages the closure as a C-compatible `(fn_ptr, void* user_data)` pair.
    - The caller on the C side invokes via `fn_ptr(user_data, args...)`.
-3. **Lifetime safety:** Closures passed to C must not reference stack-local variables that may be deallocated before the C code invokes the callback. The compiler should reject such patterns or require `move` capture.
+3. **Lifetime safety:** Captures are owned by the closure (§6.2.2), so a closure never references stack-local variables — the dangling-callback hazard is excluded by construction. The `task.scope` scoped-borrow exception never crosses FFI, because scope-joined closures cannot escape their block. For the `#[callback]` wrapper there is one additional contract the compiler cannot enforce across the boundary: the wrapper must keep the closure — and thus `user_data` and its environment — alive until C can no longer invoke the callback, either by retaining it for the registration's lifetime or by guaranteeing the callback is unregistered (and never invoked again) before release.
 
 ```ryo
 # Valid: no-capture closure as C callback
@@ -70,9 +71,9 @@ offset = 10
 
 ## Task Closure Interaction
 
-Closures passed to `task.run`, `task.scope`, and `task.spawn_detached` (see §9.2.1) have additional representation constraints. All three capture by move implicitly — the compiler enforces this because tasks may outlive the spawning scope (§6.2.2) — with one scoped exception:
+Closures passed to `task.run`, `task.scope`, and `task.spawn_detached` (see §9.2.1) have additional representation constraints. All closures capture by move/copy (§6.2.2) — owned captures are what make it safe for tasks to outlive the spawning scope — with one scoped exception:
 
-1. **Move capture for `task.run` / `task.spawn_detached`:** These closures own their environment entirely (the `FnMove` layout above). No borrowed references to the spawning scope are permitted.
+1. **Owned environments for `task.run` / `task.spawn_detached`:** These closures own their environment entirely (the owned-environment layout above). No borrowed references to the spawning scope are permitted.
 2. **Scoped-borrow exception for `task.scope`:** Because a scope joins all children before exiting, closures inside a `task.scope` body may capture by immutable borrow — the environment may hold references into the spawning scope, including projections (`strview`, `slice[T]`, `bytesview`). The compiler verifies the captured data is frozen for the scope's duration and that no capture escapes the scope.
 3. **Send-safety:** The environment struct must contain only types that are safe to transfer across task boundaries. Specifically:
    - `shared[T]` handles are captured by assignment, which retains the handle (§5.6) — there is no explicit `.clone()`.
@@ -81,7 +82,7 @@ Closures passed to `task.run`, `task.scope`, and `task.spawn_detached` (see §9.
 
 ```ryo
 fn spawn_worker(data: [int]):
-	# Implicit move capture — no `move` keyword needed
+	# Move capture by default — data moves into the closure
 	fut = task.run:
 		for item in data:
 			process(item)

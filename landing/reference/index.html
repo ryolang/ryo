@@ -56,18 +56,7 @@
     <link rel="stylesheet" href="../assets/styles.css" />
     <link rel="stylesheet" href="../assets/reference.css" />
     <script defer src="https://umami.tiderun.cloud/script.js" data-website-id="15405a3b-2bb2-4087-a85b-c6873b7b40a6"></script>
-    <script>
-      // Apply theme before paint to avoid flash
-      (function () {
-        const saved = localStorage.getItem("theme");
-        const prefersDark = window.matchMedia(
-          "(prefers-color-scheme: dark)",
-        ).matches;
-        if (saved === "dark" || (!saved && prefersDark)) {
-          document.documentElement.classList.add("dark");
-        }
-      })();
-    </script>
+    <script src="../assets/theme-init.js"></script>
   </head>
   <body>
     <!-- Navbar -->
@@ -87,9 +76,17 @@
           <a href="./" style="color: var(--text-base); font-weight: 600"
             >Reference</a
           >
+          <a href="../ownership/">Ownership</a>
         </div>
 
         <div class="nav-actions">
+          <a
+            class="nav-cta"
+            href="https://play.ryolang.org/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Try it &rarr;</a
+          >
           <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">
             <svg
               class="icon-moon"
@@ -199,6 +196,9 @@
               <nav class="ref-nav-list">
                 <a href="#ownership">Ownership Lite</a>
                 <a href="#borrow-modes">Borrow Modes</a>
+                <a href="#rules">The Seven Rules</a>
+                <a href="#why-no-gc">Why No GC</a>
+                <a href="#limits">Limits &amp; Trade-offs</a>
               </nav>
             </div>
 
@@ -220,8 +220,8 @@
               Ryo /ˈraɪoʊ/ is a statically-typed, compiled language that
               combines Python-style syntax with the memory safety of Rust and
               the concurrency model of Go. This reference documents the language
-              <strong>as implemented</strong> in the current pre-alpha (through
-              <em>Milestone 8.4</em>). Every example below compiles and runs
+              <strong>as implemented</strong> in the current pre-alpha. Every
+              example below compiles and runs
               today. Features not yet available are gathered in
               <a href="#whats-next">What's Next</a> and never presented as
               working.
@@ -1042,7 +1042,7 @@ fn main():
                   <tr>
                     <td>Ownership</td>
                     <td>
-                      <code>&amp;</code> (borrow) · <code>inout</code> ·
+                      <code>&amp;</code> (mutable borrow) · <code>inout</code> ·
                       <code>move</code>
                     </td>
                   </tr>
@@ -1190,9 +1190,9 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
               <div>
                 <p class="callout-title">New to ownership?</p>
                 <p>
-                  Walk through a real ownership error and the three ways to fix
+                  Walk through a real ownership error and the four ways to fix
                   it in the
-                  <a href="../ownership.html">interactive Ownership Lite tutorial</a>.
+                  <a href="../ownership/">interactive Ownership Lite tutorial</a>.
                 </p>
               </div>
             </div>
@@ -1294,9 +1294,9 @@ fn main():
             <h3>Move (<code>move</code>)</h3>
             <p>
               A <code>move</code> parameter takes ownership. After the call, the
-              caller's binding is dead — reading it is a compile error. The
-              value is destroyed when the callee returns (unless it moves it
-              onward).
+              caller's binding is dead — reading it is a compile error. Inside
+              the callee the value is dropped at its last use, not at return
+              (unless it moves it onward).
             </p>
             <div class="code-block">
               <div class="code-block-head">
@@ -1305,8 +1305,8 @@ fn main():
               </div>
               <pre><code class="language-ryo">fn take_text(move text: str):
 	modified = text + ", owned"
+	# text's last use — it is dropped here, before the print
 	print(modified)
-	# text is dropped when take_text returns
 
 fn main():
 	message = "Hello"
@@ -1340,6 +1340,281 @@ fn main():
           </section>
 
           <!-- =================================================== -->
+          <section id="rules">
+            <h2>
+              The Seven Rules
+              <a class="anchor" href="#rules" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Every ownership diagnostic is an instance of seven formal rules
+              from the
+              <a
+                href="https://github.com/ryolang/ryo/blob/main/docs/specification.md"
+                >spec (§5.3)</a
+              >:
+            </p>
+            <div class="ref-table-wrap">
+              <table class="rules-table">
+                <thead>
+                  <tr><th></th><th>Rule</th><th>In one line</th></tr>
+                </thead>
+                <tbody>
+                  <tr id="rule-1">
+                    <td><span class="rule-num">1</span></td>
+                    <td>Assignment and return default to <strong>move</strong></td>
+                    <td>Owning types invalidate the source binding — E0020</td>
+                  </tr>
+                  <tr id="rule-2">
+                    <td><span class="rule-num">2</span></td>
+                    <td>Parameters default to <strong>immutable borrow</strong></td>
+                    <td>No annotation anywhere; the caller's binding stays valid</td>
+                  </tr>
+                  <tr id="rule-3">
+                    <td><span class="rule-num">3</span></td>
+                    <td>Mutable borrows are always <strong>explicit</strong></td>
+                    <td><code>inout</code> in the signature, <code>&amp;</code> at the call site, <code>mut</code> binding</td>
+                  </tr>
+                  <tr id="rule-4">
+                    <td><span class="rule-num">4</span></td>
+                    <td><code>move</code> parameters override the default</td>
+                    <td>The transfer is declared in the signature; the caller's binding dies</td>
+                  </tr>
+                  <tr id="rule-5">
+                    <td><span class="rule-num">5</span></td>
+                    <td>Functions cannot return borrows</td>
+                    <td>Returns are always owned — retaining views over <code>shared[T]</code> excepted (spec'd)</td>
+                  </tr>
+                  <tr id="rule-6">
+                    <td><span class="rule-num">6</span></td>
+                    <td>Structs cannot contain references</td>
+                    <td>Fields are owned, <code>shared[T]</code>, retaining views, or IDs — never <code>&amp;T</code></td>
+                  </tr>
+                  <tr id="rule-7">
+                    <td><span class="rule-num">7</span></td>
+                    <td>One writer <strong>or</strong> many readers — borrows scoped to calls</td>
+                    <td>Per value: one <code>inout</code> or many reads, never both — E0032</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="why-no-gc">
+            <h2>
+              Why No GC, Ever
+              <a class="anchor" href="#why-no-gc" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              All of the ownership ceremony buys one thing:
+              <strong>deterministic destruction</strong>. Every value's
+              resources — heap buffers, sockets, file handles — are released
+              at a point the compiler can see: at last use, or at the end of
+              the scope. There is no garbage collector to pause your program,
+              no finalizer running late, no refcount traffic on the hot path.
+              And because borrows are scoped to a single call, most of the
+              fights people have with Rust's borrow checker simply never
+              happen.
+            </p>
+            <div class="why-grid">
+              <div class="why-cell">
+                <div class="why-cell-title">No GC pauses</div>
+                Memory is freed where and when the code says it is —
+                performance stays predictable from run to run.
+              </div>
+              <div class="why-cell">
+                <div class="why-cell-title">No runtime safety tax</div>
+                Every ownership rule is enforced at compile time. The checks
+                cost nothing at runtime — moves and borrows compile to plain
+                pointer passes.
+              </div>
+              <div class="why-cell">
+                <div class="why-cell-title">Shared only on request</div>
+                <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+                When a value genuinely needs more than one owner, you opt in
+                with <code>shared[T]</code> — refcounting is a tool you reach
+                for, not a tax you always pay. (Written into the spec; the
+                refcount runtime is still being built.)
+              </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="limits">
+            <h2>
+              Where Ownership Lite Draws the Line
+              <a class="anchor" href="#limits" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Honesty time: the same rules that delete the lifetime vocabulary
+              also forbid one fundamental capability —
+              <strong>a borrow that outlives the call it was created in</strong>.
+              It can't be returned, stored, or sent anywhere. Four shapes of
+              programs are unbuildable in the safe model because of exactly
+              that one sentence — and for each, here's what's enforced in the
+              compiler <em>today</em> versus what's already written into the
+              spec as the planned way out:
+            </p>
+            <p>
+              <span class="status-pill status-pill--now">Enforced today</span>
+              the compiler rejects this code right now.
+              <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+              designed and specified, but not yet implemented — the blocker is
+              named on each card.
+            </p>
+            <div class="why-grid">
+              <div class="why-cell limit-cell">
+                <div class="why-cell-title">Zero-copy parsers over owned input</div>
+                <p>
+                  <span class="status-pill status-pill--now">Enforced today</span>
+                  Free functions can't return views of owned values
+                  (<a href="#rule-5">Rule 5</a>), so the parser-combinator
+                  shape —
+                  <code>fn parse(input: strview) -&gt; (strview, strview)</code> —
+                  can't exist: parsing a huge file zero-copy works
+                  <em>inside</em> one call, but the results can't come back to
+                  you as borrows.
+                </p>
+                <button class="limit-toggle" type="button" aria-expanded="false">
+                  The rescue plan
+                </button>
+                <div class="limit-rescue hidden">
+                  <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+                  <p>
+                    <strong>Retaining views</strong> (spec §5.7): a view
+                    sliced from a <code>shared[T]</code> store keeps the
+                    buffer alive, so a parser library <em>will</em> hand
+                    borrowed results back — and structs <em>will</em> be able
+                    to hold them. Blocked on the <code>shared[T]</code>
+                    refcount runtime. Cost: a frozen input and one atomic
+                    retain per view.
+                  </p>
+                </div>
+              </div>
+              <div class="why-cell limit-cell">
+                <div class="why-cell-title">Stored lazy pipelines</div>
+                <p>
+                  <span class="status-pill status-pill--now">Enforced today</span>
+                  A borrow can't be stored: an iterator/filter chain saved in
+                  a struct and consumed later holds a borrow across arbitrary
+                  time, and Ryo's views are tied to their owner's scope —
+                  pipelines are callback-shaped instead.
+                </p>
+                <button class="limit-toggle" type="button" aria-expanded="false">
+                  The rescue plan
+                </button>
+                <div class="limit-rescue hidden">
+                  <span class="status-pill status-pill--planned">Rewrite spec'd · ships with iterators</span>
+                  <p>
+                    No language escape is planned — sugar can't extend a
+                    borrow's life, and the general fix is the lifetime
+                    machinery Ownership Lite exists to avoid. The mechanical
+                    rewrite is spec'd: chain adaptors in one statement and
+                    <code>collect()</code>, or store a closure over
+                    <em>owned</em> data and run it on consumption. Streaming
+                    stages over a channel arrive with the concurrency runtime.
+                  </p>
+                </div>
+              </div>
+              <div class="why-cell limit-cell">
+                <div class="why-cell-title">Mutable stack-lending parallelism</div>
+                <p>
+                  <span class="status-pill status-pill--planned">Deliberate non-goal</span>
+                  <em>Mutable</em> lending across tasks — rayon-style
+                  <code>par_iter</code> writing into disjoint chunks — stays
+                  out: proving disjointness across tasks is full borrow
+                  checking.
+                </p>
+                <button class="limit-toggle" type="button" aria-expanded="false">
+                  The rescue plan
+                </button>
+                <div class="limit-rescue hidden">
+                  <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+                  <p>
+                    Read-only stack lending <em>is</em> in the spec: inside a
+                    <code>task.scope</code>, child tasks may capture by
+                    immutable borrow — the scope joins every child before
+                    your frame ends, so the borrow provably never outlives it.
+                    That's Rust's <code>thread::scope</code> shape for
+                    readers. Blocked on the concurrency runtime.
+                  </p>
+                  <span class="status-pill status-pill--planned">Deliberate non-goal + one exception</span>
+                  <p>
+                    The single blessed exception is
+                    <code>std.slice.split_mut</code>: disjoint chunks by
+                    construction, stdlib-internal <code>unsafe</code> as the
+                    proof, each <code>task.scope</code> child capturing one
+                    chunk.
+                  </p>
+                </div>
+              </div>
+              <div class="why-cell limit-cell">
+                <div class="why-cell-title">Self-referential types</div>
+                <p>
+                  <span class="status-pill status-pill--now">Enforced today</span>
+                  A struct can't hold views into itself
+                  (<a href="#rule-5">Rules 5</a> and
+                  <a href="#rule-6">6</a>): a struct that owns a buffer and
+                  holds views into it — editor piece tables, arena+reference
+                  designs — is unbuildable.
+                </p>
+                <button class="limit-toggle" type="button" aria-expanded="false">
+                  The rescue plan
+                </button>
+                <div class="limit-rescue hidden">
+                  <span class="status-pill status-pill--planned">Spec'd · in progress</span>
+                  <p>
+                    The escape hatch is manifest-gated <code>unsafe</code>
+                    blocks (spec §17) — the same tool Rust requires
+                    (<code>Pin</code> + <code>unsafe</code>) for most of these
+                    types. Lands with the FFI/unsafe work. The common case
+                    has a safe rewrite: IDs or handles into a
+                    <code>shared[T]</code>-owned buffer.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <p style="margin-top: 1.25rem">
+              Not on this list: disjoint field borrows, borrowed graph edges,
+              interior mutability. Those change <em>how</em> you write the
+              program — split the call, use IDs, opt into
+              <code>shared[T]</code> — never <em>whether</em> you can. Every
+              application has a mechanical rewrite; there is always an escape
+              hatch for the rest.
+            </p>
+            <div class="callout callout--warn">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path
+                  d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+                />
+                <line x1="12" y1="9" x2="12" y2="13" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <div>
+                <p class="callout-title">The one real casualty — and its rescue plan</p>
+                <p>
+                  Applications can always be restructured, so Ryo can build
+                  any of them. The hard case is the <strong>zero-copy parsing
+                  library ecosystem</strong> — libraries where the borrowed
+                  result <em>is</em> the product. That shape is impossible
+                  over owned input today — but it isn't abandoned: retaining
+                  views (spec §5.7) bring it back over <code>shared[T]</code>
+                  input, at the price of a frozen buffer and one retain per
+                  view. Until the refcount runtime lands, that ecosystem
+                  waits — by design, not by oversight.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
           <section id="whats-next">
             <h2>
               What's Next
@@ -1361,8 +1636,11 @@ fn main():
                 </thead>
                 <tbody>
                   <tr>
-                    <td>Methods on structs</td>
-                    <td><span class="pill">Milestone 17</span></td>
+                    <td>
+                      CLI intrinsics (<code>process_*</code>,
+                      <code>io_*</code>)
+                    </td>
+                    <td><span class="pill">Milestone 9.2</span></td>
                   </tr>
                   <tr>
                     <td>Tuples</td>
@@ -1388,6 +1666,10 @@ fn main():
                       Optionals (<code>?T</code>) &amp; <code>orelse</code>
                     </td>
                     <td><span class="pill">Milestone 16</span></td>
+                  </tr>
+                  <tr>
+                    <td>Methods on structs</td>
+                    <td><span class="pill">Milestone 17</span></td>
                   </tr>
                   <tr>
                     <td>Collections (<code>list</code>, <code>map</code>)</td>
@@ -1450,46 +1732,14 @@ fn main():
         // Highlighting is handled by the shared script.js
         // (vendor/highlight.min.js + vendor/ryo-highlight.js loaded above).
 
-        // Mobile sidebar toggle.
-        var sidebar = document.getElementById("ref-sidebar");
-        var toggle = document.querySelector(".ref-nav-toggle");
-        if (toggle && sidebar) {
-          toggle.addEventListener("click", function () {
-            var open = sidebar.classList.toggle("open");
-            toggle.setAttribute("aria-expanded", String(open));
+        // Limits section: collapse/expand the rescue plans.
+        document.querySelectorAll(".limit-toggle").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var rescue = btn.nextElementSibling;
+            var open = rescue.classList.toggle("hidden") === false;
+            btn.setAttribute("aria-expanded", open ? "true" : "false");
           });
-        }
-
-        // Scroll-spy: highlight the current section in the sidebar.
-        var links = Array.prototype.slice.call(
-          document.querySelectorAll(".ref-nav-list a"),
-        );
-        var linkFor = {};
-        links.forEach(function (a) {
-          var id = a.getAttribute("href").slice(1);
-          var sec = document.getElementById(id);
-          if (sec) linkFor[id] = a;
         });
-        if ("IntersectionObserver" in window && links.length) {
-          var observer = new IntersectionObserver(
-            function (entries) {
-              entries.forEach(function (entry) {
-                var a = linkFor[entry.target.id];
-                if (!a) return;
-                if (entry.isIntersecting) {
-                  links.forEach(function (l) {
-                    l.classList.remove("is-active");
-                  });
-                  a.classList.add("is-active");
-                }
-              });
-            },
-            { rootMargin: "-5rem 0px -70% 0px", threshold: 0 },
-          );
-          Object.keys(linkFor).forEach(function (id) {
-            observer.observe(document.getElementById(id));
-          });
-        }
       })();
     </script>
   </body>

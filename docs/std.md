@@ -40,7 +40,7 @@
 **Essential Functions:**
 
 - `io.eprint(msg: str) -> void`: Prints directly to standard error.
-- `io.readln() -> IoError!str`: Reads a single line of text from standard input. Returns the line on success or an `IoError` on failure (e.g., EOF).
+- `io.read_line() -> IoError!?str`: Reads a single line of text from standard input. Returns `none` on clean end-of-input; an `IoError` is reserved for real failures (read errors, invalid UTF-8).
 
 ## 4. str Package (String Manipulation)
 
