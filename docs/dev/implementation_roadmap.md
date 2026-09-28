@@ -2310,7 +2310,7 @@ fn main():
   - `print(str) -> void`: Print to stdout (already in M3.5 as builtin)
   - `println(str) -> void`: Print with newline
   - `eprint(str) -> void`, `eprintln(str) -> void`: Print to stderr. **Update (2026-09):** `eprint` lands as a builtin in M9.2; the `io` version wraps it
-  - `input() -> io.Error!str`: Read from stdin. **Update (2026-09):** lands as the `read_line() -> IoError!str` builtin in M13.6; the `io` version wraps it
+  - `read_line() -> IoError!str`: Read from stdin. **Update (2026-09):** lands as a builtin in M13.6; the `io` version wraps it under the same name
   - `read_file(path: strview) -> io.Error!str`: Read file contents
   - `write_file(path: strview, content: strview) -> io.Error!void`: Write to file
   - `append_file(path: strview, content: strview) -> io.Error!void`: Append to file
