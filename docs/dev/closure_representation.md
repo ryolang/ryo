@@ -17,6 +17,8 @@ This section specifies the memory representation and calling conventions for clo
 
 The **environment struct** is an anonymous, compiler-generated struct containing each captured variable as an **owned value** (moved or copied in, per §6.2.2) in declaration order. The only case where an environment may hold a reference instead is the `task.scope` scoped-borrow exception (see Task Closure Interaction below). Field alignment follows platform ABI rules (same as user-defined structs with `#[repr(C)]` layout).
 
+The environment must remain intact for the closure's whole lifetime: moving a capture *out* of the environment (returning it, or moving it into another value) is a compile error — there is no single-use (`FnOnce`) category (§6.2.3). Codegen can therefore always assume every environment field is valid on every call.
+
 > **Design Choice:** Should the environment struct preserve capture declaration order, or should the compiler reorder fields for optimal packing? Declaration order aids debuggability; reordering reduces padding. *Resolution deferred to implementation phase.*
 
 ## Calling Convention
@@ -51,7 +53,7 @@ FFI interoperability (v0.2+) imposes the following rules on closures crossing la
 2. **Closures with captures** cannot cross FFI boundaries directly. They require an explicit wrapper:
    - A `#[callback]` attribute (future) that packages the closure as a C-compatible `(fn_ptr, void* user_data)` pair.
    - The caller on the C side invokes via `fn_ptr(user_data, args...)`.
-3. **Lifetime safety:** Captures are owned by the closure (§6.2.2), so a closure never references stack-local variables — the dangling-callback hazard is excluded by construction. The `task.scope` scoped-borrow exception never crosses FFI, because scope-joined closures cannot escape their block.
+3. **Lifetime safety:** Captures are owned by the closure (§6.2.2), so a closure never references stack-local variables — the dangling-callback hazard is excluded by construction. The `task.scope` scoped-borrow exception never crosses FFI, because scope-joined closures cannot escape their block. For the `#[callback]` wrapper there is one additional contract the compiler cannot enforce across the boundary: the wrapper must keep the closure — and thus `user_data` and its environment — alive until C can no longer invoke the callback, either by retaining it for the registration's lifetime or by guaranteeing the callback is unregistered (and never invoked again) before release.
 
 ```ryo
 # Valid: no-capture closure as C callback

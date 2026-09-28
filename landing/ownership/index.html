@@ -537,53 +537,61 @@ fn main():
             <span></span>
           </div>
 
-          <div class="dt-row rc-borrow" role="button" tabindex="0" aria-expanded="false">
-            <span class="dt-q"><strong>No</strong> — just reading/sharing</span>
-            <span class="dt-do">nothing <code class="rule-chip">default borrow</code></span>
-            <span class="dt-after">valid, unchanged</span>
-            <span class="dt-caret" aria-hidden="true"></span>
+          <div class="dt-row rc-borrow">
+            <button class="dt-toggle" type="button" aria-expanded="false" aria-controls="dt-note-borrow">
+              <span class="dt-q"><strong>No</strong> — just reading/sharing</span>
+              <span class="dt-do">nothing <code class="rule-chip">default borrow</code></span>
+              <span class="dt-after">valid, unchanged</span>
+              <span class="dt-caret" aria-hidden="true"></span>
+            </button>
             <button class="dt-goto" type="button" data-goto-fix="borrow">fix →</button>
           </div>
-          <div class="dt-note rc-borrow hidden">
+          <div class="dt-note rc-borrow hidden" id="dt-note-borrow">
             Parameters borrow by default — no annotation, no <code>&amp;</code>,
             no lifetime. The borrow dies when the call returns and the binding
             is fully yours again. If in doubt, do nothing.
           </div>
 
-          <div class="dt-row rc-inout" role="button" tabindex="0" aria-expanded="false">
-            <span class="dt-q"><strong>No</strong> — callee modifies it</span>
-            <span class="dt-do"><code>inout</code> in signature, <code>&amp;x</code> at call, <code>mut</code> binding <code class="rule-chip">inout</code></span>
-            <span class="dt-after">valid, possibly modified</span>
-            <span class="dt-caret" aria-hidden="true"></span>
+          <div class="dt-row rc-inout">
+            <button class="dt-toggle" type="button" aria-expanded="false" aria-controls="dt-note-inout">
+              <span class="dt-q"><strong>No</strong> — callee modifies it</span>
+              <span class="dt-do"><code>inout</code> in signature, <code>&amp;x</code> at call, <code>mut</code> binding <code class="rule-chip">inout</code></span>
+              <span class="dt-after">valid, possibly modified</span>
+              <span class="dt-caret" aria-hidden="true"></span>
+            </button>
             <button class="dt-goto" type="button" data-goto-fix="inout">fix →</button>
           </div>
-          <div class="dt-note rc-inout hidden">
+          <div class="dt-note rc-inout hidden" id="dt-note-inout">
             Mutation is a borrow, not a transfer: under the hood this passes a
             pointer, so no copy is made — and the <code>mut</code> binding
             keeps mutability visible at every call site.
           </div>
 
-          <div class="dt-row rc-restructure" role="button" tabindex="0" aria-expanded="false">
-            <span class="dt-q"><strong>No</strong> — you still need it after the move</span>
-            <span class="dt-do">reorder: use first, move second <code class="rule-chip">reorder</code></span>
-            <span class="dt-after">valid until the move</span>
-            <span class="dt-caret" aria-hidden="true"></span>
+          <div class="dt-row rc-restructure">
+            <button class="dt-toggle" type="button" aria-expanded="false" aria-controls="dt-note-restructure">
+              <span class="dt-q"><strong>No</strong> — you still need it after the move</span>
+              <span class="dt-do">reorder: use first, move second <code class="rule-chip">reorder</code></span>
+              <span class="dt-after">valid until the move</span>
+              <span class="dt-caret" aria-hidden="true"></span>
+            </button>
             <button class="dt-goto" type="button" data-goto-fix="restructure">fix →</button>
           </div>
-          <div class="dt-note rc-restructure hidden">
+          <div class="dt-note rc-restructure hidden" id="dt-note-restructure">
             Ownership errors are about order: use the value first, move it
             second. Borrows end at each call, so splitting statements splits
             the borrows.
           </div>
 
-          <div class="dt-row rc-move" role="button" tabindex="0" aria-expanded="false">
-            <span class="dt-q"><strong>Yes</strong> — it changes hands</span>
-            <span class="dt-do"><code>move</code> in the signature <code class="rule-chip">move</code></span>
-            <span class="dt-after">invalidated — E0020</span>
-            <span class="dt-caret" aria-hidden="true"></span>
+          <div class="dt-row rc-move">
+            <button class="dt-toggle" type="button" aria-expanded="false" aria-controls="dt-note-move">
+              <span class="dt-q"><strong>Yes</strong> — it changes hands</span>
+              <span class="dt-do"><code>move</code> in the signature <code class="rule-chip">move</code></span>
+              <span class="dt-after">invalidated — E0020</span>
+              <span class="dt-caret" aria-hidden="true"></span>
+            </button>
             <button class="dt-goto" type="button" data-goto-fix="move">fix →</button>
           </div>
-          <div class="dt-note rc-move hidden">
+          <div class="dt-note rc-move hidden" id="dt-note-move">
             The call site stays plain; the transfer is declared in the
             signature and the compiler enforces that the old binding is never
             touched again. Say it in the signature, never at the call.
@@ -711,20 +719,14 @@ fn main():
 
         // §7 decision table: the row expands its why? note; the fix →
         // button navigates to the fix. No nested click targets.
-        document.querySelectorAll(".dt-row").forEach(function (row) {
-          function toggle() {
-            var note = row.nextElementSibling;
+        document.querySelectorAll(".dt-toggle").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var note = document.getElementById(
+              btn.getAttribute("aria-controls"),
+            );
             var open = note.classList.toggle("hidden") === false;
-            row.classList.toggle("expanded", open);
-            row.setAttribute("aria-expanded", open ? "true" : "false");
-          }
-          row.addEventListener("click", toggle);
-          row.addEventListener("keydown", function (e) {
-            if (e.target !== row) return;
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              toggle();
-            }
+            btn.setAttribute("aria-expanded", open ? "true" : "false");
+            btn.closest(".dt-row").classList.toggle("expanded", open);
           });
         });
         document.querySelectorAll(".dt-goto").forEach(function (btn) {

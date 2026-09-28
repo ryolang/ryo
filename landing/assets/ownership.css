@@ -277,11 +277,15 @@
 .dt-head,
 .dt-row {
   display: grid;
-  grid-template-columns: 1.2fr 1.4fr 1fr auto auto;
+  grid-template-columns: 1fr auto;
   gap: 0.75rem;
   align-items: center;
 }
 .dt-head {
+  display: grid;
+  grid-template-columns: 1.2fr 1.4fr 1fr auto auto;
+  gap: 0.75rem;
+  align-items: center;
   padding: 0 1.1rem;
   font-size: 0.72rem;
   font-weight: 700;
@@ -305,11 +309,28 @@
     border-color 0.15s ease,
     transform 0.15s ease;
 }
-.dt-row:hover,
-.dt-row:focus-visible {
+.dt-row:hover {
   border-color: var(--color-primary-500);
   transform: translateY(-1px);
-  outline: none;
+}
+.dt-toggle {
+  display: grid;
+  grid-template-columns: 1.2fr 1.4fr 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.dt-toggle:focus-visible {
+  outline: 2px solid var(--color-primary-500);
+  outline-offset: 4px;
+  border-radius: 8px;
 }
 .dt-q {
   font-size: 0.95rem;
@@ -363,6 +384,9 @@
     display: none;
   }
   .dt-row {
+    grid-template-columns: 1fr;
+  }
+  .dt-toggle {
     grid-template-columns: 1fr;
     gap: 0.35rem;
   }

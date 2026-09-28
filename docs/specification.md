@@ -1877,6 +1877,8 @@ Closures are categorized by their capture behavior for type checking purposes:
 
 **Note:** These are compiler-internal concepts, not user-facing traits. Full trait-based closures come with the trait system.
 
+**No single-use closures:** every closure remains callable for its whole lifetime, so moving an owning capture *out* of the closure's environment — returning it, or moving it into another value — is a compile error. There is no `FnOnce` type. Copy captures return freely (they copy out, leaving the environment intact); to extract an owning capture, derive a new owned value instead (e.g. concatenation or `str(view)` materialization).
+
 #### 6.2.4 Stateless Closure Coercion (C-ABI)
 
 If a closure captures **no variables** from its enclosing scope, the compiler automatically coerces it into a plain, state-free function pointer.

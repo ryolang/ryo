@@ -2327,7 +2327,7 @@ fn main():
   - `print(str) -> void`: Print to stdout (already in M3.5 as builtin)
   - `println(str) -> void`: Print with newline
   - `eprint(str) -> void`, `eprintln(str) -> void`: Print to stderr. **Update (2026-09):** `io_eprint` lands as a throwaway intrinsic in M9.2; `io.eprint` is its final form (mechanical `io_eprint` → `io.eprint` swap)
-  - `read_line() -> IoError!str`: Read from stdin. **Update (2026-09):** `io_read_line` lands as a placeholder intrinsic in M9.2 and gains error unions in M13.6; `io.read_line` is the final name (M16 takes the signature to `IoError!?str`)
+  - `read_line() -> IoError!?str`: Read from stdin (`none` on clean EOF). **Update (2026-09):** `io_read_line` lands as a placeholder intrinsic in M9.2 and gains error unions in M13.6; `io.read_line` is the final name (M16 takes the signature to `IoError!?str`)
   - `read_file(path: strview) -> io.Error!str`: Read file contents
   - `write_file(path: strview, content: strview) -> io.Error!void`: Write to file
   - `append_file(path: strview, content: strview) -> io.Error!void`: Append to file

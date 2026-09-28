@@ -1392,7 +1392,7 @@ fn main():
                   <tr id="rule-7">
                     <td><span class="rule-num">7</span></td>
                     <td>One writer <strong>or</strong> many readers — borrows scoped to calls</td>
-                    <td>One <code>inout</code> or many borrows per call, never both — E0032</td>
+                    <td>Per value: one <code>inout</code> or many reads, never both — E0032</td>
                   </tr>
                 </tbody>
               </table>
@@ -1637,7 +1637,8 @@ fn main():
                 <tbody>
                   <tr>
                     <td>
-                      CLI intrinsics (exit, stderr, args, stdin)
+                      CLI intrinsics (<code>process_*</code>,
+                      <code>io_*</code>)
                     </td>
                     <td><span class="pill">Milestone 9.2</span></td>
                   </tr>
