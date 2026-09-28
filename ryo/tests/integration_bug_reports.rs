@@ -14,7 +14,9 @@ use std::process::Output;
 /// JIT-run an inlined repro source from a temp file.
 fn run_bug_report(name: &str, src: &str) -> Output {
     let dir = std::env::temp_dir();
-    let path = dir.join(format!("ryo_test_{name}.ryo"));
+    // PID-guarded: concurrent cargo test processes must not share the
+    // path (the file is deleted after the run).
+    let path = dir.join(format!("ryo_test_{}_{name}.ryo", std::process::id()));
     let mut f = std::fs::File::create(&path).expect("write repro temp file");
     f.write_all(src.as_bytes()).expect("write repro temp file");
     let out = run_ryo_command(&["run", "name"], &path).expect("run ryo");
