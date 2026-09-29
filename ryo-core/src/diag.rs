@@ -62,6 +62,11 @@ pub enum DiagCode {
     /// A struct contains itself, directly or transitively, as a
     /// by-value field, so its size would be unbounded (M9).
     InfiniteSize,
+    /// `#[derive(Eq)]` on a struct with a field whose type is not
+    /// Eq-capable (M9.1): the scalar primitives are, a struct is only
+    /// with its own `#[derive(Eq)]`, and views / tuples / the rest
+    /// are not.
+    DeriveFieldNotEq,
 
     // --- sema ---
     /// A user-defined function or variable uses the `__ryo_` prefix,

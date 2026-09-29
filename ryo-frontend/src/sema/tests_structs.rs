@@ -211,3 +211,36 @@ fn compound_field_assignment_rejects_bad_operator() {
     let (_t, diags, _p) = run_with_errors(src);
     assert!(any_code(&diags, DiagCode::FloatModulo), "got {diags:?}");
 }
+
+#[test]
+fn derive_eq_struct_with_eq_capable_fields_is_clean() {
+    // `int` and `str` are both Eq-capable primitives, so the derive
+    // resolves with no diagnostics (the `==` acceptance itself is
+    // pinned by the operator-gate work).
+    let src = "#[derive(Eq)] struct P:\n\tx: int\n\ty: str\n";
+    assert!(run(src).is_ok());
+}
+
+#[test]
+fn derive_eq_rejects_non_eq_field() {
+    // `Inner` has no `#[derive(Eq)]`, so `Outer`'s derive must name
+    // the field and its type.
+    let src = "struct Inner:\n\tx: int\n\n#[derive(Eq)] struct Outer:\n\tinner: Inner\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::DeriveFieldNotEq)
+        .expect("DeriveFieldNotEq must fire");
+    assert_eq!(
+        diag.message,
+        "cannot derive 'Eq' for 'Outer': field 'inner' of type 'Inner' is not Eq-capable"
+    );
+}
+
+#[test]
+fn repr_c_struct_compiles_clean() {
+    // `#[repr(C)]` is recorded on the type, not branched on: the
+    // default layout algorithm computes identically.
+    let src = "#[repr(C)] struct Mixed:\n\ta: int\n\tb: float\n\tc: int\n";
+    assert!(run(src).is_ok());
+}

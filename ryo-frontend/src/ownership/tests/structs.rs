@@ -8,14 +8,24 @@ fn move_struct_classified() {
     let id = pool.declare_struct(name);
     let field_name = pool.intern_str("name");
     let str_ty = pool.str_();
-    pool.define_struct(id, name, &[(field_name, str_ty)]);
+    pool.define_struct(
+        id,
+        name,
+        &[(field_name, str_ty)],
+        ryo_core::types::StructFlags::default(),
+    );
     assert!(is_move_type(id, &pool));
 
     let point_name = pool.intern_str("Point");
     let point = pool.declare_struct(point_name);
     let x = pool.intern_str("x");
     let float_ty = pool.float();
-    pool.define_struct(point, point_name, &[(x, float_ty)]);
+    pool.define_struct(
+        point,
+        point_name,
+        &[(x, float_ty)],
+        ryo_core::types::StructFlags::default(),
+    );
     assert!(!is_move_type(point, &pool));
 }
 

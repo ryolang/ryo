@@ -21,7 +21,7 @@
 use chumsky::span::{SimpleSpan, Span as _};
 use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::types::{InternPool, StringId, TypeId};
+use ryo_core::types::{InternPool, StringId, StructFlags, TypeId};
 use ryo_core::uir::{InstRef, InstTag, Uir, UirBuilder, UirParam, UirStructDecl, UirStructField};
 use std::collections::HashMap;
 
@@ -360,8 +360,38 @@ impl StructDefiner<'_> {
             self.states.insert(name, DefState::Failed);
             return;
         }
+        if def.attrs.derive_eq {
+            // M9.1: every field type must be Eq-capable for the
+            // derive to be sound. One diagnostic per offending
+            // field, analysis continues — and the struct is still
+            // defined with the flag, so `derive_eq` always matches
+            // the source attribute.
+            for f in &fields {
+                if pool.is_eq_capable(f.ty) {
+                    continue;
+                }
+                sink.emit(Diag::error(
+                    f.span,
+                    DiagCode::DeriveFieldNotEq,
+                    format!(
+                        "cannot derive 'Eq' for '{}': field '{}' of type '{}' is not Eq-capable",
+                        pool.str(name),
+                        pool.str(f.name),
+                        pool.display(f.ty),
+                    ),
+                ));
+            }
+        }
         let field_types: Vec<(StringId, TypeId)> = fields.iter().map(|f| (f.name, f.ty)).collect();
-        pool.define_struct(ty, name, &field_types);
+        pool.define_struct(
+            ty,
+            name,
+            &field_types,
+            StructFlags {
+                derive_eq: def.attrs.derive_eq,
+                repr_c: def.attrs.repr_c,
+            },
+        );
         self.states.insert(name, DefState::Defined);
         self.resolved.insert(name, fields);
     }
