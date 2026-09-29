@@ -452,3 +452,11 @@ fn valgrind_debug_repr_primitives_frees() {
         "debug_repr_primitives",
     );
 }
+
+#[test]
+fn valgrind_struct_eq_heap_str_fields() {
+    run_valgrind_smoke(
+        common::find_fixture("struct_eq_heap_str_fields"),
+        "struct_eq_heap_str_fields",
+    );
+}

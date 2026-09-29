@@ -139,6 +139,78 @@ fn print_struct_then_reuse_fields_jit() {
 }
 
 // =============================================================================
+// M9.1 memberwise struct equality (#[derive(Eq)]) — `==`/`!=` lower to
+// per-field compares: icmp/fcmp for scalars, ryo_str_eq for str fields,
+// recursion for nested derived structs. `==` borrows both operands.
+// =============================================================================
+
+#[test]
+fn struct_eq_equal_and_unequal_jit() {
+    assert_ryo_output(
+        "struct_eq_basic",
+        "#[derive(Eq)] struct Point:\n\tx: int\n\ty: int\n\nfn main():\n\tp = Point{x=1, y=2}\n\tq = Point{x=1, y=2}\n\tr = Point{x=1, y=3}\n\tprint(p == q)\n\tprint(\"\\n\")\n\tprint(p == r)\n\tprint(\"\\n\")\n\tprint(p != r)\n\tprint(\"\\n\")\n",
+        "true\nfalse\ntrue\n",
+    );
+}
+
+#[test]
+fn struct_eq_field_order_matters_jit() {
+    // The same values in swapped field positions are unequal —
+    // comparison is memberwise in declaration order, not set-like.
+    assert_ryo_output(
+        "struct_eq_field_order",
+        "#[derive(Eq)] struct Pair:\n\ta: int\n\tb: int\n\nfn main():\n\tp = Pair{a=1, b=2}\n\tq = Pair{a=2, b=1}\n\tprint(p == q)\n\tprint(\"\\n\")\n",
+        "false\n",
+    );
+}
+
+#[test]
+fn struct_eq_nested_derived_jit() {
+    // A derived struct field compares through the recursion into the
+    // nested type's own memberwise equality.
+    assert_ryo_output(
+        "struct_eq_nested",
+        "#[derive(Eq)] struct Point:\n\tx: float\n\ty: float\n\n#[derive(Eq)] struct Line:\n\tstart: Point\n\tend: Point\n\nfn main():\n\tl1 = Line{start=Point{x=0.0, y=0.0}, end=Point{x=1.0, y=1.0}}\n\tl2 = Line{start=Point{x=0.0, y=0.0}, end=Point{x=1.0, y=1.0}}\n\tl3 = Line{start=Point{x=0.0, y=0.0}, end=Point{x=1.0, y=2.0}}\n\tprint(l1 == l2)\n\tprint(\"\\n\")\n\tprint(l1 == l3)\n\tprint(\"\\n\")\n\tprint(l1 != l3)\n\tprint(\"\\n\")\n",
+        "true\nfalse\ntrue\n",
+    );
+}
+
+#[test]
+fn struct_eq_str_field_jit() {
+    // str fields compare by content. "al" + "ice" produces an inline
+    // (SSO) field while the literal is static — the compare must
+    // extract both (ptr, len) pairs through the slot home.
+    assert_ryo_output(
+        "struct_eq_str_field",
+        "#[derive(Eq)] struct User:\n\tname: str\n\tage: int\n\nfn main():\n\ta = User{name=\"alice\", age=30}\n\tb = User{name=\"al\" + \"ice\", age=30}\n\tc = User{name=int_to_str(42), age=30}\n\tprint(a == b)\n\tprint(\"\\n\")\n\tprint(a == c)\n\tprint(\"\\n\")\n\tprint(a != c)\n\tprint(\"\\n\")\n",
+        "true\nfalse\ntrue\n",
+    );
+}
+
+#[test]
+fn struct_eq_nan_field_never_equals_jit() {
+    // IEEE: NaN != NaN, so fcmp eq on a NaN field is false even when
+    // both operands are the very same struct. NaN is built arithmetically
+    // — float division does not trap (0.0 / 0.0).
+    assert_ryo_output(
+        "struct_eq_nan",
+        "#[derive(Eq)] struct Point:\n\tx: float\n\ty: float\n\nfn main():\n\tp = Point{x=0.0 / 0.0, y=1.0}\n\tprint(p == p)\n\tprint(\"\\n\")\n\tprint(p != p)\n\tprint(\"\\n\")\n",
+        "false\ntrue\n",
+    );
+}
+
+#[test]
+fn struct_eq_operands_remain_usable_jit() {
+    // Borrow proof: `==` roots borrows of both operands — a struct with
+    // needs-drop fields must survive the comparison fully usable.
+    assert_ryo_output(
+        "struct_eq_borrow",
+        "#[derive(Eq)] struct User:\n\tname: str\n\tage: int\n\nfn main():\n\tp = User{name=\"alice\", age=30}\n\tq = User{name=\"bob\", age=30}\n\tprint(p == q)\n\tprint(\"\\n\")\n\tprint(p.name)\n\tprint(q.name)\n\tprint(int_to_str(p.age))\n\tprint(\"\\n\")\n\tprint(p != q)\n\tprint(\"\\n\")\n",
+        "false\nalicebob30\ntrue\n",
+    );
+}
+
+// =============================================================================
 // AOT exact output
 // =============================================================================
 

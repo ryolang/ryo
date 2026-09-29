@@ -165,3 +165,22 @@ fn field_reassign_drops_old_str_value() {
         "the old field value must be freed immediately before the overwrite store:\n{clif}"
     );
 }
+
+#[test]
+fn struct_eq_compares_fields_memberwise() {
+    // M9.1: `p == q` on an Eq-derived struct lowers to one compare per
+    // field pair against the rhs struct's slot — int fields with
+    // `icmp eq`, float fields with `fcmp eq` (IEEE) — never a byte-wise
+    // block compare.
+    let clif = clif_of(
+        "#[derive(Eq)] struct P:\n\tx: int\n\ty: float\n\nfn main():\n\tp = P{x=1, y=2.0}\n\tq = P{x=1, y=2.0}\n\tprint(p == q)\n\tprint(\"\\n\")\n",
+    );
+    assert!(
+        clif.contains("icmp eq"),
+        "int field must compare with icmp eq:\n{clif}"
+    );
+    assert!(
+        clif.contains("fcmp eq"),
+        "float field must compare with fcmp eq:\n{clif}"
+    );
+}

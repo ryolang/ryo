@@ -375,3 +375,11 @@ fn asan_debug_repr_primitives_frees() {
         "debug_repr_primitives",
     );
 }
+
+#[test]
+fn asan_struct_eq_heap_str_fields() {
+    run_asan_smoke(
+        common::find_fixture("struct_eq_heap_str_fields"),
+        "struct_eq_heap_str_fields",
+    );
+}

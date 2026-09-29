@@ -618,6 +618,118 @@ impl<M: Module> Codegen<M> {
         Ok(true)
     }
 
+    /// Memberwise struct equality (M9.1): one comparison per field pair
+    /// in declaration order — int/bool fields `icmp eq` on the loaded
+    /// values, float fields `fcmp eq` (IEEE, no fast-math: a NaN field
+    /// makes the struct never equal itself), str/bytes fields the
+    /// runtime content compare on both extracted `(ptr, len)` pairs,
+    /// nested structs recurse. The per-field results AND-reduce with
+    /// `band` — equality has no side effects, so a branchless chain
+    /// beats short-circuit branching. `negate` flips the final i8 for
+    /// `!=`. Both operands are borrowed, never consumed.
+    pub(crate) fn emit_struct_eq(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        lhs_addr: Value,
+        rhs_addr: Value,
+        ty: TypeId,
+        negate: bool,
+    ) -> Result<Value, String> {
+        let view = ctx.pool.struct_view(ty);
+        let mut acc: Option<Value> = None;
+        for field in &view.fields {
+            let lhs_field = if field.offset == 0 {
+                lhs_addr
+            } else {
+                builder.ins().iadd_imm_s(lhs_addr, i64::from(field.offset))
+            };
+            let rhs_field = if field.offset == 0 {
+                rhs_addr
+            } else {
+                builder.ins().iadd_imm_s(rhs_addr, i64::from(field.offset))
+            };
+            let field_eq = match ctx.pool.kind(field.ty) {
+                TypeKind::Int | TypeKind::Bool => {
+                    let cl_ty = cranelift_type_for(field.ty, ctx.pool, ctx.int_type);
+                    let lv = builder
+                        .ins()
+                        .load(cl_ty, MemFlagsData::trusted(), lhs_field, 0);
+                    let rv = builder
+                        .ins()
+                        .load(cl_ty, MemFlagsData::trusted(), rhs_field, 0);
+                    builder.ins().icmp(IntCC::Equal, lv, rv)
+                }
+                TypeKind::Float => {
+                    let lv = builder
+                        .ins()
+                        .load(types::F64, MemFlagsData::trusted(), lhs_field, 0);
+                    let rv = builder
+                        .ins()
+                        .load(types::F64, MemFlagsData::trusted(), rhs_field, 0);
+                    builder.ins().fcmp(FloatCC::Equal, lv, rv)
+                }
+                TypeKind::Str | TypeKind::Bytes => {
+                    let is_bytes = matches!(ctx.pool.kind(field.ty), TypeKind::Bytes);
+                    let (lp, ll, lc) = Self::emit_debug_field_triple(builder, ctx, lhs_field);
+                    let (rp, rl, rc) = Self::emit_debug_field_triple(builder, ctx, rhs_field);
+                    // Inline (SSO) fields keep their bytes in the struct
+                    // slot: extract against the slot address as the
+                    // inline home, exactly like the repr path.
+                    let (lvp, lvl) =
+                        Self::emit_fat_bytes_ptr_len(builder, ctx, lp, ll, lc, Some(lhs_field))?;
+                    let (rvp, rvl) =
+                        Self::emit_fat_bytes_ptr_len(builder, ctx, rp, rl, rc, Some(rhs_field))?;
+                    let fn_name = if is_bytes {
+                        "ryo_bytes_eq"
+                    } else {
+                        "ryo_str_eq"
+                    };
+                    let eq_ref = Self::declare_runtime_fn(
+                        ctx,
+                        builder,
+                        fn_name,
+                        &[ctx.int_type, types::I64, ctx.int_type, types::I64],
+                        &[types::I8],
+                    )?;
+                    let call = builder.ins().call(eq_ref, &[lvp, lvl, rvp, rvl]);
+                    builder.inst_results(call)[0]
+                }
+                TypeKind::Struct => {
+                    Self::emit_struct_eq(builder, ctx, lhs_field, rhs_field, field.ty, false)?
+                }
+                TypeKind::View(_) => {
+                    return Err(
+                        "view struct field reached codegen; sema Rule 6 rejects it".to_string()
+                    );
+                }
+                other => {
+                    return Err(format!(
+                        "emit_struct_eq: field '{}' of '{}' has non-comparable type kind {other:?}",
+                        ctx.pool.str(field.name),
+                        ctx.pool.str(view.name),
+                    ));
+                }
+            };
+            acc = Some(match acc {
+                None => field_eq,
+                Some(prev) => builder.ins().band(prev, field_eq),
+            });
+        }
+        let result = match acc {
+            Some(v) => v,
+            // A fieldless struct equals itself.
+            None => builder.ins().iconst(types::I8, 1),
+        };
+        // `band` yields i8 0/1 (1 = all fields equal). `!=` is the
+        // boolean NOT of that — for a 0/1 value, `result == 0`.
+        if negate {
+            let zero = builder.ins().iconst(types::I8, 0);
+            Ok(builder.ins().icmp(IntCC::Equal, result, zero))
+        } else {
+            Ok(result)
+        }
+    }
+
     /// Debug representation of the struct value at `addr` (M9.1):
     /// builds `Name{f=v, f=v}` in declaration order, no spaces, into a
     /// fresh `RyoStrFat` slot whose address is returned. The string is

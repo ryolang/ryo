@@ -932,6 +932,32 @@ fn main():
 \tprint(\"ok\\n\")
 ",
     ),
+    (
+        // M9.1: memberwise `==` on a needs-drop struct — the compare
+        // borrows both operands (nothing drops at the comparison), the
+        // heap str fields drop exactly once at scope end, and the field
+        // reassign drops the old buffer before the overwrite.
+        "struct_eq_heap_str_fields",
+        "\
+#[derive(Eq)] struct User:
+\tname: str
+\tage: int
+
+fn main():
+\tp = User{name=int_to_str(42), age=30}
+\tmut q = User{name=int_to_str(7), age=30}
+\tprint(p == q)
+\tprint(\"\\n\")
+\tprint(p != q)
+\tprint(\"\\n\")
+\tq.name = int_to_str(42)
+\tprint(p == q)
+\tprint(\"\\n\")
+\tprint(p.name)
+\tprint(q.name)
+\tprint(\"\\n\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's

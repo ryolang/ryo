@@ -302,6 +302,20 @@ impl<M: Module> Codegen<M> {
                 };
                 Self::emit_bytes_eq(builder, ctx, inst.tag, lhs, rhs)?
             }
+            TirTag::StructEq | TirTag::StructNe => {
+                let (lhs, rhs) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!("StructEq/StructNe must carry TirData::BinOp"),
+                };
+                // Operands are struct values: materialize their slot
+                // addresses (never the scalar entry — structs are
+                // memory-first), then memberwise-compare. The
+                // comparison borrows both operands.
+                let lv = Self::eval_inst_struct(builder, ctx, lhs)?;
+                let rv = Self::eval_inst_struct(builder, ctx, rhs)?;
+                let ty = ctx.tir.inst(lhs).ty;
+                Self::emit_struct_eq(builder, ctx, lv, rv, ty, inst.tag == TirTag::StructNe)?
+            }
             TirTag::BytesIndex => {
                 let (base, index) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
