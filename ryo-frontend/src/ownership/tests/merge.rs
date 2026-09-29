@@ -234,6 +234,33 @@ fn return_accumulator_in_loop_no_e0020() {
 }
 
 #[test]
+fn trailing_all_return_if_loop_body_does_not_poison_backedge() {
+    // Loop whose LAST statement is an if whose arms ALL return: the
+    // body end never flows to the back-edge or the post-loop join, so
+    // the moves in those arms must not enter the (entry ⊔ post-body)
+    // merge. Pre-fix `after_flows_off_end` only recognized a literal
+    // trailing Return/ReturnVoid and the post-loop `out = out + "z"`
+    // use tripped a bogus E0020.
+    //   fn f(c: bool) -> str:
+    //       mut out = "a"
+    //       while c:
+    //           out = out + "b"
+    //           if c:
+    //               return out
+    //           else:
+    //               return out + "!"
+    //       out = out + "z"
+    //       return out
+    let (diags, mut _sidecar, _tirs, _pool) = check_src_full(
+        "fn f(c: bool) -> str:\n\tmut out = \"a\"\n\twhile c:\n\t\tout = out + \"b\"\n\t\tif c:\n\t\t\treturn out\n\t\telse:\n\t\t\treturn out + \"!\"\n\tout = out + \"z\"\n\treturn out\n",
+    );
+    assert!(
+        diags.is_empty(),
+        "a loop body ending in an all-return if must not poison the back-edge merge; got: {diags:?}"
+    );
+}
+
+#[test]
 fn move_on_fallthrough_arm_still_e0020() {
     // Negative guard for the semantics change: the exemption applies
     // ONLY to arms that exit. A value moved on an arm that falls

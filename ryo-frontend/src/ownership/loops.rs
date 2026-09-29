@@ -210,6 +210,51 @@ pub(crate) fn body_must_terminate(tir: &Tir, stmts: &[TirRef]) -> bool {
     }
 }
 
+/// Return-only variant of [`body_must_terminate`] for the loop
+/// back-edge merge: true when `stmt` cannot complete without exiting
+/// the function — a Return, or an else-ful if whose arms all must
+/// return (recursively). Deliberately narrower than
+/// `body_must_terminate`: `break`/`continue` end-states still flow to
+/// the loop join / back-edge (their state is consumed by the
+/// jump-exit machinery, which needs them in the merge), so only
+/// returns are exempted from the (entry ⊔ post-body) merge.
+pub(crate) fn stmt_must_return(tir: &Tir, stmt: TirRef) -> bool {
+    match tir.inst(stmt).tag {
+        TirTag::Return | TirTag::ReturnVoid => true,
+        TirTag::IfStmt => {
+            let view = tir.if_stmt_view(stmt);
+            view.else_stmts.is_some()
+                && body_must_return_only(tir, &view.then_stmts)
+                && view
+                    .elif_branches
+                    .iter()
+                    .all(|e| body_must_return_only(tir, &e.body))
+                && view
+                    .else_stmts
+                    .as_ref()
+                    .is_some_and(|es| body_must_return_only(tir, es))
+        }
+        // `ExprStmt`-wrapped if (sema's `assert` desugaring).
+        _ => {
+            if let TirData::UnOp(o) = tir.inst(stmt).data
+                && tir.inst(o).tag == TirTag::IfStmt
+            {
+                return stmt_must_return(tir, o);
+            }
+            false
+        }
+    }
+}
+
+/// Statement-list companion of [`stmt_must_return`]: the last
+/// statement decides (earlier statements always complete on some
+/// path).
+fn body_must_return_only(tir: &Tir, stmts: &[TirRef]) -> bool {
+    stmts
+        .last()
+        .is_some_and(|&last| stmt_must_return(tir, last))
+}
+
 /// True when at least one path through the if reaches its merge block:
 /// an else-less if always has the fall-through path; with an else,
 /// some arm's body must NOT must-terminate (an arm whose last
@@ -778,17 +823,15 @@ pub(crate) fn analyze_loop_body(
     // divergent bodies (move-without-rebind) converge by the second
     // walk's comparison and break early; oscillating bodies stop at
     // the cap with the same merged state the old re-walk started from.
-    // A body whose last statement is an unconditional `return` never
-    // flows off its end: the post-body state reaches neither the
-    // back-edge nor the post-loop join, so its Moved entries must not
-    // enter the (entry ⊔ post-body) merge (merge_non_monotone drops
-    // them). `break`/`continue` end-states still flow to the join /
-    // back-edge and keep contributing. Structural, whole-body test —
-    // never per-owner.
-    let after_flows_off_end = !matches!(
-        body.last().map(|r| tir.inst(*r).tag),
-        Some(TirTag::Return | TirTag::ReturnVoid)
-    );
+    // A body whose end cannot complete without returning (an
+    // unconditional `return`, or a trailing if whose arms all return)
+    // never flows off its end: the post-body state reaches neither
+    // the back-edge nor the post-loop join, so its Moved entries must
+    // not enter the (entry ⊔ post-body) merge (merge_non_monotone
+    // drops them). `break`/`continue` end-states still flow to the
+    // join / back-edge and keep contributing. Structural, whole-body
+    // test — never per-owner.
+    let after_flows_off_end = !body.last().is_some_and(|&last| stmt_must_return(tir, last));
 
     const MAX_PROPAGATE_PASSES: usize = 2;
     let mut entry = snap.clone();
