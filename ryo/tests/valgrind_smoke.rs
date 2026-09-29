@@ -388,3 +388,43 @@ fn valgrind_struct_leak_check() {
         "struct_leak_check",
     );
 }
+
+#[test]
+fn valgrind_loop_carried_concat_break_no_double_free() {
+    run_valgrind_smoke(
+        common::find_fixture("loop_carried_concat_break"),
+        "loop_carried_concat_break",
+    );
+}
+
+#[test]
+fn valgrind_loop_carried_concat_in_loop_no_double_free() {
+    run_valgrind_smoke(
+        common::find_fixture("loop_carried_concat_in_loop"),
+        "loop_carried_concat_in_loop",
+    );
+}
+
+#[test]
+fn valgrind_int_to_str_with_long_live_str() {
+    run_valgrind_smoke(
+        common::find_fixture("int_to_str_with_long_live_str"),
+        "int_to_str_with_long_live_str",
+    );
+}
+
+#[test]
+fn valgrind_loop_local_reassign_break_no_leak() {
+    run_valgrind_smoke(
+        common::find_fixture("loop_local_reassign_break_leak"),
+        "loop_local_reassign_break_leak",
+    );
+}
+
+#[test]
+fn valgrind_early_return_owned_value_from_loop() {
+    run_valgrind_smoke(
+        common::find_fixture("early_return_owned_value_from_loop"),
+        "early_return_owned_value_from_loop",
+    );
+}

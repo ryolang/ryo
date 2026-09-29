@@ -1,18 +1,44 @@
 //! ASan leak-detection smoke tests for M8.1c.
 //!
 //! Compiles representative .ryo programs, then re-links the object
-//! file with `-fsanitize=address` via zig cc and runs the binary.
-//! Any ASan-detected leak or memory error fails the test.
-//! Skipped on platforms where AOT linking isn't supported.
+//! file with `-fsanitize=address` via the host C compiler and runs the
+//! binary. Any ASan-detected leak or memory error fails the test.
+//!
+//! Linux only, and deliberately re-linked with `cc` rather than the
+//! managed Zig toolchain: zig cc accepts `-fsanitize=address` without
+//! complaint but links no ASan runtime on any platform (verified on
+//! macOS and linux-x86_64/aarch64 — the entire lane was vacuous from
+//! its introduction until the symbol assertion below), while the host
+//! gcc on the glibc CI runners ships a working ASan. The re-link is
+//! native (no `-target`), so the sanitizer binaries are glibc-linked;
+//! the musl AOT default never applies to this path.
 
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+#![cfg(target_os = "linux")]
 
 mod common;
 
 use std::process::Command;
 
 fn run_asan_smoke(source: &str, name: &str) {
-    let (_tmp, exe) = common::build_and_link(source, name, &["-fsanitize=address"]);
+    let (_tmp, exe) = common::build_and_link_host_cc(source, name, &["-fsanitize=address"]);
+
+    // Liveness guard: a passing suite is only meaningful if the binary
+    // actually carries the ASan runtime. `zig cc -fsanitize=address`
+    // accepts the flag without complaint even when no runtime is
+    // linked (observed on macOS) — fail loudly instead of passing
+    // vacuously.
+    let nm = Command::new("nm")
+        .arg(&exe)
+        .output()
+        .expect("run nm on test binary");
+    let syms = String::from_utf8_lossy(&nm.stdout);
+    assert!(
+        syms.contains("__asan_init"),
+        "binary {name} has no ASan runtime symbols — the sanitizer link is vacuous.\n\
+         nm exit: {:?}, stderr: {}",
+        nm.status,
+        String::from_utf8_lossy(&nm.stderr)
+    );
 
     // Step 3: run with leak detection
     let run = Command::new(&exe)
@@ -283,5 +309,45 @@ fn asan_self_assign_struct_no_double_free() {
     run_asan_smoke(
         common::find_fixture("self_assign_struct"),
         "self_assign_struct",
+    );
+}
+
+#[test]
+fn asan_loop_carried_concat_break_no_double_free() {
+    run_asan_smoke(
+        common::find_fixture("loop_carried_concat_break"),
+        "loop_carried_concat_break",
+    );
+}
+
+#[test]
+fn asan_loop_carried_concat_in_loop_no_double_free() {
+    run_asan_smoke(
+        common::find_fixture("loop_carried_concat_in_loop"),
+        "loop_carried_concat_in_loop",
+    );
+}
+
+#[test]
+fn asan_int_to_str_with_long_live_str() {
+    run_asan_smoke(
+        common::find_fixture("int_to_str_with_long_live_str"),
+        "int_to_str_with_long_live_str",
+    );
+}
+
+#[test]
+fn asan_loop_local_reassign_break_no_leak() {
+    run_asan_smoke(
+        common::find_fixture("loop_local_reassign_break_leak"),
+        "loop_local_reassign_break_leak",
+    );
+}
+
+#[test]
+fn asan_early_return_owned_value_from_loop() {
+    run_asan_smoke(
+        common::find_fixture("early_return_owned_value_from_loop"),
+        "early_return_owned_value_from_loop",
     );
 }

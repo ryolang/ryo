@@ -7,6 +7,17 @@ use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
+use std::collections::HashMap;
+
+/// The three tables built by [`Codegen::build_free_binding_names`]:
+/// free-target → binding name (dense, per instruction ref), fat-param
+/// sentinel → binding name (dense, per param position), and binding
+/// name → its most recent write (see the builder's docs).
+type FreeBindingTables = (
+    Vec<Option<StringId>>,
+    Vec<Option<StringId>>,
+    HashMap<StringId, TirRef>,
+);
 
 impl<M: Module> Codegen<M> {
     /// True if a `FreePoint` with the given `branch` tag is eligible
@@ -286,8 +297,30 @@ impl<M: Module> Codegen<M> {
                 continue;
             }
             let is_bytes = Self::free_target_is_bytes(ctx, target);
+            // Binding-path redirect: free the binding's CURRENT home
+            // value instead of the producing inst's cached repr (the
+            // cached triple may be stale across reassigns/merges). The
+            // redirect frees the home SLOT's contents, so it must not
+            // fire for a stale/superseded target (e.g. the pre-reassign
+            // owner of a loop-carried binding, scheduled by a
+            // last-use/exit pass against the first-wins merged owner
+            // map): that would free the value the binding CURRENTLY
+            // holds, double-freeing it with that value's own last-use
+            // Free. The redirect fires when the target IS the binding's
+            // most recent write, OR when that most recent write has no
+            // Free of its own — the branch-divergent reseat shape,
+            // where the merge keeps the pre-branch owner as the live
+            // owner, the reseated value's Free is skipped as stale, and
+            // the pre-branch owner's Free must redirect to free the
+            // path-correct buffer. Any other stale target falls through
+            // to the cached-repr path (or the static cap==0 elision)
+            // below.
             let binding_name = Self::free_binding_name(ctx, target)
-                .filter(|name| Self::read_slot(&ctx.fat_locals, *name).is_some());
+                .filter(|name| Self::read_slot(&ctx.fat_locals, *name).is_some())
+                .filter(|name| match ctx.binding_last_write.get(name) {
+                    Some(&last) => last == target || !ctx.all_free_targets.contains(&last),
+                    None => false,
+                });
             if let Some(name) = binding_name {
                 // Provably-inline elision: the free fires on the
                 // binding's CURRENT value, so it is sound only when the
@@ -421,49 +454,65 @@ impl<M: Module> Codegen<M> {
     /// once per function; `emit_frees` consults it to free a binding's
     /// current `FatLocals` rather than a stale cached repr.
     ///
-    /// Returns two dense tables: the first indexed by `TirRef::index()`
-    /// for real instruction refs (slot 0 unused), the second indexed by
-    /// param position for fat-param sentinel refs — queried together via
-    /// `Codegen::free_binding_name`.
-    pub(crate) fn build_free_binding_names(
-        tir: &Tir,
-        pool: &InternPool,
-    ) -> (Vec<Option<StringId>>, Vec<Option<StringId>>) {
-        fn walk(tir: &Tir, stmts: &[TirRef], map: &mut [Option<StringId>]) {
+    /// Returns three tables (see [`FreeBindingTables`]): the first two
+    /// are dense — indexed by `TirRef::index()` for real instruction
+    /// refs (slot 0 unused) and by param position for fat-param sentinel
+    /// refs — queried together via `Codegen::free_binding_name`. The
+    /// third, `last_write`, is keyed by binding name and records the
+    /// `TirRef` of the binding's most recent write in program order (the
+    /// `VarDecl` initializer, overwritten by each `Assign` value; fat
+    /// params start at their param sentinel ref). `emit_frees`'
+    /// binding-path redirect frees the binding's CURRENT home value,
+    /// which is only the FreePoint's buffer when the FreePoint's target
+    /// IS that most recent write — a stale/superseded target (e.g. a
+    /// pre-reassign owner of a loop-carried binding) would free whatever
+    /// value the binding currently holds, so the redirect must not fire
+    /// for it.
+    pub(crate) fn build_free_binding_names(tir: &Tir, pool: &InternPool) -> FreeBindingTables {
+        fn walk(
+            tir: &Tir,
+            stmts: &[TirRef],
+            map: &mut [Option<StringId>],
+            last_write: &mut HashMap<StringId, TirRef>,
+        ) {
             for &r in stmts {
                 match tir.inst(r).tag {
                     TirTag::VarDecl => {
                         let view = tir.var_decl_view(r);
                         map[view.initializer.index()] = Some(view.name);
+                        last_write.insert(view.name, view.initializer);
                     }
                     TirTag::Assign => {
                         let view = tir.assign_view(r);
                         map[view.value.index()] = Some(view.name);
+                        last_write.insert(view.name, view.value);
                     }
                     TirTag::IfStmt => {
                         let view = tir.if_stmt_view(r);
-                        walk(tir, &view.then_stmts, map);
+                        walk(tir, &view.then_stmts, map, last_write);
                         for elif in &view.elif_branches {
-                            walk(tir, &elif.body, map);
+                            walk(tir, &elif.body, map, last_write);
                         }
                         if let Some(else_stmts) = &view.else_stmts {
-                            walk(tir, else_stmts, map);
+                            walk(tir, else_stmts, map, last_write);
                         }
                     }
-                    TirTag::WhileLoop => walk(tir, &tir.while_loop_view(r).body, map),
-                    TirTag::ForRange => walk(tir, &tir.for_range_view(r).body, map),
+                    TirTag::WhileLoop => walk(tir, &tir.while_loop_view(r).body, map, last_write),
+                    TirTag::ForRange => walk(tir, &tir.for_range_view(r).body, map, last_write),
                     _ => {}
                 }
             }
         }
+        let mut last_write: HashMap<StringId, TirRef> = HashMap::new();
         let mut param_names = vec![None; tir.params.len()];
         for (idx, param) in tir.params.iter().enumerate() {
             if is_fat_type(param.ty, pool) {
                 param_names[idx] = Some(param.name);
+                last_write.insert(param.name, TirRef::param(idx));
             }
         }
         let mut inst_names = vec![None; tir.instructions.len()];
-        walk(tir, &tir.body_stmts(), &mut inst_names);
-        (inst_names, param_names)
+        walk(tir, &tir.body_stmts(), &mut inst_names, &mut last_write);
+        (inst_names, param_names, last_write)
     }
 }

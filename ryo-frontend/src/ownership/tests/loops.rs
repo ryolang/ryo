@@ -713,3 +713,93 @@ fn loop_nesting_chains_depth_three() {
     assert_eq!(nesting.ancestor_at_depth(print_call, 1), wl_outer);
     assert_eq!(nesting.ancestor_at_depth(print_call, 2), wl_inner);
 }
+
+#[test]
+fn loop_carried_concat_break_gets_no_jump_free() {
+    // Regression for the loop-carried double free: a `mut str`
+    // concatenated and reassigned inside a `while` loop is the
+    // binding's CURRENT owner at the `break` — it survives the jump
+    // and is read after the loop. A break-anchored Free would free
+    // the binding's current home buffer (codegen's binding-path
+    // redirect) while the last-use pass independently frees the same
+    // buffer after the final read. The jump scheduler must skip
+    // loop-carried owners; the legitimate Free anchors after the
+    // post-loop read instead.
+    let src = "fn main():\n\tmut total = \"aaaaaaaaaaaaaaaaaaaaaaa\"\n\twhile true:\n\t\ttotal = total + \"b\"\n\t\tif total.len() > 5000:\n\t\t\tbreak\n\tprint(total)\n";
+    let (diags, mut sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "diags: {diags:?}"
+    );
+    let sc = take_function_sidecar(&mut sidecar, 0);
+    let tir = &tirs[0];
+    let jumps: Vec<TirRef> = (1..tir.instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .filter(|&r| matches!(tir.inst(r).tag, TirTag::Break | TirTag::Continue))
+        .collect();
+    assert!(!jumps.is_empty(), "expected a break in the loop");
+    let concats: Vec<TirRef> = (1..tir.instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .filter(|&r| matches!(tir.inst(r).tag, TirTag::StrConcat))
+        .collect();
+    assert_eq!(concats.len(), 1, "expected one concat; got {concats:?}");
+    let concat = concats[0];
+    assert!(
+        sc.free_schedule
+            .iter()
+            .all(|fp| !(jumps.contains(&fp.after) && fp.target == concat)),
+        "no Free anchored on a jump may target the loop-carried concat owner; got: {:?}",
+        sc.free_schedule
+    );
+    // The binding's buffer must still be freed — after the post-loop
+    // read, not at the loop exit (which would free it before the read).
+    let post_loop_read_free = sc
+        .free_schedule
+        .iter()
+        .find(|fp| fp.target == concat)
+        .expect("concat owner must have a last-use Free");
+    assert!(
+        !jumps.contains(&post_loop_read_free.after),
+        "concat Free must not anchor on a jump; got: {:?}",
+        post_loop_read_free
+    );
+}
+
+#[test]
+fn loop_carried_concat_continue_gets_no_jump_free() {
+    // The `continue` shape of the loop-carried double free: same
+    // skip rule as `break`.
+    let src = "fn main():\n\tmut total = \"aaaaaaaaaaaaaaaaaaaaaaa\"\n\tmut n = 0\n\twhile n < 100:\n\t\ttotal = total + \"b\"\n\t\tn = n + 1\n\t\tif n < 50:\n\t\t\tcontinue\n\tprint(total)\n";
+    let (diags, mut sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "diags: {diags:?}"
+    );
+    let sc = take_function_sidecar(&mut sidecar, 0);
+    let tir = &tirs[0];
+    let jumps: Vec<TirRef> = (1..tir.instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .filter(|&r| matches!(tir.inst(r).tag, TirTag::Break | TirTag::Continue))
+        .collect();
+    assert!(
+        jumps
+            .iter()
+            .any(|&r| matches!(tir.inst(r).tag, TirTag::Continue)),
+        "expected a continue in the loop"
+    );
+    let concat = (1..tir.instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .find(|&r| matches!(tir.inst(r).tag, TirTag::StrConcat))
+        .expect("expected a concat");
+    assert!(
+        sc.free_schedule
+            .iter()
+            .all(|fp| !(jumps.contains(&fp.after) && fp.target == concat)),
+        "no Free anchored on a jump may target the loop-carried concat owner; got: {:?}",
+        sc.free_schedule
+    );
+}

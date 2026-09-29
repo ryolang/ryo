@@ -210,3 +210,18 @@ jobs:
         if: steps.zig-cache.outputs.cache-hit != 'true'
         run: cargo run -- toolchain install
       - run: cargo test --test valgrind_smoke
+      # The smoke suites above link fixtures through the AOT linker with
+      # the default musl target; pin the glibc link mode too so a
+      # regression in `--link glibc` can't slip past CI.
+      - name: AOT link-mode smoke (glibc vs musl)
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          cp examples/hello.ryo "$tmp/hello.ryo"
+          cargo run --quiet -- build --link glibc "$tmp/hello.ryo"
+          file "$tmp/hello" | grep "dynamically linked"
+          "$tmp/hello"
+          rm "$tmp/hello"
+          cargo run --quiet -- build "$tmp/hello.ryo"
+          file "$tmp/hello" | grep "statically linked"
+          "$tmp/hello"

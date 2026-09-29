@@ -54,8 +54,13 @@ impl Ownership {
     /// caller's snapshot); each arm's end state merges into them in arm
     /// order. Per-field rules:
     /// - `states`: any branch `Moved` → `Moved`; otherwise first observed
-    ///   wins. So a value consumed on only one branch is still treated as
-    ///   moved at the join point and a post-`if` use trips E0020.
+    ///   wins — but only across branches that fall through. A branch whose
+    ///   end-state terminates in `Return`/`Break`/`Continue`
+    ///   (`falls_through[i] == false`) contributes nothing: its move is
+    ///   path-local to an exit the join point never sees (the return
+    ///   epilogue / loop-exit passes own destruction on those paths), so
+    ///   a conditional `return` of a value no longer poisons post-`if`
+    ///   uses with E0020.
     /// - `current_owner`: first-write-wins across branches; reseats
     ///   inside a branch survive the join.
     /// - `pending_dead_store`: pre-branch keys intersect (any branch that
@@ -75,7 +80,12 @@ impl Ownership {
     /// `Ownership` in place and never restore those fields, so `self`
     /// already holds every arm's contribution and a union would be a
     /// subset-into-superset no-op.
-    pub(super) fn merge_branches(&mut self, branches: Vec<BranchState>) {
+    pub(super) fn merge_branches(&mut self, branches: Vec<BranchState>, falls_through: &[bool]) {
+        debug_assert_eq!(
+            branches.len(),
+            falls_through.len(),
+            "one fall-through flag per branch"
+        );
         // Snapshot pre-branch (name → owner) bindings before we start
         // touching `self.states`. After the per-TirRef merge below
         // the binding-aware override (merge_binding_states) revisits
@@ -86,9 +96,13 @@ impl Ownership {
         let pre_branch_owners = self.current_owner.clone();
 
         // Rule: any branch Moved → Moved; otherwise first observed
-        // (across branches) wins.
-        for b in &branches {
-            merge_states_any_moved_wins(&mut self.states, &b.states);
+        // (across branches) wins. Branches that do not fall through
+        // (Return/Break/Continue terminator) are skipped — their Moved
+        // state is path-local to an exit the join never sees.
+        for (b, &ft) in branches.iter().zip(falls_through) {
+            if ft {
+                merge_states_any_moved_wins(&mut self.states, &b.states);
+            }
         }
         for b in &branches {
             merge_current_owner_first_wins(&mut self.current_owner, &b.current_owner);
@@ -100,9 +114,13 @@ impl Ownership {
         // Binding-aware override: recompute each pre-branch binding's
         // state through whichever owner each branch ended on (shared
         // with the loop fixed-point merge — see merge_binding_states).
+        // Non-fall-through branches are excluded from the sides for the
+        // same reason as the per-branch Moved merge above.
         let sides: Vec<_> = branches
             .iter()
-            .map(|b| (&b.current_owner, &b.states))
+            .zip(falls_through)
+            .filter(|&(_, &ft)| ft)
+            .map(|(b, _)| (&b.current_owner, &b.states))
             .collect();
         merge_binding_states(&mut self.states, &pre_branch_owners, &sides);
 
@@ -322,7 +340,28 @@ pub(crate) fn states_differ_snapshot(
 /// both states BY VALUE: `entry`'s maps become the merge accumulators,
 /// so no snapshot clones happen here. Shares its per-field merge rules
 /// with `Ownership::merge_branches`.
-pub(crate) fn merge_non_monotone(own: &mut Ownership, entry: BranchState, after: BranchState) {
+///
+/// `after_flows_off_end` — false when the loop body's end-state
+/// terminates in an exit (a trailing `return`): the post-body state
+/// reaches neither the back-edge nor the post-loop join, so its
+/// `Moved` entries are path-local to the exit and must not poison the
+/// entry state (the return epilogue owns destruction there). When
+/// false, `after`'s `Moved` entries are dropped before merging. This
+/// is structural (whole-body), never per-owner: a `break`/`continue`
+/// end-state still flows to the join / back-edge and keeps
+/// contributing.
+pub(crate) fn merge_non_monotone(
+    own: &mut Ownership,
+    entry: BranchState,
+    after: BranchState,
+    after_flows_off_end: bool,
+) {
+    let mut after = after;
+    if !after_flows_off_end {
+        after
+            .states
+            .retain(|_, s| !matches!(s, OwnerState::Moved { .. }));
+    }
     // Binding-aware override computed FIRST, while `entry`/`after` are
     // intact — NOT monotone (see binding_state_writes);
     // analyze_loop_body's propagate-phase cap depends on that. Applied

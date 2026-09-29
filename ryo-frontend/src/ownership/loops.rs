@@ -164,56 +164,109 @@ pub(crate) fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
     false
 }
 
-/// True when any statement in `stmts` is a `Break`/`Continue` whose
-/// target is the loop ENCLOSING `stmts` — i.e. the list may jump out
-/// instead of falling through. Recurses into `if` arms (including an
-/// `ExprStmt`-wrapped if, sema's `assert` desugaring) but NOT into
-/// nested loops: their breaks/continues target the inner loop and
-/// don't leave the arm.
-pub(crate) fn body_may_jump_out(tir: &Tir, stmts: &[TirRef]) -> bool {
-    for &r in stmts {
-        match tir.inst(r).tag {
-            TirTag::Break | TirTag::Continue => return true,
-            TirTag::IfStmt => {
-                let view = tir.if_stmt_view(r);
-                if body_may_jump_out(tir, &view.then_stmts)
-                    || view
-                        .elif_branches
-                        .iter()
-                        .any(|e| body_may_jump_out(tir, &e.body))
-                    || view
-                        .else_stmts
-                        .as_ref()
-                        .is_some_and(|es| body_may_jump_out(tir, es))
-                {
-                    return true;
-                }
+/// True when NO path through `stmts` reaches the end of the list:
+/// the last statement terminates in Return/Break/Continue, or is an
+/// if whose arms ALL must terminate (else-less ifs have an implicit
+/// fall-through arm, so they never qualify; nested loops may exit
+/// naturally with zero iterations, so they don't either). This is the
+/// must-terminates counterpart of the may-style `body_may_return` /
+/// `body_may_jump_out`: an arm exempted from a join merge on the
+/// grounds that it "exits" must terminate on EVERY path — an arm that
+/// merely CONTAINS a nested exit but also falls through still reaches
+/// the merge, and its end-state must keep contributing.
+pub(crate) fn body_must_terminate(tir: &Tir, stmts: &[TirRef]) -> bool {
+    let Some(&last) = stmts.last() else {
+        return false;
+    };
+    match tir.inst(last).tag {
+        TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue => true,
+        TirTag::IfStmt => {
+            let view = tir.if_stmt_view(last);
+            if view.else_stmts.is_none() {
+                return false;
             }
-            _ => {
-                if let TirData::UnOp(o) = tir.inst(r).data
-                    && tir.inst(o).tag == TirTag::IfStmt
-                    && body_may_jump_out(tir, std::slice::from_ref(&o))
-                {
-                    return true;
-                }
+            body_must_terminate(tir, &view.then_stmts)
+                && view
+                    .elif_branches
+                    .iter()
+                    .all(|e| body_must_terminate(tir, &e.body))
+                && view
+                    .else_stmts
+                    .as_ref()
+                    .is_some_and(|es| body_must_terminate(tir, es))
+        }
+        // Loops may run zero iterations and fall through naturally, so
+        // a loop last-statement never must-terminates.
+        TirTag::WhileLoop | TirTag::ForRange => false,
+        _ => {
+            // `ExprStmt`-wrapped if (sema's `assert` desugaring).
+            if let TirData::UnOp(o) = tir.inst(last).data
+                && tir.inst(o).tag == TirTag::IfStmt
+            {
+                return body_must_terminate(tir, std::slice::from_ref(&o));
             }
+            false
         }
     }
-    false
+}
+
+/// Return-only variant of [`body_must_terminate`] for the loop
+/// back-edge merge: true when `stmt` cannot complete without exiting
+/// the function — a Return, or an else-ful if whose arms all must
+/// return (recursively). Deliberately narrower than
+/// `body_must_terminate`: `break`/`continue` end-states still flow to
+/// the loop join / back-edge (their state is consumed by the
+/// jump-exit machinery, which needs them in the merge), so only
+/// returns are exempted from the (entry ⊔ post-body) merge.
+pub(crate) fn stmt_must_return(tir: &Tir, stmt: TirRef) -> bool {
+    match tir.inst(stmt).tag {
+        TirTag::Return | TirTag::ReturnVoid => true,
+        TirTag::IfStmt => {
+            let view = tir.if_stmt_view(stmt);
+            view.else_stmts.is_some()
+                && body_must_return_only(tir, &view.then_stmts)
+                && view
+                    .elif_branches
+                    .iter()
+                    .all(|e| body_must_return_only(tir, &e.body))
+                && view
+                    .else_stmts
+                    .as_ref()
+                    .is_some_and(|es| body_must_return_only(tir, es))
+        }
+        // `ExprStmt`-wrapped if (sema's `assert` desugaring).
+        _ => {
+            if let TirData::UnOp(o) = tir.inst(stmt).data
+                && tir.inst(o).tag == TirTag::IfStmt
+            {
+                return stmt_must_return(tir, o);
+            }
+            false
+        }
+    }
+}
+
+/// Statement-list companion of [`stmt_must_return`]: the last
+/// statement decides (earlier statements always complete on some
+/// path).
+fn body_must_return_only(tir: &Tir, stmts: &[TirRef]) -> bool {
+    stmts
+        .last()
+        .is_some_and(|&last| stmt_must_return(tir, last))
 }
 
 /// True when at least one path through the if reaches its merge block:
 /// an else-less if always has the fall-through path; with an else,
-/// some arm's body must neither return nor jump out of the enclosing
-/// loop. A Free anchored after an if whose merge block is unreachable
-/// would never fire.
+/// some arm's body must NOT must-terminate (an arm whose last
+/// statement is Return/Break/Continue, or an all-terminating if,
+/// never reaches the merge). A Free anchored after an if whose merge
+/// block is unreachable would never fire.
 pub(crate) fn if_may_fall_through(tir: &Tir, if_stmt: TirRef) -> bool {
     let view = tir.if_stmt_view(if_stmt);
     if view.else_stmts.is_none() {
         return true;
     }
-    let arm_falls_through =
-        |body: &[TirRef]| !body_may_return(tir, body) && !body_may_jump_out(tir, body);
+    let arm_falls_through = |body: &[TirRef]| !body_must_terminate(tir, body);
     arm_falls_through(&view.then_stmts)
         || view
             .elif_branches
@@ -405,6 +458,61 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
         None
     }
     walk(tir, &tir.body_stmts(), target, &mut Vec::new())
+}
+
+/// Last-use Free anchor for a named-binding owner whose raw last read
+/// (`after`) sits inside a branch or loop. The default re-anchor is the
+/// OUTERMOST branch/loop statement's exit — the earliest point where
+/// the value is dead on ALL paths: anchoring after the read itself
+/// fires per-iteration in loops (UAF on later reads) and never fires
+/// on not-taken arms (leak). Arms that `return` never reach the branch
+/// exit, but the return epilogue owns those paths: its covered-check
+/// excludes ancestor branches, so the exit anchor does not suppress
+/// the epilogue Free. Temps / branch-local bindings skip the
+/// re-anchor (their values don't exist on every exit path).
+///
+/// EXCEPTION — loop-carried owner read again after the loop: a value
+/// assigned inside the loop to a pre-loop binding survives the loop,
+/// so the loop exit is NOT its death point. Anchoring there frees the
+/// binding's current buffer before the post-loop read (garbage output
+/// / UAF). Anchor after the binding's true last read (by name) instead;
+/// codegen's binding-path redirect frees the path-correct buffer there
+/// (the final iteration's value, or the pre-loop value on the
+/// zero-iteration path).
+pub(crate) fn last_use_anchor(
+    tir: &Tir,
+    owner: TirRef,
+    after: TirRef,
+    order: &[u32],
+    last_read_by_name: &HashMap<StringId, TirRef>,
+    loop_carried_owners: &HashSet<TirRef>,
+) -> TirRef {
+    match outermost_branch_of(tir, after) {
+        Some(branch_stmt)
+            if owner_binding_name(tir, owner)
+                .is_some_and(|name| declared_before_stmt(tir, name, branch_stmt)) =>
+        {
+            if matches!(
+                tir.inst(branch_stmt).tag,
+                TirTag::WhileLoop | TirTag::ForRange
+            ) && loop_carried_owners.contains(&owner)
+                && owner_binding_name(tir, owner).is_some_and(|name| {
+                    last_read_by_name.get(&name).is_some_and(|read| {
+                        read != &after
+                            && order.get(read.index()).copied().unwrap_or(0)
+                                > order.get(branch_stmt.index()).copied().unwrap_or(0)
+                    })
+                })
+            {
+                owner_binding_name(tir, owner)
+                    .and_then(|name| last_read_by_name.get(&name).copied())
+                    .unwrap_or(branch_stmt)
+            } else {
+                branch_stmt
+            }
+        }
+        _ => after,
+    }
 }
 
 /// All branch statements (`IfStmt`/`WhileLoop`/`ForRange`) containing
@@ -715,6 +823,16 @@ pub(crate) fn analyze_loop_body(
     // divergent bodies (move-without-rebind) converge by the second
     // walk's comparison and break early; oscillating bodies stop at
     // the cap with the same merged state the old re-walk started from.
+    // A body whose end cannot complete without returning (an
+    // unconditional `return`, or a trailing if whose arms all return)
+    // never flows off its end: the post-body state reaches neither
+    // the back-edge nor the post-loop join, so its Moved entries must
+    // not enter the (entry ⊔ post-body) merge (merge_non_monotone
+    // drops them). `break`/`continue` end-states still flow to the
+    // join / back-edge and keep contributing. Structural, whole-body
+    // test — never per-owner.
+    let after_flows_off_end = !body.last().is_some_and(|&last| stmt_must_return(tir, last));
+
     const MAX_PROPAGATE_PASSES: usize = 2;
     let mut entry = snap.clone();
     for _ in 0..MAX_PROPAGATE_PASSES {
@@ -742,7 +860,7 @@ pub(crate) fn analyze_loop_body(
         // Always merge (entry ⊔ post-body) into `own`; on convergence
         // post-body == entry so the merge is a no-op and `own` already
         // holds the converged entry state Phase 2 starts from.
-        merge_non_monotone(own, entry, after);
+        merge_non_monotone(own, entry, after, after_flows_off_end);
         if !differ {
             break;
         }
@@ -756,7 +874,7 @@ pub(crate) fn analyze_loop_body(
     // Final merge with the loop-entry snapshot: the loop may execute
     // zero times, so post-loop state = entry ⊔ post-check-pass.
     let after = own.take_branch(BranchState::default());
-    merge_non_monotone(own, snap, after);
+    merge_non_monotone(own, snap, after, after_flows_off_end);
 }
 
 /// Fixed-point ownership analysis for `while`, in the
@@ -844,11 +962,106 @@ pub(crate) fn analyze_for_range(
 ///   top-level body statement that contains it (the first container in
 ///   source order wins). Turns "which body stmt reaches the jump" into
 ///   one lookup instead of a per-stmt containment walk of the body.
+/// * `loop_carried_owners` — values assigned (via `Assign`) inside the
+///   loop to a binding DECLARED BEFORE the loop — the same definition
+///   `collect_loop_carried_owners` uses. Such a value is a loop-carried
+///   binding's current owner: it survives the jump, so a jump-anchored
+///   Free would free memory the binding still owns (codegen resolves
+///   the free through the binding's home slot, and the last-use pass
+///   independently schedules the legitimate Free after the final
+///   read). A loop-LOCAL binding does NOT qualify even though the
+///   post-walk `current_owner` still contains it (the loop merge
+///   re-inserts it): the binding dies with the loop, its value is
+///   per-iteration fresh, and its in-body last-use Free may be
+///   bypassed by the jump — exactly the leak the jump-anchored Free
+///   must cover. Computed once per loop, shared by every jump in it.
 pub(crate) struct LoopExitCtx {
     body: Vec<TirRef>,
     inside_loop: HashSet<TirRef>,
     has_any: HashSet<TirRef>,
     top_level: HashMap<TirRef, TirRef>,
+    loop_carried_owners: HashSet<TirRef>,
+}
+
+/// Collect every `Assign` (name, value) pair reachable from `stmts`,
+/// descending through if/loop bodies. Values only; `VarDecl`s are not
+/// loop-carried writes (a loop-local declaration dies with the loop and
+/// still needs its jump-anchored Free).
+pub(crate) fn collect_assign_writes(
+    tir: &Tir,
+    stmts: &[TirRef],
+    out: &mut Vec<(StringId, TirRef)>,
+) {
+    for &r in stmts {
+        match tir.inst(r).tag {
+            TirTag::Assign => {
+                let view = tir.assign_view(r);
+                out.push((view.name, view.value));
+            }
+            TirTag::IfStmt => {
+                let view = tir.if_stmt_view(r);
+                collect_assign_writes(tir, &view.then_stmts, out);
+                for elif in &view.elif_branches {
+                    collect_assign_writes(tir, &elif.body, out);
+                }
+                if let Some(else_stmts) = &view.else_stmts {
+                    collect_assign_writes(tir, else_stmts, out);
+                }
+            }
+            TirTag::WhileLoop => {
+                collect_assign_writes(tir, &tir.while_loop_view(r).body, out);
+            }
+            TirTag::ForRange => {
+                collect_assign_writes(tir, &tir.for_range_view(r).body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every in-loop `Assign` value whose binding is declared BEFORE the
+/// enclosing loop — i.e. loop-carried owners: values a live binding
+/// holds at the loop's exit, on both the iterated paths (the value
+/// written this iteration) and, via the binding's home slot, the
+/// zero-iteration path is NOT included (the home then holds the
+/// pre-loop owner, a different ref). Jump-exit and last-use anchoring
+/// both need this set to avoid freeing a loop-carried value while the
+/// binding is still live.
+pub(crate) fn collect_loop_carried_owners(tir: &Tir) -> HashSet<TirRef> {
+    fn walk(tir: &Tir, stmts: &[TirRef], out: &mut HashSet<TirRef>) {
+        for &r in stmts {
+            match tir.inst(r).tag {
+                TirTag::WhileLoop | TirTag::ForRange => {
+                    let body = match tir.inst(r).tag {
+                        TirTag::WhileLoop => tir.while_loop_view(r).body,
+                        _ => tir.for_range_view(r).body,
+                    };
+                    let mut writes = Vec::new();
+                    collect_assign_writes(tir, &body, &mut writes);
+                    for (name, value) in writes {
+                        if declared_before_stmt(tir, name, r) {
+                            out.insert(value);
+                        }
+                    }
+                    walk(tir, &body, out);
+                }
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(r);
+                    walk(tir, &view.then_stmts, out);
+                    for elif in &view.elif_branches {
+                        walk(tir, &elif.body, out);
+                    }
+                    if let Some(else_stmts) = &view.else_stmts {
+                        walk(tir, else_stmts, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    walk(tir, &tir.body_stmts(), &mut out);
+    out
 }
 
 impl LoopExitCtx {
@@ -865,11 +1078,28 @@ impl LoopExitCtx {
                 top_level.entry(r).or_insert(stmt);
             }
         }
+        // A value assigned inside the loop to a binding declared BEFORE
+        // the loop is loop-carried: it is the binding's owner at the
+        // jump and stays live after the loop. The declared-before
+        // predicate is load-bearing — the post-walk `current_owner`
+        // still contains loop-LOCAL names (the loop merge re-inserts
+        // them), and treating those as loop-carried makes the jump
+        // pass skip their Free while the in-body last-use anchor the
+        // break bypasses — a per-jump leak. Same rule as
+        // `collect_loop_carried_owners`.
+        let mut writes = Vec::new();
+        collect_assign_writes(tir, &body, &mut writes);
+        let loop_carried_owners: HashSet<TirRef> = writes
+            .into_iter()
+            .filter(|(name, _)| declared_before_stmt(tir, *name, loop_inst))
+            .map(|(_, value)| value)
+            .collect();
         Some(Self {
             body,
             inside_loop,
             has_any,
             top_level,
+            loop_carried_owners,
         })
     }
 }
@@ -927,8 +1157,14 @@ pub(crate) fn schedule_loop_exit_frees_in(
 /// that fires on the jump's path.
 ///
 /// Inside-loop owners (in `inside_loop`) — schedule iff no scheduled
-/// Free is anchored on the path that reaches this jump. The next
-/// iteration allocates a fresh buffer, so jump-side Frees are safe.
+/// Free is anchored on the path that reaches this jump, EXCEPT
+/// loop-carried owners (`ctx.loop_carried_owners`: values assigned
+/// inside the loop to a binding declared BEFORE the loop). A
+/// loop-carried value survives the jump, so a jump-anchored Free would
+/// free memory the binding still owns — the last-use pass schedules the
+/// legitimate Free after the final read instead. For all other
+/// inside-loop owners (loop-locals included — each iteration allocates
+/// fresh) jump-side Frees are safe.
 ///
 /// Pre-loop owners — schedule defensively iff NO Free is scheduled
 /// anywhere. We can't free a pre-loop owner on the jump path: a
@@ -1016,9 +1252,19 @@ pub(crate) fn schedule_break_continue_frees(
         }
 
         if inside_loop.contains(&r) {
-            // Inside-loop owner: each iteration allocates fresh, so
-            // a jump-anchored Free is safe. Schedule iff no Free
-            // already fires on this jump's path.
+            // Inside-loop owner. Each iteration allocates fresh, so a
+            // jump-anchored Free is safe — UNLESS the owner is
+            // loop-carried (a pre-loop binding's value assigned inside
+            // the loop): it survives the jump, and codegen's
+            // binding-path redirect would free the binding's current
+            // home-slot contents while the last-use pass independently
+            // frees the same buffer after the final read (double free /
+            // read-after-free). The last-use pass owns that owner's
+            // lifetime (its post-loop anchor fires on every exit path);
+            // skip it here.
+            if ctx.loop_carried_owners.contains(&r) {
+                continue;
+            }
             if covers_this_jump.contains(&r) {
                 continue;
             }

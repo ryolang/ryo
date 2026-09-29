@@ -27,7 +27,21 @@ fn zig_path() -> PathBuf {
     PathBuf::from(path_str)
 }
 
-/// Compiles a Ryo program and links it using the Zig linker.
+/// Which compiler performs the fixture re-link.
+///
+/// `Zig` is the default (matches the AOT pipeline's managed toolchain).
+/// `HostCc` is the host C compiler (`cc`): required for sanitizer
+/// re-links, because zig cc accepts `-fsanitize=address` without
+/// complaint but links no ASan runtime on any platform (verified on
+/// macOS and linux-x86_64/aarch64 — the symbols assertion in
+/// asan_smoke.rs exists because of this), while gcc/clang on a glibc
+/// host ship a working ASan.
+pub enum TestLinker {
+    Zig,
+    HostCc,
+}
+
+/// Compiles a Ryo program and re-links the object file.
 ///
 /// Returns the temporary directory (which must be kept alive by the caller)
 /// and the path to the compiled executable.
@@ -35,6 +49,25 @@ pub fn build_and_link(
     source: &str,
     name: &str,
     extra_link_args: &[&str],
+) -> (tempfile::TempDir, PathBuf) {
+    build_and_link_with(source, name, extra_link_args, TestLinker::Zig)
+}
+
+/// Same as [`build_and_link`] but re-links with the host C compiler —
+/// see [`TestLinker::HostCc`]. Used by the sanitizer smoke suites.
+pub fn build_and_link_host_cc(
+    source: &str,
+    name: &str,
+    extra_link_args: &[&str],
+) -> (tempfile::TempDir, PathBuf) {
+    build_and_link_with(source, name, extra_link_args, TestLinker::HostCc)
+}
+
+fn build_and_link_with(
+    source: &str,
+    name: &str,
+    extra_link_args: &[&str],
+    linker: TestLinker,
 ) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let src_path = tmp.path().join(format!("{name}.ryo"));
@@ -66,18 +99,23 @@ pub fn build_and_link(
         runtime_lib.display()
     );
 
-    let zig = zig_path();
-    let mut cmd = Command::new(&zig);
-    cmd.arg("cc");
+    let (compiler, compiler_name): (PathBuf, &str) = match linker {
+        TestLinker::Zig => (zig_path(), "zig cc"),
+        TestLinker::HostCc => (PathBuf::from("cc"), "host cc"),
+    };
+    let mut cmd = Command::new(&compiler);
+    if matches!(linker, TestLinker::Zig) {
+        cmd.arg("cc");
+    }
     cmd.args(extra_link_args);
     cmd.arg("-o");
     cmd.arg(&exe);
     cmd.arg(&obj);
     cmd.arg(&runtime_lib);
-    let out = cmd.output().expect("zig cc");
+    let out = cmd.output().expect("relink fixture");
     assert!(
         out.status.success(),
-        "zig cc failed with args {:?}:\nstdout: {}\nstderr: {}",
+        "{compiler_name} failed with args {:?}:\nstdout: {}\nstderr: {}",
         extra_link_args,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
@@ -729,6 +767,115 @@ fn main():
 \tx: str = int_to_str(654321)
 \tscan(false, x)
 \tprint(\"done\")
+",
+    ),
+    (
+        // Loop-carried str concat past the 23-byte inline boundary with
+        // an immediate `break` (dead conditional after it, as in the
+        // original repro): the loop-exit anchor must not free the
+        // loop-carried owner a second time — pre-fix this double-freed
+        // (glibc "double free", macOS SIGTRAP/SIGABRT) and the print
+        // past the inline boundary emitted garbage.
+        "loop_carried_concat_break",
+        "\
+fn main():
+\tmut total = \"😀😀😀😀😀😀😀\"
+\twhile true:
+\t\ttotal = total + \"🦊\"
+\t\tbreak
+\t\tif total.len() > 5000:
+\t\t\tbreak
+\tprint(total)
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // Same family with a live conditional exit: the accumulator
+        // grows past 5000 bytes over many iterations, so each
+        // superseded buffer drops exactly once (in-loop reassign) and
+        // the final buffer drops exactly once at the last use.
+        "loop_carried_concat_in_loop",
+        "\
+fn main():
+\tmut total = \"😀😀😀😀😀😀😀\"
+\twhile true:
+\t\ttotal = total + \"🦊\"
+\t\tif total.len() > 5000:
+\t\t\tbreak
+\tprint(total)
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // int_to_str formatting while a >23-byte str is live: the
+        // formatted buffer's length field must not pick up the live
+        // string's state — pre-fix print emitted ~32 garbage bytes
+        // after the digits and the process double-freed at exit.
+        "int_to_str_with_long_live_str",
+        "\
+fn main():
+\tmut total = \"😀😀😀😀😀😀😀\"
+\twhile true:
+\t\ttotal = total + \"🦊\"
+\t\tbreak
+\tprint(int_to_str(total.len()))
+\tprint(total)
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // Two owned str locals inside a loop body with an inout call
+        // between them and an early `return v` of one from the loop.
+        // Pins: the return epilogue frees only owners live on the
+        // return's path (pre-fix codegen aborted "no ValueRepr cached"
+        // on the loop-local recorded by the backedge-seeded state), and
+        // both buffers are freed exactly once on every path.
+        "early_return_owned_value_from_loop",
+        "\
+fn adv(inout p: int):
+\tp += 1
+
+fn slice_at(s: str, at: int) -> str:
+\treturn str(s[at:at + 2])
+
+fn find(b: bytesview, s: str, key: str) -> str:
+\tmut p = 0
+\twhile true:
+\t\tif p >= b.len():
+\t\t\treturn \"<none>\"
+\t\tk = slice_at(s, p)
+\t\tadv(&p)
+\t\tv = slice_at(s, p)
+\t\tif k == key:
+\t\t\treturn v
+\t\tadv(&p)
+\treturn \"<none>\"
+
+fn main():
+\tdoc = \"hello world\"
+\tb = doc.as_bytes()
+\tprint(find(b, doc, \"he\"))
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // A loop-LOCAL mut str reassigned inside the body (concat
+        // crossing the 23-byte inline boundary) and broken out of
+        // while live. Loop-local bindings are NOT loop-carried: the
+        // break-exit Free must still fire — pre-fix the two
+        // definitions of "loop-carried" disagreed and this leaked
+        // the final iteration's buffer on the break path.
+        "loop_local_reassign_break_leak",
+        "\
+fn main():
+\tmut i = 0
+\twhile i < 3:
+\t\tmut s = \"ab\"
+\t\ts = s + \"🦊🦊🦊🦊🦊🦊\"
+\t\ti += 1
+\t\tif i == 2:
+\t\t\tbreak
+\tprint(\"ok\\n\")
 ",
     ),
 ];

@@ -59,6 +59,10 @@ enum Commands {
         /// command is silent on success.
         #[arg(long, value_delimiter = ',', value_enum)]
         emit: Vec<EmitKind>,
+        /// Libc to link the produced binary against (Linux only; no
+        /// effect on other hosts). Default: musl (static, portable).
+        #[arg(long, value_enum, default_value = "musl")]
+        link: pipeline::LinkMode,
     },
     /// Manage the Ryo toolchain (Zig linker)
     Toolchain {
@@ -127,7 +131,7 @@ fn run_command(cli: Cli) -> Result<std::process::ExitCode, CompilerError> {
                 program_exit.clamp(0, 255) as u8
             ));
         }
-        Commands::Build { file, emit } => pipeline::build_file(&file, &emit)?,
+        Commands::Build { file, emit, link } => pipeline::build_file(&file, &emit, link)?,
         Commands::Toolchain { action } => match action {
             ToolchainAction::Install => {
                 toolchain::ensure_zig()?;

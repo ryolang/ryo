@@ -2568,7 +2568,7 @@ Test result: ok. 2 passed; 0 failed
      - `x86_64-pc-windows-msvc` (Windows)
    - Automated release artifact creation
    - Binary signing and checksums
-   - ✅ Done: AOT-produced Linux programs link static musl (`-target <arch>-linux-musl` in `ryo-backend/src/linker.rs`) — they run on any Linux regardless of host glibc version. Caveat carried to the concurrency milestone: musl's resolver skips NSS plugins, so `std.net` needs a resolver decision before it ships. A `--link=glibc|musl` escape hatch remains open.
+   - ✅ Done: AOT-produced Linux programs link static musl by default (`ryo build --link musl`, `-target <arch>-linux-musl` in `ryo-backend/src/linker.rs`) — they run on any Linux regardless of host glibc version. Caveat carried to the concurrency milestone: musl's resolver skips NSS plugins, so `std.net` needs a resolver decision before it ships. Escape hatch: `--link glibc` omits the `-target` flag so zig cc links natively against the host glibc — such binaries are only as portable as the build host's glibc (no NSS/getaddrinfo limitation, since they use the host's resolver stack). The flag is accepted on every host and has no effect off Linux.
 
 2. **Installation Scripts:**
    - `install.sh` for Unix-like systems: ✅ Done (repo root)
