@@ -2,7 +2,7 @@
 
 use super::{FuncCtx, Scope, Sema, borrow_target_reason};
 use ryo_core::diag::{Diag, DiagCode};
-use ryo_core::tir::{ParamMode, TirRef, TirTag};
+use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeKind, ViewKind};
 use ryo_core::uir::{CallView, InstData, InstRef, InstTag, Span};
 
@@ -58,24 +58,36 @@ pub(crate) fn emit_builtin_call(
             // rewrite to `print(__ryo_bytes_repr(arg))` at the TIR level
             // so the repr temp is a normal ownership-tracked str
             // producer (a codegen-synthesized temp would never be freed).
+            // M9.1: print(int/float/bool/struct) renders the Debug
+            // repr — rewrite to `print(DebugRepr(arg))` for the same
+            // reason (DebugRepr borrows its operand; its str result is
+            // a normal owned temp).
             let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
             let owned_args;
-            let effective: &[TirRef] = if matches!(
-                sema.pool.kind(arg_ty),
-                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes)
-            ) {
-                let callee = sema.pool.intern_str("__ryo_bytes_repr");
-                let repr = fcx.builder.call(
-                    callee,
-                    &[arg_tirs[0]],
-                    &[ParamMode::Borrow],
-                    sema.pool.str_(),
-                    span,
-                );
-                owned_args = vec![repr];
-                &owned_args
-            } else {
-                arg_tirs
+            let effective: &[TirRef] = match sema.pool.kind(arg_ty) {
+                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => {
+                    let callee = sema.pool.intern_str("__ryo_bytes_repr");
+                    let repr = fcx.builder.call(
+                        callee,
+                        &[arg_tirs[0]],
+                        &[ParamMode::Borrow],
+                        sema.pool.str_(),
+                        span,
+                    );
+                    owned_args = vec![repr];
+                    &owned_args
+                }
+                TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Struct => {
+                    let repr = fcx.builder.push_typed(
+                        TirTag::DebugRepr,
+                        TirData::UnOp(arg_tirs[0]),
+                        sema.pool.str_(),
+                        span,
+                    );
+                    owned_args = vec![repr];
+                    &owned_args
+                }
+                _ => arg_tirs,
             };
             // W0003 case A: `print` takes `strview`/`bytesview`
             // directly. Warn on the pre-rewrite argument: for str
@@ -629,13 +641,19 @@ pub(crate) fn check_print_args(
     }
     if !matches!(
         sema.pool.kind(arg_ty),
-        TypeKind::Str | TypeKind::Bytes | TypeKind::View(_)
+        TypeKind::Str
+            | TypeKind::Bytes
+            | TypeKind::View(_)
+            | TypeKind::Int
+            | TypeKind::Float
+            | TypeKind::Bool
+            | TypeKind::Struct
     ) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
             format!(
-                "print() argument must be str, strview, bytes, or bytesview, got {}",
+                "print() argument must be str, strview, bytes, bytesview, int, float, bool, or struct, got {}",
                 sema.pool.display(arg_ty)
             ),
         ));

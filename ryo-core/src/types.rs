@@ -84,6 +84,16 @@ impl StringId {
     pub const fn from_raw(raw: u32) -> Self {
         StringId(raw)
     }
+
+    /// Well-known attribute vocabulary (M9.1), interned at fixed ids
+    /// by [`InternPool::new`] before any user string. The parser has
+    /// no pool access, so it recognizes `#[derive(Eq)]` /
+    /// `#[repr(C)]` by comparing against these ids. The intern order
+    /// in `new` defines the ids — keep the two in sync.
+    pub const ATTR_DERIVE: StringId = StringId(0);
+    pub const ATTR_EQ: StringId = StringId(1);
+    pub const ATTR_REPR: StringId = StringId(2);
+    pub const ATTR_C: StringId = StringId(3);
 }
 
 // ---------- Internal storage ----------
@@ -198,6 +208,58 @@ pub enum ViewKind {
     Slice(TypeId),
 }
 
+/// M9.1 struct attribute flags: the `#[derive(Eq)]` / `#[repr(C)]`
+/// bits parsed off the declaration (see `ast::StructAttrs`), recorded
+/// on the interned struct so sema's `==` gate (derive_eq) and codegen
+/// layout pinning (repr_c) can read them back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StructFlags {
+    /// `#[derive(Eq)]` — memberwise `==` / `!=` are synthesized for
+    /// the struct and it is Eq-capable.
+    pub derive_eq: bool,
+    /// `#[repr(C)]` — pin declaration-order field layout. Today the
+    /// default algorithm IS declaration order, so this is recorded,
+    /// not branched on; it exists so a future reordering optimizer
+    /// stays honest.
+    pub repr_c: bool,
+}
+
+impl StructFlags {
+    const BIT_IS_COPY: u32 = 1 << 0;
+    const BIT_DERIVE_EQ: u32 = 1 << 1;
+    const BIT_REPR_C: u32 = 1 << 2;
+
+    /// Pack into the interned payload's single flags word together
+    /// with the `is_copy` bit computed by `define_struct` — the
+    /// pre-M9.1 `is_copy` word widened in place, so the payload
+    /// gains no words.
+    fn pack(self, is_copy: bool) -> u32 {
+        let mut bits = 0;
+        if is_copy {
+            bits |= Self::BIT_IS_COPY;
+        }
+        if self.derive_eq {
+            bits |= Self::BIT_DERIVE_EQ;
+        }
+        if self.repr_c {
+            bits |= Self::BIT_REPR_C;
+        }
+        bits
+    }
+
+    /// Unpack the payload's flags word back into the `is_copy` bit
+    /// and the attribute flags.
+    fn unpack(word: u32) -> (bool, StructFlags) {
+        (
+            word & Self::BIT_IS_COPY != 0,
+            StructFlags {
+                derive_eq: word & Self::BIT_DERIVE_EQ != 0,
+                repr_c: word & Self::BIT_REPR_C != 0,
+            },
+        )
+    }
+}
+
 /// Read-back view of a defined struct's interned payload (M9).
 ///
 /// Returned by value (like [`InternPool::tuple_elements_vec`]) because
@@ -216,6 +278,22 @@ pub struct StructView {
     /// True when every field is Copy: the struct duplicates on `=`
     /// and never needs a drop.
     pub is_copy: bool,
+    /// M9.1 attribute flags recorded by `define_struct`.
+    flags: StructFlags,
+}
+
+impl StructView {
+    /// `#[derive(Eq)]` was present on the declaration (M9.1): the
+    /// struct is Eq-capable and memberwise `==` / `!=` apply.
+    pub fn is_eq(&self) -> bool {
+        self.flags.derive_eq
+    }
+
+    /// `#[repr(C)]` was present on the declaration (M9.1):
+    /// declaration-order layout is pinned.
+    pub fn is_repr_c(&self) -> bool {
+        self.flags.repr_c
+    }
 }
 
 /// One field of a defined struct.
@@ -395,6 +473,20 @@ impl InternPool {
             data: 1,
         });
         debug_assert!(pool.items.len() == (ID_BYTESVIEW + 1) as usize);
+
+        // Well-known attribute vocabulary (M9.1) at fixed string ids
+        // (see `StringId::ATTR_*`): interned before any user string so
+        // the pool-less parser can recognize the attribute names by
+        // identity. Order defines the ids.
+        debug_assert_eq!(
+            pool.strings.len(),
+            0,
+            "user strings must come after the well-known ids"
+        );
+        let _ = pool.intern_str("derive");
+        let _ = pool.intern_str("Eq");
+        let _ = pool.intern_str("repr");
+        let _ = pool.intern_str("C");
         pool
     }
 
@@ -481,6 +573,24 @@ impl InternPool {
             // A declared-but-undefined struct panics in `struct_view`
             // (trusted-producer contract: define before querying).
             TypeKind::Struct => self.struct_view(ty).is_copy,
+            _ => false,
+        }
+    }
+
+    /// True for types usable as a `#[derive(Eq)]` struct field (M9.1):
+    /// the scalar primitives (`int`, `float`, `bool`, `str`, `bytes`)
+    /// and any struct that declared its own `#[derive(Eq)]`.
+    /// Everything else — `void`, `never`, tuples, views — is not
+    /// Eq-capable.
+    pub fn is_eq_capable(&self, ty: TypeId) -> bool {
+        match self.kind(ty) {
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Bytes => {
+                true
+            }
+            // Defined struct: the `derive_eq` flag recorded by
+            // `define_struct`. Same trusted-producer contract as
+            // `is_copy` — define before querying.
+            TypeKind::Struct => self.struct_view(ty).is_eq(),
             _ => false,
         }
     }
@@ -644,17 +754,29 @@ impl InternPool {
     }
 
     /// Fill a declared struct's payload: field list, computed layout
-    /// (offsets, size, align), and the inferred Copy flag.
+    /// (offsets, size, align), the inferred Copy flag, and the M9.1
+    /// attribute flags.
     ///
     /// Layout is declaration order with natural alignment, computed
     /// once here so sema, ownership, and codegen all read it from the
-    /// pool. Every field type must be fully defined before the call —
-    /// the producer's DFS guarantees that or errors first.
+    /// pool. `repr_c` in `flags` is recorded, not branched on: the
+    /// default layout computes identically. Every field type must be
+    /// fully defined before the call — the producer's DFS guarantees
+    /// that or errors first.
     ///
     /// Extra block at `data`:
-    /// `[name, n_fields, size, align, is_copy]` then per field
-    /// `[field_name, field_type, offset]` (3 words each).
-    pub fn define_struct(&mut self, id: TypeId, name: StringId, fields: &[(StringId, TypeId)]) {
+    /// `[name, n_fields, size, align, flags]` then per field
+    /// `[field_name, field_type, offset]` (3 words each). The `flags`
+    /// word packs `is_copy` (bit 0), `derive_eq` (bit 1), and
+    /// `repr_c` (bit 2) — the pre-M9.1 `is_copy` word widened in
+    /// place, so the payload gains no words.
+    pub fn define_struct(
+        &mut self,
+        id: TypeId,
+        name: StringId,
+        fields: &[(StringId, TypeId)],
+        flags: StructFlags,
+    ) {
         debug_assert!(matches!(self.items[id.0 as usize].tag, Tag::Struct));
         debug_assert!(!self.is_defined_struct(id), "struct redefined");
         let mut offset = 0u32;
@@ -680,7 +802,7 @@ impl InternPool {
         self.extra.push(n_fields);
         self.extra.push(size);
         self.extra.push(align);
-        self.extra.push(u32::from(is_copy));
+        self.extra.push(flags.pack(is_copy));
         for (field_offset, &(fname, fty)) in offsets.iter().zip(fields) {
             self.extra.push(fname.raw());
             self.extra.push(fty.raw());
@@ -715,12 +837,14 @@ impl InternPool {
                 idx: u32::try_from(i).expect("struct field index overflow"),
             });
         }
+        let (is_copy, flags) = StructFlags::unpack(self.extra[start + 4]);
         StructView {
             name: StringId::from_raw(self.extra[start]),
             fields,
             size: self.extra[start + 2],
             align: self.extra[start + 3],
-            is_copy: self.extra[start + 4] != 0,
+            is_copy,
+            flags,
         }
     }
 
@@ -1070,16 +1194,20 @@ mod tests {
         // The dedup table stores `StringId` handles, not owned
         // `String` keys, so the byte content lives exactly once —
         // in `string_bytes`. Asserts the storage shape: after
-        // interning N distinct strings, `string_bytes.len()` is
-        // the sum of their byte lengths and nothing else.
+        // interning N distinct strings, the arena grows by exactly
+        // the sum of their byte lengths and the table by N (measured
+        // as deltas: `new` pre-interns the well-known attribute
+        // vocabulary at fixed ids, a nonzero baseline).
         let mut pool = InternPool::new();
+        let bytes_before = pool.string_bytes.len();
+        let table_before = pool.string_dedup.len();
         let inputs = ["alpha", "beta", "gamma", "δελτα"];
         for s in &inputs {
             pool.intern_str(s);
         }
         let expected: usize = inputs.iter().map(|s| s.len()).sum();
-        assert_eq!(pool.string_bytes.len(), expected);
-        assert_eq!(pool.string_dedup.len(), inputs.len());
+        assert_eq!(pool.string_bytes.len() - bytes_before, expected);
+        assert_eq!(pool.string_dedup.len() - table_before, inputs.len());
     }
 
     #[test]
@@ -1221,13 +1349,33 @@ mod tests {
     }
 
     #[test]
+    fn well_known_attribute_strings_have_fixed_ids() {
+        // The pool-less parser recognizes attribute vocabulary by id,
+        // so the intern order in `new` is a stability contract.
+        let mut pool = InternPool::new();
+        assert_eq!(pool.str(StringId::ATTR_DERIVE), "derive");
+        assert_eq!(pool.str(StringId::ATTR_EQ), "Eq");
+        assert_eq!(pool.str(StringId::ATTR_REPR), "repr");
+        assert_eq!(pool.str(StringId::ATTR_C), "C");
+        // Re-interning returns the same id; user strings land after.
+        assert_eq!(pool.intern_str("derive"), StringId::ATTR_DERIVE);
+        let user = pool.intern_str("Point");
+        assert!(user.raw() > StringId::ATTR_C.raw());
+    }
+
+    #[test]
     fn struct_declare_define_round_trip() {
         let mut pool = InternPool::new();
         let name = pool.intern_str("Point");
         let (x, y) = (pool.intern_str("x"), pool.intern_str("y"));
         let id = pool.declare_struct(name);
         assert!(!pool.is_defined_struct(id));
-        pool.define_struct(id, name, &[(x, pool.float()), (y, pool.float())]);
+        pool.define_struct(
+            id,
+            name,
+            &[(x, pool.float()), (y, pool.float())],
+            StructFlags::default(),
+        );
         assert!(pool.is_defined_struct(id));
         let view = pool.struct_view(id);
         assert_eq!(pool.str(view.name), "Point");
@@ -1247,7 +1395,12 @@ mod tests {
         let name = pool.intern_str("Person");
         let (n, a) = (pool.intern_str("name"), pool.intern_str("age"));
         let id = pool.declare_struct(name);
-        pool.define_struct(id, name, &[(n, pool.str_()), (a, pool.int())]);
+        pool.define_struct(
+            id,
+            name,
+            &[(n, pool.str_()), (a, pool.int())],
+            StructFlags::default(),
+        );
         let view = pool.struct_view(id);
         assert_eq!(view.fields[0].offset, 0); // str: 24 bytes at 0
         assert_eq!(view.fields[1].offset, 24); // int: 8 bytes at 24
@@ -1257,17 +1410,52 @@ mod tests {
     }
 
     #[test]
+    fn struct_flags_round_trip() {
+        // M9.1: `#[repr(C)]` / `#[derive(Eq)]` ride in the payload's
+        // flags word — layout is identical, the bits read back clean.
+        let mut pool = InternPool::new();
+        let name = pool.intern_str("Mixed");
+        let (a, b, c) = (
+            pool.intern_str("a"),
+            pool.intern_str("b"),
+            pool.intern_str("c"),
+        );
+        let id = pool.declare_struct(name);
+        pool.define_struct(
+            id,
+            name,
+            &[(a, pool.int()), (b, pool.float()), (c, pool.int())],
+            StructFlags {
+                derive_eq: true,
+                repr_c: true,
+            },
+        );
+        let view = pool.struct_view(id);
+        assert_eq!(view.fields[0].offset, 0);
+        assert_eq!(view.fields[1].offset, 8);
+        assert_eq!(view.fields[2].offset, 16);
+        assert!(view.is_repr_c());
+        assert!(view.is_eq());
+        assert!(pool.is_eq_capable(id));
+    }
+
+    #[test]
     fn struct_names_dedup_and_nested_layout() {
         let mut pool = InternPool::new();
         let p = pool.intern_str("Point");
         let (x, y) = (pool.intern_str("x"), pool.intern_str("y"));
         let a = pool.declare_struct(p);
         assert_eq!(a, pool.declare_struct(p)); // same name, same TypeId
-        pool.define_struct(a, p, &[(x, pool.float()), (y, pool.float())]);
+        pool.define_struct(
+            a,
+            p,
+            &[(x, pool.float()), (y, pool.float())],
+            StructFlags::default(),
+        );
         let line = pool.intern_str("Line");
         let (s, e) = (pool.intern_str("start"), pool.intern_str("end"));
         let b = pool.declare_struct(line);
-        pool.define_struct(b, line, &[(s, a), (e, a)]);
+        pool.define_struct(b, line, &[(s, a), (e, a)], StructFlags::default());
         let view = pool.struct_view(b);
         assert_eq!(view.fields[1].offset, 16);
         assert_eq!((view.size, view.align), (32, 8));

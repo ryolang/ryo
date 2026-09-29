@@ -14,6 +14,18 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+## 🔴 Blocking
+
+### I-193 — Attributes only parse on struct definitions; functions and other items cannot carry them
+
+**Files:** `ryo-frontend/src/parser.rs` (attribute placement rule), `ryo-frontend/src/lexer.rs`, `ryo-core/src/diag.rs` (E0108 note text), `docs/specification.md` (§2, §19)
+
+**Summary:** Milestone 9.1 introduced `#[...]` attributes restricted to struct definitions; an attribute before a function or any other item is a compile error (E0108, "attributes are only supported on struct definitions"). Roadmap features that need function attributes — the testing framework's `#[test]`, contracts (`#[pre]`/`#[post]`), `#[no_mangle]` (spec §19) — are blocked until placement widens. The groundwork is already M26-ready: the lexer exposes `#[` everywhere and the parser's attribute *contents* are generic (`ident` + optional parenthesized comma-list), so the change is the placement rule, per-name recognition with per-item validation, and the E0108 message.
+
+**Resolution:** Lands with Milestone 26 (the general attribute system) at the earliest; a narrower interim step (e.g. `#[test]` only) would widen the placement rule for functions without the full system.
+
+---
+
 ## 🟡 Correctness / Hygiene
 
 ### I-032 — IfStmt is statement-only, no expression-level conditional
@@ -80,13 +92,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken::Float` regex, cf. I-027), `ryo-frontend/src/builtins.rs`, `ryo-frontend/src/sema/`, `docs/specification.md`
 **Summary:** There is no source-level spelling for IEEE infinity or NaN. The float literal grammar (`[0-9]+\.[0-9]+`, I-027) cannot express either — infinity has no decimal spelling, and the grammar has no exponent notation. IEEE edge cases are reachable at runtime (`1.0 / 0.0` yields `+inf`, see `examples/float_zero_div.ryo`) but can only be *detected* indirectly via identities like `x > 0.0 and x * 2.0 == x`, which is opaque and fragile. Almost no language spells infinity as a literal (Rust, Go, Python, C all use named constants), so this is a naming gap, not a grammar gap.
-**Resolution:** Add `inf` as a predefined name that sema resolves to `FloatLit(f64::INFINITY.to_bits())` — same mechanism as the other builtins, no new literal grammar. Decide `nan` deliberately rather than by default: a `nan` constant makes `nan == nan` false in surface syntax, which is a real footgun; consider whether `x != x` suffices for NaN detection instead. This is a language design change — it requires explicit spec approval and a paragraph in the specification's literals/constants section before implementation.
-
-### I-028 — No `print(float)` (or `print` on non-string types)
-
-**Files:** `ryo-frontend/src/builtins.rs`, `ryo-frontend/src/sema/builtins.rs` (`check_print_args`), `ryo-backend/src/codegen/expr.rs` (print emission)
-**Summary:** Float arithmetic has no observability beyond the program exit code. `print` is an ordinary runtime call (`ryo_print`) but accepts only `str`/`strview` arguments. Inspecting a float at runtime requires either a formatter (`f"{x:.2}"`) or polymorphic `print`, neither of which exists.
-**Resolution:** Lands when the runtime gains `print_f64` (or a polymorphic dispatch) and `check_print_args` accepts `float` arguments.
+**Resolution:** Add `inf` as a predefined name that sema resolves to `FloatLit(f64::INFINITY.to_bits())` — same mechanism as the other builtins, no new literal grammar. Decide `nan` deliberately rather than by default: a `nan` constant makes `nan == nan` false in surface syntax, which is a real footgun; consider whether `x != x` suffices for NaN detection instead. This is a language design change — it requires explicit spec approval and a paragraph in the specification's literals/constants section before implementation. (Deep review 2026-09-29, deferred by owner: the seam is `sema/expr.rs`'s `InstTag::Var` arm — check an unbound `inf` in the `scope.lookup` miss branch and emit `float_const`, ~6 lines; `inf`/`nan` already lex as plain identifiers, so no lexer/parser change, and shadowing falls out naturally since locals resolve first. Zero identifier collisions in examples/benchmarks. Natural sibling: M13.7 literal completeness. When done, simplify `examples/float_zero_div.ryo`'s IEEE-identity workaround.)
 
 ### I-029 — AST loses `Eq` because `Literal::Float` carries an `f64`
 

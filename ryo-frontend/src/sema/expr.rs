@@ -965,11 +965,38 @@ pub(crate) fn check_binary_op(
                 fcx.builder
                     .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
             }
-            TypeKind::Void
-            | TypeKind::Never
-            | TypeKind::Tuple
-            | TypeKind::Struct
-            | TypeKind::View(_) => {
+            // M9.1: memberwise struct equality is opt-in via
+            // `#[derive(Eq)]` (sema gate; codegen lands separately).
+            // `is_eq` is only meaningful on an error-free program —
+            // a rejected derive still leaves the flag set, but the
+            // driver short-circuits before codegen on any error.
+            TypeKind::Struct => {
+                if sema.pool.struct_view(kind_ty).is_eq() {
+                    let tir_tag = match tag {
+                        InstTag::Eq => TirTag::StructEq,
+                        InstTag::NotEq => TirTag::StructNe,
+                        _ => unreachable!(),
+                    };
+                    fcx.builder
+                        .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+                } else {
+                    let name = sema.pool.display(kind_ty).to_string();
+                    sema.sink.emit(
+                        Diag::error(
+                            span,
+                            DiagCode::EqDeriveRequired,
+                            format!(
+                                "binary operator `{}` requires `{}` to be `Eq`",
+                                bin_op_symbol(tag),
+                                name,
+                            ),
+                        )
+                        .with_help(format!("add `#[derive(Eq)]` to `{name}`")),
+                    );
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
+                }
+            }
+            TypeKind::Void | TypeKind::Never | TypeKind::Tuple | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,

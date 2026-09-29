@@ -351,3 +351,43 @@ fn asan_early_return_owned_value_from_loop() {
         "early_return_owned_value_from_loop",
     );
 }
+
+#[test]
+fn asan_debug_repr_struct_print_frees() {
+    run_asan_smoke(
+        common::find_fixture("debug_repr_struct_print"),
+        "debug_repr_struct_print",
+    );
+}
+
+#[test]
+fn asan_debug_repr_nested_struct_frees() {
+    run_asan_smoke(
+        common::find_fixture("debug_repr_nested_struct"),
+        "debug_repr_nested_struct",
+    );
+}
+
+#[test]
+fn asan_debug_repr_primitives_frees() {
+    run_asan_smoke(
+        common::find_fixture("debug_repr_primitives"),
+        "debug_repr_primitives",
+    );
+}
+
+#[test]
+fn asan_struct_eq_heap_str_fields() {
+    run_asan_smoke(
+        common::find_fixture("struct_eq_heap_str_fields"),
+        "struct_eq_heap_str_fields",
+    );
+}
+
+#[test]
+fn asan_struct_eq_bytes_field() {
+    run_asan_smoke(
+        common::find_fixture("struct_eq_bytes_field"),
+        "struct_eq_bytes_field",
+    );
+}

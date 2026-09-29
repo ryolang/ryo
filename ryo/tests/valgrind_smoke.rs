@@ -428,3 +428,43 @@ fn valgrind_early_return_owned_value_from_loop() {
         "early_return_owned_value_from_loop",
     );
 }
+
+#[test]
+fn valgrind_debug_repr_struct_print_frees() {
+    run_valgrind_smoke(
+        common::find_fixture("debug_repr_struct_print"),
+        "debug_repr_struct_print",
+    );
+}
+
+#[test]
+fn valgrind_debug_repr_nested_struct_frees() {
+    run_valgrind_smoke(
+        common::find_fixture("debug_repr_nested_struct"),
+        "debug_repr_nested_struct",
+    );
+}
+
+#[test]
+fn valgrind_debug_repr_primitives_frees() {
+    run_valgrind_smoke(
+        common::find_fixture("debug_repr_primitives"),
+        "debug_repr_primitives",
+    );
+}
+
+#[test]
+fn valgrind_struct_eq_heap_str_fields() {
+    run_valgrind_smoke(
+        common::find_fixture("struct_eq_heap_str_fields"),
+        "struct_eq_heap_str_fields",
+    );
+}
+
+#[test]
+fn valgrind_struct_eq_bytes_field() {
+    run_valgrind_smoke(
+        common::find_fixture("struct_eq_bytes_field"),
+        "struct_eq_bytes_field",
+    );
+}

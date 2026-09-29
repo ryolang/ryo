@@ -214,7 +214,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 		```
 
   - *(Rationale: Uses `#` as the base. The `#:` marker provides an unambiguous distinction for documentation tooling, avoiding whitespace sensitivity and block comment syntax. Attributes `#[...]` remain separate).*
-- **Attributes:** Metadata annotations use the `#[...]` syntax, placed before the documented item. *(Rationale: Distinct syntax using brackets clearly separates attributes from code and comments).* Ahead of the general attribute system, the compiler recognizes `#[derive(Eq)]` and `#[repr(C)]` on struct definitions (Section 4.5) as one-off compiler-known attributes (see Section 6.1.1 and the testing framework's `#[test]`).
+- **Attributes:** Metadata annotations use the `#[...]` syntax, placed before the documented item. *(Rationale: Distinct syntax using brackets clearly separates attributes from code and comments).* Ahead of the general attribute system, the compiler recognizes `#[derive(Eq)]` and `#[repr(C)]` on struct definitions (Section 4.5) as one-off compiler-known attributes (see Section 6.1.2 and the testing framework's `#[test]`).
 - **Indentation:** **Tabs** strictly denote code blocks. One tab per indentation level. Mixing tabs and spaces for indentation is a compile-time error. *(Rationale: Enforces a single, consistent style like Go, avoids common Python indentation issues).*
   - **Note:** Code examples in this documentation may display spaces for markdown rendering compatibility, but actual `.ryo` source files **MUST** use tabs. The compiler will enforce this requirement and reject files with mixed tabs and spaces.
 - **Statements:** Generally one per line; semicolons are not required or used.
@@ -1735,11 +1735,13 @@ unsafe extern "C":
     fn printf(fmt: *const char, ...) -> int
 ```
 
-**Implication for `print`:** `print` takes exactly one value argument plus an optional keyword-only `end` parameter (default `"\n"`, appended after the value — the Python convention, which makes a separate `println` redundant), and returns `void`. The value argument is a `str` (a `strview` passes to it via the re-borrow, §4.4) or binary data (`bytes` / `bytesview`). Binary data prints as an escaped repr mirroring the literal syntax (`b"\x01\x02A"`): printable ASCII renders literally, short escapes (`\n`, `\t`, `\\`, …) are used where they exist, and every other byte renders as `\xNN`. It does not accept multiple value arguments, formatting placeholders, or other non-string types. To print other values, use an f-string, which calls the value's `Display` implementation at the interpolation site.
+**Implication for `print`:** `print` takes exactly one value argument plus an optional keyword-only `end` parameter (default `"\n"`, appended after the value — the Python convention, which makes a separate `println` redundant), and returns `void`. The value argument is a `str` (a `strview` passes to it via the re-borrow, §4.4), binary data (`bytes` / `bytesview`), or any Debug-capable value — `int`, `float`, and `bool` print bare (`42`, `3.14`, `true`), and structs print their compiler-synthesized debug form (`Point{x=1.0, y=2.0}`, §4.5). Binary data prints as an escaped repr mirroring the literal syntax (`b"\x01\x02A"`): printable ASCII renders literally, short escapes (`\n`, `\t`, `\\`, …) are used where they exist, and every other byte renders as `\xNN`. It does not accept multiple value arguments, formatting placeholders, or values without a Debug representation. To print a value that has no Debug representation, use an f-string, which calls the value's `Display` implementation at the interpolation site.
 
 ```ryo
-# Signature (in the implicit `core`/`builtin` module)
-fn print(_ s: str, end: str = "\n")
+# Signature (in the implicit `core`/`builtin` module). The value parameter
+# accepts str (strview re-borrows, §4.4), bytes/bytesview, and any
+# Debug-capable value — int, float, bool, or a struct (§4.5).
+fn print(_ value, end: str = "\n")
 
 # Usage
 print("hello")                         # "hello\n" — newline appended by default
@@ -1747,7 +1749,7 @@ print("hello", end="")                 # no trailing newline
 print(b"\x01\x02A")                    # bytes print as their escaped repr
 print(f"x = {x}, y = {y}")             # f-string handles formatting
 # print(x, y)                          # compile error: no variadic params
-# print(42)                            # compile error: expected str or bytes, got int
+print(42)                              # "42\n" — primitives print bare; structs print their Debug form (§4.5)
 ```
 
 ### 6.1.3 Return Checking (Return-Flow Analysis)
@@ -3715,7 +3717,7 @@ fn main():
   - **Ryo Standard Library (`std`):** High-level APIs written in Ryo, wrapping the runtime via internal FFI.
 - **Structure:** Composed of distinct packages (e.g., `io`, `string`, `collections`, `net.http`, `ffi`). Users import only needed packages. *(Rationale: Reduces binary size, improves compile times, makes dependencies explicit).*
 - **Core Packages (Initial):**
-  - `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `panic`, `assert`, `range`), error and optional type support. **`print` accepts exactly one value argument plus an optional keyword-only `end` (default `"\n"`)** — there are no variadic forms (see Section 6.1.2). The value argument is a `str` (or `strview` via re-borrow) or binary data (`bytes` / `bytesview`, printed as an escaped repr mirroring the literal syntax). For other non-string values, use an f-string: `print(f"x = {x}")`.
+  - `core`/`builtin` (Implicit): Core traits (`Drop`, `From`, `Length` for `.len(self)`), built-in functions (`print`, `panic`, `assert`, `range`), error and optional type support. **`print` accepts exactly one value argument plus an optional keyword-only `end` (default `"\n"`)** — there are no variadic forms (see Section 6.1.2). The value argument is a `str` (or `strview` via re-borrow), binary data (`bytes` / `bytesview`, printed as an escaped repr mirroring the literal syntax), or any Debug-capable value (`int`, `float`, `bool`, structs — §4.5). For values without a Debug representation, use an f-string: `print(f"x = {x}")`.
   - `process`: Execution environment — `process.exit(code: int) -> never` terminates the process with the given exit code, `process.args() -> list[str]` returns the command-line arguments, `process.env(key: str) -> ?str` reads an environment variable (`none` when unset).
   - `template`: Native support for parsing and evaluating `t"..."` strings. Includes builder traits and HTML/SQL sanitization utilities (similar to Dave Peck's `tdom` concept for Python) to safely construct DOM trees or queries from Template types.
     - Includes `template.include("path")`: A compiler-backed function that reads an external file (like `.html` or `.sql`) at compile-time and treats it as an inline `t-string`. This allows designers to edit plain HTML files without logic, while the Ryo compiler statically checks and interpolates variables into the Template object at compile-time with zero runtime parsing cost. Control flow (loops/conditionals) must be handled in Ryo via component composition (joining multiple Templates) to maintain strict MVC separation.

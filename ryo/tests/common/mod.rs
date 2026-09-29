@@ -859,6 +859,60 @@ fn main():
 ",
     ),
     (
+        // M9.1: print() renders a struct via DebugRepr — the 28-byte repr
+        // (Person{name="42", age=12345}) goes to the heap, and the
+        // per-field render temps must free exactly once.
+        "debug_repr_struct_print",
+        "\
+struct Person:
+\tname: str
+\tage: int
+
+fn main():
+\tp = Person{name=int_to_str(42), age=12345}
+\tprint(p)
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // M9.1: nested struct print — the nested repr temp and the
+        // per-field render temps all free; the borrowed struct fields
+        // are untouched.
+        "debug_repr_nested_struct",
+        "\
+struct Point:
+\tx: float
+\ty: float
+
+struct Line:
+\ta: Point
+\tb: Point
+
+fn main():
+\tl = Line{a=Point{x=1.0, y=2.0}, b=Point{x=3.0, y=4.0}}
+\tprint(l)
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // M9.1: primitive prints through DebugRepr — bare rendering, no
+        // braces; each repr temp frees after its print.
+        "debug_repr_primitives",
+        "\
+fn main():
+\tprint(42)
+\tprint(\"\\n\")
+\tprint(-7)
+\tprint(\"\\n\")
+\tprint(3.14)
+\tprint(\"\\n\")
+\tprint(1.0)
+\tprint(\"\\n\")
+\tprint(true)
+\tprint(\"\\n\")
+",
+    ),
+    (
         // A loop-LOCAL mut str reassigned inside the body (concat
         // crossing the 23-byte inline boundary) and broken out of
         // while live. Loop-local bindings are NOT loop-carried: the
@@ -876,6 +930,54 @@ fn main():
 \t\tif i == 2:
 \t\t\tbreak
 \tprint(\"ok\\n\")
+",
+    ),
+    (
+        // M9.1: memberwise `==` on a needs-drop struct — the compare
+        // borrows both operands (nothing drops at the comparison), the
+        // heap str fields drop exactly once at scope end, and the field
+        // reassign drops the old buffer before the overwrite.
+        "struct_eq_heap_str_fields",
+        "\
+#[derive(Eq)] struct User:
+\tname: str
+\tage: int
+
+fn main():
+\tp = User{name=int_to_str(42), age=30}
+\tmut q = User{name=int_to_str(7), age=30}
+\tprint(p == q)
+\tprint(\"\\n\")
+\tprint(p != q)
+\tprint(\"\\n\")
+\tq.name = int_to_str(42)
+\tprint(p == q)
+\tprint(\"\\n\")
+\tprint(p.name)
+\tprint(q.name)
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // M9.1: bytes fields compare by content (ryo_bytes_eq) — the
+        // literal is static while `b"al" + b"ice"` is a fresh heap
+        // buffer; both extract through the slot home.
+        "struct_eq_bytes_field",
+        "\
+#[derive(Eq)] struct Blob:
+	data: bytes
+	tag: int
+
+fn main():
+	a = Blob{data=b\"alice\", tag=1}
+	b = Blob{data=b\"al\" + b\"ice\", tag=1}
+	c = Blob{data=b\"bob\", tag=1}
+	print(a == b)
+	print(\"\\n\")
+	print(a == c)
+	print(\"\\n\")
+	print(a != c)
+	print(\"\\n\")
 ",
     ),
 ];

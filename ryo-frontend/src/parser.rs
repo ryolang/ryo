@@ -495,9 +495,12 @@ where
         .boxed()
 }
 
-/// A `struct` declaration: `struct Name:` followed by an indented
-/// block of `field: type` lines (M9).
-fn struct_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+/// The tail of a `struct` declaration after the `struct` keyword:
+/// `Name:` followed by an indented block of `field: type` lines (M9).
+/// Yields the name and the raw field list; both struct-declaration
+/// forms (plain and attributed) build their `StructDef` node from this.
+fn struct_tail_parser<'a, I>()
+-> impl Parser<'a, I, (Ident, Vec<(StringId, TypeExpr)>), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -531,11 +534,8 @@ where
         .and_is(require_newlines().then_ignore(just(Token::Indent).not()))
         .to(None);
 
-    just(Token::Struct)
-        .ignore_then(
-            select! { Token::Ident(name) => name }
-                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
-        )
+    select! { Token::Ident(name) => name }
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
         .then_ignore(just(Token::Colon))
         .then(body.or(no_body))
         .validate(|(name, fields), e: &mut Mx<'a, '_, I>, emitter| {
@@ -545,9 +545,124 @@ where
             }
             (name, fields)
         })
+        .boxed()
+}
+
+/// A `struct` declaration: `struct Name:` plus the field block (M9).
+fn struct_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    just(Token::Struct)
+        .ignore_then(struct_tail_parser())
         .map_with(|(name, fields), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
-            e.state().struct_def(name, &fields, span)
+            e.state()
+                .struct_def(name, &fields, StructAttrs::default(), span)
+        })
+        .boxed()
+}
+
+/// One `#[...]` attribute group (M9.1): `#[` ident (`(` ident
+/// (`,` ident)* `)`)? `]`. Yields the head identifier, the optional
+/// argument list, and the group's span (for diagnostics).
+fn attr_group_parser<'a, I>()
+-> impl Parser<'a, I, (StringId, Option<Vec<StringId>>, SimpleSpan), PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let args = just(Token::LParen)
+        .ignore_then(
+            select! { Token::Ident(name) => name }
+                .separated_by(just(Token::Comma))
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(just(Token::RParen));
+
+    just(Token::HashBracket)
+        .ignore_then(select! { Token::Ident(name) => name })
+        .then(args.or_not())
+        .then_ignore(just(Token::RBracket))
+        .map_with(|(name, args), e: &mut Mx<'a, '_, I>| (name, args, e.span()))
+        .boxed()
+}
+
+/// A `struct` declaration preceded by one or more attribute groups
+/// (M9.1). Only `#[derive(Eq)]` and `#[repr(C)]` are known; anything
+/// else emits `ParseDiag::UnknownAttribute` naming the attribute.
+/// Attributes followed by something other than `struct` emit
+/// `ParseDiag::MisplacedAttribute` and recover to an `Error` node, so
+/// the misplaced line reports once and the following statement still
+/// parses.
+fn attributed_struct_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    // Attribute groups stack vertically (blank lines tolerated); the
+    // newlines before each group and before `struct` belong to this
+    // alternative only when what follows is another group or `struct`
+    // — chumsky rewinds a failed alternative, so on the misplaced path
+    // the statement list keeps the line-ending newline and recovers
+    // cleanly.
+    let attrs = skip_newlines()
+        .ignore_then(attr_group_parser())
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>();
+
+    attrs
+        .then(
+            skip_newlines()
+                .ignore_then(just(Token::Struct))
+                .ignore_then(struct_tail_parser())
+                .map(Some)
+                .or(empty().to(None)),
+        )
+        .validate(|(attrs, tail), e: &mut Mx<'a, '_, I>, emitter| {
+            // The parser is pool-less, so the attribute vocabulary is
+            // recognized by the fixed well-known ids (see
+            // `StringId::ATTR_*`): exactly `derive(Eq)` / `repr(C)`.
+            let mut bits = StructAttrs::default();
+            let mut all_known = true;
+            for (name, args, span) in &attrs {
+                let recognized = if *name == StringId::ATTR_DERIVE
+                    && args.as_deref() == Some(&[StringId::ATTR_EQ])
+                {
+                    bits.derive_eq = true;
+                    true
+                } else if *name == StringId::ATTR_REPR
+                    && args.as_deref() == Some(&[StringId::ATTR_C])
+                {
+                    bits.repr_c = true;
+                    true
+                } else {
+                    false
+                };
+                if !recognized {
+                    all_known = false;
+                    emitter.emit(Rich::custom(
+                        *span,
+                        ParseDiag::UnknownAttribute {
+                            name: *name,
+                            args: args.clone().unwrap_or_default(),
+                        },
+                    ));
+                }
+            }
+            // Misplaced only piles on when the attributes themselves
+            // were fine — an unknown attribute already explains the
+            // line.
+            if tail.is_none() && all_known {
+                emitter.emit(Rich::custom(e.span(), ParseDiag::MisplacedAttribute));
+            }
+            (bits, tail)
+        })
+        .map_with(|(bits, tail), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            match tail {
+                Some((name, fields)) => e.state().struct_def(name, &fields, bits, span),
+                None => e.state().error_stmt(span),
+            }
         })
         .boxed()
 }
@@ -568,8 +683,11 @@ where
     });
 
     // `struct` opens with a unique keyword, so trying it first is
-    // safe and keeps speculation cheap.
+    // safe and keeps speculation cheap. An attributed struct starts
+    // with `#[` (attribute groups before `struct`, M9.1) and fails
+    // just as cheaply anywhere else.
     choice((
+        attributed_struct_decl_parser(),
         struct_decl_parser(),
         function_def_parser(),
         var_decl_parser(),

@@ -62,6 +62,11 @@ pub enum DiagCode {
     /// A struct contains itself, directly or transitively, as a
     /// by-value field, so its size would be unbounded (M9).
     InfiniteSize,
+    /// `#[derive(Eq)]` on a struct with a field whose type is not
+    /// Eq-capable (M9.1): the scalar primitives are, a struct is only
+    /// with its own `#[derive(Eq)]`, and views / tuples / the rest
+    /// are not.
+    DeriveFieldNotEq,
 
     // --- sema ---
     /// A user-defined function or variable uses the `__ryo_` prefix,
@@ -73,6 +78,11 @@ pub enum DiagCode {
     ArityMismatch,
     BuiltinArgKind,
     UnsupportedOperator,
+    /// `==` / `!=` applied to a struct type that does not carry
+    /// `#[derive(Eq)]` (M9.1). Struct equality is memberwise and
+    /// opt-in; the fix-it ("add `#[derive(Eq)]` to ...") rides along
+    /// as a help note.
+    EqDeriveRequired,
     /// A valueless result — `void` (e.g. the result of a
     /// void-returning call like `print(...)`) or `never` (a
     /// diverging expression like `panic(...)`, which yields no
@@ -201,6 +211,11 @@ pub enum DiagCode {
     /// A `struct` declaration whose body is missing: `struct Name:`
     /// not followed by an indented field block (M9).
     EmptyStructBody,
+    /// An unrecognized `#[...]` attribute (M9.1): the attribute name is
+    /// not one of the known forms (`derive(Eq)`, `repr(C)`), its
+    /// argument list does not match, or it is attached to something
+    /// other than a struct definition.
+    UnknownAttribute,
 
     /// Emitted by `DiagSink::into_diags` when the sink dropped
     /// diagnostics past `MAX_DIAGS`. Distinct from `ParseError` so
@@ -354,6 +369,21 @@ pub enum ParseDiag {
     EmptyBrackets,
     /// `struct Name:` with no indented field block (M9).
     EmptyStructBody,
+    /// `#[name(args)]` that is not one of the recognized attribute
+    /// forms (M9.1): `derive(Eq)` or `repr(C)`. Carries the attribute
+    /// head and arguments as interned ids; render them through the
+    /// pool with [`ParseDiag::message`] — `Display` is the pool-free
+    /// fallback, which omits the attribute spelling.
+    UnknownAttribute {
+        name: crate::types::StringId,
+        args: Vec<crate::types::StringId>,
+    },
+    /// A well-formed attribute whose target is not a struct definition
+    /// (M9.1). The `Display`/message text is the headline only; the
+    /// driver's Custom→Diag conversion attaches the mandated
+    /// explanation ("attributes are only supported on struct
+    /// definitions") as a structured `DiagNote`.
+    MisplacedAttribute,
     /// Escape hatch for one-off messages (e.g. lexer diagnostics
     /// re-wrapped as parser errors in tests).
     Message(String),
@@ -366,7 +396,34 @@ impl ParseDiag {
             ParseDiag::RangeArity { .. } => DiagCode::RangeArity,
             ParseDiag::EmptyBrackets => DiagCode::EmptyBrackets,
             ParseDiag::EmptyStructBody => DiagCode::EmptyStructBody,
+            ParseDiag::UnknownAttribute { .. } | ParseDiag::MisplacedAttribute => {
+                DiagCode::UnknownAttribute
+            }
             ParseDiag::Message(_) => DiagCode::ParseError,
+        }
+    }
+
+    /// The user-facing message with interned identifier payloads
+    /// resolved through `pool`. The driver should use this over
+    /// `Display` whenever a pool is available so diagnostics name the
+    /// actual attribute text instead of dropping it.
+    pub fn message(&self, pool: &crate::types::InternPool) -> String {
+        match self {
+            ParseDiag::UnknownAttribute { name, args } => {
+                let mut attr = pool.str(*name).to_string();
+                if !args.is_empty() {
+                    attr.push('(');
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            attr.push_str(", ");
+                        }
+                        attr.push_str(pool.str(*arg));
+                    }
+                    attr.push(')');
+                }
+                format!("unknown attribute '{attr}'; known attributes: derive(Eq), repr(C)")
+            }
+            _ => self.to_string(),
         }
     }
 }
@@ -390,6 +447,11 @@ impl std::fmt::Display for ParseDiag {
                 "struct declaration has no fields: \
                  indent at least one `name: type` field line",
             ),
+            ParseDiag::UnknownAttribute { .. } => f.write_str(
+                "unknown attribute; known attributes: \
+                 derive(Eq), repr(C)",
+            ),
+            ParseDiag::MisplacedAttribute => f.write_str("unexpected attribute"),
             ParseDiag::Message(msg) => f.write_str(msg),
         }
     }

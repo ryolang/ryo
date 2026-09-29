@@ -302,6 +302,20 @@ impl<M: Module> Codegen<M> {
                 };
                 Self::emit_bytes_eq(builder, ctx, inst.tag, lhs, rhs)?
             }
+            TirTag::StructEq | TirTag::StructNe => {
+                let (lhs, rhs) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!("StructEq/StructNe must carry TirData::BinOp"),
+                };
+                // Operands are struct values: materialize their slot
+                // addresses (never the scalar entry — structs are
+                // memory-first), then memberwise-compare. The
+                // comparison borrows both operands.
+                let lv = Self::eval_inst_struct(builder, ctx, lhs)?;
+                let rv = Self::eval_inst_struct(builder, ctx, rhs)?;
+                let ty = ctx.tir.inst(lhs).ty;
+                Self::emit_struct_eq(builder, ctx, lv, rv, ty, inst.tag == TirTag::StructNe)?
+            }
             TirTag::BytesIndex => {
                 let (base, index) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
@@ -852,6 +866,68 @@ impl<M: Module> Codegen<M> {
                     ValueRepr::Bytes { ptr, len, cap }
                 } else {
                     ValueRepr::Str { ptr, len, cap }
+                }
+            }
+            TirTag::DebugRepr => {
+                // M9.1 print() gate: render the operand's Debug
+                // representation into a fresh owned str. Primitive
+                // operands render bare through the ryo_*_to_str
+                // family (no braces); struct operands recurse through
+                // `emit_debug_repr` (structs.rs). The cached triple
+                // feeds print's `eval_str_or_view_parts` like any
+                // other str temp, and the ownership pass's scheduled
+                // Free releases the buffer after the statement.
+                let operand = match inst.data {
+                    TirData::UnOp(o) => o,
+                    _ => unreachable!("DebugRepr must carry TirData::UnOp"),
+                };
+                let operand_ty = ctx.tir.inst(operand).ty;
+                match ctx.pool.kind(operand_ty) {
+                    TypeKind::Int | TypeKind::Float | TypeKind::Bool => {
+                        let v = Self::eval_inst(builder, ctx, operand)?;
+                        let (fn_name, param_ty) = match ctx.pool.kind(operand_ty) {
+                            TypeKind::Int => ("ryo_int_to_str", ctx.int_type),
+                            TypeKind::Float => ("ryo_float_to_str", types::F64),
+                            _ => ("ryo_bool_to_str", types::I8),
+                        };
+                        let (ptr, len, cap) = Self::emit_slot_out_call(
+                            builder,
+                            ctx,
+                            fn_name,
+                            &[(param_ty, v)],
+                            out_slot,
+                        )?;
+                        ValueRepr::Str { ptr, len, cap }
+                    }
+                    TypeKind::Struct => {
+                        // emit_debug_repr allocates its own result slot; a
+                        // caller-provided out_slot would silently be ignored.
+                        debug_assert!(
+                            out_slot.is_none(),
+                            "DebugRepr struct operand manages its own repr slot"
+                        );
+                        let addr = Self::eval_inst_struct(builder, ctx, operand)?;
+                        let repr_addr = Self::emit_debug_repr(builder, ctx, addr, operand_ty)?;
+                        let ptr =
+                            builder
+                                .ins()
+                                .load(ctx.int_type, MemFlagsData::trusted(), repr_addr, 0);
+                        let len =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlagsData::trusted(), repr_addr, 8);
+                        let cap =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlagsData::trusted(), repr_addr, 16);
+                        ValueRepr::Str { ptr, len, cap }
+                    }
+                    other => {
+                        return Err(format!(
+                            "eval_inst_fat_slot: DebugRepr operand at %{} has non-renderable type kind {other:?}",
+                            operand.index()
+                        ));
+                    }
                 }
             }
             _ => {

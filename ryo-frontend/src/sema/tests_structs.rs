@@ -211,3 +211,138 @@ fn compound_field_assignment_rejects_bad_operator() {
     let (_t, diags, _p) = run_with_errors(src);
     assert!(any_code(&diags, DiagCode::FloatModulo), "got {diags:?}");
 }
+
+#[test]
+fn derive_eq_struct_with_eq_capable_fields_is_clean() {
+    // `int` and `str` are both Eq-capable primitives, so the derive
+    // resolves with no diagnostics (the `==` acceptance itself is
+    // pinned by the operator-gate work).
+    let src = "#[derive(Eq)] struct P:\n\tx: int\n\ty: str\n";
+    assert!(run(src).is_ok());
+}
+
+#[test]
+fn derive_eq_rejects_non_eq_field() {
+    // `Inner` has no `#[derive(Eq)]`, so `Outer`'s derive must name
+    // the field and its type.
+    let src = "struct Inner:\n\tx: int\n\n#[derive(Eq)] struct Outer:\n\tinner: Inner\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::DeriveFieldNotEq)
+        .expect("DeriveFieldNotEq must fire");
+    assert_eq!(
+        diag.message,
+        "cannot derive 'Eq' for 'Outer': field 'inner' of type 'Inner' is not Eq-capable"
+    );
+}
+
+#[test]
+fn repr_c_struct_compiles_clean() {
+    // `#[repr(C)]` is recorded on the type, not branched on: the
+    // default layout algorithm computes identically.
+    let src = "#[repr(C)] struct Mixed:\n\ta: int\n\tb: float\n\tc: int\n";
+    assert!(run(src).is_ok());
+}
+
+#[test]
+fn print_struct_rewrites_to_debug_repr() {
+    // M9.1: print() on a struct value is rewritten at the TIR level to
+    // print(DebugRepr(arg)) — the repr temp is a normal str producer.
+    let src = "struct Point:\n\tx: int\n\nfn main():\n\tp = Point{x=1}\n\tprint(p)\n";
+    let (tirs, pool) = run(src).expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    assert!(
+        main.instructions.iter().any(|i| i.tag == TirTag::DebugRepr),
+        "print(struct) must lower to a DebugRepr inst"
+    );
+}
+
+#[test]
+fn print_scalar_rewrites_to_debug_repr() {
+    // int / float / bool are Debug-capable — each print() rewrites to
+    // DebugRepr exactly like the struct case.
+    let cases = [
+        "fn main():\n\tprint(42)\n",
+        "fn main():\n\tprint(3.14)\n",
+        "fn main():\n\tprint(true)\n",
+    ];
+    for src in cases {
+        let (tirs, pool) = run(src).expect("sema ok");
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(
+            main.instructions.iter().any(|i| i.tag == TirTag::DebugRepr),
+            "print(int/float/bool) must lower to a DebugRepr inst: {src}"
+        );
+    }
+}
+
+#[test]
+fn derived_struct_equality_lowers_to_struct_eq() {
+    // M9.1: `==` on an Eq-derived struct lowers to TirTag::StructEq —
+    // BinOp payload, bool result.
+    let src = "#[derive(Eq)] struct P:\n\tx: int\n\nfn main():\n\tp = P{x=1}\n\tq = P{x=2}\n\tr = p == q\n";
+    let (tirs, pool) = run(src).expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    let eq = main
+        .instructions
+        .iter()
+        .find(|i| i.tag == TirTag::StructEq)
+        .expect("p == q must lower to a StructEq inst");
+    assert_eq!(eq.ty, pool.bool_(), "StructEq result must be bool");
+}
+
+#[test]
+fn derived_struct_inequality_lowers_to_struct_ne() {
+    // `!=` lowers to StructNe directly at sema — not StructEq + not.
+    let src = "#[derive(Eq)] struct P:\n\tx: int\n\nfn main():\n\tp = P{x=1}\n\tq = P{x=2}\n\tr = p != q\n";
+    let (tirs, pool) = run(src).expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    let ne = main
+        .instructions
+        .iter()
+        .find(|i| i.tag == TirTag::StructNe)
+        .expect("p != q must lower to a StructNe inst");
+    assert_eq!(ne.ty, pool.bool_(), "StructNe result must be bool");
+}
+
+#[test]
+fn struct_inequality_without_derive_requires_eq() {
+    // `!=` hits the same gate, with the operator spelling interpolated.
+    let src = "struct P:\n\tx: int\n\nfn main():\n\tp = P{x=1}\n\tq = P{x=2}\n\tr = p != q\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::EqDeriveRequired)
+        .expect("EqDeriveRequired must fire for !=");
+    assert_eq!(diag.message, "binary operator `!=` requires `P` to be `Eq`");
+}
+
+#[test]
+fn struct_equality_without_derive_requires_eq() {
+    // No `#[derive(Eq)]` → EqDeriveRequired with the roadmap's fix-it
+    // wording, message and help asserted verbatim.
+    let src = "struct P:\n\tx: int\n\nfn main():\n\tp = P{x=1}\n\tq = P{x=2}\n\tr = p == q\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::EqDeriveRequired)
+        .expect("EqDeriveRequired must fire");
+    assert_eq!(diag.message, "binary operator `==` requires `P` to be `Eq`");
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.message == "help: add `#[derive(Eq)]` to `P`"),
+        "expected the derive fix-it help note; got {:?}",
+        diag.notes
+    );
+}
+
+#[test]
+fn derived_struct_with_mixed_eq_capable_fields_compares_clean() {
+    // int, float, str, bool, bytes, and a nested derived struct are all
+    // Eq-capable (Task 2's is_eq_capable), so both `==` and `!=` on the
+    // derived struct resolve with no diagnostics.
+    let src = "#[derive(Eq)] struct Inner:\n\tv: int\n\n#[derive(Eq)] struct P:\n\ta: int\n\tb: float\n\tc: str\n\td: bool\n\te: bytes\n\tinner: Inner\n\nfn main():\n\tp = P{a=1, b=2.0, c=\"x\", d=true, e=b\"yz\", inner=Inner{v=3}}\n\tq = P{a=1, b=2.0, c=\"x\", d=true, e=b\"yz\", inner=Inner{v=3}}\n\tr = p == q\n\ts = p != q\n";
+    assert!(run(src).is_ok());
+}
