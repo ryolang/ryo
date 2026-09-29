@@ -557,7 +557,7 @@ fn analyze_function(
                     // Free (last-use / dead-store / loop-exit), which
                     // redirects to the same home slot.
                     if reassign_targets.contains(owner)
-                        && let Some(&name) = decl_of_init.get(r)
+                        && let Some(&name) = decl_of_init.get(r).or(assign_value_of.get(r))
                         && reassign_orders.get(&name).is_some_and(|v| {
                             v.iter().any(|&rr| anchored_after(tir, &order, rr, anchor))
                         })
@@ -1012,8 +1012,28 @@ fn schedule_return_epilogue_frees(
             if !epilogue_emitted.insert((*return_stmt, r)) {
                 continue;
             }
+            // A covering Free must fire on a path that REACHES this
+            // return. `collect_jump_path` adds a non-containing
+            // loop/branch's ENTIRE subtree to `on_path` under the
+            // "runs to completion" rule — but a Free anchored at a
+            // terminator jump inside that subtree (a `return`/`break`/
+            // `continue` of its own) never fires on this return's path:
+            // codegen cannot sweep after a terminator, so the anchor
+            // only services its own exit. Excluding terminator anchors
+            // keeps the covering sound; without it a loop-internal
+            // return-anchored Free suppresses this epilogue Free and
+            // codegen's leak-direction assert fires.
+            let fires_on_this_path = |after: TirRef| -> bool {
+                !matches!(
+                    tir.inst(after).tag,
+                    TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
+                )
+            };
             let covered = sidecar.free_schedule.iter().any(|fp| {
-                fp.target == r && on_path.contains(&fp.after) && !ancestors.contains(&fp.after)
+                fp.target == r
+                    && on_path.contains(&fp.after)
+                    && !ancestors.contains(&fp.after)
+                    && fires_on_this_path(fp.after)
             });
             if covered {
                 continue;
@@ -1036,7 +1056,10 @@ fn schedule_return_epilogue_frees(
                 // EVERY reassign of the binding — otherwise the return
                 // may hold a value the covering Free did not release.
                 let binding_covered = sidecar.free_schedule.iter().any(|fp| {
-                    if !on_path.contains(&fp.after) || ancestors.contains(&fp.after) {
+                    if !on_path.contains(&fp.after)
+                        || ancestors.contains(&fp.after)
+                        || !fires_on_this_path(fp.after)
+                    {
                         return false;
                     }
                     if name_of(fp.target) != Some(name) {

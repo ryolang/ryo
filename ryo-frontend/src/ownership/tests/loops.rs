@@ -811,8 +811,9 @@ fn break_before_in_loop_owner_def_schedules_no_jump_free() {
     // free pass must not attribute the owner to the break: the jump's
     // path never materializes the value (pre-fix: compile abort
     // "ownership pass scheduled Free for struct %N but no struct local
-    // or ValueRepr" from bug_natural_loop_str_accumulator's while-true
-    // variant). The owner's release is its own in-body last-use Free.
+    // or ValueRepr" — the while-true + break rewrite of the same
+    // recursive-descent parser loop that SIGABRT'd in its do-while
+    // form). The owner's release is its own in-body last-use Free.
     let src = r#"
 struct P:
 	text: str

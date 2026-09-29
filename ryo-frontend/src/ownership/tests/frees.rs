@@ -1729,7 +1729,8 @@ fn loop_carried_struct_reassign_pre_owner_not_double_freed() {
     // the binding's home slot) releases the final buffer. Pre-fix the
     // owner was scheduled BOTH a last-use Free and the reassign-Free,
     // and the return epilogue double-freed the final value through the
-    // same slot (I-194, bug_natural_loop_str_accumulator).
+    // same home slot — natural do-while parser loops (a JSON
+    // parse_array) SIGABRT'd on exactly this composition.
     let src = r#"
 struct P:
 	text: str
@@ -1814,4 +1815,93 @@ fn main():
         "reseated value must be freed exactly once: {:?}",
         sc.free_schedule
     );
+}
+
+#[test]
+fn early_return_after_loop_carried_reassign_keeps_outer_epilogue_free() {
+    // `while ...: s = g(); ...; if n > 1: return s; return s + "!"` —
+    // a Free anchored at the INNER return must not count as covering
+    // the OUTER return's epilogue Free for the same binding:
+    // `collect_jump_path` marks a non-containing loop's whole subtree
+    // on-path, but codegen cannot sweep after a terminator, so an
+    // inner-return-anchored Free never fires on the outer return's
+    // path. When the binding-covering check accepted it, the epilogue
+    // Free was suppressed and codegen's leak-direction assert tripped
+    // ("frees anchored to unmaterialized instructions were dropped").
+    let src = r#"
+fn make(x: int) -> str:
+	return int_to_str(x) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn f(n: int) -> str:
+	mut s = make(0)
+	mut i = 0
+	while i < n:
+		s = make(1)
+		i += 1
+	if n > 1:
+		return s
+	return s + "!"
+
+fn main():
+	print(f(3))
+"#;
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "expected no errors: {diags:?}"
+    );
+    let idx = tirs.iter().position(|t| pool.str(t.name) == "f").unwrap();
+    let tir = &tirs[idx];
+    let sc = take_function_sidecar(&mut sidecar, idx);
+
+    let mut outer_return = None;
+    let mut inner_return = None;
+    for r in 1..tir.instructions.len() {
+        if tir.instructions[r].tag == TirTag::Return {
+            let rr = TirRef::from_raw(r as u32);
+            match inner_return {
+                None => inner_return = Some(rr),
+                _ => outer_return = Some(rr),
+            }
+        }
+    }
+    let outer_return = outer_return.expect("two returns (inner if-arm, outer fallthrough)");
+    let s = pool.intern_str("s");
+    let outer_epilogue = sc.free_schedule.iter().any(|fp| {
+        fp.after == outer_return
+            && (tir.instructions[fp.target.index()].tag == TirTag::Call
+                || tir.instructions[fp.target.index()].tag == TirTag::Var)
+            && {
+                // the free targets a value of `s` (decl init or reassign value)
+                let mut found = false;
+                for rr2 in 1..tir.instructions.len() {
+                    let t2 = TirRef::from_raw(rr2 as u32);
+                    match tir.instructions[rr2].tag {
+                        TirTag::VarDecl => {
+                            let v = tir.var_decl_view(t2);
+                            if v.name == s && v.initializer == fp.target {
+                                found = true;
+                            }
+                        }
+                        TirTag::Assign => {
+                            let v = tir.assign_view(t2);
+                            if v.name == s && v.value == fp.target {
+                                found = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                found
+            }
+    });
+    assert!(
+        outer_epilogue,
+        "the outer return's epilogue Free for `s` must survive \
+         (inner-return-anchored frees do not cover it): {:?}",
+        sc.free_schedule
+    );
+    let _ = inner_return;
 }

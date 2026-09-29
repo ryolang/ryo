@@ -322,3 +322,36 @@ fn bug_natural_loop_str_accumulator() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout, "32 34\n");
 }
+
+const EARLY_RETURN_AFTER_LOOP_REASSIGN: &str = "\
+fn f(n: int) -> str:
+\tmut s = \"aaaaaaaaaaaaaaaa\"
+\tmut i = 0
+\twhile i < n:
+\t\ts = \"bbbbbbbbbbbbbbbb\"
+\t\ti += 1
+\tif n > 1:
+\t\treturn s
+\treturn s + \"!\"
+
+fn main():
+\tprint(f(3))
+\tprint(\"\\n\")
+";
+
+#[test]
+fn bug_early_return_after_loop_reassign() {
+    // Pre-fix (binding-covering without the terminator-anchor
+    // exclusion): the inner-return-anchored Free counted as covering
+    // the outer return's epilogue Free, codegen's leak-direction
+    // assert tripped ("frees anchored to unmaterialized instructions
+    // were dropped"), and the debug compiler aborted on this natural
+    // guard shape.
+    let output = run_bug_report(
+        "early_return_after_loop_reassign",
+        EARLY_RETURN_AFTER_LOOP_REASSIGN,
+    );
+    assert_success(&output, "bug_early_return_after_loop_reassign");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "bbbbbbbbbbbbbbbb\n");
+}
