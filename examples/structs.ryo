@@ -5,6 +5,7 @@ struct Point:
 	y: float
 
 struct Rectangle:
+	center: Point
 	width: float
 	height: float
 
@@ -14,7 +15,7 @@ fn area(rect: Rectangle) -> float:
 fn main():
 	p = Point{x=1.0, y=2.0}
 	assert(p == Point{x=1.0, y=2.0}, "equal Points compare equal")
-	r = Rectangle{width=10.0, height=5.0}
+	r = Rectangle{center=p, width=10.0, height=5.0}
 	assert(area(r) == 50.0, "area is width * height")
 	mut q = Point{x=0.0, y=0.0}
 	q.x = 7.0
@@ -25,4 +26,13 @@ fn main():
 	print(area(r))
 	print("\n")
 	print(q.x)
+	print("\n")
+	# IEEE edge values are printable via the float Debug path
+	print(0.0 / 0.0)
+	print("\n")
+	print(1.0 / 0.0)
+	print("\n")
+	print(-1.0 / 0.0)
+	print("\n")
+	print(r)
 	print("\n")
