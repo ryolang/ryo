@@ -3,9 +3,17 @@
 //! Compiles representative .ryo programs, then re-links the object
 //! file with `-fsanitize=address` via zig cc and runs the binary.
 //! Any ASan-detected leak or memory error fails the test.
-//! Skipped on platforms where AOT linking isn't supported.
+//!
+//! Linux only. The harness re-links natively (no `-target`), i.e.
+//! against the host glibc — ASan has no musl support, and the musl
+//! default in `linker.rs` does not apply here. On macOS the same
+//! invocation links no ASan runtime at all (verified: zero asan
+//! symbols in the produced binary), so the suite would pass vacuously;
+//! running it there is theater, and the symbol assertion below keeps
+//! the lane honest about that (same philosophy as the valgrind
+//! presence check).
 
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+#![cfg(target_os = "linux")]
 
 mod common;
 
@@ -13,6 +21,24 @@ use std::process::Command;
 
 fn run_asan_smoke(source: &str, name: &str) {
     let (_tmp, exe) = common::build_and_link(source, name, &["-fsanitize=address"]);
+
+    // Liveness guard: a passing suite is only meaningful if the binary
+    // actually carries the ASan runtime. `zig cc -fsanitize=address`
+    // accepts the flag without complaint even when no runtime is
+    // linked (observed on macOS) — fail loudly instead of passing
+    // vacuously.
+    let nm = Command::new("nm")
+        .arg(&exe)
+        .output()
+        .expect("run nm on test binary");
+    let syms = String::from_utf8_lossy(&nm.stdout);
+    assert!(
+        syms.contains("__asan_init"),
+        "binary {name} has no ASan runtime symbols — the sanitizer link is vacuous.\n\
+         nm exit: {:?}, stderr: {}",
+        nm.status,
+        String::from_utf8_lossy(&nm.stderr)
+    );
 
     // Step 3: run with leak detection
     let run = Command::new(&exe)
