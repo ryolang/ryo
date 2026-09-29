@@ -648,7 +648,8 @@ impl<M: Module> Codegen<M> {
             } else {
                 builder.ins().iadd_imm_s(rhs_addr, i64::from(field.offset))
             };
-            let field_eq = match ctx.pool.kind(field.ty) {
+            let field_kind = ctx.pool.kind(field.ty);
+            let field_eq = match field_kind {
                 TypeKind::Int | TypeKind::Bool => {
                     let cl_ty = cranelift_type_for(field.ty, ctx.pool, ctx.int_type);
                     let lv = builder
@@ -668,8 +669,8 @@ impl<M: Module> Codegen<M> {
                         .load(types::F64, MemFlagsData::trusted(), rhs_field, 0);
                     builder.ins().fcmp(FloatCC::Equal, lv, rv)
                 }
-                TypeKind::Str | TypeKind::Bytes => {
-                    let is_bytes = matches!(ctx.pool.kind(field.ty), TypeKind::Bytes);
+                k @ (TypeKind::Str | TypeKind::Bytes) => {
+                    let is_bytes = matches!(k, TypeKind::Bytes);
                     let (lp, ll, lc) = Self::emit_debug_field_triple(builder, ctx, lhs_field);
                     let (rp, rl, rc) = Self::emit_debug_field_triple(builder, ctx, rhs_field);
                     // Inline (SSO) fields keep their bytes in the struct

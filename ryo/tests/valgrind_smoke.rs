@@ -460,3 +460,11 @@ fn valgrind_struct_eq_heap_str_fields() {
         "struct_eq_heap_str_fields",
     );
 }
+
+#[test]
+fn valgrind_struct_eq_bytes_field() {
+    run_valgrind_smoke(
+        common::find_fixture("struct_eq_bytes_field"),
+        "struct_eq_bytes_field",
+    );
+}

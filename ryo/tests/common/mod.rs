@@ -859,9 +859,9 @@ fn main():
 ",
     ),
     (
-        // M9.1: print() renders a struct via DebugRepr — the repr temp
-        // (26 bytes, heap) and the per-field render temps must free
-        // exactly once.
+        // M9.1: print() renders a struct via DebugRepr — the 28-byte repr
+        // (Person{name="42", age=12345}) goes to the heap, and the
+        // per-field render temps must free exactly once.
         "debug_repr_struct_print",
         "\
 struct Person:
@@ -956,6 +956,28 @@ fn main():
 \tprint(p.name)
 \tprint(q.name)
 \tprint(\"\\n\")
+",
+    ),
+    (
+        // M9.1: bytes fields compare by content (ryo_bytes_eq) — the
+        // literal is static while `b"al" + b"ice"` is a fresh heap
+        // buffer; both extract through the slot home.
+        "struct_eq_bytes_field",
+        "\
+#[derive(Eq)] struct Blob:
+	data: bytes
+	tag: int
+
+fn main():
+	a = Blob{data=b\"alice\", tag=1}
+	b = Blob{data=b\"al\" + b\"ice\", tag=1}
+	c = Blob{data=b\"bob\", tag=1}
+	print(a == b)
+	print(\"\\n\")
+	print(a == c)
+	print(\"\\n\")
+	print(a != c)
+	print(\"\\n\")
 ",
     ),
 ];

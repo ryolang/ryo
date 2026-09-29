@@ -307,6 +307,18 @@ fn derived_struct_inequality_lowers_to_struct_ne() {
 }
 
 #[test]
+fn struct_inequality_without_derive_requires_eq() {
+    // `!=` hits the same gate, with the operator spelling interpolated.
+    let src = "struct P:\n\tx: int\n\nfn main():\n\tp = P{x=1}\n\tq = P{x=2}\n\tr = p != q\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::EqDeriveRequired)
+        .expect("EqDeriveRequired must fire for !=");
+    assert_eq!(diag.message, "binary operator `!=` requires `P` to be `Eq`");
+}
+
+#[test]
 fn struct_equality_without_derive_requires_eq() {
     // No `#[derive(Eq)]` → EqDeriveRequired with the roadmap's fix-it
     // wording, message and help asserted verbatim.

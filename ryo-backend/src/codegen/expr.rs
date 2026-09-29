@@ -900,6 +900,12 @@ impl<M: Module> Codegen<M> {
                         ValueRepr::Str { ptr, len, cap }
                     }
                     TypeKind::Struct => {
+                        // emit_debug_repr allocates its own result slot; a
+                        // caller-provided out_slot would silently be ignored.
+                        debug_assert!(
+                            out_slot.is_none(),
+                            "DebugRepr struct operand manages its own repr slot"
+                        );
                         let addr = Self::eval_inst_struct(builder, ctx, operand)?;
                         let repr_addr = Self::emit_debug_repr(builder, ctx, addr, operand_ty)?;
                         let ptr =

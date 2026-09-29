@@ -176,6 +176,18 @@ fn struct_eq_nested_derived_jit() {
 }
 
 #[test]
+fn struct_eq_bytes_field_jit() {
+    // bytes fields compare by content via ryo_bytes_eq. The literal is
+    // static while `b"al" + b"ice"` is a fresh heap buffer — the compare
+    // must extract both (ptr, len) pairs through the slot home.
+    assert_ryo_output(
+        "struct_eq_bytes_field",
+        "#[derive(Eq)] struct Blob:\n\tdata: bytes\n\ttag: int\n\nfn main():\n\ta = Blob{data=b\"alice\", tag=1}\n\tb = Blob{data=b\"al\" + b\"ice\", tag=1}\n\tc = Blob{data=b\"bob\", tag=1}\n\tprint(a == b)\n\tprint(\"\\n\")\n\tprint(a == c)\n\tprint(\"\\n\")\n\tprint(a != c)\n\tprint(\"\\n\")\n",
+        "true\nfalse\ntrue\n",
+    );
+}
+
+#[test]
 fn struct_eq_str_field_jit() {
     // str fields compare by content. "al" + "ice" produces an inline
     // (SSO) field while the literal is static — the compare must
