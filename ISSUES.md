@@ -14,6 +14,18 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+## 🔴 Blocking
+
+### I-193 — Attributes only parse on struct definitions; functions and other items cannot carry them
+
+**Files:** `ryo-frontend/src/parser.rs` (attribute placement rule), `ryo-frontend/src/lexer.rs`, `ryo-core/src/diag.rs` (E0108 note text), `docs/specification.md` (§2, §19)
+
+**Summary:** Milestone 9.1 introduced `#[...]` attributes restricted to struct definitions; an attribute before a function or any other item is a compile error (E0108, "attributes are only supported on struct definitions"). Roadmap features that need function attributes — the testing framework's `#[test]`, contracts (`#[pre]`/`#[post]`), `#[no_mangle]` (spec §19) — are blocked until placement widens. The groundwork is already M26-ready: the lexer exposes `#[` everywhere and the parser's attribute *contents* are generic (`ident` + optional parenthesized comma-list), so the change is the placement rule, per-name recognition with per-item validation, and the E0108 message.
+
+**Resolution:** Lands with Milestone 26 (the general attribute system) at the earliest; a narrower interim step (e.g. `#[test]` only) would widen the placement rule for functions without the full system.
+
+---
+
 ## 🟡 Correctness / Hygiene
 
 ### I-032 — IfStmt is statement-only, no expression-level conditional
