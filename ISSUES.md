@@ -82,12 +82,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** There is no source-level spelling for IEEE infinity or NaN. The float literal grammar (`[0-9]+\.[0-9]+`, I-027) cannot express either — infinity has no decimal spelling, and the grammar has no exponent notation. IEEE edge cases are reachable at runtime (`1.0 / 0.0` yields `+inf`, see `examples/float_zero_div.ryo`) but can only be *detected* indirectly via identities like `x > 0.0 and x * 2.0 == x`, which is opaque and fragile. Almost no language spells infinity as a literal (Rust, Go, Python, C all use named constants), so this is a naming gap, not a grammar gap.
 **Resolution:** Add `inf` as a predefined name that sema resolves to `FloatLit(f64::INFINITY.to_bits())` — same mechanism as the other builtins, no new literal grammar. Decide `nan` deliberately rather than by default: a `nan` constant makes `nan == nan` false in surface syntax, which is a real footgun; consider whether `x != x` suffices for NaN detection instead. This is a language design change — it requires explicit spec approval and a paragraph in the specification's literals/constants section before implementation.
 
-### I-028 — No `print(float)` (or `print` on non-string types)
-
-**Files:** `ryo-frontend/src/builtins.rs`, `ryo-frontend/src/sema/builtins.rs` (`check_print_args`), `ryo-backend/src/codegen/expr.rs` (print emission)
-**Summary:** Float arithmetic has no observability beyond the program exit code. `print` is an ordinary runtime call (`ryo_print`) but accepts only `str`/`strview` arguments. Inspecting a float at runtime requires either a formatter (`f"{x:.2}"`) or polymorphic `print`, neither of which exists.
-**Resolution:** Lands when the runtime gains `print_f64` (or a polymorphic dispatch) and `check_print_args` accepts `float` arguments.
-
 ### I-029 — AST loses `Eq` because `Literal::Float` carries an `f64`
 
 **Files:** `ryo-core/src/ast.rs` (`Literal`, `Expression`, `Statement`, `Program`, `StmtKind`, `ExprKind`, `VarDecl`, `FunctionDef`)

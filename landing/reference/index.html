@@ -452,12 +452,14 @@
               </svg>
               <div>
                 <p class="callout-title">
-                  <code>print()</code> takes only <code>str</code>
+                  <code>print()</code> renders numbers bare
                 </p>
                 <p>
-                  To output a number, convert it first with
-                  <code>int_to_str(n)</code>. There is no implicit formatting
-                  yet.
+                  <code>print()</code> accepts <code>int</code>,
+                  <code>float</code>, and <code>bool</code> directly —
+                  <code>print(42)</code> writes <code>42</code>. For custom
+                  formatting, convert first: <code>int_to_str(n)</code>,
+                  <code>float_to_str(x)</code>, <code>bool_to_str(b)</code>.
                 </p>
               </div>
             </div>
@@ -857,6 +859,42 @@ fn main():
 	print(int_to_str(q.age))  # 30</code></pre>
             </div>
 
+            <h3>Printing &amp; Equality</h3>
+            <p>
+              Every struct has an always-on <strong>Debug</strong>
+              representation mirroring the literal syntax:
+              <code>print(p)</code> writes <code>Point{x=1.0, y=2.0}</code>,
+              nested structs render recursively, and primitives print bare
+              (<code>print(42)</code>, <code>print(3.14)</code>,
+              <code>print(true)</code>). Printing borrows the value — it
+              stays fully usable afterwards.
+            </p>
+            <p>
+              Memberwise <code>==</code> / <code>!=</code> is opt-in via
+              <code>#[derive(Eq)]</code> on the struct definition; every
+              field must be Eq-capable, and float fields use IEEE
+              <code>==</code> (a struct holding NaN never equals itself).
+              <code>#[repr(C)]</code> pins field layout to declaration
+              order with standard C padding — the hook for future FFI.
+            </p>
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">struct_eq.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">#[derive(Eq)]
+#[repr(C)]
+struct Point:
+	x: float
+	y: float
+
+fn main():
+	p = Point{x=1.0, y=2.0}
+	print(p)                          # Point{x=1.0, y=2.0}
+	print(p == Point{x=1.0, y=2.0})   # true
+	print(p != Point{x=3.0, y=4.0})   # true</code></pre>
+            </div>
+
             <div class="callout callout--info">
               <svg
                 viewBox="0 0 24 24"
@@ -875,9 +913,7 @@ fn main():
                 <p>
                   Structs are plain data today — methods land with
                   Milestone 17. Behavior lives in free functions like
-                  <code>area(rect)</code> above. Printing a struct
-                  directly (<code>print(p)</code>) and <code>==</code> on
-                  structs arrive with Milestone 9.1.
+                  <code>area(rect)</code> above.
                 </p>
               </div>
             </div>
@@ -1081,9 +1117,12 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
                 </thead>
                 <tbody>
                   <tr>
-                    <td><code>print(s: str)</code></td>
+                    <td><code>print(value)</code></td>
                     <td>
-                      Write a string to standard output. No trailing newline.
+                      Write a value to standard output. No trailing newline.
+                      Accepts <code>str</code>, <code>bytes</code>,
+                      <code>int</code>, <code>float</code>, <code>bool</code>,
+                      and structs (their Debug representation).
                     </td>
                   </tr>
                   <tr>
@@ -1147,15 +1186,15 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
               </svg>
               <div>
                 <p class="callout-title">
-                  <code>print()</code> prints <code>str</code> and
-                  <code>bytes</code>
+                  <code>print()</code> prints strings, bytes, and
+                  Debug-capable values
                 </p>
                 <p>
-                  Passing an <code>int</code>, <code>float</code>, or
-                  <code>bool</code> is a compile error. Convert numbers with
-                  <code>int_to_str()</code> or <code>float_to_str()</code>,
-                  and booleans with <code>bool_to_str()</code>,
-                  first.
+                  <code>int</code>, <code>float</code>, and
+                  <code>bool</code> render bare (<code>42</code>,
+                  <code>3.14</code>, <code>true</code>); structs render
+                  their Debug form (<code>Point{x=1.0, y=2.0}</code>).
+                  Printing borrows the value.
                 </p>
               </div>
             </div>

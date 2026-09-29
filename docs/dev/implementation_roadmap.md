@@ -31,7 +31,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.4.1.2 — View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE](#milestone-8412-view-materialization-strview--w0003-alpha--complete)
 - [x] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha] ✅ COMPLETE](#milestone-842-bytes-type--bytesview-alpha--complete)
 - [x] [Milestone 9 — Structs ✅ COMPLETE](#milestone-9-structs--complete)
-- [ ] [Milestone 9.1 — Synthesized Eq & Debug for Structs](#milestone-91-synthesized-eq--debug-for-structs)
+- [x] [Milestone 9.1 — Synthesized Eq & Debug for Structs ✅ COMPLETE](#milestone-91-synthesized-eq--debug-for-structs--complete)
 - [ ] [Milestone 9.2 — Throwaway CLI Intrinsics (`process_*`, `io_*`)](#milestone-92-throwaway-cli-intrinsics-process_-io_) *(no dependencies; slots in alongside the core cluster)*
 - [ ] [Milestone 10 — Tuples](#milestone-10-tuples)
 - [ ] [Milestone 11 — Enums (Algebraic Data Types) [alpha]](#milestone-11-enums-algebraic-data-types-alpha)
@@ -1375,7 +1375,7 @@ fn main():
 - **D11 (final spec §10):** struct literals use brace construction — `Point{x=1, y=2}` — per the Brace Law (braces group by name; construction is visibly distinct from calls). The named-argument grammar for *calls* still comes from Milestone 13.5; braces are no longer reserved exclusively for f-string interpolation
 - Dependencies: Milestone 4 (functions for passing structs). Struct literals use brace construction (D11) with their own grammar — they do **not** depend on Milestone 13.5's named-argument parsing, so the M13.5 deferral does not block this milestone.
 
-### Milestone 9.1: Synthesized Eq & Debug for Structs
+### Milestone 9.1: Synthesized Eq & Debug for Structs ✅ COMPLETE
 
 **Goal:** Generate equality and debug representations for structs without user boilerplate
 
