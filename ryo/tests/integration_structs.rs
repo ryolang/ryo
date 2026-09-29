@@ -75,6 +75,70 @@ fn struct_field_inout_borrow_jit() {
 }
 
 // =============================================================================
+// M9.1 Debug repr through print() — sema rewrites print(x) to
+// print(DebugRepr(x)); codegen renders primitives bare and structs as
+// Name{f=v, f=v}. print appends no newline, so each program ends with
+// an explicit print("\n") to terminate the final line.
+// =============================================================================
+
+#[test]
+fn print_primitive_debug_repr_jit() {
+    assert_ryo_output(
+        "debug_primitives",
+        "fn main():\n\tprint(42)\n\tprint(\"\\n\")\n\tprint(-7)\n\tprint(\"\\n\")\n\tprint(3.14)\n\tprint(\"\\n\")\n\tprint(1.0)\n\tprint(\"\\n\")\n\tprint(true)\n\tprint(\"\\n\")\n",
+        "42\n-7\n3.14\n1.0\ntrue\n",
+    );
+}
+
+#[test]
+fn print_struct_debug_repr_jit() {
+    assert_ryo_output(
+        "debug_struct_point",
+        "struct Point:\n\tx: float\n\ty: float\n\nfn main():\n\tp = Point{x=1.0, y=2.0}\n\tprint(p)\n\tprint(\"\\n\")\n",
+        "Point{x=1.0, y=2.0}\n",
+    );
+}
+
+#[test]
+fn print_nested_struct_debug_repr_jit() {
+    assert_ryo_output(
+        "debug_struct_line",
+        "struct Point:\n\tx: float\n\ty: float\n\nstruct Line:\n\ta: Point\n\tb: Point\n\nfn main():\n\tl = Line{a=Point{x=1.0, y=2.0}, b=Point{x=3.0, y=4.0}}\n\tprint(l)\n\tprint(\"\\n\")\n",
+        "Line{a=Point{x=1.0, y=2.0}, b=Point{x=3.0, y=4.0}}\n",
+    );
+}
+
+#[test]
+fn print_struct_str_field_debug_repr_jit() {
+    // str fields render quoted with raw (unescaped) content.
+    assert_ryo_output(
+        "debug_struct_user",
+        "struct User:\n\tname: str\n\nfn main():\n\tu = User{name=\"alice\"}\n\tprint(u)\n\tprint(\"\\n\")\n",
+        "User{name=\"alice\"}\n",
+    );
+}
+
+#[test]
+fn print_struct_int_bool_fields_debug_repr_jit() {
+    assert_ryo_output(
+        "debug_struct_flags",
+        "struct Flags:\n\tcount: int\n\ton: bool\n\nfn main():\n\tf = Flags{count=42, on=true}\n\tprint(f)\n\tprint(\"\\n\")\n",
+        "Flags{count=42, on=true}\n",
+    );
+}
+
+#[test]
+fn print_struct_then_reuse_fields_jit() {
+    // Borrow proof: DebugRepr borrows the struct — field reads after
+    // the print must still see the original values.
+    assert_ryo_output(
+        "debug_struct_borrow",
+        "struct Point:\n\tx: float\n\ty: float\n\nfn main():\n\tp = Point{x=1.0, y=2.0}\n\tprint(p)\n\tprint(\"\\n\")\n\tprint(float_to_str(p.x + p.y))\n\tprint(\"\\n\")\n",
+        "Point{x=1.0, y=2.0}\n3.0\n",
+    );
+}
+
+// =============================================================================
 // AOT exact output
 // =============================================================================
 
@@ -101,6 +165,34 @@ fn struct_person_aot_exact_output() {
     // `print` appends no newline, so the two prints concatenate.
     assert_eq!(
         stdout, "alice30",
+        "binary stdout must be exactly the printed bytes"
+    );
+}
+
+#[test]
+fn print_struct_debug_repr_aot_exact_output() {
+    // M9.1: Debug repr synthesis must produce identical output through
+    // the AOT pipeline (object emission + Zig link).
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "struct Point:\n\tx: float\n\ty: float\n\nfn main():\n\tp = Point{x=1.0, y=2.0}\n\tprint(p)\n\tprint(\"\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "debug_struct_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = exe_path(temp_dir.path(), "debug_struct_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+
+    assert!(run_output.status.success(), "compiled binary should exit 0");
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    assert_eq!(
+        stdout, "Point{x=1.0, y=2.0}\n",
         "binary stdout must be exactly the printed bytes"
     );
 }

@@ -854,6 +854,62 @@ impl<M: Module> Codegen<M> {
                     ValueRepr::Str { ptr, len, cap }
                 }
             }
+            TirTag::DebugRepr => {
+                // M9.1 print() gate: render the operand's Debug
+                // representation into a fresh owned str. Primitive
+                // operands render bare through the ryo_*_to_str
+                // family (no braces); struct operands recurse through
+                // `emit_debug_repr` (structs.rs). The cached triple
+                // feeds print's `eval_str_or_view_parts` like any
+                // other str temp, and the ownership pass's scheduled
+                // Free releases the buffer after the statement.
+                let operand = match inst.data {
+                    TirData::UnOp(o) => o,
+                    _ => unreachable!("DebugRepr must carry TirData::UnOp"),
+                };
+                let operand_ty = ctx.tir.inst(operand).ty;
+                match ctx.pool.kind(operand_ty) {
+                    TypeKind::Int | TypeKind::Float | TypeKind::Bool => {
+                        let v = Self::eval_inst(builder, ctx, operand)?;
+                        let (fn_name, param_ty) = match ctx.pool.kind(operand_ty) {
+                            TypeKind::Int => ("ryo_int_to_str", ctx.int_type),
+                            TypeKind::Float => ("ryo_float_to_str", types::F64),
+                            _ => ("ryo_bool_to_str", types::I8),
+                        };
+                        let (ptr, len, cap) = Self::emit_slot_out_call(
+                            builder,
+                            ctx,
+                            fn_name,
+                            &[(param_ty, v)],
+                            out_slot,
+                        )?;
+                        ValueRepr::Str { ptr, len, cap }
+                    }
+                    TypeKind::Struct => {
+                        let addr = Self::eval_inst_struct(builder, ctx, operand)?;
+                        let repr_addr = Self::emit_debug_repr(builder, ctx, addr, operand_ty)?;
+                        let ptr =
+                            builder
+                                .ins()
+                                .load(ctx.int_type, MemFlagsData::trusted(), repr_addr, 0);
+                        let len =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlagsData::trusted(), repr_addr, 8);
+                        let cap =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlagsData::trusted(), repr_addr, 16);
+                        ValueRepr::Str { ptr, len, cap }
+                    }
+                    other => {
+                        return Err(format!(
+                            "eval_inst_fat_slot: DebugRepr operand at %{} has non-renderable type kind {other:?}",
+                            operand.index()
+                        ));
+                    }
+                }
+            }
             _ => {
                 // Delegate to scalar eval_inst for non-fat instructions
                 let val = Self::eval_inst(builder, ctx, r)?;

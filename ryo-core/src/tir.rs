@@ -64,9 +64,8 @@ pub type Span = SimpleSpan;
 
 // ---------- TirRef ----------
 
-/// Index into a single [`Tir`]'s `instructions`. Refs are scoped to
-/// the function body that produced them — a `TirRef` from one `Tir`
-/// is meaningless in another.
+/// Index into a single [`Tir`]'s `instructions` — a `TirRef` from one
+/// body is meaningless in another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TirRef(NonZeroU32);
 
@@ -100,12 +99,10 @@ impl TirRef {
     /// Ownership / codegen use these as map keys for param-origin
     /// values; they are never valid indices into `instructions`.
     ///
-    /// # Invariant
-    ///
-    /// Sentinels land at `> u32::MAX / 2`, so the encoding only stays
-    /// collision-free while a function body has fewer than 2^31
-    /// instructions (enforced by a `debug_assert!` in `from_index`,
-    /// the arena-push path) and `idx` stays below 2^31.
+    /// Sentinels land at `> u32::MAX / 2`, so the encoding stays
+    /// collision-free only while a body has fewer than 2^31
+    /// instructions (a `debug_assert!` in `from_index` enforces it)
+    /// and `idx` stays below 2^31.
     pub fn param(idx: usize) -> Self {
         // Same domain as `from_index`: `idx` must stay below 2^31 or the
         // sentinel collides with real instruction indices (and the
@@ -151,14 +148,13 @@ impl ExtraRange {
 
 /// All TIR instruction kinds.
 ///
-/// Compared with [`crate::uir::InstTag`], TIR tags are *lowered*:
-/// the type information that disambiguates polymorphic UIR ops
-/// (`Add` works for any numeric type once we have floats) lives in
+/// Compared with [`crate::uir::InstTag`], TIR tags are *lowered*: the
+/// type information that disambiguates polymorphic UIR ops lives in
 /// [`TypedInst::ty`], and the tag itself names the concrete machine
 /// operation. Today the language only has `int`, `bool`, and `str`,
-/// so the lowered set is mostly a 1:1 rename — `IAdd`, `INeg` —
-/// but the shape is what lets float/SIMD variants slot in as new
-/// arms without reshuffling sema or codegen.
+/// so the lowered set is mostly a 1:1 rename (`IAdd`, `INeg`) — but
+/// the shape lets float/SIMD variants slot in as new arms without
+/// reshuffling sema or codegen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TirTag {
@@ -261,16 +257,13 @@ pub enum TirTag {
     ToView,
     /// View → owner re-borrow (final spec P6'): materializes the cap=0
     /// fat triple — no allocation, call-scoped. Inserted by sema when a
-    /// view is passed to an owned borrow parameter. Operand in
-    /// `data.un_op`.
+    /// view is passed to an owned borrow parameter. `TirData::UnOp`.
     ViewAsOwner,
 
-    /// `print()`-gate rewrite (M9.1): `int`, `float`, `bool`, and
-    /// struct arguments are rendered through their Debug representation
-    /// — sema rewrites `print(x)` to `print(DebugRepr(x))` at the TIR
-    /// level, the same shape as the bytes → `__ryo_bytes_repr` rewrite.
-    /// Borrows its operand; result is a fresh owned `str`. Operand in
-    /// `TirData::UnOp`.
+    /// `print()`-gate rewrite (M9.1): `int`/`float`/`bool`/struct args
+    /// render via their Debug repr — sema rewrites `print(x)` to
+    /// `print(DebugRepr(x))`, like the bytes → `__ryo_bytes_repr`
+    /// rewrite. Borrows its operand; fresh owned `str`. `TirData::UnOp`.
     DebugRepr,
 
     /// `return <expr>`. Operand in `TirData::UnOp`.
@@ -416,7 +409,7 @@ pub struct TirParam {
 ///
 /// Per the doc (§4.1): "TIR is per-function-body, not per-program."
 /// Each `Tir` owns its own `instructions` / `extra` / `spans`
-/// arenas; refs are scoped to the body. This is the shape that lets
+/// arenas; refs are scoped to the body — the shape that lets
 /// monomorphization (Phase 5) clone-and-substitute one body without
 /// renumbering everything else.
 ///

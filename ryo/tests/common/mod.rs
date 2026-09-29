@@ -859,6 +859,60 @@ fn main():
 ",
     ),
     (
+        // M9.1: print() renders a struct via DebugRepr — the repr temp
+        // (26 bytes, heap) and the per-field render temps must free
+        // exactly once.
+        "debug_repr_struct_print",
+        "\
+struct Person:
+\tname: str
+\tage: int
+
+fn main():
+\tp = Person{name=int_to_str(42), age=12345}
+\tprint(p)
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // M9.1: nested struct print — the nested repr temp and the
+        // per-field render temps all free; the borrowed struct fields
+        // are untouched.
+        "debug_repr_nested_struct",
+        "\
+struct Point:
+\tx: float
+\ty: float
+
+struct Line:
+\ta: Point
+\tb: Point
+
+fn main():
+\tl = Line{a=Point{x=1.0, y=2.0}, b=Point{x=3.0, y=4.0}}
+\tprint(l)
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // M9.1: primitive prints through DebugRepr — bare rendering, no
+        // braces; each repr temp frees after its print.
+        "debug_repr_primitives",
+        "\
+fn main():
+\tprint(42)
+\tprint(\"\\n\")
+\tprint(-7)
+\tprint(\"\\n\")
+\tprint(3.14)
+\tprint(\"\\n\")
+\tprint(1.0)
+\tprint(\"\\n\")
+\tprint(true)
+\tprint(\"\\n\")
+",
+    ),
+    (
         // A loop-LOCAL mut str reassigned inside the body (concat
         // crossing the 23-byte inline boundary) and broken out of
         // while live. Loop-local bindings are NOT loop-carried: the

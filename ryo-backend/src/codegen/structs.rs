@@ -11,11 +11,14 @@
 
 use cranelift::codegen::ir::{MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
 use cranelift::prelude::*;
-use cranelift_module::Module;
+use cranelift_module::{DataId, Module};
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeId, TypeKind};
 
-use super::{Codegen, FunctionContext, Terminator, ValueRepr, cranelift_type_for, ranges};
+use super::bytes::store_string;
+use super::{
+    Codegen, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr, cranelift_type_for, ranges,
+};
 
 impl<M: Module> Codegen<M> {
     /// Stack slot for a struct value of type `ty`, sized and aligned
@@ -613,5 +616,247 @@ impl<M: Module> Codegen<M> {
         let ty = ctx.tir.inst(target).ty;
         Self::emit_struct_drop(builder, ctx, addr, ty)?;
         Ok(true)
+    }
+
+    /// Debug representation of the struct value at `addr` (M9.1):
+    /// builds `Name{f=v, f=v}` in declaration order, no spaces, into a
+    /// fresh `RyoStrFat` slot whose address is returned. The string is
+    /// assembled in place with an `__ryo_str_push` chain: the result
+    /// slot is seeded with the runtime's canonical empty value
+    /// (`{null, 0, 0}` — what `ryo_str_concat` writes for two empty
+    /// halves; the push ABI never reads the ptr at len 0), then
+    /// punctuation and field names come from read-only .rodata while
+    /// each field value renders into a temp slot, is pushed, and is
+    /// freed immediately (the push copies the bytes first, and
+    /// `ryo_str_free` is a runtime no-op for inline/static caps). str
+    /// fields are quoted and borrowed straight out of the struct — the
+    /// struct keeps owning them, so no free fires. Nested structs
+    /// recurse; the nested repr temp frees after its push into the
+    /// enclosing result.
+    pub(crate) fn emit_debug_repr(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        addr: Value,
+        ty: TypeId,
+    ) -> Result<Value, String> {
+        let view = ctx.pool.struct_view(ty);
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let result = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        let zero = builder.ins().iconst(ctx.int_type, 0);
+        let zero64 = builder.ins().iconst(types::I64, 0);
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), zero, result, 0);
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), zero64, result, 8);
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), zero64, result, 16);
+
+        Self::push_debug_name(builder, ctx, result, view.name)?;
+        Self::push_debug_static(builder, ctx, result, "{")?;
+        for (i, field) in view.fields.iter().enumerate() {
+            if i > 0 {
+                Self::push_debug_static(builder, ctx, result, ", ")?;
+            }
+            Self::push_debug_name(builder, ctx, result, field.name)?;
+            Self::push_debug_static(builder, ctx, result, "=")?;
+            let field_addr = if field.offset == 0 {
+                addr
+            } else {
+                builder.ins().iadd_imm_s(addr, i64::from(field.offset))
+            };
+            match ctx.pool.kind(field.ty) {
+                TypeKind::Int | TypeKind::Float | TypeKind::Bool => {
+                    let cl_ty = cranelift_type_for(field.ty, ctx.pool, ctx.int_type);
+                    let v = builder
+                        .ins()
+                        .load(cl_ty, MemFlagsData::trusted(), field_addr, 0);
+                    let (fn_name, param_ty) = match ctx.pool.kind(field.ty) {
+                        TypeKind::Int => ("ryo_int_to_str", ctx.int_type),
+                        TypeKind::Float => ("ryo_float_to_str", types::F64),
+                        _ => ("ryo_bool_to_str", types::I8),
+                    };
+                    let (tmp_addr, p, l, c) =
+                        Self::emit_debug_render(builder, ctx, fn_name, &[(param_ty, v)])?;
+                    Self::emit_debug_push_result(builder, ctx, result, tmp_addr, p, l, c)?;
+                }
+                TypeKind::Str => {
+                    // Quoted, raw (unescaped) content — borrowed from
+                    // the struct, which keeps owning the field.
+                    let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
+                    let (vp, vl) =
+                        Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(field_addr))?;
+                    Self::push_debug_static(builder, ctx, result, "\"")?;
+                    Self::emit_debug_push(builder, ctx, result, vp, vl)?;
+                    Self::push_debug_static(builder, ctx, result, "\"")?;
+                }
+                TypeKind::Bytes => {
+                    let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
+                    let (vp, vl) =
+                        Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(field_addr))?;
+                    let (tmp_addr, p, l, c) = Self::emit_debug_render(
+                        builder,
+                        ctx,
+                        "__ryo_bytes_repr",
+                        &[(ctx.int_type, vp), (types::I64, vl)],
+                    )?;
+                    Self::emit_debug_push_result(builder, ctx, result, tmp_addr, p, l, c)?;
+                }
+                TypeKind::Struct => {
+                    let nested = Self::emit_debug_repr(builder, ctx, field_addr, field.ty)?;
+                    let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, nested);
+                    let (vp, vl) =
+                        Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(nested))?;
+                    Self::emit_debug_push(builder, ctx, result, vp, vl)?;
+                    // The nested repr temp is fully copied into the
+                    // enclosing result — release it (a no-op when the
+                    // nested render stayed inline).
+                    let free_ref = Self::declare_str_free(ctx, builder)?;
+                    builder.ins().call(free_ref, &[p, c]);
+                }
+                TypeKind::View(_) => {
+                    return Err(
+                        "view struct field reached codegen; sema Rule 6 rejects it".to_string()
+                    );
+                }
+                other => {
+                    return Err(format!(
+                        "emit_debug_repr: field '{}' of '{}' has non-renderable type kind {other:?}",
+                        ctx.pool.str(field.name),
+                        ctx.pool.str(view.name),
+                    ));
+                }
+            }
+        }
+        Self::push_debug_static(builder, ctx, result, "}")?;
+        Ok(result)
+    }
+
+    /// Load the (ptr, len, cap) triple stored at a struct field's
+    /// address (or a finished repr slot). Inline values keep their
+    /// bytes and tag in the slot itself; the loaded ptr/len words are
+    /// only meaningful for heap/static values, so consumers route the
+    /// triple through `emit_fat_bytes_ptr_len` with the slot address
+    /// as the inline home.
+    fn emit_debug_field_triple(
+        builder: &mut FunctionBuilder,
+        ctx: &FunctionContext<'_, M>,
+        field_addr: Value,
+    ) -> (Value, Value, Value) {
+        let ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlagsData::trusted(), field_addr, 0);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), field_addr, 8);
+        let cap = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), field_addr, 16);
+        (ptr, len, cap)
+    }
+
+    /// Run one slot-out repr producer (`ryo_*_to_str`, `__ryo_bytes_repr`)
+    /// into a fresh temp slot. Returns the temp's slot address plus its
+    /// loaded triple — the caller pushes the bytes (extracted against
+    /// the slot address: inline renders keep their bytes in the slot)
+    /// and then frees the temp.
+    fn emit_debug_render(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &'static str,
+        args: &[(types::Type, Value)],
+    ) -> Result<(Value, Value, Value, Value), String> {
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let tmp_addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        let (p, l, c) = Self::emit_slot_out_call(builder, ctx, fn_name, args, Some(slot))?;
+        Ok((tmp_addr, p, l, c))
+    }
+
+    /// Push a freshly rendered temp's bytes onto the repr and free the
+    /// temp. The push copies the bytes out of the temp first;
+    /// `ryo_str_free` no-ops on inline/static caps.
+    fn emit_debug_push_result(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        result: Value,
+        tmp_addr: Value,
+        p: Value,
+        l: Value,
+        c: Value,
+    ) -> Result<(), String> {
+        let (vp, vl) = Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(tmp_addr))?;
+        Self::emit_debug_push(builder, ctx, result, vp, vl)?;
+        let free_ref = Self::declare_str_free(ctx, builder)?;
+        builder.ins().call(free_ref, &[p, c]);
+        Ok(())
+    }
+
+    /// One `__ryo_str_push(result, suffix_ptr, suffix_len)` step of
+    /// the repr chain.
+    fn emit_debug_push(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        result: Value,
+        ptr: Value,
+        len: Value,
+    ) -> Result<(), String> {
+        let push_ref = Self::declare_runtime_fn(
+            ctx,
+            builder,
+            "__ryo_str_push",
+            &[ctx.int_type, ctx.int_type, types::I64],
+            &[],
+        )?;
+        builder.ins().call(push_ref, &[result, ptr, len]);
+        Ok(())
+    }
+
+    /// Push a read-only .rodata piece (already defined) onto the repr.
+    fn push_debug_data(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        result: Value,
+        data_id: DataId,
+        len: usize,
+    ) -> Result<(), String> {
+        let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+        let ptr = builder.ins().symbol_value(ctx.int_type, data_ref);
+        let len_v = builder.ins().iconst(types::I64, len as i64);
+        Self::emit_debug_push(builder, ctx, result, ptr, len_v)
+    }
+
+    /// Push a compiler-static text piece (punctuation): deduped per
+    /// module through the guard-message data cache.
+    fn push_debug_static(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        result: Value,
+        text: &'static str,
+    ) -> Result<(), String> {
+        let data_id = Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, text)?;
+        Self::push_debug_data(builder, ctx, result, data_id, text.len())
+    }
+
+    /// Push a field name: deduped per module through the interned
+    /// string-literal data cache, keyed on the field's `StringId`.
+    fn push_debug_name(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        result: Value,
+        name: StringId,
+    ) -> Result<(), String> {
+        let text = ctx.pool.str(name);
+        let data_id = store_string(name, text, ctx.module, ctx.data_ctx, ctx.string_data)?;
+        Self::push_debug_data(builder, ctx, result, data_id, text.len())
     }
 }
