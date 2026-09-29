@@ -1,0 +1,64 @@
+name: Nightly Release
+
+on:
+  schedule:
+    # 05:23 UTC daily
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Release even if there are no code changes"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Check for code changes
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - name: Get commit behind latest dev release
+        id: remote
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The tag records which commit the last release was built from
+          # (dev-YYYYMMDD-<hash> convention). If its hash matches HEAD, no
+          # code has changed since the last release.
+          LAST_TAG=$(gh release list --limit 100 --json tagName --jq '[.[].tagName | select(startswith("dev-"))] | .[0] // ""')
+          echo "tag_name=${LAST_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Compare with current commit
+        id: check
+        env:
+          TAG_NAME: ${{ steps.remote.outputs.tag_name }}
+          HEAD_SHA: ${{ github.sha }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          LAST_HASH="${TAG_NAME##*-}"
+          HEAD_SHORT="${HEAD_SHA:0:7}"
+          if [[ "$FORCE" == "true" ]]; then
+            echo "Forced run — releasing regardless of changes"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$LAST_HASH" && "$LAST_HASH" == "$HEAD_SHORT" ]]; then
+            echo "No code changes since release $TAG_NAME — skipping"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Code changed since the last release (${TAG_NAME:-none} -> ${HEAD_SHORT})"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    name: Publish nightly release
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    uses: ./.github/workflows/_release-shared.yml
+    with:
+      force: true
+      title_prefix: Nightly
+    secrets: inherit
