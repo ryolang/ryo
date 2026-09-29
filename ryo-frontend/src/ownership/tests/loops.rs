@@ -882,3 +882,80 @@ fn main():
         sc.free_schedule
     );
 }
+
+#[test]
+fn continue_before_in_loop_owner_def_schedules_no_jump_free() {
+    // `while true: i += 1; if i == 1: continue; child = make(i)` — the
+    // continue lexically PRECEDES the inside-loop owner definition.
+    // The same jump-path guard as break applies: pre-fix the scheduler
+    // emitted a continue-anchored Free for the not-yet-defined owner
+    // (latent garbage/double free — it lowered through the binding's
+    // home slot, whose content at the jump is a stale or uninitialized
+    // buffer). The owner's release is its in-body last-use Free.
+    let src = r#"
+struct P:
+	text: str
+	next: int
+
+fn make(x: int) -> P:
+	return P{text=int_to_str(x) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", next=x}
+
+fn main():
+	mut i = 0
+	while true:
+		i += 1
+		if i == 1:
+			continue
+		if i > 3:
+			break
+		child = make(i)
+		print(child.text)
+	print("done")
+"#;
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "expected no errors: {diags:?}"
+    );
+    let idx = tirs
+        .iter()
+        .position(|t| pool.str(t.name) == "main")
+        .unwrap();
+    let tir = &tirs[idx];
+    let sc = take_function_sidecar(&mut sidecar, idx);
+
+    let mut continue_ref = None;
+    let mut post_continue_owner = None;
+    let child = pool.intern_str("child");
+    for r in 1..tir.instructions.len() {
+        let rr = TirRef::from_raw(r as u32);
+        match tir.instructions[r].tag {
+            TirTag::Continue => continue_ref = Some(rr),
+            TirTag::VarDecl => {
+                let v = tir.var_decl_view(rr);
+                if v.name == child {
+                    post_continue_owner = Some(v.initializer);
+                }
+            }
+            _ => {}
+        }
+    }
+    let continue_ref = continue_ref.expect("continue found");
+    let post_continue_owner = post_continue_owner.expect("child decl found");
+    assert!(
+        !sc.free_schedule
+            .iter()
+            .any(|fp| fp.after == continue_ref && fp.target == post_continue_owner),
+        "a Free anchored at the continue must not target the not-yet-defined owner: {:?}",
+        sc.free_schedule
+    );
+    assert!(
+        sc.free_schedule
+            .iter()
+            .any(|fp| fp.target == post_continue_owner && fp.after != continue_ref),
+        "owner must be freed by its in-body last-use Free: {:?}",
+        sc.free_schedule
+    );
+}
