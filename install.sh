@@ -48,7 +48,7 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  --prefix=DIR    Install to DIR instead of ~/.ryo/bin"
-    echo "  --force        Overwrite existing installation"
+    echo "  --force        Overwrite existing installation without asking"
     echo "  --dry-run      Show what would be done without making changes"
     echo "  --help, -h     Show this help message"
     echo ""
@@ -77,6 +77,15 @@ RELEASE_TAG="${RYO_RELEASE:-$RELEASE_TAG}"
 # Determine OS and architecture
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+
+# Android identifies as Linux, but glibc Linux binaries don't run on it
+# (different C library / runtime) — and there is no Android build yet.
+if [ "$(uname -o 2>/dev/null)" = "Android" ] || [ -n "$ANDROID_ROOT" ] || [ -d "/system/bin" ]; then
+    echo "${RED}Android is not supported.${NC}" >&2
+    echo "No prebuilt binary is available for Android (it needs a dedicated target," >&2
+    echo "the Linux ARM64 build will not run). Installation skipped." >&2
+    exit 1
+fi
 
 # Map OS and architecture to our naming scheme
 case "$OS" in
@@ -134,14 +143,38 @@ fi
 BINARY_PATH="$INSTALL_DIR/$BINARY_NAME"
 
 if [ -f "$BINARY_PATH" ]; then
-    if [ "$FORCE" = false ]; then
-        CURRENT_VERSION=$($BINARY_PATH --version 2>/dev/null || echo "unknown")
-        echo "${YELLOW}Warning: Ryo is already installed at $BINARY_PATH${NC}"
-        echo "  Current version: $CURRENT_VERSION"
-        echo "  Use --force to overwrite"
-        exit 1
+    CURRENT_VERSION=$($BINARY_PATH --version 2>/dev/null || echo "unknown")
+    echo "${YELLOW}Ryo is already installed at $BINARY_PATH${NC}"
+    echo "  Current version: $CURRENT_VERSION"
+
+    if [ "$FORCE" = true ]; then
+        echo "${YELLOW}Overwriting existing installation (--force)${NC}"
+    elif [ "$DRY_RUN" = true ]; then
+        echo "Would ask whether to overwrite the existing installation"
+    elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        # stdin may be the install script itself (curl ... | sh), so read
+        # the answer from the terminal instead.
+        printf "Install the latest version over it? [y/N] "
+        REPLY=""
+        if read -r REPLY < /dev/tty 2>/dev/null; then
+            case "$REPLY" in
+                y|Y|yes|Yes|YES)
+                    echo "${YELLOW}Overwriting existing installation${NC}"
+                    ;;
+                *)
+                    echo "Installation cancelled."
+                    exit 0
+                    ;;
+            esac
+        else
+            echo ""
+            echo "Cannot read from the terminal."
+            echo "  Re-run with --force to overwrite non-interactively."
+            exit 1
+        fi
     else
-        echo "${YELLOW}Overwriting existing installation at $BINARY_PATH${NC}"
+        echo "  Re-run with --force to overwrite non-interactively."
+        exit 1
     fi
 fi
 
