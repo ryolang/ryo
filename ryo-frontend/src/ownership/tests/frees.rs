@@ -1718,3 +1718,100 @@ fn compound_assign_rhs_method_call_counts_as_use() {
         sidecar.functions[0].free_schedule
     );
 }
+
+#[test]
+fn loop_carried_struct_reassign_pre_owner_not_double_freed() {
+    // `mut child = f(); while c: child = g()` with child never read
+    // after the loop (the natural do-while parser-loop shape): the
+    // pre-reassign owner's last-use Free must be suppressed — the
+    // reassign-Free releases it at the first displacing store, and the
+    // loop-exit Free of the reseated value (codegen redirects it to
+    // the binding's home slot) releases the final buffer. Pre-fix the
+    // owner was scheduled BOTH a last-use Free and the reassign-Free,
+    // and the return epilogue double-freed the final value through the
+    // same slot (I-194, bug_natural_loop_str_accumulator).
+    let src = r#"
+struct P:
+	text: str
+	next: int
+
+fn make(x: int) -> P:
+	return P{text=int_to_str(x) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", next=x}
+
+fn main():
+	mut i = 0
+	mut child = make(1)
+	while i < 2:
+		child = make(2)
+		i += 1
+	print("done")
+"#;
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "expected no errors: {diags:?}"
+    );
+    let idx = tirs
+        .iter()
+        .position(|t| pool.str(t.name) == "main")
+        .unwrap();
+    let tir = &tirs[idx];
+    let sc = take_function_sidecar(&mut sidecar, idx);
+
+    let child = pool.intern_str("child");
+    let mut pre_owner = None;
+    let mut in_loop_value = None;
+    let mut assign_ref = None;
+    for r in 1..tir.instructions.len() {
+        let rr = TirRef::from_raw(r as u32);
+        match tir.instructions[r].tag {
+            TirTag::VarDecl => {
+                let v = tir.var_decl_view(rr);
+                if v.name == child {
+                    pre_owner = Some(v.initializer);
+                }
+            }
+            TirTag::Assign => {
+                let v = tir.assign_view(rr);
+                if v.name == child {
+                    assign_ref = Some(rr);
+                    in_loop_value = Some(v.value);
+                }
+            }
+            _ => {}
+        }
+    }
+    let pre_owner = pre_owner.expect("child decl found");
+    let in_loop_value = in_loop_value.expect("child reassign found");
+    let assign_ref = assign_ref.expect("child assign found");
+
+    // Displacement coverage exists.
+    assert_eq!(
+        sc.free_on_reassign[assign_ref.index()],
+        Some(pre_owner),
+        "reassign-Free must release the pre-reassign owner"
+    );
+    // The pre-reassign owner has NO scheduled Free: its only release
+    // is the reassign-Free (loop ran) or the loop-exit slot redirect
+    // (zero iterations) — never both, never a last-use Free anchored
+    // before the reassign.
+    assert!(
+        !sc.free_schedule.iter().any(|fp| fp.target == pre_owner),
+        "pre-reassign owner must not be in free_schedule: {:?}",
+        sc.free_schedule
+    );
+    // The final buffer gets exactly one release: the loop-exit Free of
+    // the reseated value (redirected to the home slot by codegen).
+    let final_frees = sc
+        .free_schedule
+        .iter()
+        .filter(|fp| fp.target == in_loop_value)
+        .count();
+    assert_eq!(
+        final_frees, 1,
+        "reseated value must be freed exactly once: {:?}",
+        sc.free_schedule
+    );
+}
