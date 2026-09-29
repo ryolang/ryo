@@ -78,6 +78,11 @@ pub enum DiagCode {
     ArityMismatch,
     BuiltinArgKind,
     UnsupportedOperator,
+    /// `==` / `!=` applied to a struct type that does not carry
+    /// `#[derive(Eq)]` (M9.1). Struct equality is memberwise and
+    /// opt-in; the fix-it ("add `#[derive(Eq)]` to ...") rides along
+    /// as a help note.
+    EqDeriveRequired,
     /// A valueless result — `void` (e.g. the result of a
     /// void-returning call like `print(...)`) or `never` (a
     /// diverging expression like `panic(...)`, which yields no

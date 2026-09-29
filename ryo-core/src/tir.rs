@@ -151,10 +151,8 @@ impl ExtraRange {
 /// Compared with [`crate::uir::InstTag`], TIR tags are *lowered*: the
 /// type information that disambiguates polymorphic UIR ops lives in
 /// [`TypedInst::ty`], and the tag itself names the concrete machine
-/// operation. Today the language only has `int`, `bool`, and `str`,
-/// so the lowered set is mostly a 1:1 rename (`IAdd`, `INeg`) — but
-/// the shape lets float/SIMD variants slot in as new arms without
-/// reshuffling sema or codegen.
+/// operation — the shape lets new operations slot in as new arms
+/// without reshuffling sema or codegen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TirTag {
@@ -166,10 +164,8 @@ pub enum TirTag {
     /// `b"..."` literal (M8.4.2). Payload in `TirData::Str`.
     BytesConst,
 
-    /// Read of a local (parameter or `let`-bound). Resolved to a
-    /// `StringId` so codegen's `HashMap<StringId, Variable>` lookup
-    /// is the same as today; future phases may swap this for a
-    /// `LocalSlot(u32)` once we have a proper local table.
+    /// Read of a local (parameter or `let`-bound), resolved to a
+    /// `StringId` for codegen's `HashMap<StringId, Variable>` lookup.
     Var,
 
     // Integer arithmetic / comparison. Both operands in
@@ -205,7 +201,12 @@ pub enum TirTag {
     /// load → `int` (`u8` at M17.1). Payload in `TirData::BinOp`.
     BytesIndex,
 
-    /// Read the `len` field of a str fat pointer. Operand in `TirData::UnOp`.
+    /// Memberwise struct equality (M9.1). Payload in `TirData::BinOp`; result `bool`.
+    StructEq,
+    /// Memberwise struct inequality (M9.1). Payload in `TirData::BinOp`; result `bool`.
+    StructNe,
+
+    /// Read the `len` field of a str fat pointer. `TirData::UnOp`.
     StrLen,
 
     // Float arithmetic / comparison.
@@ -231,17 +232,15 @@ pub enum TirTag {
     Call,
 
     /// Variable declaration with an initializer. Variable payload in
-    /// `extra` — see [`var_decl_extra`]. The `ty` slot of the
-    /// `TypedInst` carries the *variable's* resolved type (matches
-    /// the side-table behaviour from the Phase-3 interim sema).
+    /// `extra` — see [`var_decl_extra`]; `TypedInst.ty` carries the
+    /// *variable's* resolved type (Phase-3 side-table behaviour).
     VarDecl,
 
-    /// Reassignment to an existing mutable variable.
-    /// Variable payload in `extra` — see [`assign_extra`].
+    /// Reassignment to an existing mutable variable. Variable payload in `extra` — see [`assign_extra`].
     Assign,
 
-    /// Compound assignment (`+=`, `-=`, etc.) to a mutable variable.
-    /// Variable payload in `extra` — see [`compound_assign_extra`].
+    /// Compound assignment (`+=`, `-=`, etc.) to a mutable variable;
+    /// variable payload in `extra` — see [`compound_assign_extra`].
     CompoundAssign,
 
     /// Slice projection `base[start:end]` → `strview` (M8.4).
@@ -249,15 +248,15 @@ pub enum TirTag {
     /// Explicit owner → view representation conversion (drops `cap`),
     /// inserted by sema at view-parameter call sites and mixed
     /// owner/view equality operands. Operand in `data.un_op`. Owner
-    /// pairs come from the pool's `owner_view` table: `str → strview`
-    /// (M8.4), `bytes → bytesview` (M8.4.2). One cross-family use:
-    /// `str`/`strview`.as_bytes() lowers to a `ToView` typed
-    /// `bytesview` — the representation conversion (drop `cap`,
-    /// promote-on-view) is identical, only the projected type differs.
+    /// pairs come from the pool's `owner_view` table (`str → strview`,
+    /// `bytes → bytesview`, M8.4); the one cross-family use is
+    /// `str`/`strview`.as_bytes() → `bytesview` — same representation
+    /// conversion (drop `cap`, promote-on-view), different projected
+    /// type.
     ToView,
-    /// View → owner re-borrow (final spec P6'): materializes the cap=0
-    /// fat triple — no allocation, call-scoped. Inserted by sema when a
-    /// view is passed to an owned borrow parameter. `TirData::UnOp`.
+    /// View → owner re-borrow (final spec P6'): materializes the cap=0 fat
+    /// triple — no allocation, call-scoped. Inserted by sema when a view
+    /// is passed to an owned borrow parameter. `TirData::UnOp`.
     ViewAsOwner,
 
     /// `print()`-gate rewrite (M9.1): `int`/`float`/`bool`/struct args
@@ -272,8 +271,7 @@ pub enum TirTag {
     /// `return` with no expression.
     ReturnVoid,
 
-    /// Top-level expression statement (value discarded). Operand in
-    /// `TirData::UnOp`.
+    /// Top-level expression statement (value discarded). Operand in `TirData::UnOp`.
     ExprStmt,
 
     // Logical operators (short-circuit in codegen).
@@ -287,8 +285,7 @@ pub enum TirTag {
     /// `while cond: body`. Variable payload in `extra` — see [`while_loop_extra`].
     WhileLoop,
 
-    /// `for var in range(start, end): body`. Variable payload in `extra`
-    /// — see [`for_range_extra`].
+    /// `for var in range(start, end): body`. Variable payload in `extra` — see [`for_range_extra`].
     ForRange,
 
     /// `break` statement.
@@ -319,9 +316,8 @@ pub enum TirTag {
     /// field type.
     FieldAssign,
 
-    /// Compound field-path assignment `p.x += v` (M9). Variable
-    /// payload in `extra` — see [`compound_field_assign_extra`];
-    /// `TypedInst.ty` is the field type.
+    /// Compound field-path assignment `p.x += v` (M9). Variable payload
+    /// in `extra` — see [`compound_field_assign_extra`]; `TypedInst.ty` is the field type.
     CompoundFieldAssign,
 }
 
@@ -734,6 +730,8 @@ impl TirBuilder {
                 | TirTag::BytesCmpEq
                 | TirTag::BytesCmpNe
                 | TirTag::BytesIndex
+                | TirTag::StructEq
+                | TirTag::StructNe
                 | TirTag::FAdd
                 | TirTag::FSub
                 | TirTag::FMul
@@ -1973,6 +1971,8 @@ fn bin_op_name(t: TirTag) -> &'static str {
         TirTag::BytesCmpEq => "bytes_eq",
         TirTag::BytesCmpNe => "bytes_ne",
         TirTag::BytesIndex => "bytes_index",
+        TirTag::StructEq => "struct_eq",
+        TirTag::StructNe => "struct_ne",
         TirTag::BoolAnd => "bool_and",
         TirTag::BoolOr => "bool_or",
         _ => "?bin",

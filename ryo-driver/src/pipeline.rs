@@ -346,6 +346,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::MainSignature => "E0004",
         DiagCode::InfiniteSize => "E0005",
         DiagCode::DeriveFieldNotEq => "E0006",
+        DiagCode::EqDeriveRequired => "E0007",
         DiagCode::UndefinedVariable => "E0010",
         DiagCode::UndefinedFunction => "E0011",
         DiagCode::TypeMismatch => "E0012",
@@ -756,6 +757,7 @@ mod tests {
             (DiagCode::MainSignature, "E0004"),
             (DiagCode::InfiniteSize, "E0005"),
             (DiagCode::DeriveFieldNotEq, "E0006"),
+            (DiagCode::EqDeriveRequired, "E0007"),
             (DiagCode::UndefinedVariable, "E0010"),
             (DiagCode::UndefinedFunction, "E0011"),
             (DiagCode::TypeMismatch, "E0012"),
@@ -827,6 +829,7 @@ mod tests {
                 | DiagCode::MainSignature
                 | DiagCode::InfiniteSize
                 | DiagCode::DeriveFieldNotEq
+                | DiagCode::EqDeriveRequired
                 | DiagCode::UndefinedVariable
                 | DiagCode::UndefinedFunction
                 | DiagCode::TypeMismatch
