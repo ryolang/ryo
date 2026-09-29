@@ -157,10 +157,27 @@ jobs:
           done
 
           # Recovery path: a forced rebuild can collide with an existing
-          # release of the same tag — replace just that one.
+          # release or bare tag of the same name — replace just that one.
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "Replacing existing release: $TAG"
             gh release delete "$TAG" --yes --cleanup-tag
+          else
+            # A tag can also exist on the remote without a release (interrupted
+            # run, manual push), and gh release create refuses to reuse it.
+            # Dereference annotated tags to compare commit targets.
+            TAG_SHA=$(git ls-remote origin "refs/tags/${TAG}^{}" | cut -f1)
+            if [ -z "$TAG_SHA" ]; then
+              TAG_SHA=$(git ls-remote origin "refs/tags/${TAG}" | cut -f1)
+            fi
+            if [ -n "$TAG_SHA" ]; then
+              if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+                echo "Remote tag $TAG points to ${TAG_SHA}, not ${GITHUB_SHA}." >&2
+                echo "Refusing to republish it from this run — remove the tag manually." >&2
+                exit 1
+              fi
+              echo "Removing stale tag $TAG (no release, same commit)"
+              git push origin --delete "refs/tags/${TAG}"
+            fi
           fi
 
           # --target pins the tag to the commit that was actually built —
