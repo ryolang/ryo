@@ -1738,8 +1738,10 @@ unsafe extern "C":
 **Implication for `print`:** `print` takes exactly one value argument plus an optional keyword-only `end` parameter (default `"\n"`, appended after the value — the Python convention, which makes a separate `println` redundant), and returns `void`. The value argument is a `str` (a `strview` passes to it via the re-borrow, §4.4), binary data (`bytes` / `bytesview`), or any Debug-capable value — `int`, `float`, and `bool` print bare (`42`, `3.14`, `true`), and structs print their compiler-synthesized debug form (`Point{x=1.0, y=2.0}`, §4.5). Binary data prints as an escaped repr mirroring the literal syntax (`b"\x01\x02A"`): printable ASCII renders literally, short escapes (`\n`, `\t`, `\\`, …) are used where they exist, and every other byte renders as `\xNN`. It does not accept multiple value arguments, formatting placeholders, or values without a Debug representation. To print a value that has no Debug representation, use an f-string, which calls the value's `Display` implementation at the interpolation site.
 
 ```ryo
-# Signature (in the implicit `core`/`builtin` module)
-fn print(_ s: str, end: str = "\n")
+# Signature (in the implicit `core`/`builtin` module). The value parameter
+# accepts str (strview re-borrows, §4.4), bytes/bytesview, and any
+# Debug-capable value — int, float, bool, or a struct (§4.5).
+fn print(_ value, end: str = "\n")
 
 # Usage
 print("hello")                         # "hello\n" — newline appended by default

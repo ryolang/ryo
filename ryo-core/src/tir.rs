@@ -260,9 +260,8 @@ pub enum TirTag {
     ViewAsOwner,
 
     /// `print()`-gate rewrite (M9.1): `int`/`float`/`bool`/struct args
-    /// render via their Debug repr — sema rewrites `print(x)` to
-    /// `print(DebugRepr(x))`, like the bytes → `__ryo_bytes_repr`
-    /// rewrite. Borrows its operand; fresh owned `str`. `TirData::UnOp`.
+    /// render via their Debug repr (`print(x)` → `print(DebugRepr(x))`,
+    /// like bytes → `__ryo_bytes_repr`). Borrows operand; owned `str` out.
     DebugRepr,
 
     /// `return <expr>`. Operand in `TirData::UnOp`.
@@ -1989,6 +1988,7 @@ fn un_op_name(t: TirTag) -> &'static str {
         TirTag::StrLen => "str_len",
         TirTag::ToView => "to_view",
         TirTag::ViewAsOwner => "view_as_owner",
+        TirTag::DebugRepr => "debug_repr",
         _ => "?un",
     }
 }
