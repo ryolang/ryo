@@ -153,12 +153,17 @@ if [ -f "$BINARY_PATH" ]; then
         echo "Would ask whether to overwrite the existing installation"
     elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
         # stdin may be the install script itself (curl ... | sh), so read
-        # the answer from the terminal instead.
-        printf "Install the latest version over it? [y/N] "
+        # the answer from the terminal instead. Mirror the prompt to /dev/tty
+        # when stdout is not the terminal, so it isn't lost in a log file.
+        if [ -t 1 ]; then
+            printf "Install the latest version over it? [y/N] "
+        else
+            printf "Install the latest version over it? [y/N] " > /dev/tty
+        fi
         REPLY=""
         if read -r REPLY < /dev/tty 2>/dev/null; then
-            case "$REPLY" in
-                y|Y|yes|Yes|YES)
+            case "$(printf '%s' "$REPLY" | tr '[:upper:]' '[:lower:]')" in
+                y|yes)
                     echo "${YELLOW}Overwriting existing installation${NC}"
                     ;;
                 *)

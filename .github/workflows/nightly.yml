@@ -51,7 +51,7 @@ jobs:
           # The tag records which commit the last release was built from
           # (same dev-YYYYMMDD-<hash> convention as release.yml). If it
           # matches HEAD, no code has changed since the last release.
-          LAST_TAG=$(gh release list --limit 10 --json tagName --jq '[.[].tagName | select(startswith("dev-"))] | .[0] // ""')
+          LAST_TAG=$(gh release list --limit 100 --json tagName --jq '[.[].tagName | select(startswith("dev-"))] | .[0] // ""')
           LAST_HASH="${LAST_TAG##*-}"
           if [[ -n "$LAST_HASH" && "$LAST_HASH" == "$SHORT_HASH" ]]; then
             echo "No code changes since release $LAST_TAG — skipping"
@@ -121,11 +121,23 @@ jobs:
         with:
           path: artifacts
 
+      - name: Verify artifacts before replacing releases
+        run: |
+          shopt -s globstar nullglob
+          ASSETS=(artifacts/**/*.tar.gz)
+          echo "Found ${#ASSETS[@]} assets:"
+          printf '  %s\n' "${ASSETS[@]}"
+          if [[ ${#ASSETS[@]} -ne 3 ]]; then
+            echo "Expected 3 platform assets, found ${#ASSETS[@]}." >&2
+            echo "Aborting without deleting the existing releases." >&2
+            exit 1
+          fi
+
       - name: Delete previous dev releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for tag in $(gh release list --limit 10 --json tagName --jq '.[].tagName | select(startswith("dev-"))'); do
+          for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName | select(startswith("dev-"))'); do
             echo "Deleting release: $tag"
             gh release delete "$tag" --yes --cleanup-tag
           done
