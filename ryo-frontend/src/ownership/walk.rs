@@ -929,6 +929,26 @@ pub(crate) fn visit_expr(
                 }
             }
         }
+        // ---- Debug repr (M9.1) ----
+        // `DebugRepr` renders its operand without consuming it: the
+        // operand is visited as a plain read of its root (the
+        // `check_use_moved` below, same as `StrConcat`'s operands), and
+        // the result is a brand-new owned `str` temp — the
+        // result-temp seeding above `StrConcat` is copied verbatim, so
+        // the repr string is freed after its last use.
+        TirTag::DebugRepr => {
+            if needs_tracking(inst.ty, pool) {
+                own.states.insert(Owner::Inst(r), OwnerState::Valid);
+                Ownership::dense_set(&mut own.origin, r, None);
+                own.temp_owners.insert(Owner::Inst(r));
+            }
+            if let TirData::UnOp(operand) = inst.data {
+                visit_expr(tir, pool, own, sink, sidecar, operand);
+                if needs_tracking(tir.inst(operand).ty, pool) {
+                    check_use_moved(tir, pool, own, sink, operand, tir.span(operand));
+                }
+            }
+        }
         // ---- Struct literal (M9) ----
         // A needs-drop struct literal materializes a fresh owner, like
         // `StrConst`. Its payload is `TirData::Extra`, so the

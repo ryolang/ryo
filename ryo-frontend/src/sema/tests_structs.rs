@@ -244,3 +244,35 @@ fn repr_c_struct_compiles_clean() {
     let src = "#[repr(C)] struct Mixed:\n\ta: int\n\tb: float\n\tc: int\n";
     assert!(run(src).is_ok());
 }
+
+#[test]
+fn print_struct_rewrites_to_debug_repr() {
+    // M9.1: print() on a struct value is rewritten at the TIR level to
+    // print(DebugRepr(arg)) — the repr temp is a normal str producer.
+    let src = "struct Point:\n\tx: int\n\nfn main():\n\tp = Point{x=1}\n\tprint(p)\n";
+    let (tirs, pool) = run(src).expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    assert!(
+        main.instructions.iter().any(|i| i.tag == TirTag::DebugRepr),
+        "print(struct) must lower to a DebugRepr inst"
+    );
+}
+
+#[test]
+fn print_scalar_rewrites_to_debug_repr() {
+    // int / float / bool are Debug-capable — each print() rewrites to
+    // DebugRepr exactly like the struct case.
+    let cases = [
+        "fn main():\n\tprint(42)\n",
+        "fn main():\n\tprint(3.14)\n",
+        "fn main():\n\tprint(true)\n",
+    ];
+    for src in cases {
+        let (tirs, pool) = run(src).expect("sema ok");
+        let main = tir_named(&tirs, &pool, "main");
+        assert!(
+            main.instructions.iter().any(|i| i.tag == TirTag::DebugRepr),
+            "print(int/float/bool) must lower to a DebugRepr inst: {src}"
+        );
+    }
+}

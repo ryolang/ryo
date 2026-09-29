@@ -313,3 +313,44 @@ fn same_field_reassign_rejected_while_field_view_live() {
         "expected SourceProjected naming `p`; got {diags:?}"
     );
 }
+
+#[test]
+fn print_struct_then_use_again_no_move() {
+    // M9.1: print() renders a struct via DebugRepr, which borrows the
+    // operand root — the value must still be usable afterwards (a move
+    // would make `q = p` a use-after-move).
+    let src = "struct P:\n\tx: int\n\nfn main():\n\tp = P{x=1}\n\tprint(p)\n\tq = p\n\tprint(q)\n";
+    let diags = check_src(src);
+    assert!(
+        diags.is_empty(),
+        "print(struct) must borrow, not move; got {diags:?}"
+    );
+}
+
+#[test]
+fn print_needs_drop_struct_then_use_again_no_move() {
+    // M9.1: the borrow proof only bites for needs-drop structs — `S`
+    // holds a `str`, so the ownership pass tracks it and `t = s` is a
+    // real move out of `s`: if print(s) moved s, this would be a
+    // use-after-move (see the control test below).
+    let src = "struct S:\n\tname: str\n\tx: int\n\nfn main():\n\ts = S{name=\"a\", x=1}\n\tprint(s)\n\tt = s\n\tprint(t)\n";
+    let diags = check_src(src);
+    assert!(
+        diags.is_empty(),
+        "print(struct) must borrow, not move; got {diags:?}"
+    );
+}
+
+#[test]
+fn print_needs_drop_struct_move_control() {
+    // Negative control for the test above: an ACTUAL move of a
+    // needs-drop struct followed by a use IS caught by the same
+    // harness — so the clean run above proves the borrow, not harness
+    // blindness.
+    let src = "struct S:\n\tname: str\n\tx: int\n\nfn main():\n\ts = S{name=\"a\", x=1}\n\tt = s\n\tu = s\n";
+    let diags = check_src(src);
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::UseAfterMove),
+        "expected UseAfterMove for a real move-then-use; got {diags:?}"
+    );
+}

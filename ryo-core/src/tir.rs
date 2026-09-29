@@ -265,6 +265,14 @@ pub enum TirTag {
     /// `data.un_op`.
     ViewAsOwner,
 
+    /// `print()`-gate rewrite (M9.1): `int`, `float`, `bool`, and
+    /// struct arguments are rendered through their Debug representation
+    /// — sema rewrites `print(x)` to `print(DebugRepr(x))` at the TIR
+    /// level, the same shape as the bytes → `__ryo_bytes_repr` rewrite.
+    /// Borrows its operand; result is a fresh owned `str`. Operand in
+    /// `TirData::UnOp`.
+    DebugRepr,
+
     /// `return <expr>`. Operand in `TirData::UnOp`.
     Return,
 
