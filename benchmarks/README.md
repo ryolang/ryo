@@ -67,7 +67,7 @@ JIT and AOT land within noise of each other (~1.33–1.34×) because both share 
 
 * **Focus:** Integer loop/branch — total stopping time for seeds 1..1,000,000; a hot flat loop complementing fibonacci's recursion profile.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT runs at **2.07x Rust** (216 ms), decomposed by disassembly diff into ~1.6x the spec §18 checked-arithmetic policy (equally-checked Rust measures 1.61x, on par with Swift's 1.58x) plus ~1.3x Cranelift aarch64 lowering gaps (unfolded `srem x, 2`, unfused overflow branches per I-165, unstrength-reduced `mul x, 3`). See the benchmark's README for the breakdown.
+* **Highlights:** Ryo AOT runs at **2.11x Rust** (237.6 ms; checkpoint 2026-09-29, Cranelift 0.136.1), decomposed by disassembly diff into ~1.6x the spec §18 checked-arithmetic policy (equally-checked Rust measures ~1.6x, on par with Swift's 1.58x) plus ~1.3x Cranelift aarch64 lowering gaps (`srem x, 2` not folded to a bit test, unfused `sadd_overflow` branches per I-165 — `smul_overflow` fused in 0.136.1 —, unstrength-reduced `mul x, 3`). See the benchmark's README for the breakdown.
 
 ### 8. [Doubling Concat Benchmark](./doubling_concat/)
 
