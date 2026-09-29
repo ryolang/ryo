@@ -30,19 +30,23 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 
 | Language | Version | Mean Time | Speed vs Rust | Memory (Max Resident) |
 |----------|---------|-----------|---------------|-----------------------|
-| **Rust** | 1.98.0 | ~253.4 ms | 1.00x         | 1.45 MB               |
-| **Kotlin**| 2.4.10 (java 26.0.2) | ~270.8 ms | 1.07x slower | 44.55 MB     |
-| **Go**   | 1.26.6 | ~292.5 ms | 1.15x slower  | 4.03 MB               |
-| **Swift**| 6.3.3 | ~320.5 ms | 1.26x slower  | 1.56 MB               |
-| **Ryo (AOT)** | 0.1.0 | ~360.8 ms | 1.42x slower | **1.34 MB**           |
-| **Ryo (JIT)** | 0.1.0 | ~361.4 ms | 1.43x slower | 4.75 MB               |
-| **Bun (TS)**  | 1.3.13 | ~399.6 ms | 1.58x slower | 27.44 MB              |
-| **Julia** | 1.12.6 | ~416.5 ms | 1.64x slower | 214.08 MB             |
-| **Elixir**    | 1.20.3 | ~869.3 ms | 3.43x slower | 89.98 MB              |
-| **Python**| 3.14.4 | ~4.939 s | 19.49x slower  | 18.97 MB               |
-| **Ruby** | 4.0.6 | ~5.863 s | 23.14x slower | 18.19 MB              |
+| **Rust** | 1.98.0 | ~272.2 ms | 1.00x         | 1.45 MB               |
+| **Kotlin**| 2.4.20 (java 26.0.2.1) | ~278.8 ms | 1.02x slower | 44.86 MB     |
+| **Go**   | 1.27.1 | ~300.5 ms | 1.10x slower  | 3.75 MB               |
+| **Swift**| 6.3.3 | ~339.4 ms | 1.25x slower  | 1.56 MB               |
+| **Ryo (AOT)** | 0.1.0-dev.20260929+228adbb | ~362.5 ms | 1.33x slower | **1.34 MB**           |
+| **Ryo (JIT)** | 0.1.0-dev.20260929+228adbb | ~364.6 ms | 1.34x slower | 4.69 MB               |
+| **Bun (TS)**  | 1.3.13 | ~407.4 ms | 1.50x slower | 27.44 MB              |
+| **Julia** | 1.12.7 | ~421.4 ms | 1.55x slower | 213.66 MB             |
+| **Elixir**    | 1.20.4 | ~975.1 ms | 3.58x slower | 90.20 MB              |
+| **Python**| 3.14.4 | ~5.258 s | 19.32x slower  | 19.27 MB               |
+| **Ruby** | 4.0.6 | ~5.856 s | 21.51x slower | 18.19 MB              |
 
-*(Measured with `hyperfine` on macOS, Apple M3 Pro, 2026-08-26 (evening checkpoint). Ryo is compiled using `--release`.)*
+*(Measured with `hyperfine` on macOS, Apple M3 Pro, 2026-09-29 (Cranelift 0.136.1 checkpoint). Ryo is compiled using `--release`.)*
+
+### Checkpoint: Cranelift 0.136.1 (2026-09-29)
+
+Re-measurement after the Cranelift pin moved 0.135.1 → 0.136.1 (branch `chore/cranelift-0.136.1`). A disassembly diff of the `fibonacci` hot path across the bump is **byte-identical** — the 0.136.1 mid-end/lowering changes do not touch this shape (the surviving guard is a `sadd_overflow`, and the new upstream flag-forwarding covers only `uadd`/`umul`/`smul`; see I-165). Consistently, Ryo's absolute time is unchanged (~362.5 ms vs ~360.8 ms in the 2026-08-26 checkpoint). The ratio improvement to 1.33× is entirely Rust measuring slower this run (~272 ms vs ~253 ms) along with a machine-wide drift (Swift, Go, and Kotlin all moved the same direction); Ryo AOT max resident (1.34 MB) still holds below Rust's (1.45 MB).
 
 ### Checkpoint: value-range guard elision (2026-08-26)
 

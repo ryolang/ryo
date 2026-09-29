@@ -167,6 +167,11 @@ pub struct Codegen<M: Module> {
 /// Overflow guard message for the spec §18 checked-arithmetic traps.
 const OVERFLOW_MSG: &str = "integer overflow\n";
 
+/// Declared functions: `FuncId` plus the `Signature` built at
+/// declaration time, so `compile_function` can install it into
+/// `ctx.func` instead of rebuilding it (I-150).
+type DeclaredFunctions = HashMap<StringId, (FuncId, Signature)>;
+
 /// Per-loop codegen state: the Cranelift blocks that `break` and
 /// `continue` jump to.
 struct LoopContext {
@@ -290,7 +295,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// the slot-table undo logs: those restore pre-scope slot values,
     /// while this drives the resurrect-then-re-kill join invalidation.
     assigned_log: Vec<StringId>,
-    func_ids: &'a HashMap<StringId, FuncId>,
+    func_ids: &'a DeclaredFunctions,
     /// `TirRef → ValueRepr` memo. Materializing the same instruction
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
@@ -650,7 +655,7 @@ impl<M: Module> Codegen<M> {
         &mut self,
         tirs: &[Tir],
         pool: &InternPool,
-    ) -> Result<HashMap<StringId, FuncId>, String> {
+    ) -> Result<DeclaredFunctions, String> {
         self.declare_all_functions(tirs, pool)
     }
 
@@ -775,7 +780,7 @@ impl<M: Module> Codegen<M> {
             .ok_or_else(|| "No main function defined".to_string())?;
         let main = func_ids
             .get(&main_id)
-            .copied()
+            .map(|(id, _)| *id)
             .ok_or_else(|| "No main function defined".to_string())?;
         Ok((main, ir_output))
     }
@@ -803,7 +808,7 @@ impl<M: Module> Codegen<M> {
         pool: &InternPool,
         sidecar: &ryo_core::ownership::OwnershipSidecar,
         dump_ir: bool,
-    ) -> Result<(HashMap<StringId, FuncId>, String), String> {
+    ) -> Result<(DeclaredFunctions, String), String> {
         debug_assert!(
             bytes::no_unreachable_in(tirs),
             "codegen requires sema to have produced TIR with no Unreachable instructions"
@@ -826,7 +831,7 @@ impl<M: Module> Codegen<M> {
         &mut self,
         tirs: &[Tir],
         pool: &InternPool,
-    ) -> Result<HashMap<StringId, FuncId>, String> {
+    ) -> Result<DeclaredFunctions, String> {
         let mut func_ids = HashMap::new();
         for tir in tirs {
             let sig = self.build_signature(tir, pool);
@@ -840,7 +845,9 @@ impl<M: Module> Codegen<M> {
                 .module
                 .declare_function(name_str, linkage, &sig)
                 .map_err(|e| format!("Failed to declare function '{}': {}", name_str, e))?;
-            func_ids.insert(tir.name, func_id);
+            // Keep the signature: `compile_function` installs it into
+            // `ctx.func` instead of rebuilding it.
+            func_ids.insert(tir.name, (func_id, sig));
         }
         Ok(func_ids)
     }
@@ -898,15 +905,16 @@ impl<M: Module> Codegen<M> {
     fn compile_function(
         &mut self,
         tir: &Tir,
-        func_ids: &HashMap<StringId, FuncId>,
+        func_ids: &DeclaredFunctions,
         pool: &InternPool,
         sidecar: &ryo_core::ownership::OwnershipSidecar,
         sidecar_index: usize,
         dump_ir: bool,
     ) -> Result<String, String> {
-        let func_id = *func_ids
+        let (func_id, sig) = func_ids
             .get(&tir.name)
             .ok_or_else(|| format!("Function '{}' not declared", pool.str(tir.name)))?;
+        let func_id = *func_id;
 
         // Pick the per-function sidecar entry. `TirRef`s are scoped
         // per-function (each `Tir` arena restarts at `TirRef(1)`), so
@@ -937,7 +945,10 @@ impl<M: Module> Codegen<M> {
             sidecar_index
         );
 
-        self.ctx.func.signature = self.build_signature(tir, pool);
+        // The signature built at declaration time; cloning two small
+        // Vecs beats rebuilding the signature (pool queries + per-param
+        // ABI branching) a second time.
+        self.ctx.func.signature = sig.clone();
 
         {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
