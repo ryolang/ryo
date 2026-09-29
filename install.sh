@@ -151,10 +151,13 @@ if [ -f "$BINARY_PATH" ]; then
         echo "${YELLOW}Overwriting existing installation (--force)${NC}"
     elif [ "$DRY_RUN" = true ]; then
         echo "Would ask whether to overwrite the existing installation"
-    elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    elif : 2>/dev/null < /dev/tty; then
         # stdin may be the install script itself (curl ... | sh), so read
-        # the answer from the terminal instead. Mirror the prompt to /dev/tty
-        # when stdout is not the terminal, so it isn't lost in a log file.
+        # the answer from the terminal instead. This branch is only reached
+        # when /dev/tty can actually be opened (readable/writable is not
+        # enough — it can exist without a controlling terminal).
+        # Mirror the prompt to /dev/tty when stdout is not the terminal,
+        # so it isn't lost in a log file.
         if [ -t 1 ]; then
             printf "Install the latest version over it? [y/N] "
         else
@@ -172,10 +175,11 @@ if [ -f "$BINARY_PATH" ]; then
                     ;;
             esac
         else
-            echo ""
-            echo "Cannot read from the terminal."
-            echo "  Re-run with --force to overwrite non-interactively."
-            exit 1
+            # The terminal closed or sent EOF (e.g. ctrl-D) — same as a
+            # declined answer. A terminal we cannot open at all is handled
+            # by the branch below with --force guidance.
+            echo "Installation cancelled."
+            exit 0
         fi
     else
         echo "  Re-run with --force to overwrite non-interactively."

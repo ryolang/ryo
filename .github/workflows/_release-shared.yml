@@ -134,15 +134,6 @@ jobs:
             exit 1
           fi
 
-      - name: Delete previous dev releases
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName | select(startswith("dev-"))'); do
-            echo "Deleting release: $tag"
-            gh release delete "$tag" --yes --cleanup-tag
-          done
-
       - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -165,5 +156,30 @@ jobs:
             ASSETS+=("$asset")
           done
 
+          # Recovery path: a forced rebuild can collide with an existing
+          # release of the same tag — replace just that one.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Replacing existing release: $TAG"
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
+
+          # --target pins the tag to the commit that was actually built —
+          # the default branch may have moved on since this run started.
           gh release create "$TAG" "${ASSETS[@]}" \
+            --target "$GITHUB_SHA" \
             --title "${TITLE_PREFIX} ${DATE} (${SHORT_HASH})" --prerelease --notes "$NOTES"
+
+      - name: Delete previous dev releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: dev-${{ needs.check.outputs.date }}-${{ needs.check.outputs.short_hash }}
+        run: |
+          # The new release is already live at this point — only retire the
+          # older dev releases, and never the one we just created.
+          for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName | select(startswith("dev-"))'); do
+            if [[ "$tag" == "$TAG" ]]; then
+              continue
+            fi
+            echo "Deleting release: $tag"
+            gh release delete "$tag" --yes --cleanup-tag
+          done
