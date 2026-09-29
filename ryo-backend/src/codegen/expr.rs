@@ -1321,9 +1321,10 @@ impl<M: Module> Codegen<M> {
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
-        let callee_id = *ctx
+        let callee_id = ctx
             .func_ids
             .get(&name_id)
+            .map(|(id, _)| *id)
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
         let mut arg_values = Vec::with_capacity(view.args.len() * 3 + 1);

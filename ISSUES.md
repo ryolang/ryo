@@ -297,12 +297,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Every string literal gets an owned `String` from `unescape` even when it contains no escapes — the common case. Per string literal.
 **Resolution:** Fast-path with `memchr(b'\\')` (or a byte scan) returning `Cow::Borrowed(inner)` when no escape is present; build the owned string only on the escape path.
 
-### I-150 — Each function's Cranelift `Signature` is built twice
-
-**Files:** `ryo-backend/src/codegen/mod.rs` (`build_signature` called at :490 and :590)
-**Summary:** `declare_all_functions` builds every function's `Signature` to register the `FuncId`, then `compile_function` rebuilds the identical signature — redundant pool queries and two Vec allocations per function.
-**Resolution:** Store the `Signature` alongside the `FuncId` in `func_ids` and move/clone it into `ctx.func`.
-
 ### I-152 — Parser builds a throwaway `Vec` per call/params node before the arena copy
 
 **Files:** `ryo-frontend/src/parser.rs` (:604-615, :650-661, :534-538, :436-446)
