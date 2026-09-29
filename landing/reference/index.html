@@ -1120,9 +1120,11 @@ result = 1 + 7 * (3 - 4) / 2     # = 1 + (7 * -1 / 2) = 1 + (-3) = -2</code></pr
                     <td><code>print(value)</code></td>
                     <td>
                       Write a value to standard output. No trailing newline.
-                      Accepts <code>str</code>, <code>bytes</code>,
-                      <code>int</code>, <code>float</code>, <code>bool</code>,
-                      and structs (their Debug representation).
+                      Accepts <code>str</code> (<code>strview</code>
+                      re-borrows), <code>bytes</code> (<code>bytesview</code>
+                      re-borrows), <code>int</code>, <code>float</code>,
+                      <code>bool</code>, and structs (their Debug
+                      representation).
                     </td>
                   </tr>
                   <tr>
