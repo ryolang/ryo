@@ -84,6 +84,16 @@ impl StringId {
     pub const fn from_raw(raw: u32) -> Self {
         StringId(raw)
     }
+
+    /// Well-known attribute vocabulary (M9.1), interned at fixed ids
+    /// by [`InternPool::new`] before any user string. The parser has
+    /// no pool access, so it recognizes `#[derive(Eq)]` /
+    /// `#[repr(C)]` by comparing against these ids. The intern order
+    /// in `new` defines the ids — keep the two in sync.
+    pub const ATTR_DERIVE: StringId = StringId(0);
+    pub const ATTR_EQ: StringId = StringId(1);
+    pub const ATTR_REPR: StringId = StringId(2);
+    pub const ATTR_C: StringId = StringId(3);
 }
 
 // ---------- Internal storage ----------
@@ -395,6 +405,20 @@ impl InternPool {
             data: 1,
         });
         debug_assert!(pool.items.len() == (ID_BYTESVIEW + 1) as usize);
+
+        // Well-known attribute vocabulary (M9.1) at fixed string ids
+        // (see `StringId::ATTR_*`): interned before any user string so
+        // the pool-less parser can recognize the attribute names by
+        // identity. Order defines the ids.
+        debug_assert_eq!(
+            pool.strings.len(),
+            0,
+            "user strings must come after the well-known ids"
+        );
+        let _ = pool.intern_str("derive");
+        let _ = pool.intern_str("Eq");
+        let _ = pool.intern_str("repr");
+        let _ = pool.intern_str("C");
         pool
     }
 
@@ -1070,16 +1094,20 @@ mod tests {
         // The dedup table stores `StringId` handles, not owned
         // `String` keys, so the byte content lives exactly once —
         // in `string_bytes`. Asserts the storage shape: after
-        // interning N distinct strings, `string_bytes.len()` is
-        // the sum of their byte lengths and nothing else.
+        // interning N distinct strings, the arena grows by exactly
+        // the sum of their byte lengths and the table by N (measured
+        // as deltas: `new` pre-interns the well-known attribute
+        // vocabulary at fixed ids, a nonzero baseline).
         let mut pool = InternPool::new();
+        let bytes_before = pool.string_bytes.len();
+        let table_before = pool.string_dedup.len();
         let inputs = ["alpha", "beta", "gamma", "δελτα"];
         for s in &inputs {
             pool.intern_str(s);
         }
         let expected: usize = inputs.iter().map(|s| s.len()).sum();
-        assert_eq!(pool.string_bytes.len(), expected);
-        assert_eq!(pool.string_dedup.len(), inputs.len());
+        assert_eq!(pool.string_bytes.len() - bytes_before, expected);
+        assert_eq!(pool.string_dedup.len() - table_before, inputs.len());
     }
 
     #[test]
@@ -1218,6 +1246,21 @@ mod tests {
         assert_eq!(pool.intern_bytes(&[0x41, 0x00, 0xff]), id);
         // Same bytes interned as a str share the id (same byte content).
         assert_eq!(pool.intern_str("A"), pool.intern_bytes(b"A"));
+    }
+
+    #[test]
+    fn well_known_attribute_strings_have_fixed_ids() {
+        // The pool-less parser recognizes attribute vocabulary by id,
+        // so the intern order in `new` is a stability contract.
+        let mut pool = InternPool::new();
+        assert_eq!(pool.str(StringId::ATTR_DERIVE), "derive");
+        assert_eq!(pool.str(StringId::ATTR_EQ), "Eq");
+        assert_eq!(pool.str(StringId::ATTR_REPR), "repr");
+        assert_eq!(pool.str(StringId::ATTR_C), "C");
+        // Re-interning returns the same id; user strings land after.
+        assert_eq!(pool.intern_str("derive"), StringId::ATTR_DERIVE);
+        let user = pool.intern_str("Point");
+        assert!(user.raw() > StringId::ATTR_C.raw());
     }
 
     #[test]

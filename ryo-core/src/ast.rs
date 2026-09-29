@@ -343,12 +343,27 @@ pub struct VarDecl {
     pub initializer: ExprId,
 }
 
+/// Attributes parsed off a `struct` declaration (M9.1): the
+/// `#[derive(Eq)]` / `#[repr(C)]` bits. The parser is pool-less, so
+/// the frontend recognizes the attribute vocabulary by the fixed
+/// `StringId::ATTR_*` ids and stores plain booleans here; later passes
+/// map them to type-pool flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StructAttrs {
+    /// `#[derive(Eq)]` — synthesize memberwise `==` / `!=`.
+    pub derive_eq: bool,
+    /// `#[repr(C)]` — pin declaration-order field layout (today the
+    /// only layout; recorded so a reordering optimizer stays honest).
+    pub repr_c: bool,
+}
+
 /// A `struct` declaration (M9). All fields are `Copy` handles; the
 /// field list itself lives in the `struct_field_decls` side arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StructDef {
     pub name: Ident,
     pub fields: StructFieldDeclList,
+    pub attrs: StructAttrs,
 }
 
 /// A struct literal `Name{field=value, ...}` (M9). All fields are
@@ -886,14 +901,24 @@ impl Ast {
 
     /// `struct Name:` declaration (M9); the field list is copied
     /// into the `struct_field_decls` side arena in declaration order.
+    /// `attrs` carries the parsed `#[derive(Eq)]` / `#[repr(C)]` bits
+    /// (M9.1); pass `StructAttrs::default()` for an unattributed decl.
     pub fn struct_def(
         &mut self,
         name: Ident,
         fields: &[(StringId, TypeExpr)],
+        attrs: StructAttrs,
         span: SimpleSpan,
     ) -> StmtId {
         let fields = self.push_struct_field_decl_list(fields);
-        self.push_stmt(StmtKind::StructDef(StructDef { name, fields }), span)
+        self.push_stmt(
+            StmtKind::StructDef(StructDef {
+                name,
+                fields,
+                attrs,
+            }),
+            span,
+        )
     }
 
     /// Struct literal `Name{field=value, ...}` (M9); the field

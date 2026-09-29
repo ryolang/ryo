@@ -113,6 +113,8 @@ pub enum Token {
     RBracket,
     Comma,
     Dot,
+    /// `#[` — attribute-group open (M9.1).
+    HashBracket,
 
     // Newline + indentation tokens (post-processed by `indent`).
     Newline,
@@ -186,6 +188,7 @@ impl fmt::Display for Token {
             Self::RBracket => write!(f, "]"),
             Self::Comma => write!(f, ","),
             Self::Dot => write!(f, "."),
+            Self::HashBracket => write!(f, "#["),
             Self::Newline => write!(f, "<newline>"),
             Self::Indent => write!(f, "<indent>"),
             Self::Dedent => write!(f, "<dedent>"),
@@ -316,6 +319,10 @@ pub(crate) enum RawToken<'a> {
     Comma,
     #[token(".")]
     Dot,
+    /// `#[` — opens an attribute group (M9.1). Longest match keeps the
+    /// line-comment regex below from swallowing it.
+    #[token("#[")]
+    HashBracket,
 
     // CRLF line endings (the Windows-editor default) lex as the same
     // Newline token; the leading `\r` is part of the token's span so
@@ -327,10 +334,15 @@ pub(crate) enum RawToken<'a> {
     Indent,
     Dedent,
 
-    // `[^\r\n]` (not `[^\n]`): in a CRLF file the comment must stop
-    // before the `\r` too, so the `\r\n` stays inside the following
-    // Newline token's span — same as every other line ending.
-    #[regex(r"#[^\r\n]*", logos::skip, allow_greedy = true)]
+    // `#[...]` opens an attribute (M9.1), so the line-comment tail
+    // cannot start with `[`. `[^\r\n]` (not `[^\n]`): in a CRLF file
+    // the comment must stop before the `\r` too, so the `\r\n` stays
+    // inside the following Newline token's span — same as every other
+    // line ending. A bare `#` with nothing after it on the line stays
+    // a comment via the second pattern; longest match still routes
+    // `#[` to `HashBracket`.
+    #[regex(r"#[^\[\r\n][^\r\n]*", logos::skip, allow_greedy = true)]
+    #[token("#", logos::skip)]
     Comment,
 
     #[regex(r"[ \t\f]+", logos::skip)]
@@ -659,6 +671,7 @@ fn intern_token(
         RawToken::RBracket => Token::RBracket,
         RawToken::Comma => Token::Comma,
         RawToken::Dot => Token::Dot,
+        RawToken::HashBracket => Token::HashBracket,
 
         RawToken::Newline(_) => Token::Newline,
         RawToken::Indent => Token::Indent,
@@ -791,6 +804,49 @@ mod tests {
         match toks[0] {
             Token::Ident(_) => {}
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn lex_hash_bracket_attribute_tokens() {
+        // `#[` is the attribute-group open (M9.1), NOT a comment: the
+        // group lexes as punctuation + identifiers.
+        let (toks, pool) = lex_strings("#[derive(Eq)]");
+        assert_eq!(toks.len(), 6);
+        assert_eq!(toks[0], Token::HashBracket);
+        ident(&toks, 1, &pool, "derive");
+        assert_eq!(toks[2], Token::LParen);
+        ident(&toks, 3, &pool, "Eq");
+        assert_eq!(toks[4], Token::RParen);
+        assert_eq!(toks[5], Token::RBracket);
+    }
+
+    #[test]
+    fn lex_doc_comment_skipped() {
+        // `#:` doc comments keep lexing as skipped comments.
+        let (toks, _) = lex_strings("#: this is a doc comment");
+        assert!(toks.is_empty());
+    }
+
+    #[test]
+    fn lex_bare_hash_at_line_end_is_comment() {
+        // A `#` with nothing after it on the line stays a comment.
+        let (toks, _) = lex_strings("x = 5 #");
+        assert_eq!(toks.len(), 3);
+        assert_eq!(toks[2], Token::IntLit(5));
+    }
+
+    #[test]
+    fn lex_string_literal_with_hash_bracket_untouched() {
+        // String lexing already wins by longest match; `#` inside a
+        // literal must not open an attribute or a comment.
+        let (toks, pool) = lex_strings("x = \"a#[b\"");
+        assert_eq!(toks.len(), 3);
+        ident(&toks, 0, &pool, "x");
+        assert_eq!(toks[1], Token::Assign);
+        match toks[2] {
+            Token::StrLit(id) => assert_eq!(pool.str(id), "a#[b"),
+            ref t => panic!("expected StrLit, got {t:?}"),
         }
     }
 

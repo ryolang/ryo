@@ -314,6 +314,98 @@ fn struct_declaration_alongside_fn_main() {
 }
 
 #[test]
+fn parse_struct_with_derive_eq_attribute() {
+    let (ast, _pool) = lex_and_parse("#[derive(Eq)] struct P:\n\tx: int\n").unwrap();
+    let def = struct_def_stmt(&ast, only_stmt(&ast));
+    assert!(def.attrs.derive_eq);
+    assert!(!def.attrs.repr_c);
+}
+
+#[test]
+fn parse_struct_with_repr_c_attribute() {
+    let (ast, _pool) = lex_and_parse("#[repr(C)] struct P:\n\tx: int\n").unwrap();
+    let def = struct_def_stmt(&ast, only_stmt(&ast));
+    assert!(def.attrs.repr_c);
+    assert!(!def.attrs.derive_eq);
+}
+
+#[test]
+fn parse_struct_with_stacked_attributes() {
+    // Attribute groups stack on their own lines before `struct`.
+    let (ast, _pool) = lex_and_parse("#[derive(Eq)]\n#[repr(C)]\nstruct P:\n\tx: int\n").unwrap();
+    let def = struct_def_stmt(&ast, only_stmt(&ast));
+    assert!(def.attrs.derive_eq);
+    assert!(def.attrs.repr_c);
+}
+
+/// Assert the parse reports exactly one `UnknownAttribute` diagnostic
+/// whose name/args resolve (through the pool) to the given spelling.
+fn assert_unknown_attribute(errs: &[TestErr], pool: &InternPool, name: &str, args: &[&str]) {
+    assert_eq!(errs.len(), 1, "expected one diagnostic: {errs:?}");
+    match errs[0].reason() {
+        RichReason::Custom(ParseDiag::UnknownAttribute {
+            name: attr_name,
+            args: attr_args,
+        }) => {
+            assert_eq!(pool.str(*attr_name), name);
+            let got: Vec<&str> = attr_args.iter().map(|&a| pool.str(a)).collect();
+            assert_eq!(got, args);
+        }
+        other => panic!("expected UnknownAttribute, got {other:?}"),
+    }
+}
+
+#[test]
+fn unknown_derive_argument_is_rejected() {
+    let (_ok, _ast, errs, pool) =
+        lex_and_parse_recovering("#[derive(Bogus)] struct P:\n\tx: int\n");
+    assert_unknown_attribute(&errs, &pool, "derive", &["Bogus"]);
+}
+
+#[test]
+fn unknown_attribute_name_is_rejected() {
+    let (_ok, _ast, errs, pool) = lex_and_parse_recovering("#[bogus] struct P:\n\tx: int\n");
+    assert_unknown_attribute(&errs, &pool, "bogus", &[]);
+}
+
+#[test]
+fn derive_with_extra_arguments_is_rejected() {
+    // Only `derive(Eq)` is known for now: a second argument turns the
+    // whole group into the unknown-attribute diagnostic.
+    let (_ok, _ast, errs, pool) =
+        lex_and_parse_recovering("#[derive(Eq, Other)] struct P:\n\tx: int\n");
+    assert_unknown_attribute(&errs, &pool, "derive", &["Eq", "Other"]);
+}
+
+#[test]
+fn misplaced_attribute_before_fn_is_rejected() {
+    // Attributes parsed but no `struct` follows: the fn still parses,
+    // the attribute line recovers to an error statement.
+    let (ok, ast, errs, _pool) =
+        lex_and_parse_recovering("#[derive(Eq)]\nfn f():\n\tpass_through = 1\n");
+    assert!(ok, "recovery must produce a partial program");
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected exactly the misplaced-attribute diagnostic: {errs:?}"
+    );
+    match errs[0].reason() {
+        RichReason::Custom(pd @ ParseDiag::MisplacedAttribute) => {
+            // Headline only — the driver attaches the mandated
+            // "attributes are only supported on struct definitions"
+            // sentence as a structured note (pinned end-to-end in
+            // ryo-driver's pipeline tests).
+            assert!(
+                pd.to_string().contains("unexpected attribute"),
+                "diagnostic should headline the misplaced attribute, got: {pd}"
+            );
+        }
+        other => panic!("expected MisplacedAttribute, got {other:?}"),
+    }
+    assert_eq!(ast.top_level_stmts().len(), 2);
+}
+
+#[test]
 fn empty_struct_body_is_rejected() {
     let (_ok, _ast, errs, _pool) =
         lex_and_parse_recovering("struct Empty:\nfn main():\n\tpass_through = 1\n");

@@ -171,9 +171,22 @@ fn parse_source(
     for e in &errs {
         let span = chumsky::span::SimpleSpan::new((), e.span().start..e.span().end);
         match e.reason() {
-            // Parser-emitted custom errors carry their own `DiagCode`
-            // and a self-contained message — no pool rendering needed.
-            RichReason::Custom(pd) => sink.emit(Diag::error(span, pd.code(), pd.to_string())),
+            // Parser-emitted custom errors carry their own `DiagCode`.
+            // Most are self-contained; `UnknownAttribute` carries
+            // interned ids, so resolve its spelling through the pool
+            // here (same pattern as `rich_error_message` below), and
+            // `MisplacedAttribute` rides its mandated explanation as a
+            // structured note on the headline message.
+            RichReason::Custom(pd) => {
+                let diag = Diag::error(span, pd.code(), pd.message(pool));
+                let diag = match pd {
+                    ParseDiag::MisplacedAttribute => {
+                        diag.with_note(None, "attributes are only supported on struct definitions")
+                    }
+                    _ => diag,
+                };
+                sink.emit(diag);
+            }
             RichReason::ExpectedFound { .. } => sink.emit(Diag::error(
                 span,
                 DiagCode::ParseError,
@@ -375,6 +388,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::RangeArity => "E0105",
         DiagCode::EmptyBrackets => "E0106",
         DiagCode::EmptyStructBody => "E0107",
+        DiagCode::UnknownAttribute => "E0108",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -782,6 +796,7 @@ mod tests {
             (DiagCode::RangeArity, "E0105"),
             (DiagCode::EmptyBrackets, "E0106"),
             (DiagCode::EmptyStructBody, "E0107"),
+            (DiagCode::UnknownAttribute, "E0108"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -852,6 +867,7 @@ mod tests {
                 | DiagCode::RangeArity
                 | DiagCode::EmptyBrackets
                 | DiagCode::EmptyStructBody
+                | DiagCode::UnknownAttribute
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape
@@ -880,6 +896,61 @@ mod tests {
         assert!(
             !msg.contains("<id#"),
             "message must not leak opaque handle ids: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_attribute_diagnostic_names_the_attribute() {
+        // The parser is pool-less, so it reports the unknown attribute
+        // as interned ids; the driver must render the spelling (and
+        // the known set) through the pool.
+        let mut pool = InternPool::new();
+        let (_program, diags) = parse_source(
+            "#[derive(Bogus)] struct P:\n\tx: int\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("recovery should yield a partial program");
+        assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:?}");
+        let diag = &diags[0];
+        assert_eq!(diag.code, DiagCode::UnknownAttribute);
+        assert!(
+            diag.message.contains("derive(Bogus)"),
+            "message should name the attribute: {}",
+            diag.message
+        );
+        assert!(
+            diag.message.contains("derive(Eq), repr(C)"),
+            "message should list the known set: {}",
+            diag.message
+        );
+    }
+
+    #[test]
+    fn misplaced_attribute_diagnostic_carries_the_note() {
+        // The mandated explanation rides as a structured `DiagNote`
+        // under the headline message, not as message text.
+        let mut pool = InternPool::new();
+        let (_program, diags) = parse_source(
+            "#[derive(Eq)]\nfn f():\n\tpass_through = 1\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("recovery should yield a partial program");
+        assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:?}");
+        let diag = &diags[0];
+        assert_eq!(diag.code, DiagCode::UnknownAttribute);
+        assert!(
+            diag.message.contains("unexpected attribute"),
+            "headline should name the misplaced attribute: {}",
+            diag.message
+        );
+        assert!(
+            diag.notes
+                .iter()
+                .any(|n| n.message == "attributes are only supported on struct definitions"),
+            "note should explain that attributes need a struct definition: {:?}",
+            diag.notes
         );
     }
 
