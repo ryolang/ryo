@@ -27,7 +27,21 @@ fn zig_path() -> PathBuf {
     PathBuf::from(path_str)
 }
 
-/// Compiles a Ryo program and links it using the Zig linker.
+/// Which compiler performs the fixture re-link.
+///
+/// `Zig` is the default (matches the AOT pipeline's managed toolchain).
+/// `HostCc` is the host C compiler (`cc`): required for sanitizer
+/// re-links, because zig cc accepts `-fsanitize=address` without
+/// complaint but links no ASan runtime on any platform (verified on
+/// macOS and linux-x86_64/aarch64 — the symbols assertion in
+/// asan_smoke.rs exists because of this), while gcc/clang on a glibc
+/// host ship a working ASan.
+pub enum TestLinker {
+    Zig,
+    HostCc,
+}
+
+/// Compiles a Ryo program and re-links the object file.
 ///
 /// Returns the temporary directory (which must be kept alive by the caller)
 /// and the path to the compiled executable.
@@ -35,6 +49,25 @@ pub fn build_and_link(
     source: &str,
     name: &str,
     extra_link_args: &[&str],
+) -> (tempfile::TempDir, PathBuf) {
+    build_and_link_with(source, name, extra_link_args, TestLinker::Zig)
+}
+
+/// Same as [`build_and_link`] but re-links with the host C compiler —
+/// see [`TestLinker::HostCc`]. Used by the sanitizer smoke suites.
+pub fn build_and_link_host_cc(
+    source: &str,
+    name: &str,
+    extra_link_args: &[&str],
+) -> (tempfile::TempDir, PathBuf) {
+    build_and_link_with(source, name, extra_link_args, TestLinker::HostCc)
+}
+
+fn build_and_link_with(
+    source: &str,
+    name: &str,
+    extra_link_args: &[&str],
+    linker: TestLinker,
 ) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let src_path = tmp.path().join(format!("{name}.ryo"));
@@ -66,18 +99,23 @@ pub fn build_and_link(
         runtime_lib.display()
     );
 
-    let zig = zig_path();
-    let mut cmd = Command::new(&zig);
-    cmd.arg("cc");
+    let (compiler, compiler_name): (PathBuf, &str) = match linker {
+        TestLinker::Zig => (zig_path(), "zig cc"),
+        TestLinker::HostCc => (PathBuf::from("cc"), "host cc"),
+    };
+    let mut cmd = Command::new(&compiler);
+    if matches!(linker, TestLinker::Zig) {
+        cmd.arg("cc");
+    }
     cmd.args(extra_link_args);
     cmd.arg("-o");
     cmd.arg(&exe);
     cmd.arg(&obj);
     cmd.arg(&runtime_lib);
-    let out = cmd.output().expect("zig cc");
+    let out = cmd.output().expect("relink fixture");
     assert!(
         out.status.success(),
-        "zig cc failed with args {:?}:\nstdout: {}\nstderr: {}",
+        "{compiler_name} failed with args {:?}:\nstdout: {}\nstderr: {}",
         extra_link_args,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)

@@ -1,17 +1,17 @@
 //! ASan leak-detection smoke tests for M8.1c.
 //!
 //! Compiles representative .ryo programs, then re-links the object
-//! file with `-fsanitize=address` via zig cc and runs the binary.
-//! Any ASan-detected leak or memory error fails the test.
+//! file with `-fsanitize=address` via the host C compiler and runs the
+//! binary. Any ASan-detected leak or memory error fails the test.
 //!
-//! Linux only. The harness re-links natively (no `-target`), i.e.
-//! against the host glibc — ASan has no musl support, and the musl
-//! default in `linker.rs` does not apply here. On macOS the same
-//! invocation links no ASan runtime at all (verified: zero asan
-//! symbols in the produced binary), so the suite would pass vacuously;
-//! running it there is theater, and the symbol assertion below keeps
-//! the lane honest about that (same philosophy as the valgrind
-//! presence check).
+//! Linux only, and deliberately re-linked with `cc` rather than the
+//! managed Zig toolchain: zig cc accepts `-fsanitize=address` without
+//! complaint but links no ASan runtime on any platform (verified on
+//! macOS and linux-x86_64/aarch64 — the entire lane was vacuous from
+//! its introduction until the symbol assertion below), while the host
+//! gcc on the glibc CI runners ships a working ASan. The re-link is
+//! native (no `-target`), so the sanitizer binaries are glibc-linked;
+//! the musl AOT default never applies to this path.
 
 #![cfg(target_os = "linux")]
 
@@ -20,7 +20,7 @@ mod common;
 use std::process::Command;
 
 fn run_asan_smoke(source: &str, name: &str) {
-    let (_tmp, exe) = common::build_and_link(source, name, &["-fsanitize=address"]);
+    let (_tmp, exe) = common::build_and_link_host_cc(source, name, &["-fsanitize=address"]);
 
     // Liveness guard: a passing suite is only meaningful if the binary
     // actually carries the ASan runtime. `zig cc -fsanitize=address`
