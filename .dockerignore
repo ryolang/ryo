@@ -1,0 +1,21 @@
+# Build context for scripts/Dockerfile (scripts/run_linux_tests.sh).
+# The image has no COPY instructions, so the context only needs to be
+# small, not complete. Host `target/` holds macOS/Windows binaries —
+# useless and huge to the Linux build, which compiles fresh into its
+# own CARGO_TARGET_DIR (/tmp/target).
+
+target
+.git
+graphify-out
+.local
+.cache
+.claude
+.idea
+.vscode
+.zed
+.superpowers
+.ruff_cache
+.dirac-symbol-index
+.DS_Store
+bug_reports
+local
