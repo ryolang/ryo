@@ -61,6 +61,9 @@ enum Commands {
         emit: Vec<EmitKind>,
         /// Libc to link the produced binary against (Linux only; no
         /// effect on other hosts). Default: musl (static, portable).
+        /// Note: static musl binaries are opaque to Valgrind's leak
+        /// checker (its malloc is not intercepted — a leak check
+        /// reports zero allocations); use glibc when leak-checking.
         #[arg(long, value_enum, default_value = "musl")]
         link: pipeline::LinkMode,
     },

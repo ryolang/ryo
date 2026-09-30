@@ -10,7 +10,16 @@
 //! Cranelift output is not ASan-instrumented (no `__asan_init`, no
 //! `.preinit_array` entry, no stack-root reporting). Valgrind
 //! dynamically translates the binary at runtime so it sees every
-//! `malloc`/`free` call regardless of how the binary was compiled.
+//! `malloc`/`free` call regardless of how the binary was compiled —
+//! provided the binary is dynamically linked against a libc Valgrind
+//! intercepts. The harness relinks fixtures with native `zig cc`
+//! (dynamic glibc); a STATIC binary (e.g. `ryo build`'s default musl
+//! link) reports "0 allocs, 0 frees, no leaks" for any program, so
+//! leak-checking a static AOT binary by hand is vacuous. Fixtures
+//! whose correctness requires heap traffic run through
+//! `run_valgrind_smoke_allocating`, which additionally asserts
+//! Valgrind's `total heap usage:` summary shows non-zero allocations
+//! — the lane's heap-visibility guard.
 //!
 //! This harness is Linux-only — Valgrind on macOS lags upstream by
 //! several years and is unreliable on recent Darwin releases.
@@ -63,20 +72,59 @@ fn require_valgrind(name: &str) -> bool {
 }
 
 fn run_valgrind_smoke(source: &str, name: &str) {
+    let _ = run_valgrind_smoke_impl(source, name);
+}
+
+/// `run_valgrind_smoke` for fixtures whose correctness REQUIRES heap
+/// allocations to happen at runtime. Besides the leak check, parses
+/// Valgrind's `total heap usage:` summary and fails if it reports
+/// zero allocations — proof the fixture's heap activity actually
+/// reached the detector. Without this guard a link-mode change (e.g.
+/// a future static-libc link default) silently nullifies the whole
+/// lane while every test keeps passing: a binary whose malloc
+/// Valgrind cannot intercept reports "0 allocs, 0 frees, no leaks"
+/// for ANY program, and programs that only touch short literals never
+/// allocate at all (SSO inline cap is 23 bytes). The asan_smoke
+/// `__asan_init` liveness guard, adapted for a runtime detector.
+fn run_valgrind_smoke_allocating(source: &str, name: &str) {
+    let Some(output) = run_valgrind_smoke_impl(source, name) else {
+        return; // skipped (no valgrind / explicit opt-out)
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let allocs = stderr.lines().find_map(|l| {
+        let rest = l.split("total heap usage:").nth(1)?;
+        rest.split("allocs").next()?.trim().parse::<u64>().ok()
+    });
+    assert!(
+        allocs.is_some_and(|n| n > 0),
+        "{name}: Valgrind must report non-zero allocations for this \
+         fixture, but the `total heap usage:` summary is missing or \
+         zero — the leak check is vacuous for this binary. A \
+         static-libc link (e.g. musl) is invisible to Valgrind's \
+         malloc interception. stderr:\n{stderr}"
+    );
+}
+
+/// Build, link, and run a fixture under Valgrind; assert the leak
+/// check is clean. Returns the captured Valgrind output (`None` when
+/// the smoke is skipped), so [`run_valgrind_smoke_allocating`] can
+/// apply its visibility guard on top.
+fn run_valgrind_smoke_impl(source: &str, name: &str) -> Option<std::process::Output> {
     if !require_valgrind(name) {
-        return;
+        return None;
     }
 
     let (_tmp, exe) = common::build_and_link(source, name, &[]);
 
     // Step 3: run under Valgrind. `--error-exitcode=42` makes the
     // process exit non-zero if any leak (or other valgrind-detected
-    // error) is reported.
+    // error) is reported. `--quiet` is deliberately NOT passed: it
+    // suppresses the `total heap usage:` summary that
+    // `run_valgrind_smoke_allocating`'s visibility guard parses.
     let run = Command::new("valgrind")
         .arg("--leak-check=full")
         .arg("--errors-for-leak-kinds=definite,indirect")
         .arg("--error-exitcode=42")
-        .arg("--quiet")
         .arg(&exe)
         .output()
         .expect("run binary under valgrind");
@@ -86,6 +134,7 @@ fn run_valgrind_smoke(source: &str, name: &str) {
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
+    Some(run)
 }
 
 #[test]
@@ -235,7 +284,10 @@ fn valgrind_inout_str_reborrow() {
 
 #[test]
 fn valgrind_str_push_growth() {
-    run_valgrind_smoke(common::find_fixture("str_push_growth"), "str_push_growth");
+    // str_push regrows the buffer past the SSO cap — verified to
+    // perform a real heap allocation (the must-allocate guard checks
+    // Valgrind's usage summary).
+    run_valgrind_smoke_allocating(common::find_fixture("str_push_growth"), "str_push_growth");
 }
 
 #[test]
@@ -466,5 +518,21 @@ fn valgrind_struct_eq_bytes_field() {
     run_valgrind_smoke(
         common::find_fixture("struct_eq_bytes_field"),
         "struct_eq_bytes_field",
+    );
+}
+
+#[test]
+fn valgrind_shadow_binding_reassign_leak() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("shadow_binding_reassign_leak"),
+        "shadow_binding_reassign_leak",
+    );
+}
+
+#[test]
+fn valgrind_sibling_scope_binding_reassign() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("sibling_scope_binding_reassign"),
+        "sibling_scope_binding_reassign",
     );
 }

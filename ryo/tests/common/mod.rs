@@ -980,6 +980,51 @@ fn main():
 	print(\"\\n\")
 ",
     ),
+    (
+        // Same-name shadow, not-taken reassign path. The inner
+        // `mut x` is a different binding: its reassigns must not
+        // suppress the outer binding's cleanup. When they did (the
+        // free-suppression grouped reassigns by name), the outer
+        // buffer's only Free was dropped — the `if false` reassign
+        // never fires to release it — and the outer heap buffer
+        // leaked on every run. Heap strings via make(): programs
+        // that only touch short literals never allocate (SSO cap 23)
+        // and are leak-invisible under Valgrind.
+        "shadow_binding_reassign_leak",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut x = make(1)
+\tif false:
+\t\tx = make(2)
+\tprint(x)
+\tif true:
+\t\tmut x = make(3)
+\t\tx = make(4)
+\tprint(\"done\\n\")
+",
+    ),
+    (
+        // Sibling scopes (no shadowing): each arm declares its own
+        // `x`. An arm's reassigns must not enter the sibling arm's
+        // binding — name-keyed suppression dropped a sibling buffer.
+        "sibling_scope_binding_reassign",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tif true:
+\t\tmut x = make(1)
+\t\tx = make(2)
+\telse:
+\t\tmut x = make(3)
+\t\tx = make(4)
+\tprint(\"done\\n\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's
