@@ -22,6 +22,11 @@ jobs:
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
     steps:
+      - name: Checkout repository
+        # gh release list resolves the repo from the git remote — without a
+        # checkout the scheduled run dies with "not a git repository".
+        uses: actions/checkout@v6
+
       - name: Get commit behind latest dev release
         id: remote
         env:
