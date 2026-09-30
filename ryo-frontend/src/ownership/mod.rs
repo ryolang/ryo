@@ -132,6 +132,19 @@ pub(crate) fn param_idx(param_index: &HashMap<StringId, usize>, name: StringId) 
 pub(crate) struct Ownership {
     pub states: HashMap<Owner, OwnerState>,
     pub current_owner: HashMap<StringId, Owner>,
+    /// Name → the lexical BINDING the name currently resolves to:
+    /// the `TirRef` of the declaring `VarDecl` (unique per binding —
+    /// one name may denote several bindings via an explicit `mut`
+    /// shadow or sibling-scope declarations), or a param's virtual
+    /// ref for a param binding. The walk stamps every `Assign` with
+    /// its resolved binding into the sidecar's `assign_binding`
+    /// table; the free-scheduling passes group reassignments by that
+    /// identity so a shadow binding's reassigns cannot influence the
+    /// outer binding's cleanup. Non-monotone like `current_owner`:
+    /// snapshotted and restored with `BranchState` at branches and
+    /// loops, first-wins at merges (a shadow does not survive the
+    /// join unless every side took it).
+    pub binding_of_name: HashMap<StringId, TirRef>,
     /// Lazily-built [`program_order`] rank table, cached so
     /// `record_return_epilogue` does not rebuild the per-function Vec
     /// on every Return (loop convergence re-walks returns several
@@ -427,6 +440,10 @@ fn analyze_function(
         };
         own.states.insert(owner, state);
         own.current_owner.insert(param.name, owner);
+        // The param is the current binding for its name until a
+        // shadowing `VarDecl` installs a different one.
+        own.binding_of_name
+            .insert(param.name, TirRef::param(own.param_index[&param.name]));
         if param.mode == ParamMode::Inout {
             own.inout_str_params.insert(param.name);
         }
@@ -495,6 +512,9 @@ fn analyze_function(
         .flatten()
         .map(|t| Owner::Inst(*t))
         .collect();
+    // Reassign points per binding name, and owner-value → binding-name
+    // maps (see the helpers for what the suppressions below use them).
+    let (reassign_orders, decl_of_init, assign_value_of) = binding_value_maps(tir, sidecar, &order);
     let live_binding_owners: HashSet<Owner> = own.current_owner.values().copied().collect();
     // Owners that escape through an `inout str` param's write-back
     // pointer at function exit: whatever value is CURRENTLY bound to each
@@ -539,6 +559,42 @@ fn analyze_function(
                         &last_read_by_name,
                         &loop_carried_owners,
                     );
+                    // Anchor-order suppression: the owner is its
+                    // binding's current owner (the stale-target check
+                    // above did not fire — a loop merge's first-wins
+                    // reseat leaves the PRE-reassign owner seated), but
+                    // the binding is reassigned AFTER this anchor. The
+                    // reassign-Free then releases this exact buffer at
+                    // the first store that displaces it, and codegen's
+                    // binding-path redirect frees the slot's CURRENT
+                    // content wherever a later Free targets this owner —
+                    // so scheduling a last-use Free here double-frees.
+                    // Whatever the binding holds after its last
+                    // reassign is released by that value's own final
+                    // Free (last-use / dead-store / loop-exit), which
+                    // redirects to the same home slot. The reassign set
+                    // is the owner's OWN binding (its declaring
+                    // VarDecl): a same-named shadow's reassigns target
+                    // a different binding and home slot, so they must
+                    // not suppress this owner — when they did, the
+                    // outer buffer leaked on every path where the
+                    // outer reassign never ran.
+                    // A value belongs to exactly one binding's
+                    // home-slot lineage — either a declaring VarDecl's
+                    // init or a single reseating Assign's value, never
+                    // both — so the `.or()` below is unambiguous.
+                    debug_assert!(
+                        !(decl_of_init.contains_key(r) && assign_value_of.contains_key(r)),
+                        "owner {r:?} is both a VarDecl init and an Assign value"
+                    );
+                    if reassign_targets.contains(owner)
+                        && let Some(&binding) = decl_of_init.get(r).or(assign_value_of.get(r))
+                        && reassign_orders.get(&binding).is_some_and(|v| {
+                            v.iter().any(|&rr| anchored_after(tir, &order, rr, anchor))
+                        })
+                    {
+                        continue;
+                    }
                     sidecar.free_schedule.push(FreePoint {
                         after: anchor,
                         target: *r,
@@ -937,17 +993,40 @@ fn analyze_function(
     // owners that no earlier pass already covered.
     schedule_loop_exit_frees_in(tir, &own, sidecar, &body_stmts, None);
 
-    // Return epilogue: destroy locals still live at an early return.
-    // Runs LAST so every other Free pass has populated `free_schedule`
-    // and we can dedup against it — a value is skipped when another
-    // Free already fires on the return's path, or the dead-store drain
-    // owns it (its after-decl Free covers every path). Codegen emits
-    // due Frees before every `return_`, so anchoring at the return
-    // statement itself fires exactly on that exit path.
+    schedule_return_epilogue_frees(
+        tir,
+        &own,
+        sidecar,
+        &body_stmts,
+        &order,
+        &decl_of_init,
+        &assign_value_of,
+        &reassign_orders,
+    );
+}
+
+/// Return epilogue: destroy locals still live at an early return.
+/// Runs LAST so every other Free pass has populated `free_schedule`
+/// and we can dedup against it — a value is skipped when another
+/// Free already fires on the return's path, or the dead-store drain
+/// owns it (its after-decl Free covers every path). Codegen emits
+/// due Frees before every `return_`, so anchoring at the return
+/// statement itself fires exactly on that exit path.
+#[allow(clippy::too_many_arguments)]
+fn schedule_return_epilogue_frees(
+    tir: &Tir,
+    own: &Ownership,
+    sidecar: &mut FunctionSidecar,
+    body_stmts: &[TirRef],
+    order: &[u32],
+    decl_of_init: &HashMap<TirRef, TirRef>,
+    assign_value_of: &HashMap<TirRef, TirRef>,
+    reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
+) {
     let mut epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
     for (return_stmt, owners) in &own.return_epilogue {
         let mut on_path: HashSet<TirRef> = HashSet::new();
-        let _ = tir.collect_jump_path(&body_stmts, *return_stmt, &mut on_path);
+        let _ = tir.collect_jump_path(body_stmts, *return_stmt, &mut on_path);
         // A Free anchored after a branch CONTAINING the return never
         // fires on the return's path — the branch statement does not
         // complete before the return exits. Exclude ancestors from the
@@ -964,11 +1043,70 @@ fn analyze_function(
             if !epilogue_emitted.insert((*return_stmt, r)) {
                 continue;
             }
+            // A covering Free must fire on a path that REACHES this
+            // return. `collect_jump_path` adds a non-containing
+            // loop/branch's ENTIRE subtree to `on_path` under the
+            // "runs to completion" rule — but a Free anchored at a
+            // terminator jump inside that subtree (a `return`/`break`/
+            // `continue` of its own) never fires on this return's path:
+            // codegen cannot sweep after a terminator, so the anchor
+            // only services its own exit. Excluding terminator anchors
+            // keeps the covering sound; without it a loop-internal
+            // return-anchored Free suppresses this epilogue Free and
+            // codegen's leak-direction assert fires.
+            let fires_on_this_path = |after: TirRef| -> bool {
+                !matches!(
+                    tir.inst(after).tag,
+                    TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
+                )
+            };
             let covered = sidecar.free_schedule.iter().any(|fp| {
-                fp.target == r && on_path.contains(&fp.after) && !ancestors.contains(&fp.after)
+                fp.target == r
+                    && on_path.contains(&fp.after)
+                    && !ancestors.contains(&fp.after)
+                    && fires_on_this_path(fp.after)
             });
             if covered {
                 continue;
+            }
+            // Binding-covering: codegen's binding-path redirect lowers
+            // a Free for ANY of a binding's values to "free the home
+            // slot's CURRENT content". Two frees that redirect to the
+            // same slot — e.g. a loop-exit Free targeting the in-loop
+            // reseated value and this epilogue Free targeting the
+            // merge-seated pre-reassign owner — release the same
+            // runtime buffer twice. Covered when an on-path Free
+            // targets another value of the SAME binding and anchors
+            // after that binding's LAST reassign: whatever the binding
+            // holds at the return is exactly what that Free released.
+            // Identity is the declaring VarDecl (never the name): a
+            // same-named shadow is a different binding whose frees
+            // redirect to a different home slot.
+            let binding_of = |t: TirRef| -> Option<TirRef> {
+                decl_of_init.get(&t).or(assign_value_of.get(&t)).copied()
+            };
+            if let Some(binding) = binding_of(r) {
+                // Covered only when the covering Free anchors after
+                // EVERY reassign of the binding — otherwise the return
+                // may hold a value the covering Free did not release.
+                let binding_covered = sidecar.free_schedule.iter().any(|fp| {
+                    if !on_path.contains(&fp.after)
+                        || ancestors.contains(&fp.after)
+                        || !fires_on_this_path(fp.after)
+                    {
+                        return false;
+                    }
+                    if binding_of(fp.target) != Some(binding) {
+                        return false;
+                    }
+                    reassign_orders.get(&binding).is_some_and(|v| {
+                        !v.is_empty()
+                            && v.iter().all(|&rr| anchored_after(tir, order, fp.after, rr))
+                    })
+                });
+                if binding_covered {
+                    continue;
+                }
             }
             sidecar.free_schedule.push(FreePoint {
                 after: *return_stmt,
@@ -978,6 +1116,82 @@ fn analyze_function(
             });
         }
     }
+}
+
+/// Reassign points per BINDING, plus owner-value → binding maps (see
+/// the helpers for what the suppressions below use them). A binding is
+/// identified by its declaring `VarDecl`'s `TirRef` (or a param's
+/// virtual ref) — never by name: one name can denote several bindings
+/// (`mut` shadow, sibling scopes), and name-keyed grouping let a
+/// shadow's reassigns suppress the outer binding's cleanup.
+type BindingValueMaps = (
+    HashMap<TirRef, Vec<TirRef>>,
+    HashMap<TirRef, TirRef>,
+    HashMap<TirRef, TirRef>,
+);
+
+/// Maps built by [`binding_value_maps`]: reassign points per binding,
+/// VarDecl-init → declaring inst, and Assign-value → binding. The
+/// anchor-order suppression and the epilogue's binding-covering check
+/// need "is this binding reassigned AFTER some program point" (not just
+/// "reassigned somewhere") and "which binding's home slot aliases this
+/// owner's buffer" — a Free that lowers through codegen's binding-path
+/// redirect releases the slot's CURRENT content, so two frees resolving
+/// to the same binding can double-free even with distinct targets.
+/// Grouping is by lexical binding (the walk-recorded
+/// `sidecar.assign_binding` / the declaring VarDecl), NOT by name: a
+/// same-named shadow's reassigns must not enter the outer binding's
+/// reassign set — anchored after the outer owner's last use, they
+/// suppressed the outer owner's only Free and leaked the outer buffer
+/// on every path where the outer reassign did not run.
+fn binding_value_maps(tir: &Tir, sidecar: &FunctionSidecar, order: &[u32]) -> BindingValueMaps {
+    let mut reassign_orders: HashMap<TirRef, Vec<TirRef>> = HashMap::new();
+    for (slot, t) in sidecar.free_on_reassign.iter().enumerate() {
+        if t.is_none() {
+            continue;
+        }
+        let r = TirRef::from_raw(slot as u32);
+        if order[r.index()] == 0 {
+            continue;
+        }
+        let Some(binding) = sidecar.assign_binding[slot] else {
+            continue;
+        };
+        reassign_orders.entry(binding).or_default().push(r);
+    }
+    // VarDecl init value → the declaring instruction (that VarDecl IS
+    // the binding's identity).
+    let mut decl_of_init: HashMap<TirRef, TirRef> = HashMap::new();
+    // Assign value → the binding the Assign targeted (recorded by the
+    // walk), same purpose for reseated values.
+    let mut assign_value_of: HashMap<TirRef, TirRef> = HashMap::new();
+    for r in 1..tir.instructions.len() {
+        if tir.instructions[r].tag == TirTag::VarDecl {
+            let rr = TirRef::from_raw(r as u32);
+            let view = tir.var_decl_view(rr);
+            decl_of_init.entry(view.initializer).or_insert(rr);
+        } else if tir.instructions[r].tag == TirTag::Assign {
+            let Some(binding) = sidecar.assign_binding[r] else {
+                continue;
+            };
+            let view = tir.assign_view(TirRef::from_raw(r as u32));
+            assign_value_of.entry(view.value).or_insert(binding);
+        }
+    }
+    (reassign_orders, decl_of_init, assign_value_of)
+}
+
+/// True when `anchor` fires at or after `point` in control flow:
+/// a strictly-later program rank, or `anchor` is a loop/branch
+/// statement whose body CONTAINS `point` (containers rank before
+/// their bodies in `program_order`, so the rank test alone
+/// under-orders them).
+fn anchored_after(tir: &Tir, order: &[u32], anchor: TirRef, point: TirRef) -> bool {
+    order[anchor.index()] > order[point.index()]
+        || matches!(
+            tir.inst(anchor).tag,
+            TirTag::WhileLoop | TirTag::ForRange | TirTag::IfStmt
+        ) && tir.contains_reachable(anchor, point)
 }
 
 #[cfg(test)]

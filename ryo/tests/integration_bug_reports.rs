@@ -173,3 +173,185 @@ fn bug_e0020_return_accumulator_in_loop() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout, "[xxx\n");
 }
+
+const NATURAL_LOOP_STR_ACCUMULATOR: &str = "\
+struct Parsed:
+\ttext: str
+\tnext: int
+
+fn skip_ws(b: bytesview, at: int) -> int:
+\tmut p = at
+\twhile p < b.len():
+\t\tc = b[p]
+\t\tif c == 32 or c == 9 or c == 10 or c == 13:
+\t\t\tp += 1
+\t\telse:
+\t\t\treturn p
+\treturn p
+
+fn take_string(b: bytesview, s: str, at: int) -> Parsed:
+\tmut i = at + 1
+\tmut end = -1
+\twhile i < b.len() and end < 0:
+\t\tc = b[i]
+\t\tif c == 92:
+\t\t\ti += 2
+\t\telif c == 34:
+\t\t\tend = i + 1
+\t\telse:
+\t\t\ti += 1
+\tif end < 0:
+\t\treturn Parsed{text=\"<error>\", next=b.len()}
+\treturn Parsed{text=str(s[at:end]), next=end}
+
+fn take_number(b: bytesview, s: str, at: int) -> Parsed:
+\tmut i = at
+\tmut go = true
+\twhile go and i < b.len():
+\t\tc = b[i]
+\t\tif (c >= 48 and c <= 57) or c == 45 or c == 43 or c == 46 or c == 101 or c == 69:
+\t\t\ti += 1
+\t\telse:
+\t\t\tgo = false
+\treturn Parsed{text=str(s[at:i]), next=i}
+
+fn parse_array(b: bytesview, s: str, at: int) -> Parsed:
+\tmut p = skip_ws(b, at + 1)
+\tif p < b.len() and b[p] == 93:
+\t\treturn Parsed{text=\"[]\", next=p + 1}
+\tmut out = \"[\"
+\tmut child = parse_value(b, s, p)
+\tstr_push(&out, child.text)
+\tp = skip_ws(b, child.next)
+\twhile p < b.len() and b[p] == 44:
+\t\tstr_push(&out, \",\")
+\t\tchild = parse_value(b, s, p + 1)
+\t\tstr_push(&out, child.text)
+\t\tp = skip_ws(b, child.next)
+\tif p < b.len() and b[p] == 93:
+\t\tp += 1
+\t\tstr_push(&out, \"]\")
+\treturn Parsed{text=out, next=p}
+
+fn parse_object(b: bytesview, s: str, at: int) -> Parsed:
+\tmut p = skip_ws(b, at + 1)
+\tif p < b.len() and b[p] == 125:
+\t\treturn Parsed{text=\"{}\", next=p + 1}
+\tmut out = \"{\"
+\tmut first = true
+\tmut go = true
+\twhile go:
+\t\tif not first:
+\t\t\tstr_push(&out, \",\")
+\t\tfirst = false
+\t\tp = skip_ws(b, p)
+\t\tk = take_string(b, s, p)
+\t\tstr_push(&out, k.text)
+\t\tstr_push(&out, \":\")
+\t\tp = skip_ws(b, k.next)
+\t\tif p >= b.len() or b[p] != 58:
+\t\t\tgo = false
+\t\telse:
+\t\t\tchild = parse_value(b, s, p + 1)
+\t\t\tstr_push(&out, child.text)
+\t\t\tp = skip_ws(b, child.next)
+\t\t\tif p >= b.len():
+\t\t\t\tgo = false
+\t\t\telse:
+\t\t\t\tc = b[p]
+\t\t\t\tif c == 44:
+\t\t\t\t\tp += 1
+\t\t\t\telif c == 125:
+\t\t\t\t\tp += 1
+\t\t\t\t\tstr_push(&out, \"}\")
+\t\t\t\t\tgo = false
+\t\t\t\telse:
+\t\t\t\t\tgo = false
+\treturn Parsed{text=out, next=p}
+
+fn parse_value(b: bytesview, s: str, at: int) -> Parsed:
+\tp = skip_ws(b, at)
+\tif p >= b.len():
+\t\treturn Parsed{text=\"<error>\", next=p}
+\tc = b[p]
+\tif c == 34:
+\t\treturn take_string(b, s, p)
+\tif c == 123:
+\t\treturn parse_object(b, s, p)
+\tif c == 91:
+\t\treturn parse_array(b, s, p)
+\tif c == 116:
+\t\treturn Parsed{text=\"true\", next=p + 4}
+\tif c == 102:
+\t\treturn Parsed{text=\"false\", next=p + 5}
+\tif c == 110:
+\t\treturn Parsed{text=\"null\", next=p + 4}
+\tif c == 45 or (c >= 48 and c <= 57):
+\t\treturn take_number(b, s, p)
+\treturn Parsed{text=\"<error>\", next=p}
+
+fn render(doc: str) -> int:
+\tb = doc.as_bytes()
+\tr = parse_value(b, doc, 0)
+\treturn r.text.len()
+
+fn main():
+\t# Zero comma-iterations: the pre-fix build double-freed the
+\t# pre-loop child struct through codegen's binding-path redirect
+\t# (last-use Free anchored before the in-loop reassign).
+\tone = render(\"[{\\\"id\\\":0,\\\"name\\\":\\\"useruseruser\\\"}]\")
+\t# Two comma-iterations: exercises the reassign-free displacement
+\t# chain across loop back-edges.
+\tmut two = render(\"[{\\\"a\\\":1},{\\\"b\\\":2}]\")
+\ttwo += render(\"[{\\\"a\\\":1},{\\\"b\\\":2}]\")
+\tprint(int_to_str(one))
+\tprint(\" \")
+\tprint(int_to_str(two))
+\tprint(\"\\n\")
+";
+
+#[test]
+fn bug_natural_loop_str_accumulator() {
+    // Pre-fix: SIGABRT (exit 134) from a bad ryo_str_free — the
+    // loop-carried `child` binding's pre-reassign owner was freed by
+    // BOTH a last-use Free (anchored before the in-loop reassign) and
+    // the reassign-free, and the return epilogue double-freed the
+    // binding's final value through the same home slot.
+    let output = run_bug_report("natural_loop_str_accumulator", NATURAL_LOOP_STR_ACCUMULATOR);
+    assert_success(&output, "bug_natural_loop_str_accumulator");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "32 34\n");
+}
+
+const EARLY_RETURN_AFTER_LOOP_REASSIGN: &str = "\
+fn f(n: int) -> str:
+\tmut s = \"aaaaaaaaaaaaaaaa\"
+\tmut i = 0
+\twhile i < n:
+\t\ts = \"bbbbbbbbbbbbbbbb\"
+\t\ti += 1
+\tif n > 1:
+\t\treturn s
+\treturn s + \"!\"
+
+fn main():
+\tprint(f(3))
+\tprint(\"\\n\")
+";
+
+#[test]
+fn bug_early_return_after_loop_reassign() {
+    // Pre-fix (binding-covering without the terminator-anchor
+    // exclusion): the inner-return-anchored Free counted as covering
+    // the outer return's epilogue Free, codegen's leak-direction
+    // assert tripped ("frees anchored to unmaterialized instructions
+    // were dropped"), and the debug compiler aborted on this natural
+    // guard shape.
+    let output = run_bug_report(
+        "early_return_after_loop_reassign",
+        EARLY_RETURN_AFTER_LOOP_REASSIGN,
+    );
+    assert_success(&output, "bug_early_return_after_loop_reassign");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "bbbbbbbbbbbbbbbb\n");
+}

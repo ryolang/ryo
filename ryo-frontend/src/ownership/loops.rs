@@ -1252,6 +1252,15 @@ pub(crate) fn schedule_break_continue_frees(
         }
 
         if inside_loop.contains(&r) {
+            // The owner's producer must actually run before this jump
+            // on the jump's path: a break/continue placed BEFORE the
+            // producer in the loop body exits without the allocation
+            // ever happening. Freeing it would target a value codegen
+            // never materialized (struct: no local or cached repr;
+            // str: a garbage triple).
+            if !on_path.contains(&r) {
+                continue;
+            }
             // Inside-loop owner. Each iteration allocates fresh, so a
             // jump-anchored Free is safe — UNLESS the owner is
             // loop-carried (a pre-loop binding's value assigned inside

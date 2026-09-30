@@ -102,6 +102,21 @@ pub struct FunctionSidecar {
     /// (never param sentinels); `target` itself may be a param sentinel
     /// ref for `inout` params.
     pub free_on_reassign: Vec<Option<TirRef>>,
+    /// The lexical binding each `Assign` targets, recorded by the
+    /// ownership walk. Dense side table indexed by the `Assign`
+    /// instruction's `TirRef::index()`, sized like `free_on_reassign`.
+    /// `Some(decl)` at slot `r` means: the name the `Assign` at `r`
+    /// stores into resolved to the binding declared by `decl` — a
+    /// `VarDecl` instruction's `TirRef`, or a param's virtual ref
+    /// (`TirRef::param`) for param bindings. The free-scheduling passes
+    /// use it to group reassignments by BINDING rather than by name:
+    /// one name can denote several bindings (an explicit `mut` shadow or
+    /// sibling-scope declarations), and name-grouped suppression lets a
+    /// shadow binding's reassigns interfere with the outer binding's
+    /// cleanup (a same-name reassign anchored after an outer owner's
+    /// last use suppresses the outer owner's Free — leaking the outer
+    /// buffer on paths where the outer reassign never ran).
+    pub assign_binding: Vec<Option<TirRef>>,
     /// In-place concat selections (consuming-concat optimization).
     /// Dense side table indexed by the `Assign` instruction's
     /// `TirRef::index()`, sized like `free_on_reassign`. `Some(concat)`
@@ -147,6 +162,7 @@ impl FunctionSidecar {
             name,
             free_schedule: Vec::new(),
             free_on_reassign: vec![None; arena_len],
+            assign_binding: vec![None; arena_len],
             consumed_concat_lhs: vec![None; arena_len],
             field_free_on_reassign: vec![None; arena_len],
             if_branches: vec![None; arena_len],
