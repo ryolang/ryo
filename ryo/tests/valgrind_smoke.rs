@@ -91,24 +91,17 @@ fn run_valgrind_smoke_allocating(source: &str, name: &str) {
         return; // skipped (no valgrind / explicit opt-out)
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let allocs = stderr
-        .lines()
-        .find_map(|l| {
-            let rest = l.split("total heap usage:").nth(1)?;
-            rest.split("allocs").next()?.trim().parse::<u64>().ok()
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "{name}: Valgrind output has no 'total heap usage:' summary — \
-                 cannot prove heap visibility; stderr:\n{stderr}"
-            )
-        });
+    let allocs = stderr.lines().find_map(|l| {
+        let rest = l.split("total heap usage:").nth(1)?;
+        rest.split("allocs").next()?.trim().parse::<u64>().ok()
+    });
     assert!(
-        allocs > 0,
-        "{name}: Valgrind reported {allocs} allocations for a fixture that \
-         must allocate — the leak check is vacuous for this binary. A \
-         static-libc link (e.g. musl) is invisible to Valgrind's malloc \
-         interception; stderr:\n{stderr}"
+        allocs.is_some_and(|n| n > 0),
+        "{name}: Valgrind must report non-zero allocations for this \
+         fixture, but the `total heap usage:` summary is missing or \
+         zero — the leak check is vacuous for this binary. A \
+         static-libc link (e.g. musl) is invisible to Valgrind's \
+         malloc interception. stderr:\n{stderr}"
     );
 }
 
