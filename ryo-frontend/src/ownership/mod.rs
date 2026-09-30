@@ -579,6 +579,14 @@ fn analyze_function(
                     // not suppress this owner — when they did, the
                     // outer buffer leaked on every path where the
                     // outer reassign never ran.
+                    // A value belongs to exactly one binding's
+                    // home-slot lineage — either a declaring VarDecl's
+                    // init or a single reseating Assign's value, never
+                    // both — so the `.or()` below is unambiguous.
+                    debug_assert!(
+                        !(decl_of_init.contains_key(r) && assign_value_of.contains_key(r)),
+                        "owner {r:?} is both a VarDecl init and an Assign value"
+                    );
                     if reassign_targets.contains(owner)
                         && let Some(&binding) = decl_of_init.get(r).or(assign_value_of.get(r))
                         && reassign_orders.get(&binding).is_some_and(|v| {
