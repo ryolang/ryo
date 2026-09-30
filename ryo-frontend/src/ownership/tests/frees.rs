@@ -1818,6 +1818,97 @@ fn main():
 }
 
 #[test]
+fn shadowed_binding_reassign_does_not_suppress_outer_owner_free() {
+    // A same-named shadow is a DIFFERENT binding: its reassigns must
+    // not enter the outer binding's reassign set. Pre-fix the
+    // anchor-order suppression grouped reassigns by name, so the
+    // shadow's `x = "s1"` — anchored after the outer owner's last use —
+    // suppressed the outer owner's only surviving Free. The outer
+    // buffer then leaked on every run (the `if false:` reassign-Free
+    // never fires to release it).
+    let src = "fn main():\n\tmut x = \"outer_a\"\n\tif false:\n\t\tx = \"outer_b\"\n\tprint(x)\n\tif true:\n\t\tmut x = \"s0\"\n\t\tx = \"s1\"\n\tprint(\"end\")\n";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "expected no errors: {diags:?}"
+    );
+    let idx = tirs
+        .iter()
+        .position(|t| pool.str(t.name) == "main")
+        .unwrap();
+    let tir = &tirs[idx];
+    let sc = take_function_sidecar(&mut sidecar, idx);
+
+    let x = pool.intern_str("x");
+    let mut outer_init = None;
+    for r in 1..tir.instructions.len() {
+        if tir.instructions[r].tag == TirTag::VarDecl {
+            let v = tir.var_decl_view(TirRef::from_raw(r as u32));
+            if v.name == x && outer_init.is_none() {
+                outer_init = Some(v.initializer);
+            }
+        }
+    }
+    let outer_init = outer_init.expect("outer decl found");
+    // free_on_reassign covers the taken path only; a scheduled Free
+    // must cover the not-taken path. Pre-fix there was none.
+    assert!(
+        sc.free_schedule.iter().any(|fp| fp.target == outer_init),
+        "outer owner must have a scheduled Free (the shadow's reassign \
+         must not suppress it): {:?}",
+        sc.free_schedule
+    );
+}
+
+#[test]
+fn sibling_scope_bindings_do_not_share_reassign_sets() {
+    // Same failure mode without shadowing: two sibling scopes declare
+    // their own `x`. An arm's reassign must not count toward the other
+    // arm's binding suppression set.
+    let src = "fn main():\n\tif true:\n\t\tmut x = \"a1\"\n\t\tx = \"a2\"\n\telse:\n\t\tmut x = \"b1\"\n\t\tx = \"b2\"\n\tprint(1)\n";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "expected no errors: {diags:?}"
+    );
+    let idx = tirs
+        .iter()
+        .position(|t| pool.str(t.name) == "main")
+        .unwrap();
+    let tir = &tirs[idx];
+    let sc = take_function_sidecar(&mut sidecar, idx);
+
+    // Every arm value must be released exactly through the machinery
+    // (reassign-Free or a scheduled Free); in particular the b-arm's
+    // values must not be dropped from scheduling by the a-arm's
+    // same-name reassigns.
+    let x = pool.intern_str("x");
+    let mut values = Vec::new();
+    for r in 1..tir.instructions.len() {
+        if tir.instructions[r].tag == TirTag::VarDecl {
+            let v = tir.var_decl_view(TirRef::from_raw(r as u32));
+            if v.name == x {
+                values.push(v.initializer);
+            }
+        }
+    }
+    assert_eq!(values.len(), 2, "two sibling bindings of x");
+    for v in values {
+        let freed = sc.free_schedule.iter().any(|fp| fp.target == v)
+            || sc.free_on_reassign.contains(&Some(v));
+        assert!(
+            freed,
+            "sibling binding value {v:?} must be freed: {:?}",
+            sc.free_schedule
+        );
+    }
+}
+
+#[test]
 fn early_return_after_loop_carried_reassign_keeps_outer_epilogue_free() {
     // `while ...: s = g(); ...; if n > 1: return s; return s + "!"` —
     // a Free anchored at the INNER return must not count as covering

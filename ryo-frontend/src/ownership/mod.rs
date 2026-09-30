@@ -132,6 +132,19 @@ pub(crate) fn param_idx(param_index: &HashMap<StringId, usize>, name: StringId) 
 pub(crate) struct Ownership {
     pub states: HashMap<Owner, OwnerState>,
     pub current_owner: HashMap<StringId, Owner>,
+    /// Name → the lexical BINDING the name currently resolves to:
+    /// the `TirRef` of the declaring `VarDecl` (unique per binding —
+    /// one name may denote several bindings via an explicit `mut`
+    /// shadow or sibling-scope declarations), or a param's virtual
+    /// ref for a param binding. The walk stamps every `Assign` with
+    /// its resolved binding into the sidecar's `assign_binding`
+    /// table; the free-scheduling passes group reassignments by that
+    /// identity so a shadow binding's reassigns cannot influence the
+    /// outer binding's cleanup. Non-monotone like `current_owner`:
+    /// snapshotted and restored with `BranchState` at branches and
+    /// loops, first-wins at merges (a shadow does not survive the
+    /// join unless every side took it).
+    pub binding_of_name: HashMap<StringId, TirRef>,
     /// Lazily-built [`program_order`] rank table, cached so
     /// `record_return_epilogue` does not rebuild the per-function Vec
     /// on every Return (loop convergence re-walks returns several
@@ -427,6 +440,10 @@ fn analyze_function(
         };
         own.states.insert(owner, state);
         own.current_owner.insert(param.name, owner);
+        // The param is the current binding for its name until a
+        // shadowing `VarDecl` installs a different one.
+        own.binding_of_name
+            .insert(param.name, TirRef::param(own.param_index[&param.name]));
         if param.mode == ParamMode::Inout {
             own.inout_str_params.insert(param.name);
         }
@@ -555,10 +572,16 @@ fn analyze_function(
                     // Whatever the binding holds after its last
                     // reassign is released by that value's own final
                     // Free (last-use / dead-store / loop-exit), which
-                    // redirects to the same home slot.
+                    // redirects to the same home slot. The reassign set
+                    // is the owner's OWN binding (its declaring
+                    // VarDecl): a same-named shadow's reassigns target
+                    // a different binding and home slot, so they must
+                    // not suppress this owner — when they did, the
+                    // outer buffer leaked on every path where the
+                    // outer reassign never ran.
                     if reassign_targets.contains(owner)
-                        && let Some(&name) = decl_of_init.get(r).or(assign_value_of.get(r))
-                        && reassign_orders.get(&name).is_some_and(|v| {
+                        && let Some(&binding) = decl_of_init.get(r).or(assign_value_of.get(r))
+                        && reassign_orders.get(&binding).is_some_and(|v| {
                             v.iter().any(|&rr| anchored_after(tir, &order, rr, anchor))
                         })
                     {
@@ -988,9 +1011,9 @@ fn schedule_return_epilogue_frees(
     sidecar: &mut FunctionSidecar,
     body_stmts: &[TirRef],
     order: &[u32],
-    decl_of_init: &HashMap<TirRef, StringId>,
-    assign_value_of: &HashMap<TirRef, StringId>,
-    reassign_orders: &HashMap<StringId, Vec<TirRef>>,
+    decl_of_init: &HashMap<TirRef, TirRef>,
+    assign_value_of: &HashMap<TirRef, TirRef>,
+    reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
 ) {
     let mut epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
     for (return_stmt, owners) in &own.return_epilogue {
@@ -1048,10 +1071,13 @@ fn schedule_return_epilogue_frees(
             // targets another value of the SAME binding and anchors
             // after that binding's LAST reassign: whatever the binding
             // holds at the return is exactly what that Free released.
-            let name_of = |t: TirRef| -> Option<StringId> {
+            // Identity is the declaring VarDecl (never the name): a
+            // same-named shadow is a different binding whose frees
+            // redirect to a different home slot.
+            let binding_of = |t: TirRef| -> Option<TirRef> {
                 decl_of_init.get(&t).or(assign_value_of.get(&t)).copied()
             };
-            if let Some(name) = name_of(r) {
+            if let Some(binding) = binding_of(r) {
                 // Covered only when the covering Free anchors after
                 // EVERY reassign of the binding — otherwise the return
                 // may hold a value the covering Free did not release.
@@ -1062,10 +1088,10 @@ fn schedule_return_epilogue_frees(
                     {
                         return false;
                     }
-                    if name_of(fp.target) != Some(name) {
+                    if binding_of(fp.target) != Some(binding) {
                         return false;
                     }
-                    reassign_orders.get(&name).is_some_and(|v| {
+                    reassign_orders.get(&binding).is_some_and(|v| {
                         !v.is_empty()
                             && v.iter().all(|&rr| anchored_after(tir, order, fp.after, rr))
                     })
@@ -1084,24 +1110,34 @@ fn schedule_return_epilogue_frees(
     }
 }
 
-/// Maps built by [`binding_value_maps`]: reassign points per binding
-/// name, VarDecl-init → name, and Assign-value → name.
+/// Reassign points per BINDING, plus owner-value → binding maps (see
+/// the helpers for what the suppressions below use them). A binding is
+/// identified by its declaring `VarDecl`'s `TirRef` (or a param's
+/// virtual ref) — never by name: one name can denote several bindings
+/// (`mut` shadow, sibling scopes), and name-keyed grouping let a
+/// shadow's reassigns suppress the outer binding's cleanup.
 type BindingValueMaps = (
-    HashMap<StringId, Vec<TirRef>>,
-    HashMap<TirRef, StringId>,
-    HashMap<TirRef, StringId>,
+    HashMap<TirRef, Vec<TirRef>>,
+    HashMap<TirRef, TirRef>,
+    HashMap<TirRef, TirRef>,
 );
 
-/// Reassign points per binding name, plus owner-value → binding-name
-/// maps. The anchor-order suppression and the epilogue's
-/// binding-covering check need "is this binding reassigned AFTER some
-/// program point" (not just "reassigned somewhere") and "which binding's
-/// home slot aliases this owner's buffer" — a Free that lowers through
-/// codegen's binding-path redirect releases the slot's CURRENT content,
-/// so two frees resolving to the same binding can double-free even with
-/// distinct targets.
+/// Maps built by [`binding_value_maps`]: reassign points per binding,
+/// VarDecl-init → declaring inst, and Assign-value → binding. The
+/// anchor-order suppression and the epilogue's binding-covering check
+/// need "is this binding reassigned AFTER some program point" (not just
+/// "reassigned somewhere") and "which binding's home slot aliases this
+/// owner's buffer" — a Free that lowers through codegen's binding-path
+/// redirect releases the slot's CURRENT content, so two frees resolving
+/// to the same binding can double-free even with distinct targets.
+/// Grouping is by lexical binding (the walk-recorded
+/// `sidecar.assign_binding` / the declaring VarDecl), NOT by name: a
+/// same-named shadow's reassigns must not enter the outer binding's
+/// reassign set — anchored after the outer owner's last use, they
+/// suppressed the outer owner's only Free and leaked the outer buffer
+/// on every path where the outer reassign did not run.
 fn binding_value_maps(tir: &Tir, sidecar: &FunctionSidecar, order: &[u32]) -> BindingValueMaps {
-    let mut reassign_orders: HashMap<StringId, Vec<TirRef>> = HashMap::new();
+    let mut reassign_orders: HashMap<TirRef, Vec<TirRef>> = HashMap::new();
     for (slot, t) in sidecar.free_on_reassign.iter().enumerate() {
         if t.is_none() {
             continue;
@@ -1110,22 +1146,28 @@ fn binding_value_maps(tir: &Tir, sidecar: &FunctionSidecar, order: &[u32]) -> Bi
         if order[r.index()] == 0 {
             continue;
         }
-        reassign_orders
-            .entry(tir.assign_view(r).name)
-            .or_default()
-            .push(r);
+        let Some(binding) = sidecar.assign_binding[slot] else {
+            continue;
+        };
+        reassign_orders.entry(binding).or_default().push(r);
     }
-    // VarDecl init value → declared name.
-    let mut decl_of_init: HashMap<TirRef, StringId> = HashMap::new();
-    // Assign value → target name, same purpose for reseated values.
-    let mut assign_value_of: HashMap<TirRef, StringId> = HashMap::new();
+    // VarDecl init value → the declaring instruction (that VarDecl IS
+    // the binding's identity).
+    let mut decl_of_init: HashMap<TirRef, TirRef> = HashMap::new();
+    // Assign value → the binding the Assign targeted (recorded by the
+    // walk), same purpose for reseated values.
+    let mut assign_value_of: HashMap<TirRef, TirRef> = HashMap::new();
     for r in 1..tir.instructions.len() {
         if tir.instructions[r].tag == TirTag::VarDecl {
-            let view = tir.var_decl_view(TirRef::from_raw(r as u32));
-            decl_of_init.entry(view.initializer).or_insert(view.name);
+            let rr = TirRef::from_raw(r as u32);
+            let view = tir.var_decl_view(rr);
+            decl_of_init.entry(view.initializer).or_insert(rr);
         } else if tir.instructions[r].tag == TirTag::Assign {
+            let Some(binding) = sidecar.assign_binding[r] else {
+                continue;
+            };
             let view = tir.assign_view(TirRef::from_raw(r as u32));
-            assign_value_of.entry(view.value).or_insert(view.name);
+            assign_value_of.entry(view.value).or_insert(binding);
         }
     }
     (reassign_orders, decl_of_init, assign_value_of)

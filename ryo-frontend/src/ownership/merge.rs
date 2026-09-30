@@ -5,7 +5,7 @@ use ryo_core::tir::{Span, TirRef};
 use ryo_core::types::StringId;
 use std::collections::{HashMap, HashSet};
 
-/// The four non-monotone `Ownership` fields, extracted as a unit for
+/// The five non-monotone `Ownership` fields, extracted as a unit for
 /// per-arm / per-loop-pass snapshot and restore. Everything else in
 /// `Ownership` is monotone (arms accumulate it in place and never
 /// restore it) or walk-constant — see the field docs in `mod.rs`.
@@ -13,29 +13,32 @@ use std::collections::{HashMap, HashSet};
 pub(crate) struct BranchState {
     pub states: HashMap<Owner, OwnerState>,
     pub current_owner: HashMap<StringId, Owner>,
+    pub binding_of_name: HashMap<StringId, TirRef>,
     pub pending_dead_store: HashMap<Owner, (StringId, Span, TirRef)>,
     pub live_projections: HashMap<Owner, Vec<Owner>>,
 }
 
 impl Ownership {
-    /// Clone the four non-monotone fields — the single snapshot taken
+    /// Clone the five non-monotone fields — the single snapshot taken
     /// per branch point / loop.
     pub(crate) fn snapshot_branch(&self) -> BranchState {
         BranchState {
             states: self.states.clone(),
             current_owner: self.current_owner.clone(),
+            binding_of_name: self.binding_of_name.clone(),
             pending_dead_store: self.pending_dead_store.clone(),
             live_projections: self.live_projections.clone(),
         }
     }
 
-    /// Move the four non-monotone fields out (installing `restore`
+    /// Move the five non-monotone fields out (installing `restore`
     /// in their place, without cloning it) so a finished arm / loop
     /// pass can hand its end state to the merge.
     pub(crate) fn take_branch(&mut self, restore: BranchState) -> BranchState {
         BranchState {
             states: std::mem::replace(&mut self.states, restore.states),
             current_owner: std::mem::replace(&mut self.current_owner, restore.current_owner),
+            binding_of_name: std::mem::replace(&mut self.binding_of_name, restore.binding_of_name),
             pending_dead_store: std::mem::replace(
                 &mut self.pending_dead_store,
                 restore.pending_dead_store,
@@ -50,7 +53,7 @@ impl Ownership {
 
 impl Ownership {
     /// Conservatively merge per-branch lattices into `self`. On entry,
-    /// `self`'s four non-monotone fields hold the pre-branch state (the
+    /// `self`'s five non-monotone fields hold the pre-branch state (the
     /// caller's snapshot); each arm's end state merges into them in arm
     /// order. Per-field rules:
     /// - `states`: any branch `Moved` → `Moved`; otherwise first observed
@@ -106,6 +109,10 @@ impl Ownership {
         }
         for b in &branches {
             merge_current_owner_first_wins(&mut self.current_owner, &b.current_owner);
+            // Binding identity follows the same first-wins rule as
+            // `current_owner`: post-merge, a name resolves to the
+            // pre-branch binding unless every side re-bound it.
+            merge_name_map_first_wins(&mut self.binding_of_name, &b.binding_of_name);
             // P2 freeze ranges: union per root (the caller prunes
             // views whose last use is inside the branch).
             union_live_projections(&mut self.live_projections, &b.live_projections);
@@ -152,16 +159,25 @@ pub(crate) fn merge_states_any_moved_wins(
     }
 }
 
-/// First-write-wins merge of binding → owner entries: `dst` keeps
-/// its existing entries, entries present only in `src` are copied
-/// over. Shared by `Ownership::merge_branches` and
-/// `merge_non_monotone`.
+/// First-write-wins merge of name-keyed entries: `dst` keeps its
+/// existing entries, entries present only in `src` are copied over.
+/// Shared by `Ownership::merge_branches` and `merge_non_monotone` for
+/// both `current_owner` and `binding_of_name` (same join semantics:
+/// a branch-local rebinding does not survive the join).
 pub(crate) fn merge_current_owner_first_wins(
     dst: &mut HashMap<StringId, Owner>,
     src: &HashMap<StringId, Owner>,
 ) {
-    for (&name, &owner) in src {
-        dst.entry(name).or_insert(owner);
+    merge_name_map_first_wins(dst, src);
+}
+
+/// The value-type-generic half of [`merge_current_owner_first_wins`].
+pub(crate) fn merge_name_map_first_wins<V: Copy>(
+    dst: &mut HashMap<StringId, V>,
+    src: &HashMap<StringId, V>,
+) {
+    for (&name, &value) in src {
+        dst.entry(name).or_insert(value);
     }
 }
 
@@ -386,6 +402,10 @@ pub(crate) fn merge_non_monotone(
     let mut merged_current_owner = entry.current_owner;
     merge_current_owner_first_wins(&mut merged_current_owner, &after.current_owner);
 
+    // 2b. Merge binding_of_name: first-wins, same rule.
+    let mut merged_binding_of_name = entry.binding_of_name;
+    merge_name_map_first_wins(&mut merged_binding_of_name, &after.binding_of_name);
+
     // 3. Merge pending_dead_store: pre-existing keys intersect; local keys union.
     let mut merged_pending_dead_store = entry.pending_dead_store;
     merge_pending_dead_store(&mut merged_pending_dead_store, &[&after.pending_dead_store]);
@@ -398,6 +418,7 @@ pub(crate) fn merge_non_monotone(
 
     own.states = merged_states;
     own.current_owner = merged_current_owner;
+    own.binding_of_name = merged_binding_of_name;
     own.pending_dead_store = merged_pending_dead_store;
     own.live_projections = merged_live_projections;
 }

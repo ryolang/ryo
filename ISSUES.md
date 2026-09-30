@@ -28,6 +28,14 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ## 🟡 Correctness / Hygiene
 
+### I-199 — Same-name shadow + taken branch reseat: invalid free and leak (heap strings)
+
+**Files:** `ryo-frontend/src/ownership/` (schedule), `ryo-backend/src/codegen/` (scoped-home restore + binding-path redirect)
+
+**Summary:** Composition of three ingredients — an outer `mut x` reassigned inside a TAKEN `if` arm (branch-divergent reseat), a same-named shadow binding (`mut x`) in a later scope, and heap-materialized strings — produces an Invalid free of the reseated buffer plus a 64-byte definite leak of the shadow's final value. Verified under Valgrind (glibc-linked, Linux): 4 allocs / 4 frees, invalid free of the make(2) buffer (released once through the binding's own release and again through the outer owner's restored last-use Free — both redirect to the same home-slot content after the merge), and the shadow's make(4) never released. On macOS the same program usually exits 0 silently but aborts (SIGABRT, status code None) under heap layouts where the allocator catches the invalid free — observed when JIT-run from the integration-test harness. Control shapes are clean: the taken reassign WITHOUT the shadow scope (2/2 frees, 0 errors), and the shadow scope with a NOT-taken reassign (3/3 frees — the valgrind fixture `shadow_binding_reassign_leak`). Surfaced by the heap-materializing fixtures added with the I-198 gate work; the durable local repro with full evidence is `bug_reports/bug_shadow_taken_arm_double_free.ryo` (bug_reports/ is gitignored; the program is also inlined in this entry so it is self-contained). Failure modes by tree state: main leaks (no invalid free); the natural-loop PR state leaks via the suppressed Free; with the binding-identity fix the double-free becomes visible. Suspect area: codegen's scoped-home restore for the shadow vs the redirect targets of the outer binding's frees resolving through the shared slot on the taken path. Distinct from I-198 (gate coverage) — this is a compiler defect, not a test gap.
+
+**Resolution:** Reproduce with the valgrind fixture (add `shadow_binding_reassign_taken_arm` to RYO_FIXTURES as a must-allocate smoke test), then fix the scoped-home/redirect interaction in codegen or the schedule; the bug report file documents the control shapes that must stay clean.
+
 ### I-197 — Elif-chain + heap-value reassignment in every arm fails to compile (Cranelift verifier error)
 
 **Files:** `ryo-frontend/src/ownership/` (free anchoring across elif merges), `ryo-backend/src/codegen/` (Return-operand-subtree anchors that never fire)

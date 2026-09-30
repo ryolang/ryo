@@ -155,6 +155,11 @@ pub(crate) fn analyze_var_decl(
     let init = view.initializer;
     let init_ty = tir.inst(init).ty;
     visit_expr(tir, pool, own, sink, sidecar, init);
+    // The VarDecl IS a fresh lexical binding (possibly shadowing an
+    // outer same-named one): record it as the binding `name` resolves
+    // to from here until scope exit. The initializer was evaluated in
+    // the outer scope, so this happens after `visit_expr(init)`.
+    own.binding_of_name.insert(view.name, r);
     if needs_tracking(init_ty, pool) {
         let span = tir.span(r);
         let consumed_name = consumed_binding_name(tir, init);
@@ -201,6 +206,12 @@ pub(crate) fn analyze_assign(
     r: TirRef,
 ) {
     let view = tir.assign_view(r);
+    // Stamp the Assign with the lexical binding its name resolved to
+    // (declaring VarDecl / param ref), BEFORE any early return below:
+    // the free-scheduling passes group reassignments by this identity
+    // so a same-named shadow's reassigns cannot suppress the outer
+    // binding's cleanup.
+    sidecar.assign_binding[r.index()] = own.binding_of_name.get(&view.name).copied();
     let value_ty = tir.inst(view.value).ty;
     visit_expr(tir, pool, own, sink, sidecar, view.value);
     if needs_tracking(value_ty, pool) {
