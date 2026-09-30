@@ -1266,6 +1266,24 @@ impl<M: Module> Codegen<M> {
             // `&s` (lowered to Var(s)); arg 1 is the suffix str.
             let s_ref = view.args[0];
             let suffix_ref = view.args[1];
+            // A field place (`str_push(&s.field, ...)`) already lives in
+            // the root struct's stack slot — pass its address directly
+            // (same invariant as the generic inout call path): the
+            // runtime mutates the field in place, so no snapshot, spill,
+            // or reload is needed.
+            if matches!(ctx.tir.inst(s_ref).data, TirData::FieldAccess { .. }) {
+                let addr = Self::inout_pointee_addr(builder, ctx, s_ref)?;
+                let (suf_ptr, suf_len) = Self::eval_str_or_view_parts(builder, ctx, suffix_ref)?;
+                let func_ref = Self::declare_runtime_fn(
+                    ctx,
+                    builder,
+                    "__ryo_str_push",
+                    &[ctx.int_type, ctx.int_type, types::I64],
+                    &[],
+                )?;
+                builder.ins().call(func_ref, &[addr, suf_ptr, suf_len]);
+                return Ok(builder.ins().iconst(ctx.int_type, 0));
+            }
             let home_addr =
                 Self::local_name_of(ctx, s_ref).and_then(|n| Self::fat_home_addr(builder, ctx, n));
             let s_repr = Self::eval_inst_fat(builder, ctx, s_ref)?;
@@ -1339,6 +1357,22 @@ impl<M: Module> Codegen<M> {
             // The 0-255 range check is runtime-side (M8.4.2 stopgap).
             let b_ref = view.args[0];
             let x_ref = view.args[1];
+            // Field place (`bytes_push(&b.field, ...)`) — see the
+            // str_push arm: pass the field's address in the root
+            // struct's slot directly; the runtime mutates in place.
+            if matches!(ctx.tir.inst(b_ref).data, TirData::FieldAccess { .. }) {
+                let addr = Self::inout_pointee_addr(builder, ctx, b_ref)?;
+                let x_val = Self::eval_inst(builder, ctx, x_ref)?;
+                let func_ref = Self::declare_runtime_fn(
+                    ctx,
+                    builder,
+                    "__ryo_bytes_push",
+                    &[ctx.int_type, types::I64],
+                    &[],
+                )?;
+                builder.ins().call(func_ref, &[addr, x_val]);
+                return Ok(builder.ins().iconst(ctx.int_type, 0));
+            }
             let home_addr =
                 Self::local_name_of(ctx, b_ref).and_then(|n| Self::fat_home_addr(builder, ctx, n));
             let b_repr = Self::eval_inst_fat(builder, ctx, b_ref)?;
