@@ -355,3 +355,44 @@ fn bug_early_return_after_loop_reassign() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout, "bbbbbbbbbbbbbbbb\n");
 }
+
+const STR_PUSH_STRUCT_FIELD_NOOP: &str = "\
+struct Rec:
+\ttext: str
+\tbuf: bytes
+\tn: int
+
+fn bump(inout s: str):
+\tstr_push(&s, \"!\")
+
+fn main():
+\tmut a = Rec{text=\"x\", buf=\"\".to_bytes(), n=0}
+\tbump(&a.text)
+\tprint(a.text)
+\tprint(\"\\n\")
+
+\tmut r = Rec{text=\"y\", buf=\"\".to_bytes(), n=0}
+\tstr_push(&r.text, \"?\")
+\tprint(r.text)
+\tprint(\"\\n\")
+
+\tbytes_push(&r.buf, 65)
+\tbytes_push(&r.buf, 66)
+\tprint(int_to_str(r.buf.len()))
+\tprint(\"\\n\")
+";
+
+#[test]
+fn bug_str_push_struct_field_noop() {
+    // Pre-fix: the str_push/bytes_push builtin intercepts assumed arg 0
+    // lowered to Var(name), so a FieldAccess place was evaluated into a
+    // snapshot triple spilled to a temp slot; the runtime mutated the
+    // temp, and the reload was gated on local_name_of(field), which is
+    // None — the write-back was silently dropped (compiles, exit 0,
+    // prints "x!\ny\n0"). Post-fix the field's address in the root
+    // struct's slot is passed directly, like the generic inout path.
+    let output = run_bug_report("str_push_struct_field_noop", STR_PUSH_STRUCT_FIELD_NOOP);
+    assert_success(&output, "bug_str_push_struct_field_noop");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "x!\ny?\n2\n");
+}
