@@ -19,13 +19,20 @@ jobs:
   check:
     name: Check for code changes
     runs-on: ubuntu-latest
+    # Read-only: the check job only lists releases and emits a boolean
+    # decision. Publication authority stays in the release job below.
+    permissions:
+      contents: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
     steps:
       - name: Checkout repository
         # gh release list resolves the repo from the git remote — without a
         # checkout the scheduled run dies with "not a git repository".
+        # No git auth is needed beyond the remote, so don't persist the token.
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Get commit behind latest dev release
         id: remote
