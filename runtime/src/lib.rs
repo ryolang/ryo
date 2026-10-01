@@ -17,18 +17,34 @@ extern crate std;
 use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 
+const STDIN_FD: c_int = 0;
 const STDOUT_FD: c_int = 1;
 const STDERR_FD: c_int = 2;
 
 #[cfg(not(windows))]
 unsafe extern "C" {
     fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+    fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
 }
 
 #[cfg(windows)]
 unsafe extern "C" {
     fn _write(fd: c_int, buf: *const c_void, count: u32) -> c_int;
+    fn _read(fd: c_int, buf: *mut c_void, count: u32) -> c_int;
     fn _setmode(fd: c_int, mode: c_int) -> c_int;
+}
+
+// Thread-local errno accessors for the EINTR retry in `read_line_from`.
+// Windows references neither: the CRT's `_read` reports no EINTR, so
+// any negative result there is a genuine error.
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn __error() -> *mut c_int;
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+unsafe extern "C" {
+    fn __errno_location() -> *mut c_int;
 }
 
 /// `_O_BINARY` — no `\n` → `\r\n` translation on write.
@@ -96,6 +112,47 @@ fn write_all(fd: c_int, mut ptr: *const u8, mut len: usize) {
         // stays within (or at most one past) the caller's buffer.
         ptr = unsafe { ptr.add(n as usize) };
         len -= n as usize;
+    }
+}
+
+/// Thin wrapper over the C `read`/`_read` for one fd.
+/// Returns the byte count read, 0 at EOF, or < 0 on error.
+fn os_read(fd: c_int, ptr: *mut u8, len: usize) -> isize {
+    #[cfg(not(windows))]
+    // SAFETY: caller guarantees ptr is writable for len bytes; the call
+    // does not retain the buffer.
+    unsafe {
+        read(fd, ptr.cast::<c_void>(), len)
+    }
+    #[cfg(windows)]
+    // SAFETY: same. `_read` takes a u32 count; a single read chunk is
+    // clamped below 4 GiB by construction (io_read_line's growth loop
+    // starts at 128 bytes).
+    unsafe {
+        _read(fd, ptr.cast::<c_void>(), len.min(u32::MAX as usize) as u32) as isize
+    }
+}
+
+/// EINTR (`errno == 4`) — `read` interrupted by a signal with no data
+/// transferred: retry rather than fail. Only referenced on non-Windows
+/// builds; see the errno externs above.
+#[cfg(not(windows))]
+const EINTR: c_int = 4;
+
+/// The calling thread's current errno value.
+#[cfg(not(windows))]
+fn errno() -> c_int {
+    #[cfg(target_os = "macos")]
+    // SAFETY: `__error` always returns a valid pointer to the calling
+    // thread's errno slot; the load reads its current value.
+    unsafe {
+        *__error()
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    // SAFETY: `__errno_location` always returns a valid pointer to the
+    // calling thread's errno slot; the load reads its current value.
+    unsafe {
+        *__errno_location()
     }
 }
 
@@ -309,6 +366,111 @@ pub unsafe extern "C" fn ryo_getenv(key_ptr: *const u8, key_len: u64, out: *mut 
     // bytes. The copy is what makes returning safe — the CRT retains
     // ownership of the environ storage itself.
     unsafe { write_str_slot(out, bytes) };
+}
+
+// ---------- io_read_line (M9.2) ----------
+
+/// Read one line from `fd` into a growable heap buffer, then copy it
+/// into `out` as a tagged slot (inline when it fits, else a fresh heap
+/// buffer — the transient accumulation buffer is freed on every exit
+/// path). The `\n` terminates the line and is stripped; EOF with an
+/// empty buffer yields "" (EOF is not an error), and EOF after partial
+/// bytes returns that final unterminated line as-is. A `read` error
+/// panics (stderr + exit 101, the `ryo_panic` contract) after freeing
+/// the buffer; `EINTR` retries instead of failing. No line-length cap:
+/// the buffer doubles until the newline or EOF arrives.
+///
+/// # Safety
+/// `out` points to a valid, uninitialized `RyoStrFat`; `fd` is open and
+/// readable for the duration of the call.
+pub(crate) unsafe fn read_line_from(fd: c_int, out: *mut RyoStrFat) {
+    // Initial accumulation-buffer cap; also the growth quantum
+    // (doubling). One typical line fits without a single realloc.
+    const CHUNK: usize = 128;
+    let mut cap: usize = CHUNK;
+    // SAFETY: CHUNK is nonzero; the null check below handles OOM.
+    let mut buf = unsafe { c_malloc(cap) } as *mut u8;
+    if buf.is_null() {
+        oom_abort();
+    }
+    let mut len: usize = 0;
+    loop {
+        if len == cap {
+            // Grow: double the buffer (checked — never wraps toward a
+            // cap smaller than `len`).
+            cap = cap.checked_mul(2).unwrap_or_else(|| overflow_abort());
+            // SAFETY: buf came from c_malloc/c_realloc with the old
+            // cap; on success realloc copies the old `len` bytes and
+            // frees the old buffer. On failure the old buffer is still
+            // live: free it before the abort so OOM paths leak nothing.
+            let grown = unsafe { c_realloc(buf as *mut c_void, cap) } as *mut u8;
+            if grown.is_null() {
+                // SAFETY: buf is the still-live old allocation.
+                unsafe { c_free(buf as *mut c_void) };
+                oom_abort();
+            }
+            buf = grown;
+        }
+        // SAFETY: buf points to `cap` writable bytes and len < cap here
+        // (the growth above restores the invariant), so buf+len has
+        // cap-len bytes of room.
+        let n = os_read(fd, unsafe { buf.add(len) }, cap - len);
+        if n > 0 {
+            let start = len;
+            len += n as usize;
+            // SAFETY: the read just initialized n bytes at buf+start.
+            let fresh = unsafe { core::slice::from_raw_parts(buf.add(start), n as usize) };
+            if let Some(pos) = fresh.iter().position(|&b| b == b'\n') {
+                let line_len = start + pos;
+                // SAFETY: out is a valid out-slot; buf holds line_len
+                // initialized bytes (write_str_slot copies them out).
+                unsafe { write_str_slot(out, core::slice::from_raw_parts(buf, line_len)) };
+                // SAFETY: buf is this loop's own allocation.
+                unsafe { c_free(buf as *mut c_void) };
+                return;
+            }
+        } else if n == 0 {
+            // EOF: whatever accumulated (possibly nothing) is the line
+            // — an unterminated final line is returned as-is.
+            // SAFETY: out is a valid out-slot; buf holds `len`
+            // initialized bytes. buf is non-null and valid even when
+            // len == 0, so the empty slice is sound.
+            unsafe { write_str_slot(out, core::slice::from_raw_parts(buf, len)) };
+            // SAFETY: buf is this loop's own allocation.
+            unsafe { c_free(buf as *mut c_void) };
+            return;
+        } else {
+            #[cfg(not(windows))]
+            {
+                // EINTR: a signal arrived mid-read with no data —
+                // retry the read. Any other errno is a genuine error.
+                if errno() == EINTR {
+                    continue;
+                }
+            }
+            // SAFETY: buf is this loop's own allocation; free it before
+            // the diverging panic so the error path leaks nothing.
+            unsafe { c_free(buf as *mut c_void) };
+            panic_msg(b"io_read_line: read error\n");
+        }
+    }
+}
+
+/// Runtime backing for `io_read_line() -> str` (M9.2): read one line
+/// from stdin (fd 0) and write it into `out` as a tagged slot. The
+/// trailing `\n` is stripped; EOF before any byte yields "". The fd is
+/// parameterized on the crate-visible `read_line_from` so runtime tests
+/// can drive it with temp files.
+/// TODO(M13.6): interim call form — replaced by
+/// `io.read_line() -> IoError!str`.
+///
+/// # Safety
+/// `out` points to a valid, uninitialized `RyoStrFat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_read_line(out: *mut RyoStrFat) {
+    // SAFETY: forwarded contract — `out` is a valid out-slot (the
+    // caller's guarantee), and fd 0 is the process's own stdin.
+    unsafe { read_line_from(STDIN_FD, out) }
 }
 
 #[cfg(feature = "staticlib")]

@@ -174,6 +174,25 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
+        // TODO(M13.6): interim call form — replaced by
+        // `io.read_line() -> IoError!str`. `io_read_line()` takes no
+        // arguments; the runtime maps EOF to the empty string (the
+        // M13.6 `IoError!str` shape will distinguish real errors).
+        n if n == ids.io_read_line => {
+            if !view.args.is_empty() {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "io_read_line() takes exactly 0 arguments, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
         n if n == ids.int_to_str => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(

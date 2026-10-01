@@ -984,6 +984,110 @@ fn test_free_inline_str_is_noop() {
     assert!(is_inline(slot.cap)); // slot untouched
 }
 
+// ---------- io_read_line (M9.2) ----------
+
+/// Write `content` to a fresh temp file and rewind it. Returns the open
+/// file (its fd readable from the start) and the path for cleanup.
+/// `tempfile` is intentionally not a dev-dependency: a pid + counter
+/// name in the system temp dir is enough, and Miri's isolated FS
+/// already permits TMPDIR.
+///
+/// Windows is excluded: `_read` needs a CRT file descriptor, which a
+/// std `File` does not expose (`as_raw_handle` is a HANDLE).
+#[cfg(not(windows))]
+fn temp_file_with(content: &[u8]) -> (std::fs::File, std::path::PathBuf) {
+    use std::io::{Seek, SeekFrom, Write};
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "ryo_rt_read_line_{}_{}.tmp",
+        std::process::id(),
+        N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    ));
+    // OpenOptions, not File::create: the fd must be readable —
+    // File::create is write-only (O_WRONLY) and read would fail EBADF.
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .expect("create temp file");
+    f.write_all(content).expect("write temp file");
+    f.seek(SeekFrom::Start(0)).expect("rewind temp file");
+    (f, path)
+}
+
+/// A line terminated by `\n` comes back without it — and the read
+/// stops at the newline, leaving later bytes unread.
+#[cfg(not(windows))]
+#[test]
+fn read_line_strips_trailing_newline() {
+    use std::os::unix::io::AsRawFd;
+
+    let (file, path) = temp_file_with(b"hello\nrest");
+    let mut slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    // SAFETY: valid out-slot; the file's fd is open and readable.
+    unsafe { read_line_from(file.as_raw_fd(), &mut slot) };
+    assert!(is_inline(slot.cap));
+    assert_eq!(slot_content(&slot), b"hello");
+    drop(file);
+    std::fs::remove_file(&path).expect("remove temp file");
+}
+
+/// EOF after partial bytes returns the final unterminated line as-is.
+/// 300 bytes with no '\n' forces several `read` calls and buffer
+/// growth past the 128-byte initial cap — the result must still come
+/// back complete (heap slot, freed here).
+#[cfg(not(windows))]
+#[test]
+fn read_line_unterminated_final_line_is_returned_as_is() {
+    use std::os::unix::io::AsRawFd;
+
+    let content = [b'x'; 300];
+    let (file, path) = temp_file_with(&content);
+    let mut slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    // SAFETY: valid out-slot; the file's fd is open and readable.
+    unsafe { read_line_from(file.as_raw_fd(), &mut slot) };
+    assert!(!is_inline(slot.cap));
+    assert_eq!(slot.len, 300);
+    assert_eq!(slot_content(&slot), &content);
+    // SAFETY: heap slot produced above; cap is its allocation size.
+    unsafe { ryo_str_free(slot.ptr, slot.cap) };
+    drop(file);
+    std::fs::remove_file(&path).expect("remove temp file");
+}
+
+/// EOF before any byte yields the empty slot — the io_read_line
+/// contract maps EOF to "", not to an error.
+#[cfg(not(windows))]
+#[test]
+fn read_line_empty_file_yields_empty_slot() {
+    use std::os::unix::io::AsRawFd;
+
+    let (file, path) = temp_file_with(b"");
+    let mut slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    // SAFETY: valid out-slot; the file's fd is open at EOF, so the
+    // first read returns 0.
+    unsafe { read_line_from(file.as_raw_fd(), &mut slot) };
+    assert!(is_inline(slot.cap));
+    assert_eq!(inline_len(slot.cap), 0);
+    assert_eq!(slot_content(&slot), b"");
+    drop(file);
+    std::fs::remove_file(&path).expect("remove temp file");
+}
+
 /// Combined env test (M9.2): `std::env::set_var`/`remove_var` mutate the
 /// process-wide environment, which parallel cargo-test threads could
 /// observe mid-mutation, so every ryo_getenv case lives in this ONE test

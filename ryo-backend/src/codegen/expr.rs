@@ -850,6 +850,15 @@ impl<M: Module> Codegen<M> {
                         out_slot,
                     )?;
                     ValueRepr::Str { ptr, len, cap }
+                } else if ids.io_read_line == Some(name_id) {
+                    // TODO(M13.6): interim call form — replaced by
+                    // `io.read_line() -> IoError!str`. `io_read_line()`
+                    // reads one line from stdin (fd 0) into the tagged
+                    // str slot: the trailing `\n` is stripped, EOF maps
+                    // to "". Arg-less — the out-slot is the call's only
+                    // parameter, passed last (the `process_env` pattern).
+                    let (ptr, len, cap) = Self::emit_io_read_line(builder, ctx, out_slot)?;
+                    ValueRepr::Str { ptr, len, cap }
                 } else {
                     // User call — emit_call handles sret for fat-returning
                     // calls and caches the triple. Called directly
