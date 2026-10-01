@@ -82,6 +82,14 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         max_output_len: None,
     },
     BuiltinFunction {
+        // TODO(M24): interim call form — replaced by `io.eprint`.
+        name: "io_eprint",
+        return_ty: BuiltinReturn::Void,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[],
+        max_output_len: None,
+    },
+    BuiltinFunction {
         name: "int_to_str",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],

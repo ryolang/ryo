@@ -1262,6 +1262,11 @@ impl<M: Module> Codegen<M> {
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
+        // TODO(M24): interim call form — replaced by `io.eprint`.
+        if name_str == "io_eprint" {
+            return Self::emit_io_eprint(builder, ctx, r);
+        }
+
         if name_str == "str_push" {
             // str_push(&s, suffix): spill s's fat pointer to a 24-byte
             // slot, call __ryo_str_push(slot_addr, suffix_ptr, suffix_len),
@@ -1660,6 +1665,29 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(dead);
         builder.switch_to_block(dead);
         Ok(builder.ins().iconst(types::I8, 0))
+    }
+
+    /// `io_eprint(arg)` → `ryo_eprint(ptr, len: u64)` — the exact twin
+    /// of the `print` arm above, writing fd 2 (stderr) instead of fd 1.
+    /// Sema has already rewritten bytes/scalar/struct arguments to their
+    /// str reprs, so the argument is either repr here.
+    /// TODO(M24): interim call form — replaced by `io.eprint`.
+    fn emit_io_eprint(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<Value, String> {
+        let view = ctx.tir.call_view(r);
+        debug_assert_eq!(
+            view.args.len(),
+            1,
+            "sema should reject io_eprint() arity errors"
+        );
+        let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+        let eprint_ref =
+            Self::declare_runtime_fn(ctx, builder, "ryo_eprint", &[ctx.int_type, types::I64], &[])?;
+        builder.ins().call(eprint_ref, &[ptr, len]);
+        Ok(builder.ins().iconst(ctx.int_type, 0))
     }
 
     /// Consuming-concat fast path: `s = s + suffix` where the ownership

@@ -1948,6 +1948,21 @@ fn w0003_materialize_arg_to_print_warns() {
 }
 
 #[test]
+fn w0003_materialize_arg_to_io_eprint_warns() {
+    // W0003 case A, builtin shape: `io_eprint` (M9.2) has full `print`
+    // type parity — it accepts `strview` arguments directly, so
+    // materializing first is a redundant allocation.
+    let (_tirs, diags, _pool) =
+        run_with_errors("fn main():\n\ts: str = \"hi\"\n\tio_eprint(str(s[0:1]))\n");
+    assert_eq!(
+        count_code(&diags, DiagCode::RedundantMaterialize),
+        1,
+        "expected exactly one W0003; got {:?}",
+        diags
+    );
+}
+
+#[test]
 fn w0003_materialize_suffix_to_str_push_warns() {
     // W0003 case A, builtin shape: str_push's suffix is `strview` —
     // materializing it first is a redundant allocation. (Source and

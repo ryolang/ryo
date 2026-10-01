@@ -98,3 +98,77 @@ fn exit_expr_position_rejected() {
         stderr
     );
 }
+
+// ============================================================================
+// Milestone 9.2: io_eprint CLI intrinsic
+// ============================================================================
+
+#[test]
+fn stderr_not_stdout_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tio_eprint(\"err\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "stderr_not_stdout.ryo", code);
+
+    let output = run_ryo_command(&["run", "stderr_not_stdout.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "io_eprint program should exit 0. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout should be empty, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "err\n",
+        "io_eprint must write to stderr, not stdout"
+    );
+}
+
+#[test]
+fn eprint_strview_jit() {
+    // A strview argument projects the owner's buffer directly —
+    // io_eprint(s[0:2]) writes the viewed bytes with no copy.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\ts = \"hello\"\n\tio_eprint(s[0:2])\n";
+    let test_file = create_test_file(temp_dir.path(), "eprint_strview.ryo", code);
+
+    let output = run_ryo_command(&["run", "eprint_strview.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "io_eprint(strview) should exit 0. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "he",
+        "io_eprint of a strview should write the viewed bytes"
+    );
+}
+
+#[test]
+fn eprint_no_auto_newline_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tio_eprint(\"a\")\n\tio_eprint(\"b\")\n";
+    let test_file = create_test_file(temp_dir.path(), "eprint_no_auto_newline.ryo", code);
+
+    let output = run_ryo_command(&["run", "eprint_no_auto_newline.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "io_eprint program should exit 0. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "ab",
+        "io_eprint appends no newline — consecutive calls concatenate"
+    );
+}

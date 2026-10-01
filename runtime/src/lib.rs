@@ -108,6 +108,24 @@ pub unsafe extern "C" fn ryo_print(ptr: *const u8, len: u64) {
     write_all(STDOUT_FD, ptr, len as usize);
 }
 
+/// Runtime backing for the `io_eprint` builtin (M9.2): write the
+/// viewed bytes to stderr. No added newline, same contract as
+/// `ryo_print`. TODO(M24): interim call form — replaced by `io.eprint`.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes (or be null/dangling when
+/// `len == 0`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_eprint(ptr: *const u8, len: u64) {
+    if len == 0 {
+        return;
+    }
+    if ptr.is_null() {
+        null_abort();
+    }
+    write_all(STDERR_FD, ptr, len as usize);
+}
+
 /// Runtime backing for `__ryo_panic` (panic/assert): write the
 /// sema-formatted message to stderr and exit 101.
 ///

@@ -50,54 +50,11 @@ pub(crate) fn emit_builtin_call(
         }
     }
     match name {
-        "print" => {
-            if !check_print_args(sema, fcx, view, arg_tirs, span) {
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-            // M8.4.2: print(bytes/bytesview) renders the escaped repr —
-            // rewrite to `print(__ryo_bytes_repr(arg))` at the TIR level
-            // so the repr temp is a normal ownership-tracked str
-            // producer (a codegen-synthesized temp would never be freed).
-            // M9.1: print(int/float/bool/struct) renders the Debug
-            // repr — rewrite to `print(DebugRepr(arg))` for the same
-            // reason (DebugRepr borrows its operand; its str result is
-            // a normal owned temp).
-            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
-            let owned_args;
-            let effective: &[TirRef] = match sema.pool.kind(arg_ty) {
-                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => {
-                    let callee = sema.pool.intern_str("__ryo_bytes_repr");
-                    let repr = fcx.builder.call(
-                        callee,
-                        &[arg_tirs[0]],
-                        &[ParamMode::Borrow],
-                        sema.pool.str_(),
-                        span,
-                    );
-                    owned_args = vec![repr];
-                    &owned_args
-                }
-                TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Struct => {
-                    let repr = fcx.builder.push_typed(
-                        TirTag::DebugRepr,
-                        TirData::UnOp(arg_tirs[0]),
-                        sema.pool.str_(),
-                        span,
-                    );
-                    owned_args = vec![repr];
-                    &owned_args
-                }
-                _ => arg_tirs,
-            };
-            // W0003 case A: `print` takes `strview`/`bytesview`
-            // directly. Warn on the pre-rewrite argument: for str
-            // `effective == arg_tirs` anyway, and for bytes the
-            // rewritten repr call is str-typed, which would never
-            // match the `bytes` owner type.
-            warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], "print");
-            let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, effective, &modes, ret_ty, span)
-        }
+        "print" => emit_print_like(sema, fcx, view, arg_tirs, &modes, span, builtin),
+        // M9.2: `io_eprint` is the exact twin of `print` — same
+        // accepted types, same routing, stderr instead of stdout.
+        // TODO(M24): interim call form — replaced by `io.eprint`.
+        "io_eprint" => emit_print_like(sema, fcx, view, arg_tirs, &modes, span, builtin),
         "panic" => emit_panic(sema, fcx, view, span),
         // TODO(M24): interim call form — replaced by `process.exit`.
         "process_exit" => {
@@ -657,12 +614,16 @@ pub(crate) fn check_print_args(
     view: &CallView,
     arg_tirs: &[TirRef],
     span: Span,
+    builtin: &str,
 ) -> bool {
     if view.args.len() != 1 {
         sema.sink.emit(Diag::error(
             span,
             DiagCode::ArityMismatch,
-            format!("print() takes exactly 1 argument, got {}", view.args.len()),
+            format!(
+                "{builtin}() takes exactly 1 argument, got {}",
+                view.args.len()
+            ),
         ));
         return false;
     }
@@ -684,13 +645,73 @@ pub(crate) fn check_print_args(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
             format!(
-                "print() argument must be str, strview, bytes, bytesview, int, float, bool, or struct, got {}",
+                "{builtin}() argument must be str, strview, bytes, bytesview, int, float, bool, or struct, got {}",
                 sema.pool.display(arg_ty)
             ),
         ));
         return false;
     }
     true
+}
+
+/// Shared body of the `print` / `io_eprint` builtin arms (M9.2 makes
+/// `io_eprint` the exact twin of `print`, stderr instead of stdout):
+/// full type parity via [`check_print_args`], then the same TIR-level
+/// rewrites. M8.4.2: bytes/bytesview renders the escaped repr — rewrite
+/// to `<builtin>(__ryo_bytes_repr(arg))` so the repr temp is a normal
+/// ownership-tracked str producer (a codegen-synthesized temp would
+/// never be freed). M9.1: int/float/bool/struct renders the Debug repr —
+/// rewrite to `<builtin>(DebugRepr(arg))` for the same reason
+/// (DebugRepr borrows its operand; its str result is a normal owned
+/// temp).
+fn emit_print_like(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    modes: &[ParamMode],
+    span: Span,
+    builtin: &'static crate::builtins::BuiltinFunction,
+) -> TirRef {
+    let name = sema.pool.str(view.name).to_string();
+    if !check_print_args(sema, fcx, view, arg_tirs, span, &name) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+    let owned_args;
+    let effective: &[TirRef] = match sema.pool.kind(arg_ty) {
+        TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => {
+            let callee = sema.pool.intern_str("__ryo_bytes_repr");
+            let repr = fcx.builder.call(
+                callee,
+                &[arg_tirs[0]],
+                &[ParamMode::Borrow],
+                sema.pool.str_(),
+                span,
+            );
+            owned_args = vec![repr];
+            &owned_args
+        }
+        TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Struct => {
+            let repr = fcx.builder.push_typed(
+                TirTag::DebugRepr,
+                TirData::UnOp(arg_tirs[0]),
+                sema.pool.str_(),
+                span,
+            );
+            owned_args = vec![repr];
+            &owned_args
+        }
+        _ => arg_tirs,
+    };
+    // W0003 case A: `print`/`io_eprint` take `strview`/`bytesview`
+    // directly. Warn on the pre-rewrite argument: for str
+    // `effective == arg_tirs` anyway, and for bytes the rewritten repr
+    // call is str-typed, which would never match the `bytes` owner
+    // type.
+    warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], &name);
+    let ret_ty = builtin.return_type(sema.pool);
+    fcx.builder.call(view.name, effective, modes, ret_ty, span)
 }
 
 // Column counts unicode codepoints, not bytes — matches editor conventions.
