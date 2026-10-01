@@ -94,8 +94,9 @@ pub(crate) const CODEGEN_INLINED_BUILTINS: &[&str] = &["bool_to_str"];
 /// Interned-name ids resolved once per compilation (in `compile_all`)
 /// so per-function and per-instruction name dispatch — `main`
 /// detection, the `__ryo_panic` / `print` / `io_eprint` /
-/// `process_exit` call-form routing, the fat-producer slot-out chain,
-/// the codegen-inlined builtin exclusion, the push mutation scan — is
+/// `process_exit` / `process_argc` call-form routing, the fat-producer
+/// slot-out chain (including `process_argv`), the codegen-inlined
+/// builtin exclusion, the push mutation scan — is
 /// a `StringId` equality check instead of `pool.str(id) == "..."`.
 /// Each entry is `None` when the program never mentioned the name (the
 /// pool only holds what earlier passes interned); a `None` id simply
@@ -107,6 +108,8 @@ pub(crate) struct CodegenNameIds {
     print: Option<StringId>,
     io_eprint: Option<StringId>,
     process_exit: Option<StringId>,
+    process_argc: Option<StringId>,
+    process_argv: Option<StringId>,
     bool_to_str: Option<StringId>,
     int_to_str: Option<StringId>,
     float_to_str: Option<StringId>,
@@ -127,6 +130,8 @@ impl CodegenNameIds {
             print: pool.find_str("print"),
             io_eprint: pool.find_str("io_eprint"),
             process_exit: pool.find_str("process_exit"),
+            process_argc: pool.find_str("process_argc"),
+            process_argv: pool.find_str("process_argv"),
             bool_to_str: pool.find_str("bool_to_str"),
             int_to_str: pool.find_str("int_to_str"),
             float_to_str: pool.find_str("float_to_str"),

@@ -623,9 +623,11 @@ fn generate_and_display_ir(
 /// `--emit` additionally prints IR sections in pipeline order (AST
 /// after parse; UIR/TIR after lowering; CLIF after codegen, before
 /// execution), rendered identically to `ryo ir`. `program_args` are
-/// forwarded to the program verbatim and published to the runtime's
-/// argv storage by the entry shim before `main`'s first instruction;
-/// callers with no program arguments pass `&[]`.
+/// forwarded to the program and published to the runtime's argv storage
+/// by the entry shim before `main`'s first instruction; a synthetic
+/// argv[0] — the source file path — is prepended so argc/argv match the
+/// AOT binary's C-runtime table (argv[0] = invocation path, included in
+/// the count). Callers with no program arguments pass `&[]`.
 pub fn run_file(
     file: &Path,
     emit: &[EmitKind],
@@ -663,8 +665,11 @@ pub fn run_file(
         print!("{clif}");
     }
 
+    let mut argv = Vec::with_capacity(program_args.len() + 1);
+    argv.push(file.to_string_lossy().into_owned());
+    argv.extend_from_slice(program_args);
     codegen
-        .execute(main_id, program_args)
+        .execute(main_id, &argv)
         .map_err(CompilerError::ExecutionError)
 }
 

@@ -789,6 +789,14 @@ impl<M: Module> Codegen<M> {
                         out_slot,
                     )?;
                     ValueRepr::Str { ptr, len, cap }
+                } else if ids.process_argv == Some(name_id) {
+                    // TODO(M22): interim call form — replaced by
+                    // `process.args`. `process_argv(i)` copies argv[i]
+                    // into a tagged str slot (SSO inline or fresh heap
+                    // buffer); out-of-range panics in the runtime.
+                    let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
+                    let (ptr, len, cap) = Self::emit_process_argv(builder, ctx, arg_val, out_slot)?;
+                    ValueRepr::Str { ptr, len, cap }
                 } else {
                     // User call — emit_call handles sret for fat-returning
                     // calls and caches the triple. Called directly
@@ -1274,6 +1282,11 @@ impl<M: Module> Codegen<M> {
             return Self::emit_io_eprint(builder, ctx, r);
         }
 
+        // TODO(M22): interim call form — replaced by `process.args`.
+        if ids.process_argc == Some(name_id) {
+            return Self::emit_process_argc(builder, ctx, r);
+        }
+
         if ids.str_push == Some(name_id) {
             // str_push(&s, suffix): spill s's fat pointer to a 24-byte
             // slot, call __ryo_str_push(slot_addr, suffix_ptr, suffix_len),
@@ -1672,6 +1685,70 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(dead);
         builder.switch_to_block(dead);
         Ok(builder.ins().iconst(types::I8, 0))
+    }
+
+    /// `process_argc() -> int` → `ryo_process_argc() -> i64`, the
+    /// runtime's argv count (argv[0] included, matching the C
+    /// convention). TODO(M22): interim call form — replaced by
+    /// `process.args`.
+    fn emit_process_argc(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<Value, String> {
+        let view = ctx.tir.call_view(r);
+        debug_assert!(
+            view.args.is_empty(),
+            "sema should reject process_argc() arity errors"
+        );
+        let argc_ref =
+            Self::declare_runtime_fn(ctx, builder, "ryo_process_argc", &[], &[ctx.int_type])?;
+        let call = builder.ins().call(argc_ref, &[]);
+        let results = builder.inst_results(call);
+        Ok(results[0])
+    }
+
+    /// `process_argv(i: int) -> str` → `ryo_process_argv(i: u64, out:
+    /// *mut RyoStrFat)`. NOTE the argument order: unlike every other
+    /// slot-out producer (`out` first — see `emit_slot_out_call`), the
+    /// runtime's argv accessor takes the index first (its runtime tests
+    /// call `ryo_process_argv(3, &mut slot)`), so this hand-rolls the
+    /// slot-out instead of going through `emit_slot_out_call`. The
+    /// runtime copies argv[i] into the tagged slot (SSO inline or fresh
+    /// heap buffer); out-of-range panics there. TODO(M22): interim call
+    /// form — replaced by `process.args`.
+    fn emit_process_argv(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        index: Value,
+        out_slot: Option<StackSlot>,
+    ) -> Result<(Value, Value, Value), String> {
+        let slot = out_slot.unwrap_or_else(|| {
+            builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                STR_SLOT_SIZE,
+                3,
+            ))
+        });
+        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        let func_ref = Self::declare_runtime_fn(
+            ctx,
+            builder,
+            "ryo_process_argv",
+            &[ctx.int_type, ctx.int_type],
+            &[],
+        )?;
+        builder.ins().call(func_ref, &[index, addr]);
+        let ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 8);
+        let cap = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 16);
+        Ok((ptr, len, cap))
     }
 
     /// `io_eprint(arg)` → `ryo_eprint(ptr, len: u64)` — the exact twin

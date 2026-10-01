@@ -36,6 +36,7 @@ pub struct BuiltinFunction {
 enum BuiltinReturn {
     Void,
     Never,
+    Int,
     Str,
     Bytes,
 }
@@ -45,6 +46,7 @@ impl BuiltinFunction {
         match self.return_ty {
             BuiltinReturn::Void => pool.void(),
             BuiltinReturn::Never => pool.never(),
+            BuiltinReturn::Int => pool.int(),
             BuiltinReturn::Str => pool.str_(),
             BuiltinReturn::Bytes => pool.bytes(),
         }
@@ -67,6 +69,8 @@ pub struct BuiltinNameIds {
     pub(crate) panic: StringId,
     pub(crate) process_exit: StringId,
     pub(crate) io_eprint: StringId,
+    pub(crate) process_argc: StringId,
+    pub(crate) process_argv: StringId,
     pub(crate) int_to_str: StringId,
     pub(crate) float_to_str: StringId,
     pub(crate) bool_to_str: StringId,
@@ -90,6 +94,8 @@ impl BuiltinNameIds {
             panic: pool.intern_str("panic"),
             process_exit: pool.intern_str("process_exit"),
             io_eprint: pool.intern_str("io_eprint"),
+            process_argc: pool.intern_str("process_argc"),
+            process_argv: pool.intern_str("process_argv"),
             int_to_str: pool.intern_str("int_to_str"),
             float_to_str: pool.intern_str("float_to_str"),
             bool_to_str: pool.intern_str("bool_to_str"),
@@ -138,6 +144,22 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         // TODO(M24): interim call form — replaced by `io.eprint`.
         name: "io_eprint",
         return_ty: BuiltinReturn::Void,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[],
+        max_output_len: None,
+    },
+    BuiltinFunction {
+        // TODO(M22): interim call form — replaced by `process.args`.
+        name: "process_argc",
+        return_ty: BuiltinReturn::Int,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[],
+        max_output_len: None,
+    },
+    BuiltinFunction {
+        // TODO(M22): interim call form — replaced by `process.args`.
+        name: "process_argv",
+        return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
         view_borrow_params: &[],
         max_output_len: None,

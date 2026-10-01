@@ -116,11 +116,12 @@ impl Codegen<JITModule> {
         Ok(Self::from_module(JITModule::new(jit_builder)))
     }
 
-    /// Enter the compiled `main`, forwarding `argv` (the program
-    /// arguments collected after the source file — argv[0]-less, unlike
-    /// a C runtime's table) to the runtime's argv storage via the
-    /// entry shim codegen emits at `main`'s entry. Returns the shim's
-    /// int exit word.
+    /// Enter the compiled `main`, forwarding `argv` (already including
+    /// argv[0] — `pipeline::run_file` prepends the source file path, so
+    /// the JIT table matches the argc/argv convention a C runtime hands
+    /// an AOT binary) to the runtime's argv storage via the entry shim
+    /// codegen emits at `main`'s entry. Returns the shim's int exit
+    /// word.
     pub fn execute(mut self, main_id: FuncId, argv: &[String]) -> Result<i32, String> {
         self.module
             .finalize_definitions()

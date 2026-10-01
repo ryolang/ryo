@@ -174,6 +174,126 @@ fn eprint_no_auto_newline_jit() {
 }
 
 // ============================================================================
+// Milestone 9.2: process_argc / process_argv CLI intrinsics
+// ============================================================================
+
+/// Prints argc on the first line, then every argv entry (argv[0] included)
+/// on its own line. With program args `a b`, argc is 3 everywhere (JIT and
+/// AOT): argv[0] is the invocation path — the source file under `ryo run`,
+/// the binary path for a standalone executable.
+const ARGS_ECHO: &str = "\
+fn main():
+\tn = process_argc()
+\tprint(n)
+\tprint(\"\\n\")
+\tmut i = 0
+\twhile i < n:
+\t\tprint(process_argv(i))
+\t\tprint(\"\\n\")
+\t\ti += 1
+";
+
+#[test]
+fn args_echo_jit_forwarding() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), "args_echo.ryo", ARGS_ECHO);
+
+    // Program args must follow the source file on the command line, so
+    // `run_ryo_command` (which appends the file last) cannot express
+    // this — build the command directly (same as the Task 5 shim test).
+    let output = Command::new(env!("CARGO_BIN_EXE_ryo"))
+        .arg("run")
+        .arg(&test_file)
+        .args(["a", "b"])
+        .output()
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "args_echo should exit 0. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        4,
+        "expected 4 stdout lines (argc + 3 args), got: {stdout:?}"
+    );
+    assert_eq!(lines[0], "3", "argc should be 3 (argv[0] + a + b)");
+    assert_eq!(
+        lines[1],
+        test_file.to_string_lossy(),
+        "JIT argv[0] should be the source file path"
+    );
+    assert_eq!(lines[2], "a");
+    assert_eq!(lines[3], "b");
+}
+
+#[test]
+fn args_echo_aot() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), "args_echo_aot.ryo", ARGS_ECHO);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = exe_path(temp_dir.path(), "args_echo_aot");
+    let run_output = Command::new(&binary_path)
+        .args(["a", "b"])
+        .output()
+        .expect("Failed to execute compiled binary");
+
+    assert!(
+        run_output.status.success(),
+        "args_echo binary should exit 0. stderr: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        4,
+        "expected 4 stdout lines (argc + 3 args), got: {stdout:?}"
+    );
+    assert_eq!(lines[0], "3", "argc should be 3 (argv[0] + a + b)");
+    assert!(
+        lines[1].contains("args_echo_aot"),
+        "AOT argv[0] should be the binary path, got: {}",
+        lines[1]
+    );
+    assert_eq!(lines[2], "a");
+    assert_eq!(lines[3], "b");
+}
+
+#[test]
+fn args_out_of_range_panics_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tprocess_argv(99)\n";
+    let test_file = create_test_file(temp_dir.path(), "args_oob.ryo", code);
+
+    let output = run_ryo_command(&["run", "args_oob.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "out-of-range process_argv should exit 101. stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("process_argv index out of range"),
+        "stderr should contain the out-of-range message, got: {}",
+        stderr
+    );
+}
+
+// ============================================================================
 // Milestone 9.2: hosted entry shim — trailing CLI args forwarded to the program
 // ============================================================================
 
