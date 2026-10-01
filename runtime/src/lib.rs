@@ -7,11 +7,15 @@
 #![cfg_attr(feature = "staticlib", no_std)]
 
 // Test builds link std through the harness; the gate keeps `std::`
-// paths available in test code if needed.
+// paths available in test code if needed. `alloc` comes along for
+// `alloc::ffi::CString` (the std_instead_of_alloc lint demands it).
+#[cfg(test)]
+extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
+use core::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 
 const STDOUT_FD: c_int = 1;
 const STDERR_FD: c_int = 2;
@@ -42,6 +46,7 @@ pub static _fltused: c_int = 0;
 unsafe extern "C" {
     fn exit(code: c_int) -> !;
     fn abort() -> !;
+    fn strlen(s: *const c_char) -> usize;
 }
 
 unsafe extern "C" {
@@ -126,6 +131,16 @@ pub unsafe extern "C" fn ryo_eprint(ptr: *const u8, len: u64) {
     write_all(STDERR_FD, ptr, len as usize);
 }
 
+/// Shared panic tail: write `msg` to stderr and exit 101 — the
+/// `ryo_panic` contract, reused by the runtime's own bounds failures
+/// (argv indexing and friends) so the exit path lives in one place.
+#[cold]
+fn panic_msg(msg: &[u8]) -> ! {
+    write_all(STDERR_FD, msg.as_ptr(), msg.len());
+    // SAFETY: exit never returns.
+    unsafe { exit(101) }
+}
+
 /// Runtime backing for `__ryo_panic` (panic/assert): write the
 /// sema-formatted message to stderr and exit 101.
 ///
@@ -137,10 +152,11 @@ pub unsafe extern "C" fn ryo_panic(ptr: *const u8, len: u64) -> ! {
         if ptr.is_null() {
             null_abort();
         }
-        write_all(STDERR_FD, ptr, len as usize);
+        // SAFETY: caller contract — ptr/len describe a readable byte range.
+        let msg = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
+        panic_msg(msg)
     }
-    // SAFETY: exit never returns.
-    unsafe { exit(101) }
+    panic_msg(b"")
 }
 
 /// Runtime backing for the `process_exit` builtin: exit with the given
@@ -153,6 +169,84 @@ pub unsafe extern "C" fn ryo_exit(code: u64) -> ! {
     // SAFETY: exit never returns. `code as c_int` truncation matches
     // shell exit-code semantics, same as the CLI's clamp(0, 255).
     unsafe { exit(code as c_int) }
+}
+
+// ---------- process argv (M9.2) ----------
+//
+// The runtime's first mutable globals: the C runtime's argv outlives
+// any single call, so it is stored here rather than passed per-call.
+// The codegen entry shim (built at `main`'s signature) calls
+// `ryo_rt_init` exactly once before the first user instruction;
+// readers Acquire-load. The writes happen once, before any read — the
+// Release/Acquire pairs make that contract explicit.
+
+static ARGC: AtomicIsize = AtomicIsize::new(0);
+static ARGV: AtomicPtr<c_char> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Store the C runtime's argv — the `(argc, argv)` passed to `main` —
+/// for the process lifetime. Called once at `main` entry by the
+/// codegen entry shim.
+///
+/// # Safety
+/// `argv` must point to `argc` readable `*const c_char` entries, each a
+/// NUL-terminated string owned by the C runtime for the process
+/// lifetime (the natural crt0 contract).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_rt_init(argc: c_int, argv: *const *const c_char) {
+    // Release stores: pair with the Acquire loads in the readers — a
+    // reader that observes the ARGC store also observes the ARGV store.
+    ARGC.store(argc as isize, Ordering::Release);
+    ARGV.store(argv as *mut c_char, Ordering::Release);
+}
+
+/// Runtime backing for `process_argc() -> int` (M9.2). argv[0] (the
+/// program path) is included, matching C convention.
+///
+/// # Safety
+/// No additional contract — the Acquire load cannot fault. Marked
+/// `unsafe extern "C"` for symmetry with the other process intrinsics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_process_argc() -> i64 {
+    // Acquire load: pairs with ryo_rt_init's Release store.
+    ARGC.load(Ordering::Acquire) as i64
+}
+
+/// Runtime backing for `process_argv(i: int) -> str` (M9.2): copy
+/// `argv[i]` into `out` as a tagged slot (inline when it fits the SSO
+/// cap, else a fresh heap buffer). Out-of-range panics: message to
+/// stderr + exit 101, the `ryo_panic` contract.
+///
+/// # Safety
+/// `out` points to a valid, uninitialized `RyoStrFat`. `ryo_rt_init`
+/// must have run (the codegen entry shim guarantees this for any ryo
+/// program; before init ARGC is 0 and every index fails the check
+/// rather than dereferencing the null table).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_process_argv(i: u64, out: *mut RyoStrFat) {
+    // Acquire load: pairs with ryo_rt_init's Release store.
+    let argc = ARGC.load(Ordering::Acquire);
+    // argc.max(0): ARGC is a count and never negative; the clamp only
+    // keeps the `as u64` cast from wrapping if an untrusted caller
+    // stored a negative value.
+    if i >= argc.max(0) as u64 {
+        panic_msg(b"process_argv index out of range\n");
+    }
+    // Acquire: pairs with ryo_rt_init's Release store — passing the
+    // ARGC check above means this load cannot observe a stale
+    // (pre-init) pointer for a program that ran its entry shim.
+    let table = ARGV.load(Ordering::Acquire) as *const *const c_char;
+    // SAFETY: i < argc, so the argv vector — owned by the C runtime
+    // for the process lifetime and stored by ryo_rt_init — has a
+    // readable entry at index i.
+    let s = unsafe { *table.add(i as usize) };
+    // SAFETY: s is the C runtime's NUL-terminated argv string.
+    let len = unsafe { strlen(s) };
+    // SAFETY: strlen reports the initialized byte length of s.
+    let bytes = unsafe { core::slice::from_raw_parts(s.cast::<u8>(), len) };
+    // SAFETY: out is a valid out-slot; `bytes` holds `len` initialized
+    // bytes. The copy is what makes returning safe — the C runtime
+    // retains ownership of the argv storage itself.
+    unsafe { write_str_slot(out, bytes) };
 }
 
 #[cfg(feature = "staticlib")]

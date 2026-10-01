@@ -891,6 +891,78 @@ fn test_ensure_heap_noop_for_heap_and_static() {
     unsafe { ryo_str_free(p, 32) };
 }
 
+/// Combined argv test (M9.2): ARGC/ARGV are the runtime's first
+/// process-wide mutable globals, so every argv test lives in this ONE
+/// test fn — parallel cargo-test threads would otherwise race on them.
+///
+/// The out-of-range panic path terminates the process, so it is
+/// asserted via a subprocess: this test binary re-executes itself with
+/// `RYO_RT_ARGV_PANIC_CHILD=1`, and the flag gates the diverging call
+/// at the top of THIS test. The child never runs its init, so ARGC is
+/// 0 and the read is trivially out of range; the parent asserts the
+/// child's exit code 101 and stderr message.
+#[test]
+fn argv_storage_roundtrip() {
+    use alloc::ffi::CString;
+
+    // Child mode: diverge before the roundtrip below.
+    if std::env::var_os("RYO_RT_ARGV_PANIC_CHILD").is_some() {
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot. ryo_rt_init never ran in the child,
+        // so ARGC is 0 and index 3 is out of range — this must write
+        // the panic message to stderr and exit 101, never returning.
+        unsafe { ryo_process_argv(3, &mut slot) };
+        panic!("ryo_process_argv(3) returned; out-of-range must diverge");
+    }
+
+    let a = CString::new("a").expect("CString");
+    let b = CString::new("b").expect("CString");
+    let c = CString::new("c").expect("CString");
+    let argv = [a.as_ptr(), b.as_ptr(), c.as_ptr()];
+    // SAFETY: argv points to 3 readable NUL-terminated C strings; the
+    // CStrings outlive every ryo_process_argv call below (they model
+    // the C runtime's process-lifetime ownership of the real argv).
+    unsafe { ryo_rt_init(3, argv.as_ptr()) };
+
+    // SAFETY: no other test fn touches these atomics (see fn doc).
+    assert_eq!(unsafe { ryo_process_argc() }, 3);
+
+    let mut slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    for (i, want) in [(0u64, &b"a"[..]), (1, &b"b"[..]), (2, &b"c"[..])] {
+        // SAFETY: valid out-slot; i < argc (3), in range.
+        unsafe { ryo_process_argv(i, &mut slot) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), want);
+    }
+
+    // Out-of-range: the re-exec'd child terminates with the panic
+    // message and exit 101.
+    let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+        .arg("tests::argv_storage_roundtrip")
+        .arg("--exact")
+        .env("RYO_RT_ARGV_PANIC_CHILD", "1")
+        .output()
+        .expect("spawn argv panic child");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(101),
+        "out-of-range process_argv must exit 101. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("process_argv index out of range"),
+        "child stderr should carry the panic message, got: {stderr}"
+    );
+}
+
 #[test]
 fn test_free_inline_str_is_noop() {
     // An inline slot's ptr word is byte data, NOT a heap pointer;

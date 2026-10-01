@@ -615,7 +615,7 @@ impl Codegen<ObjectModule> {
 /// `declare_runtime_fn` (the module-level import cache is keyed on the
 /// same names). Functions whose bodies codegen now inlines (literal
 /// packing, slicing) are deliberately absent.
-fn runtime_symbols() -> [(&'static str, *const u8); 23] {
+fn runtime_symbols() -> [(&'static str, *const u8); 26] {
     [
         ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
         ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
@@ -675,6 +675,18 @@ fn runtime_symbols() -> [(&'static str, *const u8); 23] {
         ("ryo_eprint", ryo_runtime::ryo_eprint as *const u8),
         ("ryo_panic", ryo_runtime::ryo_panic as *const u8),
         ("ryo_exit", ryo_runtime::ryo_exit as *const u8),
+        // M9.2 PR2 argv family — `ryo_rt_init` is called at main entry
+        // by the codegen entry shim; `ryo_process_*` back the
+        // process_argc/process_argv intrinsics.
+        ("ryo_rt_init", ryo_runtime::ryo_rt_init as *const u8),
+        (
+            "ryo_process_argc",
+            ryo_runtime::ryo_process_argc as *const u8,
+        ),
+        (
+            "ryo_process_argv",
+            ryo_runtime::ryo_process_argv as *const u8,
+        ),
     ]
 }
 
