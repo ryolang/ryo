@@ -204,17 +204,19 @@ fn panic_msg(msg: &[u8]) -> ! {
 
 /// `panic_msg` for a bounds failure on a computed index: the message
 /// must name the failing index, not just the operation. Writes
-/// `prefix` + the decimal digits of `i` + a newline from a stack
-/// buffer — allocation-free (the runtime is no_std) — then exits 101.
+/// `prefix` + the decimal digits of `i` (with a leading `-` for
+/// negative indices) + a newline from a stack buffer — allocation-free
+/// (the runtime is no_std) — then exits 101.
 #[cold]
-fn panic_msg_indexed(prefix: &[u8], i: u64) -> ! {
-    // 33-byte prefix + 20 digits (u64::MAX) + newline fits in 64.
+fn panic_msg_indexed(prefix: &[u8], i: i64) -> ! {
+    // 33-byte prefix + sign + 19 digits (i64::MIN magnitude) + newline
+    // fits in 64.
     let mut buf = [0u8; 64];
     buf[..prefix.len()].copy_from_slice(prefix);
     // Digits least-significant-first into a temp, then copied
     // most-significant-first after the prefix.
     let mut tmp = [0u8; 20];
-    let mut n = i;
+    let mut n = i.unsigned_abs();
     let mut start = tmp.len();
     loop {
         start -= 1;
@@ -224,9 +226,14 @@ fn panic_msg_indexed(prefix: &[u8], i: u64) -> ! {
             break;
         }
     }
+    let mut end = prefix.len();
+    if i < 0 {
+        buf[end] = b'-';
+        end += 1;
+    }
     let digits = &tmp[start..];
-    buf[prefix.len()..prefix.len() + digits.len()].copy_from_slice(digits);
-    let end = prefix.len() + digits.len();
+    buf[end..end + digits.len()].copy_from_slice(digits);
+    end += digits.len();
     buf[end] = b'\n';
     panic_msg(&buf[..end + 1]);
 }
@@ -307,9 +314,10 @@ pub unsafe extern "C" fn ryo_process_argc() -> i64 {
 
 /// Runtime backing for `process_argv(i: int) -> str` (M9.2): copy
 /// `argv[i]` into `out` as a tagged slot (inline when it fits the SSO
-/// cap, else a fresh heap buffer). Out-of-range panics with a message
-/// naming the failing index: stderr + exit 101, the `ryo_panic`
-/// contract. TODO(M22): interim call form — replaced by `process.args`.
+/// cap, else a fresh heap buffer). Out-of-range — including negative
+/// indices — panics with a message naming the failing index: stderr +
+/// exit 101, the `ryo_panic` contract. TODO(M22): interim call form —
+/// replaced by `process.args`.
 ///
 /// # Safety
 /// `out` points to a valid, uninitialized `RyoStrFat`. `ryo_rt_init`
@@ -317,22 +325,23 @@ pub unsafe extern "C" fn ryo_process_argc() -> i64 {
 /// program; before init ARGC is 0 and every index fails the check
 /// rather than dereferencing the null table).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ryo_process_argv(i: u64, out: *mut RyoStrFat) {
+pub unsafe extern "C" fn ryo_process_argv(i: i64, out: *mut RyoStrFat) {
     // Acquire load: pairs with ryo_rt_init's Release store.
     let argc = ARGC.load(Ordering::Acquire);
     // argc.max(0): ARGC is a count and never negative; the clamp only
-    // keeps the `as u64` cast from wrapping if an untrusted caller
-    // stored a negative value.
-    if i >= argc.max(0) as u64 {
+    // keeps the comparison sound if an untrusted caller stored a
+    // negative value. Negative Ryo indices fail here alongside the
+    // too-large ones.
+    if i < 0 || i >= argc.max(0) as i64 {
         panic_msg_indexed(b"process_argv index out of range: ", i);
     }
     // Acquire: pairs with ryo_rt_init's Release store — passing the
     // ARGC check above means this load cannot observe a stale
     // (pre-init) pointer for a program that ran its entry shim.
     let table = ARGV.load(Ordering::Acquire) as *const *const c_char;
-    // SAFETY: i < argc, so the argv vector — owned by the C runtime
-    // for the process lifetime and stored by ryo_rt_init — has a
-    // readable entry at index i.
+    // SAFETY: 0 <= i < argc, so the argv vector — owned by the C
+    // runtime for the process lifetime and stored by ryo_rt_init — has
+    // a readable entry at index i.
     let s = unsafe { *table.add(i as usize) };
     // SAFETY: s is the C runtime's NUL-terminated argv string.
     let len = unsafe { strlen(s) };

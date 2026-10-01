@@ -907,16 +907,23 @@ fn argv_storage_roundtrip() {
 
     // Child mode: diverge before the roundtrip below.
     if std::env::var_os("RYO_RT_ARGV_PANIC_CHILD").is_some() {
+        // The parent parameterizes the failing index so both the
+        // too-large and the negative paths get their own child run.
+        let index: i64 = std::env::var("RYO_RT_ARGV_PANIC_INDEX")
+            .expect("child index")
+            .parse()
+            .expect("child index parses");
         let mut slot = RyoStrFat {
             ptr: core::ptr::null_mut(),
             len: 0,
             cap: 0,
         };
         // SAFETY: valid out-slot. ryo_rt_init never ran in the child,
-        // so ARGC is 0 and index 3 is out of range — this must write
-        // the panic message to stderr and exit 101, never returning.
-        unsafe { ryo_process_argv(3, &mut slot) };
-        panic!("ryo_process_argv(3) returned; out-of-range must diverge");
+        // so ARGC is 0 and the index is trivially out of range — this
+        // must write the panic message to stderr and exit 101, never
+        // returning.
+        unsafe { ryo_process_argv(index, &mut slot) };
+        panic!("ryo_process_argv({index}) returned; out-of-range must diverge");
     }
 
     let a = CString::new("a").expect("CString");
@@ -936,7 +943,7 @@ fn argv_storage_roundtrip() {
         len: 0,
         cap: 0,
     };
-    for (i, want) in [(0u64, &b"a"[..]), (1, &b"b"[..]), (2, &b"c"[..])] {
+    for (i, want) in [(0i64, &b"a"[..]), (1, &b"b"[..]), (2, &b"c"[..])] {
         // SAFETY: valid out-slot; i < argc (3), in range.
         unsafe { ryo_process_argv(i, &mut slot) };
         assert!(is_inline(slot.cap));
@@ -944,30 +951,41 @@ fn argv_storage_roundtrip() {
     }
 
     // Out-of-range: the re-exec'd child terminates with the panic
-    // message and exit 101. Skipped under Miri: its isolation mode
-    // cannot spawn processes. The in-process roundtrip above still
-    // runs under Miri, so the new unsafe read path keeps its
-    // UB/leak coverage.
+    // message and exit 101 — run once for a too-large index and once
+    // for a negative one (the Ryo index is a signed int). Skipped
+    // under Miri: its isolation mode cannot spawn processes. The
+    // in-process roundtrip above still runs under Miri, so the new
+    // unsafe read path keeps its UB/leak coverage.
     if !cfg!(miri) {
-        let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
-            .arg("tests::argv_storage_roundtrip")
-            .arg("--exact")
-            .env("RYO_RT_ARGV_PANIC_CHILD", "1")
-            .output()
-            .expect("spawn argv panic child");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(
-            out.status.code(),
-            Some(101),
-            "out-of-range process_argv must exit 101. stderr: {stderr}"
-        );
-        assert!(
-            stderr.contains("process_argv index out of range"),
-            "child stderr should carry the panic message, got: {stderr}"
-        );
+        let run_child = |index: &str| {
+            let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+                .arg("tests::argv_storage_roundtrip")
+                .arg("--exact")
+                .env("RYO_RT_ARGV_PANIC_CHILD", "1")
+                .env("RYO_RT_ARGV_PANIC_INDEX", index)
+                .output()
+                .expect("spawn argv panic child");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(101),
+                "out-of-range process_argv({index}) must exit 101. stderr: {stderr}"
+            );
+            assert!(
+                stderr.contains("process_argv index out of range"),
+                "child stderr should carry the panic message, got: {stderr}"
+            );
+            stderr.into_owned()
+        };
+        let stderr = run_child("3");
         assert!(
             stderr.contains(": 3"),
             "child stderr should name the failing index 3, got: {stderr}"
+        );
+        let stderr = run_child("-1");
+        assert!(
+            stderr.contains(": -1"),
+            "child stderr should name the failing index -1, got: {stderr}"
         );
     }
 }
