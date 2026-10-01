@@ -37,7 +37,7 @@ pub(crate) fn check_call(
     // Builtins short-circuit: they're not in `signatures` /
     // `name_to_decl`, so signature resolution and the worklist
     // never see them.
-    if let Some(&builtin) = sema.builtin_by_id.get(&name_id) {
+    if let Some(&(_, builtin)) = sema.builtin_by_id.iter().find(|&&(id, _)| id == name_id) {
         return emit_builtin_call(sema, fcx, scope, view, arg_tirs, span, builtin);
     }
 
