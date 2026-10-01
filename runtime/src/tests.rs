@@ -1044,6 +1044,12 @@ fn temp_file_with(content: &[u8]) -> (std::fs::File, std::path::PathBuf) {
 #[cfg(not(windows))]
 #[test]
 fn read_line_strips_trailing_newline() {
+    // Miri's isolation mode forbids `open` (temp_file_with), so the
+    // fd-parameterized path is verified by the normal runs only; the
+    // in-process read logic itself has no unsafe isolation conflicts.
+    if cfg!(miri) {
+        return;
+    }
     use std::os::unix::io::AsRawFd;
 
     let (file, path) = temp_file_with(b"hello\nrest");
@@ -1067,6 +1073,11 @@ fn read_line_strips_trailing_newline() {
 #[cfg(not(windows))]
 #[test]
 fn read_line_unterminated_final_line_is_returned_as_is() {
+    // See read_line_strips_trailing_newline: Miri isolation forbids
+    // the temp-file open.
+    if cfg!(miri) {
+        return;
+    }
     use std::os::unix::io::AsRawFd;
 
     let content = [b'x'; 300];
@@ -1092,6 +1103,11 @@ fn read_line_unterminated_final_line_is_returned_as_is() {
 #[cfg(not(windows))]
 #[test]
 fn read_line_empty_file_yields_empty_slot() {
+    // See read_line_strips_trailing_newline: Miri isolation forbids
+    // the temp-file open.
+    if cfg!(miri) {
+        return;
+    }
     use std::os::unix::io::AsRawFd;
 
     let (file, path) = temp_file_with(b"");
@@ -1139,30 +1155,42 @@ fn getenv_present_unset_and_long_key() {
         panic!("ryo_getenv with a 4097-byte key returned; over-long key must diverge");
     }
 
-    const PRESENT: &str = "RYO_RT_GETENV_PRESENT";
-    const VALUE: &str = "ryo-env-value";
-    // SAFETY: the combined-fn rule keeps every env mutation in this
-    // binary in this one thread, and no other test reads these
-    // sentinel keys.
-    unsafe { std::env::set_var(PRESENT, VALUE) };
+    // Present key: skipped on Windows — std::env::set_var writes via
+    // SetEnvironmentVariableW, which the CRT's getenv snapshot (taken
+    // at process start) never sees; the documented narrow-getenv
+    // placeholder limitation (M16's process.env switches to the wide
+    // API). The integration test covers the real path there via env
+    // inherited at spawn. Unix setenv updates the CRT environ, so the
+    // present case runs in-process.
+    if !cfg!(windows) {
+        const PRESENT: &str = "RYO_RT_GETENV_PRESENT";
+        const VALUE: &str = "ryo-env-value";
+        // SAFETY: the combined-fn rule keeps every env mutation in this
+        // binary in this one thread, and no other test reads these
+        // sentinel keys.
+        unsafe { std::env::set_var(PRESENT, VALUE) };
 
-    let mut slot = RyoStrFat {
-        ptr: core::ptr::null_mut(),
-        len: 0,
-        cap: 0,
-    };
-    let key = CString::new(PRESENT).expect("CString");
-    // SAFETY: key's bytes are readable for their length (a C string is
-    // readable up to and including its NUL); slot is a valid out-slot.
-    // The variable is set above.
-    unsafe {
-        ryo_getenv(
-            key.as_bytes().as_ptr(),
-            key.as_bytes().len() as u64,
-            &mut slot,
-        )
-    };
-    assert_eq!(slot_content(&slot), VALUE.as_bytes());
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        let key = CString::new(PRESENT).expect("CString");
+        // SAFETY: key's bytes are readable for their length (a C string is
+        // readable up to and including its NUL); slot is a valid out-slot.
+        // The variable is set above.
+        unsafe {
+            ryo_getenv(
+                key.as_bytes().as_ptr(),
+                key.as_bytes().len() as u64,
+                &mut slot,
+            )
+        };
+        assert_eq!(slot_content(&slot), VALUE.as_bytes());
+
+        // SAFETY: same single-thread argument as set_var above.
+        unsafe { std::env::remove_var(PRESENT) };
+    }
 
     // Unset variable: the M16 placeholder contract — empty string,
     // never a dangling or garbage slot.
@@ -1182,9 +1210,6 @@ fn getenv_present_unset_and_long_key() {
         )
     };
     assert_eq!(slot_content(&unset_slot), b"");
-
-    // SAFETY: same single-thread argument as set_var above.
-    unsafe { std::env::remove_var(PRESENT) };
 
     // Over-long key: the re-exec'd child terminates with the panic
     // message and exit 101. Skipped under Miri: its isolation mode
