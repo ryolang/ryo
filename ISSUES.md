@@ -28,6 +28,14 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ## 🟡 Correctness / Hygiene
 
+### I-200 — Runtime atomics publication contracts have no mechanical guard (Miri can provide one)
+
+**Files:** `runtime/src/lib.rs` (`ryo_rt_init`, `ryo_process_argc`, `ryo_process_argv`), `runtime/src/tests.rs`, `.github/workflows/ci.yml` (Miri job)
+
+**Summary:** The M9.2 argv storage introduced the runtime's first mutable globals with a Release/Acquire data-then-flag publication contract (`ARGV` stored before `ARGC`; readers Acquire-load `ARGC` before `ARGV`). The contract is guarded only by comments: the original implementation shipped the inverted order (flag first, so a reader could observe `ARGC` with a stale/null `ARGV` — latent on ARM), and it was caught by human code review, not tooling, because the existing Miri job cannot see it. The current Miri tests are single-threaded, and Miri's weak-memory emulation only exposes stale reads across threads. Experiments (2026-10-01, nightly 1.101.0): a threaded reader spinning on `ARGC` then dereferencing `ARGV` under `cargo +nightly miri run` flags `Undefined Behavior: memory access failed ... null pointer` on 3 of 8 seeds (`-Zmiri-seed=0..7`) with the inverted order, and 0 of 8 with the correct order — Miri's default weak-memory emulation mechanically detects the violation, no extra flags or dependencies (the formerly documented `-Zmiri-track-weak-memory-accesses` flag no longer exists on current nightlies). Related coverage boundaries established the same day: Miri's isolation sandbox blocks file opens, stdin reads, and process spawning (only stdout/stderr writes pass), so fd-based paths (`read_line_from`) have no Miri coverage — ASan/Valgrind carry them, and the gating convention is documented in the root `AGENTS.md` Testing section; `ryo-backend` is not worth adding to the Miri job (its fs-touching tests abort on `mkdir` under isolation, and its remaining unsafe — JIT trampolines, executing generated code — is not interpretable).
+
+**Resolution:** Add a threaded publication test to `runtime/src/tests.rs` (Miri-only is fine): a reader thread spins on `ARGC` (Acquire) then reads `ARGV` (Acquire) and dereferences the entry; it passes against the current code and fails under Miri (seed sweep, e.g. `MIRIFLAGS="-Zmiri-seed=N"` for N in a small range run in a loop in the Miri CI job) if the publish order is ever inverted or the Acquire pairing breaks.
+
 ### I-199 — Same-name shadow + taken branch reseat: invalid free and leak (heap strings)
 
 **Files:** `ryo-frontend/src/ownership/` (schedule), `ryo-backend/src/codegen/` (scoped-home restore + binding-path redirect)
