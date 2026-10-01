@@ -32,7 +32,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 8.4.2 — `bytes` Type & `bytesview` [alpha] ✅ COMPLETE](#milestone-842-bytes-type--bytesview-alpha--complete)
 - [x] [Milestone 9 — Structs ✅ COMPLETE](#milestone-9-structs--complete)
 - [x] [Milestone 9.1 — Synthesized Eq & Debug for Structs ✅ COMPLETE](#milestone-91-synthesized-eq--debug-for-structs--complete)
-- [ ] [Milestone 9.2 — Throwaway CLI Intrinsics (`process_*`, `io_*`)](#milestone-92-throwaway-cli-intrinsics-process_-io_) *(no dependencies; slots in alongside the core cluster)*
+- [x] [Milestone 9.2 — Throwaway CLI Intrinsics (`process_*`, `io_*`) ✅ COMPLETE](#milestone-92-throwaway-cli-intrinsics-process_-io_--complete) *(no dependencies; slots in alongside the core cluster)*
 - [ ] [Milestone 10 — Tuples](#milestone-10-tuples)
 - [ ] [Milestone 11 — Enums (Algebraic Data Types) [alpha]](#milestone-11-enums-algebraic-data-types-alpha)
 - [ ] [Milestone 12 — Pattern Matching [alpha]](#milestone-12-pattern-matching-alpha)
@@ -1420,11 +1420,11 @@ fn main():
 - Enums (M11) get the same derive/Debug treatment as a follow-up; out of scope here
 - Dependencies: Milestone 9 (structs)
 
-### Milestone 9.2: Throwaway CLI Intrinsics (`process_*`, `io_*`)
+### Milestone 9.2: Throwaway CLI Intrinsics (`process_*`, `io_*`) ✅ COMPLETE
 
 **Goal:** Make CLIs usable now — exit codes, stderr, args, env, stdin — via a **temporary** compiler-intrinsic layer named to mirror the future module paths (`process.*`, `io.*` per [docs/std.md](../std.md)), so the eventual migration is a mechanical `prefix_name` → `prefix.name` swap. Nothing is added to the prelude: `print` stays the only I/O prelude builtin.
 
-**Status:** ⏳ Planned — ships in two PRs: PR1 (`process_exit`, `io_eprint`), PR2 (`process_argc`/`process_argv`, `process_env`, `io_read_line`, plus the runtime entry shim).
+**Status:** ✅ COMPLETE (2026-10-01, PR #172 — the planned PR1/PR2 split shipped as one PR)
 
 > **Why throwaway (2026-09):** the real implementations are the module functions from [docs/std.md](../std.md) (`process.exit`, `io.eprint`, …), built on the `std.sys` → `std.io` → `std.mem` stack ([docs/dev/std.md](std.md)) — all gated behind the module system (M6), which is far away. This layer makes CLIs work today with placeholder return types that **will** change (documented breaking changes, acceptable pre-alpha). The intrinsics are deliberately **not spec surface** — the spec documents only the final `process.*` / `io.*` API. No major language routes basic I/O through its general FFI layer (Go/Rust/Swift/Python all give the runtime its own syscall channel), so these are compiler-known builtins backed by `ryo_*` runtime exports — the `print()` pattern — with no `extern "C"`, no allocator, and no module system.
 
