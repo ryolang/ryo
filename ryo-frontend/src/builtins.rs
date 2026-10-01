@@ -52,8 +52,9 @@ impl BuiltinFunction {
 }
 
 /// Pre-interned `StringId`s for every name sema compares on a hot path:
-/// each `BUILTINS` dispatch name plus the `str`/`bytes` materialize
-/// intercepts (not `BUILTINS` entries) and the reserved `range` name.
+/// each `BUILTINS` dispatch name, the `str`/`bytes` materialize
+/// intercepts (not `BUILTINS` entries), the reserved `range` name, and
+/// the receiver-method names dispatched per `MethodCall`.
 /// Built once per `Sema::run`; downstream dispatch is a `StringId`
 /// equality check instead of `pool.str(id) == "..."`.
 #[derive(Clone, Copy)]
@@ -71,6 +72,11 @@ pub struct BuiltinNameIds {
     pub(crate) bool_to_str: StringId,
     pub(crate) str_push: StringId,
     pub(crate) bytes_push: StringId,
+    pub(crate) len: StringId,
+    pub(crate) is_empty: StringId,
+    pub(crate) to_str: StringId,
+    pub(crate) to_bytes: StringId,
+    pub(crate) as_bytes: StringId,
 }
 
 impl BuiltinNameIds {
@@ -89,6 +95,11 @@ impl BuiltinNameIds {
             bool_to_str: pool.intern_str("bool_to_str"),
             str_push: pool.intern_str("str_push"),
             bytes_push: pool.intern_str("bytes_push"),
+            len: pool.intern_str("len"),
+            is_empty: pool.intern_str("is_empty"),
+            to_str: pool.intern_str("to_str"),
+            to_bytes: pool.intern_str("to_bytes"),
+            as_bytes: pool.intern_str("as_bytes"),
         }
     }
 }
