@@ -107,6 +107,51 @@ fn arm_reseat_then_shadow_keeps_fallthrough_drop() {
 }
 
 #[test]
+fn nested_reseat_then_shadow_keeps_fallthrough_drop() {
+    // `if c1: if c2: x = "b"; mut x = "c"` — the arm reseats the
+    // pre-branch binding inside a NESTED conditional and then shadows
+    // the name. The arm scan must descend into the nested body: the
+    // reseat belongs to the enclosing arm's record (the nested if's own
+    // drop only covers its fall-through), so without the descent the
+    // pre-branch buffer "a" leaked whenever the ENCLOSING arm was
+    // skipped (64 bytes under Valgrind with heap strings).
+    let src = "fn main():\n\tmut x = \"a\"\n\tif true:\n\t\tif true:\n\t\t\tx = \"b\"\n\t\tmut x = \"c\"\n\tprint(\"end\")\n";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "expected no errors: {diags:?}"
+    );
+    let idx = tirs
+        .iter()
+        .position(|t| pool.str(t.name) == "main")
+        .unwrap();
+    let tir = &tirs[idx];
+    let sc = take_function_sidecar(&mut sidecar, idx);
+
+    let x = pool.intern_str("x");
+    let mut outer_init = None;
+    for r in 1..tir.instructions.len() {
+        if tir.instructions[r].tag == TirTag::VarDecl {
+            let v = tir.var_decl_view(TirRef::from_raw(r as u32));
+            if v.name == x && outer_init.is_none() {
+                outer_init = Some(v.initializer);
+            }
+        }
+    }
+    let outer_init = outer_init.expect("outer decl found");
+    assert!(
+        sc.conditional_dead_drops
+            .iter()
+            .any(|d| d.target == outer_init),
+        "nested reseat-then-shadow arm must still mint the pre-branch \
+         fall-through drop: {:?}",
+        sc.conditional_dead_drops
+    );
+}
+
+#[test]
 fn conditional_dead_reassign_still_minted_for_same_binding() {
     // Binding-aware honoring must not weaken the genuine shape: a dead
     // reseat of the SAME binding still honors the record and drops the

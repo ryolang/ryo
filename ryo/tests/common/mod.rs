@@ -1078,6 +1078,36 @@ fn main():
 ",
     ),
     (
+        // Nested reseat-then-shadow: the arm reseats the OUTER binding
+        // inside a nested conditional, then shadows the name. The
+        // enclosing arm's reseat record must capture the nested reseat
+        // (the arm scan descends into nested bodies) or the
+        // pre-branch buffer leaks on every run where the enclosing
+        // arm was skipped — 64 bytes under Valgrind for heap strings.
+        // The x shape (enclosing arm skipped) pins the leak; the y
+        // shape (enclosing taken, nested skipped) pins the nested if's
+        // own fall-through drop.
+        "nested_reseat_then_shadow_leak",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tcond = \"ab\".len() > 0
+\tmut x = make(1)
+\tif not cond:
+\t\tif cond:
+\t\t\tx = make(2)
+\t\tmut x = make(3)
+\tmut y = make(4)
+\tif cond:
+\t\tif not cond:
+\t\t\ty = make(5)
+\t\tmut y = make(6)
+\tprint(\"done\\n\")
+",
+    ),
+    (
         // Sibling scopes (no shadowing): each arm declares its own
         // `x`. An arm's reassigns must not enter the sibling arm's
         // binding — name-keyed suppression dropped a sibling buffer.

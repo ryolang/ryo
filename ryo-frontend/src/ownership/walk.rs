@@ -611,6 +611,63 @@ pub(crate) fn stmts_subtree(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
     set
 }
 
+/// Collect every `Assign` value in `stmts` — including nested
+/// if/elif/else, while, and for bodies — that stores into `binding`
+/// (the pre-branch binding a shadowing arm took the name from). Used
+/// by `analyze_if_stmt`'s reseat-record: an arm that reseats the
+/// pre-branch binding and THEN shadows the name must still attribute
+/// the reseat to the pre-branch binding, wherever in the arm (however
+/// deeply nested) the reseat happened, or the pre-branch buffer leaks
+/// on the paths where the whole arm was skipped.
+fn collect_arm_reseats(
+    tir: &Tir,
+    pool: &InternPool,
+    sidecar: &FunctionSidecar,
+    stmts: &[TirRef],
+    binding: TirRef,
+    reseat_owners: &mut HashSet<Owner>,
+) {
+    for &s in stmts {
+        match tir.inst(s).tag {
+            TirTag::Assign => {
+                let av = tir.assign_view(s);
+                if sidecar.assign_binding[s.index()] == Some(binding)
+                    && needs_tracking(tir.inst(av.value).ty, pool)
+                {
+                    reseat_owners.insert(Owner::Inst(av.value));
+                }
+            }
+            TirTag::IfStmt => {
+                let view = tir.if_stmt_view(s);
+                collect_arm_reseats(tir, pool, sidecar, &view.then_stmts, binding, reseat_owners);
+                for elif in &view.elif_branches {
+                    collect_arm_reseats(tir, pool, sidecar, &elif.body, binding, reseat_owners);
+                }
+                if let Some(else_stmts) = &view.else_stmts {
+                    collect_arm_reseats(tir, pool, sidecar, else_stmts, binding, reseat_owners);
+                }
+            }
+            TirTag::WhileLoop => collect_arm_reseats(
+                tir,
+                pool,
+                sidecar,
+                &tir.while_loop_view(s).body,
+                binding,
+                reseat_owners,
+            ),
+            TirTag::ForRange => collect_arm_reseats(
+                tir,
+                pool,
+                sidecar,
+                &tir.for_range_view(s).body,
+                binding,
+                reseat_owners,
+            ),
+            _ => {}
+        }
+    }
+}
+
 /// CFG join for `if` / `elif` / `else`. The naïve forward walk
 /// would let a move inside a then-branch persist past the merge
 /// regardless of whether else also moved — wrong for the spec's
@@ -900,25 +957,21 @@ pub(crate) fn analyze_if_stmt(
                     // mint a dead drop for the pre-branch binding. But
                     // the arm may have reseated the pre-branch binding
                     // BEFORE the shadow took the name (`x = a; mut x =
-                    // b` in one arm): scan the arm's top-level
-                    // statements for those earlier reseats and record
-                    // their values, so the dead-store drain can honor
-                    // the record on one of them and drop the pre-branch
-                    // buffer on the untouched arms. (Nested ifs'
-                    // reseats are branch-divergent within the arm and
-                    // belong to the nested if's own record.)
-                    if let Some(stmts) = arm_stmts {
-                        for &s in *stmts {
-                            if tir.inst(s).tag != TirTag::Assign {
-                                continue;
-                            }
-                            let av = tir.assign_view(s);
-                            if sidecar.assign_binding[s.index()] == pre_binding
-                                && needs_tracking(tir.inst(av.value).ty, pool)
-                            {
-                                reseat_owners.insert(Owner::Inst(av.value));
-                            }
-                        }
+                    // b` in one arm) — also inside a NESTED conditional
+                    // (`if c2: x = a` then `mut x = b`): the nested
+                    // reseat's free_on_reassign covers only the nested
+                    // arm, and the enclosing arm's own record must
+                    // still capture the reseat or the pre-branch
+                    // buffer leaks on every path where the ENCLOSING
+                    // arm was skipped. Scan the arm recursively for
+                    // those earlier reseats and record their values, so
+                    // the dead-store drain can honor the record on one
+                    // of them and drop the pre-branch buffer on the
+                    // untouched arms.
+                    if let Some(stmts) = arm_stmts
+                        && let Some(binding) = pre_binding
+                    {
+                        collect_arm_reseats(tir, pool, sidecar, stmts, binding, &mut reseat_owners);
                     }
                 }
             }

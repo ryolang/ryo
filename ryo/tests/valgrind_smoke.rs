@@ -552,3 +552,11 @@ fn valgrind_shadow_scope_runtime_cond() {
         "shadow_scope_runtime_cond",
     );
 }
+
+#[test]
+fn valgrind_nested_reseat_then_shadow_leak() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("nested_reseat_then_shadow_leak"),
+        "nested_reseat_then_shadow_leak",
+    );
+}
