@@ -1104,7 +1104,9 @@ fn read_line_unterminated_final_line_is_returned_as_is() {
 #[test]
 fn read_line_empty_file_yields_empty_slot() {
     // See read_line_strips_trailing_newline: Miri isolation forbids
-    // the temp-file open.
+    // the temp-file open (and even reads from stdin — only stdout /
+    // stderr writes are permitted), so this path has no Miri coverage;
+    // ASan/Valgrind and the normal runs carry it.
     if cfg!(miri) {
         return;
     }
