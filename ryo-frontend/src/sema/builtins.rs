@@ -99,6 +99,37 @@ pub(crate) fn emit_builtin_call(
             fcx.builder.call(view.name, effective, &modes, ret_ty, span)
         }
         "panic" => emit_panic(sema, fcx, view, span),
+        // TODO(M24): interim call form — replaced by `process.exit`.
+        "process_exit" => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "process_exit() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            if !matches!(sema.pool.kind(arg_ty), TypeKind::Int) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "process_exit() argument must be int, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
         "assert" => emit_assert(sema, fcx, view, arg_tirs, span),
         "int_to_str" => {
             if view.args.len() != 1 {

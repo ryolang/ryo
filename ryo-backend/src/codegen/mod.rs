@@ -535,7 +535,7 @@ impl Codegen<ObjectModule> {
 /// `declare_runtime_fn` (the module-level import cache is keyed on the
 /// same names). Functions whose bodies codegen now inlines (literal
 /// packing, slicing) are deliberately absent.
-fn runtime_symbols() -> [(&'static str, *const u8); 21] {
+fn runtime_symbols() -> [(&'static str, *const u8); 22] {
     [
         ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
         ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
@@ -593,6 +593,7 @@ fn runtime_symbols() -> [(&'static str, *const u8); 21] {
         ("ryo_bytes_free", ryo_runtime::ryo_bytes_free as *const u8),
         ("ryo_print", ryo_runtime::ryo_print as *const u8),
         ("ryo_panic", ryo_runtime::ryo_panic as *const u8),
+        ("ryo_exit", ryo_runtime::ryo_exit as *const u8),
     ]
 }
 

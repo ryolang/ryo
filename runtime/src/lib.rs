@@ -125,6 +125,18 @@ pub unsafe extern "C" fn ryo_panic(ptr: *const u8, len: u64) -> ! {
     unsafe { exit(101) }
 }
 
+/// Runtime backing for the `process_exit` builtin: exit with the given
+/// status code. TODO(M24): interim call form — replaced by `process.exit`.
+///
+/// # Safety
+/// Never returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_exit(code: u64) -> ! {
+    // SAFETY: exit never returns. `code as c_int` truncation matches
+    // shell exit-code semantics, same as the CLI's clamp(0, 255).
+    unsafe { exit(code as c_int) }
+}
+
 #[cfg(feature = "staticlib")]
 #[panic_handler]
 fn panic_handler(_info: &core::panic::PanicInfo) -> ! {

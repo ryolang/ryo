@@ -74,6 +74,14 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         max_output_len: None,
     },
     BuiltinFunction {
+        // TODO(M24): interim call form — replaced by `process.exit`.
+        name: "process_exit",
+        return_ty: BuiltinReturn::Never,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[],
+        max_output_len: None,
+    },
+    BuiltinFunction {
         name: "int_to_str",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],

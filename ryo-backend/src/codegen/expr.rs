@@ -1229,6 +1229,11 @@ impl<M: Module> Codegen<M> {
             return Ok(builder.ins().iconst(types::I8, 0));
         }
 
+        // TODO(M24): interim call form — replaced by `process.exit`.
+        if name_str == "process_exit" {
+            return Self::emit_process_exit(builder, ctx, r);
+        }
+
         if name_str == "print" {
             // print is an ordinary runtime call. Accepts either
             // repr — owned str triple or strview pair; ryo_print(ptr,
@@ -1627,6 +1632,34 @@ impl<M: Module> Codegen<M> {
         } else {
             Ok(results[0])
         }
+    }
+
+    /// `process_exit(code)` → `ryo_exit(code: u64)`, backed by the
+    /// runtime's `exit()`. TODO(M24): interim call form — replaced by
+    /// `process.exit`. The trap after the call is unreachable in
+    /// practice; it keeps Cranelift honest about the never-returns
+    /// contract, same as the `__ryo_panic` arm.
+    fn emit_process_exit(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<Value, String> {
+        let view = ctx.tir.call_view(r);
+        debug_assert_eq!(
+            view.args.len(),
+            1,
+            "sema should reject process_exit() arity errors"
+        );
+        let arg = Self::eval_inst(builder, ctx, view.args[0])?;
+        let exit_ref = Self::declare_runtime_fn(ctx, builder, "ryo_exit", &[ctx.int_type], &[])?;
+        builder.ins().call(exit_ref, &[arg]);
+        builder.ins().trap(
+            TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
+        );
+        let dead = builder.create_block();
+        builder.seal_block(dead);
+        builder.switch_to_block(dead);
+        Ok(builder.ins().iconst(types::I8, 0))
     }
 
     /// Consuming-concat fast path: `s = s + suffix` where the ownership
