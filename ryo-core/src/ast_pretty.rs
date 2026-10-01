@@ -352,7 +352,11 @@ fn write_expr(
         ExprKind::Slice { .. } => Cow::Borrowed("Slice"),
         ExprKind::Index { .. } => Cow::Borrowed("Index"),
         ExprKind::StructLiteral(lit) => {
-            Cow::Owned(format!("StructLiteral({})", pool.str(lit.name.name)))
+            let name = match lit.name {
+                Some(ident) => pool.str(ident.name),
+                None => "anonymous",
+            };
+            Cow::Owned(format!("StructLiteral({name})"))
         }
         ExprKind::FieldAccess { field, .. } => {
             Cow::Owned(format!("FieldAccess(.{})", pool.str(field.name)))

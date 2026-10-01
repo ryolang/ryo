@@ -51,9 +51,10 @@
 //!
 //! ## Parser-state integration
 //!
-//! The parser builds directly into the arenas with `Ast` as the
-//! chumsky state object; see the `Inspector` impl at the bottom of
-//! this file for rewind truncation.
+//! The parser builds directly into the arenas with the `Ast` as the
+//! arena half of the chumsky state object (the parser-state wrapper
+//! in `ryo-frontend` pairs it with the intern pool); see the
+//! `Inspector` impl at the bottom of this file for rewind truncation.
 
 use crate::tir::ParamMode;
 use crate::types::StringId;
@@ -230,9 +231,12 @@ pub enum ExprKind {
         base: ExprId,
         index: ExprId,
     },
-    /// Struct literal `Name{field=value, ...}` (M9). The field
+    /// Struct literal `Name{field=value, ...}` (M9) or the anonymous
+    /// form `{field=value, ...}` (M10). `None` = anonymous: the shape
+    /// is the identity, there is no declared name. The field
     /// initializers live in the `struct_field_inits` side arena, in
-    /// source order (sema canonicalizes against the declaration).
+    /// source order (sema canonicalizes named literals against the
+    /// declaration).
     StructLiteral(StructLiteral),
     /// Field access `object.field` (M9). Chains fold left:
     /// `a.b.c` is `FieldAccess(FieldAccess(a, b), c)`.
@@ -366,12 +370,14 @@ pub struct StructDef {
     pub attrs: StructAttrs,
 }
 
-/// A struct literal `Name{field=value, ...}` (M9). All fields are
-/// `Copy` handles; the field initializers live in the
+/// A struct literal `Name{field=value, ...}` (M9) or the anonymous
+/// `{field=value, ...}` (M10). `name` is `None` for the anonymous
+/// form — its type identity is the field shape, not a declared name.
+/// All fields are `Copy` handles; the field initializers live in the
 /// `struct_field_inits` side arena, in source order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StructLiteral {
-    pub name: Ident,
+    pub name: Option<Ident>,
     pub fields: StructFieldInitList,
 }
 
@@ -921,12 +927,13 @@ impl Ast {
         )
     }
 
-    /// Struct literal `Name{field=value, ...}` (M9); the field
-    /// initializers are copied into the `struct_field_inits` side
-    /// arena in source order.
+    /// Struct literal `Name{field=value, ...}` (M9) or the anonymous
+    /// `{field=value, ...}` (M10); pass `None` for the anonymous
+    /// form. The field initializers are copied into the
+    /// `struct_field_inits` side arena in source order.
     pub fn struct_literal(
         &mut self,
-        name: Ident,
+        name: Option<Ident>,
         fields: &[(StringId, ExprId)],
         span: SimpleSpan,
     ) -> ExprId {
@@ -1050,7 +1057,9 @@ impl Ast {
 
 /// Chumsky parser-state implementation: the parser builds directly
 /// into the arenas via `map_with`/`foldl_with` closures that call
-/// `e.state()`, with the `Ast` itself as the state object.
+/// `e.state()`; the `Ast` is the arena half of the parser state
+/// (see `ParseState` in `ryo-frontend`'s parser, which pairs it
+/// with the intern pool).
 ///
 /// The `Inspector` hooks are deliberately no-ops. A failed
 /// alternative (`or`/`choice` backtracking, `repeated` iteration

@@ -2,13 +2,16 @@
 //!
 //! Built on chumsky over the lexer's `Token` type. Identifiers,
 //! type names, and string literals come pre-interned as `StringId`
-//! handles, so the parser only ever copies handles out of tokens —
-//! no `to_string` allocations, no `&'a str` slicing into source.
+//! handles — the parser only copies handles out of those tokens.
+//! The one exception is positional field keys (`{0=17}`, `pair.0`):
+//! the canonical field name is the numeric VALUE in decimal (`007`
+//! → `"7"`), a string the lexer never sees, so the parse state
+//! carries the intern pool to mint it (see [`ParseState`]).
 //!
-//! The parser builds directly into the [`Ast`] arenas: the `Ast` is
-//! threaded as chumsky parser state (`extra::Full<_, Ast, _>`,
-//! entered via `parse_with_state`), and node-producing combinators
-//! push `Expr`/`Stmt` values through `e.state()` inside
+//! The parser builds directly into the [`Ast`] arenas: the state
+//! threaded through `parse_with_state` is [`ParseState`], which
+//! derefs to the `Ast`, and node-producing combinators push
+//! `Expr`/`Stmt` values through `e.state()` inside
 //! `map_with`/`foldl_with` closures, yielding [`ExprId`]s /
 //! [`StmtId`]s. The arenas are append-only: a backtracking
 //! alternative that pushed nodes before failing leaves them behind
@@ -28,13 +31,73 @@ use crate::lexer::Token;
 use ryo_core::ast::*;
 use ryo_core::diag::ParseDiag;
 use ryo_core::tir::ParamMode;
-use ryo_core::types::StringId;
+use ryo_core::types::{InternPool, StringId};
+
+/// Chumsky parse state: the [`Ast`] arenas under construction plus
+/// the compilation's intern pool. Identifiers and string literals
+/// arrive pre-interned from the lexer, but positional field keys
+/// mint NEW strings — the canonical decimal field name — so the
+/// state carries the pool to intern them.
+///
+/// [`Deref`]/[`DerefMut`] to `Ast` keep the existing
+/// `e.state().<builder>(...)` call sites unchanged.
+#[derive(Debug)]
+pub struct ParseState {
+    ast: Ast,
+    pool: InternPool,
+}
+
+impl ParseState {
+    /// Fresh arenas over the lexer's pool (ownership moves back out
+    /// through [`ParseState::into_parts`]).
+    pub fn new(pool: InternPool) -> Self {
+        ParseState {
+            ast: Ast::new(),
+            pool,
+        }
+    }
+
+    pub fn into_parts(self) -> (Ast, InternPool) {
+        (self.ast, self.pool)
+    }
+}
+
+impl std::ops::Deref for ParseState {
+    type Target = Ast;
+    fn deref(&self) -> &Self::Target {
+        &self.ast
+    }
+}
+
+impl std::ops::DerefMut for ParseState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ast
+    }
+}
+
+// The `Inspector` hooks stay no-ops — the rewind-truncation rationale
+// lives on the `Ast` impl in `ryo-core` (snapshotting at every
+// choice/repeated boundary cost ~20% of parse time; orphan nodes are
+// unreachable from `top_level`).
+impl<'src, I: chumsky::input::Input<'src>> chumsky::inspector::Inspector<'src, I> for ParseState {
+    type Checkpoint = ();
+
+    fn on_token(&mut self, _: &I::Token) {}
+
+    fn on_save<'parse>(&self, _: &chumsky::input::Cursor<'src, 'parse, I>) -> Self::Checkpoint {}
+
+    fn on_rewind<'parse>(
+        &mut self,
+        _: &chumsky::input::Checkpoint<'src, 'parse, I, Self::Checkpoint>,
+    ) {
+    }
+}
 
 /// Parser extra: `Rich` errors carrying a typed [`ParseDiag`] payload
 /// (chumsky 0.13's `RichReason::Custom(C)` parameter), the [`Ast`]
 /// arena as state, no context. Every grammar rule below is
 /// parameterized over it.
-type PExtra<'a> = extra::Full<Rich<'a, Token, SimpleSpan, ParseDiag>, Ast, ()>;
+type PExtra<'a> = extra::Full<Rich<'a, Token, SimpleSpan, ParseDiag>, ParseState, ()>;
 
 /// `MapExtra` with our extra config. Annotating `map_with` closure
 /// parameters with it pins the `E` type parameter that `e.state()`
@@ -805,6 +868,25 @@ where
         .boxed()
 }
 
+/// Canonical field name for a positional key: the numeric VALUE in
+/// decimal, so `{0=17}` and `pair.007` both name field `"0"` / `"7"`
+/// (the literal text is irrelevant). This is the one string the
+/// lexer cannot pre-intern — canonicalization happens at parse time
+/// against the state's pool.
+fn positional_field_name(n: i64, pool: &mut InternPool) -> StringId {
+    pool.intern_str(&n.to_string())
+}
+
+/// A struct-literal field key: an identifier, or an integer literal
+/// canonicalized to its numeric value (a positional key).
+fn field_key<'a, I>() -> impl Parser<'a, I, StringId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    select! { Token::Ident(name) => name }.or(select! { Token::IntLit(n) => n }
+        .map_with(|n, e: &mut Mx<'a, '_, I>| positional_field_name(n, &mut e.state().pool)))
+}
+
 fn expression_parser<'a, I>() -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -842,7 +924,14 @@ where
             // disambiguates, so the two alternatives cannot both
             // consume input. Field order stays in source order —
             // sema canonicalizes against the declaration.
-            let field_init = select! { Token::Ident(name) => name }
+            //
+            // Field keys are identifiers or integer literals: a
+            // positional key canonicalizes to its numeric value
+            // (`{0=17, 1="alice"}` names fields "0", "1" — the brace
+            // spelling of tuple sugar). Named literals with numeric
+            // keys parse the same way and are rejected later, in
+            // sema, as unknown fields.
+            let field_init = field_key()
                 .then_ignore(just(Token::Assign))
                 .then(expr.clone());
 
@@ -850,6 +939,7 @@ where
                 .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
                 .then(
                     field_init
+                        .clone()
                         .separated_by(just(Token::Comma))
                         .allow_trailing()
                         .collect::<Vec<_>>()
@@ -857,7 +947,30 @@ where
                 )
                 .map_with(|(name, fields), e: &mut Mx<'a, '_, I>| {
                     let span = e.span();
-                    e.state().struct_literal(name, &fields, span)
+                    e.state().struct_literal(Some(name), &fields, span)
+                });
+
+            // Anonymous struct literal `{field=value, ...}` (M10):
+            // the same field list with no `Name` in front — the shape
+            // is the identity. Tried after `struct_literal`; the two
+            // open with different tokens, so they cannot both
+            // consume input. `{}` stays reserved for the future
+            // empty map literal: diagnosed, and recovered as an
+            // empty literal so the rest of the file still parses.
+            let anon_struct_literal = field_init
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace))
+                .validate(|fields, e: &mut Mx<'a, '_, I>, emitter| {
+                    if fields.is_empty() {
+                        emitter.emit(Rich::custom(e.span(), ParseDiag::EmptyAnonStruct));
+                    }
+                    fields
+                })
+                .map_with(|fields, e: &mut Mx<'a, '_, I>| {
+                    let span = e.span();
+                    e.state().struct_literal(None, &fields, span)
                 });
 
             let ident_expr =
@@ -904,6 +1017,7 @@ where
             borrow
                 .or(call)
                 .or(struct_literal)
+                .or(anon_struct_literal)
                 .or(ident_expr)
                 .or(literal)
                 .or(parenthesized)
@@ -916,6 +1030,9 @@ where
         enum PostfixOp {
             Method(StringId, Vec<ExprId>, SimpleSpan),
             Field(Ident, SimpleSpan),
+            /// A diagnosed stray float after `.` (`pair.0.1`): the
+            /// receiver is kept unchanged.
+            Missing,
             Slice(Option<ExprId>, Option<ExprId>, SimpleSpan),
             Index(ExprId, SimpleSpan),
         }
@@ -933,15 +1050,43 @@ where
                 PostfixOp::Method(method, args, e.span())
             });
 
-        // Field access `p.x` (M9). Tried after `method_op`: the method
-        // rule has the longer required match (parens), so chumsky
-        // backtracks to this one when no `(` follows the name.
+        // Field access `p.x` (M9) and positional access `pair.0`
+        // (M10). Tried after `method_op`: the method rule has the
+        // longer required match (parens), so chumsky backtracks to
+        // this one when no `(` follows the name.
+        //
+        // A chained positional access can only be spelled with the
+        // inner access parenthesized — `(pair.0).1`. Bare
+        // `pair.0.1` lexes as `pair . <float 0.1>`: maximal munch
+        // eats `0.1` whole, and the merged float lands exactly where
+        // the field key would be. The stray float is consumed, the
+        // well-formed receiver is kept, and the diagnostic points at
+        // the float with the parenthesized spelling.
+        enum AccessKey {
+            Named(Ident),
+            Positional(Ident),
+            StrayFloat(SimpleSpan),
+        }
+        let named_key = select! { Token::Ident(name) => name }
+            .map_with(|name, e: &mut Mx<'a, '_, I>| AccessKey::Named(Ident::new(name, e.span())));
+        let positional_key =
+            select! { Token::IntLit(n) => n }.map_with(|n, e: &mut Mx<'a, '_, I>| {
+                let name = positional_field_name(n, &mut e.state().pool);
+                AccessKey::Positional(Ident::new(name, e.span()))
+            });
+        let stray_float_key = select! { Token::FloatLit(_) => () }
+            .map_with(|_, e: &mut Mx<'a, '_, I>| AccessKey::StrayFloat(e.span()));
         let field_op = just(Token::Dot)
-            .ignore_then(
-                select! { Token::Ident(name) => name }
-                    .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
-            )
-            .map_with(|field, e: &mut Mx<'a, '_, I>| PostfixOp::Field(field, e.span()));
+            .ignore_then(named_key.or(positional_key).or(stray_float_key))
+            .validate(|key, e: &mut Mx<'a, '_, I>, emitter| match key {
+                AccessKey::StrayFloat(fspan) => {
+                    emitter.emit(Rich::custom(fspan, ParseDiag::ChainedPositionalAccess));
+                    PostfixOp::Missing
+                }
+                AccessKey::Named(field) | AccessKey::Positional(field) => {
+                    PostfixOp::Field(field, e.span())
+                }
+            });
 
         // One bracket parse, no speculation: the optional leading
         // expression is parsed exactly once, then `:` (slice) vs `]`
@@ -986,6 +1131,7 @@ where
                             field,
                             SimpleSpan::new((), start..span.end),
                         ),
+                        PostfixOp::Missing => receiver,
                         PostfixOp::Slice(lo, hi, span) => {
                             e.state()
                                 .slice(receiver, lo, hi, SimpleSpan::new((), start..span.end))
