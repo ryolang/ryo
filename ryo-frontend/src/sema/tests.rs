@@ -1,7 +1,7 @@
 use super::*;
 use crate::astgen;
 use crate::lexer::lex;
-use crate::parser::program_parser;
+use crate::parser::{ParseState, program_parser};
 use chumsky::Parser;
 use chumsky::input::Input;
 use chumsky::span::{SimpleSpan, Span as _};
@@ -26,11 +26,12 @@ pub(super) fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
         lex_sink.into_diags()
     );
     let token_stream = tokens[..].split_token_span((0..input.len()).into());
-    let mut ast = ryo_core::ast::Ast::new();
+    let mut state = ParseState::new(pool);
     program_parser()
-        .parse_with_state(token_stream, &mut ast)
+        .parse_with_state(token_stream, &mut state)
         .into_result()
         .expect("parse ok");
+    let (ast, mut pool) = state.into_parts();
 
     let mut sink = DiagSink::new();
     let uir = astgen::generate(&ast, &mut pool, &mut sink);
@@ -56,11 +57,12 @@ pub(super) fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) 
         lex_sink.into_diags()
     );
     let token_stream = tokens[..].split_token_span((0..input.len()).into());
-    let mut ast = ryo_core::ast::Ast::new();
+    let mut state = ParseState::new(pool);
     program_parser()
-        .parse_with_state(token_stream, &mut ast)
+        .parse_with_state(token_stream, &mut state)
         .into_result()
         .expect("parse ok");
+    let (ast, mut pool) = state.into_parts();
 
     let mut sink = DiagSink::new();
     let uir = astgen::generate(&ast, &mut pool, &mut sink);

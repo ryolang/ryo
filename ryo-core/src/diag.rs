@@ -211,6 +211,18 @@ pub enum DiagCode {
     /// A `struct` declaration whose body is missing: `struct Name:`
     /// not followed by an indented field block (M9).
     EmptyStructBody,
+    /// Empty braces `{}` (M10): reserved for the future empty map
+    /// literal — there is no empty anonymous struct (`void` is the
+    /// unit type). The message names the reservation and what to
+    /// write instead (`none`, or a named / non-empty struct literal).
+    EmptyAnonStruct,
+    /// A float literal continued a positional field-access chain:
+    /// `pair.0.1` lexes as `pair . <float 0.1>` (maximal munch eats
+    /// `0.1` whole), so the chained access can only be spelled with
+    /// the inner access parenthesized — `(pair.0).1`. The parser
+    /// keeps the well-formed receiver and the diagnostic suggests the
+    /// parenthesized form.
+    ChainedPositionalAccess,
     /// An unrecognized `#[...]` attribute (M9.1): the attribute name is
     /// not one of the known forms (`derive(Eq)`, `repr(C)`), its
     /// argument list does not match, or it is attached to something
@@ -369,6 +381,12 @@ pub enum ParseDiag {
     EmptyBrackets,
     /// `struct Name:` with no indented field block (M9).
     EmptyStructBody,
+    /// Empty braces `{}` (M10): reserved for the future empty map
+    /// literal.
+    EmptyAnonStruct,
+    /// A float literal continued a positional field-access chain
+    /// (`pair.0.1` lexes as `pair . <float 0.1>`).
+    ChainedPositionalAccess,
     /// `#[name(args)]` that is not one of the recognized attribute
     /// forms (M9.1): `derive(Eq)` or `repr(C)`. Carries the attribute
     /// head and arguments as interned ids; render them through the
@@ -396,6 +414,8 @@ impl ParseDiag {
             ParseDiag::RangeArity { .. } => DiagCode::RangeArity,
             ParseDiag::EmptyBrackets => DiagCode::EmptyBrackets,
             ParseDiag::EmptyStructBody => DiagCode::EmptyStructBody,
+            ParseDiag::EmptyAnonStruct => DiagCode::EmptyAnonStruct,
+            ParseDiag::ChainedPositionalAccess => DiagCode::ChainedPositionalAccess,
             ParseDiag::UnknownAttribute { .. } | ParseDiag::MisplacedAttribute => {
                 DiagCode::UnknownAttribute
             }
@@ -446,6 +466,15 @@ impl std::fmt::Display for ParseDiag {
             ParseDiag::EmptyStructBody => f.write_str(
                 "struct declaration has no fields: \
                  indent at least one `name: type` field line",
+            ),
+            ParseDiag::EmptyAnonStruct => f.write_str(
+                "empty braces are reserved for the future empty map literal; \
+                 write `none` for the unit value, or construct a named \
+                 struct (`Point{x=1, y=2}`)",
+            ),
+            ParseDiag::ChainedPositionalAccess => f.write_str(
+                "chained positional access needs parentheses — `pair.0.1` \
+                 lexes `0.1` as a single float literal; write `(pair.0).1`",
             ),
             ParseDiag::UnknownAttribute { .. } => f.write_str(
                 "unknown attribute; known attributes: \

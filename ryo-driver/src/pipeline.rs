@@ -49,7 +49,7 @@ use ryo_core::types::InternPool;
 use ryo_core::uir::Uir;
 use ryo_frontend::astgen;
 use ryo_frontend::lexer::{self, Token};
-use ryo_frontend::parser::program_parser;
+use ryo_frontend::parser::{ParseState, program_parser};
 use ryo_frontend::sema;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -162,12 +162,15 @@ fn parse_source(
     // placeholder nodes). Callers thread the diagnostics into the
     // middle-end sink and keep analyzing, so one bad statement never
     // suppresses semantic diagnostics elsewhere in the file (R9).
-    // The parser builds directly into the AST arenas, threaded
-    // as chumsky parser state.
-    let mut ast = ast::Ast::new();
+    // The parser builds directly into the AST arenas, threaded as
+    // chumsky parser state (the state also carries the intern pool
+    // so positional field keys can mint their canonical names).
+    let mut state = ParseState::new(std::mem::take(pool));
     let (out, errs) = program_parser()
-        .parse_with_state(token_stream, &mut ast)
+        .parse_with_state(token_stream, &mut state)
         .into_output_errors();
+    let (ast, parsed_pool) = state.into_parts();
+    *pool = parsed_pool;
     for e in &errs {
         let span = chumsky::span::SimpleSpan::new((), e.span().start..e.span().end);
         match e.reason() {
@@ -430,6 +433,8 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::EmptyBrackets => "E0106",
         DiagCode::EmptyStructBody => "E0107",
         DiagCode::UnknownAttribute => "E0108",
+        DiagCode::EmptyAnonStruct => "E0109",
+        DiagCode::ChainedPositionalAccess => "E0110",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -852,6 +857,8 @@ mod tests {
             (DiagCode::EmptyBrackets, "E0106"),
             (DiagCode::EmptyStructBody, "E0107"),
             (DiagCode::UnknownAttribute, "E0108"),
+            (DiagCode::EmptyAnonStruct, "E0109"),
+            (DiagCode::ChainedPositionalAccess, "E0110"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -925,6 +932,8 @@ mod tests {
                 | DiagCode::EmptyBrackets
                 | DiagCode::EmptyStructBody
                 | DiagCode::UnknownAttribute
+                | DiagCode::EmptyAnonStruct
+                | DiagCode::ChainedPositionalAccess
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape

@@ -21,15 +21,16 @@ fn lex_and_parse(input: &str) -> Result<(Ast, InternPool), Vec<TestErr>> {
     }
     let token_stream = tokens[..].split_token_span((0..input.len()).into());
 
-    let mut ast = Ast::new();
+    let mut state = ParseState::new(pool);
     program_parser()
-        .parse_with_state(token_stream, &mut ast)
+        .parse_with_state(token_stream, &mut state)
         .into_result()
         .map_err(|e| {
             e.into_iter()
                 .map(|rich| rich.into_owned())
                 .collect::<Vec<_>>()
         })?;
+    let (ast, pool) = state.into_parts();
     Ok((ast, pool))
 }
 
@@ -436,7 +437,7 @@ fn parse_struct_literal() {
     let init = decl_init(&ast);
     match &ast.expr(init).kind {
         ExprKind::StructLiteral(lit) => {
-            assert_eq!(pool.str(lit.name.name), "Point");
+            assert_eq!(pool.str(lit.name.unwrap().name), "Point");
             let fields = ast.struct_field_inits(lit.fields);
             assert_eq!(fields.len(), 2);
             assert_eq!(pool.str(fields[0].0), "x");
@@ -456,7 +457,9 @@ fn parse_struct_literal_trailing_comma() {
     let (ast, pool) = lex_and_parse("p = Point{x=1.0,}\n").unwrap();
     let init = decl_init(&ast);
     match &ast.expr(init).kind {
-        ExprKind::StructLiteral(lit) => assert_eq!(pool.str(lit.name.name), "Point"),
+        ExprKind::StructLiteral(lit) => {
+            assert_eq!(pool.str(lit.name.unwrap().name), "Point")
+        }
         other => panic!("expected StructLiteral, got {:?}", other),
     }
 }
@@ -467,7 +470,7 @@ fn parse_struct_literal_empty_fields() {
     let init = decl_init(&ast);
     match &ast.expr(init).kind {
         ExprKind::StructLiteral(lit) => {
-            assert_eq!(pool.str(lit.name.name), "Point");
+            assert_eq!(pool.str(lit.name.unwrap().name), "Point");
             assert_eq!(ast.struct_field_inits(lit.fields).len(), 0);
         }
         other => panic!("expected StructLiteral, got {:?}", other),
@@ -483,6 +486,138 @@ fn struct_literal_does_not_shadow_call_or_ident() {
     assert!(matches!(ast.expr(call_init).kind, ExprKind::Call(_, _)));
     let ident_init = var_decl(&ast, stmts[1]).initializer;
     assert!(matches!(ast.expr(ident_init).kind, ExprKind::Ident(_)));
+}
+
+#[test]
+fn anon_struct_literal_parses() {
+    let (ast, pool) = lex_and_parse("p = {x=1, y=2}\n").unwrap();
+    let init = decl_init(&ast);
+    match &ast.expr(init).kind {
+        ExprKind::StructLiteral(lit) => {
+            // No declared name — the shape IS the identity.
+            assert!(lit.name.is_none());
+            let fields = ast.struct_field_inits(lit.fields);
+            assert_eq!(fields.len(), 2);
+            assert_eq!(pool.str(fields[0].0), "x");
+            assert_eq!(pool.str(fields[1].0), "y");
+            assert_int_lit(&ast, fields[0].1, 1);
+            assert_int_lit(&ast, fields[1].1, 2);
+        }
+        other => panic!("expected StructLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn anon_literal_numeric_field_keys() {
+    // Positional keys canonicalize to their numeric value, so the
+    // brace spelling of a tuple — `{0=17, 1="alice"}` — names the
+    // same fields as `(17, "alice")` sugar.
+    let (ast, pool) = lex_and_parse("p = {0=17, 1=\"alice\"}\n").unwrap();
+    let init = decl_init(&ast);
+    match &ast.expr(init).kind {
+        ExprKind::StructLiteral(lit) => {
+            assert!(lit.name.is_none());
+            let fields = ast.struct_field_inits(lit.fields);
+            assert_eq!(fields.len(), 2);
+            assert_eq!(pool.str(fields[0].0), "0");
+            assert_eq!(pool.str(fields[1].0), "1");
+            assert_int_lit(&ast, fields[0].1, 17);
+            assert!(matches!(
+                ast.expr(fields[1].1).kind,
+                ExprKind::Literal(Literal::Str(_))
+            ));
+        }
+        other => panic!("expected StructLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn anon_literal_rejects_empty_braces() {
+    // `{}` stays reserved for the future empty map literal.
+    let errs = lex_and_parse("p = {}\n").expect_err("empty braces must be rejected");
+    let msg = errs
+        .iter()
+        .find_map(|e| match e.reason() {
+            RichReason::Custom(pd @ ParseDiag::EmptyAnonStruct) => Some(pd.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected an EmptyAnonStruct diagnostic, got: {errs:?}"));
+    assert!(msg.contains("map literal"), "{msg}");
+    assert!(msg.contains("none"), "{msg}");
+    assert!(msg.contains("named struct"), "{msg}");
+}
+
+#[test]
+fn positional_field_access_parses() {
+    let (ast, pool) = lex_and_parse("x = pair.0\n").unwrap();
+    let init = decl_init(&ast);
+    match ast.expr(init).kind {
+        ExprKind::FieldAccess { object, field } => {
+            assert_eq!(pool.str(field.name), "0");
+            assert!(matches!(ast.expr(object).kind, ExprKind::Ident(_)));
+        }
+        other => panic!("expected FieldAccess, got {:?}", other),
+    }
+
+    // A chained positional access needs the inner access
+    // parenthesized — bare `pair.0.1` is the lexer's `0.1` float, so
+    // `(pair.0).1` is the spellable form.
+    let (ast, pool) = lex_and_parse("y = (pair.0).1\n").unwrap();
+    let init = decl_init(&ast);
+    match ast.expr(init).kind {
+        ExprKind::FieldAccess { object, field } => {
+            assert_eq!(pool.str(field.name), "1");
+            match ast.expr(object).kind {
+                ExprKind::FieldAccess {
+                    object: inner,
+                    field: inner_field,
+                } => {
+                    assert_eq!(pool.str(inner_field.name), "0");
+                    assert!(matches!(ast.expr(inner).kind, ExprKind::Ident(_)));
+                }
+                other => panic!("expected nested FieldAccess, got {:?}", other),
+            }
+        }
+        other => panic!("expected FieldAccess, got {:?}", other),
+    }
+}
+
+#[test]
+fn positional_access_canonicalizes_value() {
+    // The field name is the numeric VALUE, not the literal text:
+    // `pair.007` accesses field "7".
+    let (ast, pool) = lex_and_parse("x = pair.007\n").unwrap();
+    let init = decl_init(&ast);
+    match ast.expr(init).kind {
+        ExprKind::FieldAccess { field, .. } => assert_eq!(pool.str(field.name), "7"),
+        other => panic!("expected FieldAccess, got {:?}", other),
+    }
+}
+
+#[test]
+fn bare_chained_positional_errors_with_paren_hint() {
+    // Maximal munch: `pair.0.1` lexes as `pair . <float 0.1>` — the
+    // float regex eats `0.1` whole, so the positional chain cannot
+    // continue bare. The parser consumes the stray float, keeps the
+    // well-formed receiver, and suggests the parenthesized spelling.
+    let (ok, ast, errs, _pool) = lex_and_parse_recovering("x = pair.0.1\n");
+    assert!(ok, "statement should recover to a partial program");
+    let msg = errs
+        .iter()
+        .find_map(|e| match e.reason() {
+            RichReason::Custom(pd @ ParseDiag::ChainedPositionalAccess) => Some(pd.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a ChainedPositionalAccess diagnostic, got: {errs:?}"));
+    assert!(msg.contains("(pair.0).1"), "{msg}");
+    // The merged float consumed the whole `.0.1` tail, so the
+    // recovered expression is the bare receiver.
+    let init = decl_init(&ast);
+    assert!(
+        matches!(ast.expr(init).kind, ExprKind::Ident(_)),
+        "expected the partial AST to keep the receiver, got {:?}",
+        ast.expr(init).kind
+    );
 }
 
 #[test]
@@ -1132,10 +1267,11 @@ fn lex_and_parse_recovering(input: &str) -> (bool, Ast, Vec<TestErr>, InternPool
     let tokens = lex(input, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "test input must lex cleanly");
     let token_stream = tokens[..].split_token_span((0..input.len()).into());
-    let mut ast = Ast::new();
+    let mut state = ParseState::new(pool);
     let (out, errs) = program_parser()
-        .parse_with_state(token_stream, &mut ast)
+        .parse_with_state(token_stream, &mut state)
         .into_output_errors();
+    let (ast, pool) = state.into_parts();
     (
         out.is_some(),
         ast,
