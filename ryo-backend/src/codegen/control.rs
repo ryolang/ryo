@@ -26,9 +26,14 @@ impl<M: Module> Codegen<M> {
         // (e.g. an if with no Move-typed bindings live across it):
         // unconditional Frees still fire because their `branch` is
         // `None`, and there are no branch-gated entries to gate.
-        let branch_ids = ctx.sidecar.if_branches[r.index()]
-            .clone()
-            .unwrap_or_default();
+        // The sidecar reference is copied out of `ctx` so the entry
+        // can be BORROWED, not cloned: `IfBranchIds` carries the elif
+        // Vec, and the old `.clone().unwrap_or_default()` paid a heap
+        // allocation per if even when there was no entry (I-144).
+        let sidecar = ctx.sidecar;
+        let branch_ids = sidecar.if_branches[r.index()].as_ref();
+        let then_branch = branch_ids.map(|b| b.then_branch).unwrap_or_default();
+        let else_branch = branch_ids.and_then(|b| b.else_branch).unwrap_or_default();
 
         let cond_val = Self::eval_inst(builder, ctx, view.cond)?;
         let then_block = builder.create_block();
@@ -38,12 +43,7 @@ impl<M: Module> Codegen<M> {
         // An else-less if whose arms conditionally reseated a
         // binding needs a REAL fall-through block so the arm-gated
         // DeadDrops have somewhere to fire.
-        let needs_fallthrough_block = !has_else
-            && ctx
-                .sidecar
-                .conditional_dead_drops
-                .iter()
-                .any(|d| d.if_stmt == r);
+        let needs_fallthrough_block = !has_else && !ctx.dead_drop_by_if[r.index()].is_empty();
         let capacity = elif_count + usize::from(has_else || needs_fallthrough_block);
         let mut next_blocks: Vec<Block> = Vec::with_capacity(capacity);
         for _ in 0..elif_count {
@@ -69,8 +69,8 @@ impl<M: Module> Codegen<M> {
         // Manual push/pop (not RAII) — `?` propagation interacts
         // poorly with a scope-guard holding `&mut ctx`. We pop on
         // both Ok and Err paths by binding the result first.
-        ctx.branch_stack.push(branch_ids.then_branch);
-        Self::emit_conditional_dead_drops(builder, ctx, r, branch_ids.then_branch)?;
+        ctx.branch_stack.push(then_branch);
+        Self::emit_conditional_dead_drops(builder, ctx, r, then_branch)?;
         let then_term_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
         ctx.branch_stack.pop();
         let then_term = then_term_result?;
@@ -123,7 +123,10 @@ impl<M: Module> Codegen<M> {
             builder.seal_block(elif_body_block);
             builder.switch_to_block(elif_body_block);
             Self::seed_cond_facts(ctx, elif.cond, true);
-            let elif_branch_id = branch_ids.elif_branches.get(i).copied().unwrap_or_default();
+            let elif_branch_id = branch_ids
+                .and_then(|b| b.elif_branches.get(i))
+                .copied()
+                .unwrap_or_default();
             ctx.branch_stack.push(elif_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, elif_branch_id)?;
             let elif_term_result = Self::emit_scoped_body(builder, ctx, &elif.body);
@@ -160,7 +163,7 @@ impl<M: Module> Codegen<M> {
             // Same re-application of cond-eval kills as the elif cond
             // blocks above.
             Self::kill_assigned_since(ctx, scope_mark);
-            let else_branch_id = branch_ids.else_branch.unwrap_or_default();
+            let else_branch_id = else_branch;
             ctx.branch_stack.push(else_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, else_branch_id)?;
             let else_term_result = Self::emit_scoped_body(builder, ctx, else_stmts);
@@ -176,7 +179,7 @@ impl<M: Module> Codegen<M> {
             // DeadDrops for the paths where no arm reseated the binding.
             builder.seal_block(else_or_merge);
             builder.switch_to_block(else_or_merge);
-            let fallthrough_id = branch_ids.else_branch.unwrap_or_default();
+            let fallthrough_id = else_branch;
             ctx.branch_stack.push(fallthrough_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, fallthrough_id)?;
             ctx.branch_stack.pop();

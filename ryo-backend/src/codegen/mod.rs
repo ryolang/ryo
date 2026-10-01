@@ -436,6 +436,13 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// (slot 0 unused — refs are 1-based); an empty Vec means no frees
     /// anchor there. Anchors are never param sentinel refs.
     free_by_after: Vec<Vec<usize>>,
+    /// Maps an `IfStmt` `TirRef` to the indices of
+    /// `sidecar.conditional_dead_drops` keyed on it. Dense table indexed
+    /// by `TirRef::index()` (slot 0 unused — refs are 1-based); an empty
+    /// Vec means the if has no dead drops. `emit_conditional_dead_drops`
+    /// consults it instead of re-scanning the whole per-function drop
+    /// list at the start of every arm (O(ifs × arms × drops)).
+    dead_drop_by_if: Vec<Vec<usize>>,
     /// Unfired indices in `sidecar.free_schedule` that still need to be swept.
     /// Used to avoid O(K * S) quadratic scaling during end-of-statement sweep.
     pending_sweep: Vec<usize>,
@@ -1140,6 +1147,14 @@ impl<M: Module> Codegen<M> {
                 free_by_after[fp.after.index()].push(idx);
             }
             let pending_sweep: Vec<usize> = (0..func_sidecar.free_schedule.len()).collect();
+            let mut dead_drop_by_if: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
+            for (idx, dd) in func_sidecar.conditional_dead_drops.iter().enumerate() {
+                debug_assert!(
+                    !dd.if_stmt.is_param(),
+                    "dead-drop keys are always real IfStmt refs"
+                );
+                dead_drop_by_if[dd.if_stmt.index()].push(idx);
+            }
             let (
                 free_binding_names,
                 free_binding_param_names,
@@ -1191,6 +1206,7 @@ impl<M: Module> Codegen<M> {
                 param_values: vec![None; tir.params.len()],
                 freed_at: vec![false; func_sidecar.free_schedule.len()],
                 free_by_after,
+                dead_drop_by_if,
                 pending_sweep,
                 loop_stack: Vec::new(),
                 fat_locals: fat_param_locals,
