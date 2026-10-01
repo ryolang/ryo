@@ -970,11 +970,33 @@ fn analyze_function(
     // (Reads-after clear the pending entry by name, so honored records
     // never collide with the last-use machinery.) Deduped by record:
     // several pending entries can match one record.
+    //
+    // The pending owner must belong to the SAME binding as the record's
+    // pre-branch owner. A same-named shadow declared inside an arm
+    // re-binds the record's name: the arm-end owner (and its pending
+    // entry) then belongs to the shadow binding, and honoring the
+    // record on it minted a dead drop against the OUTER binding's home
+    // slot — a slot the outer owner's own Free already released, so the
+    // drop double-freed the slot's current buffer on every path where
+    // it fired. The shadow's reseat value needs no fall-through drop
+    // either: the shadow binding does not exist on the arms where its
+    // reassign never ran.
+    let binding_of_owner = |o: &Owner| -> Option<TirRef> {
+        match o {
+            Owner::Inst(r) => decl_of_init.get(r).or(assign_value_of.get(r)).copied(),
+            Owner::Param(_) => None,
+        }
+    };
     let mut honored: HashSet<usize> = HashSet::new();
     for (owner, (name, _, _)) in &own.pending_dead_store {
         for (idx, drop) in own.reseat_drops.iter().enumerate() {
             if drop.name == *name && drop.reseat_owners.contains(owner) {
-                honored.insert(idx);
+                match (binding_of_owner(&drop.pre_owner), binding_of_owner(owner)) {
+                    (Some(pre_binding), Some(owner_binding)) if pre_binding == owner_binding => {
+                        honored.insert(idx);
+                    }
+                    _ => {}
+                }
             }
         }
     }

@@ -494,8 +494,22 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// ref), built alongside `free_binding_names`. `emit_frees` only
     /// takes the binding-path redirect when the FreePoint's target IS
     /// this write — a stale/superseded target would free the binding's
-    /// current value instead of its own buffer.
-    binding_last_write: HashMap<StringId, TirRef>,
+    /// current value instead of its own buffer. Keyed by BINDING
+    /// identity (the declaring VarDecl's ref, or a fat param's sentinel
+    /// ref), not by name: one name can denote several bindings (a
+    /// same-named shadow), and name-keyed lookup lets a later shadow's
+    /// writes suppress the branch-divergent-reseat redirect of an outer
+    /// binding's Free (the invalid-free + leak in the taken-arm reseat
+    /// + shadow composition).
+    binding_last_write: HashMap<TirRef, TirRef>,
+    /// Free-target (initializer / Assign value) → BINDING identity (the
+    /// declaring VarDecl's `TirRef`; `sidecar.assign_binding` for Assign
+    /// values), built alongside `free_binding_names`. Params need no
+    /// entry — their binding identity is their own sentinel ref (see
+    /// `free_binding_of`). `emit_frees` pairs this with
+    /// `binding_last_write` to keep the redirect's lineage tracking
+    /// per-binding while `fat_locals` stay name-keyed.
+    free_binding_of_insts: Vec<Option<TirRef>>,
     /// Every `FreePoint` target in this function's schedule. `emit_frees`
     /// consults it to distinguish a superseded redirect target whose
     /// most recent write IS freed elsewhere (loop-carried reassign: do
@@ -662,6 +676,23 @@ impl<M: Module> Codegen<M> {
             ctx.free_binding_param_names[idx as usize]
         } else {
             ctx.free_binding_names.get(r.index()).copied().flatten()
+        }
+    }
+
+    /// Read the free-target → BINDING identity map: the declaring
+    /// `VarDecl`'s `TirRef` for initializer targets, the
+    /// `sidecar.assign_binding` entry for `Assign` value targets. A fat
+    /// param's binding identity IS its own sentinel ref (params are
+    /// never shadowed). Same dispatch shape as `free_binding_name`;
+    /// `emit_frees` consults it so the redirect's "most recent write"
+    /// lookup is per-binding, not per-name (a same-named shadow is a
+    /// different binding and must not clobber the outer binding's
+    /// lineage).
+    pub(crate) fn free_binding_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<TirRef> {
+        if r.as_param_index().is_some() {
+            Some(r)
+        } else {
+            ctx.free_binding_of_insts.get(r.index()).copied().flatten()
         }
     }
 
@@ -1109,8 +1140,12 @@ impl<M: Module> Codegen<M> {
                 free_by_after[fp.after.index()].push(idx);
             }
             let pending_sweep: Vec<usize> = (0..func_sidecar.free_schedule.len()).collect();
-            let (free_binding_names, free_binding_param_names, binding_last_write) =
-                Self::build_free_binding_names(tir, pool);
+            let (
+                free_binding_names,
+                free_binding_param_names,
+                free_binding_of_insts,
+                binding_last_write,
+            ) = Self::build_free_binding_names(tir, pool, func_sidecar);
             let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, pool, &ids);
 
             let mut promo_free_by_after: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
@@ -1172,6 +1207,7 @@ impl<M: Module> Codegen<M> {
                 struct_locals_undo,
                 free_binding_names,
                 free_binding_param_names,
+                free_binding_of_insts,
                 binding_last_write,
                 all_free_targets: func_sidecar
                     .free_schedule

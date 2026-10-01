@@ -1007,6 +1007,77 @@ fn main():
 ",
     ),
     (
+        // Same-name shadow + TAKEN reassign path: the mirror of
+        // shadow_binding_reassign_leak. Codegen's binding-path
+        // redirect resolves a Free through the binding's CURRENT home
+        // slot; the lookup was keyed by NAME, so the shadow scope's
+        // later writes clobbered the outer binding's "most recent
+        // write" and the redirect was rejected for the outer owner's
+        // last-use Free. The fallback freed the owner's stale cached
+        // triple (an invalid free — the buffer was already released
+        // by the taken arm's free_on_reassign) while the slot's
+        // path-correct buffer (the taken reseat's value) leaked.
+        // Both defects are heap-only (SSO short literals never
+        // allocate), hence make().
+        "shadow_taken_arm_double_free",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut x = make(1)
+\tif true:
+\t\tx = make(2)
+\tprint(x)
+\tif true:
+\t\tmut x = make(3)
+\t\tx = make(4)
+\tprint(\"done\\n\")
+",
+    ),
+    (
+        // The taken-arm + shadow composition with RUNTIME conditions,
+        // both directions in one run: the x shape exercises the taken
+        // reseat + taken shadow scope, the y shape the not-taken
+        // reseat + not-taken shadow scope. The not-taken shadow side
+        // pins the binding-aware ConditionalDeadDrop honoring: a dead
+        // shadow-scope reseat value must not mint a drop against the
+        // outer binding's home slot (the outer owner's own Free
+        // already released it — the drop double-freed the slot's
+        // buffer on this exact path).
+        "shadow_scope_runtime_cond",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tcond = \"ab\".len() > 0
+\tmut x = make(1)
+\tif cond:
+\t\tx = make(2)
+\tprint(x)
+\tif cond:
+\t\tmut x = make(3)
+\t\tx = make(4)
+\tmut y = make(5)
+\tif not cond:
+\t\ty = make(6)
+\tprint(y)
+\tif not cond:
+\t\tmut y = make(7)
+\t\ty = make(8)
+\tmut z = make(9)
+\tif cond:
+\t\tz = make(10)
+\t\tmut z = make(11)
+\tmut w = make(12)
+\tif not cond:
+\t\tw = make(13)
+\t\tmut w = make(14)
+\tprint(\"done\\n\")
+",
+    ),
+    (
         // Sibling scopes (no shadowing): each arm declares its own
         // `x`. An arm's reassigns must not enter the sibling arm's
         // binding — name-keyed suppression dropped a sibling buffer.
