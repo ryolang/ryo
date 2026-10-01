@@ -611,6 +611,63 @@ pub(crate) fn stmts_subtree(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
     set
 }
 
+/// Collect every `Assign` value in `stmts` — including nested
+/// if/elif/else, while, and for bodies — that stores into `binding`
+/// (the pre-branch binding a shadowing arm took the name from). Used
+/// by `analyze_if_stmt`'s reseat-record: an arm that reseats the
+/// pre-branch binding and THEN shadows the name must still attribute
+/// the reseat to the pre-branch binding, wherever in the arm (however
+/// deeply nested) the reseat happened, or the pre-branch buffer leaks
+/// on the paths where the whole arm was skipped.
+fn collect_arm_reseats(
+    tir: &Tir,
+    pool: &InternPool,
+    sidecar: &FunctionSidecar,
+    stmts: &[TirRef],
+    binding: TirRef,
+    reseat_owners: &mut HashSet<Owner>,
+) {
+    for &s in stmts {
+        match tir.inst(s).tag {
+            TirTag::Assign => {
+                let av = tir.assign_view(s);
+                if sidecar.assign_binding[s.index()] == Some(binding)
+                    && needs_tracking(tir.inst(av.value).ty, pool)
+                {
+                    reseat_owners.insert(Owner::Inst(av.value));
+                }
+            }
+            TirTag::IfStmt => {
+                let view = tir.if_stmt_view(s);
+                collect_arm_reseats(tir, pool, sidecar, &view.then_stmts, binding, reseat_owners);
+                for elif in &view.elif_branches {
+                    collect_arm_reseats(tir, pool, sidecar, &elif.body, binding, reseat_owners);
+                }
+                if let Some(else_stmts) = &view.else_stmts {
+                    collect_arm_reseats(tir, pool, sidecar, else_stmts, binding, reseat_owners);
+                }
+            }
+            TirTag::WhileLoop => collect_arm_reseats(
+                tir,
+                pool,
+                sidecar,
+                &tir.while_loop_view(s).body,
+                binding,
+                reseat_owners,
+            ),
+            TirTag::ForRange => collect_arm_reseats(
+                tir,
+                pool,
+                sidecar,
+                &tir.for_range_view(s).body,
+                binding,
+                reseat_owners,
+            ),
+            _ => {}
+        }
+    }
+}
+
 /// CFG join for `if` / `elif` / `else`. The naïve forward walk
 /// would let a move inside a then-branch persist past the merge
 /// regardless of whether else also moved — wrong for the spec's
@@ -840,18 +897,33 @@ pub(crate) fn analyze_if_stmt(
     // the reassign did not happen. Includes the implicit fall-through
     // pseudo-arm of an else-less if (its BranchId was minted above).
     {
-        let mut arm_states: Vec<(BranchId, &BranchState)> =
+        let mut arm_states: Vec<(BranchId, &BranchState, Option<&[TirRef]>)> =
             Vec::with_capacity(branch_results.len());
-        arm_states.push((then_branch, &branch_results[0]));
+        arm_states.push((then_branch, &branch_results[0], Some(&view.then_stmts)));
         for (i, _) in view.elif_branches.iter().enumerate() {
-            arm_states.push((elif_branches[i], &branch_results[1 + i]));
+            arm_states.push((
+                elif_branches[i],
+                &branch_results[1 + i],
+                Some(&view.elif_branches[i].body),
+            ));
         }
-        arm_states.push((
-            else_branch.expect("else/fall-through arm id minted"),
-            branch_results
-                .last()
-                .expect("else/fall-through snapshot pushed"),
-        ));
+        if let Some(else_stmts) = &view.else_stmts {
+            arm_states.push((
+                else_branch.expect("else/fall-through arm id minted"),
+                branch_results
+                    .last()
+                    .expect("else/fall-through snapshot pushed"),
+                Some(else_stmts),
+            ));
+        } else {
+            arm_states.push((
+                else_branch.expect("else/fall-through arm id minted"),
+                branch_results
+                    .last()
+                    .expect("else/fall-through snapshot pushed"),
+                None,
+            ));
+        }
         for (name, owner_pre) in &snap.current_owner {
             // Only tracked (Move-typed) locals need drops; Copy values
             // have no buffer, and params are covered by the exit-time
@@ -862,14 +934,45 @@ pub(crate) fn analyze_if_stmt(
             if !needs_tracking(tir.inst(*pre_ref).ty, pool) {
                 continue;
             }
+            let pre_binding = snap.binding_of_name.get(name).copied();
             let mut reseat_owners: HashSet<Owner> = HashSet::new();
             let mut untouched_arms: Vec<BranchId> = Vec::new();
-            for (bid, b) in &arm_states {
+            for (bid, b, arm_stmts) in &arm_states {
                 let owner_b = b.current_owner.get(name).copied().unwrap_or(*owner_pre);
-                if owner_b == *owner_pre {
-                    untouched_arms.push(*bid);
+                let binding_b = b.binding_of_name.get(name).copied().or(pre_binding);
+                if binding_b == pre_binding {
+                    // The arm's end state is the SAME binding as before
+                    // the if: a differing owner is a genuine reseat of
+                    // the pre-branch binding.
+                    if owner_b == *owner_pre {
+                        untouched_arms.push(*bid);
+                    } else {
+                        reseat_owners.insert(owner_b);
+                    }
                 } else {
-                    reseat_owners.insert(owner_b);
+                    // The arm shadows `name` with a binding declared
+                    // inside the arm. The arm-end owner belongs to that
+                    // arm-local shadow — it cannot leak on the arms
+                    // where the shadow never existed, so it must not
+                    // mint a dead drop for the pre-branch binding. But
+                    // the arm may have reseated the pre-branch binding
+                    // BEFORE the shadow took the name (`x = a; mut x =
+                    // b` in one arm) — also inside a NESTED conditional
+                    // (`if c2: x = a` then `mut x = b`): the nested
+                    // reseat's free_on_reassign covers only the nested
+                    // arm, and the enclosing arm's own record must
+                    // still capture the reseat or the pre-branch
+                    // buffer leaks on every path where the ENCLOSING
+                    // arm was skipped. Scan the arm recursively for
+                    // those earlier reseats and record their values, so
+                    // the dead-store drain can honor the record on one
+                    // of them and drop the pre-branch buffer on the
+                    // untouched arms.
+                    if let Some(stmts) = arm_stmts
+                        && let Some(binding) = pre_binding
+                    {
+                        collect_arm_reseats(tir, pool, sidecar, stmts, binding, &mut reseat_owners);
+                    }
                 }
             }
             // Dedup: loop-convergence re-walks revisit this if.

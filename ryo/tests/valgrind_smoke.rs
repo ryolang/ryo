@@ -536,3 +536,27 @@ fn valgrind_sibling_scope_binding_reassign() {
         "sibling_scope_binding_reassign",
     );
 }
+
+#[test]
+fn valgrind_shadow_taken_arm_double_free() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("shadow_taken_arm_double_free"),
+        "shadow_taken_arm_double_free",
+    );
+}
+
+#[test]
+fn valgrind_shadow_scope_runtime_cond() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("shadow_scope_runtime_cond"),
+        "shadow_scope_runtime_cond",
+    );
+}
+
+#[test]
+fn valgrind_nested_reseat_then_shadow_leak() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("nested_reseat_then_shadow_leak"),
+        "nested_reseat_then_shadow_leak",
+    );
+}

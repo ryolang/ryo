@@ -9,14 +9,18 @@ use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::HashMap;
 
-/// The three tables built by [`Codegen::build_free_binding_names`]:
+/// The four tables built by [`Codegen::build_free_binding_names`]:
 /// free-target → binding name (dense, per instruction ref), fat-param
-/// sentinel → binding name (dense, per param position), and binding
-/// name → its most recent write (see the builder's docs).
+/// sentinel → binding name (dense, per param position), free-target →
+/// its BINDING identity (dense, per instruction ref — a declaring
+/// `VarDecl`'s `TirRef`, or the `Assign` value's
+/// `sidecar.assign_binding` entry), and binding identity → its most
+/// recent write (see the builder's docs).
 type FreeBindingTables = (
     Vec<Option<StringId>>,
     Vec<Option<StringId>>,
-    HashMap<StringId, TirRef>,
+    Vec<Option<TirRef>>,
+    HashMap<TirRef, TirRef>,
 );
 
 impl<M: Module> Codegen<M> {
@@ -317,10 +321,25 @@ impl<M: Module> Codegen<M> {
             // path-correct buffer. Any other stale target falls through
             // to the cached-repr path (or the static cap==0 elision)
             // below.
+            //
+            // Both the target's binding and the "most recent write"
+            // table are keyed by BINDING identity (the declaring
+            // VarDecl's ref; `sidecar.assign_binding` for Assign
+            // values), not by name: a same-named shadow writes the same
+            // name-keyed slot tables but is a different binding with its
+            // own home lineage. Name-keyed lookup let a later shadow's
+            // writes clobber the outer binding's "most recent write",
+            // misclassifying the outer owner's Free as superseded — the
+            // fallback then freed the owner's stale cached triple (an
+            // invalid free on the taken path) while the slot's
+            // path-correct buffer leaked.
             let binding_name = Self::free_binding_name(ctx, target)
                 .filter(|name| Self::read_slot(&ctx.fat_locals, *name).is_some())
-                .filter(|name| match ctx.binding_last_write.get(name) {
-                    Some(&last) => last == target || !ctx.all_free_targets.contains(&last),
+                .filter(|_| match Self::free_binding_of(ctx, target) {
+                    Some(binding) => match ctx.binding_last_write.get(&binding) {
+                        Some(&last) => last == target || !ctx.all_free_targets.contains(&last),
+                        None => false,
+                    },
                     None => false,
                 });
             if let Some(name) = binding_name {
@@ -456,65 +475,110 @@ impl<M: Module> Codegen<M> {
     /// once per function; `emit_frees` consults it to free a binding's
     /// current `FatLocals` rather than a stale cached repr.
     ///
-    /// Returns three tables (see [`FreeBindingTables`]): the first two
-    /// are dense — indexed by `TirRef::index()` for real instruction
-    /// refs (slot 0 unused) and by param position for fat-param sentinel
-    /// refs — queried together via `Codegen::free_binding_name`. The
-    /// third, `last_write`, is keyed by binding name and records the
-    /// `TirRef` of the binding's most recent write in program order (the
-    /// `VarDecl` initializer, overwritten by each `Assign` value; fat
-    /// params start at their param sentinel ref). `emit_frees`'
+    /// Returns four tables (see [`FreeBindingTables`]): the first and
+    /// third are dense — indexed by `TirRef::index()` for real
+    /// instruction refs (slot 0 unused), mapping a free target to its
+    /// binding NAME and to its BINDING identity respectively (a VarDecl
+    /// initializer's binding is its own `VarDecl` ref; an Assign value's
+    /// binding is the `sidecar.assign_binding` entry the ownership walk
+    /// stamped). The second is dense by param position for fat-param
+    /// sentinel refs. The fourth, `last_write`, is keyed by BINDING
+    /// identity (not name — one name can denote a same-named shadow) and
+    /// records the `TirRef` of the binding's most recent write in
+    /// program order (the `VarDecl` initializer, overwritten by each
+    /// `Assign` value; fat params start at their param sentinel ref,
+    /// whose binding identity is the sentinel itself). `emit_frees'`
     /// binding-path redirect frees the binding's CURRENT home value,
     /// which is only the FreePoint's buffer when the FreePoint's target
     /// IS that most recent write — a stale/superseded target (e.g. a
     /// pre-reassign owner of a loop-carried binding) would free whatever
     /// value the binding currently holds, so the redirect must not fire
     /// for it.
-    pub(crate) fn build_free_binding_names(tir: &Tir, pool: &InternPool) -> FreeBindingTables {
+    pub(crate) fn build_free_binding_names(
+        tir: &Tir,
+        pool: &InternPool,
+        sidecar: &ryo_core::ownership::FunctionSidecar,
+    ) -> FreeBindingTables {
         fn walk(
             tir: &Tir,
+            sidecar: &ryo_core::ownership::FunctionSidecar,
             stmts: &[TirRef],
             map: &mut [Option<StringId>],
-            last_write: &mut HashMap<StringId, TirRef>,
+            binding_of: &mut [Option<TirRef>],
+            last_write: &mut HashMap<TirRef, TirRef>,
         ) {
             for &r in stmts {
                 match tir.inst(r).tag {
                     TirTag::VarDecl => {
                         let view = tir.var_decl_view(r);
                         map[view.initializer.index()] = Some(view.name);
-                        last_write.insert(view.name, view.initializer);
+                        // A VarDecl always declares a fresh binding
+                        // (possibly shadowing an outer same-named one),
+                        // so the binding identity is the VarDecl itself.
+                        binding_of[view.initializer.index()] = Some(r);
+                        last_write.insert(r, view.initializer);
                     }
                     TirTag::Assign => {
                         let view = tir.assign_view(r);
                         map[view.value.index()] = Some(view.name);
-                        last_write.insert(view.name, view.value);
+                        // The binding this Assign stores into, recorded
+                        // by the ownership walk; missing only for
+                        // sema-rejected programs.
+                        if let Some(binding) = sidecar.assign_binding[r.index()] {
+                            binding_of[view.value.index()] = Some(binding);
+                            last_write.insert(binding, view.value);
+                        }
                     }
                     TirTag::IfStmt => {
                         let view = tir.if_stmt_view(r);
-                        walk(tir, &view.then_stmts, map, last_write);
+                        walk(tir, sidecar, &view.then_stmts, map, binding_of, last_write);
                         for elif in &view.elif_branches {
-                            walk(tir, &elif.body, map, last_write);
+                            walk(tir, sidecar, &elif.body, map, binding_of, last_write);
                         }
                         if let Some(else_stmts) = &view.else_stmts {
-                            walk(tir, else_stmts, map, last_write);
+                            walk(tir, sidecar, else_stmts, map, binding_of, last_write);
                         }
                     }
-                    TirTag::WhileLoop => walk(tir, &tir.while_loop_view(r).body, map, last_write),
-                    TirTag::ForRange => walk(tir, &tir.for_range_view(r).body, map, last_write),
+                    TirTag::WhileLoop => walk(
+                        tir,
+                        sidecar,
+                        &tir.while_loop_view(r).body,
+                        map,
+                        binding_of,
+                        last_write,
+                    ),
+                    TirTag::ForRange => walk(
+                        tir,
+                        sidecar,
+                        &tir.for_range_view(r).body,
+                        map,
+                        binding_of,
+                        last_write,
+                    ),
                     _ => {}
                 }
             }
         }
-        let mut last_write: HashMap<StringId, TirRef> = HashMap::new();
+        let mut last_write: HashMap<TirRef, TirRef> = HashMap::new();
         let mut param_names = vec![None; tir.params.len()];
         for (idx, param) in tir.params.iter().enumerate() {
             if is_fat_type(param.ty, pool) {
+                // A fat param's binding identity is its own sentinel ref
+                // (params are bound at entry and never shadowed).
                 param_names[idx] = Some(param.name);
-                last_write.insert(param.name, TirRef::param(idx));
+                last_write.insert(TirRef::param(idx), TirRef::param(idx));
             }
         }
         let mut inst_names = vec![None; tir.instructions.len()];
-        walk(tir, &tir.body_stmts(), &mut inst_names, &mut last_write);
-        (inst_names, param_names, last_write)
+        let mut inst_bindings = vec![None; tir.instructions.len()];
+        walk(
+            tir,
+            sidecar,
+            &tir.body_stmts(),
+            &mut inst_names,
+            &mut inst_bindings,
+            &mut last_write,
+        );
+        (inst_names, param_names, inst_bindings, last_write)
     }
 }

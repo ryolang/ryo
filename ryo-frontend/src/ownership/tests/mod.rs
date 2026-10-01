@@ -5,6 +5,7 @@ mod frees_w0004;
 mod inout;
 mod loops;
 mod merge;
+mod shadow_bindings;
 mod structs;
 mod views_basics;
 mod views_branches;
