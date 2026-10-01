@@ -291,6 +291,11 @@ fn args_out_of_range_panics_jit() {
         "stderr should contain the out-of-range message, got: {}",
         stderr
     );
+    assert!(
+        stderr.contains("99"),
+        "stderr should name the failing index 99, got: {}",
+        stderr
+    );
 }
 
 // ============================================================================
@@ -339,8 +344,9 @@ fn env_present_and_unset_jit() {
     let test_file = create_test_file(temp_dir.path(), "env_echo.ryo", code);
 
     // `run_ryo_command` takes no env hook, so build the command directly
-    // (same as the args_echo test). The JIT runs in this process, so the
-    // variable lands in the compiled program's own environment.
+    // (same as the args_echo test). The env var is set on the spawned
+    // `ryo run` child, whose in-process JIT runs the program in that
+    // same environment.
     let output = Command::new(env!("CARGO_BIN_EXE_ryo"))
         .arg("run")
         .arg(&test_file)

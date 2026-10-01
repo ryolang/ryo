@@ -51,12 +51,12 @@ pub(crate) fn emit_builtin_call(
         }
     }
     match view.name {
-        n if n == ids.print || n == ids.io_eprint => {
-            emit_print_like(sema, fcx, view, arg_tirs, &modes, span, builtin)
-        }
         // M9.2: `io_eprint` is the exact twin of `print` — same
         // accepted types, same routing, stderr instead of stdout.
         // TODO(M24): interim call form — replaced by `io.eprint`.
+        n if n == ids.print || n == ids.io_eprint => {
+            emit_print_like(sema, fcx, view, arg_tirs, &modes, span, builtin)
+        }
         n if n == ids.panic => emit_panic(sema, fcx, view, span),
         // TODO(M24): interim call form — replaced by `process.exit`.
         n if n == ids.process_exit => {
@@ -781,8 +781,11 @@ fn emit_print_like(
     span: Span,
     builtin: &'static crate::builtins::BuiltinFunction,
 ) -> TirRef {
-    let name = sema.pool.str(view.name).to_string();
-    if !check_print_args(sema, fcx, view, arg_tirs, span, &name) {
+    // The dispatch arm already matched `view.name` to this `builtin`,
+    // so `builtin.name` is the callee's `&'static str` — no pool lookup,
+    // no per-call `String` allocation (I-147's class).
+    let name = builtin.name;
+    if !check_print_args(sema, fcx, view, arg_tirs, span, name) {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
     let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
@@ -817,7 +820,7 @@ fn emit_print_like(
     // `effective == arg_tirs` anyway, and for bytes the rewritten repr
     // call is str-typed, which would never match the `bytes` owner
     // type.
-    warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], &name);
+    warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], name);
     let ret_ty = builtin.return_type(sema.pool);
     fcx.builder.call(view.name, effective, modes, ret_ty, span)
 }

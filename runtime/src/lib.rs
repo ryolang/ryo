@@ -202,6 +202,35 @@ fn panic_msg(msg: &[u8]) -> ! {
     unsafe { exit(101) }
 }
 
+/// `panic_msg` for a bounds failure on a computed index: the message
+/// must name the failing index, not just the operation. Writes
+/// `prefix` + the decimal digits of `i` + a newline from a stack
+/// buffer — allocation-free (the runtime is no_std) — then exits 101.
+#[cold]
+fn panic_msg_indexed(prefix: &[u8], i: u64) -> ! {
+    // 33-byte prefix + 20 digits (u64::MAX) + newline fits in 64.
+    let mut buf = [0u8; 64];
+    buf[..prefix.len()].copy_from_slice(prefix);
+    // Digits least-significant-first into a temp, then copied
+    // most-significant-first after the prefix.
+    let mut tmp = [0u8; 20];
+    let mut n = i;
+    let mut start = tmp.len();
+    loop {
+        start -= 1;
+        tmp[start] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let digits = &tmp[start..];
+    buf[prefix.len()..prefix.len() + digits.len()].copy_from_slice(digits);
+    let end = prefix.len() + digits.len();
+    buf[end] = b'\n';
+    panic_msg(&buf[..end + 1]);
+}
+
 /// Runtime backing for `__ryo_panic` (panic/assert): write the
 /// sema-formatted message to stderr and exit 101.
 ///
@@ -265,6 +294,7 @@ pub unsafe extern "C" fn ryo_rt_init(argc: c_int, argv: *const *const c_char) {
 
 /// Runtime backing for `process_argc() -> int` (M9.2). argv[0] (the
 /// program path) is included, matching C convention.
+/// TODO(M22): interim call form — replaced by `process.args`.
 ///
 /// # Safety
 /// No additional contract — the Acquire load cannot fault. Marked
@@ -277,8 +307,9 @@ pub unsafe extern "C" fn ryo_process_argc() -> i64 {
 
 /// Runtime backing for `process_argv(i: int) -> str` (M9.2): copy
 /// `argv[i]` into `out` as a tagged slot (inline when it fits the SSO
-/// cap, else a fresh heap buffer). Out-of-range panics: message to
-/// stderr + exit 101, the `ryo_panic` contract.
+/// cap, else a fresh heap buffer). Out-of-range panics with a message
+/// naming the failing index: stderr + exit 101, the `ryo_panic`
+/// contract. TODO(M22): interim call form — replaced by `process.args`.
 ///
 /// # Safety
 /// `out` points to a valid, uninitialized `RyoStrFat`. `ryo_rt_init`
@@ -293,7 +324,7 @@ pub unsafe extern "C" fn ryo_process_argv(i: u64, out: *mut RyoStrFat) {
     // keeps the `as u64` cast from wrapping if an untrusted caller
     // stored a negative value.
     if i >= argc.max(0) as u64 {
-        panic_msg(b"process_argv index out of range\n");
+        panic_msg_indexed(b"process_argv index out of range: ", i);
     }
     // Acquire: pairs with ryo_rt_init's Release store — passing the
     // ARGC check above means this load cannot observe a stale

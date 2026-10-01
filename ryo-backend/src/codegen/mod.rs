@@ -100,9 +100,12 @@ pub(crate) const CODEGEN_INLINED_BUILTINS: &[&str] = &["bool_to_str"];
 /// `io_read_line`), the codegen-inlined builtin exclusion, the push
 /// mutation scan — is
 /// a `StringId` equality check instead of `pool.str(id) == "..."`.
-/// Each entry is `None` when the program never mentioned the name (the
-/// pool only holds what earlier passes interned); a `None` id simply
-/// never matches.
+/// The BUILTINS-name probes always resolve to `Some`: `Sema::new`
+/// interns every BUILTINS name up front, and astgen interns `main`.
+/// Only the `__ryo_*` synthesis names can stay `None` — sema interns
+/// each lazily, only when it emits the corresponding rewrite, so a
+/// program that never triggers one never has it in the pool. A `None`
+/// id simply never matches.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CodegenNameIds {
     main: Option<StringId>,
@@ -853,12 +856,16 @@ impl<M: Module> Codegen<M> {
         }
         // C-ABI shim for `main`: Ryo's `fn main()` is void and takes no
         // Ryo params (sema rejects a parametrized main), but the host
-        // C runtime (crt0 via zig cc, or our JIT trampoline) calls
-        // `main` as `int main(int argc, char **argv)`. Push the two
-        // entry params — argc, then argv, in C order — before the int
-        // return word; `compile_function` reads them from the entry
-        // block to call `ryo_rt_init`, and falls through to an
-        // explicit `return 0` since Ryo's return type is void.
+        // C runtime (crt0 via zig cc, or our JIT trampoline) enters
+        // `main` with C's `(argc, argv)`. C's argc is a 32-bit `int`,
+        // but the Cranelift ABI word is pointer-sized (`i64`): works on
+        // x86-64/aarch64/Windows because a 32-bit argument arrives
+        // zero-extended in its register, so the low half the C side
+        // reads is exact. Push the two entry params — argc, then argv,
+        // in C order — before the int return word; `compile_function`
+        // reads them from the entry block to call `ryo_rt_init`, and
+        // falls through to an explicit `return 0` since Ryo's return
+        // type is void.
         // `is_main` is resolved by `declare_all_functions` from the
         // interned-id cache.
         if is_main {
@@ -1243,6 +1250,13 @@ impl<M: Module> Codegen<M> {
                 // builder, which the `call` below needs mutably.
                 let entry_params = builder.block_params(entry_block);
                 let (argc, argv) = (entry_params[0], entry_params[1]);
+                // Declared argc is `i64`, but `ryo_rt_init` takes
+                // `c_int` — sound in this call direction: the callee
+                // reads the low 32 bits of the (zero-extended)
+                // register, and argc is small and non-negative. Don't
+                // "fix" the runtime side to `i64`: reading the full
+                // 64 bits would trust upper bits the C ABI leaves
+                // unspecified.
                 let rt_init = Self::declare_runtime_fn(
                     &mut ctx,
                     &mut builder,

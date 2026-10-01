@@ -965,6 +965,10 @@ fn argv_storage_roundtrip() {
             stderr.contains("process_argv index out of range"),
             "child stderr should carry the panic message, got: {stderr}"
         );
+        assert!(
+            stderr.contains(": 3"),
+            "child stderr should name the failing index 3, got: {stderr}"
+        );
     }
 }
 
