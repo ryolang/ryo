@@ -1,0 +1,53 @@
+# oracle.ryo -- Milestone 9.2's throwaway CLI intrinsics, end to end.
+#
+#     cargo run -- run examples/oracle.ryo alice
+#     RYO_MOOD=cheeky cargo run -- run examples/oracle.ryo alice
+#     printf 'y\nn\ny\n' | cargo run -- run examples/oracle.ryo alice
+#
+# Think of a number from 1 to 100; the oracle finds it in at most seven
+# questions. No randomness needed -- the oracle needs no luck, only a pipe.
+# io_read_line carries your y/n answers (anything else is scolded and
+# re-asked; an empty line / EOF is a coward's exit via io_eprint + exit).
+# process_argc/process_argv take the querent's name, process_env tunes
+# the oracle's mood (unset -> stoic).
+#
+# Play it live in a terminal: io_read_line is an interim one-chunk read
+# (M13.6 owns buffering), so piping all answers at once starves it.
+fn main():
+	if process_argc() < 2:
+		io_eprint("usage: oracle <name> -- think of a number from 1 to 100; the oracle will find it\n")
+		process_exit(1)
+
+	name = process_argv(1)
+	mut mood = process_env("RYO_MOOD")
+	if mood == "":
+		mood = "stoic"
+
+	print("The oracle faces " + name + ". Think of a number from 1 to 100. Tell no one. The pipe hears only y or n.\n")
+
+	mut lo = 1
+	mut hi = 100
+	mut questions = 0
+	while lo < hi:
+		mid = (lo + hi) / 2
+		print("is your number " + int_to_str(mid) + " or less? (y/n) ")
+		answer = io_read_line()
+		if answer == "":
+			io_eprint("oracle: the pipe went silent. a coward's exit.\n")
+			process_exit(1)
+		if answer == "y":
+			hi = mid
+			questions += 1
+		elif answer == "n":
+			lo = mid + 1
+			questions += 1
+		else:
+			if mood == "cheeky":
+				print("oracle: '" + answer + "' is not a thought this oracle recognises. y or n.\n")
+			else:
+				print("oracle: y or n. the oracle is patient, not omniscient.\n")
+
+	if mood == "cheeky":
+		print("oracle: your number is " + int_to_str(lo) + ". " + int_to_str(questions) + " questions. " + name + ", you are an open book.\n")
+	else:
+		print("oracle: your number is " + int_to_str(lo) + ". found in " + int_to_str(questions) + " questions. the oracle needs no luck, only a pipe.\n")
