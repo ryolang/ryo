@@ -520,7 +520,7 @@ fn gen_stmt(
     let span = ast.stmt_span(stmt);
     match &ast.stmt(stmt).kind {
         ast::StmtKind::VarDecl(decl) => {
-            let initializer = gen_expr(b, ast, decl.initializer, pool);
+            let initializer = gen_expr(b, ast, decl.initializer);
             let ty = decl
                 .type_annotation
                 .as_ref()
@@ -530,7 +530,7 @@ fn gen_stmt(
         }
         ast::StmtKind::Return(value) => match value {
             Some(expr) => {
-                let value = gen_expr(b, ast, *expr, pool);
+                let value = gen_expr(b, ast, *expr);
                 out.push(b.unary(InstTag::Return, value, span));
             }
             None => {
@@ -538,7 +538,7 @@ fn gen_stmt(
             }
         },
         ast::StmtKind::ExprStmt(value) => {
-            let value = gen_expr(b, ast, *value, pool);
+            let value = gen_expr(b, ast, *value);
             out.push(b.unary(InstTag::ExprStmt, value, span));
         }
         ast::StmtKind::FunctionDef(_) => {
@@ -549,29 +549,29 @@ fn gen_stmt(
             ));
         }
         ast::StmtKind::AssignOrDecl { target, value } => {
-            let value_ref = gen_expr(b, ast, *value, pool);
+            let value_ref = gen_expr(b, ast, *value);
             let r = b.assign_or_decl(target.name, value_ref, span);
             out.push(r);
         }
         ast::StmtKind::CompoundAssign { target, op, value } => {
-            let value_ref = gen_expr(b, ast, *value, pool);
+            let value_ref = gen_expr(b, ast, *value);
             let r = b.compound_assign(target.name, *op, value_ref, span);
             out.push(r);
         }
         ast::StmtKind::FieldAssign { target, value } => {
-            let target_ref = gen_expr(b, ast, *target, pool);
-            let value_ref = gen_expr(b, ast, *value, pool);
+            let target_ref = gen_expr(b, ast, *target);
+            let value_ref = gen_expr(b, ast, *value);
             let r = b.field_assign(target_ref, value_ref, span);
             out.push(r);
         }
         ast::StmtKind::CompoundFieldAssign { target, op, value } => {
-            let target_ref = gen_expr(b, ast, *target, pool);
-            let value_ref = gen_expr(b, ast, *value, pool);
+            let target_ref = gen_expr(b, ast, *target);
+            let value_ref = gen_expr(b, ast, *value);
             let r = b.compound_field_assign(target_ref, *op, value_ref, span);
             out.push(r);
         }
         ast::StmtKind::IfStmt(if_stmt) => {
-            let cond = gen_expr(b, ast, if_stmt.cond, pool);
+            let cond = gen_expr(b, ast, if_stmt.cond);
             let then_stmts =
                 lower_block(b, ast, ast.stmt_list(if_stmt.then_block), types, pool, sink);
 
@@ -579,7 +579,7 @@ fn gen_stmt(
                 .elif_list(if_stmt.elif_branches)
                 .iter()
                 .map(|elif| {
-                    let elif_cond = gen_expr(b, ast, elif.cond, pool);
+                    let elif_cond = gen_expr(b, ast, elif.cond);
                     let elif_body =
                         lower_block(b, ast, ast.stmt_list(elif.block), types, pool, sink);
                     (elif_cond, elif_body)
@@ -600,7 +600,7 @@ fn gen_stmt(
             out.push(r);
         }
         ast::StmtKind::WhileLoop { cond, body } => {
-            let cond_ref = gen_expr(b, ast, *cond, pool);
+            let cond_ref = gen_expr(b, ast, *cond);
             let body_refs = lower_block(b, ast, ast.stmt_list(*body), types, pool, sink);
             let r = b.while_loop(cond_ref, &body_refs, span);
             out.push(r);
@@ -625,8 +625,8 @@ fn gen_stmt(
                     ),
                 ));
             }
-            let start_ref = gen_expr(b, ast, *start, pool);
-            let end_ref = gen_expr(b, ast, *end, pool);
+            let start_ref = gen_expr(b, ast, *start);
+            let end_ref = gen_expr(b, ast, *end);
             let body_refs = lower_block(b, ast, ast.stmt_list(*body), types, pool, sink);
             let r = b.for_range(var.name, start_ref, end_ref, &body_refs, span);
             out.push(r);
@@ -649,12 +649,7 @@ fn gen_stmt(
     }
 }
 
-fn gen_expr(
-    b: &mut UirBuilder,
-    ast: &ast::Ast,
-    expr: ast::ExprId,
-    pool: &mut InternPool,
-) -> InstRef {
+fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
     let span = ast.expr_span(expr);
     match ast.expr(expr).kind {
         ast::ExprKind::Literal(lit) => match lit {
@@ -666,8 +661,8 @@ fn gen_expr(
         },
         ast::ExprKind::Ident(name) => b.var_ref(name, span),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
-            let l = gen_expr(b, ast, lhs, pool);
-            let r = gen_expr(b, ast, rhs, pool);
+            let l = gen_expr(b, ast, lhs);
+            let r = gen_expr(b, ast, rhs);
             let tag = match op {
                 ast::BinaryOperator::Add => InstTag::Add,
                 ast::BinaryOperator::Sub => InstTag::Sub,
@@ -686,7 +681,7 @@ fn gen_expr(
             b.binary(tag, l, r, span)
         }
         ast::ExprKind::UnaryOp(op, operand) => {
-            let s = gen_expr(b, ast, operand, pool);
+            let s = gen_expr(b, ast, operand);
             let tag = match op {
                 ast::UnaryOperator::Neg => InstTag::Neg,
                 ast::UnaryOperator::Not => InstTag::Not,
@@ -697,7 +692,7 @@ fn gen_expr(
             let arg_refs: Vec<InstRef> = ast
                 .expr_list(args)
                 .iter()
-                .map(|&a| gen_expr(b, ast, a, pool))
+                .map(|&a| gen_expr(b, ast, a))
                 .collect();
             b.call(name, &arg_refs, span)
         }
@@ -706,60 +701,54 @@ fn gen_expr(
             method,
             args,
         } => {
-            let receiver_ref = gen_expr(b, ast, receiver, pool);
+            let receiver_ref = gen_expr(b, ast, receiver);
             let arg_refs: Vec<InstRef> = ast
                 .expr_list(args)
                 .iter()
-                .map(|&a| gen_expr(b, ast, a, pool))
+                .map(|&a| gen_expr(b, ast, a))
                 .collect();
             b.method_call(receiver_ref, method, &arg_refs, span)
         }
         ast::ExprKind::Borrow(inner) => {
-            let inner_ref = gen_expr(b, ast, inner, pool);
+            let inner_ref = gen_expr(b, ast, inner);
             b.borrow(inner_ref, span)
         }
         ast::ExprKind::Slice { base, start, end } => {
             // Slice projection `base[start:end]` (final spec §3);
             // bounds are optional shorthands. Sema type-checks the
             // base and yields `strview`.
-            let base_ref = gen_expr(b, ast, base, pool);
-            let start_ref = start.map(|e| gen_expr(b, ast, e, pool));
-            let end_ref = end.map(|e| gen_expr(b, ast, e, pool));
+            let base_ref = gen_expr(b, ast, base);
+            let start_ref = start.map(|e| gen_expr(b, ast, e));
+            let end_ref = end.map(|e| gen_expr(b, ast, e));
             b.slice(base_ref, start_ref, end_ref, span)
         }
         ast::ExprKind::Index { base, index } => {
             // Scalar indexing `base[index]` (M8.4.2). Sema gates the
             // base to bytes/bytesview.
-            let base_ref = gen_expr(b, ast, base, pool);
-            let index_ref = gen_expr(b, ast, index, pool);
+            let base_ref = gen_expr(b, ast, base);
+            let index_ref = gen_expr(b, ast, index);
             b.index(base_ref, index_ref, span)
         }
         // Struct literal `Name{field=value, ...}` (M9) or the
         // anonymous `{field=value, ...}` (M10). The field
         // initializers stay in source order; sema canonicalizes them
-        // against the declaration in `uir.struct_decls`.
+        // against the declaration in `uir.struct_decls` (named) or
+        // infers the structural type from the field values
+        // (anonymous — the UIR name slot carries the
+        // `UIR_ANON_STRUCT_NAME` sentinel).
         ast::ExprKind::StructLiteral(lit) => {
             let fields: Vec<(StringId, InstRef)> = ast
                 .struct_field_inits(lit.fields)
                 .iter()
-                .map(|&(fname, e)| (fname, gen_expr(b, ast, e, pool)))
+                .map(|&(fname, e)| (fname, gen_expr(b, ast, e)))
                 .collect();
-            // Anonymous literal: no declared name exists for the
-            // shape. Sema does not type anonymous literals yet, so
-            // the literal lowers through the reserved empty-name
-            // sentinel — the same name `InternPool::anon_struct`
-            // uses — and sema reports its ordinary unknown-struct
-            // error instead of choking on the placeholder.
-            let name = match lit.name {
-                Some(ident) => ident.name,
-                None => pool.intern_str(""),
-            };
+            let name = lit.name.map(|ident| ident.name);
             b.struct_lit(name, &fields, span)
         }
         // Field access `object.field` (M9); chains fold left in the
         // AST, so each access lowers against its own object.
         ast::ExprKind::FieldAccess { object, field } => {
-            let obj = gen_expr(b, ast, object, pool);
+            let obj = gen_expr(b, ast, object);
             b.field_access(obj, field.name, span)
         }
     }
@@ -1201,7 +1190,7 @@ mod tests {
         let stmts = uir.body_stmts(main);
         let decl = uir.var_decl_view(stmts[0]);
         let lit = uir.struct_lit_view(decl.initializer);
-        assert_eq!(pool.str(lit.name), "Point");
+        assert_eq!(lit.name.map(|n| pool.str(n)), Some("Point"));
         assert_eq!(lit.fields.len(), 1);
         assert_eq!(pool.str(lit.fields[0].0), "x");
         let q = uir.var_decl_view(stmts[1]);

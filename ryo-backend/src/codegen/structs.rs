@@ -185,7 +185,7 @@ impl<M: Module> Codegen<M> {
             TypeKind::View(_) => {
                 Err("view struct field reached codegen; sema Rule 6 rejects it".to_string())
             }
-            TypeKind::Struct => {
+            TypeKind::Struct | TypeKind::AnonStruct => {
                 let src = Self::eval_inst_struct(builder, ctx, v)?;
                 let dst = if offset == 0 {
                     base
@@ -213,7 +213,11 @@ impl<M: Module> Codegen<M> {
         debug_assert!(
             !matches!(
                 ctx.pool.kind(field_ty),
-                TypeKind::Str | TypeKind::Bytes | TypeKind::View(_) | TypeKind::Struct
+                TypeKind::Str
+                    | TypeKind::Bytes
+                    | TypeKind::View(_)
+                    | TypeKind::Struct
+                    | TypeKind::AnonStruct
             ),
             "non-scalar field reached the scalar FieldAccess path"
         );
@@ -285,7 +289,7 @@ impl<M: Module> Codegen<M> {
                         "view struct field reached codegen; sema Rule 6 rejects it".to_string()
                     );
                 }
-                TypeKind::Struct => {
+                TypeKind::Struct | TypeKind::AnonStruct => {
                     let s = if field.offset == 0 {
                         src
                     } else {
@@ -353,7 +357,7 @@ impl<M: Module> Codegen<M> {
                 builder.ins().call(free_ref, &[ptr, cap]);
                 Ok(())
             }
-            TypeKind::Struct => {
+            TypeKind::Struct | TypeKind::AnonStruct => {
                 let addr = if offset == 0 {
                     base
                 } else {
@@ -509,7 +513,7 @@ impl<M: Module> Codegen<M> {
             TypeKind::View(_) => {
                 return Err("view struct field reached codegen; sema Rule 6 rejects it".to_string());
             }
-            TypeKind::Struct => {
+            TypeKind::Struct | TypeKind::AnonStruct => {
                 let src = Self::eval_inst_struct(builder, ctx, view.value)?;
                 if drop_old {
                     Self::emit_field_drop(builder, ctx, field_addr, 0, field_ty)?;
@@ -575,7 +579,7 @@ impl<M: Module> Codegen<M> {
         } else {
             ctx.tir.inst(target).ty
         };
-        if !matches!(ctx.pool.kind(ty), TypeKind::Struct) {
+        if !matches!(ctx.pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct) {
             return Ok(false);
         }
         let addr = match Self::free_binding_name(ctx, target)
@@ -743,7 +747,9 @@ impl<M: Module> Codegen<M> {
     /// freed immediately (the push copies the bytes first, and
     /// `ryo_str_free` is a runtime no-op for inline/static caps). str
     /// fields are quoted and borrowed straight out of the struct — the
-    /// struct keeps owning them, so no free fires. Nested structs
+    /// struct keeps owning them, so no free fires — except under an
+    /// anonymous struct (M10), whose repr renders bare: `{f=v, ...}`
+    /// with no name prefix and no str quotes. Nested structs
     /// recurse; the nested repr temp frees after its push into the
     /// enclosing result.
     pub(crate) fn emit_debug_repr(
@@ -753,6 +759,8 @@ impl<M: Module> Codegen<M> {
         ty: TypeId,
     ) -> Result<Value, String> {
         let view = ctx.pool.struct_view(ty);
+        // Anon structs intern the "" sentinel as their name.
+        let anon = ctx.pool.str(view.name).is_empty();
         let slot = builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             STR_SLOT_SIZE,
@@ -771,7 +779,9 @@ impl<M: Module> Codegen<M> {
             .ins()
             .store(MemFlagsData::trusted(), zero64, result, 16);
 
-        Self::push_debug_name(builder, ctx, result, view.name)?;
+        if !anon {
+            Self::push_debug_name(builder, ctx, result, view.name)?;
+        }
         Self::push_debug_static(builder, ctx, result, "{")?;
         for (i, field) in view.fields.iter().enumerate() {
             if i > 0 {
@@ -800,14 +810,19 @@ impl<M: Module> Codegen<M> {
                     Self::emit_debug_push_result(builder, ctx, result, tmp_addr, p, l, c)?;
                 }
                 TypeKind::Str => {
-                    // Quoted, raw (unescaped) content — borrowed from
-                    // the struct, which keeps owning the field.
+                    // Borrowed straight out of the struct (which keeps
+                    // owning the field), raw (unescaped) content. Named
+                    // structs quote; anonymous structs render bare.
                     let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
                     let (vp, vl) =
                         Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(field_addr))?;
-                    Self::push_debug_static(builder, ctx, result, "\"")?;
+                    if !anon {
+                        Self::push_debug_static(builder, ctx, result, "\"")?;
+                    }
                     Self::emit_debug_push(builder, ctx, result, vp, vl)?;
-                    Self::push_debug_static(builder, ctx, result, "\"")?;
+                    if !anon {
+                        Self::push_debug_static(builder, ctx, result, "\"")?;
+                    }
                 }
                 TypeKind::Bytes => {
                     let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
@@ -821,7 +836,7 @@ impl<M: Module> Codegen<M> {
                     )?;
                     Self::emit_debug_push_result(builder, ctx, result, tmp_addr, p, l, c)?;
                 }
-                TypeKind::Struct => {
+                TypeKind::Struct | TypeKind::AnonStruct => {
                     let nested = Self::emit_debug_repr(builder, ctx, field_addr, field.ty)?;
                     let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, nested);
                     let (vp, vl) =

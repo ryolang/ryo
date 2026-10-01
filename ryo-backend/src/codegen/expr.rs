@@ -972,7 +972,7 @@ impl<M: Module> Codegen<M> {
                         )?;
                         ValueRepr::Str { ptr, len, cap }
                     }
-                    TypeKind::Struct => {
+                    TypeKind::Struct | TypeKind::AnonStruct => {
                         // emit_debug_repr allocates its own result slot; a
                         // caller-provided out_slot would silently be ignored.
                         debug_assert!(

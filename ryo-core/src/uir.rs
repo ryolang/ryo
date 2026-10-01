@@ -520,7 +520,8 @@ pub mod for_range_extra {
 /// Layout in `extra` for [`InstTag::StructLit`]:
 ///
 /// ```text
-///   [0]  name:     StringId
+///   [0]  name:     StringId (or `UIR_ANON_STRUCT_NAME` for an
+///                  anonymous literal — there is no declared name)
 ///   [1]  n_fields: u32
 ///   [2..2+2*n]     per field: [field_name: StringId.raw(), value: InstRef.raw()]
 /// ```
@@ -528,6 +529,12 @@ pub mod struct_lit_extra {
     pub const NAME: usize = 0;
     pub const NFIELDS: usize = 1;
     pub const FIELDS: usize = 2;
+    /// Anonymous-literal marker for the `NAME` slot (M10), mirroring
+    /// [`var_decl_extra::TY_NONE_SENTINEL`]: `u32::MAX` is outside any
+    /// plausible `StringId` range, so it can never collide with a real
+    /// (or user-interned) name. Sema infers the structural type from
+    /// the field values instead of looking the name up.
+    pub const UIR_ANON_STRUCT_NAME: u32 = u32::MAX;
 }
 
 /// Layout in `extra` for [`InstTag::FieldAssign`]:
@@ -920,15 +927,20 @@ impl UirBuilder {
     }
 
     /// Emits a `StructLit` with the struct name and the source-order
-    /// field initializers packed into `extra` (M9).
+    /// field initializers packed into `extra` (M9). `name` of `None`
+    /// is encoded as [`struct_lit_extra::UIR_ANON_STRUCT_NAME`] (M10
+    /// anonymous literal); sema infers the structural type from the
+    /// field values.
     pub fn struct_lit(
         &mut self,
-        name: StringId,
+        name: Option<StringId>,
         fields: &[(StringId, InstRef)],
         span: Span,
     ) -> InstRef {
         let offset = self.extra_offset();
-        self.uir.extra.push(name.raw());
+        self.uir
+            .extra
+            .push(name.map_or(struct_lit_extra::UIR_ANON_STRUCT_NAME, |n| n.raw()));
         self.uir.extra.push(Self::len_u32(fields.len()));
         for &(fname, value) in fields {
             self.uir.extra.push(fname.raw());
@@ -1058,9 +1070,12 @@ pub struct MethodCallView {
 }
 
 /// Decoded view of an [`InstTag::StructLit`] payload. Field
-/// initializers are in source order.
+/// initializers are in source order. `name` of `None` is the M10
+/// anonymous literal (encoded as
+/// [`struct_lit_extra::UIR_ANON_STRUCT_NAME`]); sema infers the
+/// structural type from the field values instead of resolving a name.
 pub struct StructLitView {
-    pub name: StringId,
+    pub name: Option<StringId>,
     pub fields: Vec<(StringId, InstRef)>,
 }
 
@@ -1248,7 +1263,10 @@ impl Uir {
             _ => unreachable!("StructLit must carry InstData::Extra"),
         };
         let slice = &self.extra[range.as_range()];
-        let name = StringId::from_raw(slice[struct_lit_extra::NAME]);
+        let name = match slice[struct_lit_extra::NAME] {
+            struct_lit_extra::UIR_ANON_STRUCT_NAME => None,
+            raw => Some(StringId::from_raw(raw)),
+        };
         let n = slice[struct_lit_extra::NFIELDS] as usize;
         let mut fields = Vec::with_capacity(n);
         for i in 0..n {
@@ -1540,7 +1558,10 @@ fn write_inst(
         (InstTag::Continue, InstData::None) => writeln!(f, "continue"),
         (InstTag::StructLit, InstData::Extra(_)) => {
             let view = uir.struct_lit_view(r);
-            write!(f, "struct_lit {} {{", pool.str(view.name))?;
+            match view.name {
+                Some(name) => write!(f, "struct_lit {} {{", pool.str(name))?,
+                None => write!(f, "struct_lit <anon> {{")?,
+            }
             for (i, (fname, v)) in view.fields.iter().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
@@ -1827,12 +1848,27 @@ mod tests {
         let mut b = UirBuilder::new();
         let one = b.float_literal(1.0, sp());
         let two = b.float_literal(2.0, sp());
-        let lit = b.struct_lit(point, &[(x, one), (y, two)], sp());
+        let lit = b.struct_lit(Some(point), &[(x, one), (y, two)], sp());
 
         let uir = b.finish();
         let view = uir.struct_lit_view(lit);
-        assert_eq!(view.name, point);
+        assert_eq!(view.name, Some(point));
         assert_eq!(view.fields, vec![(x, one), (y, two)]);
+    }
+
+    #[test]
+    fn anon_struct_lit_round_trips_none_name() {
+        let mut pool = InternPool::new();
+        let x = pool.intern_str("x");
+
+        let mut b = UirBuilder::new();
+        let one = b.int_literal(1, sp());
+        let lit = b.struct_lit(None, &[(x, one)], sp());
+
+        let uir = b.finish();
+        let view = uir.struct_lit_view(lit);
+        assert_eq!(view.name, None);
+        assert_eq!(view.fields, vec![(x, one)]);
     }
 
     #[test]
