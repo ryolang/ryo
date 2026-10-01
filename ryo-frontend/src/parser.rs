@@ -569,7 +569,7 @@ where
 {
     let field = select! { Token::Ident(name) => name }
         .then_ignore(just(Token::Colon))
-        .then(type_expr_parser());
+        .then(named_type_expr_parser());
 
     // Field lines mirror `statement_list`'s newline structure: at
     // least one newline between fields, blank lines tolerated, and
@@ -766,15 +766,12 @@ where
     top_level_statement_parser().boxed()
 }
 
-/// Type annotation: a plain name (`str`, `int`, ...) or the legacy
-/// `&name` view form (M8.4 pre-Q5). Post-M8.4.1 the `&` form is retired
-/// syntax — it survives here only so astgen can emit the targeted
-/// migration error. The view alternative comes first so the `&` is
-/// consumed before the plain form can reject it.
-///
-/// Yields a plain `TypeExpr` value, not a node: annotations are
-/// packed into their parent node's `extra` header.
-fn type_expr_parser<'a, I>() -> impl Parser<'a, I, TypeExpr, PExtra<'a>> + Clone + 'a
+/// A plain-name type expression: `str`, `int`, `Point`, or the legacy
+/// `&name` view form (M8.4 pre-Q5). Struct declaration fields use
+/// this rule — they stay name-only — while the compound anonymous
+/// form is added on top in [`type_expr_parser`] for the function
+/// signature / variable annotation positions.
+fn named_type_expr_parser<'a, I>() -> impl Parser<'a, I, TypeExpr, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -783,7 +780,51 @@ where
         .map_with(|name, e: &mut Mx<'a, '_, I>| TypeExpr::view(name, e.span()));
     let plain = select! { Token::Ident(name) => name }
         .map_with(|name, e: &mut Mx<'a, '_, I>| TypeExpr::new(name, e.span()));
+    // The view alternative comes first so the `&` is consumed before
+    // the plain form can reject it.
     view.or(plain).boxed()
+}
+
+/// Type annotation: a plain name (`str`, `int`, ...), the legacy
+/// `&name` view form (M8.4 pre-Q5), or a compound anonymous struct
+/// type literal `{q: int, r: int}` (M10). Post-M8.4.1 the `&` form is
+/// retired syntax — it survives here only so astgen can emit the
+/// targeted migration error.
+///
+/// The compound form opens with `{` (and the view form with `&`), so
+/// the three alternatives are token-disjoint; chumsky rewinds a failed
+/// alternative without consuming input. `{}` stays reserved for the
+/// future empty map literal, exactly like the value literal: diagnosed
+/// here and recovered as an empty field list so the rest of the file
+/// still parses.
+///
+/// Yields a plain `TypeExpr` value, not a node: annotations are
+/// packed into their parent node's `extra` header.
+fn type_expr_parser<'a, I>() -> impl Parser<'a, I, TypeExpr, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    recursive(|ty| {
+        let field = select! { Token::Ident(name) => name }
+            .then_ignore(just(Token::Colon))
+            .then(ty.clone());
+        let anon = field
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .validate(|fields, e: &mut Mx<'a, '_, I>, emitter| {
+                if fields.is_empty() {
+                    emitter.emit(Rich::custom(e.span(), ParseDiag::EmptyAnonStruct));
+                }
+                fields
+            })
+            .map_with(|fields, e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                e.state().type_expr_anon(&fields, span)
+            });
+        named_type_expr_parser().or(anon).boxed()
+    })
 }
 
 fn function_def_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a

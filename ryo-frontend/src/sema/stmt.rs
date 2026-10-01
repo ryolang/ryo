@@ -2,7 +2,7 @@
 
 use super::{
     ConstInt, FuncCtx, Scope, Sema, analyze_expr, analyze_expr_allow_never, check_reserved_builtin,
-    const_eval_int,
+    const_eval_int, with_struct_shape_notes,
 };
 use ryo_core::ast::CompoundOp;
 use ryo_core::diag::{Diag, DiagCode};
@@ -76,14 +76,19 @@ pub(crate) fn analyze_stmt(
                     ));
                 }
             } else if !sema.pool.compatible(actual, fcx.return_type) {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::TypeMismatch,
-                    format!(
-                        "return type mismatch: function expects '{}', got '{}'",
-                        sema.pool.display(fcx.return_type),
-                        sema.pool.display(actual),
+                sema.sink.emit(with_struct_shape_notes(
+                    Diag::error(
+                        span,
+                        DiagCode::TypeMismatch,
+                        format!(
+                            "return type mismatch: function expects '{}', got '{}'",
+                            sema.pool.display(fcx.return_type),
+                            sema.pool.display(actual),
+                        ),
                     ),
+                    sema.pool,
+                    fcx.return_type,
+                    actual,
                 ));
             }
             fcx.builder
@@ -658,15 +663,20 @@ pub(crate) fn resolve_var_decl_type(
             // type] = expr` decl span — the type came from the
             // annotation but the *mismatch* is the initializer's
             // fault.
-            sema.sink.emit(Diag::error(
-                sema.uir.span(view.initializer),
-                DiagCode::TypeMismatch,
-                format!(
-                    "type mismatch: '{}' annotated '{}', initializer is '{}'",
-                    sema.pool.str(view.name),
-                    sema.pool.display(annotated),
-                    sema.pool.display(inferred),
+            sema.sink.emit(with_struct_shape_notes(
+                Diag::error(
+                    sema.uir.span(view.initializer),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "type mismatch: '{}' annotated '{}', initializer is '{}'",
+                        sema.pool.str(view.name),
+                        sema.pool.display(annotated),
+                        sema.pool.display(inferred),
+                    ),
                 ),
+                sema.pool,
+                annotated,
+                inferred,
             ));
             annotated
         }

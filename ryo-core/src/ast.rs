@@ -27,6 +27,11 @@
 //! - `struct_field_inits: Vec<(StringId, ExprId)>` — side arena for
 //!   struct literal field initializers, in source order, behind a
 //!   [`StructFieldInitList`] range.
+//! - `type_field_lists: Vec<(StringId, TypeExpr)>` / `type_expr_lists:
+//!   Vec<TypeExpr>` — side arenas for compound type expressions
+//!   (M10): the field list of an anonymous type literal `{q: int,
+//!   r: int}` behind a [`TypeFieldList`], and the element list of a
+//!   positional type expression `(int, str)` behind a [`TypeExprList`].
 //! - `top_level: Vec<StmtId>` — the program's statements in source
 //!   order; everything below is reached by following ids out of them.
 //!
@@ -181,6 +186,38 @@ pub struct StructFieldInitList {
 }
 
 impl StructFieldInitList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+/// A `[offset, offset+len)` slice of the `type_field_lists` side
+/// arena — the `q: int` field list of an anonymous struct type
+/// literal `{q: int, r: int}` (M10), in written order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeFieldList {
+    offset: u32,
+    len: u32,
+}
+
+impl TypeFieldList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+/// A `[offset, offset+len)` slice of the `type_expr_lists` side
+/// arena — the element list of a positional type expression
+/// `(int, str)` (M10), in written order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeExprList {
+    offset: u32,
+    len: u32,
+}
+
+impl TypeExprList {
     fn as_range(self) -> std::ops::Range<usize> {
         let start = self.offset as usize;
         start..start + self.len as usize
@@ -419,38 +456,60 @@ impl Ident {
     }
 }
 
-/// A type expression. Currently just a name like `int`, `bool`, etc.,
-/// plus the `is_view` flag for legacy `&name` view syntax (M8.4
-/// pre-Q5) — post-M8.4.1 that syntax only feeds the targeted
-/// migration error in astgen.
+/// A type expression: a plain (or legacy `&name`) name, an anonymous
+/// struct type literal `{q: int, r: int}` (M10), or the positional
+/// sugar form `(int, str)` (M10, ≡ `{0: int, 1: str}`).
 ///
-/// Field order keeps the struct at 24 bytes: `span` (16 B, align 8)
-/// first, then `name` (4 B) and `is_view` (1 B) pack into the tail
-/// padding. Declaring `name` before `span` would grow it to 32 B.
+/// 32 bytes: `span` (16 B, align 8) plus `kind` (12 B — an 8-byte
+/// list-range payload plus the discriminant, 4-byte aligned).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeExpr {
     pub span: SimpleSpan,
-    pub name: StringId,
-    /// Legacy `&name` view-syntax flag (M8.4 pre-Q5): the annotation used
-    /// the retired `&` prefix. Post-M8.4.1 this only feeds astgen's
-    /// targeted migration error; it never constructs a view type.
-    pub is_view: bool,
+    pub kind: TypeExprKind,
+}
+
+/// The payload of a [`TypeExpr`]. Compound forms keep their child
+/// lists in the `type_field_lists` / `type_expr_lists` side arenas,
+/// mirroring the `struct_field_decls` discipline: a variant stores a
+/// range handle, never an owned `Vec`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeExprKind {
+    /// A type name like `int`, `bool`, or `Point`, plus the legacy
+    /// `&name` view flag (M8.4 pre-Q5) — post-M8.4.1 the `&` form only
+    /// feeds astgen's targeted migration error; it never constructs a
+    /// view type.
+    Name { name: StringId, is_view: bool },
+    /// `{q: int, r: int}` — an anonymous struct type literal (M10).
+    /// The field list lives in the `type_field_lists` side arena, in
+    /// written order.
+    Anon { fields: TypeFieldList },
+    /// `(int, str)` — positional sugar over an anonymous struct (M10),
+    /// ≡ `{0: int, 1: str}`. The element list lives in the
+    /// `type_expr_lists` side arena; resolution interns the `"0"`,
+    /// `"1"`, … names before pool dedup. Defined here (Task 4); the
+    /// parser only starts producing this variant when the paren syntax
+    /// wires up in Task 5.
+    Positional(TypeExprList),
 }
 
 impl TypeExpr {
     pub fn new(name: StringId, span: SimpleSpan) -> Self {
         TypeExpr {
             span,
-            name,
-            is_view: false,
+            kind: TypeExprKind::Name {
+                name,
+                is_view: false,
+            },
         }
     }
 
     pub fn view(name: StringId, span: SimpleSpan) -> Self {
         TypeExpr {
             span,
-            name,
-            is_view: true,
+            kind: TypeExprKind::Name {
+                name,
+                is_view: true,
+            },
         }
     }
 }
@@ -561,6 +620,8 @@ pub struct Ast {
     elifs: Vec<ElifBranch>,
     struct_field_decls: Vec<(StringId, TypeExpr)>,
     struct_field_inits: Vec<(StringId, ExprId)>,
+    type_field_lists: Vec<(StringId, TypeExpr)>,
+    type_expr_lists: Vec<TypeExpr>,
     top_level: Vec<StmtId>,
     /// Span covering the first through last top-level statement;
     /// `0..0` for an empty program. Kept for the pretty-printer's
@@ -594,6 +655,8 @@ impl Ast {
             elifs: Vec::new(),
             struct_field_decls: Vec::new(),
             struct_field_inits: Vec::new(),
+            type_field_lists: Vec::new(),
+            type_expr_lists: Vec::new(),
             top_level: Vec::new(),
             span: SimpleSpan::new((), 0..0),
         }
@@ -644,6 +707,19 @@ impl Ast {
     /// range, in source order.
     pub fn struct_field_inits(&self, list: StructFieldInitList) -> &[(StringId, ExprId)] {
         &self.struct_field_inits[list.as_range()]
+    }
+
+    /// The fields behind a [`TypeFieldList`] range — the `name: type`
+    /// pairs of an anonymous struct type literal — in written order.
+    pub fn type_field_list(&self, list: TypeFieldList) -> &[(StringId, TypeExpr)] {
+        &self.type_field_lists[list.as_range()]
+    }
+
+    /// The elements behind a [`TypeExprList`] range — the element
+    /// types of a positional type expression `(int, str)` — in
+    /// written order.
+    pub fn type_expr_list(&self, list: TypeExprList) -> &[TypeExpr] {
+        &self.type_expr_lists[list.as_range()]
     }
 
     /// The program's top-level statements in source order.
@@ -777,6 +853,32 @@ impl Ast {
             offset,
             len: u32::try_from(items.len())
                 .expect("AST struct field init list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Copy an anonymous struct type literal's field list into the
+    /// `type_field_lists` side arena; see [`Self::push_expr_list`]
+    /// for the checked-conversion rationale.
+    fn push_type_field_list(&mut self, items: &[(StringId, TypeExpr)]) -> TypeFieldList {
+        let offset = u32::try_from(self.type_field_lists.len())
+            .expect("AST type_field_lists arena exceeded u32::MAX");
+        self.type_field_lists.extend_from_slice(items);
+        TypeFieldList {
+            offset,
+            len: u32::try_from(items.len()).expect("AST type field list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Copy a positional type expression's element list into the
+    /// `type_expr_lists` side arena; see [`Self::push_expr_list`]
+    /// for the checked-conversion rationale.
+    fn push_type_expr_list(&mut self, items: &[TypeExpr]) -> TypeExprList {
+        let offset = u32::try_from(self.type_expr_lists.len())
+            .expect("AST type_expr_lists arena exceeded u32::MAX");
+        self.type_expr_lists.extend_from_slice(items);
+        TypeExprList {
+            offset,
+            len: u32::try_from(items.len()).expect("AST type expr list length exceeded u32::MAX"),
         }
     }
 
@@ -942,6 +1044,35 @@ impl Ast {
             ExprKind::StructLiteral(StructLiteral { name, fields }),
             span,
         )
+    }
+
+    /// Anonymous struct type literal `{q: int, r: int}` (M10); the
+    /// field list is copied into the `type_field_lists` side arena in
+    /// written order. Yields the inline [`TypeExpr`] value — type
+    /// expressions are packed into their parent node's payload, not
+    /// arena-allocated.
+    pub fn type_expr_anon(
+        &mut self,
+        fields: &[(StringId, TypeExpr)],
+        span: SimpleSpan,
+    ) -> TypeExpr {
+        let fields = self.push_type_field_list(fields);
+        TypeExpr {
+            span,
+            kind: TypeExprKind::Anon { fields },
+        }
+    }
+
+    /// Positional type expression `(int, str)` (M10); the element
+    /// list is copied into the `type_expr_lists` side arena in
+    /// written order. The parser starts producing this in Task 5 —
+    /// until then only hand-built ASTs (and tests) reach it.
+    pub fn type_expr_positional(&mut self, elems: &[TypeExpr], span: SimpleSpan) -> TypeExpr {
+        let elems = self.push_type_expr_list(elems);
+        TypeExpr {
+            span,
+            kind: TypeExprKind::Positional(elems),
+        }
     }
 
     /// Field access `object.field` (M9).
@@ -1140,9 +1271,11 @@ mod tests {
 
     #[test]
     fn type_expr_stays_small() {
-        // `span` (16 B) + `name` (4 B) + `is_view` (1 B) must pack
-        // into 24 B — see the field-order note on `TypeExpr`.
-        assert_eq!(std::mem::size_of::<TypeExpr>(), 24);
+        // `span` (16 B) + `kind` (12 B: an 8-byte list-range payload
+        // plus the discriminant, 4-byte aligned) must pack into 32 B —
+        // see the field-order note on `TypeExpr`.
+        assert_eq!(std::mem::size_of::<TypeExpr>(), 32);
+        assert_eq!(std::mem::size_of::<TypeExprKind>(), 12);
     }
 
     #[test]
@@ -1233,7 +1366,10 @@ mod tests {
                 assert_eq!(def.name.name, f);
                 assert_eq!(def.params, vec![param]);
                 assert_eq!(
-                    def.return_type.map(|t| (t.name, t.is_view)),
+                    def.return_type.map(|t| match t.kind {
+                        TypeExprKind::Name { name, is_view } => (name, is_view),
+                        other => panic!("expected Name return type, got {other:?}"),
+                    }),
                     Some((str_, false))
                 );
                 assert_eq!(ast.stmt_list(def.body), &[body_stmt]);

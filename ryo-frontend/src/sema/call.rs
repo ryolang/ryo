@@ -2,7 +2,7 @@
 
 use super::{
     FuncCtx, Scope, Sema, emit_builtin_call, emit_bytes_materialize, emit_str_materialize,
-    materialize_name,
+    materialize_name, with_struct_shape_notes,
 };
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{ParamMode, TirRef};
@@ -179,16 +179,21 @@ pub(crate) fn check_call(
             };
             let actual = fcx.builder.ty_of(arg_tir);
             if !sema.pool.compatible(actual, exp_ty) {
-                sema.sink.emit(Diag::error(
-                    sema.uir.span(*arg_uir),
-                    DiagCode::TypeMismatch,
-                    format!(
-                        "call to '{}': argument {} has type '{}', expected '{}'",
-                        sema.pool.str(name_id),
-                        idx + 1,
-                        sema.pool.display(actual),
-                        sema.pool.display(exp_ty),
+                sema.sink.emit(with_struct_shape_notes(
+                    Diag::error(
+                        sema.uir.span(*arg_uir),
+                        DiagCode::TypeMismatch,
+                        format!(
+                            "call to '{}': argument {} has type '{}', expected '{}'",
+                            sema.pool.str(name_id),
+                            idx + 1,
+                            sema.pool.display(actual),
+                            sema.pool.display(exp_ty),
+                        ),
                     ),
+                    sema.pool,
+                    exp_ty,
+                    actual,
                 ));
             }
 
