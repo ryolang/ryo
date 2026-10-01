@@ -208,10 +208,10 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
             unreachable!("cranelift_type_for: <error> sentinel reached codegen")
         }
         TypeKind::AnonStruct => {
-            // No surface syntax constructs anon structs today (M10
-            // lands the pool substrate first), so an anon TypeId
-            // cannot reach codegen; the variant exists to carry
-            // layout for the later lowering tasks.
+            // Anonymous structs (M10) are aggregates exactly like named
+            // ones: every struct-typed value is gated to the struct
+            // slot paths before codegen, so reaching the scalar type
+            // mapping is a caller bug — same contract as `Struct`.
             unreachable!("cranelift_type_for: anon struct TypeId reached codegen")
         }
         // Struct codegen (aggregate layout) lands in a later M9 task.
@@ -1639,7 +1639,10 @@ impl<M: Module> Codegen<M> {
                     );
                     return Ok(Terminator::None);
                 }
-                if matches!(ctx.pool.kind(inst.ty), TypeKind::Struct) {
+                if matches!(
+                    ctx.pool.kind(inst.ty),
+                    TypeKind::Struct | TypeKind::AnonStruct
+                ) {
                     return Self::emit_struct_var_decl(builder, ctx, r);
                 }
                 let val = Self::eval_inst(builder, ctx, view.initializer)?;
@@ -1720,7 +1723,10 @@ impl<M: Module> Codegen<M> {
                     let _ = Self::eval_inst_fat(builder, ctx, operand)?;
                 } else if ctx.pool.is_view(operand_ty) {
                     let _ = Self::eval_inst_view(builder, ctx, operand)?;
-                } else if matches!(ctx.pool.kind(operand_ty), TypeKind::Struct) {
+                } else if matches!(
+                    ctx.pool.kind(operand_ty),
+                    TypeKind::Struct | TypeKind::AnonStruct
+                ) {
                     // Bare struct-valued statement (e.g. a discarded
                     // struct-returning call): materialize so the call
                     // is emitted; scheduled temp Frees handle the drop.
@@ -1862,7 +1868,10 @@ impl<M: Module> Codegen<M> {
                     Self::kill_fact(ctx, view.name);
                     return Ok(Terminator::None);
                 }
-                if matches!(ctx.pool.kind(inst.ty), TypeKind::Struct) {
+                if matches!(
+                    ctx.pool.kind(inst.ty),
+                    TypeKind::Struct | TypeKind::AnonStruct
+                ) {
                     return Self::emit_struct_assign(builder, ctx, r);
                 }
                 let val = Self::eval_inst(builder, ctx, view.value)?;

@@ -4,7 +4,7 @@ use super::{FuncCtx, Scope, Sema, check_call};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeId, TypeKind, ViewKind};
-use ryo_core::uir::{InstData, InstRef, InstTag, Span, Uir};
+use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
 
 /// Expression-position analysis. A `never`-typed result (e.g. a
 /// `panic` call) is rejected: `panic` may only appear as a bare
@@ -450,12 +450,15 @@ fn analyze_borrow(
     analyze_expr(sema, fcx, scope, inner)
 }
 
-/// Struct literal `Name{field = value, ...}` (M9). Validates the
+/// Struct literal `Name{field = value, ...}` (M9) or the anonymous
+/// `{field = value, ...}` (M10). The named path validates the
 /// literal against the declaration registered in `sema.struct_types`
 /// (unknown / duplicated / missing / mistyped fields each get their
 /// own diagnostic; analysis continues past all of them) and emits a
 /// canonical-order TIR `StructLit`. Slots with no valid initializer
-/// recover with an error-typed `Unreachable`.
+/// recover with an error-typed `Unreachable`. The anonymous path
+/// infers the structural type from the field values — see
+/// [`analyze_anon_struct_lit`].
 fn analyze_struct_lit(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -464,14 +467,17 @@ fn analyze_struct_lit(
     span: Span,
 ) -> TirRef {
     let view = sema.uir.struct_lit_view(r);
-    let Some(&sty) = sema.struct_types.get(&view.name) else {
+    let Some(name) = view.name else {
+        return analyze_anon_struct_lit(sema, fcx, scope, &view, span);
+    };
+    let Some(&sty) = sema.struct_types.get(&name) else {
         // Not a registered struct: either never declared, or declared
         // but left undefined by astgen (cycle / unknown field type —
         // already diagnosed). Recover with the error sentinel.
         sema.sink.emit(Diag::error(
             span,
             DiagCode::UnknownType,
-            format!("unknown struct: '{}'", sema.pool.str(view.name)),
+            format!("unknown struct: '{}'", sema.pool.str(name)),
         ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     };
@@ -556,9 +562,78 @@ fn analyze_struct_lit(
     fcx.builder.struct_lit(sty, &fields, span)
 }
 
-/// Field access `object.field` (M9). Resolves the field against the
-/// object's struct type and emits a TIR `FieldAccess` carrying the
-/// canonical declaration-order field index and the field type.
+/// Anonymous struct literal `{field = value, ...}` (M10). There is no
+/// declaration to validate against — the type is structural, inferred
+/// from the initializers: each field's type is its value's type, and
+/// the ordered (name, type) pairs intern via [`InternPool::anon_struct`].
+/// The TIR emission then matches the named path: canonical (here:
+/// written) order, duplicates diagnosed with `DuplicateStructField`,
+/// and a view-typed initializer rejected with `ViewFieldType` (Rule 6
+/// — views cannot live in struct fields). A field whose initializer
+/// failed to type-check poisons the whole literal: an error-typed
+/// field has no layout, so no anon type can be interned for it.
+fn analyze_anon_struct_lit(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    view: &StructLitView,
+    span: Span,
+) -> TirRef {
+    let error_ty = sema.pool.error_type();
+    let mut fields: Vec<(StringId, TypeId, TirRef)> = Vec::with_capacity(view.fields.len());
+    let mut poisoned = false;
+    for (fname, value_ref) in &view.fields {
+        let fspan = sema.uir.span(*value_ref);
+        if fields.iter().any(|(n, _, _)| n == fname) {
+            sema.sink.emit(Diag::error(
+                fspan,
+                DiagCode::DuplicateStructField,
+                format!(
+                    "field '{}' is specified more than once",
+                    sema.pool.str(*fname)
+                ),
+            ));
+            // Same recovery as the named path: analyze the duplicate's
+            // initializer so its own errors still surface.
+            analyze_expr(sema, fcx, scope, *value_ref);
+            continue;
+        }
+        let value = analyze_expr(sema, fcx, scope, *value_ref);
+        let vty = fcx.builder.ty_of(value);
+        if sema.pool.is_error(vty) {
+            poisoned = true;
+        }
+        if sema.pool.is_view(vty) {
+            sema.sink.emit(Diag::error(
+                fspan,
+                DiagCode::ViewFieldType,
+                format!(
+                    "struct fields must be owned values; '{}' is a projection (Rule 6)",
+                    sema.pool.display(vty)
+                ),
+            ));
+        }
+        fields.push((*fname, vty, value));
+    }
+    if poisoned {
+        return fcx.builder.unreachable(error_ty, span);
+    }
+    let pairs: Vec<(StringId, TypeId)> = fields.iter().map(|&(n, t, _)| (n, t)).collect();
+    let sty = sema.pool.anon_struct(&pairs);
+    // The anon type's canonical order is the written order.
+    let values: Vec<(u32, TirRef)> = fields
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, _, v))| (i as u32, v))
+        .collect();
+    fcx.builder.struct_lit(sty, &values, span)
+}
+
+/// Field access `object.field` (M9; anonymous structs read fields
+/// identically, M10). Resolves the field against the object's struct
+/// type and emits a TIR `FieldAccess` carrying the canonical
+/// field index (declaration order for named structs, written order
+/// for anonymous ones) and the field type.
 fn analyze_field_access(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -575,7 +650,7 @@ fn analyze_field_access(
     if sema.pool.is_error(oty) {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    let is_struct = matches!(sema.pool.kind(oty), TypeKind::Struct);
+    let is_struct = matches!(sema.pool.kind(oty), TypeKind::Struct | TypeKind::AnonStruct);
     if !is_struct {
         sema.sink.emit(Diag::error(
             span,
@@ -584,22 +659,29 @@ fn analyze_field_access(
         ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    if !sema.pool.is_defined_struct(oty) {
+    if matches!(sema.pool.kind(oty), TypeKind::Struct) && !sema.pool.is_defined_struct(oty) {
         // Declared but never defined (cycle / unknown field type) —
         // astgen already diagnosed it. Recover without touching
-        // `struct_view`, which panics on undefined structs.
+        // `struct_view`, which panics on undefined structs. (Anon
+        // structs are interned whole; they are always defined.)
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
     match sema.pool.struct_field(oty, field) {
         Some(f) => fcx.builder.field_access(obj, f.idx, f.ty, span),
         None => {
             let sview = sema.pool.struct_view(oty);
+            // An anon struct's interned name is the "" sentinel; name
+            // the shape by its structural display instead.
+            let owner = match sema.pool.kind(oty) {
+                TypeKind::AnonStruct => sema.pool.display(oty).to_string(),
+                _ => sema.pool.str(sview.name).to_string(),
+            };
             sema.sink.emit(Diag::error(
                 span,
                 DiagCode::UnknownField,
                 format!(
                     "'{}' has no field '{}' (fields: {})",
-                    sema.pool.str(sview.name),
+                    owner,
                     sema.pool.str(field),
                     field_list(sema.pool, &sview),
                 ),

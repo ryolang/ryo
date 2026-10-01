@@ -145,10 +145,10 @@ pub(crate) fn check_field_move_out(
         unreachable!("FieldAccess must carry TirData::FieldAccess");
     };
     let obj_ty = tir.inst(object).ty;
-    // Sema guarantees the object is a struct; a poisoned (error-typed)
-    // chain already has a sema diagnostic, so don't add noise — the
-    // normal consume path no-ops on it.
-    if !matches!(pool.kind(obj_ty), TypeKind::Struct) {
+    // Sema guarantees the object is a struct (named or anonymous); a
+    // poisoned (error-typed) chain already has a sema diagnostic, so
+    // don't add noise — the normal consume path no-ops on it.
+    if !matches!(pool.kind(obj_ty), TypeKind::Struct | TypeKind::AnonStruct) {
         return false;
     }
     let sview = pool.struct_view(obj_ty);
