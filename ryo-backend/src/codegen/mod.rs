@@ -78,6 +78,14 @@ pub(crate) fn is_fat_type(ty: TypeId, pool: &InternPool) -> bool {
     matches!(pool.kind(ty), TypeKind::Str | TypeKind::Bytes)
 }
 
+/// True for the aggregate struct kinds — M9 named and M10 anonymous.
+/// Their values are memory-first (stack-slot addresses,
+/// `ValueRepr::Struct`), so params/returns ride the slot-address /
+/// sret ABI and these types must never reach `cranelift_type_for`.
+pub(crate) fn is_struct_type(ty: TypeId, pool: &InternPool) -> bool {
+    matches!(pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct)
+}
+
 /// Builtins whose fat result codegen materializes inline — no runtime
 /// call, no slot-out write. `writes_out_slot` must exclude exactly
 /// these: the inlined arm in `eval_inst_fat_slot` ignores its
@@ -884,9 +892,10 @@ impl<M: Module> Codegen<M> {
                 // `strview` view: 2-word ABI (ptr, len) — no cap word (M8.4).
                 sig.params.push(AbiParam::new(self.int_type)); // ptr
                 sig.params.push(AbiParam::new(types::I64)); // len
-            } else if matches!(pool.kind(param.ty), TypeKind::Struct) {
-                // Struct (M9): a single pointer to the value's stack
-                // slot, regardless of mode (borrow/move/copy).
+            } else if is_struct_type(param.ty, pool) {
+                // Struct (M9 named / M10 anonymous): a single pointer to
+                // the value's stack slot, regardless of mode
+                // (borrow/move/copy).
                 sig.params.push(AbiParam::new(self.int_type));
             } else {
                 let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
@@ -913,9 +922,7 @@ impl<M: Module> Codegen<M> {
                 .push(AbiParam::new(self.module.isa().pointer_type()));
             sig.returns.push(AbiParam::new(self.int_type));
         } else if tir.return_type != pool.void() {
-            if is_fat_type(tir.return_type, pool)
-                || matches!(pool.kind(tir.return_type), TypeKind::Struct)
-            {
+            if is_fat_type(tir.return_type, pool) || is_struct_type(tir.return_type, pool) {
                 // sret: hidden pointer prepended to regular params, no IR-level return.
                 sig.params.insert(
                     0,
@@ -998,7 +1005,7 @@ impl<M: Module> Codegen<M> {
 
             let is_main = ids.main == Some(tir.name);
             let returns_fat = !is_main && is_fat_type(tir.return_type, pool);
-            let returns_struct = !is_main && matches!(pool.kind(tir.return_type), TypeKind::Struct);
+            let returns_struct = !is_main && is_struct_type(tir.return_type, pool);
             let has_sret = returns_fat || returns_struct;
             let mut block_idx: usize = if has_sret { 1 } else { 0 };
             let sret_ptr = if has_sret {
@@ -1056,11 +1063,12 @@ impl<M: Module> Codegen<M> {
                                 home_inline: false,
                             }),
                         );
-                    } else if matches!(pool.kind(param.ty), TypeKind::Struct) {
-                        // Struct inout pointee (M9): mutations happen in
-                        // place through the caller's slot — bind the
-                        // pointer directly and skip the write-back
-                        // table (there is nothing to store back).
+                    } else if is_struct_type(param.ty, pool) {
+                        // Struct inout pointee (M9 named / M10 anon):
+                        // mutations happen in place through the
+                        // caller's slot — bind the pointer directly
+                        // and skip the write-back table (there is
+                        // nothing to store back).
                         let var = builder.declare_var(int_type);
                         builder.def_var(var, ptr);
                         Self::write_slot(
@@ -1117,10 +1125,10 @@ impl<M: Module> Codegen<M> {
                         }),
                     );
                     block_idx += 2;
-                } else if matches!(pool.kind(param.ty), TypeKind::Struct) {
-                    // Struct param (M9): a single pointer to the
-                    // caller-side slot (borrow) or to a transferred
-                    // field-wise copy (move/copy).
+                } else if is_struct_type(param.ty, pool) {
+                    // Struct param (M9 named / M10 anon): a single
+                    // pointer to the caller-side slot (borrow) or to a
+                    // transferred field-wise copy (move/copy).
                     let var = builder.declare_var(int_type);
                     builder.def_var(var, builder.block_params(entry_block)[block_idx]);
                     Self::write_slot(
@@ -1261,7 +1269,7 @@ impl<M: Module> Codegen<M> {
                         len: builder.use_var(locals.len),
                     };
                     ctx.param_values[idx] = Some(repr);
-                } else if matches!(pool.kind(param.ty), TypeKind::Struct) {
+                } else if is_struct_type(param.ty, pool) {
                     let var = Self::read_slot(&ctx.struct_locals, param.name)
                         .expect("every struct param gets a struct_locals entry above");
                     ctx.param_values[idx] = Some(ValueRepr::Struct {
@@ -1683,7 +1691,7 @@ impl<M: Module> Codegen<M> {
                     Self::emit_due_frees(builder, ctx, r)?;
                     Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[])?;
-                } else if matches!(ctx.pool.kind(ctx.tir.return_type), TypeKind::Struct) {
+                } else if is_struct_type(ctx.tir.return_type, ctx.pool) {
                     return Self::emit_struct_return(builder, ctx, r, operand);
                 } else {
                     let val = Self::eval_inst(builder, ctx, operand)?;

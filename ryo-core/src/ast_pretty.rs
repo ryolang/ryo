@@ -13,12 +13,51 @@
 //! `{prefix}{"│   " | "    "}` depending on whether the node was the
 //! last child of its parent.
 
-use crate::ast::{Ast, ExprId, ExprKind, FunctionDef, IfStmt, Literal, StmtId, StmtKind, VarDecl};
+use crate::ast::{
+    Ast, ExprId, ExprKind, FunctionDef, IfStmt, Literal, StmtId, StmtKind, TypeExpr, TypeExprKind,
+    VarDecl,
+};
 use crate::tir::ParamMode;
 use crate::types::InternPool;
 use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write as _;
+
+/// Render a type expression back to source-shaped text: a plain name
+/// as-is, an anonymous struct literal as `{q: int, r: int}`, a
+/// positional form as `(int, str)` (the AST-level mirror of the
+/// pool's structural display, which needs a `TypeId` this layer
+/// doesn't have).
+fn fmt_type_expr<'p>(texpr: &TypeExpr, ast: &Ast, pool: &'p InternPool) -> Cow<'p, str> {
+    match &texpr.kind {
+        TypeExprKind::Name { name, is_view } => {
+            let name = pool.str(*name);
+            if *is_view {
+                Cow::Owned(format!("&{name}"))
+            } else {
+                Cow::Borrowed(name)
+            }
+        }
+        TypeExprKind::Anon { fields } => {
+            let fields = ast
+                .type_field_list(*fields)
+                .iter()
+                .map(|(name, ty)| format!("{}: {}", pool.str(*name), fmt_type_expr(ty, ast, pool)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Cow::Owned(format!("{{{fields}}}"))
+        }
+        TypeExprKind::Positional(elems) => {
+            let elems = ast
+                .type_expr_list(*elems)
+                .iter()
+                .map(|ty| fmt_type_expr(ty, ast, pool).into_owned())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Cow::Owned(format!("({elems})"))
+        }
+    }
+}
 
 /// Render the full program as an indented tree.
 pub fn render_program(ast: &Ast, pool: &InternPool) -> String {
@@ -125,7 +164,7 @@ fn write_stmt_children(
                     "{}├── field: {}: {}",
                     inner,
                     pool.str(*field_name),
-                    pool.str(field_ty.name)
+                    fmt_type_expr(field_ty, ast, pool)
                 )?;
             }
             Ok(())
@@ -218,11 +257,16 @@ fn write_function_def(
             inner,
             mode_prefix,
             pool.str(param.name.name),
-            pool.str(param.type_annotation.name),
+            fmt_type_expr(&param.type_annotation, ast, pool),
         )?;
     }
     if let Some(ret_ty) = &func.return_type {
-        writeln!(out, "{}├── returns: {}", inner, pool.str(ret_ty.name))?;
+        writeln!(
+            out,
+            "{}├── returns: {}",
+            inner,
+            fmt_type_expr(ret_ty, ast, pool)
+        )?;
     }
     write_block(
         out,
@@ -310,7 +354,7 @@ fn write_var_decl(
             out,
             "{}├── type: {} ({}..{})",
             new_prefix,
-            pool.str(ty.name),
+            fmt_type_expr(ty, ast, pool),
             ty.span.start,
             ty.span.end
         )?;

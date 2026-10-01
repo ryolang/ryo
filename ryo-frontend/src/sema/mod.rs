@@ -55,6 +55,8 @@ mod builtins;
 pub(crate) use builtins::*;
 mod call;
 pub(crate) use call::*;
+mod diff;
+pub(crate) use diff::*;
 mod expr;
 pub(crate) use expr::*;
 mod stmt;
@@ -591,3 +593,5 @@ mod tests;
 mod tests_bytes;
 #[cfg(test)]
 mod tests_structs;
+#[cfg(test)]
+mod tests_type_literals;

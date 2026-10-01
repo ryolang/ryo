@@ -113,3 +113,100 @@ fn anon_empty_braces_report_only_e0109() {
         stderr
     );
 }
+
+// ---- M10: anonymous struct type literals (`{q: int, r: int}`) ----
+
+#[test]
+fn divmod_named_shape_jit() {
+    // A compound type expression in the return type: the anonymous
+    // literal's inferred shape must structurally match the annotation,
+    // and field access reads through the signature type.
+    assert_ryo_output(
+        "divmod_named_shape",
+        "fn divmod(a: int, b: int) -> {q: int, r: int}:\n\treturn {q=a / b, r=a % b}\n\nfn main():\n\tdm = divmod(10, 3)\n\tprint(dm.q)\n",
+        "3",
+    );
+}
+
+#[test]
+fn type_literal_view_field_rejected() {
+    // Rule 6 holds inside type literals: a view-typed field is
+    // rejected with the same ViewFieldType diagnostic as everywhere
+    // else.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn f(p: {v: strview}) -> int:\n\treturn 1\n\nfn main():\n\tprint(1)\n";
+    let test_file = create_test_file(temp_dir.path(), "type_lit_view.ryo", code);
+
+    let output = run_ryo_command(&["run", "type_lit_view.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "a view-typed field in a type literal must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0042"),
+        "should emit E0042 (ViewFieldType), got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("struct fields must be owned values"),
+        "error should carry the view-field message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn shape_typo_field_diff_message() {
+    // §9 bar: expected + found structural displays, plus a field-level
+    // diff note naming `rr` vs `r` with a did-you-mean.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn divmod(a: int, b: int) -> {q: int, rr: int}:\n\treturn {q=a / b, r=a % b}\n\nfn main():\n\tdm = divmod(10, 3)\n\tprint(dm.q)\n";
+    let test_file = create_test_file(temp_dir.path(), "shape_typo.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "shape_typo.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(!output.status.success(), "a shape typo must be rejected");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("{q: int, rr: int}"),
+        "error should show the expected shape, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("{q: int, r: int}"),
+        "error should show the found shape, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("did you mean"),
+        "a name typo gets a did-you-mean, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn graduation_fixit_message() {
+    // §9 bar: an anonymous shape passed where a named struct is
+    // expected gets the graduation fix-it naming the struct and its
+    // real field names.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "struct Point:\n\tx: int\n\ty: int\n\nfn take(p: Point):\n\tprint(p.x)\n\nfn main():\n\ttake({x=1, y=2})\n";
+    let test_file = create_test_file(temp_dir.path(), "graduation.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "graduation.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "anon-into-named must be rejected (no implicit coercion)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("construct explicitly: `Point{x=…, y=…}`"),
+        "error should teach explicit construction, got: {}",
+        stderr
+    );
+}

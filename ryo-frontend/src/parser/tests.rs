@@ -139,7 +139,7 @@ fn parse_variable_with_type_annotation() {
     let (ast, pool) = lex_and_parse("x: int = 42").unwrap();
     let decl = var_decl(&ast, only_stmt(&ast));
     assert_eq!(pool.str(decl.name.name), "x");
-    assert_eq!(pool.str(decl.type_annotation.unwrap().name), "int");
+    assert_eq!(pool.str(type_name(&decl.type_annotation.unwrap()).0), "int");
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn parse_mutable_with_type() {
     let decl = var_decl(&ast, only_stmt(&ast));
     assert!(decl.mutable);
     assert_eq!(pool.str(decl.name.name), "counter");
-    assert_eq!(pool.str(decl.type_annotation.unwrap().name), "int");
+    assert_eq!(pool.str(type_name(&decl.type_annotation.unwrap()).0), "int");
     assert_int_lit(&ast, decl.initializer, 0);
 }
 
@@ -281,7 +281,7 @@ fn parse_struct_declaration() {
     let fields = ast.struct_field_decls(def.fields);
     assert_eq!(fields.len(), 2);
     assert_eq!(pool.str(fields[0].0), "x");
-    assert_eq!(pool.str(fields[0].1.name), "float");
+    assert_eq!(pool.str(type_name(&fields[0].1).0), "float");
     assert_eq!(pool.str(fields[1].0), "y");
 }
 
@@ -1140,7 +1140,9 @@ fn parse_move_parameter() {
         "param `s` should be marked move"
     );
     assert_eq!(pool.str(f.params[0].name.name), "s");
-    assert_eq!(pool.str(f.params[0].type_annotation.name), "str");
+    let (name, is_view) = type_name(&f.params[0].type_annotation);
+    assert!(!is_view);
+    assert_eq!(pool.str(name), "str");
 }
 
 #[test]
@@ -1153,7 +1155,9 @@ fn parse_default_parameter_is_not_move() {
         "bare param `s` should default to Borrow mode"
     );
     assert_eq!(pool.str(f.params[0].name.name), "s");
-    assert_eq!(pool.str(f.params[0].type_annotation.name), "str");
+    let (name, is_view) = type_name(&f.params[0].type_annotation);
+    assert!(!is_view);
+    assert_eq!(pool.str(name), "str");
 }
 
 #[test]
@@ -1254,8 +1258,9 @@ fn parse_slice_three_part_rejected() {
 fn parse_view_param_annotation() {
     let (ast, pool) = lex_and_parse("fn first(text: &str):\n\tprint(text)\n").unwrap();
     let f = fn_def(&ast, only_stmt(&ast));
-    assert!(f.params[0].type_annotation.is_view);
-    assert_eq!(pool.str(f.params[0].type_annotation.name), "str");
+    let (name, is_view) = type_name(&f.params[0].type_annotation);
+    assert!(is_view);
+    assert_eq!(pool.str(name), "str");
 }
 
 /// Recovery-aware variant of `lex_and_parse`: returns whether a
@@ -1681,4 +1686,95 @@ fn bare_ident_compound_assignment_still_compound_assign() {
         ast.stmt(body[1]).kind,
         StmtKind::CompoundAssign { .. }
     ));
+}
+
+// ---- M10: anonymous struct type literals (`{q: int, r: int}`) ----
+
+/// The `(name, is_view)` payload of a name-only type expression,
+/// panicking on a compound form.
+fn type_name(texpr: &TypeExpr) -> (StringId, bool) {
+    match texpr.kind {
+        TypeExprKind::Name { name, is_view } => (name, is_view),
+        other => panic!("expected Name type expression, got {other:?}"),
+    }
+}
+
+/// The `TypeExprKind::Anon` field list behind a compound type
+/// expression, panicking on any other kind.
+fn anon_type_fields<'a>(ast: &'a Ast, texpr: &TypeExpr) -> &'a [(StringId, TypeExpr)] {
+    match &texpr.kind {
+        TypeExprKind::Anon { fields } => ast.type_field_list(*fields),
+        other => panic!("expected Anon type literal, got {other:?}"),
+    }
+}
+
+#[test]
+fn type_literal_in_return_type() {
+    let (ast, pool) =
+        lex_and_parse("fn divmod(a: int, b: int) -> {q: int, r: int}:\n\treturn {q=1, r=2}\n")
+            .unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let fields = anon_type_fields(&ast, f.return_type.as_ref().unwrap());
+    assert_eq!(fields.len(), 2);
+    assert_eq!(pool.str(fields[0].0), "q");
+    assert_eq!(pool.str(fields[1].0), "r");
+    match fields[1].1.kind {
+        TypeExprKind::Name {
+            name,
+            is_view: false,
+        } => assert_eq!(pool.str(name), "int"),
+        other => panic!("expected plain `int` name, got {other:?}"),
+    }
+}
+
+#[test]
+fn type_literal_in_param() {
+    let (ast, pool) =
+        lex_and_parse("fn dist(p: {x: float, y: float}) -> float:\n\treturn p.x\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let fields = anon_type_fields(&ast, &f.params[0].type_annotation);
+    assert_eq!(fields.len(), 2);
+    assert_eq!(pool.str(fields[0].0), "x");
+    match fields[1].1.kind {
+        TypeExprKind::Name { name, .. } => assert_eq!(pool.str(name), "float"),
+        other => panic!("expected Name, got {other:?}"),
+    }
+}
+
+#[test]
+fn type_literal_in_var_annotation() {
+    let (ast, _pool) = lex_and_parse("fn main():\n\tdm: {q: int, r: int} = {q=1, r=2}\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let decl = match &ast.stmt(fn_body(&ast, f)[0]).kind {
+        StmtKind::VarDecl(decl) => decl,
+        other => panic!("expected VarDecl, got {other:?}"),
+    };
+    let fields = anon_type_fields(&ast, decl.type_annotation.as_ref().unwrap());
+    assert_eq!(fields.len(), 2);
+}
+
+#[test]
+fn type_literal_rejects_empty_braces() {
+    // `{}` stays reserved for the future empty map literal in type
+    // position too — there is no empty anonymous struct.
+    let errs = lex_and_parse("p: {} = {x=1}\n").expect_err("empty type braces must be rejected");
+    let msg = errs
+        .iter()
+        .find_map(|e| match e.reason() {
+            RichReason::Custom(pd @ ParseDiag::EmptyAnonStruct) => Some(pd.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected an EmptyAnonStruct diagnostic, got: {errs:?}"));
+    assert!(msg.contains("map literal"), "{msg}");
+}
+
+#[test]
+fn type_literal_rejected_in_struct_decl_field() {
+    // Compound type literals live in function signatures and var
+    // annotations; struct declaration fields stay name-only (the M9
+    // define DFS walks named fields for by-value cycles).
+    assert!(
+        lex_and_parse("struct P:\n\tf: {x: int}\n").is_err(),
+        "struct decl fields must stay name-only"
+    );
 }
