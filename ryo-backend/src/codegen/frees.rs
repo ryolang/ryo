@@ -1,7 +1,7 @@
 //! Free/dead-drop emission and the provably-inline free elision —
 //! split from `expr.rs`; see module docs in `mod.rs`.
 
-use super::{Codegen, FunctionContext, ValueRepr, is_fat_type};
+use super::{Codegen, CodegenNameIds, FunctionContext, ValueRepr, is_fat_type};
 use cranelift::codegen::ir::{FuncRef, InstructionData, Opcode, ValueDef};
 use cranelift::prelude::*;
 use cranelift_module::Module;
@@ -176,6 +176,7 @@ impl<M: Module> Codegen<M> {
     pub(crate) fn build_fat_mutation_tables(
         tir: &Tir,
         pool: &InternPool,
+        ids: &CodegenNameIds,
     ) -> (Vec<bool>, Vec<bool>) {
         let mut fat_mutated = vec![false; pool.string_count()];
         let mut view_base_insts = vec![false; tir.instructions.len()];
@@ -194,8 +195,9 @@ impl<M: Module> Codegen<M> {
                 }
                 TirTag::Call => {
                     let view = tir.call_view(r);
-                    let name = pool.str(view.name);
-                    if (name == "str_push" || name == "bytes_push")
+                    // StringId equality against the ids resolved once
+                    // per compilation (see `CodegenNameIds`).
+                    if (ids.str_push == Some(view.name) || ids.bytes_push == Some(view.name))
                         && let Some(&target) = view.args.first()
                     {
                         mark_var(&mut fat_mutated, tir, target);

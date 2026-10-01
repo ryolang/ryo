@@ -660,8 +660,11 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::Call => {
                 let view = ctx.tir.call_view(r);
-                let name_str = ctx.pool.str(view.name);
-                if name_str == "__ryo_str_from_view" {
+                // Fat-producer dispatch compares interned ids (resolved
+                // once per compilation in `CodegenNameIds`).
+                let ids = ctx.name_ids;
+                let name_id = view.name;
+                if ids.str_from_view == Some(name_id) {
                     // M8.4.1.2 `str(view)` materialization: the argument
                     // is a view pair evaluated via `eval_inst_view`.
                     let ValueRepr::View {
@@ -679,7 +682,7 @@ impl<M: Module> Codegen<M> {
                         out_slot,
                     )?;
                     ValueRepr::Str { ptr, len, cap }
-                } else if name_str == "__ryo_bytes_from_view" {
+                } else if ids.bytes_from_view == Some(name_id) {
                     // M8.4.2 `bytes(bview)` materialization: the
                     // argument is a view pair via `eval_inst_view`.
                     let ValueRepr::View {
@@ -697,7 +700,7 @@ impl<M: Module> Codegen<M> {
                         out_slot,
                     )?;
                     ValueRepr::Bytes { ptr, len, cap }
-                } else if name_str == "__ryo_str_to_bytes" {
+                } else if ids.str_to_bytes == Some(name_id) {
                     // `str.to_bytes()` / `strview.to_bytes()` — only
                     // (ptr, len) is read.
                     let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
@@ -709,7 +712,7 @@ impl<M: Module> Codegen<M> {
                         out_slot,
                     )?;
                     ValueRepr::Bytes { ptr, len, cap }
-                } else if name_str == "__ryo_bytes_to_str" {
+                } else if ids.bytes_to_str == Some(name_id) {
                     // `bytes.to_str()` / `bytesview.to_str()` — returns
                     // an owned str (validated copy; panics on bad UTF-8).
                     let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
@@ -721,7 +724,7 @@ impl<M: Module> Codegen<M> {
                         out_slot,
                     )?;
                     ValueRepr::Str { ptr, len, cap }
-                } else if name_str == "__ryo_bytes_repr" {
+                } else if ids.bytes_repr == Some(name_id) {
                     // print(bytes) rewrite (sema, M8.4.2) — returns the
                     // escaped-repr str.
                     let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
@@ -733,7 +736,7 @@ impl<M: Module> Codegen<M> {
                         out_slot,
                     )?;
                     ValueRepr::Str { ptr, len, cap }
-                } else if name_str == "bool_to_str" {
+                } else if ids.bool_to_str == Some(name_id) {
                     // Provably-inline producer taken all the way: the
                     // result is one of two static literals, so select
                     // between their .rodata pointers — no runtime call,
@@ -771,12 +774,12 @@ impl<M: Module> Codegen<M> {
                     let len = builder.ins().select(cond, four, five);
                     let cap = builder.ins().iconst(types::I64, 0);
                     ValueRepr::Str { ptr, len, cap }
-                } else if name_str == "int_to_str" || name_str == "float_to_str" {
+                } else if ids.int_to_str == Some(name_id) || ids.float_to_str == Some(name_id) {
                     let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
-                    let (fn_name, param_ty) = match name_str {
-                        "int_to_str" => ("ryo_int_to_str", ctx.int_type),
-                        "float_to_str" => ("ryo_float_to_str", types::F64),
-                        _ => unreachable!(),
+                    let (fn_name, param_ty) = if ids.int_to_str == Some(name_id) {
+                        ("ryo_int_to_str", ctx.int_type)
+                    } else {
+                        ("ryo_float_to_str", types::F64)
                     };
                     let (ptr, len, cap) = Self::emit_slot_out_call(
                         builder,
@@ -1111,7 +1114,7 @@ impl<M: Module> Codegen<M> {
             }
             let r = TirRef::from_raw(u32::try_from(idx).expect("TirRef index out of range"));
             let view = ctx.tir.call_view(r);
-            if ctx.pool.str(view.name) == "__ryo_panic" {
+            if ctx.name_ids.ryo_panic == Some(view.name) {
                 for a in &view.args {
                     panic_args[a.index()] = true;
                 }
@@ -1189,10 +1192,14 @@ impl<M: Module> Codegen<M> {
         let view = ctx.tir.call_view(r);
         let name_id = view.name;
         let name_str = ctx.pool.str(name_id);
+        // Call-form dispatch compares interned ids (resolved once per
+        // compilation in `CodegenNameIds`); `name_str` remains only for
+        // the user-function path below.
+        let ids = ctx.name_ids;
 
         // print and __ryo_panic are ordinary runtime calls. They
         // do NOT use the str-triple expansion that user functions use.
-        if name_str == "__ryo_panic" {
+        if ids.ryo_panic == Some(name_id) {
             // __ryo_panic(ptr, len) keeps its raw scalar ABI — the StrConst
             // .rodata pointer and an int len — now backed by ryo_panic in
             // the runtime (stderr + exit 101). The trap after the call is
@@ -1230,11 +1237,11 @@ impl<M: Module> Codegen<M> {
         }
 
         // TODO(M24): interim call form — replaced by `process.exit`.
-        if name_str == "process_exit" {
+        if ids.process_exit == Some(name_id) {
             return Self::emit_process_exit(builder, ctx, r);
         }
 
-        if name_str == "print" {
+        if ids.print == Some(name_id) {
             // print is an ordinary runtime call. Accepts either
             // repr — owned str triple or strview pair; ryo_print(ptr,
             // len) only needs the viewed bytes.
@@ -1263,11 +1270,11 @@ impl<M: Module> Codegen<M> {
         }
 
         // TODO(M24): interim call form — replaced by `io.eprint`.
-        if name_str == "io_eprint" {
+        if ids.io_eprint == Some(name_id) {
             return Self::emit_io_eprint(builder, ctx, r);
         }
 
-        if name_str == "str_push" {
+        if ids.str_push == Some(name_id) {
             // str_push(&s, suffix): spill s's fat pointer to a 24-byte
             // slot, call __ryo_str_push(slot_addr, suffix_ptr, suffix_len),
             // then reload the mutated triple back into s's FatLocals.
@@ -1357,7 +1364,7 @@ impl<M: Module> Codegen<M> {
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
-        if name_str == "bytes_push" {
+        if ids.bytes_push == Some(name_id) {
             // bytes_push(&b, x): spill b's fat pointer to a 24-byte
             // slot, call __ryo_bytes_push(slot_addr, x), then reload
             // the mutated triple back into b's FatLocals. A home-backed

@@ -16,7 +16,7 @@ pub(crate) fn emit_builtin_call(
     span: Span,
     builtin: &'static crate::builtins::BuiltinFunction,
 ) -> TirRef {
-    let name = sema.pool.str(view.name);
+    let ids = sema.names;
     // Builtins never take ownership of their arguments — every arg
     // is borrowed regardless of declared type.
     let modes = vec![ParamMode::Borrow; arg_tirs.len()];
@@ -26,7 +26,8 @@ pub(crate) fn emit_builtin_call(
     // str_push/bytes_push — everywhere else it is rejected, exactly
     // like user-function calls. The push arms additionally validate
     // the mutable lvalue of that first argument.
-    let builtin_modes: Vec<ParamMode> = if name == "str_push" || name == "bytes_push" {
+    let builtin_modes: Vec<ParamMode> = if view.name == ids.str_push || view.name == ids.bytes_push
+    {
         vec![ParamMode::Inout, ParamMode::Borrow]
     } else {
         modes.clone()
@@ -49,15 +50,16 @@ pub(crate) fn emit_builtin_call(
             );
         }
     }
-    match name {
-        "print" => emit_print_like(sema, fcx, view, arg_tirs, &modes, span, builtin),
+    match view.name {
+        n if n == ids.print || n == ids.io_eprint => {
+            emit_print_like(sema, fcx, view, arg_tirs, &modes, span, builtin)
+        }
         // M9.2: `io_eprint` is the exact twin of `print` — same
         // accepted types, same routing, stderr instead of stdout.
         // TODO(M24): interim call form — replaced by `io.eprint`.
-        "io_eprint" => emit_print_like(sema, fcx, view, arg_tirs, &modes, span, builtin),
-        "panic" => emit_panic(sema, fcx, view, span),
+        n if n == ids.panic => emit_panic(sema, fcx, view, span),
         // TODO(M24): interim call form — replaced by `process.exit`.
-        "process_exit" => {
+        n if n == ids.process_exit => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -87,8 +89,8 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        "assert" => emit_assert(sema, fcx, view, arg_tirs, span),
-        "int_to_str" => {
+        n if n == ids.assert => emit_assert(sema, fcx, view, arg_tirs, span),
+        n if n == ids.int_to_str => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -118,7 +120,7 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        "float_to_str" => {
+        n if n == ids.float_to_str => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -148,7 +150,7 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        "bool_to_str" => {
+        n if n == ids.bool_to_str => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -178,7 +180,7 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        "str_push" => {
+        n if n == ids.str_push => {
             // str_push(s: inout str, suffix: strview) -> void. Builtins
             // bypass `check_call`, so the `&`/`inout` agreement +
             // mutable-lvalue checks are replayed here against arg 0.
@@ -246,7 +248,7 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        "bytes_push" => {
+        n if n == ids.bytes_push => {
             // bytes_push(b: inout bytes, x: int) -> void (M8.4.2
             // stopgap: the byte is an `int` range-checked 0-255 at
             // runtime; becomes `u8` at M17.1). Mirrors the str_push
@@ -318,14 +320,17 @@ pub(crate) fn materialize_name(sema: &Sema<'_>, arg_uir: InstRef) -> Option<&'st
         return None;
     }
     let name = sema.uir.call_view(arg_uir).name;
-    let s = sema.pool.str(name);
-    if s != "str" && s != "bytes" {
+    let owner_name = if name == sema.names.str_ {
+        "str"
+    } else if name == sema.names.bytes {
+        "bytes"
+    } else {
         return None;
-    }
+    };
     if sema.name_to_decl.contains_key(&name) {
         return None;
     }
-    Some(if s == "str" { "str" } else { "bytes" })
+    Some(owner_name)
 }
 
 /// W0003 case A for view-accepting builtins (M8.4.1.2, generalized

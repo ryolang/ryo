@@ -84,19 +84,83 @@ pub(crate) fn is_fat_type(ty: TypeId, pool: &InternPool) -> bool {
 /// slot unwritten and every later home read would load garbage.
 /// Keeping the set wrong in the other direction (listing a builtin
 /// that is NOT inlined) is harmless — it only forgoes the home.
+///
+/// Test-only: the production exclusion lives in [`writes_out_slot_ids`]
+/// as an interned-id compare, and the unit test below iterates this
+/// table to assert both stay in agreement.
+#[cfg(test)]
 pub(crate) const CODEGEN_INLINED_BUILTINS: &[&str] = &["bool_to_str"];
+
+/// Interned-name ids resolved once per compilation (in `compile_all`)
+/// so per-function and per-instruction name dispatch — `main`
+/// detection, the `__ryo_panic` / `print` / `io_eprint` /
+/// `process_exit` call-form routing, the fat-producer slot-out chain,
+/// the codegen-inlined builtin exclusion, the push mutation scan — is
+/// a `StringId` equality check instead of `pool.str(id) == "..."`.
+/// Each entry is `None` when the program never mentioned the name (the
+/// pool only holds what earlier passes interned); a `None` id simply
+/// never matches.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CodegenNameIds {
+    main: Option<StringId>,
+    ryo_panic: Option<StringId>,
+    print: Option<StringId>,
+    io_eprint: Option<StringId>,
+    process_exit: Option<StringId>,
+    bool_to_str: Option<StringId>,
+    int_to_str: Option<StringId>,
+    float_to_str: Option<StringId>,
+    str_push: Option<StringId>,
+    bytes_push: Option<StringId>,
+    str_from_view: Option<StringId>,
+    bytes_from_view: Option<StringId>,
+    str_to_bytes: Option<StringId>,
+    bytes_to_str: Option<StringId>,
+    bytes_repr: Option<StringId>,
+}
+
+impl CodegenNameIds {
+    fn resolve(pool: &InternPool) -> Self {
+        CodegenNameIds {
+            main: pool.find_str("main"),
+            ryo_panic: pool.find_str("__ryo_panic"),
+            print: pool.find_str("print"),
+            io_eprint: pool.find_str("io_eprint"),
+            process_exit: pool.find_str("process_exit"),
+            bool_to_str: pool.find_str("bool_to_str"),
+            int_to_str: pool.find_str("int_to_str"),
+            float_to_str: pool.find_str("float_to_str"),
+            str_push: pool.find_str("str_push"),
+            bytes_push: pool.find_str("bytes_push"),
+            str_from_view: pool.find_str("__ryo_str_from_view"),
+            bytes_from_view: pool.find_str("__ryo_bytes_from_view"),
+            str_to_bytes: pool.find_str("__ryo_str_to_bytes"),
+            bytes_to_str: pool.find_str("__ryo_bytes_to_str"),
+            bytes_repr: pool.find_str("__ryo_bytes_repr"),
+        }
+    }
+}
 
 /// True when instruction `r` produces its fat result through a
 /// slot-out call (`emit_slot_out_call` or user-call sret) and can
 /// therefore write a caller-provided home slot directly. Concat and
 /// every fat-returning call qualify — except codegen-inlined builtins
-/// (`CODEGEN_INLINED_BUILTINS`), which never touch a slot.
-pub(crate) fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+/// (`CodegenNameIds::bool_to_str`), which never touch a slot.
+fn writes_out_slot_ids(tir: &Tir, ids: &CodegenNameIds, r: TirRef) -> bool {
     match tir.inst(r).tag {
         TirTag::StrConcat | TirTag::BytesConcat => true,
-        TirTag::Call => !CODEGEN_INLINED_BUILTINS.contains(&pool.str(tir.call_view(r).name)),
+        TirTag::Call => ids.bool_to_str != Some(tir.call_view(r).name),
         _ => false,
     }
+}
+
+/// `#[cfg(test)]` three-arg form of [`writes_out_slot_ids`]: resolves
+/// the ids from the pool per call (test-only, so the probe cost is
+/// irrelevant) and exists because the unit test in `tests.rs` pins
+/// this exact signature.
+#[cfg(test)]
+pub(crate) fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+    writes_out_slot_ids(tir, &CodegenNameIds::resolve(pool), r)
 }
 
 /// Map a TIR type to the corresponding Cranelift IR type.
@@ -162,6 +226,12 @@ pub struct Codegen<M: Module> {
     /// function compiled into the same module; the per-function
     /// `FuncRef` is derived cheaply via `declare_func_in_func`.
     runtime_fns: HashMap<&'static str, FuncId>,
+    /// Interned-name ids for per-function / per-instruction dispatch
+    /// (`main` detection, call-form routing, the slot-out producer
+    /// chain). Resolved from the pool at the top of `compile_all` and
+    /// valid for the duration of that compilation; `Default` (all
+    /// `None`) only until the first compile.
+    name_ids: CodegenNameIds,
 }
 
 /// Overflow guard message for the spec §18 checked-arithmetic traps.
@@ -268,6 +338,15 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     int_type: types::Type,
     pool: &'a InternPool,
     tir: &'a Tir,
+    /// Whether the function being lowered is `main`, resolved by
+    /// `compile_function` from [`CodegenNameIds`]. The ReturnVoid arm
+    /// needs it to emit the C ABI's int-0 return.
+    is_main: bool,
+    /// Interned-name ids resolved once per compilation; the per-call
+    /// dispatch in `emit_call_slot`, the literal hoisting exclusion,
+    /// and the slot-out exclusion all compare `StringId` equality
+    /// against these.
+    name_ids: CodegenNameIds,
     /// Scalar binding name → Cranelift `Variable`. Dense table indexed
     /// by `StringId::raw()`, sized once per function from
     /// `pool.string_count()` (codegen never interns, so every name in
@@ -471,6 +550,7 @@ impl<M: Module> Codegen<M> {
             string_data: HashMap::new(),
             guard_msg_data: HashMap::new(),
             runtime_fns: HashMap::new(),
+            name_ids: CodegenNameIds::default(),
         }
     }
 }
@@ -772,13 +852,14 @@ impl<M: Module> Codegen<M> {
     ) -> Result<(FuncId, String), String> {
         let (func_ids, ir_output) = self.compile_all(tirs, pool, sidecar, dump_ir)?;
 
-        // Resolve "main" through the pool. `astgen` always interns
-        // the string "main" (it does so explicitly when synthesising
-        // implicit-main and when checking for an explicit-main
-        // collision), so the read-only `find_str` probe is
-        // guaranteed to hit if the program declares one.
-        let main_id = pool
-            .find_str("main")
+        // Resolve "main" through the id cache `compile_all` built.
+        // `astgen` always interns the string "main" (it does so
+        // explicitly when synthesising implicit-main and when checking
+        // for an explicit-main collision), so the read-only `find_str`
+        // probe is guaranteed to hit if the program declares one.
+        let main_id = self
+            .name_ids
+            .main
             .ok_or_else(|| "No main function defined".to_string())?;
         let main = func_ids
             .get(&main_id)
@@ -803,7 +884,8 @@ impl<M: Module> Codegen<M> {
     /// Shared driver for `compile` / `compile_and_dump_ir`: declare
     /// all functions, then lower each body. `dump_ir` gates the
     /// per-function CLIF pretty-print so only the dump paths pay for
-    /// it.
+    /// it. Resolves [`CodegenNameIds`] once, up front, and stores it
+    /// on `self` for the declaration and per-function lowering below.
     fn compile_all(
         &mut self,
         tirs: &[Tir],
@@ -815,6 +897,7 @@ impl<M: Module> Codegen<M> {
             bytes::no_unreachable_in(tirs),
             "codegen requires sema to have produced TIR with no Unreachable instructions"
         );
+        self.name_ids = CodegenNameIds::resolve(pool);
         let func_ids = self.prepare_compilation(tirs, pool)?;
 
         let mut ir_output = String::new();
@@ -836,9 +919,10 @@ impl<M: Module> Codegen<M> {
     ) -> Result<DeclaredFunctions, String> {
         let mut func_ids = HashMap::new();
         for tir in tirs {
-            let sig = self.build_signature(tir, pool);
+            let is_main = self.name_ids.main == Some(tir.name);
+            let sig = self.build_signature(tir, pool, is_main);
             let name_str = pool.str(tir.name);
-            let linkage = if name_str == "main" {
+            let linkage = if is_main {
                 Linkage::Export
             } else {
                 Linkage::Local
@@ -854,7 +938,7 @@ impl<M: Module> Codegen<M> {
         Ok(func_ids)
     }
 
-    fn build_signature(&self, tir: &Tir, pool: &InternPool) -> Signature {
+    fn build_signature(&self, tir: &Tir, pool: &InternPool, is_main: bool) -> Signature {
         let mut sig = self.module.make_signature();
         for param in &tir.params {
             if param.mode == ParamMode::Inout {
@@ -884,7 +968,8 @@ impl<M: Module> Codegen<M> {
         // calls `main` as `int main()`. Always emit an int-returning
         // signature for `main`; `compile_function` falls through to
         // an explicit `return 0` when Ryo's return type is void.
-        let is_main = pool.str(tir.name) == "main";
+        // `is_main` is resolved by `declare_all_functions` from the
+        // interned-id cache.
         if is_main {
             sig.returns.push(AbiParam::new(self.int_type));
         } else if tir.return_type != pool.void() {
@@ -913,6 +998,10 @@ impl<M: Module> Codegen<M> {
         sidecar_index: usize,
         dump_ir: bool,
     ) -> Result<String, String> {
+        // Interned-name ids for this compilation (resolved by
+        // `compile_all`); copied out so the block below can read them
+        // while `builder` holds mutable borrows of `self`.
+        let ids = self.name_ids;
         let (func_id, sig) = func_ids
             .get(&tir.name)
             .ok_or_else(|| format!("Function '{}' not declared", pool.str(tir.name)))?;
@@ -963,7 +1052,7 @@ impl<M: Module> Codegen<M> {
             let mut locals: Vec<Option<Variable>> = vec![None; pool.string_count()];
             let mut locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
 
-            let is_main = pool.str(tir.name) == "main";
+            let is_main = ids.main == Some(tir.name);
             let returns_fat = !is_main && is_fat_type(tir.return_type, pool);
             let returns_struct = !is_main && matches!(pool.kind(tir.return_type), TypeKind::Struct);
             let has_sret = returns_fat || returns_struct;
@@ -1117,7 +1206,7 @@ impl<M: Module> Codegen<M> {
             let pending_sweep: Vec<usize> = (0..func_sidecar.free_schedule.len()).collect();
             let (free_binding_names, free_binding_param_names, binding_last_write) =
                 Self::build_free_binding_names(tir, pool);
-            let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, pool);
+            let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, pool, &ids);
 
             let mut promo_free_by_after: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
             for (idx, pf) in func_sidecar.promotion_frees.iter().enumerate() {
@@ -1150,6 +1239,8 @@ impl<M: Module> Codegen<M> {
                 int_type,
                 pool,
                 tir,
+                is_main,
+                name_ids: ids,
                 locals,
                 locals_undo,
                 range_facts: vec![None; pool.string_count()],
@@ -1466,7 +1557,8 @@ impl<M: Module> Codegen<M> {
                     // writes the home directly (and the home-provenance
                     // free elision applies) instead of paying a temp
                     // slot + triple store at every reassign.
-                    let produces_slot = writes_out_slot(ctx.tir, ctx.pool, view.initializer);
+                    let produces_slot =
+                        writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.initializer);
                     let home = if produces_slot || view.mutable {
                         Some(builder.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
@@ -1614,8 +1706,7 @@ impl<M: Module> Codegen<M> {
             TirTag::ReturnVoid => {
                 // Bare `return` in a void function. If this is
                 // `main`, the C ABI demands an int return value.
-                let is_main = ctx.pool.str(ctx.tir.name) == "main";
-                if is_main {
+                if ctx.is_main {
                     let zero = builder.ins().iconst(ctx.int_type, 0);
                     Self::emit_due_frees(builder, ctx, r)?;
                     Self::emit_due_promo_frees(builder, ctx, r)?;
@@ -1682,7 +1773,7 @@ impl<M: Module> Codegen<M> {
                     // free-then-store order instead — freeing first
                     // would be a use-after-free.
                     let direct = locals.home.is_some()
-                        && writes_out_slot(ctx.tir, ctx.pool, view.value)
+                        && writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.value)
                         && !Self::expr_refs_name(ctx.tir, view.value, view.name);
                     let mut old_freed = false;
                     // Elision, same predicate as the scheduled-free

@@ -200,6 +200,14 @@ pub struct Sema<'a> {
     /// types). Struct literals and field accesses resolve against
     /// this table.
     struct_types: HashMap<StringId, TypeId>,
+    /// Interned ids for the names compared on hot paths (builtin
+    /// dispatch, materialize intercepts, reserved names). Built once
+    /// in `Sema::new`.
+    names: crate::builtins::BuiltinNameIds,
+    /// `BUILTINS` keyed by interned name id, so `check_call` resolves
+    /// a builtin callee by `StringId` equality instead of a `pool.str`
+    /// + table scan. Built once in `Sema::new`.
+    builtin_by_id: HashMap<StringId, &'static crate::builtins::BuiltinFunction>,
     /// Refs that appear as direct arguments of some call anywhere in
     /// the program. `&expr` (UIR `Borrow`) is only meaningful as a call
     /// argument to an `inout` parameter; the `Borrow` arm in
@@ -287,6 +295,12 @@ impl<'a> Sema<'a> {
         for _ in 0..n {
             results.push(None);
         }
+        let names = crate::builtins::BuiltinNameIds::intern(pool);
+        let builtin_by_id: HashMap<StringId, &'static crate::builtins::BuiltinFunction> =
+            crate::builtins::BUILTINS
+                .iter()
+                .map(|b| (pool.intern_str(b.name), b))
+                .collect();
         Sema {
             uir,
             pool,
@@ -299,6 +313,8 @@ impl<'a> Sema<'a> {
             signatures: HashMap::with_capacity(n),
             results,
             struct_types: HashMap::new(),
+            names,
+            builtin_by_id,
             call_arg_refs: collect_call_arg_refs(uir),
         }
     }

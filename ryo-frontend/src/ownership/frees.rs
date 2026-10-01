@@ -123,17 +123,43 @@ pub(crate) fn collect_named_inits_rec(tir: &Tir, r: TirRef, set: &mut HashSet<Ti
     }
 }
 
+/// Interned ids for the synthesized `__ryo_*` callees the W0003/W0004
+/// warnings match call names against. Resolved once per `check` via
+/// `find_str` probes: sema interns one of these names only when it
+/// synthesized such a call, so a missing id means the predicate can
+/// never match — the same result the old `pool.str(...) == "..."`
+/// compare produced.
+pub(crate) struct SynthCalleeIds {
+    str_from_view: Option<StringId>,
+    bytes_from_view: Option<StringId>,
+    str_to_bytes: Option<StringId>,
+}
+
+impl SynthCalleeIds {
+    pub(crate) fn resolve(pool: &InternPool) -> Self {
+        SynthCalleeIds {
+            str_from_view: pool.find_str("__ryo_str_from_view"),
+            bytes_from_view: pool.find_str("__ryo_bytes_from_view"),
+            str_to_bytes: pool.find_str("__ryo_str_to_bytes"),
+        }
+    }
+}
+
 /// True when `r` is a call to a synthesized materialize callee
 /// (`__ryo_str_from_view`, M8.4.1.2; `__ryo_bytes_from_view`, M8.4.2)
 /// with a single view-typed argument. The callee names are
 /// unshadowable (`__ryo_` is reserved), so a name match is unambiguous.
-pub(crate) fn is_materialize_call(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+pub(crate) fn is_materialize_call(
+    tir: &Tir,
+    pool: &InternPool,
+    ids: &SynthCalleeIds,
+    r: TirRef,
+) -> bool {
     if tir.inst(r).tag != TirTag::Call {
         return false;
     }
     let view = tir.call_view(r);
-    let name = pool.str(view.name);
-    (name == "__ryo_str_from_view" || name == "__ryo_bytes_from_view")
+    (ids.str_from_view == Some(view.name) || ids.bytes_from_view == Some(view.name))
         && view.args.len() == 1
         && pool.is_view(tir.inst(view.args[0]).ty)
 }
@@ -143,12 +169,12 @@ pub(crate) fn is_materialize_call(tir: &Tir, pool: &InternPool, r: TirRef) -> bo
 /// The callee name is unshadowable (`__ryo_` is reserved), so a name
 /// match is unambiguous. `as_bytes()` lowers to a `ToView`, not a
 /// call, so it never matches here.
-pub(crate) fn is_to_bytes_call(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+pub(crate) fn is_to_bytes_call(tir: &Tir, ids: &SynthCalleeIds, r: TirRef) -> bool {
     if tir.inst(r).tag != TirTag::Call {
         return false;
     }
     let view = tir.call_view(r);
-    pool.str(view.name) == "__ryo_str_to_bytes" && view.args.len() == 1
+    ids.str_to_bytes == Some(view.name) && view.args.len() == 1
 }
 
 /// Collect every bound call site — a `VarDecl`/`Assign` whose value
@@ -205,9 +231,15 @@ pub(crate) fn collect_materialize_sites(
     tir: &Tir,
     stmts: &[TirRef],
     pool: &InternPool,
+    ids: &SynthCalleeIds,
     out: &mut Vec<(TirRef, TirRef)>,
 ) {
-    collect_bound_call_sites(tir, stmts, &|t, r| is_materialize_call(t, pool, r), out);
+    collect_bound_call_sites(
+        tir,
+        stmts,
+        &|t, r| is_materialize_call(t, pool, ids, r),
+        out,
+    );
 }
 
 /// W0003 case B (M8.4.1.2; generalized to bytes in M8.4.2): a bound
@@ -236,12 +268,13 @@ pub(crate) fn collect_materialize_sites(
 pub(crate) fn warn_redundant_materialize(
     tir: &Tir,
     pool: &InternPool,
+    ids: &SynthCalleeIds,
     own: &Ownership,
     order: &[u32],
     sink: &mut DiagSink,
 ) {
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
-    collect_materialize_sites(tir, &tir.body_stmts(), pool, &mut sites);
+    collect_materialize_sites(tir, &tir.body_stmts(), pool, ids, &mut sites);
     if sites.is_empty() {
         return;
     }
@@ -293,8 +326,7 @@ pub(crate) fn warn_redundant_materialize(
         if defensive {
             continue;
         }
-        let callee = pool.str(tir.call_view(call).name);
-        let type_name = if callee == "__ryo_bytes_from_view" {
+        let type_name = if ids.bytes_from_view == Some(tir.call_view(call).name) {
             "bytes"
         } else {
             "str"
@@ -334,6 +366,7 @@ pub(crate) fn warn_redundant_materialize(
 pub(crate) fn warn_redundant_to_bytes(
     tir: &Tir,
     pool: &InternPool,
+    ids: &SynthCalleeIds,
     own: &Ownership,
     order: &[u32],
     last_use: &HashMap<TirRef, TirRef>,
@@ -343,7 +376,7 @@ pub(crate) fn warn_redundant_to_bytes(
     collect_bound_call_sites(
         tir,
         &tir.body_stmts(),
-        &|t, r| is_to_bytes_call(t, pool, r),
+        &|t, r| is_to_bytes_call(t, ids, r),
         &mut sites,
     );
     let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
