@@ -862,3 +862,56 @@ fn broken_block_header_body_does_not_leak_into_enclosing_scope() {
         stderr
     );
 }
+
+#[test]
+fn parse_error_span_survives_multibyte_source_prefix() {
+    // Ariadne 0.6 indexes Source by CHARACTER offset while every
+    // compiler span is a BYTE offset. Pre-fix, a multi-byte character
+    // before a parse error drifted the squiggle onto a later line (or
+    // dropped the report entirely when the byte offset passed the char
+    // count). The error must land at the newline right after the
+    // unclosed call — line 6 here — not on line 7 (`print(total)`).
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let src = "fn main():\n\tmut total = \"\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\"\n\twhile true:\n\t\ttotal = total + \"\u{1F98A}\"\n\t\tbreak\n\n\tprint(int_to_str(total.len())\n\tprint(total)\n";
+    let test_file = create_test_file(temp_dir.path(), "multibyte_span.ryo", src);
+
+    let output = run_ryo_command(&["run", "multibyte_span.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(!output.status.success(), "the missing ')' must be rejected");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("multibyte_span.ryo:7:"),
+        "error must point at line 7 (the unclosed call), got: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("multibyte_span.ryo:8:"),
+        "error must not drift onto line 8 (the next statement), got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn multibyte_source_with_paren_fixed_compiles_and_runs() {
+    // The same source with the ')' in place must compile and run —
+    // no cascade diagnostics hidden behind the parse error.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let src = "fn main():\n\tmut total = \"\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\"\n\twhile true:\n\t\ttotal = total + \"\u{1F98A}\"\n\t\tbreak\n\n\tprint(int_to_str(total.len())\n\tprint(total)\n\tprint(\"\\n\")\n";
+    let fixed_src = src.replace("total.len())\n", "total.len()))\n");
+    let test_file = create_test_file(temp_dir.path(), "multibyte_fixed.ryo", &fixed_src);
+
+    let output = run_ryo_command(&["run", "multibyte_fixed.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "with the ')' present the program must compile and run: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout,
+        "32\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F98A}\n"
+    );
+}
