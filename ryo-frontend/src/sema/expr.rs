@@ -1012,7 +1012,7 @@ pub(crate) fn check_binary_op(
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
             }
-            TypeKind::Void | TypeKind::Never | TypeKind::Tuple | TypeKind::View(_) => {
+            TypeKind::Void | TypeKind::Never | TypeKind::AnonStruct | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -1063,7 +1063,7 @@ pub(crate) fn check_binary_op(
             TypeKind::Bool
             | TypeKind::Void
             | TypeKind::Never
-            | TypeKind::Tuple
+            | TypeKind::AnonStruct
             | TypeKind::Struct
             | TypeKind::Bytes
             | TypeKind::View(_) => {
