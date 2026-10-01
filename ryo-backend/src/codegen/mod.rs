@@ -840,14 +840,20 @@ impl<M: Module> Codegen<M> {
                 sig.params.push(AbiParam::new(cl_ty));
             }
         }
-        // C-ABI shim for `main`: Ryo's `fn main()` is void, but the
-        // host C runtime (crt0 via zig cc, or our JIT trampoline)
-        // calls `main` as `int main()`. Always emit an int-returning
-        // signature for `main`; `compile_function` falls through to
-        // an explicit `return 0` when Ryo's return type is void.
+        // C-ABI shim for `main`: Ryo's `fn main()` is void and takes no
+        // Ryo params (sema rejects a parametrized main), but the host
+        // C runtime (crt0 via zig cc, or our JIT trampoline) calls
+        // `main` as `int main(int argc, char **argv)`. Push the two
+        // entry params — argc, then argv, in C order — before the int
+        // return word; `compile_function` reads them from the entry
+        // block to call `ryo_rt_init`, and falls through to an
+        // explicit `return 0` since Ryo's return type is void.
         // `is_main` is resolved by `declare_all_functions` from the
         // interned-id cache.
         if is_main {
+            sig.params.push(AbiParam::new(self.int_type));
+            sig.params
+                .push(AbiParam::new(self.module.isa().pointer_type()));
             sig.returns.push(AbiParam::new(self.int_type));
         } else if tir.return_type != pool.void() {
             if is_fat_type(tir.return_type, pool)
@@ -926,6 +932,10 @@ impl<M: Module> Codegen<M> {
             builder.seal_block(entry_block);
 
             let int_type = self.int_type;
+            // The Cranelift pointer type, for the hosted-main argv
+            // entry param and the `ryo_rt_init` call. Read before the
+            // `ctx` borrow of `self.module` below.
+            let pointer_type = self.module.target_config().pointer_type();
             let mut locals: Vec<Option<Variable>> = vec![None; pool.string_count()];
             let mut locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
 
@@ -1208,6 +1218,28 @@ impl<M: Module> Codegen<M> {
                 let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
                 let zero = builder.ins().iconst(types::I64, 0);
                 builder.ins().store(MemFlagsData::trusted(), zero, addr, 0);
+            }
+
+            // Entry shim for hosted `main`: publish the C runtime's
+            // (argc, argv) to the runtime before the first user
+            // instruction. Entry-block params 0/1 are argc/argv — the
+            // `is_main` signature branch appends them after (an empty)
+            // Ryo param list, and sema rejects a parametrized main.
+            // Hoisted literals and the body follow this call, so it
+            // dominates every `process_argc`/`process_argv` read.
+            if is_main {
+                // Copy the params out: `block_params` borrows the
+                // builder, which the `call` below needs mutably.
+                let entry_params = builder.block_params(entry_block);
+                let (argc, argv) = (entry_params[0], entry_params[1]);
+                let rt_init = Self::declare_runtime_fn(
+                    &mut ctx,
+                    &mut builder,
+                    "ryo_rt_init",
+                    &[int_type, pointer_type],
+                    &[],
+                )?;
+                builder.ins().call(rt_init, &[argc, argv]);
             }
 
             // Hoist string and bytes literals while the entry block is

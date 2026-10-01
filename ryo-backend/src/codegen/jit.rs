@@ -5,6 +5,7 @@
 use super::Codegen;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::FuncId;
+use std::ffi::{CString, c_char};
 
 /// Every runtime symbol the JIT must resolve, with its address. This
 /// table is the single source of truth for JIT registration — the
@@ -115,20 +116,49 @@ impl Codegen<JITModule> {
         Ok(Self::from_module(JITModule::new(jit_builder)))
     }
 
-    pub fn execute(mut self, main_id: FuncId) -> Result<i32, String> {
+    /// Enter the compiled `main`, forwarding `argv` (the program
+    /// arguments collected after the source file — argv[0]-less, unlike
+    /// a C runtime's table) to the runtime's argv storage via the
+    /// entry shim codegen emits at `main`'s entry. Returns the shim's
+    /// int exit word.
+    pub fn execute(mut self, main_id: FuncId, argv: &[String]) -> Result<i32, String> {
         self.module
             .finalize_definitions()
             .map_err(|e| format!("Failed to finalize JIT definitions: {}", e))?;
 
+        // NUL-encode the program args; both the CStrings and the
+        // pointer array built from them must outlive the call below.
+        let cstrings: Vec<CString> = argv
+            .iter()
+            .map(|arg| {
+                CString::new(arg.as_str())
+                    .map_err(|e| format!("Invalid program argument (interior NUL): {e}"))
+            })
+            .collect::<Result<_, _>>()?;
+        let ptrs: Vec<*const c_char> = cstrings.iter().map(|c| c.as_ptr()).collect();
+        let argc = i64::try_from(ptrs.len())
+            .map_err(|_| "Too many program arguments to forward".to_string())?;
+
         let code_ptr = self.module.get_finalized_function(main_id);
         // SAFETY (R5 exception): `code_ptr` was finalized by
-        // cranelift-jit for this module above, and the compiled entry point
-        // has the `extern "C" fn() -> isize` signature we emit for `main`
-        // (Cranelift's default CallConv is the platform C ABI; Rust's own
-        // ABI is unspecified, so the cast must name extern "C").
+        // cranelift-jit for this module above, and the compiled entry
+        // point has exactly the `extern "C" fn(i64, *const *const
+        // c_char) -> i64` type of `main_fn`: codegen emits hosted
+        // `main` with argc as the target's pointer-sized int (i64 on
+        // 64-bit targets — see the `is_main` branch of
+        // `build_signature`), argv as a raw pointer, and the int
+        // return word (Cranelift's default CallConv is the platform
+        // C ABI; Rust's own ABI is unspecified, so the cast must name
+        // extern "C"). `ptrs.as_ptr()` names `ptrs`'s backing storage,
+        // and `cstrings`/`ptrs` are both live across the call: every
+        // element is one of the CStrings' interior pointers, valid and
+        // NUL-terminated for the whole call, and `argc` matches the
+        // array length (an empty `argv` passes argc 0, which the
+        // runtime never dereferences).
         #[allow(unsafe_code)]
-        let main_fn: extern "C" fn() -> isize = unsafe { std::mem::transmute(code_ptr) };
-        let result = main_fn();
+        let main_fn: extern "C" fn(i64, *const *const c_char) -> i64 =
+            unsafe { std::mem::transmute(code_ptr) };
+        let result = main_fn(argc, ptrs.as_ptr());
 
         // SAFETY (R5 exception): execution finished above; freeing the
         // module's memory cannot invalidate any live code.

@@ -172,3 +172,35 @@ fn eprint_no_auto_newline_jit() {
         "io_eprint appends no newline — consecutive calls concatenate"
     );
 }
+
+// ============================================================================
+// Milestone 9.2: hosted entry shim — trailing CLI args forwarded to the program
+// ============================================================================
+
+#[test]
+fn trailing_args_forwarded_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tprint(\"ok\")\n";
+    let test_file = create_test_file(temp_dir.path(), "trailing_args.ryo", code);
+
+    // Trailing args must follow the source file on the command line, so
+    // `run_ryo_command` (which appends the file last) cannot express
+    // this — build the command directly.
+    let output = Command::new(env!("CARGO_BIN_EXE_ryo"))
+        .arg("run")
+        .arg(&test_file)
+        .args(["--verbose", "x"])
+        .output()
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "args after the file are the program's, not compiler flags. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "ok",
+        "program output should be exactly 'ok'"
+    );
+}

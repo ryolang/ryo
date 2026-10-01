@@ -580,15 +580,52 @@ fn count_calls_to(region: &str, fns: &[String]) -> usize {
         .count()
 }
 
-/// The CLIF text of the entry block (`block0:` up to the next block
-/// header) of a single-function dump.
+/// The CLIF text of the entry block (the `block0` header — `block0:` or
+/// `block0(v0: i64, ...):` — up to the next block header) of a
+/// single-function dump.
 fn clif_entry_block(clif: &str) -> &str {
-    let start = clif.find("block0:").expect("dump has an entry block");
+    let start = clif.find("block0").expect("dump has an entry block");
     let rest = &clif[start..];
     match rest[1..].find("\nblock") {
         Some(end) => &rest[..end + 1],
         None => rest,
     }
+}
+
+/// The entry block's param names (`v0`, `v1`, ... for a
+/// `block0(v0: i64, v1: i64):` header) of a single-function CLIF dump
+/// whose entry block takes params. Hosted `main` always has the two
+/// C-ABI entry params (argc, argv).
+fn clif_entry_param_names(clif: &str) -> Vec<String> {
+    let header = clif
+        .find("block0(")
+        .map(|start| clif[start..].lines().next().expect("header line"))
+        .expect("entry block has params");
+    let inner = &header["block0(".len()..header.find("):").expect("closed header")];
+    inner
+        .split(',')
+        .map(|p| {
+            p.trim()
+                .split(':')
+                .next()
+                .expect("param name")
+                .trim()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Count call sites to any of `fns` whose argument list is exactly
+/// `args` (e.g. the entry shim passes exactly the entry-block params).
+fn count_calls_passing(region: &str, fns: &[String], args: &[String]) -> usize {
+    let arg_list = args.join(", ");
+    region
+        .lines()
+        .filter(|line| {
+            fns.iter()
+                .any(|f| line.contains(&format!("call {f}({arg_list})")))
+        })
+        .count()
 }
 
 #[test]
@@ -639,7 +676,8 @@ fn clif_static_cap_str_free_is_elided() {
     // strings (cap == 0 is the .rodata sentinel), so codegen must not
     // emit the call when the freed value's cap is statically 0 at the
     // emission site. In this all-literal function the only remaining
-    // two-word void runtime call is ryo_print.
+    // two-word void runtime calls are the hosted-entry `ryo_rt_init`
+    // shim (argc, argv at main entry) and ryo_print.
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -658,10 +696,19 @@ fn clif_static_cap_str_free_is_elided() {
 
     let is_two_word_void = |sig: &str| sig.starts_with("(i64, i64)") && !sig.contains("->");
     let two_word_void_fns = clif_fns_matching_sig(&stdout, is_two_word_void);
+    // The entry shim is identifiable only by its operands: it passes
+    // exactly the two C-ABI entry params, which no other call does.
+    let entry_params = clif_entry_param_names(&stdout);
+    assert_eq!(
+        count_calls_passing(&stdout, &two_word_void_fns, &entry_params),
+        1,
+        "exactly one two-word void call takes the entry params — the ryo_rt_init shim: {}",
+        stdout
+    );
     assert_eq!(
         count_calls_to(&stdout, &two_word_void_fns),
-        1,
-        "only ryo_print may remain; ryo_str_free on a cap=0 literal must be elided: {}",
+        2,
+        "only the ryo_rt_init entry shim and ryo_print may remain; ryo_str_free on a cap=0 literal must be elided: {}",
         stdout
     );
 }

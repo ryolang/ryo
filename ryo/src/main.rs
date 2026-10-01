@@ -49,6 +49,11 @@ enum Commands {
         /// program writes.
         #[arg(long, value_delimiter = ',', value_enum)]
         emit: Vec<EmitKind>,
+        /// Arguments forwarded to the program: everything after the
+        /// source file is captured verbatim, `--flag`-shaped values
+        /// included, and handed to the program's argv intrinsics.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Compile a Ryo program to a standalone binary (AOT)
     Build {
@@ -123,8 +128,8 @@ fn run_command(cli: Cli) -> Result<std::process::ExitCode, CompilerError> {
         Commands::Lex { file } => pipeline::lex_command(&file)?,
         Commands::Parse { file } => pipeline::parse_command(&file)?,
         Commands::Ir { file, emit } => pipeline::ir_command(&file, &emit)?,
-        Commands::Run { file, emit } => {
-            let program_exit = pipeline::run_file(&file, &emit)?;
+        Commands::Run { file, emit, args } => {
+            let program_exit = pipeline::run_file(&file, &emit, &args)?;
             // Propagate the JIT program's own exit code. Ryo's
             // `main` is void today (the C-ABI shim returns 0), so
             // this is always SUCCESS in practice; clamping into the
