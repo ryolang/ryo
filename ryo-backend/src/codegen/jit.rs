@@ -13,7 +13,7 @@ use std::ffi::{CString, c_char};
 /// `declare_runtime_fn` (the module-level import cache is keyed on the
 /// same names). Functions whose bodies codegen now inlines (literal
 /// packing, slicing) are deliberately absent.
-fn runtime_symbols() -> [(&'static str, *const u8); 26] {
+fn runtime_symbols() -> [(&'static str, *const u8); 27] {
     [
         ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
         ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
@@ -85,6 +85,7 @@ fn runtime_symbols() -> [(&'static str, *const u8); 26] {
             "ryo_process_argv",
             ryo_runtime::ryo_process_argv as *const u8,
         ),
+        ("ryo_getenv", ryo_runtime::ryo_getenv as *const u8),
     ]
 }
 

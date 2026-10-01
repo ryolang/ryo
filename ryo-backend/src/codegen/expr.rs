@@ -505,6 +505,35 @@ impl<M: Module> Codegen<M> {
         args: &[(Type, Value)],
         out_slot: Option<StackSlot>,
     ) -> Result<(Value, Value, Value), String> {
+        Self::emit_slot_out_call_impl(builder, ctx, fn_name, args, out_slot, true)
+    }
+
+    /// `emit_slot_out_call` for runtime producers whose out-slot is the
+    /// LAST parameter instead of the first — the spec pins out-last for
+    /// `ryo_process_argv(i, out)` and `ryo_getenv(key_ptr, key_len,
+    /// out)`, whose signatures the runtime's own tests call directly.
+    /// Slot sizing, `out_slot` honoring, and the tagged-triple reload
+    /// are identical to [`Self::emit_slot_out_call`]; only the
+    /// parameter position differs, so both delegate to one
+    /// implementation.
+    fn emit_slot_out_call_out_last(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &'static str,
+        args: &[(Type, Value)],
+        out_slot: Option<StackSlot>,
+    ) -> Result<(Value, Value, Value), String> {
+        Self::emit_slot_out_call_impl(builder, ctx, fn_name, args, out_slot, false)
+    }
+
+    fn emit_slot_out_call_impl(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &'static str,
+        args: &[(Type, Value)],
+        out_slot: Option<StackSlot>,
+        out_first: bool,
+    ) -> Result<(Value, Value, Value), String> {
         let slot = out_slot.unwrap_or_else(|| {
             builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
@@ -514,12 +543,18 @@ impl<M: Module> Codegen<M> {
         });
         let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
         let mut param_tys = Vec::with_capacity(args.len() + 1);
-        param_tys.push(ctx.int_type);
-        param_tys.extend(args.iter().map(|(ty, _)| *ty));
-        let func_ref = Self::declare_runtime_fn(ctx, builder, fn_name, &param_tys, &[])?;
         let mut call_args = Vec::with_capacity(args.len() + 1);
-        call_args.push(addr);
+        if out_first {
+            param_tys.push(ctx.int_type);
+            call_args.push(addr);
+        }
+        param_tys.extend(args.iter().map(|(ty, _)| *ty));
         call_args.extend(args.iter().map(|(_, v)| *v));
+        if !out_first {
+            param_tys.push(ctx.int_type);
+            call_args.push(addr);
+        }
+        let func_ref = Self::declare_runtime_fn(ctx, builder, fn_name, &param_tys, &[])?;
         builder.ins().call(func_ref, &call_args);
         let ptr = builder
             .ins()
@@ -796,6 +831,24 @@ impl<M: Module> Codegen<M> {
                     // buffer); out-of-range panics in the runtime.
                     let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
                     let (ptr, len, cap) = Self::emit_process_argv(builder, ctx, arg_val, out_slot)?;
+                    ValueRepr::Str { ptr, len, cap }
+                } else if ids.process_env == Some(name_id) {
+                    // TODO(M16): interim call form — replaced by
+                    // `process.env`. `process_env(key)` copies the
+                    // environment variable's value into a tagged str
+                    // slot; an unset variable yields "" (the M16 `?str`
+                    // shape will distinguish unset). The key accepts
+                    // str/strview, same as print's operand. Transient
+                    // extraction is sound here: the key bytes are
+                    // consumed by the ryo_getenv call immediately after.
+                    let (k_ptr, k_len) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+                    let (ptr, len, cap) = Self::emit_slot_out_call_out_last(
+                        builder,
+                        ctx,
+                        "ryo_getenv",
+                        &[(ctx.int_type, k_ptr), (types::I64, k_len)],
+                        out_slot,
+                    )?;
                     ValueRepr::Str { ptr, len, cap }
                 } else {
                     // User call — emit_call handles sret for fat-returning
@@ -1712,43 +1765,24 @@ impl<M: Module> Codegen<M> {
     /// *mut RyoStrFat)`. NOTE the argument order: unlike every other
     /// slot-out producer (`out` first — see `emit_slot_out_call`), the
     /// runtime's argv accessor takes the index first (its runtime tests
-    /// call `ryo_process_argv(3, &mut slot)`), so this hand-rolls the
-    /// slot-out instead of going through `emit_slot_out_call`. The
-    /// runtime copies argv[i] into the tagged slot (SSO inline or fresh
-    /// heap buffer); out-of-range panics there. TODO(M22): interim call
-    /// form — replaced by `process.args`.
+    /// call `ryo_process_argv(3, &mut slot)`), so this lowers through
+    /// `emit_slot_out_call_out_last`. The runtime copies argv[i] into
+    /// the tagged slot (SSO inline or fresh heap buffer); out-of-range
+    /// panics there. TODO(M22): interim call form — replaced by
+    /// `process.args`.
     fn emit_process_argv(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         index: Value,
         out_slot: Option<StackSlot>,
     ) -> Result<(Value, Value, Value), String> {
-        let slot = out_slot.unwrap_or_else(|| {
-            builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                STR_SLOT_SIZE,
-                3,
-            ))
-        });
-        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-        let func_ref = Self::declare_runtime_fn(
-            ctx,
+        Self::emit_slot_out_call_out_last(
             builder,
+            ctx,
             "ryo_process_argv",
-            &[ctx.int_type, ctx.int_type],
-            &[],
-        )?;
-        builder.ins().call(func_ref, &[index, addr]);
-        let ptr = builder
-            .ins()
-            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
-        let len = builder
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), addr, 8);
-        let cap = builder
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), addr, 16);
-        Ok((ptr, len, cap))
+            &[(ctx.int_type, index)],
+            out_slot,
+        )
     }
 
     /// `io_eprint(arg)` → `ryo_eprint(ptr, len: u64)` — the exact twin

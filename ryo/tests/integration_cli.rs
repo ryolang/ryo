@@ -324,3 +324,38 @@ fn trailing_args_forwarded_jit() {
         "program output should be exactly 'ok'"
     );
 }
+
+// ============================================================================
+// Milestone 9.2: process_env CLI intrinsic
+// ============================================================================
+
+/// `RYO_M92_TEST` is set on the child command; the source prints the looked-up
+/// value on line 1 and an unset variable (empty string) on line 2. Deliberately
+/// NOT `HOME` or `PATH` — the Windows CI job's values are not predictable.
+#[test]
+fn env_present_and_unset_jit() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tprint(process_env(\"RYO_M92_TEST\"))\n\tprint(\"\\n\")\n\tprint(process_env(\"RYO_M92_DEFINITELY_UNSET\"))\n\tprint(\"\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "env_echo.ryo", code);
+
+    // `run_ryo_command` takes no env hook, so build the command directly
+    // (same as the args_echo test). The JIT runs in this process, so the
+    // variable lands in the compiled program's own environment.
+    let output = Command::new(env!("CARGO_BIN_EXE_ryo"))
+        .arg("run")
+        .arg(&test_file)
+        .env("RYO_M92_TEST", "hello-from-env")
+        .output()
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "env_echo should exit 0. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "expected 2 stdout lines, got: {stdout:?}");
+    assert_eq!(lines[0], "hello-from-env", "set variable returns its value");
+    assert_eq!(lines[1], "", "unset variable returns the empty string");
+}

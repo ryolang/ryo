@@ -47,6 +47,10 @@ unsafe extern "C" {
     fn exit(code: c_int) -> !;
     fn abort() -> !;
     fn strlen(s: *const c_char) -> usize;
+    /// Narrow `getenv` on ALL platforms (decided 2026-10-01): non-ASCII
+    /// values on Windows come back in the ANSI codepage — the documented
+    /// placeholder limitation, no `_wgetenv`/wide-char conversion.
+    fn getenv(name: *const c_char) -> *mut c_char;
 }
 
 unsafe extern "C" {
@@ -249,6 +253,61 @@ pub unsafe extern "C" fn ryo_process_argv(i: u64, out: *mut RyoStrFat) {
     // SAFETY: out is a valid out-slot; `bytes` holds `len` initialized
     // bytes. The copy is what makes returning safe — the C runtime
     // retains ownership of the argv storage itself.
+    unsafe { write_str_slot(out, bytes) };
+}
+
+/// Cap on the environment-variable name copied to the stack: real names
+/// are short, and a fixed buffer keeps the lookup allocation-free.
+const ENV_KEY_CAP: usize = 4096;
+
+/// Runtime backing for `process_env(key: str) -> str` (M9.2): copy `key`
+/// into a 4 KiB stack buffer, NUL-terminate, and look it up in the
+/// process environment. The value is copied into `out` as a tagged slot;
+/// an unset variable yields the empty string — the M16 `?str` shape will
+/// distinguish unset. `getenv` is narrow on every platform: non-ASCII
+/// values on Windows arrive in the ANSI codepage (documented
+/// placeholder). TODO(M16): interim call form — replaced by
+/// `process.env`.
+///
+/// # Safety
+/// `key_ptr` must point to `key_len` readable bytes (or be
+/// null/dangling when `key_len == 0`). `out` points to a valid,
+/// uninitialized `RyoStrFat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_getenv(key_ptr: *const u8, key_len: u64, out: *mut RyoStrFat) {
+    if key_len > ENV_KEY_CAP as u64 {
+        panic_msg(b"process_env key too long (max 4096 bytes)\n");
+    }
+    let n: usize = key_len.try_into().unwrap_or_else(|_| overflow_abort());
+    // +1 byte for the C NUL terminator.
+    let mut buf = [0u8; ENV_KEY_CAP + 1];
+    if n > 0 {
+        if key_ptr.is_null() {
+            null_abort();
+        }
+        // SAFETY: caller contract — key_ptr is readable for n bytes
+        // (n <= ENV_KEY_CAP checked above); buf is a fresh stack buffer
+        // of ENV_KEY_CAP + 1 bytes; regions do not overlap.
+        unsafe { core::ptr::copy_nonoverlapping(key_ptr, buf.as_mut_ptr(), n) };
+    }
+    buf[n] = 0;
+    // SAFETY: buf holds a NUL-terminated name (n <= ENV_KEY_CAP, so the
+    // terminator fits at index n). getenv either returns null (unset —
+    // handled below) or a pointer to the CRT's own NUL-terminated
+    // value, valid until the next environ mutation.
+    let val = unsafe { getenv(buf.as_ptr().cast::<c_char>()) };
+    if val.is_null() {
+        // SAFETY: out is a valid out-slot.
+        unsafe { write_str_slot(out, b"") };
+        return;
+    }
+    // SAFETY: val is the CRT's NUL-terminated environment value.
+    let len = unsafe { strlen(val) };
+    // SAFETY: strlen reports the initialized byte length of val.
+    let bytes = unsafe { core::slice::from_raw_parts(val.cast::<u8>(), len) };
+    // SAFETY: out is a valid out-slot; `bytes` holds `len` initialized
+    // bytes. The copy is what makes returning safe — the CRT retains
+    // ownership of the environ storage itself.
     unsafe { write_str_slot(out, bytes) };
 }
 

@@ -137,6 +137,43 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
+        // TODO(M16): interim call form — replaced by `process.env`.
+        n if n == ids.process_env => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "process_env() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            // `str`/`strview` — the same acceptance as the other string
+            // consumers: codegen's `eval_str_or_view_parts` reads the
+            // viewed bytes of either.
+            if !matches!(
+                sema.pool.kind(arg_ty),
+                TypeKind::Str | TypeKind::View(ViewKind::Str)
+            ) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "process_env() argument must be str, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
         n if n == ids.int_to_str => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(

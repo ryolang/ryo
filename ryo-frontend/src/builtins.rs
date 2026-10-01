@@ -71,6 +71,7 @@ pub struct BuiltinNameIds {
     pub(crate) io_eprint: StringId,
     pub(crate) process_argc: StringId,
     pub(crate) process_argv: StringId,
+    pub(crate) process_env: StringId,
     pub(crate) int_to_str: StringId,
     pub(crate) float_to_str: StringId,
     pub(crate) bool_to_str: StringId,
@@ -96,6 +97,7 @@ impl BuiltinNameIds {
             io_eprint: pool.intern_str("io_eprint"),
             process_argc: pool.intern_str("process_argc"),
             process_argv: pool.intern_str("process_argv"),
+            process_env: pool.intern_str("process_env"),
             int_to_str: pool.intern_str("int_to_str"),
             float_to_str: pool.intern_str("float_to_str"),
             bool_to_str: pool.intern_str("bool_to_str"),
@@ -159,6 +161,14 @@ pub const BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction {
         // TODO(M22): interim call form — replaced by `process.args`.
         name: "process_argv",
+        return_ty: BuiltinReturn::Str,
+        borrowed_scalar_params: &[],
+        view_borrow_params: &[],
+        max_output_len: None,
+    },
+    BuiltinFunction {
+        // TODO(M16): interim call form — replaced by `process.env`.
+        name: "process_env",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],
         view_borrow_params: &[],

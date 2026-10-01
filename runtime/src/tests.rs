@@ -983,3 +983,104 @@ fn test_free_inline_str_is_noop() {
     unsafe { ryo_str_free(slot.ptr, slot.cap) };
     assert!(is_inline(slot.cap)); // slot untouched
 }
+
+/// Combined env test (M9.2): `std::env::set_var`/`remove_var` mutate the
+/// process-wide environment, which parallel cargo-test threads could
+/// observe mid-mutation, so every ryo_getenv case lives in this ONE test
+/// fn.
+///
+/// The over-long-key panic path terminates the process, so it is
+/// asserted via a subprocess: this test binary re-executes itself with
+/// `RYO_RT_ENV_PANIC_CHILD=1`, and the flag gates the diverging call at
+/// the top of THIS test. The parent asserts the child's exit code 101
+/// and stderr message.
+#[test]
+fn getenv_present_unset_and_long_key() {
+    use alloc::ffi::CString;
+
+    // Child mode: diverge before the cases below.
+    if std::env::var_os("RYO_RT_ENV_PANIC_CHILD").is_some() {
+        let long_key = [b'k'; 4097]; // one past the 4096-byte cap
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; long_key is readable for 4097 bytes —
+        // past the cap, so this must write the panic message to stderr
+        // and exit 101, never returning.
+        unsafe { ryo_getenv(long_key.as_ptr(), long_key.len() as u64, &mut slot) };
+        panic!("ryo_getenv with a 4097-byte key returned; over-long key must diverge");
+    }
+
+    const PRESENT: &str = "RYO_RT_GETENV_PRESENT";
+    const VALUE: &str = "ryo-env-value";
+    // SAFETY: the combined-fn rule keeps every env mutation in this
+    // binary in this one thread, and no other test reads these
+    // sentinel keys.
+    unsafe { std::env::set_var(PRESENT, VALUE) };
+
+    let mut slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    let key = CString::new(PRESENT).expect("CString");
+    // SAFETY: key's bytes are readable for their length (a C string is
+    // readable up to and including its NUL); slot is a valid out-slot.
+    // The variable is set above.
+    unsafe {
+        ryo_getenv(
+            key.as_bytes().as_ptr(),
+            key.as_bytes().len() as u64,
+            &mut slot,
+        )
+    };
+    assert_eq!(slot_content(&slot), VALUE.as_bytes());
+
+    // Unset variable: the M16 placeholder contract — empty string,
+    // never a dangling or garbage slot.
+    let unset = CString::new("RYO_RT_GETENV_DEFINITELY_UNSET").expect("CString");
+    let mut unset_slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    // SAFETY: same contracts; the variable does not exist, so the slot
+    // must come back empty.
+    unsafe {
+        ryo_getenv(
+            unset.as_bytes().as_ptr(),
+            unset.as_bytes().len() as u64,
+            &mut unset_slot,
+        )
+    };
+    assert_eq!(slot_content(&unset_slot), b"");
+
+    // SAFETY: same single-thread argument as set_var above.
+    unsafe { std::env::remove_var(PRESENT) };
+
+    // Over-long key: the re-exec'd child terminates with the panic
+    // message and exit 101. Skipped under Miri: its isolation mode
+    // cannot spawn processes. The in-process cases above still run
+    // under Miri, so the new unsafe read path keeps its
+    // UB/leak coverage.
+    if !cfg!(miri) {
+        let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+            .arg("tests::getenv_present_unset_and_long_key")
+            .arg("--exact")
+            .env("RYO_RT_ENV_PANIC_CHILD", "1")
+            .output()
+            .expect("spawn env panic child");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(101),
+            "over-long process_env key must exit 101. stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("process_env key too long"),
+            "child stderr should carry the panic message, got: {stderr}"
+        );
+    }
+}
