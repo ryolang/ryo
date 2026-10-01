@@ -193,10 +193,13 @@ static ARGV: AtomicPtr<c_char> = AtomicPtr::new(core::ptr::null_mut());
 /// lifetime (the natural crt0 contract).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_rt_init(argc: c_int, argv: *const *const c_char) {
-    // Release stores: pair with the Acquire loads in the readers — a
-    // reader that observes the ARGC store also observes the ARGV store.
-    ARGC.store(argc as isize, Ordering::Release);
+    // Data, then flag: a Release store publishes only writes
+    // program-ordered BEFORE it, so ARGV must be stored first — a
+    // reader that observes the ARGC store (Acquire) is then guaranteed
+    // to observe the ARGV store. Reversing this pair would let a
+    // reader see argc but a stale/null ARGV (observable on ARM).
     ARGV.store(argv as *mut c_char, Ordering::Release);
+    ARGC.store(argc as isize, Ordering::Release);
 }
 
 /// Runtime backing for `process_argc() -> int` (M9.2). argv[0] (the

@@ -944,23 +944,28 @@ fn argv_storage_roundtrip() {
     }
 
     // Out-of-range: the re-exec'd child terminates with the panic
-    // message and exit 101.
-    let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
-        .arg("tests::argv_storage_roundtrip")
-        .arg("--exact")
-        .env("RYO_RT_ARGV_PANIC_CHILD", "1")
-        .output()
-        .expect("spawn argv panic child");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(
-        out.status.code(),
-        Some(101),
-        "out-of-range process_argv must exit 101. stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("process_argv index out of range"),
-        "child stderr should carry the panic message, got: {stderr}"
-    );
+    // message and exit 101. Skipped under Miri: its isolation mode
+    // cannot spawn processes. The in-process roundtrip above still
+    // runs under Miri, so the new unsafe read path keeps its
+    // UB/leak coverage.
+    if !cfg!(miri) {
+        let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+            .arg("tests::argv_storage_roundtrip")
+            .arg("--exact")
+            .env("RYO_RT_ARGV_PANIC_CHILD", "1")
+            .output()
+            .expect("spawn argv panic child");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(101),
+            "out-of-range process_argv must exit 101. stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("process_argv index out of range"),
+            "child stderr should carry the panic message, got: {stderr}"
+        );
+    }
 }
 
 #[test]
