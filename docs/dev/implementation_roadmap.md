@@ -1289,7 +1289,7 @@ fn main():
 - `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`); W0003 extends to both shapes
 - Buffer building (the builder idiom is deferred — it needs M17 methods): `a + b` owned concatenation (mirrors `StrConcat`; view operands rejected as with `str`) and `bytes_push(&b, x)` single-byte append (`inout` first arg mirroring `str_push`; `x: int` range-checked 0–255, panics)
 - `print` accepts `bytes`/`bytesview` with an escaped repr (`b"\x01\x02A"`: printable ASCII literal, short escapes where they exist, else `\xNN`); `==`/`!=` on both types incl. cross-comparison via the implicit owner→view conversion; `.len()`/`.is_empty()`
-- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice/from_view/push/eq/repr/to_bytes/to_str mirroring the **post-fix `str` ABI** — producing functions return `{ptr, len}` by value packed in one `u128` (lo = ptr, hi = len) with `cap` derived at the call site, per the Phase 0 ABI decision recorded on `pack_pair` in `runtime/src/lib.rs` and pinned by `clif_string_ops_use_packed_return_no_stack_slots` (no out-pointer stack slots); memory fixtures for both JIT and AOT (ASan/Valgrind)
+- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice/from_view/push/eq/repr/to_bytes/to_str mirroring the `str` ABI — **ABI history:** string producers originally used the slot-out pattern (caller-provided 24-byte slot written via `write_str_slot`); commit `7d0a047` then moved `{ptr, len}` producers to a packed-`u128` register return (`pack_pair`, no out-pointer stack slots); the 2026-09 string fast-path work inlined those small ops as Cranelift IR at the call site and removed `pack_pair` from the runtime entirely (recorded in `docs/dev/cranelift_lessons.md`). Producers that still exist as runtime calls (`ryo_int_to_str`, `ryo_float_to_str`, the `__ryo_*_from_view` materialize calls) use slot-out — the template M9.2's str-producing intrinsics follow; memory fixtures for both JIT and AOT (ASan/Valgrind)
 
 **Visible Progress:** Protocol/binary code reads and slices raw buffers zero-copy; text bridging is explicit and checked (panic interim).
 
@@ -1440,6 +1440,11 @@ fn main():
 
 **Deprecation plan (documented, not built here):** when modules + `std.io` land, the intrinsics move into `std` as `process.*` / `io.*` with the final signatures; the `process_*` / `io_*` intrinsics remain as deprecated aliases that emit a warning for exactly one release, then are removed.
 
+**Design decisions (2026-10-01):**
+
+- **Runtime exports:** `runtime_symbols()` grows 21 → 28 — PR1 adds `ryo_exit`, `ryo_eprint`; PR2 adds `ryo_rt_init`, `ryo_process_argc`, `ryo_process_argv`, `ryo_getenv`, `ryo_read_line`.
+- **`process.args()` target shape at M22 (decided):** Python-style `list[str]` ergonomics — built lazily on first call, cached master copy in the runtime, deep copy per call until `shared[T]` (v0.2–v0.3) removes the copy. Args convert bytes→UTF-8 lossy (U+FFFD on invalid sequences — hostile argv must not panic); `argc == 0` → empty list; `args[0]` = invocation path, included. Zero-copy (Zig/Rust) shapes are excluded by Rule 5 (views cannot be stored in collections), not by preference; a tuple return is rejected on static arity vs. runtime length. The interim intrinsics keep today's unvalidated slot behavior; the lossy policy applies from the M22 API onward. In the v0.2 `core` embedding flavour these APIs do not exist at all — see the revisit note below.
+
 **Tasks — PR1 (exit + stderr):**
 
 - `process_exit(code: int) -> never`
@@ -1447,20 +1452,22 @@ fn main():
   - `ryo-frontend/src/sema/builtins.rs`: arm in `emit_builtin_call` — arity 1, argument must be `int`
   - `ryo-backend/src/codegen/expr.rs`: arm in `emit_call_slot` mirroring the `__ryo_panic` arm: declare `ryo_exit(int_type)`, call, then emit trap (unreachable)
   - `runtime/src/lib.rs`: `ryo_exit(code)` wrapping the libc `exit` extern already declared there
-  - `ryo-backend/src/codegen/mod.rs`: add row to `runtime_symbols()` and bump the array size
-- `io_eprint(s) -> void` accepting `str | bytes | strview | bytesview`
-  - Twin of the `print` chain: share `check_print_args`; opt into the W0003 redundant-materialize warning like `print`
+  - `ryo-backend/src/codegen/mod.rs`: add row to `runtime_symbols()` (full export set under Design decisions below)
+- `io_eprint(s) -> void` — **decided 2026-10-01: full type parity with `print`** via the shared `check_print_args` (the earlier `str | bytes | strview | bytesview` listing was the string-family subset): accepts `str`, `bytes`, views, `int`, `float`, `bool`, and structs via `DebugRepr`. No auto-newline — output is explicit, like `write()`
+  - Twin of the `print` chain; opt into the W0003 redundant-materialize warning like `print`
   - Codegen arm mirroring the `print` arm → `ryo_eprint`
-  - Runtime: `write_all(STDERR_FD, …)` — the fd plumbing already exists (including the Windows `_write` path)
+  - Runtime: `ryo_eprint(ptr, len)` → `write_all(STDERR_FD, …)` — the fd plumbing already exists (including the Windows `_write` path)
 
 **Tasks — PR2 (args + env + stdin):**
 
 - `process_argc() -> int`, `process_argv(i: int) -> str`
-  - Runtime entry shim: `main` is currently emitted C-ABI with an int return but **zero params** (`build_signature` in codegen) — add the two `AbiParam`s under the main special-case and emit a `ryo_rt_init(argc, argv)` call at function entry; the runtime stores them (new pattern: the runtime has no mutable globals today — use atomics; falls under the I-167 FFI-boundary audit)
-  - JIT: `Codegen::execute` calls main as `fn() -> isize` with no argv, and `ryo run` has no trailing-arg capture — add a clap `trailing_var_arg` to `run`, thread it through `pipeline::run_file` → `execute`, and build the argv array there
+  - `BuiltinReturn` gains a new `Int` variant (today `Void | Never | Str | Bytes`; `process_argc` is the first int-returning builtin) — decided 2026-10-01
+  - Runtime entry shim: `main` is currently emitted C-ABI with an int return but **zero params** (`build_signature` in codegen) — add two `AbiParam`s (argc: int, argv: pointer) under the main special-case and emit a `ryo_rt_init(argc, argv)` call at function entry; the runtime stores them in its first mutable globals — `ARGC: AtomicIsize` + `ARGV: AtomicPtr<c_char>`, Release-store / Acquire-load (falls under the I-167 FFI-boundary audit)
+  - argv[0] (the invocation path) is included: `process_argc()` counts it, `process_argv(0)` returns it — matches the `sys.argv` / `os.Args` convention
+  - JIT: `Codegen::execute` calls main as `fn() -> isize` with no argv, and `ryo run` has no trailing-arg capture — add a clap `trailing_var_arg = true, allow_hyphen_values = true` to `run`, thread it through `pipeline::run_file` → `execute`, build a `CString` argv there, and change the trampoline to `extern "C" fn(c_int, *const *const c_char) -> isize`
   - `process_argv(i)` is bounds-checked and panics (exit 101) on out-of-range; returns an owned `str` copy via the slot-out ABI (below)
-- `process_env(key: str) -> str` — empty string = unset (placeholder for `?str` at M16); needs a new libc `getenv` extern in the runtime (which is `#![no_std]` under the staticlib feature, so `std::env` is unavailable; on Windows decide `_wgetenv` vs `getenv`, mirroring the `_write`/`write` split)
-- `io_read_line() -> str` — read fd 0 up to `\n`, strip it; empty string on EOF (placeholder for `IoError!str` at M13.6); needs a new `read`/`_read` extern; build on a growable `bytes` buffer
+- `process_env(key: str) -> str` — empty string = unset (placeholder for `?str` at M16); needs a new libc `getenv` extern in the runtime (which is `#![no_std]` under the staticlib feature, so `std::env` is unavailable). **Decided 2026-10-01: narrow `getenv` on all platforms**, mirroring the existing narrow `_write` split — non-ASCII values on Windows come back in the ANSI codepage (documented placeholder limitation, revisited with `?str` at M16). The key is copied to a 4 KiB stack buffer + NUL-terminated; longer keys panic (interim)
+- `io_read_line() -> str` — read fd 0 up to `\n`, strip it; empty string on EOF (placeholder for `IoError!str` at M13.6); needs a new `read`/`_read` extern under the existing `cfg(windows)` split; growable heap buffer via the linked malloc/realloc; EINTR retried, other read errors panic (exit 101, interim). The runtime is factored as `ryo_read_line(out)` + `read_line_from(fd, out)` inner so unit tests can parameterize the fd
 - Str-producing builtins (`process_argv`, `process_env`, `io_read_line`) use the slot-out ABI: sema arm returning `str`, codegen arm calling `emit_slot_out_call` (the `int_to_str` pattern), runtime export writing through `write_str_slot` (SSO ≤23B inline, else heap). No ownership-pass changes needed — the pass seeds any str-returning `Call` as a fresh owner generically. Unbounded outputs → no `max_output_len` entries
 - Mark every interim call form in code with `TODO(M13/M16/M22)` noting what replaces it
 
@@ -1471,6 +1478,7 @@ fn main():
 - `cli_args.ryo`: print `process_argc()` and echo each `process_argv(i)`; verify via AOT binary args and the new `ryo run` forwarding
 - `cli_env.ryo`: `process_env("HOME")` non-empty; an unset key → `""`
 - `cli_echo.ryo`: `io_read_line()` echoes a piped stdin line; empty-on-EOF covered
+- Runtime unit tests (`runtime/src/tests.rs`): argv storage (`ryo_rt_init` + argc/argv reads + out-of-range panic), `ryo_getenv` present/unset keys, `read_line_from` against a temp file/pipe (line with `\n`, unterminated final line, EOF); slot contents via the existing `slot_content` helper. All new leak surface (argv copies, the read buffer) must stay clean under the ASan/Valgrind Linux runs
 
 **Visible Progress:** scripts can fail loudly, take arguments, and read pipes:
 
@@ -1489,6 +1497,7 @@ fn main():
 - Constraints: compiler intrinsics only — no `extern "C"` in Ryo (`std.sys` is the v0.2 design), no allocator, no modules, no `fs.*` (file I/O waits for M13 error unions, per the std design)
 - Returned `str`s are proper owned heap strings (SSO slot via `write_str_slot`); verify no leaks/double-frees under the existing ASan/Valgrind integration tests
 - Out of scope: general stdin buffering/iteration, UTF-8/encoding error handling, process spawning, the FFI layer
+- **Revisit when the runtime consumes flags:** M9.2's entry shim passes argv through untouched — `process_argc`/`process_argv` see every argument. Once the runtime itself needs flags (the v0.2 runtime profile split `--profile=core`, the debug-mode `shared[T]` cycle detector, future scheduler settings), `ryo_rt_init` must partition argv into runtime-reserved flags and program args, and the intrinsics settle on the post-partition view. Design the reserved-flag scheme then — the natural landing point is the M22 migration to `process.args() -> list[str]`. Note the `core` embedding flavour has *no* argv at all (`process.*`/`io.*` are hosted-only; a core library has no `main`, the host calls exported functions) — M9.2's shim sits entirely inside the hosted `is_main` special-case, so nothing needs gating until the v0.2 profile split lands.
 - Dependencies: none beyond what exists today (`never` type, `void`, and the extern runtime ABI all shipped)
 
 ### Milestone 10: Tuples (Tuple Sugar over Anonymous Structs)

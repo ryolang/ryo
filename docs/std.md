@@ -20,7 +20,7 @@
 **Essential Functions:**
 
 - `process.exit(code: int) -> never`: Immediately terminates the process with the given exit code. Destructors and cleanup routines are not run.
-- `process.args() -> list[str]`: Returns the command-line arguments passed to the program.
+- `process.args() -> list[str]`: Returns the command-line arguments passed to the program. `args[0]` is the invocation path. Arguments are decoded as UTF-8 with lossy replacement — invalid byte sequences become U+FFFD, so a hostile argv never panics the program. If the host passes no arguments at all, the result is an empty list.
 - `process.env(key: str) -> ?str`: Retrieves the value of an environment variable, returning `none` if it is not set.
 
 ## 2. fs Package (File System)
