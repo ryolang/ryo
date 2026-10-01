@@ -4,11 +4,12 @@
 //! - `items: Vec<Item>` — fixed-size `(tag, data)` pairs, one per
 //!   interned type. `data` is either an inline payload (no payload
 //!   for primitives, type id otherwise) or an index into `extra`.
-//! - `extra: Vec<u32>` — variable-size payloads (tuple element
-//!   lists, future function signatures). Dedup hashes the *content*
-//!   of the extra range via `hashbrown::HashTable`, not a cloned
-//!   `Box<[TypeId]>` — so adding a new variable-payload variant
-//!   doesn't pay a clone-per-intern cost.
+//! - `extra: Vec<u32>` — variable-size payloads (struct layout
+//!   blocks, anon-struct field lists, future function signatures).
+//!   Dedup hashes the *content* of the extra range via
+//!   `hashbrown::HashTable`, not a cloned `Box<[TypeId]>` — so adding
+//!   a new variable-payload variant doesn't pay a clone-per-intern
+//!   cost.
 //! - String dedup uses the same `HashTable<StringId>` shape: the
 //!   table stores only the handle and probes via the arena view of
 //!   the bytes, so we don't carry the bytes a second time as owned
@@ -114,9 +115,16 @@ enum Tag {
     /// `extra`, where `extra[idx]` is the element TypeId of a Slice view
     /// (uninhabited until M21 — no parametric interning yet).
     View,
-    /// Variable payload: `data` is the index into `extra` of an
-    /// `(n_elems: u32, elem_0: u32, ..., elem_{n-1}: u32)` block.
-    Tuple,
+    /// Anonymous struct (M10): a structural grouping of named
+    /// fields with no declared identity. `data` is the index into
+    /// `extra` of the layout block — the exact shape `define_struct`
+    /// writes (`[name, n_fields, size, align, flags]` then per-field
+    /// `[field_name, field_type, offset]`), with the interned `""`
+    /// sentinel as the name and default flags — so `struct_view`
+    /// reads anon structs back without knowing which tag produced
+    /// them. Deduped in `type_dedup` by the ordered (name, type)
+    /// field pairs.
+    AnonStruct,
     /// Nominal struct (M9). Two-phase: `declare_struct` pushes the
     /// item with `data == u32::MAX` (declared, not yet defined) so
     /// self-references can be detected; `define_struct` fills `data`
@@ -131,7 +139,7 @@ enum Tag {
 #[derive(Copy, Clone, Debug)]
 struct Item {
     tag: Tag,
-    /// For primitives, ignored. For Tuple, an index into `extra`.
+    /// For primitives, ignored. For AnonStruct, an index into `extra`.
     data: u32,
 }
 
@@ -152,10 +160,10 @@ const ID_BYTESVIEW: u32 = 9;
 
 /// Payload-free kind discriminator.
 ///
-/// Variable-payload variants (Tuple) carry no inline data here;
-/// callers fetch element lists via `InternPool::tuple_elements`.
-/// This shape mirrors Zig's `Type.Tag` and keeps the `kind` accessor
-/// allocation-free.
+/// Variable-payload variants (Struct, AnonStruct) carry no inline
+/// data here; callers fetch fields and layout via
+/// [`InternPool::struct_view`]. This shape mirrors Zig's `Type.Tag`
+/// and keeps the `kind` accessor allocation-free.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum TypeKind {
     Void,
@@ -181,10 +189,11 @@ pub enum TypeKind {
     /// [`InternPool::is_error`] / [`InternPool::compatible`].
     Error,
     Never,
-    /// Variable-arity tuple. Reserved variant proving the
-    /// sidecar-`extra` encoding works; not currently constructible
-    /// from user syntax.
-    Tuple,
+    /// Anonymous struct (M10): a structural grouping of named
+    /// fields. Identity is the ordered (name, type) sequence — no
+    /// declared name. Fields and layout read back via
+    /// [`InternPool::struct_view`].
+    AnonStruct,
     /// Nominal struct (M9). Identity is the declared name; layout and
     /// fields are read back via [`InternPool::struct_view`].
     Struct,
@@ -260,12 +269,13 @@ impl StructFlags {
     }
 }
 
-/// Read-back view of a defined struct's interned payload (M9).
+/// Read-back view of a defined struct's interned payload (M9) or an
+/// anon struct's (M10).
 ///
-/// Returned by value (like [`InternPool::tuple_elements_vec`]) because
-/// the payload lives as raw `u32`s in the `extra` arena; consumers are
-/// sema, ownership, and codegen layout queries, none of which are hot
-/// enough to justify a borrowed decoding view.
+/// Returned by value because the payload lives as raw `u32`s in the
+/// `extra` arena; consumers are sema, ownership, and codegen layout
+/// queries, none of which are hot enough to justify a borrowed
+/// decoding view.
 #[derive(Clone, Debug)]
 pub struct StructView {
     pub name: StringId,
@@ -315,16 +325,16 @@ pub struct StructField {
 /// Both dedup tables are `hashbrown::HashTable<Handle>` rather than
 /// `HashMap<Key, Handle>` — they store only the handle (`TypeId` /
 /// `StringId`) and recover the key bytes from the arena (`extra`,
-/// `string_bytes`) on probe. This lets `intern_str` and `tuple`
-/// look up by `&str` / `&[TypeId]` without allocating a Vec or
-/// String on every call.
+/// `string_bytes`) on probe. This lets `intern_str` and
+/// `anon_struct` look up by `&str` / `&[(StringId, TypeId)]` without
+/// allocating a Vec or String on every call.
 #[derive(Debug)]
 pub struct InternPool {
     items: Vec<Item>,
     extra: Vec<u32>,
     /// Dedup for variable-payload types. Stores `TypeId`s; equality
     /// and hash are computed by reading the matching slice out of
-    /// `extra` (see `tuple_eq` / `tuple_hash`).
+    /// `extra` (see `anon_eq` / `anon_hash`).
     type_dedup: HashTable<TypeId>,
 
     string_bytes: Vec<u8>,
@@ -351,52 +361,59 @@ fn hash_bytes(hasher: &DefaultHashBuilder, bytes: &[u8]) -> u64 {
     hasher.hash_one(bytes)
 }
 
-fn hash_typeids(hasher: &DefaultHashBuilder, ids: &[TypeId]) -> u64 {
-    // Hash the underlying u32 sequence directly so the same hash
-    // is reachable from a `&[TypeId]` query and from rehashing
-    // a `&[u32]` slice read out of `extra` during table resize.
+fn hash_anon_fields(hasher: &DefaultHashBuilder, fields: &[(StringId, TypeId)]) -> u64 {
+    // Hash the name/type pair sequence directly so the same hash is
+    // reachable from a `&[(StringId, TypeId)]` query and from
+    // rehashing a payload read out of `extra` during table resize
+    // (see `anon_hash`).
     let mut h = hasher.build_hasher();
-    for id in ids {
-        h.write_u32(id.0);
+    for &(name, ty) in fields {
+        h.write_u32(name.raw());
+        h.write_u32(ty.raw());
     }
     h.finish()
 }
 
-/// Read a tuple `TypeId`'s element slice out of `extra`.
+/// Read an anon struct's per-field words out of `extra`: 3 words
+/// (`field_name`, `field_type`, `offset`) per field, in written
+/// order.
 ///
-/// Returns `None` if `id` does not point at a `Tag::Tuple` item;
+/// Returns `None` if `id` does not point at a `Tag::AnonStruct` item;
 /// callers in the dedup-probe path use `None` as "not equal".
-fn tuple_extra_slice<'a>(items: &[Item], extra: &'a [u32], id: TypeId) -> Option<&'a [u32]> {
+fn anon_extra_slice<'a>(items: &[Item], extra: &'a [u32], id: TypeId) -> Option<&'a [u32]> {
     let item = items[id.0 as usize];
-    if !matches!(item.tag, Tag::Tuple) {
+    if !matches!(item.tag, Tag::AnonStruct) {
         return None;
     }
     let start = item.data as usize;
-    let n = extra[start] as usize;
-    Some(&extra[start + 1..start + 1 + n])
+    let n = extra[start + 1] as usize;
+    Some(&extra[start + 5..start + 5 + 3 * n])
 }
 
-fn tuple_eq(items: &[Item], extra: &[u32], candidate: TypeId, query: &[TypeId]) -> bool {
-    let Some(stored) = tuple_extra_slice(items, extra, candidate) else {
+fn anon_eq(items: &[Item], extra: &[u32], candidate: TypeId, query: &[(StringId, TypeId)]) -> bool {
+    let Some(stored) = anon_extra_slice(items, extra, candidate) else {
         return false;
     };
-    if stored.len() != query.len() {
+    if stored.len() != query.len() * 3 {
         return false;
     }
-    stored.iter().zip(query).all(|(&raw, q)| raw == q.0)
+    // Offsets are layout-derived from the ordered (name, type) pairs,
+    // so comparing name and type per field fully determines identity.
+    stored
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(query)
+        .all(|(w, &(qname, qty))| w[0] == qname.raw() && w[1] == qty.raw())
 }
 
-fn tuple_hash(
-    items: &[Item],
-    extra: &[u32],
-    hasher: &DefaultHashBuilder,
-    candidate: TypeId,
-) -> u64 {
+fn anon_hash(items: &[Item], extra: &[u32], hasher: &DefaultHashBuilder, candidate: TypeId) -> u64 {
     let stored =
-        tuple_extra_slice(items, extra, candidate).expect("non-tuple in tuple dedup table");
+        anon_extra_slice(items, extra, candidate).expect("non-anon struct in anon dedup table");
     let mut h = hasher.build_hasher();
-    for raw in stored {
-        h.write_u32(*raw);
+    for w in stored.as_chunks::<3>().0 {
+        h.write_u32(w[0]);
+        h.write_u32(w[1]);
     }
     h.finish()
 }
@@ -511,7 +528,7 @@ impl InternPool {
                 // `data >= 2` payload.
                 _ => unreachable!("no Slice constructor exists"),
             },
-            Tag::Tuple => TypeKind::Tuple,
+            Tag::AnonStruct => TypeKind::AnonStruct,
             Tag::Struct => TypeKind::Struct,
         }
     }
@@ -560,19 +577,20 @@ impl InternPool {
     /// invalidating the source. Mirrors Mojo's `Copyable` trait for
     /// the scalar primitives: `int`, `float`, `bool`, plus the
     /// non-owning views (`strview`, M8.4; `bytesview`, M8.4.2) —
-    /// copying a view aliases the buffer but owns nothing. A defined
-    /// struct (M9) is Copy when every field is (flag stored by
-    /// `define_struct`). Used by sema (to
+    /// copying a view aliases the buffer but owns nothing. A struct
+    /// (M9 nominal / M10 anon) is Copy when every field is (flag
+    /// computed by `define_struct` / `anon_struct`). Used by sema (to
     /// flag redundant `move` annotations) and by the ownership pass
     /// (to short-circuit liveness on these values — they never
     /// enter the lattice).
     pub fn is_copy(&self, ty: TypeId) -> bool {
         match self.kind(ty) {
             TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::View(_) => true,
-            // Defined struct: the flag computed by `define_struct`.
-            // A declared-but-undefined struct panics in `struct_view`
-            // (trusted-producer contract: define before querying).
-            TypeKind::Struct => self.struct_view(ty).is_copy,
+            // Struct or anon struct: the flag computed at
+            // define/intern time. A declared-but-undefined struct
+            // panics in `struct_view` (trusted-producer contract:
+            // define before querying).
+            TypeKind::Struct | TypeKind::AnonStruct => self.struct_view(ty).is_copy,
             _ => false,
         }
     }
@@ -580,8 +598,9 @@ impl InternPool {
     /// True for types usable as a `#[derive(Eq)]` struct field (M9.1):
     /// the scalar primitives (`int`, `float`, `bool`, `str`, `bytes`)
     /// and any struct that declared its own `#[derive(Eq)]`.
-    /// Everything else — `void`, `never`, tuples, views — is not
-    /// Eq-capable.
+    /// Everything else — `void`, `never`, views — is not Eq-capable.
+    /// An anon struct (M10) carries no attributes; it is Eq-capable
+    /// exactly when every field is, computed recursively.
     pub fn is_eq_capable(&self, ty: TypeId) -> bool {
         match self.kind(ty) {
             TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Bytes => {
@@ -591,6 +610,11 @@ impl InternPool {
             // `define_struct`. Same trusted-producer contract as
             // `is_copy` — define before querying.
             TypeKind::Struct => self.struct_view(ty).is_eq(),
+            TypeKind::AnonStruct => self
+                .struct_view(ty)
+                .fields
+                .iter()
+                .all(|f| self.is_eq_capable(f.ty)),
             _ => false,
         }
     }
@@ -651,11 +675,21 @@ impl InternPool {
         a == b || self.is_error(a) || self.is_error(b) || self.is_never(a) || self.is_never(b)
     }
 
-    /// Intern a tuple type. Dedups on element-id sequence with no
-    /// per-call key allocation: the probe hashes `elems` directly
-    /// and compares it against each candidate's slice in `extra`.
-    pub fn tuple(&mut self, elems: &[TypeId]) -> TypeId {
-        let hash = hash_typeids(&self.hasher, elems);
+    /// Intern an anonymous struct type (M10): a structural grouping
+    /// of named fields with no declared identity. Dedups on the
+    /// ordered (name, type) pairs with no per-call key allocation:
+    /// the probe hashes `fields` directly and compares it against
+    /// each candidate's field words in `extra`.
+    ///
+    /// Single-phase, unlike nominal structs: layout, the Copy flag,
+    /// and the interned-`""` sentinel name are all computed here,
+    /// because a structural type cannot be referenced before every
+    /// field type is fully interned. The payload is the exact layout
+    /// `define_struct` writes (with default flags), so `struct_view`
+    /// reads anon structs back without knowing which tag produced
+    /// them.
+    pub fn anon_struct(&mut self, fields: &[(StringId, TypeId)]) -> TypeId {
+        let hash = hash_anon_fields(&self.hasher, fields);
 
         // Probe path: fully immutable. Borrow `items` and `extra`
         // through `self` for the closure.
@@ -663,26 +697,50 @@ impl InternPool {
         let extra = &self.extra;
         if let Some(&id) = self
             .type_dedup
-            .find(hash, |&candidate| tuple_eq(items, extra, candidate, elems))
+            .find(hash, |&candidate| anon_eq(items, extra, candidate, fields))
         {
             return id;
         }
 
-        // Insert path: append the payload to `extra`, allocate a
-        // fresh `TypeId`, then register it with the dedup table.
-        let extra_idx = u32::try_from(self.extra.len())
+        // Insert path: written-order layout and Copy inference,
+        // exactly as `define_struct` computes them.
+        let mut offset = 0u32;
+        let mut align = 1u32;
+        let mut offsets = Vec::with_capacity(fields.len());
+        let mut is_copy = true;
+        for &(_, fty) in fields {
+            let (fsize, falign) = self.size_align(fty);
+            offset = offset.next_multiple_of(falign);
+            offsets.push(offset);
+            offset = offset
+                .checked_add(fsize)
+                .expect("struct layout overflow: size exceeds u32::MAX");
+            align = align.max(falign);
+            is_copy &= self.is_copy(fty);
+        }
+        let size = offset.next_multiple_of(align);
+        let name = self.intern_str("");
+        let data = u32::try_from(self.extra.len())
             .expect("extra arena overflow: more than u32::MAX u32 entries");
-        self.extra.push(elems.len() as u32);
-        for e in elems {
-            self.extra.push(e.0);
+        let n_fields = u32::try_from(fields.len())
+            .expect("struct field count overflow: more than u32::MAX fields");
+        self.extra.push(name.raw());
+        self.extra.push(n_fields);
+        self.extra.push(size);
+        self.extra.push(align);
+        self.extra.push(StructFlags::default().pack(is_copy));
+        for (field_offset, &(fname, fty)) in offsets.iter().zip(fields) {
+            self.extra.push(fname.raw());
+            self.extra.push(fty.raw());
+            self.extra.push(*field_offset);
         }
         let id = TypeId(
             u32::try_from(self.items.len())
                 .expect("type pool overflow: more than u32::MAX types interned"),
         );
         self.items.push(Item {
-            tag: Tag::Tuple,
-            data: extra_idx,
+            tag: Tag::AnonStruct,
+            data,
         });
 
         // Disjoint-field reborrows so the resize-time hasher
@@ -692,29 +750,9 @@ impl InternPool {
         let extra = &self.extra;
         let hasher = &self.hasher;
         self.type_dedup.insert_unique(hash, id, |&candidate| {
-            tuple_hash(items, extra, hasher, candidate)
+            anon_hash(items, extra, hasher, candidate)
         });
         id
-    }
-
-    /// Copy out a tuple type's element list.
-    ///
-    /// Returns by value rather than by `&[TypeId]` because element
-    /// ids are stored as raw `u32`s in the `extra` arena;
-    /// reinterpreting that as `&[TypeId]` requires
-    /// `#[repr(transparent)]` on `TypeId` plus an unsafe transmute.
-    /// Only used today by `Display` for diagnostic formatting and
-    /// by tests, neither of which is hot. Revisit if it ever shows
-    /// up in a profile.
-    pub fn tuple_elements_vec(&self, id: TypeId) -> Vec<TypeId> {
-        let item = self.items[id.0 as usize];
-        debug_assert!(matches!(item.tag, Tag::Tuple));
-        let start = item.data as usize;
-        let n = self.extra[start] as usize;
-        self.extra[start + 1..start + 1 + n]
-            .iter()
-            .map(|&r| TypeId(r))
-            .collect()
     }
 
     // ----- Structs (M9) -----
@@ -811,16 +849,18 @@ impl InternPool {
         self.items[id.0 as usize].data = data;
     }
 
-    /// Read back a defined struct's payload.
+    /// Read back a defined struct's payload (or an anon struct's,
+    /// single-phase-interned).
     ///
-    /// Trusted-producer contract (mirrors `tuple_elements_vec`):
-    /// callers must define the struct before querying. A
-    /// declared-but-undefined struct trips the `debug_assert!` below;
-    /// in release the `extra` index (`u32::MAX`) is out of bounds and
-    /// still panics — it can never silently decode garbage.
+    /// Trusted-producer contract: callers must define the struct (or
+    /// observe that `anon_struct` interned it whole) before querying.
+    /// A declared-but-undefined struct trips the `debug_assert!`
+    /// below; in release the `extra` index (`u32::MAX`) is out of
+    /// bounds and still panics — it can never silently decode
+    /// garbage.
     pub fn struct_view(&self, id: TypeId) -> StructView {
         let item = self.items[id.0 as usize];
-        debug_assert!(matches!(item.tag, Tag::Struct));
+        debug_assert!(matches!(item.tag, Tag::Struct | Tag::AnonStruct));
         debug_assert!(
             item.data != u32::MAX,
             "struct_view on declared-but-undefined struct"
@@ -858,14 +898,15 @@ impl InternPool {
 
     /// `(size, align)` in bytes for types with a fixed layout:
     /// bool (1,1); int/float (8,8); str/bytes (24,8); view (16,8);
-    /// defined struct → the layout stored by `define_struct`.
+    /// struct (M9 nominal / M10 anon) → the layout stored at
+    /// define/intern time.
     pub fn size_align(&self, ty: TypeId) -> (u32, u32) {
         match self.kind(ty) {
             TypeKind::Bool => (1, 1),
             TypeKind::Int | TypeKind::Float => (8, 8),
             TypeKind::Str | TypeKind::Bytes => (24, 8),
             TypeKind::View(_) => (16, 8),
-            TypeKind::Struct => {
+            TypeKind::Struct | TypeKind::AnonStruct => {
                 let v = self.struct_view(ty);
                 (v.size, v.align)
             }
@@ -874,11 +915,11 @@ impl InternPool {
     }
 
     /// True for types that own heap state and must be dropped:
-    /// `str`/`bytes`, or a defined struct that is not Copy.
+    /// `str`/`bytes`, or a struct that is not Copy.
     pub fn needs_drop(&self, ty: TypeId) -> bool {
         match self.kind(ty) {
             TypeKind::Str | TypeKind::Bytes => true,
-            TypeKind::Struct => !self.struct_view(ty).is_copy,
+            TypeKind::Struct | TypeKind::AnonStruct => !self.struct_view(ty).is_copy,
             _ => false,
         }
     }
@@ -1007,16 +1048,35 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::Float => write!(f, "float"),
             TypeKind::Error => write!(f, "<error>"),
             TypeKind::Never => write!(f, "never"),
-            TypeKind::Tuple => {
-                let elems = self.pool.tuple_elements_vec(self.id);
-                write!(f, "(")?;
-                for (i, e) in elems.iter().enumerate() {
+            TypeKind::AnonStruct => {
+                let view = self.pool.struct_view(self.id);
+                // Tuple-sugar paren form only when the fields are
+                // exactly "0", "1", … "n-1" in written order; any
+                // other shape renders braces.
+                let paren_form = view
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .all(|(i, field)| self.pool.str(field.name) == i.to_string());
+                let opener = if paren_form { "(" } else { "{" };
+                let closer = if paren_form { ")" } else { "}" };
+                write!(f, "{opener}")?;
+                for (i, field) in view.fields.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", self.pool.display(*e))?;
+                    if paren_form {
+                        write!(f, "{}", self.pool.display(field.ty))?;
+                    } else {
+                        write!(
+                            f,
+                            "{}: {}",
+                            self.pool.str(field.name),
+                            self.pool.display(field.ty)
+                        )?;
+                    }
                 }
-                write!(f, ")")
+                write!(f, "{closer}")
             }
             TypeKind::Struct => {
                 let view = self.pool.struct_view(self.id);
@@ -1128,44 +1188,100 @@ mod tests {
     }
 
     #[test]
-    fn tuple_dedups_and_round_trips() {
+    fn anon_struct_dedups_by_ordered_name_type_pairs() {
         let mut pool = InternPool::new();
-        let a = pool.tuple(&[pool.int(), pool.int()]);
-        let b = pool.tuple(&[pool.int(), pool.int()]);
+        let q = pool.intern_str("q");
+        let r = pool.intern_str("r");
+        let a = pool.anon_struct(&[(q, pool.int()), (r, pool.int())]);
+        let b = pool.anon_struct(&[(q, pool.int()), (r, pool.int())]);
         assert_eq!(a, b);
-        assert_eq!(pool.kind(a), TypeKind::Tuple);
-        assert_eq!(pool.tuple_elements_vec(a), vec![pool.int(), pool.int()]);
-        // Different element list -> distinct id.
-        let c = pool.tuple(&[pool.int(), pool.bool_()]);
+        assert_eq!(pool.kind(a), TypeKind::AnonStruct);
+        // Reordered pairs -> different structural identity.
+        let c = pool.anon_struct(&[(r, pool.int()), (q, pool.int())]);
         assert_ne!(a, c);
+        // Same order, different field type -> distinct type.
+        let d = pool.anon_struct(&[(q, pool.int()), (r, pool.str_())]);
+        assert_ne!(a, d);
     }
 
     #[test]
-    fn one_thousand_duplicate_tuples_share_a_single_id() {
-        // Phase 2 exit criterion: dedup-on-content keeps storage
-        // flat. With the `HashTable<TypeId>` shape there is also no
-        // per-call key allocation — the probe hashes the slice
-        // directly — so neither `extra` nor `items` nor the dedup
-        // table grow after the first insert.
+    fn anon_struct_copy_and_eq_capability_inference() {
         let mut pool = InternPool::new();
-        let first = pool.tuple(&[pool.int(), pool.int(), pool.int()]);
-        let extra_len = pool.extra.len();
-        let items_len = pool.items.len();
-        let table_len = pool.type_dedup.len();
-        for _ in 0..1000 {
-            let id = pool.tuple(&[pool.int(), pool.int(), pool.int()]);
-            assert_eq!(id, first);
-        }
-        assert_eq!(pool.extra.len(), extra_len);
-        assert_eq!(pool.items.len(), items_len);
-        assert_eq!(pool.type_dedup.len(), table_len);
+        let (a, b) = (pool.intern_str("a"), pool.intern_str("b"));
+
+        // All-primitive fields: Copy and Eq-capable.
+        let all_prim = pool.anon_struct(&[(a, pool.int()), (b, pool.float())]);
+        assert!(pool.is_copy(all_prim));
+        assert!(!pool.needs_drop(all_prim));
+        assert!(pool.is_eq_capable(all_prim));
+
+        // A `str` field: not Copy (needs drop), but `str` is
+        // Eq-capable so the anon struct stays Eq-capable.
+        let with_str = pool.anon_struct(&[(a, pool.int()), (b, pool.str_())]);
+        assert!(!pool.is_copy(with_str));
+        assert!(pool.needs_drop(with_str));
+        assert!(pool.is_eq_capable(with_str));
+
+        // Views are Copy but not Eq-capable.
+        let with_view = pool.anon_struct(&[(a, pool.str_view())]);
+        assert!(pool.is_copy(with_view));
+        assert!(!pool.is_eq_capable(with_view));
+
+        // Nested anon structs classify recursively.
+        let nested_copy = pool.anon_struct(&[(a, all_prim), (b, pool.bool_())]);
+        assert!(pool.is_copy(nested_copy));
+        assert!(!pool.needs_drop(nested_copy));
+        assert!(pool.is_eq_capable(nested_copy));
+        let nested_move = pool.anon_struct(&[(a, with_str)]);
+        assert!(!pool.is_copy(nested_move));
+        assert!(pool.needs_drop(nested_move));
     }
 
     #[test]
-    fn tuple_display_formats_recursively() {
+    fn anon_struct_display_paren_and_brace_forms() {
         let mut pool = InternPool::new();
-        let id = pool.tuple(&[pool.int(), pool.bool_()]);
-        assert_eq!(format!("{}", pool.display(id)), "(int, bool)");
+        // Fields named "0", "1", … in written order render as the
+        // tuple paren form.
+        let (f0, f1) = (pool.intern_str("0"), pool.intern_str("1"));
+        let pair = pool.anon_struct(&[(f0, pool.int()), (f1, pool.str_())]);
+        assert_eq!(format!("{}", pool.display(pair)), "(int, str)");
+
+        // Any other names render in brace form, written order.
+        let (q, r) = (pool.intern_str("q"), pool.intern_str("r"));
+        let named = pool.anon_struct(&[(q, pool.int()), (r, pool.int())]);
+        assert_eq!(format!("{}", pool.display(named)), "{q: int, r: int}");
+
+        // Mixed numeric/non-numeric names force brace form.
+        let x = pool.intern_str("x");
+        let mixed = pool.anon_struct(&[(f0, pool.int()), (x, pool.str_())]);
+        assert_eq!(format!("{}", pool.display(mixed)), "{0: int, x: str}");
+    }
+
+    #[test]
+    fn struct_view_anon_sentinel_name_and_written_order_offsets() {
+        let mut pool = InternPool::new();
+        let (q, r) = (pool.intern_str("q"), pool.intern_str("r"));
+        let id = pool.anon_struct(&[(q, pool.str_()), (r, pool.int())]);
+        let view = pool.struct_view(id);
+        // Anon structs carry no declared name: the payload records
+        // the interned "" sentinel and default (attribute-free) flags.
+        assert_eq!(pool.str(view.name), "");
+        assert!(!view.is_eq());
+        assert!(!view.is_repr_c());
+        // Layout is written order with natural alignment: str (24b) at
+        // 0, int at 24.
+        assert_eq!(view.fields.len(), 2);
+        assert_eq!(view.fields[0].name, q);
+        assert_eq!(view.fields[0].ty, pool.str_());
+        assert_eq!(view.fields[0].offset, 0);
+        assert_eq!(view.fields[0].idx, 0);
+        assert_eq!(view.fields[1].name, r);
+        assert_eq!(view.fields[1].ty, pool.int());
+        assert_eq!(view.fields[1].offset, 24);
+        assert_eq!(view.fields[1].idx, 1);
+        assert_eq!((view.size, view.align), (32, 8));
+        assert_eq!(pool.size_align(id), (32, 8));
+        assert_eq!(pool.struct_field(id, r).unwrap().offset, 24);
     }
 
     #[test]
@@ -1213,8 +1329,8 @@ mod tests {
     #[test]
     fn intern_str_repeated_does_not_grow_arena() {
         // Probe path: repeated `intern_str` of the same string
-        // returns the same `StringId` and doesn't append to the
-        // arena. Mirrors the 1000-tuple test on the string side.
+        // returns the same `StringId` and appends nothing to the
+        // arena or the dedup table.
         let mut pool = InternPool::new();
         let first = pool.intern_str("identifier");
         let bytes_len = pool.string_bytes.len();

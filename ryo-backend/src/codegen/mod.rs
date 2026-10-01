@@ -207,11 +207,12 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
             // driver must short-circuit on `sink.has_errors()`.
             unreachable!("cranelift_type_for: <error> sentinel reached codegen")
         }
-        TypeKind::Tuple => {
-            // No surface syntax constructs tuples today, so a tuple
-            // TypeId cannot reach codegen; the variant exists only to
-            // validate the InternPool's sidecar encoding.
-            unreachable!("cranelift_type_for: tuple TypeId reached codegen")
+        TypeKind::AnonStruct => {
+            // No surface syntax constructs anon structs today (M10
+            // lands the pool substrate first), so an anon TypeId
+            // cannot reach codegen; the variant exists to carry
+            // layout for the later lowering tasks.
+            unreachable!("cranelift_type_for: anon struct TypeId reached codegen")
         }
         // Struct codegen (aggregate layout) lands in a later M9 task.
         TypeKind::Struct => unreachable!("cranelift_type_for: struct TypeId reached codegen"),

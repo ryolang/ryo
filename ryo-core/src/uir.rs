@@ -680,7 +680,7 @@ impl UirBuilder {
     /// outgrows `u32::MAX` words of payload cannot be encoded and
     /// is rejected here rather than silently truncated. Mirrors the
     /// overflow handling in `InternPool::intern_str` /
-    /// `InternPool::tuple`.
+    /// `InternPool::anon_struct`.
     fn extra_offset(&self) -> u32 {
         u32::try_from(self.uir.extra.len()).expect("UIR extra arena exceeded u32::MAX words")
     }
