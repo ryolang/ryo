@@ -379,9 +379,10 @@ pub(crate) struct PromoCandidate {
 /// belongs to `tirs[i]`.
 pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipSidecar {
     let mut sidecar = OwnershipSidecar::default();
+    let synth = frees::SynthCalleeIds::resolve(pool);
     for tir in tirs {
         let mut func_sidecar = FunctionSidecar::new(tir.name, tir.instructions.len());
-        analyze_function(tir, pool, sink, &mut func_sidecar);
+        analyze_function(tir, pool, &synth, sink, &mut func_sidecar);
         sidecar.functions.push(func_sidecar);
     }
     sidecar
@@ -390,6 +391,7 @@ pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipS
 fn analyze_function(
     tir: &Tir,
     pool: &InternPool,
+    synth: &frees::SynthCalleeIds,
     sink: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
 ) {
@@ -952,13 +954,13 @@ fn analyze_function(
     // W0003 case B (M8.4.1.2): redundant bound materializations. Runs
     // after the walk so the escape classification it reuses — final
     // lattice states plus the hazard log — is complete.
-    warn_redundant_materialize(tir, pool, &own, &order, sink);
+    warn_redundant_materialize(tir, pool, synth, &own, &order, sink);
 
     // W0004: bound `to_bytes()` copies that never mutate nor escape.
     // Same post-walk shape as W0003 case B, plus the last-use map to
     // bound the window where a receiver hazard collides with the
     // suggested view.
-    warn_redundant_to_bytes(tir, pool, &own, &order, &last_use, sink);
+    warn_redundant_to_bytes(tir, pool, synth, &own, &order, &last_use, sink);
 
     // Convert honored reseat records into arm-gated
     // `ConditionalDeadDrop`s. A record is honored when a pending entry

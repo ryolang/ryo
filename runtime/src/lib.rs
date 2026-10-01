@@ -7,24 +7,44 @@
 #![cfg_attr(feature = "staticlib", no_std)]
 
 // Test builds link std through the harness; the gate keeps `std::`
-// paths available in test code if needed.
+// paths available in test code if needed. `alloc` comes along for
+// `alloc::ffi::CString` (the std_instead_of_alloc lint demands it).
+#[cfg(test)]
+extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
+use core::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 
+const STDIN_FD: c_int = 0;
 const STDOUT_FD: c_int = 1;
 const STDERR_FD: c_int = 2;
 
 #[cfg(not(windows))]
 unsafe extern "C" {
     fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+    fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
 }
 
 #[cfg(windows)]
 unsafe extern "C" {
     fn _write(fd: c_int, buf: *const c_void, count: u32) -> c_int;
+    fn _read(fd: c_int, buf: *mut c_void, count: u32) -> c_int;
     fn _setmode(fd: c_int, mode: c_int) -> c_int;
+}
+
+// Thread-local errno accessors for the EINTR retry in `read_line_from`.
+// Windows references neither: the CRT's `_read` reports no EINTR, so
+// any negative result there is a genuine error.
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn __error() -> *mut c_int;
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+unsafe extern "C" {
+    fn __errno_location() -> *mut c_int;
 }
 
 /// `_O_BINARY` — no `\n` → `\r\n` translation on write.
@@ -42,6 +62,11 @@ pub static _fltused: c_int = 0;
 unsafe extern "C" {
     fn exit(code: c_int) -> !;
     fn abort() -> !;
+    fn strlen(s: *const c_char) -> usize;
+    /// Narrow `getenv` on ALL platforms (decided 2026-10-01): non-ASCII
+    /// values on Windows come back in the ANSI codepage — the documented
+    /// placeholder limitation, no `_wgetenv`/wide-char conversion.
+    fn getenv(name: *const c_char) -> *mut c_char;
 }
 
 unsafe extern "C" {
@@ -90,6 +115,47 @@ fn write_all(fd: c_int, mut ptr: *const u8, mut len: usize) {
     }
 }
 
+/// Thin wrapper over the C `read`/`_read` for one fd.
+/// Returns the byte count read, 0 at EOF, or < 0 on error.
+fn os_read(fd: c_int, ptr: *mut u8, len: usize) -> isize {
+    #[cfg(not(windows))]
+    // SAFETY: caller guarantees ptr is writable for len bytes; the call
+    // does not retain the buffer.
+    unsafe {
+        read(fd, ptr.cast::<c_void>(), len)
+    }
+    #[cfg(windows)]
+    // SAFETY: same. `_read` takes a u32 count; a single read chunk is
+    // clamped below 4 GiB by construction (io_read_line's growth loop
+    // starts at 128 bytes).
+    unsafe {
+        _read(fd, ptr.cast::<c_void>(), len.min(u32::MAX as usize) as u32) as isize
+    }
+}
+
+/// EINTR (`errno == 4`) — `read` interrupted by a signal with no data
+/// transferred: retry rather than fail. Only referenced on non-Windows
+/// builds; see the errno externs above.
+#[cfg(not(windows))]
+const EINTR: c_int = 4;
+
+/// The calling thread's current errno value.
+#[cfg(not(windows))]
+fn errno() -> c_int {
+    #[cfg(target_os = "macos")]
+    // SAFETY: `__error` always returns a valid pointer to the calling
+    // thread's errno slot; the load reads its current value.
+    unsafe {
+        *__error()
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    // SAFETY: `__errno_location` always returns a valid pointer to the
+    // calling thread's errno slot; the load reads its current value.
+    unsafe {
+        *__errno_location()
+    }
+}
+
 /// Runtime backing for the `print` builtin: write the viewed
 /// bytes to stdout. No added newline, no formatting — print policy is
 /// a spec-level decision, not a runtime one.
@@ -108,6 +174,70 @@ pub unsafe extern "C" fn ryo_print(ptr: *const u8, len: u64) {
     write_all(STDOUT_FD, ptr, len as usize);
 }
 
+/// Runtime backing for the `io_eprint` builtin (M9.2): write the
+/// viewed bytes to stderr. No added newline, same contract as
+/// `ryo_print`. TODO(M24): interim call form — replaced by `io.eprint`.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes (or be null/dangling when
+/// `len == 0`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_eprint(ptr: *const u8, len: u64) {
+    if len == 0 {
+        return;
+    }
+    if ptr.is_null() {
+        null_abort();
+    }
+    write_all(STDERR_FD, ptr, len as usize);
+}
+
+/// Shared panic tail: write `msg` to stderr and exit 101 — the
+/// `ryo_panic` contract, reused by the runtime's own bounds failures
+/// (argv indexing and friends) so the exit path lives in one place.
+#[cold]
+fn panic_msg(msg: &[u8]) -> ! {
+    write_all(STDERR_FD, msg.as_ptr(), msg.len());
+    // SAFETY: exit never returns.
+    unsafe { exit(101) }
+}
+
+/// `panic_msg` for a bounds failure on a computed index: the message
+/// must name the failing index, not just the operation. Writes
+/// `prefix` + the decimal digits of `i` (with a leading `-` for
+/// negative indices) + a newline from a stack buffer — allocation-free
+/// (the runtime is no_std) — then exits 101.
+#[cold]
+fn panic_msg_indexed(prefix: &[u8], i: i64) -> ! {
+    // 33-byte prefix + sign + 19 digits (i64::MIN magnitude) + newline
+    // fits in 64.
+    let mut buf = [0u8; 64];
+    buf[..prefix.len()].copy_from_slice(prefix);
+    // Digits least-significant-first into a temp, then copied
+    // most-significant-first after the prefix.
+    let mut tmp = [0u8; 20];
+    let mut n = i.unsigned_abs();
+    let mut start = tmp.len();
+    loop {
+        start -= 1;
+        tmp[start] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let mut end = prefix.len();
+    if i < 0 {
+        buf[end] = b'-';
+        end += 1;
+    }
+    let digits = &tmp[start..];
+    buf[end..end + digits.len()].copy_from_slice(digits);
+    end += digits.len();
+    buf[end] = b'\n';
+    panic_msg(&buf[..end + 1]);
+}
+
 /// Runtime backing for `__ryo_panic` (panic/assert): write the
 /// sema-formatted message to stderr and exit 101.
 ///
@@ -119,10 +249,268 @@ pub unsafe extern "C" fn ryo_panic(ptr: *const u8, len: u64) -> ! {
         if ptr.is_null() {
             null_abort();
         }
-        write_all(STDERR_FD, ptr, len as usize);
+        // SAFETY: caller contract — ptr/len describe a readable byte range.
+        let msg = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
+        panic_msg(msg)
     }
-    // SAFETY: exit never returns.
-    unsafe { exit(101) }
+    panic_msg(b"")
+}
+
+/// Runtime backing for the `process_exit` builtin: exit with the given
+/// status code. TODO(M24): interim call form — replaced by `process.exit`.
+///
+/// # Safety
+/// Never returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_exit(code: u64) -> ! {
+    // SAFETY: exit never returns. `code as c_int` truncation matches
+    // shell exit-code semantics, same as the CLI's clamp(0, 255).
+    unsafe { exit(code as c_int) }
+}
+
+// ---------- process argv (M9.2) ----------
+//
+// The runtime's first mutable globals: the C runtime's argv outlives
+// any single call, so it is stored here rather than passed per-call.
+// The codegen entry shim (built at `main`'s signature) calls
+// `ryo_rt_init` exactly once before the first user instruction;
+// readers Acquire-load. The writes happen once, before any read — the
+// Release/Acquire pairs make that contract explicit.
+
+static ARGC: AtomicIsize = AtomicIsize::new(0);
+static ARGV: AtomicPtr<c_char> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Store the C runtime's argv — the `(argc, argv)` passed to `main` —
+/// for the process lifetime. Called once at `main` entry by the
+/// codegen entry shim.
+///
+/// # Safety
+/// `argv` must point to `argc` readable `*const c_char` entries, each a
+/// NUL-terminated string owned by the C runtime for the process
+/// lifetime (the natural crt0 contract).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_rt_init(argc: c_int, argv: *const *const c_char) {
+    // Data, then flag: a Release store publishes only writes
+    // program-ordered BEFORE it, so ARGV must be stored first — a
+    // reader that observes the ARGC store (Acquire) is then guaranteed
+    // to observe the ARGV store. Reversing this pair would let a
+    // reader see argc but a stale/null ARGV (observable on ARM).
+    ARGV.store(argv as *mut c_char, Ordering::Release);
+    ARGC.store(argc as isize, Ordering::Release);
+}
+
+/// Runtime backing for `process_argc() -> int` (M9.2). argv[0] (the
+/// program path) is included, matching C convention.
+/// TODO(M22): interim call form — replaced by `process.args`.
+///
+/// # Safety
+/// No additional contract — the Acquire load cannot fault. Marked
+/// `unsafe extern "C"` for symmetry with the other process intrinsics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_process_argc() -> i64 {
+    // Acquire load: pairs with ryo_rt_init's Release store.
+    ARGC.load(Ordering::Acquire) as i64
+}
+
+/// Runtime backing for `process_argv(i: int) -> str` (M9.2): copy
+/// `argv[i]` into `out` as a tagged slot (inline when it fits the SSO
+/// cap, else a fresh heap buffer). Out-of-range — including negative
+/// indices — panics with a message naming the failing index: stderr +
+/// exit 101, the `ryo_panic` contract. TODO(M22): interim call form —
+/// replaced by `process.args`.
+///
+/// # Safety
+/// `out` points to a valid, uninitialized `RyoStrFat`. `ryo_rt_init`
+/// must have run (the codegen entry shim guarantees this for any ryo
+/// program; before init ARGC is 0 and every index fails the check
+/// rather than dereferencing the null table).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_process_argv(i: i64, out: *mut RyoStrFat) {
+    // Acquire load: pairs with ryo_rt_init's Release store.
+    let argc = ARGC.load(Ordering::Acquire);
+    // argc.max(0): ARGC is a count and never negative; the clamp only
+    // keeps the comparison sound if an untrusted caller stored a
+    // negative value. Negative Ryo indices fail here alongside the
+    // too-large ones.
+    if i < 0 || i >= argc.max(0) as i64 {
+        panic_msg_indexed(b"process_argv index out of range: ", i);
+    }
+    // Acquire: pairs with ryo_rt_init's Release store — passing the
+    // ARGC check above means this load cannot observe a stale
+    // (pre-init) pointer for a program that ran its entry shim.
+    let table = ARGV.load(Ordering::Acquire) as *const *const c_char;
+    // SAFETY: 0 <= i < argc, so the argv vector — owned by the C
+    // runtime for the process lifetime and stored by ryo_rt_init — has
+    // a readable entry at index i.
+    let s = unsafe { *table.add(i as usize) };
+    // SAFETY: s is the C runtime's NUL-terminated argv string.
+    let len = unsafe { strlen(s) };
+    // SAFETY: strlen reports the initialized byte length of s.
+    let bytes = unsafe { core::slice::from_raw_parts(s.cast::<u8>(), len) };
+    // SAFETY: out is a valid out-slot; `bytes` holds `len` initialized
+    // bytes. The copy is what makes returning safe — the C runtime
+    // retains ownership of the argv storage itself.
+    unsafe { write_str_slot(out, bytes) };
+}
+
+/// Cap on the environment-variable name copied to the stack: real names
+/// are short, and a fixed buffer keeps the lookup allocation-free.
+const ENV_KEY_CAP: usize = 4096;
+
+/// Runtime backing for `process_env(key: str) -> str` (M9.2): copy `key`
+/// into a 4 KiB stack buffer, NUL-terminate, and look it up in the
+/// process environment. The value is copied into `out` as a tagged slot;
+/// an unset variable yields the empty string — the M16 `?str` shape will
+/// distinguish unset. `getenv` is narrow on every platform: non-ASCII
+/// values on Windows arrive in the ANSI codepage (documented
+/// placeholder). TODO(M16): interim call form — replaced by
+/// `process.env`.
+///
+/// # Safety
+/// `key_ptr` must point to `key_len` readable bytes (or be
+/// null/dangling when `key_len == 0`). `out` points to a valid,
+/// uninitialized `RyoStrFat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_getenv(key_ptr: *const u8, key_len: u64, out: *mut RyoStrFat) {
+    if key_len > ENV_KEY_CAP as u64 {
+        panic_msg(b"process_env key too long (max 4096 bytes)\n");
+    }
+    let n: usize = key_len.try_into().unwrap_or_else(|_| overflow_abort());
+    // +1 byte for the C NUL terminator.
+    let mut buf = [0u8; ENV_KEY_CAP + 1];
+    if n > 0 {
+        if key_ptr.is_null() {
+            null_abort();
+        }
+        // SAFETY: caller contract — key_ptr is readable for n bytes
+        // (n <= ENV_KEY_CAP checked above); buf is a fresh stack buffer
+        // of ENV_KEY_CAP + 1 bytes; regions do not overlap.
+        unsafe { core::ptr::copy_nonoverlapping(key_ptr, buf.as_mut_ptr(), n) };
+    }
+    buf[n] = 0;
+    // SAFETY: buf holds a NUL-terminated name (n <= ENV_KEY_CAP, so the
+    // terminator fits at index n). getenv either returns null (unset —
+    // handled below) or a pointer to the CRT's own NUL-terminated
+    // value, valid until the next environ mutation.
+    let val = unsafe { getenv(buf.as_ptr().cast::<c_char>()) };
+    if val.is_null() {
+        // SAFETY: out is a valid out-slot.
+        unsafe { write_str_slot(out, b"") };
+        return;
+    }
+    // SAFETY: val is the CRT's NUL-terminated environment value.
+    let len = unsafe { strlen(val) };
+    // SAFETY: strlen reports the initialized byte length of val.
+    let bytes = unsafe { core::slice::from_raw_parts(val.cast::<u8>(), len) };
+    // SAFETY: out is a valid out-slot; `bytes` holds `len` initialized
+    // bytes. The copy is what makes returning safe — the CRT retains
+    // ownership of the environ storage itself.
+    unsafe { write_str_slot(out, bytes) };
+}
+
+// ---------- io_read_line (M9.2) ----------
+
+/// Read one line from `fd` into a growable heap buffer, then copy it
+/// into `out` as a tagged slot (inline when it fits, else a fresh heap
+/// buffer — the transient accumulation buffer is freed on every exit
+/// path). The `\n` terminates the line and is stripped; EOF with an
+/// empty buffer yields "" (EOF is not an error), and EOF after partial
+/// bytes returns that final unterminated line as-is. A `read` error
+/// panics (stderr + exit 101, the `ryo_panic` contract) after freeing
+/// the buffer; `EINTR` retries instead of failing. No line-length cap:
+/// the buffer doubles until the newline or EOF arrives.
+///
+/// # Safety
+/// `out` points to a valid, uninitialized `RyoStrFat`; `fd` is open and
+/// readable for the duration of the call.
+pub(crate) unsafe fn read_line_from(fd: c_int, out: *mut RyoStrFat) {
+    // Initial accumulation-buffer cap; also the growth quantum
+    // (doubling). One typical line fits without a single realloc.
+    const CHUNK: usize = 128;
+    let mut cap: usize = CHUNK;
+    // SAFETY: CHUNK is nonzero; the null check below handles OOM.
+    let mut buf = unsafe { c_malloc(cap) } as *mut u8;
+    if buf.is_null() {
+        oom_abort();
+    }
+    let mut len: usize = 0;
+    loop {
+        if len == cap {
+            // Grow: double the buffer (checked — never wraps toward a
+            // cap smaller than `len`).
+            cap = cap.checked_mul(2).unwrap_or_else(|| overflow_abort());
+            // SAFETY: buf came from c_malloc/c_realloc with the old
+            // cap; on success realloc copies the old `len` bytes and
+            // frees the old buffer. On failure the old buffer is still
+            // live: free it before the abort so OOM paths leak nothing.
+            let grown = unsafe { c_realloc(buf as *mut c_void, cap) } as *mut u8;
+            if grown.is_null() {
+                // SAFETY: buf is the still-live old allocation.
+                unsafe { c_free(buf as *mut c_void) };
+                oom_abort();
+            }
+            buf = grown;
+        }
+        // SAFETY: buf points to `cap` writable bytes and len < cap here
+        // (the growth above restores the invariant), so buf+len has
+        // cap-len bytes of room.
+        let n = os_read(fd, unsafe { buf.add(len) }, cap - len);
+        if n > 0 {
+            let start = len;
+            len += n as usize;
+            // SAFETY: the read just initialized n bytes at buf+start.
+            let fresh = unsafe { core::slice::from_raw_parts(buf.add(start), n as usize) };
+            if let Some(pos) = fresh.iter().position(|&b| b == b'\n') {
+                let line_len = start + pos;
+                // SAFETY: out is a valid out-slot; buf holds line_len
+                // initialized bytes (write_str_slot copies them out).
+                unsafe { write_str_slot(out, core::slice::from_raw_parts(buf, line_len)) };
+                // SAFETY: buf is this loop's own allocation.
+                unsafe { c_free(buf as *mut c_void) };
+                return;
+            }
+        } else if n == 0 {
+            // EOF: whatever accumulated (possibly nothing) is the line
+            // — an unterminated final line is returned as-is.
+            // SAFETY: out is a valid out-slot; buf holds `len`
+            // initialized bytes. buf is non-null and valid even when
+            // len == 0, so the empty slice is sound.
+            unsafe { write_str_slot(out, core::slice::from_raw_parts(buf, len)) };
+            // SAFETY: buf is this loop's own allocation.
+            unsafe { c_free(buf as *mut c_void) };
+            return;
+        } else {
+            #[cfg(not(windows))]
+            {
+                // EINTR: a signal arrived mid-read with no data —
+                // retry the read. Any other errno is a genuine error.
+                if errno() == EINTR {
+                    continue;
+                }
+            }
+            // SAFETY: buf is this loop's own allocation; free it before
+            // the diverging panic so the error path leaks nothing.
+            unsafe { c_free(buf as *mut c_void) };
+            panic_msg(b"io_read_line: read error\n");
+        }
+    }
+}
+
+/// Runtime backing for `io_read_line() -> str` (M9.2): read one line
+/// from stdin (fd 0) and write it into `out` as a tagged slot. The
+/// trailing `\n` is stripped; EOF before any byte yields "". The fd is
+/// parameterized on the crate-visible `read_line_from` so runtime tests
+/// can drive it with temp files.
+/// TODO(M13.6): interim call form — replaced by
+/// `io.read_line() -> IoError!str`.
+///
+/// # Safety
+/// `out` points to a valid, uninitialized `RyoStrFat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_read_line(out: *mut RyoStrFat) {
+    // SAFETY: forwarded contract — `out` is a valid out-slot (the
+    // caller's guarantee), and fd 0 is the process's own stdin.
+    unsafe { read_line_from(STDIN_FD, out) }
 }
 
 #[cfg(feature = "staticlib")]

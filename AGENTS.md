@@ -301,6 +301,8 @@ cargo test -p ryo-frontend      # Frontend-specific tests
 cargo test -- --nocapture       # Show output
 ```
 
+**Miri (runtime crate) runs with isolation enabled:** `open`, stdin reads, and process spawning are forbidden (stdout/stderr writes are allowed). Gate test bodies that need them behind `if cfg!(miri) { return; }` — subprocess blocks and temp-file I/O — while leaving the in-process unsafe coverage unconditional. The fd-based `read_line_from` path has no Miri coverage for this reason; ASan/Valgrind and normal runs carry it.
+
 ## Binary Inspection
 
 `objdump -d` / `otool -tV` (disassembly), `nm` (symbols), `xxd` (hex dump).

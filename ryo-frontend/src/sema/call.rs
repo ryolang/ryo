@@ -4,7 +4,6 @@ use super::{
     FuncCtx, Scope, Sema, emit_builtin_call, emit_bytes_materialize, emit_str_materialize,
     materialize_name,
 };
-use crate::builtins;
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{ParamMode, TirRef};
 use ryo_core::types::{StringId, TypeId};
@@ -19,25 +18,26 @@ pub(crate) fn check_call(
     span: Span,
 ) -> TirRef {
     let name_id = view.name;
+    let names = sema.names;
 
     // M8.4.1.2: `str(view)` materialization — a call-form intercept,
     // NOT a BUILTINS-table builtin. Type names are not reserved names,
     // so a user-defined `fn str` must win over the intercept (least
     // surprise): it fires only when no user declaration carries the name.
-    if sema.pool.str(name_id) == "str" && !sema.name_to_decl.contains_key(&name_id) {
+    if name_id == names.str_ && !sema.name_to_decl.contains_key(&name_id) {
         return emit_str_materialize(sema, fcx, view, arg_tirs, span);
     }
 
     // M8.4.2: `bytes(bview)` materialization — same call-form
     // intercept rule as `str(view)`: a user-defined `fn bytes` wins.
-    if sema.pool.str(name_id) == "bytes" && !sema.name_to_decl.contains_key(&name_id) {
+    if name_id == names.bytes && !sema.name_to_decl.contains_key(&name_id) {
         return emit_bytes_materialize(sema, fcx, view, arg_tirs, span);
     }
 
     // Builtins short-circuit: they're not in `signatures` /
     // `name_to_decl`, so signature resolution and the worklist
     // never see them.
-    if let Some(builtin) = builtins::lookup(sema.pool.str(name_id)) {
+    if let Some(&(_, builtin)) = sema.builtin_by_id.iter().find(|&&(id, _)| id == name_id) {
         return emit_builtin_call(sema, fcx, scope, view, arg_tirs, span, builtin);
     }
 
@@ -276,15 +276,16 @@ pub(crate) fn check_reserved_builtin(
     span: Span,
     message: &str,
 ) -> bool {
-    let name = sema.pool.str(name_id);
-    if crate::builtins::is_reserved_name(name) {
-        sema.sink.emit(Diag::error(
-            span,
-            DiagCode::ReservedBuiltinName,
-            format!("'{}' {}", name, message),
-        ));
-        true
-    } else {
-        false
+    // `RESERVED_NAMES` is exactly `["range"]`; the comparison is a
+    // `StringId` equality against the id interned at `Sema::new`.
+    // `pool.str` is only reached on the diagnostic path.
+    if name_id != sema.names.range {
+        return false;
     }
+    sema.sink.emit(Diag::error(
+        span,
+        DiagCode::ReservedBuiltinName,
+        format!("'{}' {}", sema.pool.str(name_id), message),
+    ));
+    true
 }

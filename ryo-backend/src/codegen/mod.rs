@@ -29,7 +29,6 @@ use cranelift::codegen::ir::{
 use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
-use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
@@ -38,10 +37,12 @@ use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
 mod arith;
+mod builtins;
 mod bytes;
 mod control;
 mod expr;
 mod frees;
+mod jit;
 mod ranges;
 mod str_ops;
 mod structs;
@@ -84,19 +85,96 @@ pub(crate) fn is_fat_type(ty: TypeId, pool: &InternPool) -> bool {
 /// slot unwritten and every later home read would load garbage.
 /// Keeping the set wrong in the other direction (listing a builtin
 /// that is NOT inlined) is harmless — it only forgoes the home.
+///
+/// Test-only: the production exclusion lives in [`writes_out_slot_ids`]
+/// as an interned-id compare, and the unit test below iterates this
+/// table to assert both stay in agreement.
+#[cfg(test)]
 pub(crate) const CODEGEN_INLINED_BUILTINS: &[&str] = &["bool_to_str"];
+
+/// Interned-name ids resolved once per compilation (in `compile_all`)
+/// so per-function and per-instruction name dispatch — `main`
+/// detection, the `__ryo_panic` / `print` / `io_eprint` /
+/// `process_exit` / `process_argc` call-form routing, the fat-producer
+/// slot-out chain (including `process_argv` / `process_env` /
+/// `io_read_line`), the codegen-inlined builtin exclusion, the push
+/// mutation scan — is
+/// a `StringId` equality check instead of `pool.str(id) == "..."`.
+/// The BUILTINS-name probes always resolve to `Some`: `Sema::new`
+/// interns every BUILTINS name up front, and astgen interns `main`.
+/// Only the `__ryo_*` synthesis names can stay `None` — sema interns
+/// each lazily, only when it emits the corresponding rewrite, so a
+/// program that never triggers one never has it in the pool. A `None`
+/// id simply never matches.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CodegenNameIds {
+    main: Option<StringId>,
+    ryo_panic: Option<StringId>,
+    print: Option<StringId>,
+    io_eprint: Option<StringId>,
+    process_exit: Option<StringId>,
+    process_argc: Option<StringId>,
+    process_argv: Option<StringId>,
+    process_env: Option<StringId>,
+    io_read_line: Option<StringId>,
+    bool_to_str: Option<StringId>,
+    int_to_str: Option<StringId>,
+    float_to_str: Option<StringId>,
+    str_push: Option<StringId>,
+    bytes_push: Option<StringId>,
+    str_from_view: Option<StringId>,
+    bytes_from_view: Option<StringId>,
+    str_to_bytes: Option<StringId>,
+    bytes_to_str: Option<StringId>,
+    bytes_repr: Option<StringId>,
+}
+
+impl CodegenNameIds {
+    fn resolve(pool: &InternPool) -> Self {
+        CodegenNameIds {
+            main: pool.find_str("main"),
+            ryo_panic: pool.find_str("__ryo_panic"),
+            print: pool.find_str("print"),
+            io_eprint: pool.find_str("io_eprint"),
+            process_exit: pool.find_str("process_exit"),
+            process_argc: pool.find_str("process_argc"),
+            process_argv: pool.find_str("process_argv"),
+            process_env: pool.find_str("process_env"),
+            io_read_line: pool.find_str("io_read_line"),
+            bool_to_str: pool.find_str("bool_to_str"),
+            int_to_str: pool.find_str("int_to_str"),
+            float_to_str: pool.find_str("float_to_str"),
+            str_push: pool.find_str("str_push"),
+            bytes_push: pool.find_str("bytes_push"),
+            str_from_view: pool.find_str("__ryo_str_from_view"),
+            bytes_from_view: pool.find_str("__ryo_bytes_from_view"),
+            str_to_bytes: pool.find_str("__ryo_str_to_bytes"),
+            bytes_to_str: pool.find_str("__ryo_bytes_to_str"),
+            bytes_repr: pool.find_str("__ryo_bytes_repr"),
+        }
+    }
+}
 
 /// True when instruction `r` produces its fat result through a
 /// slot-out call (`emit_slot_out_call` or user-call sret) and can
 /// therefore write a caller-provided home slot directly. Concat and
 /// every fat-returning call qualify — except codegen-inlined builtins
-/// (`CODEGEN_INLINED_BUILTINS`), which never touch a slot.
-pub(crate) fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+/// (`CodegenNameIds::bool_to_str`), which never touch a slot.
+fn writes_out_slot_ids(tir: &Tir, ids: &CodegenNameIds, r: TirRef) -> bool {
     match tir.inst(r).tag {
         TirTag::StrConcat | TirTag::BytesConcat => true,
-        TirTag::Call => !CODEGEN_INLINED_BUILTINS.contains(&pool.str(tir.call_view(r).name)),
+        TirTag::Call => ids.bool_to_str != Some(tir.call_view(r).name),
         _ => false,
     }
+}
+
+/// `#[cfg(test)]` three-arg form of [`writes_out_slot_ids`]: resolves
+/// the ids from the pool per call (test-only, so the probe cost is
+/// irrelevant) and exists because the unit test in `tests.rs` pins
+/// this exact signature.
+#[cfg(test)]
+pub(crate) fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+    writes_out_slot_ids(tir, &CodegenNameIds::resolve(pool), r)
 }
 
 /// Map a TIR type to the corresponding Cranelift IR type.
@@ -162,6 +240,12 @@ pub struct Codegen<M: Module> {
     /// function compiled into the same module; the per-function
     /// `FuncRef` is derived cheaply via `declare_func_in_func`.
     runtime_fns: HashMap<&'static str, FuncId>,
+    /// Interned-name ids for per-function / per-instruction dispatch
+    /// (`main` detection, call-form routing, the slot-out producer
+    /// chain). Resolved from the pool at the top of `compile_all` and
+    /// valid for the duration of that compilation; `Default` (all
+    /// `None`) only until the first compile.
+    name_ids: CodegenNameIds,
 }
 
 /// Overflow guard message for the spec §18 checked-arithmetic traps.
@@ -268,6 +352,15 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     int_type: types::Type,
     pool: &'a InternPool,
     tir: &'a Tir,
+    /// Whether the function being lowered is `main`, resolved by
+    /// `compile_function` from [`CodegenNameIds`]. The ReturnVoid arm
+    /// needs it to emit the C ABI's int-0 return.
+    is_main: bool,
+    /// Interned-name ids resolved once per compilation; the per-call
+    /// dispatch in `emit_call_slot`, the literal hoisting exclusion,
+    /// and the slot-out exclusion all compare `StringId` equality
+    /// against these.
+    name_ids: CodegenNameIds,
     /// Scalar binding name → Cranelift `Variable`. Dense table indexed
     /// by `StringId::raw()`, sized once per function from
     /// `pool.string_count()` (codegen never interns, so every name in
@@ -471,6 +564,7 @@ impl<M: Module> Codegen<M> {
             string_data: HashMap::new(),
             guard_msg_data: HashMap::new(),
             runtime_fns: HashMap::new(),
+            name_ids: CodegenNameIds::default(),
         }
     }
 }
@@ -526,127 +620,6 @@ impl Codegen<ObjectModule> {
             .finish()
             .emit()
             .map_err(|e| format!("Failed to emit object file: {}", e))
-    }
-}
-
-/// Every runtime symbol the JIT must resolve, with its address. This
-/// table is the single source of truth for JIT registration — the
-/// names must stay in sync with the string literals codegen passes to
-/// `declare_runtime_fn` (the module-level import cache is keyed on the
-/// same names). Functions whose bodies codegen now inlines (literal
-/// packing, slicing) are deliberately absent.
-fn runtime_symbols() -> [(&'static str, *const u8); 21] {
-    [
-        ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
-        ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
-        (
-            "__ryo_str_ensure_heap",
-            ryo_runtime::__ryo_str_ensure_heap as *const u8,
-        ),
-        (
-            "__ryo_bytes_ensure_heap",
-            ryo_runtime::__ryo_bytes_ensure_heap as *const u8,
-        ),
-        ("ryo_str_eq", ryo_runtime::ryo_str_eq as *const u8),
-        ("ryo_int_to_str", ryo_runtime::ryo_int_to_str as *const u8),
-        (
-            "ryo_str_from_view",
-            ryo_runtime::ryo_str_from_view as *const u8,
-        ),
-        (
-            "ryo_float_to_str",
-            ryo_runtime::ryo_float_to_str as *const u8,
-        ),
-        ("ryo_bool_to_str", ryo_runtime::ryo_bool_to_str as *const u8),
-        ("ryo_str_free", ryo_runtime::ryo_str_free as *const u8),
-        // M8.4.2 bytes family — names match the runtime's
-        // `#[unsafe(no_mangle)]` exports verbatim.
-        (
-            "ryo_bytes_concat",
-            ryo_runtime::ryo_bytes_concat as *const u8,
-        ),
-        (
-            "__ryo_bytes_push",
-            ryo_runtime::__ryo_bytes_push as *const u8,
-        ),
-        (
-            "__ryo_bytes_index",
-            ryo_runtime::__ryo_bytes_index as *const u8,
-        ),
-        ("ryo_bytes_eq", ryo_runtime::ryo_bytes_eq as *const u8),
-        (
-            "ryo_bytes_from_view",
-            ryo_runtime::ryo_bytes_from_view as *const u8,
-        ),
-        (
-            "__ryo_bytes_to_str",
-            ryo_runtime::__ryo_bytes_to_str as *const u8,
-        ),
-        (
-            "__ryo_str_to_bytes",
-            ryo_runtime::__ryo_str_to_bytes as *const u8,
-        ),
-        (
-            "__ryo_bytes_repr",
-            ryo_runtime::__ryo_bytes_repr as *const u8,
-        ),
-        ("ryo_bytes_free", ryo_runtime::ryo_bytes_free as *const u8),
-        ("ryo_print", ryo_runtime::ryo_print as *const u8),
-        ("ryo_panic", ryo_runtime::ryo_panic as *const u8),
-    ]
-}
-
-impl Codegen<JITModule> {
-    pub fn new_jit() -> Result<Self, String> {
-        // opt_level=speed: run the egraph optimization pipeline (constant
-        // folding, algebraic simplification, GVN/LICM) like the AOT path.
-        // enable_verifier: debug builds and tests only, same rationale as
-        // `aot_shared_flags`.
-        let mut jit_builder = JITBuilder::with_flags(
-            &[
-                ("opt_level", "speed"),
-                (
-                    "enable_verifier",
-                    if cfg!(debug_assertions) {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                ),
-            ],
-            cranelift_module::default_libcall_names(),
-        )
-        .map_err(|e| format!("Failed to create JIT builder: {}", e))?;
-
-        // Register runtime symbols so the JIT can resolve them.
-        jit_builder.symbols(runtime_symbols());
-
-        Ok(Self::from_module(JITModule::new(jit_builder)))
-    }
-
-    pub fn execute(mut self, main_id: FuncId) -> Result<i32, String> {
-        self.module
-            .finalize_definitions()
-            .map_err(|e| format!("Failed to finalize JIT definitions: {}", e))?;
-
-        let code_ptr = self.module.get_finalized_function(main_id);
-        // SAFETY (R5 exception): `code_ptr` was finalized by
-        // cranelift-jit for this module above, and the compiled entry point
-        // has the `extern "C" fn() -> isize` signature we emit for `main`
-        // (Cranelift's default CallConv is the platform C ABI; Rust's own
-        // ABI is unspecified, so the cast must name extern "C").
-        #[allow(unsafe_code)]
-        let main_fn: extern "C" fn() -> isize = unsafe { std::mem::transmute(code_ptr) };
-        let result = main_fn();
-
-        // SAFETY (R5 exception): execution finished above; freeing the
-        // module's memory cannot invalidate any live code.
-        #[allow(unsafe_code)]
-        unsafe {
-            self.module.free_memory();
-        }
-
-        Ok(result as i32)
     }
 }
 
@@ -770,13 +743,14 @@ impl<M: Module> Codegen<M> {
     ) -> Result<(FuncId, String), String> {
         let (func_ids, ir_output) = self.compile_all(tirs, pool, sidecar, dump_ir)?;
 
-        // Resolve "main" through the pool. `astgen` always interns
-        // the string "main" (it does so explicitly when synthesising
-        // implicit-main and when checking for an explicit-main
-        // collision), so the read-only `find_str` probe is
-        // guaranteed to hit if the program declares one.
-        let main_id = pool
-            .find_str("main")
+        // Resolve "main" through the id cache `compile_all` built.
+        // `astgen` always interns the string "main" (it does so
+        // explicitly when synthesising implicit-main and when checking
+        // for an explicit-main collision), so the read-only `find_str`
+        // probe is guaranteed to hit if the program declares one.
+        let main_id = self
+            .name_ids
+            .main
             .ok_or_else(|| "No main function defined".to_string())?;
         let main = func_ids
             .get(&main_id)
@@ -801,7 +775,8 @@ impl<M: Module> Codegen<M> {
     /// Shared driver for `compile` / `compile_and_dump_ir`: declare
     /// all functions, then lower each body. `dump_ir` gates the
     /// per-function CLIF pretty-print so only the dump paths pay for
-    /// it.
+    /// it. Resolves [`CodegenNameIds`] once, up front, and stores it
+    /// on `self` for the declaration and per-function lowering below.
     fn compile_all(
         &mut self,
         tirs: &[Tir],
@@ -813,6 +788,7 @@ impl<M: Module> Codegen<M> {
             bytes::no_unreachable_in(tirs),
             "codegen requires sema to have produced TIR with no Unreachable instructions"
         );
+        self.name_ids = CodegenNameIds::resolve(pool);
         let func_ids = self.prepare_compilation(tirs, pool)?;
 
         let mut ir_output = String::new();
@@ -834,9 +810,10 @@ impl<M: Module> Codegen<M> {
     ) -> Result<DeclaredFunctions, String> {
         let mut func_ids = HashMap::new();
         for tir in tirs {
-            let sig = self.build_signature(tir, pool);
+            let is_main = self.name_ids.main == Some(tir.name);
+            let sig = self.build_signature(tir, pool, is_main);
             let name_str = pool.str(tir.name);
-            let linkage = if name_str == "main" {
+            let linkage = if is_main {
                 Linkage::Export
             } else {
                 Linkage::Local
@@ -852,7 +829,7 @@ impl<M: Module> Codegen<M> {
         Ok(func_ids)
     }
 
-    fn build_signature(&self, tir: &Tir, pool: &InternPool) -> Signature {
+    fn build_signature(&self, tir: &Tir, pool: &InternPool, is_main: bool) -> Signature {
         let mut sig = self.module.make_signature();
         for param in &tir.params {
             if param.mode == ParamMode::Inout {
@@ -877,13 +854,24 @@ impl<M: Module> Codegen<M> {
                 sig.params.push(AbiParam::new(cl_ty));
             }
         }
-        // C-ABI shim for `main`: Ryo's `fn main()` is void, but the
-        // host C runtime (crt0 via zig cc, or our JIT trampoline)
-        // calls `main` as `int main()`. Always emit an int-returning
-        // signature for `main`; `compile_function` falls through to
-        // an explicit `return 0` when Ryo's return type is void.
-        let is_main = pool.str(tir.name) == "main";
+        // C-ABI shim for `main`: Ryo's `fn main()` is void and takes no
+        // Ryo params (sema rejects a parametrized main), but the host
+        // C runtime (crt0 via zig cc, or our JIT trampoline) enters
+        // `main` with C's `(argc, argv)`. C's argc is a 32-bit `int`,
+        // but the Cranelift ABI word is pointer-sized (`i64`): works on
+        // x86-64/aarch64/Windows because a 32-bit argument arrives
+        // zero-extended in its register, so the low half the C side
+        // reads is exact. Push the two entry params — argc, then argv,
+        // in C order — before the int return word; `compile_function`
+        // reads them from the entry block to call `ryo_rt_init`, and
+        // falls through to an explicit `return 0` since Ryo's return
+        // type is void.
+        // `is_main` is resolved by `declare_all_functions` from the
+        // interned-id cache.
         if is_main {
+            sig.params.push(AbiParam::new(self.int_type));
+            sig.params
+                .push(AbiParam::new(self.module.isa().pointer_type()));
             sig.returns.push(AbiParam::new(self.int_type));
         } else if tir.return_type != pool.void() {
             if is_fat_type(tir.return_type, pool)
@@ -911,6 +899,10 @@ impl<M: Module> Codegen<M> {
         sidecar_index: usize,
         dump_ir: bool,
     ) -> Result<String, String> {
+        // Interned-name ids for this compilation (resolved by
+        // `compile_all`); copied out so the block below can read them
+        // while `builder` holds mutable borrows of `self`.
+        let ids = self.name_ids;
         let (func_id, sig) = func_ids
             .get(&tir.name)
             .ok_or_else(|| format!("Function '{}' not declared", pool.str(tir.name)))?;
@@ -958,10 +950,14 @@ impl<M: Module> Codegen<M> {
             builder.seal_block(entry_block);
 
             let int_type = self.int_type;
+            // The Cranelift pointer type, for the hosted-main argv
+            // entry param and the `ryo_rt_init` call. Read before the
+            // `ctx` borrow of `self.module` below.
+            let pointer_type = self.module.target_config().pointer_type();
             let mut locals: Vec<Option<Variable>> = vec![None; pool.string_count()];
             let mut locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
 
-            let is_main = pool.str(tir.name) == "main";
+            let is_main = ids.main == Some(tir.name);
             let returns_fat = !is_main && is_fat_type(tir.return_type, pool);
             let returns_struct = !is_main && matches!(pool.kind(tir.return_type), TypeKind::Struct);
             let has_sret = returns_fat || returns_struct;
@@ -1115,7 +1111,7 @@ impl<M: Module> Codegen<M> {
             let pending_sweep: Vec<usize> = (0..func_sidecar.free_schedule.len()).collect();
             let (free_binding_names, free_binding_param_names, binding_last_write) =
                 Self::build_free_binding_names(tir, pool);
-            let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, pool);
+            let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, pool, &ids);
 
             let mut promo_free_by_after: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
             for (idx, pf) in func_sidecar.promotion_frees.iter().enumerate() {
@@ -1148,6 +1144,8 @@ impl<M: Module> Codegen<M> {
                 int_type,
                 pool,
                 tir,
+                is_main,
+                name_ids: ids,
                 locals,
                 locals_undo,
                 range_facts: vec![None; pool.string_count()],
@@ -1238,6 +1236,35 @@ impl<M: Module> Codegen<M> {
                 let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
                 let zero = builder.ins().iconst(types::I64, 0);
                 builder.ins().store(MemFlagsData::trusted(), zero, addr, 0);
+            }
+
+            // Entry shim for hosted `main`: publish the C runtime's
+            // (argc, argv) to the runtime before the first user
+            // instruction. Entry-block params 0/1 are argc/argv — the
+            // `is_main` signature branch appends them after (an empty)
+            // Ryo param list, and sema rejects a parametrized main.
+            // Hoisted literals and the body follow this call, so it
+            // dominates every `process_argc`/`process_argv` read.
+            if is_main {
+                // Copy the params out: `block_params` borrows the
+                // builder, which the `call` below needs mutably.
+                let entry_params = builder.block_params(entry_block);
+                let (argc, argv) = (entry_params[0], entry_params[1]);
+                // Declared argc is `i64`, but `ryo_rt_init` takes
+                // `c_int` — sound in this call direction: the callee
+                // reads the low 32 bits of the (zero-extended)
+                // register, and argc is small and non-negative. Don't
+                // "fix" the runtime side to `i64`: reading the full
+                // 64 bits would trust upper bits the C ABI leaves
+                // unspecified.
+                let rt_init = Self::declare_runtime_fn(
+                    &mut ctx,
+                    &mut builder,
+                    "ryo_rt_init",
+                    &[int_type, pointer_type],
+                    &[],
+                )?;
+                builder.ins().call(rt_init, &[argc, argv]);
             }
 
             // Hoist string and bytes literals while the entry block is
@@ -1464,7 +1491,8 @@ impl<M: Module> Codegen<M> {
                     // writes the home directly (and the home-provenance
                     // free elision applies) instead of paying a temp
                     // slot + triple store at every reassign.
-                    let produces_slot = writes_out_slot(ctx.tir, ctx.pool, view.initializer);
+                    let produces_slot =
+                        writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.initializer);
                     let home = if produces_slot || view.mutable {
                         Some(builder.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
@@ -1612,8 +1640,7 @@ impl<M: Module> Codegen<M> {
             TirTag::ReturnVoid => {
                 // Bare `return` in a void function. If this is
                 // `main`, the C ABI demands an int return value.
-                let is_main = ctx.pool.str(ctx.tir.name) == "main";
-                if is_main {
+                if ctx.is_main {
                     let zero = builder.ins().iconst(ctx.int_type, 0);
                     Self::emit_due_frees(builder, ctx, r)?;
                     Self::emit_due_promo_frees(builder, ctx, r)?;
@@ -1680,7 +1707,7 @@ impl<M: Module> Codegen<M> {
                     // free-then-store order instead — freeing first
                     // would be a use-after-free.
                     let direct = locals.home.is_some()
-                        && writes_out_slot(ctx.tir, ctx.pool, view.value)
+                        && writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.value)
                         && !Self::expr_refs_name(ctx.tir, view.value, view.name);
                     let mut old_freed = false;
                     // Elision, same predicate as the scheduled-free

@@ -891,6 +891,157 @@ fn test_ensure_heap_noop_for_heap_and_static() {
     unsafe { ryo_str_free(p, 32) };
 }
 
+/// Combined argv test (M9.2): ARGC/ARGV are the runtime's first
+/// process-wide mutable globals, so every argv test lives in this ONE
+/// test fn — parallel cargo-test threads would otherwise race on them.
+///
+/// Besides the storage roundtrip (below), this fn guards the
+/// publication contract of those globals: a reader thread spins on
+/// ARGC (Acquire) and dereferences ARGV (Acquire) while a writer
+/// thread publishes through `ryo_rt_init` (data-then-flag Release).
+/// Normal runs only exercise the threads — the race is undetectable
+/// without weak-memory emulation — but under Miri each
+/// `MIRIFLAGS=-Zmiri-seed` explores different interleavings, and the
+/// test fails if the publish order is ever inverted or the Acquire
+/// pairing breaks. The Miri CI job sweeps a small seed range.
+///
+/// The out-of-range panic path terminates the process, so it is
+/// asserted via a subprocess: this test binary re-executes itself with
+/// `RYO_RT_ARGV_PANIC_CHILD=1`, and the flag gates the diverging call
+/// at the top of THIS test. The child never runs its init, so ARGC is
+/// 0 and the read is trivially out of range; the parent asserts the
+/// child's exit code 101 and stderr message.
+#[test]
+fn argv_storage_roundtrip() {
+    use alloc::ffi::CString;
+
+    // Child mode: diverge before the roundtrip below.
+    if std::env::var_os("RYO_RT_ARGV_PANIC_CHILD").is_some() {
+        // The parent parameterizes the failing index so both the
+        // too-large and the negative paths get their own child run.
+        let index: i64 = std::env::var("RYO_RT_ARGV_PANIC_INDEX")
+            .expect("child index")
+            .parse()
+            .expect("child index parses");
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot. ryo_rt_init never ran in the child,
+        // so ARGC is 0 and the index is trivially out of range — this
+        // must write the panic message to stderr and exit 101, never
+        // returning.
+        unsafe { ryo_process_argv(index, &mut slot) };
+        panic!("ryo_process_argv({index}) returned; out-of-range must diverge");
+    }
+
+    // Publication-contract guard: reset the globals, then race a
+    // reader against ryo_rt_init's ARGV-then-ARGC stores.
+    ARGC.store(0, core::sync::atomic::Ordering::Release);
+    ARGV.store(core::ptr::null_mut(), core::sync::atomic::Ordering::Release);
+    let probe = CString::new("probe").expect("CString");
+    let probe_argv = [probe.as_ptr()];
+    // Raw pointers are not Send; the address as usize is. Provenance is
+    // re-established by the cast inside the writer, where the SAFETY
+    // comment covers it.
+    let probe_argv_addr = probe_argv.as_ptr() as usize;
+    let reader = std::thread::spawn(move || {
+        loop {
+            if ARGC.load(core::sync::atomic::Ordering::Acquire) == 1 {
+                // Acquire pairs with the writer's Release: passing the ARGC
+                // check must force this load to see the stored pointer.
+                // ARGV holds the C argv table (a char** stored through an
+                // AtomicPtr<c_char>, same as ryo_process_argv reads it).
+                let table = ARGV.load(core::sync::atomic::Ordering::Acquire)
+                    as *const *const core::ffi::c_char;
+                // SAFETY: the contract under test — once ARGC is 1, `table`
+                // must be the pointer ryo_rt_init stored, never stale/null.
+                // Miri flags the dereference if the ordering ever lets a
+                // stale table through.
+                let s = unsafe { *table };
+                // SAFETY: s is the NUL-terminated C string published via
+                // ryo_rt_init; `probe` outlives the join below.
+                return unsafe { *s };
+            }
+            std::thread::yield_now();
+        }
+    });
+    let writer = std::thread::spawn(move || {
+        // SAFETY: the address came from `probe_argv`, a 1-element table
+        // of a readable NUL-terminated C string (`probe`) that outlives
+        // the call (both threads are joined before `probe` drops).
+        let argv = probe_argv_addr as *const *const core::ffi::c_char;
+        unsafe { ryo_rt_init(1, argv) };
+    });
+    writer.join().expect("publication writer");
+    let first = reader.join().expect("publication reader");
+    assert_eq!(first as u8, b'p');
+
+    let a = CString::new("a").expect("CString");
+    let b = CString::new("b").expect("CString");
+    let c = CString::new("c").expect("CString");
+    let argv = [a.as_ptr(), b.as_ptr(), c.as_ptr()];
+    // SAFETY: argv points to 3 readable NUL-terminated C strings; the
+    // CStrings outlive every ryo_process_argv call below (they model
+    // the C runtime's process-lifetime ownership of the real argv).
+    unsafe { ryo_rt_init(3, argv.as_ptr()) };
+
+    // SAFETY: no other test fn touches these atomics (see fn doc).
+    assert_eq!(unsafe { ryo_process_argc() }, 3);
+
+    let mut slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    for (i, want) in [(0i64, &b"a"[..]), (1, &b"b"[..]), (2, &b"c"[..])] {
+        // SAFETY: valid out-slot; i < argc (3), in range.
+        unsafe { ryo_process_argv(i, &mut slot) };
+        assert!(is_inline(slot.cap));
+        assert_eq!(slot_content(&slot), want);
+    }
+
+    // Out-of-range: the re-exec'd child terminates with the panic
+    // message and exit 101 — run once for a too-large index and once
+    // for a negative one (the Ryo index is a signed int). Skipped
+    // under Miri: its isolation mode cannot spawn processes. The
+    // in-process roundtrip above still runs under Miri, so the new
+    // unsafe read path keeps its UB/leak coverage.
+    if !cfg!(miri) {
+        let run_child = |index: &str| {
+            let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+                .arg("tests::argv_storage_roundtrip")
+                .arg("--exact")
+                .env("RYO_RT_ARGV_PANIC_CHILD", "1")
+                .env("RYO_RT_ARGV_PANIC_INDEX", index)
+                .output()
+                .expect("spawn argv panic child");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(101),
+                "out-of-range process_argv({index}) must exit 101. stderr: {stderr}"
+            );
+            assert!(
+                stderr.contains("process_argv index out of range"),
+                "child stderr should carry the panic message, got: {stderr}"
+            );
+            stderr.into_owned()
+        };
+        let stderr = run_child("3");
+        assert!(
+            stderr.contains(": 3"),
+            "child stderr should name the failing index 3, got: {stderr}"
+        );
+        let stderr = run_child("-1");
+        assert!(
+            stderr.contains(": -1"),
+            "child stderr should name the failing index -1, got: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn test_free_inline_str_is_noop() {
     // An inline slot's ptr word is byte data, NOT a heap pointer;
@@ -905,4 +1056,236 @@ fn test_free_inline_str_is_noop() {
     // SAFETY: tagged inline slot; free must recognize the tag.
     unsafe { ryo_str_free(slot.ptr, slot.cap) };
     assert!(is_inline(slot.cap)); // slot untouched
+}
+
+// ---------- io_read_line (M9.2) ----------
+
+/// Write `content` to a fresh temp file and rewind it. Returns the open
+/// file (its fd readable from the start) and the path for cleanup.
+/// `tempfile` is intentionally not a dev-dependency: a pid + counter
+/// name in the system temp dir is enough, and Miri's isolated FS
+/// already permits TMPDIR.
+///
+/// Windows is excluded: `_read` needs a CRT file descriptor, which a
+/// std `File` does not expose (`as_raw_handle` is a HANDLE).
+#[cfg(not(windows))]
+fn temp_file_with(content: &[u8]) -> (std::fs::File, std::path::PathBuf) {
+    use std::io::{Seek, SeekFrom, Write};
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "ryo_rt_read_line_{}_{}.tmp",
+        std::process::id(),
+        N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    ));
+    // OpenOptions, not File::create: the fd must be readable —
+    // File::create is write-only (O_WRONLY) and read would fail EBADF.
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .expect("create temp file");
+    f.write_all(content).expect("write temp file");
+    f.seek(SeekFrom::Start(0)).expect("rewind temp file");
+    (f, path)
+}
+
+/// A line terminated by `\n` comes back without it — and the read
+/// stops at the newline, leaving later bytes unread.
+#[cfg(not(windows))]
+#[test]
+fn read_line_strips_trailing_newline() {
+    // Miri's isolation mode forbids `open` (temp_file_with), so the
+    // fd-parameterized path is verified by the normal runs only; the
+    // in-process read logic itself has no unsafe isolation conflicts.
+    if cfg!(miri) {
+        return;
+    }
+    use std::os::unix::io::AsRawFd;
+
+    let (file, path) = temp_file_with(b"hello\nrest");
+    let mut slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    // SAFETY: valid out-slot; the file's fd is open and readable.
+    unsafe { read_line_from(file.as_raw_fd(), &mut slot) };
+    assert!(is_inline(slot.cap));
+    assert_eq!(slot_content(&slot), b"hello");
+    drop(file);
+    std::fs::remove_file(&path).expect("remove temp file");
+}
+
+/// EOF after partial bytes returns the final unterminated line as-is.
+/// 300 bytes with no '\n' forces several `read` calls and buffer
+/// growth past the 128-byte initial cap — the result must still come
+/// back complete (heap slot, freed here).
+#[cfg(not(windows))]
+#[test]
+fn read_line_unterminated_final_line_is_returned_as_is() {
+    // See read_line_strips_trailing_newline: Miri isolation forbids
+    // the temp-file open.
+    if cfg!(miri) {
+        return;
+    }
+    use std::os::unix::io::AsRawFd;
+
+    let content = [b'x'; 300];
+    let (file, path) = temp_file_with(&content);
+    let mut slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    // SAFETY: valid out-slot; the file's fd is open and readable.
+    unsafe { read_line_from(file.as_raw_fd(), &mut slot) };
+    assert!(!is_inline(slot.cap));
+    assert_eq!(slot.len, 300);
+    assert_eq!(slot_content(&slot), &content);
+    // SAFETY: heap slot produced above; cap is its allocation size.
+    unsafe { ryo_str_free(slot.ptr, slot.cap) };
+    drop(file);
+    std::fs::remove_file(&path).expect("remove temp file");
+}
+
+/// EOF before any byte yields the empty slot — the io_read_line
+/// contract maps EOF to "", not to an error.
+#[cfg(not(windows))]
+#[test]
+fn read_line_empty_file_yields_empty_slot() {
+    // See read_line_strips_trailing_newline: Miri isolation forbids
+    // the temp-file open (and even reads from stdin — only stdout /
+    // stderr writes are permitted), so this path has no Miri coverage;
+    // ASan/Valgrind and the normal runs carry it.
+    if cfg!(miri) {
+        return;
+    }
+    use std::os::unix::io::AsRawFd;
+
+    let (file, path) = temp_file_with(b"");
+    let mut slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    // SAFETY: valid out-slot; the file's fd is open at EOF, so the
+    // first read returns 0.
+    unsafe { read_line_from(file.as_raw_fd(), &mut slot) };
+    assert!(is_inline(slot.cap));
+    assert_eq!(inline_len(slot.cap), 0);
+    assert_eq!(slot_content(&slot), b"");
+    drop(file);
+    std::fs::remove_file(&path).expect("remove temp file");
+}
+
+/// Combined env test (M9.2): `std::env::set_var`/`remove_var` mutate the
+/// process-wide environment, which parallel cargo-test threads could
+/// observe mid-mutation, so every ryo_getenv case lives in this ONE test
+/// fn.
+///
+/// The over-long-key panic path terminates the process, so it is
+/// asserted via a subprocess: this test binary re-executes itself with
+/// `RYO_RT_ENV_PANIC_CHILD=1`, and the flag gates the diverging call at
+/// the top of THIS test. The parent asserts the child's exit code 101
+/// and stderr message.
+#[test]
+fn getenv_present_unset_and_long_key() {
+    use alloc::ffi::CString;
+
+    // Child mode: diverge before the cases below.
+    if std::env::var_os("RYO_RT_ENV_PANIC_CHILD").is_some() {
+        let long_key = [b'k'; 4097]; // one past the 4096-byte cap
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; long_key is readable for 4097 bytes —
+        // past the cap, so this must write the panic message to stderr
+        // and exit 101, never returning.
+        unsafe { ryo_getenv(long_key.as_ptr(), long_key.len() as u64, &mut slot) };
+        panic!("ryo_getenv with a 4097-byte key returned; over-long key must diverge");
+    }
+
+    // Present key: skipped on Windows — std::env::set_var writes via
+    // SetEnvironmentVariableW, which the CRT's getenv snapshot (taken
+    // at process start) never sees; the documented narrow-getenv
+    // placeholder limitation (M16's process.env switches to the wide
+    // API). The integration test covers the real path there via env
+    // inherited at spawn. Unix setenv updates the CRT environ, so the
+    // present case runs in-process.
+    if !cfg!(windows) {
+        const PRESENT: &str = "RYO_RT_GETENV_PRESENT";
+        const VALUE: &str = "ryo-env-value";
+        // SAFETY: the combined-fn rule keeps every env mutation in this
+        // binary in this one thread, and no other test reads these
+        // sentinel keys.
+        unsafe { std::env::set_var(PRESENT, VALUE) };
+
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        let key = CString::new(PRESENT).expect("CString");
+        // SAFETY: key's bytes are readable for their length (a C string is
+        // readable up to and including its NUL); slot is a valid out-slot.
+        // The variable is set above.
+        unsafe {
+            ryo_getenv(
+                key.as_bytes().as_ptr(),
+                key.as_bytes().len() as u64,
+                &mut slot,
+            )
+        };
+        assert_eq!(slot_content(&slot), VALUE.as_bytes());
+
+        // SAFETY: same single-thread argument as set_var above.
+        unsafe { std::env::remove_var(PRESENT) };
+    }
+
+    // Unset variable: the M16 placeholder contract — empty string,
+    // never a dangling or garbage slot.
+    let unset = CString::new("RYO_RT_GETENV_DEFINITELY_UNSET").expect("CString");
+    let mut unset_slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    // SAFETY: same contracts; the variable does not exist, so the slot
+    // must come back empty.
+    unsafe {
+        ryo_getenv(
+            unset.as_bytes().as_ptr(),
+            unset.as_bytes().len() as u64,
+            &mut unset_slot,
+        )
+    };
+    assert_eq!(slot_content(&unset_slot), b"");
+
+    // Over-long key: the re-exec'd child terminates with the panic
+    // message and exit 101. Skipped under Miri: its isolation mode
+    // cannot spawn processes. The in-process cases above still run
+    // under Miri, so the new unsafe read path keeps its
+    // UB/leak coverage.
+    if !cfg!(miri) {
+        let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+            .arg("tests::getenv_present_unset_and_long_key")
+            .arg("--exact")
+            .env("RYO_RT_ENV_PANIC_CHILD", "1")
+            .output()
+            .expect("spawn env panic child");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(101),
+            "over-long process_env key must exit 101. stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("process_env key too long"),
+            "child stderr should carry the panic message, got: {stderr}"
+        );
+    }
 }

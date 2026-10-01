@@ -3,7 +3,7 @@
 use super::{FuncCtx, Scope, Sema, check_call};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
-use ryo_core::types::{TypeId, TypeKind, ViewKind};
+use ryo_core::types::{StringId, TypeId, TypeKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag, Span, Uir};
 
 /// Expression-position analysis. A `never`-typed result (e.g. a
@@ -224,7 +224,7 @@ pub(crate) fn analyze_expr_allow_never(
             let view = sema.uir.method_call_view(r);
             let receiver_tir = analyze_expr(sema, fcx, scope, view.receiver);
             let receiver_ty = fcx.builder.ty_of(receiver_tir);
-            let method_name = sema.pool.str(view.name).to_string();
+            let ids = sema.names;
 
             for &arg in &view.args {
                 analyze_expr(sema, fcx, scope, arg);
@@ -246,8 +246,8 @@ pub(crate) fn analyze_expr_allow_never(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
 
-            match method_name.as_str() {
-                "len" => {
+            match view.name {
+                n if n == ids.len => {
                     if !view.args.is_empty() {
                         sema.sink.emit(Diag::error(
                             span,
@@ -266,7 +266,7 @@ pub(crate) fn analyze_expr_allow_never(
                         span,
                     )
                 }
-                "is_empty" => {
+                n if n == ids.is_empty => {
                     if !view.args.is_empty() {
                         sema.sink.emit(Diag::error(
                             span,
@@ -288,16 +288,20 @@ pub(crate) fn analyze_expr_allow_never(
                     fcx.builder
                         .binary(TirTag::ICmpEq, sema.pool.bool_(), len_tir, zero, span)
                 }
-                "to_str" | "to_bytes" => bridge_method_call(
+                n if n == ids.to_str || n == ids.to_bytes => bridge_method_call(
                     sema,
                     fcx,
-                    &method_name,
+                    if n == ids.to_str {
+                        "to_str"
+                    } else {
+                        "to_bytes"
+                    },
                     view.args.is_empty(),
                     receiver_tir,
                     receiver_ty,
                     span,
                 ),
-                "as_bytes" => as_bytes_projection(
+                n if n == ids.as_bytes => as_bytes_projection(
                     sema,
                     fcx,
                     view.args.is_empty(),
@@ -305,18 +309,7 @@ pub(crate) fn analyze_expr_allow_never(
                     receiver_ty,
                     span,
                 ),
-                _ => {
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::UndefinedFunction,
-                        format!(
-                            "{} has no method '{}'",
-                            sema.pool.display(receiver_ty),
-                            method_name
-                        ),
-                    ));
-                    fcx.builder.unreachable(sema.pool.error_type(), span)
-                }
+                _ => unknown_method_error(sema, fcx, span, receiver_ty, view.name),
             }
         }
         InstTag::Slice => {
@@ -625,6 +618,29 @@ fn field_list(pool: &ryo_core::types::InternPool, sview: &ryo_core::types::Struc
         .map(|f| format!("'{}'", pool.str(f.name)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Unknown receiver method: the generalized "X has no method 'Y'"
+/// diagnostic (M8.4 family). The name string is materialized only on
+/// this cold path — the dispatch itself compares interned ids.
+fn unknown_method_error(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    span: Span,
+    receiver_ty: TypeId,
+    name_id: StringId,
+) -> TirRef {
+    let name = sema.pool.str(name_id);
+    sema.sink.emit(Diag::error(
+        span,
+        DiagCode::UndefinedFunction,
+        format!(
+            "{} has no method '{}'",
+            sema.pool.display(receiver_ty),
+            name
+        ),
+    ));
+    fcx.builder.unreachable(sema.pool.error_type(), span)
 }
 
 /// M8.4.2 bridging methods: `bytes`/`bytesview`.to_str() lowers to

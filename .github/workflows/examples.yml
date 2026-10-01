@@ -69,6 +69,16 @@ jobs:
               else
                 echo "Expected panic occurred successfully"
               fi
+            elif [[ "$file" == *"oracle.ryo" ]]; then
+              # oracle.ryo is interactive (argv + io_read_line): with a name
+              # and closed stdin it asks one question, then takes the EOF
+              # exit (io_eprint + process_exit(1))
+              if ./target/release/ryo run "$file" ci-smoke </dev/null; then
+                echo "Error: $file was expected to exit non-zero on EOF but succeeded"
+                exit 1
+              else
+                echo "Expected EOF exit occurred successfully"
+              fi
             else
               # Expect other examples to succeed with 0
               ./target/release/ryo run "$file"

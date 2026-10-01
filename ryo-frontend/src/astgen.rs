@@ -69,9 +69,17 @@ impl Primitives {
 /// Primitive names win over struct names, mirroring the historical
 /// behavior where only primitives resolved — a struct named `int`
 /// stays shadowed by the primitive.
+///
+/// Also carries the pre-interned `StringId`s for the structural name
+/// probes lowering runs per function / per loop — the `main`
+/// signature check and the `range` iterator check — so those compare
+/// `StringId` equality instead of re-probing the pool (see
+/// `Primitives` for the same pattern on type names).
 struct TypeResolver {
     prims: Primitives,
     struct_types: HashMap<StringId, TypeId>,
+    main: StringId,
+    range: StringId,
 }
 
 impl TypeResolver {
@@ -149,6 +157,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
     let mut top_level: Vec<ast::StmtId> = Vec::new();
 
     let main_id = pool.intern_str("main");
+    let range_id = pool.intern_str("range");
 
     // Pre-scan (M9): declare every top-level struct before any field
     // type is resolved, so field annotations can name structs
@@ -192,6 +201,8 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
     let types = TypeResolver {
         prims: Primitives::new(pool),
         struct_types,
+        main: main_id,
+        range: range_id,
     };
 
     // Define DFS with cycle detection (M9): a struct's field types
@@ -255,7 +266,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         // User-defined helper functions still appear above;
         // without this, calls to them in top-level code would
         // dangle as "undefined function" errors in sema.
-        gen_implicit_main(&mut b, program, &top_level, main_id, &types, pool, sink);
+        gen_implicit_main(&mut b, program, &top_level, &types, pool, sink);
     }
 
     b.finish()
@@ -416,7 +427,6 @@ fn gen_implicit_main(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     stmts: &[ast::StmtId],
-    main_id: StringId,
     types: &TypeResolver,
     pool: &mut InternPool,
     sink: &mut DiagSink,
@@ -432,7 +442,7 @@ fn gen_implicit_main(
     }
 
     let void_ty = pool.void();
-    b.add_function(main_id, vec![], void_ty, &body_stmts, synthetic_span());
+    b.add_function(types.main, vec![], void_ty, &body_stmts, synthetic_span());
 }
 
 fn gen_function_def(
@@ -468,9 +478,9 @@ fn gen_function_def(
     // `fn main()` must be `fn main():` — no args, no return type.
     // Non-zero exit codes go through the future `exit(code)`
     // builtin (M24); main is always void in v0.1 and the C-ABI
-    // shim emitted by codegen returns 0 to the OS.
-    let main_id = pool.find_str("main");
-    if Some(func.name.name) == main_id {
+    // shim emitted by codegen returns 0 to the OS. `types.main` is
+    // interned once by `generate`; the probe is a `StringId` compare.
+    if func.name.name == types.main {
         if !func.params.is_empty() {
             sink.emit(Diag::error(
                 func.name.span,
@@ -602,7 +612,10 @@ fn gen_stmt(
             end,
             body,
         } => {
-            if pool.str(iterator.name) != "range" {
+            // `types.range` is interned once by `generate`; the
+            // per-loop probe is a `StringId` compare (the `pool.str`
+            // survives only in the diagnostic).
+            if iterator.name != types.range {
                 sink.emit(Diag::error(
                     iterator.span,
                     DiagCode::ParseError,

@@ -28,6 +28,14 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ## 🟡 Correctness / Hygiene
 
+### I-201 — Process-wide argv state has no isolation contract; concurrent hosted executions can mix generations
+
+**Files:** `runtime/src/lib.rs` (ARGC/ARGV globals, `ryo_rt_init`, `ryo_process_argc`, `ryo_process_argv`), `ryo-backend/src/codegen/mod.rs` (entry shim emitting the init call), `ryo-backend/src/codegen/jit.rs` (trampoline and runtime symbol table)
+
+**Summary:** The M9.2 argv state is process-wide: two atomics (`ARGC: AtomicIsize`, `ARGV: AtomicPtr<c_char>`) written by `ryo_rt_init` at hosted-`main` entry and read by the `process_argc`/`process_argv` intrinsics. The single-writer contract ("init exactly once, before any read") is enforced only by documentation. A second `ryo_rt_init` overlapping an active reader can interleave — `ARGC` from the newer call, `ARGV` from the older — and because the table is borrowed rather than copied, a count/table generation mix indexes past the older table's bounds and hands the out-of-bounds slot to `strlen`, which then scans arbitrary host memory. The Release/Acquire publication pair (data-then-flag) is verified by a threaded Miri test but only covers a single publication; it says nothing about re-init or cross-execution lifetime. Today's execution shapes never overlap hosted runs in one process (the `ryo run` CLI runs one program per process; AOT is one per process), so the exposure is conditional — but it gates the planned core/embedding flavour, where a host running multiple scripted executions per process is the entire point. Raised by the M9.2 PR's security-architecture review; no supported entry point can trigger it today. Same host-policy bucket, for the same future flavour: `process_env` reads the host environment with no allowlist (intentional capability in the CLI model), and the interim `io_read_line` accumulates stdin with no line-length cap — both need an explicit host-data/resource policy for untrusted embedding.
+
+**Resolution:** Before the embedding flavour ships, give hosted execution an explicit isolation contract. Cheapest sound option: whole-execution serialization — an execution-scoped init/exit handshake around the hosted run, with init aborting or blocking while a run is active (for the CLI, exit clears it, keeping sequential runs cheap). The per-execution-context alternative (thread a handle through the trampoline and store argv per execution) is a larger ABI change to the intrinsics' zero-arg signatures. Release/Acquire publication stays as the intra-run init contract either way. Decide the env and stdin policy in the same design: a curated environ/allowlist for `process_env`, and a line cap for `io_read_line` (the cap also belongs to M13.6's buffering work).
+
 ### I-199 — Same-name shadow + taken branch reseat: invalid free and leak (heap strings)
 
 **Files:** `ryo-frontend/src/ownership/` (schedule), `ryo-backend/src/codegen/` (scoped-home restore + binding-path redirect)
@@ -115,12 +123,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-core/src/ast.rs` (`Literal`, `Expression`, `Statement`, `Program`, `StmtKind`, `ExprKind`, `VarDecl`, `FunctionDef`)
 **Summary:** `Literal::Float(f64)` cannot derive `Eq` (NaN ≠ NaN), and `Eq` derivation propagates up the containment chain, so every AST struct that transitively holds a `Literal` had to drop the `Eq` derive. No consumer hashes or `Eq`-compares AST nodes today, so the change is currently invisible.
 **Resolution:** If a future pass needs `HashMap<Expression, _>` or similar, introduce a `FloatBits(u64)` newtype that derives `Eq + Hash` on the bit pattern and *also* implements `PartialEq` with IEEE semantics. Wrap `f64` inside `Literal::Float` with it. Until then, leave the derives off.
-
-### I-034 — Builtin name comparison uses string compare instead of interned ID
-
-**Files:** `ryo-frontend/src/sema/call.rs` (`check_call`), `ryo-frontend/src/sema/builtins.rs` (`emit_builtin_call`)
-**Summary:** `sema.pool.str(name_id) == "assert"` (and similar for `"panic"`, `"print"`) does a string dereference and byte comparison on every `check_call` invocation. Since the intern pool already deduplicates strings, comparing `name_id == assert_id` (where `assert_id` is cached once during builtin registration or sema init) would be a direct integer compare. Negligible today with three builtins and small programs, but the cost scales linearly with both the number of call sites and the number of builtins. Additional sites found in the M8.4.2 audit: `sema/builtins.rs:240` compares `pool.str(name_id) == "str"` for the `str(view)` materialize intercept (explicitly *not* a `BUILTINS`-table entry, so a table-driven fix misses them), codegen detects `main` by `pool.str(tir.name) == "main"` at `codegen/mod.rs:492, :531, :602, :997` (line refs refreshed 2026-08-24), and `sema/mod.rs:300` does `name.starts_with("__ryo_")` per decl. New sites from the 2026-08 arena-perf review: `astgen.rs:355` compares `pool.str(iterator.name) != "range"` per for-loop, `astgen.rs:234` hash-probes `pool.find_str("main")` per function def (the already-interned id could be threaded through), and `sema/stmt.rs:47,:196` runs `check_reserved_builtin` (`sema/call.rs:255`) per VarDecl.
-**Resolution:** Cache `StringId`s for each builtin name (e.g., in `Sema` or alongside `builtins::BUILTINS`) and match on the id instead of the string. Same applies to the codegen-side `name_str == "print"` comparisons. Also intern `"str"`, `"main"`, and the `"__ryo_"` prefix check — the materialize intercept and `main` detection are not covered by a BUILTINS-table-driven fix.
 
 ### I-037 — Panic/Assert mechanism lacks `#file` / `#line` intrinsic expansion
 
@@ -327,7 +329,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ### I-148 — Per-argument callee-name string lookups in the ownership pass
 
-**Files:** `ryo-frontend/src/ownership/walk.rs` (`is_borrowed_scalar_param` call :847, `view_borrow_params` call :917), `ryo-frontend/src/builtins.rs` (:128-148)
+**Files:** `ryo-frontend/src/ownership/walk.rs` (`is_borrowed_scalar_param` call :847, `view_borrow_params` call :917), `ryo-frontend/src/builtins.rs` (:128-148), `ryo-backend/src/codegen/frees.rs` (`provably_inline_producer`)
 **Summary:** `is_borrowed_scalar_param` runs `pool.str(name_id)` plus two linear `&'static str` table scans *per argument of every call*, though the result depends only on the callee; `view_borrow_params` repeats it per borrow-mode Call arg. Same string-compare class as I-034, but the per-arg (not per-call) repetition is a new facet.
 **Resolution:** Hoist the lookup out of the arg loop (once per Call inst); the longer-term fix is I-034's cached-`StringId` table.
 

@@ -16,7 +16,7 @@ pub(crate) fn emit_builtin_call(
     span: Span,
     builtin: &'static crate::builtins::BuiltinFunction,
 ) -> TirRef {
-    let name = sema.pool.str(view.name);
+    let ids = sema.names;
     // Builtins never take ownership of their arguments — every arg
     // is borrowed regardless of declared type.
     let modes = vec![ParamMode::Borrow; arg_tirs.len()];
@@ -26,7 +26,8 @@ pub(crate) fn emit_builtin_call(
     // str_push/bytes_push — everywhere else it is rejected, exactly
     // like user-function calls. The push arms additionally validate
     // the mutable lvalue of that first argument.
-    let builtin_modes: Vec<ParamMode> = if name == "str_push" || name == "bytes_push" {
+    let builtin_modes: Vec<ParamMode> = if view.name == ids.str_push || view.name == ids.bytes_push
+    {
         vec![ParamMode::Inout, ParamMode::Borrow]
     } else {
         modes.clone()
@@ -49,58 +50,150 @@ pub(crate) fn emit_builtin_call(
             );
         }
     }
-    match name {
-        "print" => {
-            if !check_print_args(sema, fcx, view, arg_tirs, span) {
+    match view.name {
+        // M9.2: `io_eprint` is the exact twin of `print` — same
+        // accepted types, same routing, stderr instead of stdout.
+        // TODO(M24): interim call form — replaced by `io.eprint`.
+        n if n == ids.print || n == ids.io_eprint => {
+            emit_print_like(sema, fcx, view, arg_tirs, &modes, span, builtin)
+        }
+        n if n == ids.panic => emit_panic(sema, fcx, view, span),
+        // TODO(M24): interim call form — replaced by `process.exit`.
+        n if n == ids.process_exit => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "process_exit() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
-            // M8.4.2: print(bytes/bytesview) renders the escaped repr —
-            // rewrite to `print(__ryo_bytes_repr(arg))` at the TIR level
-            // so the repr temp is a normal ownership-tracked str
-            // producer (a codegen-synthesized temp would never be freed).
-            // M9.1: print(int/float/bool/struct) renders the Debug
-            // repr — rewrite to `print(DebugRepr(arg))` for the same
-            // reason (DebugRepr borrows its operand; its str result is
-            // a normal owned temp).
             let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
-            let owned_args;
-            let effective: &[TirRef] = match sema.pool.kind(arg_ty) {
-                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => {
-                    let callee = sema.pool.intern_str("__ryo_bytes_repr");
-                    let repr = fcx.builder.call(
-                        callee,
-                        &[arg_tirs[0]],
-                        &[ParamMode::Borrow],
-                        sema.pool.str_(),
-                        span,
-                    );
-                    owned_args = vec![repr];
-                    &owned_args
-                }
-                TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Struct => {
-                    let repr = fcx.builder.push_typed(
-                        TirTag::DebugRepr,
-                        TirData::UnOp(arg_tirs[0]),
-                        sema.pool.str_(),
-                        span,
-                    );
-                    owned_args = vec![repr];
-                    &owned_args
-                }
-                _ => arg_tirs,
-            };
-            // W0003 case A: `print` takes `strview`/`bytesview`
-            // directly. Warn on the pre-rewrite argument: for str
-            // `effective == arg_tirs` anyway, and for bytes the
-            // rewritten repr call is str-typed, which would never
-            // match the `bytes` owner type.
-            warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], "print");
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            if !matches!(sema.pool.kind(arg_ty), TypeKind::Int) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "process_exit() argument must be int, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, effective, &modes, ret_ty, span)
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        "panic" => emit_panic(sema, fcx, view, span),
-        "assert" => emit_assert(sema, fcx, view, arg_tirs, span),
-        "int_to_str" => {
+        n if n == ids.assert => emit_assert(sema, fcx, view, arg_tirs, span),
+        // TODO(M22): interim call form — replaced by `process.args`.
+        n if n == ids.process_argc => {
+            if !view.args.is_empty() {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "process_argc() takes exactly 0 arguments, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
+        // TODO(M22): interim call form — replaced by `process.args`.
+        n if n == ids.process_argv => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "process_argv() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            if !matches!(sema.pool.kind(arg_ty), TypeKind::Int) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "process_argv() argument must be int, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
+        // TODO(M16): interim call form — replaced by `process.env`.
+        n if n == ids.process_env => {
+            if view.args.len() != 1 {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "process_env() takes exactly 1 argument, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+            if sema.pool.is_error(arg_ty) {
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            // `str`/`strview` — the same acceptance as the other string
+            // consumers: codegen's `eval_str_or_view_parts` reads the
+            // viewed bytes of either.
+            if !matches!(
+                sema.pool.kind(arg_ty),
+                TypeKind::Str | TypeKind::View(ViewKind::Str)
+            ) {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(view.args[0]),
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "process_env() argument must be str, got {}",
+                        sema.pool.display(arg_ty)
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
+        // TODO(M13.6): interim call form — replaced by
+        // `io.read_line() -> IoError!str`. `io_read_line()` takes no
+        // arguments; the runtime maps EOF to the empty string (the
+        // M13.6 `IoError!str` shape will distinguish real errors).
+        n if n == ids.io_read_line => {
+            if !view.args.is_empty() {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::ArityMismatch,
+                    format!(
+                        "io_read_line() takes exactly 0 arguments, got {}",
+                        view.args.len()
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
+        n if n == ids.int_to_str => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -130,7 +223,7 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        "float_to_str" => {
+        n if n == ids.float_to_str => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -160,7 +253,7 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        "bool_to_str" => {
+        n if n == ids.bool_to_str => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
                     span,
@@ -190,7 +283,7 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        "str_push" => {
+        n if n == ids.str_push => {
             // str_push(s: inout str, suffix: strview) -> void. Builtins
             // bypass `check_call`, so the `&`/`inout` agreement +
             // mutable-lvalue checks are replayed here against arg 0.
@@ -258,7 +351,7 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        "bytes_push" => {
+        n if n == ids.bytes_push => {
             // bytes_push(b: inout bytes, x: int) -> void (M8.4.2
             // stopgap: the byte is an `int` range-checked 0-255 at
             // runtime; becomes `u8` at M17.1). Mirrors the str_push
@@ -330,14 +423,17 @@ pub(crate) fn materialize_name(sema: &Sema<'_>, arg_uir: InstRef) -> Option<&'st
         return None;
     }
     let name = sema.uir.call_view(arg_uir).name;
-    let s = sema.pool.str(name);
-    if s != "str" && s != "bytes" {
+    let owner_name = if name == sema.names.str_ {
+        "str"
+    } else if name == sema.names.bytes {
+        "bytes"
+    } else {
         return None;
-    }
+    };
     if sema.name_to_decl.contains_key(&name) {
         return None;
     }
-    Some(if s == "str" { "str" } else { "bytes" })
+    Some(owner_name)
 }
 
 /// W0003 case A for view-accepting builtins (M8.4.1.2, generalized
@@ -626,12 +722,16 @@ pub(crate) fn check_print_args(
     view: &CallView,
     arg_tirs: &[TirRef],
     span: Span,
+    builtin: &str,
 ) -> bool {
     if view.args.len() != 1 {
         sema.sink.emit(Diag::error(
             span,
             DiagCode::ArityMismatch,
-            format!("print() takes exactly 1 argument, got {}", view.args.len()),
+            format!(
+                "{builtin}() takes exactly 1 argument, got {}",
+                view.args.len()
+            ),
         ));
         return false;
     }
@@ -653,13 +753,76 @@ pub(crate) fn check_print_args(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
             format!(
-                "print() argument must be str, strview, bytes, bytesview, int, float, bool, or struct, got {}",
+                "{builtin}() argument must be str, strview, bytes, bytesview, int, float, bool, or struct, got {}",
                 sema.pool.display(arg_ty)
             ),
         ));
         return false;
     }
     true
+}
+
+/// Shared body of the `print` / `io_eprint` builtin arms (M9.2 makes
+/// `io_eprint` the exact twin of `print`, stderr instead of stdout):
+/// full type parity via [`check_print_args`], then the same TIR-level
+/// rewrites. M8.4.2: bytes/bytesview renders the escaped repr — rewrite
+/// to `<builtin>(__ryo_bytes_repr(arg))` so the repr temp is a normal
+/// ownership-tracked str producer (a codegen-synthesized temp would
+/// never be freed). M9.1: int/float/bool/struct renders the Debug repr —
+/// rewrite to `<builtin>(DebugRepr(arg))` for the same reason
+/// (DebugRepr borrows its operand; its str result is a normal owned
+/// temp).
+fn emit_print_like(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    modes: &[ParamMode],
+    span: Span,
+    builtin: &'static crate::builtins::BuiltinFunction,
+) -> TirRef {
+    // The dispatch arm already matched `view.name` to this `builtin`,
+    // so `builtin.name` is the callee's `&'static str` — no pool lookup,
+    // no per-call `String` allocation (I-147's class).
+    let name = builtin.name;
+    if !check_print_args(sema, fcx, view, arg_tirs, span, name) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+    let owned_args;
+    let effective: &[TirRef] = match sema.pool.kind(arg_ty) {
+        TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => {
+            let callee = sema.pool.intern_str("__ryo_bytes_repr");
+            let repr = fcx.builder.call(
+                callee,
+                &[arg_tirs[0]],
+                &[ParamMode::Borrow],
+                sema.pool.str_(),
+                span,
+            );
+            owned_args = vec![repr];
+            &owned_args
+        }
+        TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Struct => {
+            let repr = fcx.builder.push_typed(
+                TirTag::DebugRepr,
+                TirData::UnOp(arg_tirs[0]),
+                sema.pool.str_(),
+                span,
+            );
+            owned_args = vec![repr];
+            &owned_args
+        }
+        _ => arg_tirs,
+    };
+    // W0003 case A: `print`/`io_eprint` take `strview`/`bytesview`
+    // directly. Warn on the pre-rewrite argument: for str
+    // `effective == arg_tirs` anyway, and for bytes the rewritten repr
+    // call is str-typed, which would never match the `bytes` owner
+    // type.
+    warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], name);
+    let ret_ty = builtin.return_type(sema.pool);
+    fcx.builder.call(view.name, effective, modes, ret_ty, span)
 }
 
 // Column counts unicode codepoints, not bytes — matches editor conventions.

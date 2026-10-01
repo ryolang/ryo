@@ -661,8 +661,17 @@ fn generate_and_display_ir(
 /// banners — and the return value is the program's own exit code.
 /// `--emit` additionally prints IR sections in pipeline order (AST
 /// after parse; UIR/TIR after lowering; CLIF after codegen, before
-/// execution), rendered identically to `ryo ir`.
-pub fn run_file(file: &Path, emit: &[EmitKind]) -> Result<i32, CompilerError> {
+/// execution), rendered identically to `ryo ir`. `program_args` are
+/// forwarded to the program and published to the runtime's argv storage
+/// by the entry shim before `main`'s first instruction; a synthetic
+/// argv[0] — the source file path — is prepended so argc/argv match the
+/// AOT binary's C-runtime table (argv[0] = invocation path, included in
+/// the count). Callers with no program arguments pass `&[]`.
+pub fn run_file(
+    file: &Path,
+    emit: &[EmitKind],
+    program_args: &[String],
+) -> Result<i32, CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
@@ -695,8 +704,11 @@ pub fn run_file(file: &Path, emit: &[EmitKind]) -> Result<i32, CompilerError> {
         print!("{clif}");
     }
 
+    let mut argv = Vec::with_capacity(program_args.len() + 1);
+    argv.push(file.to_string_lossy().into_owned());
+    argv.extend_from_slice(program_args);
     codegen
-        .execute(main_id)
+        .execute(main_id, &argv)
         .map_err(CompilerError::ExecutionError)
 }
 
