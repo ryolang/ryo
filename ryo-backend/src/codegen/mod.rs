@@ -37,6 +37,7 @@ use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
 mod arith;
+mod builtins;
 mod bytes;
 mod control;
 mod expr;
