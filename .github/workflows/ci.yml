@@ -178,7 +178,17 @@ jobs:
       # Valgrind cannot see. Scoped to `runtime`: the compiler crates have
       # almost no `unsafe`, and Miri's interpreter overhead rules out
       # compile-and-run integration tests.
-      - run: cargo +nightly miri test -p ryo-runtime
+      #
+      # The argv publication test (argv_storage_roundtrip) is only
+      # sensitive under weak-memory emulation, and each Miri seed explores
+      # a different set of interleavings — a stale-read violation shows
+      # up on some seeds but not others. Sweep a small seed range so the
+      # job actually gates the data-then-flag contract.
+      - run: |
+          for seed in 0 1 2 3; do
+            echo "== miri seed $seed =="
+            MIRIFLAGS="-Zmiri-seed=$seed" cargo +nightly miri test -p ryo-runtime
+          done
 
   valgrind:
     name: Valgrind leak check

@@ -895,6 +895,16 @@ fn test_ensure_heap_noop_for_heap_and_static() {
 /// process-wide mutable globals, so every argv test lives in this ONE
 /// test fn — parallel cargo-test threads would otherwise race on them.
 ///
+/// Besides the storage roundtrip (below), this fn guards the
+/// publication contract of those globals: a reader thread spins on
+/// ARGC (Acquire) and dereferences ARGV (Acquire) while a writer
+/// thread publishes through `ryo_rt_init` (data-then-flag Release).
+/// Normal runs only exercise the threads — the race is undetectable
+/// without weak-memory emulation — but under Miri each
+/// `MIRIFLAGS=-Zmiri-seed` explores different interleavings, and the
+/// test fails if the publish order is ever inverted or the Acquire
+/// pairing breaks. The Miri CI job sweeps a small seed range.
+///
 /// The out-of-range panic path terminates the process, so it is
 /// asserted via a subprocess: this test binary re-executes itself with
 /// `RYO_RT_ARGV_PANIC_CHILD=1`, and the flag gates the diverging call
@@ -925,6 +935,48 @@ fn argv_storage_roundtrip() {
         unsafe { ryo_process_argv(index, &mut slot) };
         panic!("ryo_process_argv({index}) returned; out-of-range must diverge");
     }
+
+    // Publication-contract guard: reset the globals, then race a
+    // reader against ryo_rt_init's ARGV-then-ARGC stores.
+    ARGC.store(0, core::sync::atomic::Ordering::Release);
+    ARGV.store(core::ptr::null_mut(), core::sync::atomic::Ordering::Release);
+    let probe = CString::new("probe").expect("CString");
+    let probe_argv = [probe.as_ptr()];
+    // Raw pointers are not Send; the address as usize is. Provenance is
+    // re-established by the cast inside the writer, where the SAFETY
+    // comment covers it.
+    let probe_argv_addr = probe_argv.as_ptr() as usize;
+    let reader = std::thread::spawn(move || {
+        loop {
+            if ARGC.load(core::sync::atomic::Ordering::Acquire) == 1 {
+                // Acquire pairs with the writer's Release: passing the ARGC
+                // check must force this load to see the stored pointer.
+                // ARGV holds the C argv table (a char** stored through an
+                // AtomicPtr<c_char>, same as ryo_process_argv reads it).
+                let table = ARGV.load(core::sync::atomic::Ordering::Acquire)
+                    as *const *const core::ffi::c_char;
+                // SAFETY: the contract under test — once ARGC is 1, `table`
+                // must be the pointer ryo_rt_init stored, never stale/null.
+                // Miri flags the dereference if the ordering ever lets a
+                // stale table through.
+                let s = unsafe { *table };
+                // SAFETY: s is the NUL-terminated C string published via
+                // ryo_rt_init; `probe` outlives the join below.
+                return unsafe { *s };
+            }
+            std::thread::yield_now();
+        }
+    });
+    let writer = std::thread::spawn(move || {
+        // SAFETY: the address came from `probe_argv`, a 1-element table
+        // of a readable NUL-terminated C string (`probe`) that outlives
+        // the call (both threads are joined before `probe` drops).
+        let argv = probe_argv_addr as *const *const core::ffi::c_char;
+        unsafe { ryo_rt_init(1, argv) };
+    });
+    writer.join().expect("publication writer");
+    let first = reader.join().expect("publication reader");
+    assert_eq!(first as u8, b'p');
 
     let a = CString::new("a").expect("CString");
     let b = CString::new("b").expect("CString");
