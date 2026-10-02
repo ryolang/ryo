@@ -1076,6 +1076,11 @@ impl fmt::Display for DisplayType<'_> {
                         )?;
                     }
                 }
+                // A single-field paren form needs the trailing comma:
+                // `(int,)`. (Mirrors the Debug repr in codegen.)
+                if paren_form && view.fields.len() == 1 {
+                    write!(f, ",")?;
+                }
                 write!(f, "{closer}")
             }
             TypeKind::Struct => {
@@ -1255,6 +1260,10 @@ mod tests {
         let x = pool.intern_str("x");
         let mixed = pool.anon_struct(&[(f0, pool.int()), (x, pool.str_())]);
         assert_eq!(format!("{}", pool.display(mixed)), "{0: int, x: str}");
+
+        // A one-field paren form keeps the mandatory trailing comma.
+        let one = pool.anon_struct(&[(f0, pool.int())]);
+        assert_eq!(format!("{}", pool.display(one)), "(int,)");
     }
 
     #[test]
