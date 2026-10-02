@@ -1003,4 +1003,138 @@ impl<M: Module> Codegen<M> {
         let data_id = store_string(name, text, ctx.module, ctx.data_ctx, ctx.string_data)?;
         Self::push_debug_data(builder, ctx, result, data_id, text.len())
     }
+
+    /// Destructuring assignment (M10): `pattern = rhs`. The rhs value is
+    /// its slot address; per plan field the arm either moves the field
+    /// out into the fresh binding's slot — 24-byte header copy for
+    /// `str`/`bytes`, field-wise copy for nested structs (never byte-wise:
+    /// the ASan rule), scalar store for Copy fields — or, for a wildcard,
+    /// destroys the field inline (`emit_field_drop`). The ownership pass
+    /// scheduled NOTHING for the wildcard fields and no whole-struct Free
+    /// for the shell; the only scheduled Frees target the bound fields'
+    /// owner tokens, which lower through the bindings registered here.
+    pub(crate) fn emit_destructure(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<Terminator, String> {
+        let view = ctx.tir.destructure_view(r);
+        let owners = ctx.tir.destructure_bound_owner_refs(r);
+        let rhs_addr = Self::eval_inst_struct(builder, ctx, view.rhs)?;
+        let shape = ctx.pool.struct_view(ctx.tir.inst(view.rhs).ty);
+        let mut owner_idx = 0;
+        for field in &view.fields {
+            let sf = shape.fields[field.field_index as usize];
+            let field_addr = if sf.offset == 0 {
+                rhs_addr
+            } else {
+                builder.ins().iadd_imm_s(rhs_addr, i64::from(sf.offset))
+            };
+            match field.bind {
+                None => {
+                    if ctx.pool.needs_drop(sf.ty) {
+                        Self::emit_field_drop(builder, ctx, field_addr, 0, sf.ty)?;
+                    }
+                }
+                Some(name) => {
+                    let token = owners[owner_idx];
+                    owner_idx += 1;
+                    Self::bind_destructured_field(builder, ctx, name, field_addr, sf.ty, token)?;
+                }
+            }
+        }
+        Ok(Terminator::None)
+    }
+
+    /// Register one destructured-field binding: copy the field's value
+    /// out of the rhs slot into storage the binding owns, in the same
+    /// shape `VarDecl` produces (fat SSA triples for `str`/`bytes`, a
+    /// slot address for structs, a scalar `Variable` for Copy fields) so
+    /// every later read / scheduled free finds the binding where it
+    /// expects it. The field's owner token (`token`) caches the same
+    /// value: the token instruction is never evaluated, and the
+    /// end-of-statement free sweep gates on a cached repr for the
+    /// Free's target before firing a sub-expression-anchored Free.
+    fn bind_destructured_field(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        name: StringId,
+        field_addr: Value,
+        field_ty: TypeId,
+        token: TirRef,
+    ) -> Result<(), String> {
+        match ctx.pool.kind(field_ty) {
+            TypeKind::Str | TypeKind::Bytes => {
+                let ptr = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlagsData::trusted(), field_addr, 0);
+                let len = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), field_addr, 8);
+                let cap = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), field_addr, 16);
+                let var_ptr = builder.declare_var(ctx.int_type);
+                let var_len = builder.declare_var(types::I64);
+                let var_cap = builder.declare_var(types::I64);
+                builder.def_var(var_ptr, ptr);
+                builder.def_var(var_len, len);
+                builder.def_var(var_cap, cap);
+                Self::write_slot(
+                    &mut ctx.fat_locals,
+                    &mut ctx.fat_locals_undo,
+                    name,
+                    Some(super::FatLocals {
+                        ptr: var_ptr,
+                        len: var_len,
+                        cap: var_cap,
+                        home: None,
+                        home_inline: false,
+                    }),
+                );
+                Self::cache_repr(
+                    ctx,
+                    token,
+                    if matches!(ctx.pool.kind(field_ty), TypeKind::Bytes) {
+                        ValueRepr::Bytes { ptr, len, cap }
+                    } else {
+                        ValueRepr::Str { ptr, len, cap }
+                    },
+                );
+                Ok(())
+            }
+            TypeKind::View(_) => {
+                Err("view struct field reached codegen; sema Rule 6 rejects it".to_string())
+            }
+            TypeKind::Struct | TypeKind::AnonStruct => {
+                let slot = Self::struct_slot(builder, ctx, field_ty);
+                let dst = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                Self::emit_struct_copy(builder, ctx, dst, field_addr, field_ty)?;
+                let var = builder.declare_var(ctx.int_type);
+                builder.def_var(var, dst);
+                Self::write_slot(
+                    &mut ctx.struct_locals,
+                    &mut ctx.struct_locals_undo,
+                    name,
+                    Some(var),
+                );
+                Self::cache_repr(ctx, token, ValueRepr::Struct { addr: dst });
+                Ok(())
+            }
+            _ => {
+                let cl_ty = cranelift_type_for(field_ty, ctx.pool, ctx.int_type);
+                let val = builder
+                    .ins()
+                    .load(cl_ty, MemFlagsData::trusted(), field_addr, 0);
+                let var = builder.declare_var(cl_ty);
+                builder.def_var(var, val);
+                // Defensive: a same-scope redefinition must not inherit a
+                // stale fact from the shadowed binding (mirrors VarDecl).
+                Self::write_slot(&mut ctx.range_facts, &mut ctx.range_facts_undo, name, None);
+                Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, name, Some(var));
+                Self::cache_repr(ctx, token, ValueRepr::Scalar(val));
+                Ok(())
+            }
+        }
+    }
 }

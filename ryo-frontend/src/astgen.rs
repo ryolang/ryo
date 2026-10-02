@@ -584,6 +584,74 @@ fn gen_function_def(
     );
 }
 
+/// Lower a destructuring pattern (M10) to `InstTag::Destructure`
+/// plan(s). Each pattern level becomes one instruction whose plan
+/// entries are `(selector, bind)` pairs — positional patterns select
+/// by canonical field index, brace patterns by field name, and a
+/// `None` bind is a wildcard (the field is destroyed, not bound).
+///
+/// A nested pattern element (possible only inside a positional
+/// pattern) cannot be expressed in one flat plan: astgen binds the
+/// field to a synthesized `__ryo_destructure_N` temp and recurses,
+/// emitting the sub-pattern's own `Destructure` over a `Var` read of
+/// that temp as the following statement. Sema resolves the temp
+/// through its own side table (never the user scope), so user code
+/// cannot collide with the name.
+fn lower_destructure_pattern(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    pool: &mut InternPool,
+    pattern: ast::PatternId,
+    value: InstRef,
+    span: Span,
+    out: &mut Vec<InstRef>,
+) {
+    let pat = ast.pattern(pattern);
+    match &pat.kind {
+        ast::PatternKind::Positional(list) => {
+            let mut plan: Vec<(u32, Option<StringId>)> = Vec::new();
+            // Nested elements recurse as their own statements, which
+            // must FOLLOW the enclosing Destructure (it binds the temp
+            // their `Var` rhs resolves through) — collect and lower
+            // them after this level's instruction is emitted.
+            let mut nested: Vec<(ast::PatternId, StringId, Span)> = Vec::new();
+            for (i, elem) in ast.pattern_list(*list).iter().enumerate() {
+                let elem_pat = ast.pattern(*elem);
+                match &elem_pat.kind {
+                    ast::PatternKind::Bind(ident) => {
+                        plan.push((i as u32, Some(ident.name)));
+                    }
+                    ast::PatternKind::Wildcard => plan.push((i as u32, None)),
+                    ast::PatternKind::Anon { .. } | ast::PatternKind::Positional(_) => {
+                        let n = b.next_destructure_temp();
+                        let temp = pool.intern_str(&format!("__ryo_destructure_{n}"));
+                        plan.push((i as u32, Some(temp)));
+                        nested.push((*elem, temp, elem_pat.span));
+                    }
+                }
+            }
+            out.push(b.destructure(value, true, &plan, span));
+            for (elem, temp, elem_span) in nested {
+                let elem_value = b.var_ref(temp, elem_span);
+                lower_destructure_pattern(b, ast, pool, elem, elem_value, elem_span, out);
+            }
+        }
+        ast::PatternKind::Anon { fields } => {
+            let mut plan: Vec<(u32, Option<StringId>)> = Vec::new();
+            for field in ast.pattern_field_list(*fields) {
+                // A field named `_` is a wildcard (binds nothing); a
+                // rename whose target is `_` likewise skips the field.
+                let wildcard = pool.str(field.name) == "_" || pool.str(field.binding.name) == "_";
+                plan.push((field.name.raw(), (!wildcard).then_some(field.binding.name)));
+            }
+            out.push(b.destructure(value, false, &plan, span));
+        }
+        ast::PatternKind::Wildcard | ast::PatternKind::Bind(_) => {
+            unreachable!("parser guarantees a destructure target is a shaped pattern")
+        }
+    }
+}
+
 fn gen_stmt(
     b: &mut UirBuilder,
     ast: &ast::Ast,
@@ -646,20 +714,9 @@ fn gen_stmt(
             let r = b.compound_field_assign(target_ref, *op, value_ref, span);
             out.push(r);
         }
-        // Destructuring assignment (M10): the grammar parses, but the
-        // lowering — sema/TIR/codegen/ownership — lands in the next
-        // milestone task. Keep the value expression in the body as a
-        // discarded expression so the UIR stays structurally complete,
-        // and report the statement as unsupported; the sink error
-        // stops the pipeline before sema.
-        ast::StmtKind::Destructure { value, .. } => {
+        ast::StmtKind::Destructure { target, value } => {
             let value_ref = gen_expr(b, ast, *value);
-            out.push(b.unary(InstTag::ExprStmt, value_ref, span));
-            sink.emit(Diag::error(
-                span,
-                DiagCode::UnsupportedOperator,
-                "destructuring assignment is not yet implemented",
-            ));
+            lower_destructure_pattern(b, ast, pool, *target, value_ref, span, out);
         }
         ast::StmtKind::IfStmt(if_stmt) => {
             let cond = gen_expr(b, ast, if_stmt.cond);

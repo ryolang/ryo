@@ -17,10 +17,12 @@
 //!   `field_free_on_reassign`.
 
 use super::{
-    Owner, Ownership, check_source_projected, consume_for_assignment, consumed_binding_name,
-    needs_tracking, underlying_owner,
+    Owner, OwnerState, Ownership, check_source_projected, consume_for_assignment,
+    consumed_binding_name, needs_tracking, register_pending_dead_store, underlying_owner,
+    visit_expr,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
+use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind};
 
@@ -169,4 +171,78 @@ pub(crate) fn check_field_move_out(
         ),
     ));
     true
+}
+
+/// Destructuring assignment (M10): `(a, _) = rhs` / `{q, r} = rhs` —
+/// the one place fields move out of a struct. The rhs struct owner is
+/// consumed at the statement (a whole-struct move: no partial-move
+/// state survives it), and each bound field registers as a FRESH owner
+/// keyed on the `FieldAccess` token sema emitted immediately before
+/// the `Destructure` instruction (`Tir::destructure_bound_owner_refs`)
+/// — those refs are never evaluated by codegen; they exist purely so
+/// the moved-out fields have independent owner identities for the
+/// last-use / dead-store / branch-divergence free passes, which lower
+/// through the binding's slot at codegen (the binding-path redirect).
+///
+/// Wildcard fields are CODEGEN's jurisdiction — destroyed inline at
+/// the copy-out, never tracked here — and no whole-struct Free is
+/// scheduled for the shell: consuming the rhs owner stamps it `Moved`,
+/// which every free pass skips. Copy-typed bindings need no owner at
+/// all.
+pub(crate) fn analyze_destructure(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    sidecar: &mut FunctionSidecar,
+    stmt: TirRef,
+) {
+    let view = tir.destructure_view(stmt);
+    let rhs = view.rhs;
+    let rhs_ty = tir.inst(rhs).ty;
+    visit_expr(tir, pool, own, sink, sidecar, rhs);
+    if needs_tracking(rhs_ty, pool) {
+        let span = tir.span(stmt);
+        let consumed_name = consumed_binding_name(tir, rhs);
+        // P2 freeze (final spec §3.2): the consume moves the owner.
+        check_source_projected(
+            tir,
+            pool,
+            own,
+            sink,
+            underlying_owner(own, rhs),
+            span,
+            "move",
+            consumed_name,
+        );
+        consume_for_assignment(tir, pool, own, sink, rhs, span, consumed_name, stmt);
+    }
+
+    let owners = tir.destructure_bound_owner_refs(stmt);
+    debug_assert_eq!(
+        owners.len(),
+        view.fields.iter().filter(|f| f.bind.is_some()).count(),
+        "one owner token per bound field"
+    );
+    let mut owner_idx = 0;
+    for field in &view.fields {
+        let Some(bind) = field.bind else {
+            continue;
+        };
+        let owner_ref = owners[owner_idx];
+        owner_idx += 1;
+        own.binding_of_name.insert(bind, stmt);
+        if !needs_tracking(field.ty, pool) {
+            continue;
+        }
+        let span = tir.span(stmt);
+        own.states.insert(Owner::Inst(owner_ref), OwnerState::Valid);
+        Ownership::dense_set(&mut own.origin, owner_ref, None);
+        own.current_owner.insert(bind, Owner::Inst(owner_ref));
+        // A never-read bound field is a dead store (W0001) and its
+        // allocation dies with the statement — the drain anchors the
+        // Free right after it, where codegen has just populated the
+        // binding's slot.
+        register_pending_dead_store(own, owner_ref, bind, span, stmt);
+    }
 }

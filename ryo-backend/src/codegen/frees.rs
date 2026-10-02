@@ -571,6 +571,30 @@ impl<M: Module> Codegen<M> {
                         binding_of,
                         last_write,
                     ),
+                    TirTag::Destructure => {
+                        // M10: each bound field's owner token (the
+                        // FieldAccess insts emitted immediately before
+                        // the Destructure) maps to its binding name, so
+                        // a scheduled Free lowers through the binding's
+                        // slot instead of the never-evaluated token.
+                        // The binding identity is the owner token
+                        // itself: destructure bindings are fresh, never
+                        // reassigned, and cannot collide with an
+                        // in-scope name (sema rejects), so per-binding
+                        // keying leaves same-named outer bindings'
+                        // lineages untouched.
+                        let view = tir.destructure_view(r);
+                        let owners = tir.destructure_bound_owner_refs(r);
+                        let mut owner_idx = 0;
+                        for field in &view.fields {
+                            let Some(bind) = field.bind else { continue };
+                            let owner = owners[owner_idx];
+                            owner_idx += 1;
+                            map[owner.index()] = Some(bind);
+                            binding_of[owner.index()] = Some(owner);
+                            last_write.insert(owner, owner);
+                        }
+                    }
                     _ => {}
                 }
             }

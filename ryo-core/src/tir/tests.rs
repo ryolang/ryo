@@ -307,3 +307,81 @@ fn slice_and_to_view_round_trip_and_dump() {
     assert!(out.contains("= slice %1, %2.._"), "got:\n{}", out);
     assert!(out.contains("= to_view %4"), "got:\n{}", out);
 }
+
+#[test]
+fn destructure_round_trips_and_owner_tokens() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let str_ty = pool.str_();
+    let main = pool.intern_str("main");
+    let q = pool.intern_str("q");
+    let s = pool.intern_str("s");
+    let pair_ty = pool.anon_struct(&[(q, int_ty), (s, str_ty)]);
+
+    let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
+    // A struct-typed value: simulate the call result with a Var read
+    // (the builder does not enforce producer shapes).
+    let rhs = b.var(main, pair_ty, sp());
+    // Owner tokens: one FieldAccess per BOUND field, immediately before
+    // the Destructure, plan order (field 1 is a wildcard here).
+    let owner0 = b.field_access(rhs, 0, int_ty, sp());
+    let destr = b.destructure(rhs, &[(0, Some(q), int_ty), (1, None, str_ty)], sp());
+    assert_eq!(owner0.index(), destr.index() - 1);
+    let tir = b.finish(&[destr]);
+
+    assert_eq!(tir.inst(destr).tag, TirTag::Destructure);
+    assert_eq!(tir.inst(destr).ty, pair_ty);
+    let view = tir.destructure_view(destr);
+    assert_eq!(view.rhs, rhs);
+    assert_eq!(view.fields.len(), 2);
+    assert_eq!(view.fields[0].field_index, 0);
+    assert_eq!(view.fields[0].bind, Some(q));
+    assert_eq!(view.fields[0].ty, int_ty);
+    assert_eq!(view.fields[1].field_index, 1);
+    assert_eq!(view.fields[1].bind, None);
+    assert_eq!(view.fields[1].ty, str_ty);
+
+    // The +1 bind encoding must survive a raw-0 string id: "derive" is
+    // pre-interned at raw 0 and is a legal (if unconventional) binding.
+    let derive = pool.intern_str("derive");
+    assert_eq!(derive.raw(), 0);
+    let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
+    let rhs = b.var(main, pair_ty, sp());
+    let _owner0 = b.field_access(rhs, 0, int_ty, sp());
+    let _owner1 = b.field_access(rhs, 1, str_ty, sp());
+    let destr = b.destructure(
+        rhs,
+        &[(0, Some(derive), int_ty), (1, Some(q), str_ty)],
+        sp(),
+    );
+    let tir = b.finish(&[destr]);
+    let view = tir.destructure_view(destr);
+    assert_eq!(view.fields[0].bind, Some(derive));
+    assert_eq!(view.fields[1].bind, Some(q));
+
+    let owners = tir.destructure_bound_owner_refs(destr);
+    assert_eq!(owners.len(), 2);
+}
+
+#[test]
+fn destructure_dump_lists_fields() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let q = pool.intern_str("q");
+    let pair_ty = pool.anon_struct(&[(q, int_ty)]);
+
+    let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
+    let rhs = b.var(main, pair_ty, sp());
+    let owner = b.field_access(rhs, 0, int_ty, sp());
+    let _ = owner;
+    let destr = b.destructure(rhs, &[(0, Some(q), int_ty)], sp());
+    let tir = b.finish(&[destr]);
+
+    let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));
+    assert!(
+        out.contains("= destructure %1 {0: q: int}"),
+        "got:\n{}",
+        out
+    );
+}

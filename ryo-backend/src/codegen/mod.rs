@@ -1958,6 +1958,8 @@ impl<M: Module> Codegen<M> {
             // M9 struct field assignment — lowered in codegen/structs.rs.
             TirTag::FieldAssign => Self::emit_field_assign(builder, ctx, r),
             TirTag::CompoundFieldAssign => Self::emit_compound_field_assign(builder, ctx, r),
+            // M10 destructuring — lowered in codegen/structs.rs.
+            TirTag::Destructure => Self::emit_destructure(builder, ctx, r),
             other => Err(format!(
                 "emit_stmt: instruction at %{} is not a statement (tag={:?})",
                 r.index(),

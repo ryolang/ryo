@@ -93,6 +93,14 @@ pub(crate) fn collect_named_inits_rec(tir: &Tir, r: TirRef, set: &mut HashSet<Ti
         TirTag::Assign => {
             set.insert(tir.assign_view(r).value);
         }
+        TirTag::Destructure => {
+            // M10: a destructured rhs is "named" by the destructure —
+            // the statement consumes the whole value and moves or
+            // inline-drops every field. The anon-temp pass must skip
+            // it or it would schedule a whole-struct Free on top of
+            // the field moves (double-free).
+            set.insert(tir.destructure_view(r).rhs);
+        }
         TirTag::IfStmt => {
             let v = tir.if_stmt_view(r);
             for &s in &v.then_stmts {

@@ -72,7 +72,14 @@ pub(crate) fn analyze_expr_allow_never(
                 InstData::Var(s) => s,
                 _ => unreachable!("Var must carry InstData::Var"),
             };
-            match scope.lookup(name) {
+            // M10: nested-destructuring temps resolve before any scope
+            // lookup — they are compiler-internal (`__ryo_` prefix, side
+            // table, minted per body) and their single use site sits
+            // immediately after the statement that binds them, so a
+            // user variable with the same spelling elsewhere is
+            // unaffected.
+            let temp_ty = fcx.destructure_temps.get(&name).copied();
+            match temp_ty.or_else(|| scope.lookup(name)) {
                 Some(t) => fcx.builder.var(name, t, span),
                 None => {
                     // block-scoped name resolution; unknown names are a
