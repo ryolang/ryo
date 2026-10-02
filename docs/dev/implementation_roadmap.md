@@ -1504,7 +1504,7 @@ fn main():
 
 **Goal:** Ad-hoc grouping and multiple return values via the single grouping type adopted in D11
 
-**Status:** ✅ COMPLETE (2026-10-02, branch `feat/milestone-10-tuples` — PR pending)
+**Status:** ✅ COMPLETE (2026-10-02, branch `feat/milestone-10-tuples` — [PR #175](https://github.com/ryolang/ryo/pull/175))
 
 > **Decision (adopted 2026-07-22, final spec §10, D11):** This milestone's Decision Review is **resolved**. Ryo has exactly one ad-hoc grouping type — the **anonymous struct** (`{x=1, y=2}`, type literal `{q: int, r: int}`) — and tuples are **positional sugar** over it: `(17, "alice")` ≡ `{0=17, 1="alice"}`, keeping the Python-familiar surface (literal, `(q, r) = divmod(...)` unpacking, `pair.0` access, `(x,)` trailing comma). There is no separate tuple type, ABI, or ownership path. Named-struct construction moves to braces (`Point{x=1, y=2}` — the Brace Law), as do named enum payloads (`Variant{field=value}`); positional enum payloads keep parens. Identity is structural, exact-match only; no implicit coercion to named types. `{}` stays reserved for the future empty map literal. This milestone folds into **Milestone 9** (shared construction/layout machinery — anonymous structs need no declarations or defaults); what remains here is only the **sugar layer** (parser forms + destructuring), estimated far smaller than a standalone tuple type.
 >
