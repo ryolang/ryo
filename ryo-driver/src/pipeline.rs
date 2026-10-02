@@ -437,6 +437,9 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::ChainedPositionalAccess => "E0110",
         DiagCode::UnitParen => "E0111",
         DiagCode::SingleElemDestructuring => "E0112",
+        DiagCode::DestructureArity => "E0113",
+        DiagCode::DestructureUnknownField => "E0114",
+        DiagCode::DestructurePositionalOnNamed => "E0115",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -863,6 +866,9 @@ mod tests {
             (DiagCode::ChainedPositionalAccess, "E0110"),
             (DiagCode::UnitParen, "E0111"),
             (DiagCode::SingleElemDestructuring, "E0112"),
+            (DiagCode::DestructureArity, "E0113"),
+            (DiagCode::DestructureUnknownField, "E0114"),
+            (DiagCode::DestructurePositionalOnNamed, "E0115"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -940,6 +946,9 @@ mod tests {
                 | DiagCode::ChainedPositionalAccess
                 | DiagCode::UnitParen
                 | DiagCode::SingleElemDestructuring
+                | DiagCode::DestructureArity
+                | DiagCode::DestructureUnknownField
+                | DiagCode::DestructurePositionalOnNamed
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape

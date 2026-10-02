@@ -213,110 +213,10 @@ pub(crate) fn analyze_stmt(
                 }
             }
         }
-        InstTag::CompoundAssign => {
-            let view = sema.uir.compound_assign_view(r);
-            let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
-            let value_ty = fcx.builder.ty_of(value_tir);
-
-            let (existing_ty, is_mutable) = match scope.lookup_full(view.name) {
-                Some(pair) => pair,
-                None => {
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::UndefinedAssignTarget,
-                        format!(
-                            "cannot use compound assignment on undeclared variable '{}'",
-                            sema.pool.str(view.name),
-                        ),
-                    ));
-                    return fcx.builder.unreachable(sema.pool.error_type(), span);
-                }
-            };
-
-            if !is_mutable {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::ImmutableAssign,
-                    format!(
-                        "cannot assign to immutable variable '{}'",
-                        sema.pool.str(view.name),
-                    ),
-                ));
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-
-            if existing_ty == sema.pool.error_type() {
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-
-            let op = view.op;
-            let is_int = existing_ty == sema.pool.int();
-            let is_float = existing_ty == sema.pool.float();
-
-            if check_bindable_value(sema, view.name, value_ty, sema.uir.span(view.value)) {
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-
-            if op == CompoundOp::Mod && is_float {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::FloatModulo,
-                    "operator '%=' is not defined for 'float'".to_string(),
-                ));
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-
-            if !is_int && !is_float {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::UnsupportedOperator,
-                    format!(
-                        "compound assignment is not defined for '{}'",
-                        sema.pool.display(existing_ty),
-                    ),
-                ));
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-
-            if !sema.pool.is_error(value_ty)
-                && !sema.pool.is_error(existing_ty)
-                && !sema.pool.compatible(existing_ty, value_ty)
-            {
-                sema.sink.emit(Diag::error(
-                    sema.uir.span(view.value),
-                    DiagCode::TypeMismatch,
-                    format!(
-                        "type mismatch in compound assignment: '{}' is '{}', got '{}'",
-                        sema.pool.str(view.name),
-                        sema.pool.display(existing_ty),
-                        sema.pool.display(value_ty),
-                    ),
-                ));
-            }
-
-            // Same constant-zero-divisor rule as binary `x / 0`:
-            // always panics at runtime, so reject it here.
-            if matches!(op, CompoundOp::Div | CompoundOp::Mod)
-                && is_int
-                && matches!(const_eval_int(sema.uir, view.value), ConstInt::Value(0))
-            {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::DivisionByZero,
-                    if op == CompoundOp::Div {
-                        "division by zero".to_string()
-                    } else {
-                        "modulo by zero".to_string()
-                    },
-                ));
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-
-            fcx.builder
-                .compound_assign(view.name, view.op, existing_ty, value_tir, span)
-        }
+        InstTag::CompoundAssign => analyze_compound_assign(sema, fcx, scope, r, span),
         InstTag::FieldAssign => analyze_field_assign(sema, fcx, scope, r, span),
         InstTag::CompoundFieldAssign => analyze_compound_field_assign(sema, fcx, scope, r, span),
+        InstTag::Destructure => analyze_destructure(sema, fcx, scope, r, span),
         InstTag::WhileLoop => {
             let view = sema.uir.while_loop_view(r);
 
@@ -434,6 +334,118 @@ fn field_assign_target_name(sema: &Sema<'_>, target: InstRef) -> StringId {
         InstData::FieldAccess { field, .. } => field,
         _ => unreachable!("field-assign target must be a FieldAccess chain"),
     }
+}
+
+/// Compound assignment (`+=`, `-=`, etc.) to a mutable variable:
+/// same operator-vs-type rules as the binary ops, plus the
+/// constant-zero-divisor rejection shared with bare `/` and `%`.
+fn analyze_compound_assign(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &mut Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    let view = sema.uir.compound_assign_view(r);
+    let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+    let value_ty = fcx.builder.ty_of(value_tir);
+
+    let (existing_ty, is_mutable) = match scope.lookup_full(view.name) {
+        Some(pair) => pair,
+        None => {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::UndefinedAssignTarget,
+                format!(
+                    "cannot use compound assignment on undeclared variable '{}'",
+                    sema.pool.str(view.name),
+                ),
+            ));
+            return fcx.builder.unreachable(sema.pool.error_type(), span);
+        }
+    };
+
+    if !is_mutable {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ImmutableAssign,
+            format!(
+                "cannot assign to immutable variable '{}'",
+                sema.pool.str(view.name),
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    if existing_ty == sema.pool.error_type() {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    let op = view.op;
+    let is_int = existing_ty == sema.pool.int();
+    let is_float = existing_ty == sema.pool.float();
+
+    if check_bindable_value(sema, view.name, value_ty, sema.uir.span(view.value)) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    if op == CompoundOp::Mod && is_float {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::FloatModulo,
+            "operator '%=' is not defined for 'float'".to_string(),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    if !is_int && !is_float {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::UnsupportedOperator,
+            format!(
+                "compound assignment is not defined for '{}'",
+                sema.pool.display(existing_ty),
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    if !sema.pool.is_error(value_ty)
+        && !sema.pool.is_error(existing_ty)
+        && !sema.pool.compatible(existing_ty, value_ty)
+    {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.value),
+            DiagCode::TypeMismatch,
+            format!(
+                "type mismatch in compound assignment: '{}' is '{}', got '{}'",
+                sema.pool.str(view.name),
+                sema.pool.display(existing_ty),
+                sema.pool.display(value_ty),
+            ),
+        ));
+    }
+
+    // Same constant-zero-divisor rule as binary `x / 0`:
+    // always panics at runtime, so reject it here.
+    if matches!(op, CompoundOp::Div | CompoundOp::Mod)
+        && is_int
+        && matches!(const_eval_int(sema.uir, view.value), ConstInt::Value(0))
+    {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::DivisionByZero,
+            if op == CompoundOp::Div {
+                "division by zero".to_string()
+            } else {
+                "modulo by zero".to_string()
+            },
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    fcx.builder
+        .compound_assign(view.name, view.op, existing_ty, value_tir, span)
 }
 
 /// Field-path assignment `p.x = v` (M9).
@@ -607,6 +619,291 @@ fn check_field_chain(
     let target_tir = analyze_expr(sema, fcx, scope, target);
     let field_ty = fcx.builder.ty_of(target_tir);
     Some((target_tir, field_ty))
+}
+
+/// Destructuring assignment `pattern = value` (M10): `(a, b) = e`,
+/// `{q, r} = e`. Sema resolves the rhs type (anonymous or named
+/// struct), validates the pattern against the struct shape — full
+/// coverage (bind or `_` every field), no unknown or duplicate
+/// fields, no binding collisions — inserts the fresh bindings, and
+/// emits one `TirTag::Destructure` whose plan carries canonical field
+/// indices and resolved field types. One `FieldAccess` owner token is
+/// emitted immediately before it per bound field (the arena-adjacent
+/// convention documented on `TirBuilder::destructure`); the ownership
+/// pass adopts those as the moved-out fields' fresh owners.
+///
+/// On any validation error the statement recovers with
+/// `TirTag::Unreachable`: no partial `Destructure` reaches codegen,
+/// and (mirroring `VarDecl`'s collision path) bindings insert with the
+/// error type so later uses don't cascade.
+fn analyze_destructure(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &mut Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    let view = sema.uir.destructure_view(r);
+    let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+    let value_ty = fcx.builder.ty_of(value_tir);
+    let fail = |sema: &mut Sema<'_>, fcx: &mut FuncCtx| -> TirRef {
+        fcx.builder.unreachable(sema.pool.error_type(), span)
+    };
+
+    if sema.pool.is_error(value_ty) {
+        return fail(sema, fcx);
+    }
+    let first_bind = view
+        .plan
+        .iter()
+        .find_map(|(_, bind)| *bind)
+        .unwrap_or_else(|| sema.pool.intern_str("_"));
+    if check_bindable_value(sema, first_bind, value_ty, sema.uir.span(view.value)) {
+        return fail(sema, fcx);
+    }
+    let kind = sema.pool.kind(value_ty);
+    if !matches!(
+        kind,
+        ryo_core::types::TypeKind::Struct | ryo_core::types::TypeKind::AnonStruct
+    ) {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(view.value),
+            DiagCode::NotAStruct,
+            format!(
+                "cannot destructure `{}` — destructuring works on structs and tuples",
+                sema.pool.display(value_ty),
+            ),
+        ));
+        return fail(sema, fcx);
+    }
+    let shape = sema.pool.struct_view(value_ty);
+
+    // ---- Shape validation: build the per-field plan ----
+    let mut fields: Vec<(u32, Option<StringId>, TypeId)> = Vec::new();
+    let mut had_error = false;
+    if view.by_position {
+        if matches!(kind, ryo_core::types::TypeKind::Struct) {
+            // Named structs have no "0"/"1" fields; the by-name
+            // spelling is the only shape.
+            let names = shape
+                .fields
+                .iter()
+                .map(|f| sema.pool.str(f.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            sema.sink.emit(
+                Diag::error(
+                    span,
+                    DiagCode::DestructurePositionalOnNamed,
+                    format!(
+                        "cannot destructure named struct `{}` positionally — \
+                         named structs destructure by field name",
+                        sema.pool.display(value_ty),
+                    ),
+                )
+                .with_help(format!("write the brace pattern: `{{{names}}} = ...`")),
+            );
+            had_error = true;
+        } else if view.plan.len() != shape.fields.len() {
+            let n = shape.fields.len();
+            let m = view.plan.len();
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::DestructureArity,
+                format!(
+                    "expected {n} fields, found {m} binding{}",
+                    if m == 1 { "" } else { "s" },
+                ),
+            ));
+            had_error = true;
+        } else {
+            for (i, (_, bind)) in view.plan.iter().enumerate() {
+                fields.push((i as u32, *bind, shape.fields[i].ty));
+            }
+        }
+    } else {
+        // Brace pattern. Per-entry resolution:
+        // - rename (`{x = quot}` — binding differs from the field
+        //   name): field `x` must exist (else DestructureUnknownField)
+        //   and binds the rename target (`_` skips the field);
+        // - pun (`{q}` — binding equals the field name): field `q`
+        //   when the struct has one; otherwise the NEXT UNCOVERED
+        //   field in canonical order — the Python-unpack fallback that
+        //   makes `{quot, _} = divmod(...)` bind `q` to `quot`;
+        // - a field named `_`: the wildcard-rest form — covers every
+        //   otherwise-uncovered field as an inline drop.
+        let mut covered: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for (selector, bind) in &view.plan {
+            let name = StringId::from_raw(*selector);
+            let bind = *bind;
+            if sema.pool.str(name) == "_" {
+                // Explicit bindings after the rest marker hit the
+                // covered-field error below.
+                for f in &shape.fields {
+                    if covered.insert(f.idx) {
+                        fields.push((f.idx, None, f.ty));
+                    }
+                }
+                continue;
+            }
+            let is_pun = bind == Some(name);
+            let field = if is_pun {
+                match shape.fields.iter().find(|f| f.name == name) {
+                    Some(f) => Some(f),
+                    // Unmatched pun: bind the next uncovered field.
+                    None => shape.fields.iter().find(|f| !covered.contains(&f.idx)),
+                }
+            } else {
+                match shape.fields.iter().find(|f| f.name == name) {
+                    Some(f) => Some(f),
+                    None => {
+                        sema.sink.emit(Diag::error(
+                            span,
+                            DiagCode::DestructureUnknownField,
+                            format!(
+                                "struct `{}` has no field `{}`",
+                                sema.pool.display(value_ty),
+                                sema.pool.str(name),
+                            ),
+                        ));
+                        had_error = true;
+                        continue;
+                    }
+                }
+            };
+            let Some(field) = field else {
+                // More bindings than fields — the positional reading
+                // of the arity rule.
+                let n = shape.fields.len();
+                let m = view.plan.iter().filter(|(_, b)| b.is_some()).count();
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::DestructureArity,
+                    format!(
+                        "expected {n} fields, found {m} binding{}",
+                        if m == 1 { "" } else { "s" },
+                    ),
+                ));
+                had_error = true;
+                continue;
+            };
+            if !covered.insert(field.idx) {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::DuplicateStructField,
+                    format!(
+                        "field '{}' is specified more than once",
+                        sema.pool.str(field.name),
+                    ),
+                ));
+                had_error = true;
+                continue;
+            }
+            // A rename whose target is `_` skips the field without
+            // binding it.
+            let bind = bind.filter(|b| sema.pool.str(*b) != "_");
+            fields.push((field.idx, bind, field.ty));
+        }
+        // Full coverage: every field is bound, wildcarded, or rest-
+        // covered above — anything still uncovered is an error.
+        let missing: Vec<StringId> = shape
+            .fields
+            .iter()
+            .filter(|f| !covered.contains(&f.idx))
+            .map(|f| f.name)
+            .collect();
+        if !missing.is_empty() {
+            let names = missing
+                .iter()
+                .map(|n| format!("`{}`", sema.pool.str(*n)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let (noun, pronoun) = if missing.len() == 1 {
+                ("field", "it")
+            } else {
+                ("fields", "them")
+            };
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::DestructureUnknownField,
+                format!(
+                    "destructuring `{}` does not cover {noun} {names} — \
+                     bind {pronoun} or write `_`",
+                    sema.pool.display(value_ty),
+                ),
+            ));
+            had_error = true;
+        }
+    }
+
+    // ---- Bindings: collision / reserved checks, then insertion ----
+    // Temps (nested-pattern sub-bindings) live in the side table and
+    // cannot collide; user bindings insert into the scope.
+    let mut owners: Vec<(Option<StringId>, TypeId, u32)> = Vec::new();
+    for &(field_index, bind, ty) in &fields {
+        let Some(name) = bind else { continue };
+        let is_temp = fcx_temp_name(sema, name);
+        if !is_temp && scope.contains_in_current(name) {
+            sema.sink.emit(
+                Diag::error(
+                    span,
+                    DiagCode::DuplicateDeclaration,
+                    format!(
+                        "'{}' is already declared in this scope",
+                        sema.pool.str(name),
+                    ),
+                )
+                .with_help(format!(
+                    "destructuring declares fresh bindings; to update the \
+                     existing variable, assign individually instead: \
+                     `{} = <value>`",
+                    sema.pool.str(name),
+                )),
+            );
+            scope.insert_binding(name, sema.pool.error_type(), false);
+            had_error = true;
+            continue;
+        }
+        if !is_temp
+            && check_reserved_builtin(
+                sema,
+                name,
+                span,
+                "is a reserved builtin and cannot be redefined",
+            )
+        {
+            scope.insert_binding(name, sema.pool.error_type(), false);
+            had_error = true;
+            continue;
+        }
+        if is_temp {
+            fcx.destructure_temps.insert(name, ty);
+        } else {
+            scope.insert_binding(name, ty, false);
+        }
+        owners.push((bind, ty, field_index));
+    }
+
+    if had_error {
+        return fail(sema, fcx);
+    }
+
+    // ---- Emit: owner tokens (bound fields, plan order) then the
+    // Destructure itself ----
+    for &(bind, ty, field_index) in &owners {
+        debug_assert!(bind.is_some());
+        let token = fcx.builder.field_access(value_tir, field_index, ty, span);
+        let _ = token;
+    }
+    let plan: Vec<(u32, Option<StringId>, TypeId)> = fields;
+    fcx.builder.destructure(value_tir, &plan, span)
+}
+
+/// True for the compiler-temp names astgen mints for nested
+/// destructuring patterns (`__ryo_destructure_N`) — those bind in
+/// sema's side table, never the user scope.
+fn fcx_temp_name(sema: &Sema<'_>, name: StringId) -> bool {
+    sema.pool.str(name).starts_with("__ryo_destructure_")
 }
 
 /// Variant of [`analyze_block`] that accepts a closure to seed the

@@ -501,6 +501,23 @@ impl<M: Module> Codegen<M> {
                     }
                     TirTag::WhileLoop => walk(tir, &tir.while_loop_view(r).body, map, last_write),
                     TirTag::ForRange => walk(tir, &tir.for_range_view(r).body, map, last_write),
+                    TirTag::Destructure => {
+                        // M10: each bound field's owner token (the
+                        // FieldAccess insts emitted immediately before
+                        // the Destructure) maps to its binding name, so
+                        // a scheduled Free lowers through the binding's
+                        // slot instead of the never-evaluated token.
+                        let view = tir.destructure_view(r);
+                        let owners = tir.destructure_bound_owner_refs(r);
+                        let mut owner_idx = 0;
+                        for field in &view.fields {
+                            let Some(bind) = field.bind else { continue };
+                            let owner = owners[owner_idx];
+                            owner_idx += 1;
+                            map[owner.index()] = Some(bind);
+                            last_write.insert(bind, owner);
+                        }
+                    }
                     _ => {}
                 }
             }

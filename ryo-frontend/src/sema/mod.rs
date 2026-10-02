@@ -546,6 +546,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         inst_map: vec![None; sema.uir.instructions.len()],
         return_type: body.return_type,
         loop_depth: 0,
+        destructure_temps: HashMap::new(),
     };
 
     let mut stmt_refs: Vec<TirRef> = Vec::with_capacity(sema.uir.body_stmts(body).len());
@@ -585,6 +586,11 @@ pub(crate) struct FuncCtx {
     inst_map: Vec<Option<TirRef>>,
     return_type: TypeId,
     loop_depth: u32,
+    /// M10: compiler-temp bindings synthesized by astgen for nested
+    /// destructuring patterns (`__ryo_destructure_N`). Kept OUT of the
+    /// user scope: user code can never collide with or observe them,
+    /// and the `Var` arm resolves them before any scope lookup.
+    destructure_temps: HashMap<StringId, TypeId>,
 }
 
 #[cfg(test)]

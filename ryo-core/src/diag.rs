@@ -166,6 +166,22 @@ pub enum DiagCode {
     /// fields must be owned values, not projections.
     ViewFieldType,
 
+    // --- sema: destructuring (M10) ---
+    /// A positional destructuring pattern binds a different number of
+    /// fields than the struct has (`(q, r, s) = pair`). The message
+    /// pins the expected and found counts.
+    DestructureArity,
+    /// A brace destructuring pattern disagrees with the struct's
+    /// fields per-field (M10): the pattern names a field the struct
+    /// does not have, or leaves a declared field unbound (`{q} =
+    /// divmod(...)` missing `r`). The message names the field(s) and
+    /// teaches the `_` fix.
+    DestructureUnknownField,
+    /// A positional pattern used on a named struct (M10): named
+    /// structs destructure by field name — their fields aren't
+    /// `"0"`/`"1"`. The message suggests the brace pattern spelling.
+    DestructurePositionalOnNamed,
+
     // --- ownership (M8.1b) ---
     /// Use of a value after it has been moved.
     UseAfterMove,
