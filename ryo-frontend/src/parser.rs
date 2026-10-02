@@ -786,17 +786,19 @@ where
 }
 
 /// Type annotation: a plain name (`str`, `int`, ...), the legacy
-/// `&name` view form (M8.4 pre-Q5), or a compound anonymous struct
-/// type literal `{q: int, r: int}` (M10). Post-M8.4.1 the `&` form is
-/// retired syntax — it survives here only so astgen can emit the
-/// targeted migration error.
+/// `&name` view form (M8.4 pre-Q5), a compound anonymous struct
+/// type literal `{q: int, r: int}` (M10), or the positional sugar
+/// `(int, str)` (M10, ≡ `{0: int, 1: str}`). Post-M8.4.1 the `&`
+/// form is retired syntax — it survives here only so astgen can
+/// emit the targeted migration error.
 ///
-/// The compound form opens with `{` (and the view form with `&`), so
-/// the three alternatives are token-disjoint; chumsky rewinds a failed
-/// alternative without consuming input. `{}` stays reserved for the
-/// future empty map literal, exactly like the value literal: diagnosed
-/// here and recovered as an empty field list so the rest of the file
-/// still parses.
+/// The alternatives are token-disjoint: the name form opens with an
+/// identifier (or `&`), the compound form with `{`, the positional
+/// form with `(`; chumsky rewinds a failed alternative without
+/// consuming input. `{}` stays reserved for the future empty map
+/// literal, exactly like the value literal: diagnosed here and
+/// recovered as an empty field list so the rest of the file still
+/// parses.
 ///
 /// Yields a plain `TypeExpr` value, not a node: annotations are
 /// packed into their parent node's `extra` header.
@@ -823,7 +825,32 @@ where
                 let span = e.span();
                 e.state().type_expr_anon(&fields, span)
             });
-        named_type_expr_parser().or(anon).boxed()
+        // Positional sugar `(int, str)` — ≡ `{0: int, 1: str}`. The
+        // comma is mandatory even for one element (`(int,)`), so the
+        // plain `(int)` spelling never parses here (and stays a
+        // syntax error, exactly as before this form existed). Mirrors
+        // the value atom: one parse, no speculation — the first
+        // element parses once, then the comma decides. Yields
+        // `TypeExprKind::Positional`; astgen's resolve path interns
+        // the "0"/"1" names pre-dedup.
+        let positional = ty
+            .clone()
+            .then_ignore(just(Token::Comma))
+            .then(
+                ty.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>(),
+            )
+            .delimited_by(just(Token::LParen), just(Token::RParen))
+            .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                let mut elems = Vec::with_capacity(rest.len() + 1);
+                elems.push(first);
+                elems.extend(rest);
+                e.state().type_expr_positional(&elems, span)
+            });
+        named_type_expr_parser().or(anon).or(positional).boxed()
     })
 }
 
@@ -1051,9 +1078,71 @@ where
                     e.state().borrow(target, span)
                 });
 
-            let parenthesized = expr
-                .clone()
-                .delimited_by(just(Token::LParen), just(Token::RParen));
+            // `(e)` stays a plain parenthesized expression — the inner
+            // node is returned as-is, exactly like the historical
+            // `delimited_by(LParen, RParen)` form. `(e, …)` —
+            // including the single-element `(e,)` — is tuple sugar
+            // over the anonymous struct literal: `(17, "alice")` ≡
+            // `{0=17, 1="alice"}`, fields "0", "1", … minted in
+            // written order against the state's pool (the same
+            // canonicalization as numeric brace keys). `()` is the
+            // unit: diagnosed (UnitParen — `void` is the unit type)
+            // and recovered as an empty anonymous literal, exactly
+            // like `{}` (E0109).
+            //
+            // Single parse, no speculation: after `(` either `)`
+            // matches immediately or the first expression parses
+            // once, then `,` vs `)` disambiguates tuple from paren.
+            // A failed alternative never leaves orphan arena nodes
+            // behind (the Ast checkpoint hooks are deliberate no-ops
+            // — see `successful_parses_leave_no_orphan_nodes`).
+            let paren_or_tuple = just(Token::LParen)
+                .ignore_then(
+                    just(Token::RParen).to(None).or(expr
+                        .clone()
+                        .then(
+                            just(Token::Comma)
+                                .ignore_then(
+                                    expr.clone()
+                                        .separated_by(just(Token::Comma))
+                                        .allow_trailing()
+                                        .collect::<Vec<_>>(),
+                                )
+                                .then_ignore(just(Token::RParen))
+                                .map(Some)
+                                .or(just(Token::RParen).to(None)),
+                        )
+                        .map(Some)),
+                )
+                .validate(|body, e: &mut Mx<'a, '_, I>, emitter| {
+                    if body.is_none() {
+                        emitter.emit(Rich::custom(e.span(), ParseDiag::UnitParen));
+                    }
+                    body
+                })
+                .map_with(|body, e: &mut Mx<'a, '_, I>| match body {
+                    None => {
+                        // Recovered `()`: an empty anonymous literal.
+                        // Sema tolerates the empty field list silently
+                        // (the E0109 contract), so E0111 stands alone.
+                        let span = e.span();
+                        e.state().struct_literal(None, &[], span)
+                    }
+                    Some((first, None)) => first,
+                    Some((first, Some(rest))) => {
+                        let span = e.span();
+                        let mut fields = Vec::with_capacity(rest.len() + 1);
+                        fields.push((positional_field_name(0, &mut e.state().pool), first));
+                        for (i, value) in rest.into_iter().enumerate() {
+                            let index = i64::try_from(i)
+                                .expect("tuple arity fits i64")
+                                .checked_add(1)
+                                .expect("tuple arity fits i64");
+                            fields.push((positional_field_name(index, &mut e.state().pool), value));
+                        }
+                        e.state().struct_literal(None, &fields, span)
+                    }
+                });
 
             borrow
                 .or(call)
@@ -1061,7 +1150,7 @@ where
                 .or(anon_struct_literal)
                 .or(ident_expr)
                 .or(literal)
-                .or(parenthesized)
+                .or(paren_or_tuple)
         };
 
         // Postfix operators: method calls (`s.len()`), field access

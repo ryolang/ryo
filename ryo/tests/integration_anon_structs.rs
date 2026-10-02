@@ -3,7 +3,7 @@
 //! An anonymous literal `{x=1, y=2}` infers a structural type from its
 //! field initializers (ordered (name, type) pairs, deduped in the
 //! pool), reads fields by name like a named struct, and prints through
-//! the same Debug repr with the name omitted: `{x=1, y=a}`.
+//! the same Debug repr with the name omitted: `{x=1, y="a"}`.
 
 mod common;
 use common::*;
@@ -21,13 +21,14 @@ fn anon_literal_and_field_jit() {
 
 #[test]
 fn anon_debug_print_jit() {
-    // Nameless Debug repr: `{f=v, ...}` with no `Name` prefix. The str
-    // field renders bare (no quotes) at the top level, exactly like a
-    // named struct's str field renders quoted only inside the braces.
+    // Nameless Debug repr: `{f=v, ...}` with no `Name` prefix. str
+    // fields quote, exactly like a named struct's — the M10 ruling
+    // makes the anon repr match named structs and Python container
+    // repr.
     assert_ryo_output(
         "anon_debug_print",
         "fn main():\n\tprint({x=1, y=\"a\"})\n\tprint(\"\\n\")\n",
-        "{x=1, y=a}\n",
+        "{x=1, y=\"a\"}\n",
     );
 }
 

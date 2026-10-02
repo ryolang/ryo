@@ -745,13 +745,16 @@ impl<M: Module> Codegen<M> {
     /// punctuation and field names come from read-only .rodata while
     /// each field value renders into a temp slot, is pushed, and is
     /// freed immediately (the push copies the bytes first, and
-    /// `ryo_str_free` is a runtime no-op for inline/static caps). str
-    /// fields are quoted and borrowed straight out of the struct — the
-    /// struct keeps owning them, so no free fires — except under an
-    /// anonymous struct (M10), whose repr renders bare: `{f=v, ...}`
-    /// with no name prefix and no str quotes. Nested structs
-    /// recurse; the nested repr temp frees after its push into the
-    /// enclosing result.
+    /// `ryo_str_free` is a runtime no-op for inline/static caps).
+    /// str fields are quoted and borrowed straight out of the struct —
+    /// the struct keeps owning them, so no free fires. Anonymous
+    /// structs (M10) render with no name prefix, and an anon shape
+    /// whose fields are exactly `"0"`, `"1"`, … `"n-1"` in written
+    /// order — the tuple spelling — renders in paren form instead:
+    /// `(v0, v1)`, single field `(v,)`; any other anon shape renders
+    /// braces with names (`{0=1, x=2}`). Nested structs recurse; the
+    /// nested repr temp frees after its push into the enclosing
+    /// result.
     pub(crate) fn emit_debug_repr(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -761,6 +764,15 @@ impl<M: Module> Codegen<M> {
         let view = ctx.pool.struct_view(ty);
         // Anon structs intern the "" sentinel as their name.
         let anon = ctx.pool.str(view.name).is_empty();
+        // Tuple-sugar paren form: same predicate as the pool's type
+        // display — every field name is its index in decimal. Mixed
+        // shapes (`{0=1, x=2}`) fall through to braces.
+        let paren_form = anon
+            && view
+                .fields
+                .iter()
+                .enumerate()
+                .all(|(i, field)| ctx.pool.str(field.name).parse::<usize>() == Ok(i));
         let slot = builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             STR_SLOT_SIZE,
@@ -782,13 +794,15 @@ impl<M: Module> Codegen<M> {
         if !anon {
             Self::push_debug_name(builder, ctx, result, view.name)?;
         }
-        Self::push_debug_static(builder, ctx, result, "{")?;
+        Self::push_debug_static(builder, ctx, result, if paren_form { "(" } else { "{" })?;
         for (i, field) in view.fields.iter().enumerate() {
             if i > 0 {
                 Self::push_debug_static(builder, ctx, result, ", ")?;
             }
-            Self::push_debug_name(builder, ctx, result, field.name)?;
-            Self::push_debug_static(builder, ctx, result, "=")?;
+            if !paren_form {
+                Self::push_debug_name(builder, ctx, result, field.name)?;
+                Self::push_debug_static(builder, ctx, result, "=")?;
+            }
             let field_addr = if field.offset == 0 {
                 addr
             } else {
@@ -811,18 +825,16 @@ impl<M: Module> Codegen<M> {
                 }
                 TypeKind::Str => {
                     // Borrowed straight out of the struct (which keeps
-                    // owning the field), raw (unescaped) content. Named
-                    // structs quote; anonymous structs render bare.
+                    // owning the field), raw (unescaped) content,
+                    // quoted — named and anonymous structs alike
+                    // (M10: the anon repr matches named structs and
+                    // Python container repr).
                     let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
                     let (vp, vl) =
                         Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(field_addr))?;
-                    if !anon {
-                        Self::push_debug_static(builder, ctx, result, "\"")?;
-                    }
+                    Self::push_debug_static(builder, ctx, result, "\"")?;
                     Self::emit_debug_push(builder, ctx, result, vp, vl)?;
-                    if !anon {
-                        Self::push_debug_static(builder, ctx, result, "\"")?;
-                    }
+                    Self::push_debug_static(builder, ctx, result, "\"")?;
                 }
                 TypeKind::Bytes => {
                     let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
@@ -862,7 +874,11 @@ impl<M: Module> Codegen<M> {
                 }
             }
         }
-        Self::push_debug_static(builder, ctx, result, "}")?;
+        // A single-field paren form needs the trailing comma: `(v,)`.
+        if paren_form && view.fields.len() == 1 {
+            Self::push_debug_static(builder, ctx, result, ",")?;
+        }
+        Self::push_debug_static(builder, ctx, result, if paren_form { ")" } else { "}" })?;
         Ok(result)
     }
 

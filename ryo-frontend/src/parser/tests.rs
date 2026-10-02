@@ -1778,3 +1778,108 @@ fn type_literal_rejected_in_struct_decl_field() {
         "struct decl fields must stay name-only"
     );
 }
+
+// ---- M10: tuple sugar — `(a, b)` literals, `(x,)`, `(T1, T2)` types ----
+
+#[test]
+fn tuple_literal_parses() {
+    // Tuple sugar: `(17, "alice")` is the anonymous struct literal
+    // `{0=17, 1="alice"}` — fields "0"/"1" minted in written order
+    // against the state's pool, exactly like numeric brace keys.
+    let (ast, pool) = lex_and_parse("p = (17, \"alice\")\n").unwrap();
+    let init = decl_init(&ast);
+    match &ast.expr(init).kind {
+        ExprKind::StructLiteral(lit) => {
+            assert!(lit.name.is_none());
+            let fields = ast.struct_field_inits(lit.fields);
+            assert_eq!(fields.len(), 2);
+            assert_eq!(pool.str(fields[0].0), "0");
+            assert_eq!(pool.str(fields[1].0), "1");
+            assert_int_lit(&ast, fields[0].1, 17);
+            assert!(matches!(
+                ast.expr(fields[1].1).kind,
+                ExprKind::Literal(Literal::Str(_))
+            ));
+        }
+        other => panic!("expected StructLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn single_element_tuple_requires_comma() {
+    // `(x)` stays a plain parenthesized expression — the inner node
+    // is returned as-is. `(x,)` (trailing comma mandatory) is the
+    // one-element tuple: an anonymous literal with field "0".
+    let (ast, _) = lex_and_parse("x = (v)\n").unwrap();
+    let init = decl_init(&ast);
+    assert!(
+        matches!(ast.expr(init).kind, ExprKind::Ident(_)),
+        "expected the bare inner expression, got {:?}",
+        ast.expr(init).kind
+    );
+
+    let (ast, pool) = lex_and_parse("x = (v,)\n").unwrap();
+    let init = decl_init(&ast);
+    match &ast.expr(init).kind {
+        ExprKind::StructLiteral(lit) => {
+            assert!(lit.name.is_none());
+            let fields = ast.struct_field_inits(lit.fields);
+            assert_eq!(fields.len(), 1);
+            assert_eq!(pool.str(fields[0].0), "0");
+            assert!(matches!(ast.expr(fields[0].1).kind, ExprKind::Ident(_)));
+        }
+        other => panic!("expected StructLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn empty_parens_unit_error() {
+    // `()` is the unit — there is no empty tuple. Diagnosed
+    // (UnitParen: `void` is the unit type; write `none` or a
+    // one-element tuple `(x,)`) and recovered as an empty anonymous
+    // literal, exactly like `{}` (E0109).
+    let errs = lex_and_parse("p = ()\n").expect_err("empty parens must be rejected");
+    let msg = errs
+        .iter()
+        .find_map(|e| match e.reason() {
+            RichReason::Custom(pd @ ParseDiag::UnitParen) => Some(pd.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a UnitParen diagnostic, got: {errs:?}"));
+    assert!(msg.contains("void"), "{msg}");
+    assert!(msg.contains("none"), "{msg}");
+    assert!(msg.contains("(x,)"), "{msg}");
+}
+
+#[test]
+fn positional_type_sugar_parses() {
+    // `(int, str)` in a return type is TypeExprKind::Positional —
+    // sugar over the anonymous `{0: int, 1: str}`. astgen's resolve
+    // path interns the "0"/"1" names so every spelling of the shape
+    // lands on one TypeId (pinned in astgen's type-literal tests).
+    let (ast, pool) =
+        lex_and_parse("fn pair() -> (int, str):\n\treturn (17, \"alice\")\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let ret = f.return_type.as_ref().expect("return type");
+    let elems = match &ret.kind {
+        TypeExprKind::Positional(elems) => ast.type_expr_list(*elems),
+        other => panic!("expected Positional type expression, got {other:?}"),
+    };
+    assert_eq!(elems.len(), 2);
+    assert_eq!(pool.str(type_name(&elems[0]).0), "int");
+    assert_eq!(pool.str(type_name(&elems[1]).0), "str");
+}
+
+#[test]
+fn positional_type_sugar_single_element() {
+    // `(int,)` is the one-element positional type — field "0".
+    let (ast, pool) = lex_and_parse("fn f() -> (int,):\n\treturn (7,)\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let ret = f.return_type.as_ref().expect("return type");
+    let elems = match &ret.kind {
+        TypeExprKind::Positional(elems) => ast.type_expr_list(*elems),
+        other => panic!("expected Positional type expression, got {other:?}"),
+    };
+    assert_eq!(elems.len(), 1);
+    assert_eq!(pool.str(type_name(&elems[0]).0), "int");
+}

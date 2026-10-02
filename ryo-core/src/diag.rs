@@ -223,6 +223,13 @@ pub enum DiagCode {
     /// keeps the well-formed receiver and the diagnostic suggests the
     /// parenthesized form.
     ChainedPositionalAccess,
+    /// Empty parentheses `()` (M10): the unit type is `void`, so
+    /// there is no empty tuple. The message names `void` as the unit
+    /// and suggests `none` for the unit value or a one-element tuple
+    /// `(x,)`. The parser recovers the expression as an empty
+    /// anonymous literal, exactly like `{}` (E0109), so the
+    /// diagnostic stands alone.
+    UnitParen,
     /// An unrecognized `#[...]` attribute (M9.1): the attribute name is
     /// not one of the known forms (`derive(Eq)`, `repr(C)`), its
     /// argument list does not match, or it is attached to something
@@ -387,6 +394,10 @@ pub enum ParseDiag {
     /// A float literal continued a positional field-access chain
     /// (`pair.0.1` lexes as `pair . <float 0.1>`).
     ChainedPositionalAccess,
+    /// Empty parentheses `()` (M10): the unit type is `void` — write
+    /// `none` for the unit value, or a one-element tuple `(x,)`.
+    /// Recovered as an empty anonymous struct literal, like `{}`.
+    UnitParen,
     /// `#[name(args)]` that is not one of the recognized attribute
     /// forms (M9.1): `derive(Eq)` or `repr(C)`. Carries the attribute
     /// head and arguments as interned ids; render them through the
@@ -416,6 +427,7 @@ impl ParseDiag {
             ParseDiag::EmptyStructBody => DiagCode::EmptyStructBody,
             ParseDiag::EmptyAnonStruct => DiagCode::EmptyAnonStruct,
             ParseDiag::ChainedPositionalAccess => DiagCode::ChainedPositionalAccess,
+            ParseDiag::UnitParen => DiagCode::UnitParen,
             ParseDiag::UnknownAttribute { .. } | ParseDiag::MisplacedAttribute => {
                 DiagCode::UnknownAttribute
             }
@@ -475,6 +487,10 @@ impl std::fmt::Display for ParseDiag {
             ParseDiag::ChainedPositionalAccess => f.write_str(
                 "chained positional access needs parentheses — `pair.0.1` \
                  lexes `0.1` as a single float literal; write `(pair.0).1`",
+            ),
+            ParseDiag::UnitParen => f.write_str(
+                "empty parentheses are the unit type `void`; write `none` \
+                 for the unit value, or a one-element tuple `(x,)`",
             ),
             ParseDiag::UnknownAttribute { .. } => f.write_str(
                 "unknown attribute; known attributes: \
