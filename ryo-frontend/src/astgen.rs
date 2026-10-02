@@ -646,6 +646,21 @@ fn gen_stmt(
             let r = b.compound_field_assign(target_ref, *op, value_ref, span);
             out.push(r);
         }
+        // Destructuring assignment (M10): the grammar parses, but the
+        // lowering — sema/TIR/codegen/ownership — lands in the next
+        // milestone task. Keep the value expression in the body as a
+        // discarded expression so the UIR stays structurally complete,
+        // and report the statement as unsupported; the sink error
+        // stops the pipeline before sema.
+        ast::StmtKind::Destructure { value, .. } => {
+            let value_ref = gen_expr(b, ast, *value);
+            out.push(b.unary(InstTag::ExprStmt, value_ref, span));
+            sink.emit(Diag::error(
+                span,
+                DiagCode::UnsupportedOperator,
+                "destructuring assignment is not yet implemented",
+            ));
+        }
         ast::StmtKind::IfStmt(if_stmt) => {
             let cond = gen_expr(b, ast, if_stmt.cond);
             let then_stmts =

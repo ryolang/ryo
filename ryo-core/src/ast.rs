@@ -32,6 +32,15 @@
 //!   (M10): the field list of an anonymous type literal `{q: int,
 //!   r: int}` behind a [`TypeFieldList`], and the element list of a
 //!   positional type expression `(int, str)` behind a [`TypeExprList`].
+//! - `patterns: Vec<Pattern>` — indexed by [`PatternId`], same sentinel
+//!   convention as [`ExprId`]. Destructuring patterns (M10): `_`, a
+//!   binding, `{q, r}` / `{x = quot}` field patterns, positional
+//!   `(a, b)`.
+//! - `pattern_lists: Vec<PatternId>` / `pattern_field_lists:
+//!   Vec<PatternField>` — side arenas for compound patterns: the
+//!   element list of a [`PatternKind::Positional`] behind a
+//!   [`PatternList`], and the field list of a [`PatternKind::Anon`]
+//!   behind a [`PatternFieldList`].
 //! - `top_level: Vec<StmtId>` — the program's statements in source
 //!   order; everything below is reached by following ids out of them.
 //!
@@ -39,11 +48,12 @@
 //! payload ([`ExprKind`]/[`StmtKind`]); consumers write ordinary
 //! exhaustive `match`es and follow child ids through
 //! [`Ast::expr`]/[`Ast::stmt`]/[`Ast::expr_list`]/
-//! [`Ast::stmt_list`]/[`Ast::elif_list`]. Payload structs (`Ident`,
-//! `TypeExpr`, `Param`, `VarDecl`, `FunctionDef`, `IfStmt`,
-//! `ElifBranch`) are carried inline in the variants — only *nodes*
-//! are arena-allocated. Every variable-length node list lives in a
-//! side arena, with one deliberate exception:
+//! [`Ast::stmt_list`]/[`Ast::elif_list`]/[`Ast::pattern`]/
+//! [`Ast::pattern_list`]/[`Ast::pattern_field_list`]. Payload structs
+//! (`Ident`, `TypeExpr`, `Param`, `VarDecl`, `FunctionDef`, `IfStmt`,
+//! `ElifBranch`, `PatternField`) are carried inline in the variants —
+//! only *nodes* are arena-allocated. Every variable-length node list
+//! lives in a side arena, with one deliberate exception:
 //! [`FunctionDef::params`] stays an inline `Vec<Param>` because
 //! params are scalar metadata, not nodes.
 //!
@@ -109,6 +119,24 @@ impl StmtId {
     }
 
     /// Array index into `stmts`.
+    pub fn index(self) -> usize {
+        self.0.get() as usize
+    }
+}
+
+/// Index into [`Ast::patterns`]. Same layout and sentinel convention
+/// as [`ExprId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PatternId(NonZeroU32);
+
+impl PatternId {
+    /// Convert from a `usize` array index; see [`ExprId::from_index`].
+    fn from_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("PatternId index out of range (>= 2^32)");
+        PatternId(NonZeroU32::new(raw).expect("PatternId index must be >= 1"))
+    }
+
+    /// Array index into `patterns`.
     pub fn index(self) -> usize {
         self.0.get() as usize
     }
@@ -224,6 +252,38 @@ impl TypeExprList {
     }
 }
 
+/// A `[offset, offset+len)` slice of the `pattern_lists` side arena —
+/// the element list of a [`PatternKind::Positional`] pattern `(a, b)`,
+/// in written order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternList {
+    offset: u32,
+    len: u32,
+}
+
+impl PatternList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+/// A `[offset, offset+len)` slice of the `pattern_field_lists` side
+/// arena — the field list of a [`PatternKind::Anon`] pattern
+/// `{q, r}` / `{x = quot}`, in written order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternFieldList {
+    offset: u32,
+    len: u32,
+}
+
+impl PatternFieldList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
 // ---------- Expressions ----------
 
 /// A single expression: kind plus inline source span.
@@ -294,6 +354,57 @@ pub enum Literal {
     Float(f64),
 }
 
+// ---------- Patterns ----------
+
+/// A single destructuring pattern: kind plus inline source span.
+/// Mirrors [`Expr`]: the arena node carries its span, and consumers
+/// match on `ast.pattern(id).kind`.
+///
+/// Grammar (M10): `_`, a binding, `{q, r}` / `{x = quot}` field
+/// patterns, and positional `(a, b)` — including the statement-level
+/// paren-less form `a, b = e`, which the parser desugars into a
+/// positional pattern. Literal/variant patterns are M12 work.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: SimpleSpan,
+}
+
+/// The kind of a destructuring pattern. Child lists are
+/// [`PatternList`] / [`PatternFieldList`] ranges into the
+/// `pattern_lists` / `pattern_field_lists` side arenas; like
+/// [`ExprKind`], every payload field is `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PatternKind {
+    /// `_` — binds nothing, skips the field/element. `_` lexes as an
+    /// ordinary identifier; the parser recognizes it by name.
+    Wildcard,
+    /// A fresh binding for one field/element (`a`).
+    Bind(Ident),
+    /// `{q, r}` / `{x = quot}` — an anonymous struct shape: bare
+    /// fields are puns (field `q` binds local `q`), `name = binding`
+    /// renames. The field list lives in the `pattern_field_lists`
+    /// side arena, in written order.
+    Anon { fields: PatternFieldList },
+    /// `(a, b)` — a positional shape; elements are full patterns, so
+    /// nesting like `(a, (b, c))` parses. The element list lives in
+    /// the `pattern_lists` side arena, in written order.
+    Positional(PatternList),
+}
+
+/// One field of a [`PatternKind::Anon`] pattern. A pun (`{q, r}`)
+/// records the same identifier as the field name and the binding; a
+/// rename (`{x = quot}`) binds field `x` to the local `quot`. A field
+/// named `_` is a wildcard: it binds nothing (recognized by name, the
+/// same rule as [`PatternKind::Wildcard`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternField {
+    /// The struct field being destructured.
+    pub name: StringId,
+    /// The local the field binds into.
+    pub binding: Ident,
+}
+
 // ---------- Statements ----------
 
 /// A single statement: kind plus inline source span.
@@ -338,6 +449,14 @@ pub enum StmtKind {
     CompoundFieldAssign {
         target: ExprId,
         op: CompoundOp,
+        value: ExprId,
+    },
+    /// Destructuring assignment `pattern = value` (M10): `(a, b) = e`,
+    /// `a, b = e`, `{q, r} = e`, `{x = quot} = e`. The pattern lives
+    /// in the `patterns` arena; the parser guarantees it is not a bare
+    /// binding (plain `a = e` stays [`StmtKind::AssignOrDecl`]).
+    Destructure {
+        target: PatternId,
         value: ExprId,
     },
     WhileLoop {
@@ -622,6 +741,9 @@ pub struct Ast {
     struct_field_inits: Vec<(StringId, ExprId)>,
     type_field_lists: Vec<(StringId, TypeExpr)>,
     type_expr_lists: Vec<TypeExpr>,
+    patterns: Vec<Pattern>,
+    pattern_lists: Vec<PatternId>,
+    pattern_field_lists: Vec<PatternField>,
     top_level: Vec<StmtId>,
     /// Span covering the first through last top-level statement;
     /// `0..0` for an empty program. Kept for the pretty-printer's
@@ -657,6 +779,12 @@ impl Ast {
             struct_field_inits: Vec::new(),
             type_field_lists: Vec::new(),
             type_expr_lists: Vec::new(),
+            patterns: vec![Pattern {
+                kind: PatternKind::Wildcard,
+                span: SimpleSpan::new((), 0..0),
+            }],
+            pattern_lists: Vec::new(),
+            pattern_field_lists: Vec::new(),
             top_level: Vec::new(),
             span: SimpleSpan::new((), 0..0),
         }
@@ -720,6 +848,29 @@ impl Ast {
     /// written order.
     pub fn type_expr_list(&self, list: TypeExprList) -> &[TypeExpr] {
         &self.type_expr_lists[list.as_range()]
+    }
+
+    /// Lookup a destructuring pattern by id.
+    pub fn pattern(&self, id: PatternId) -> &Pattern {
+        &self.patterns[id.index()]
+    }
+
+    /// Source span attached to a destructuring pattern.
+    pub fn pattern_span(&self, id: PatternId) -> SimpleSpan {
+        self.patterns[id.index()].span
+    }
+
+    /// The element slice behind a [`PatternList`] range — the
+    /// elements of a [`PatternKind::Positional`] pattern — in written
+    /// order.
+    pub fn pattern_list(&self, list: PatternList) -> &[PatternId] {
+        &self.pattern_lists[list.as_range()]
+    }
+
+    /// The field slice behind a [`PatternFieldList`] range — the
+    /// fields of a [`PatternKind::Anon`] pattern — in written order.
+    pub fn pattern_field_list(&self, list: PatternFieldList) -> &[PatternField] {
+        &self.pattern_field_lists[list.as_range()]
     }
 
     /// The program's top-level statements in source order.
@@ -879,6 +1030,42 @@ impl Ast {
         TypeExprList {
             offset,
             len: u32::try_from(items.len()).expect("AST type expr list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Push a pattern with its span and return its id; see
+    /// [`Self::push_expr`]. Slot 0 of `patterns` is the reserved
+    /// sentinel.
+    fn push_pattern(&mut self, kind: PatternKind, span: SimpleSpan) -> PatternId {
+        let idx = self.patterns.len();
+        self.patterns.push(Pattern { kind, span });
+        PatternId::from_index(idx)
+    }
+
+    /// Copy a positional pattern's element list into the
+    /// `pattern_lists` side arena; see [`Self::push_expr_list`] for
+    /// the checked-conversion rationale.
+    fn push_pattern_list(&mut self, items: &[PatternId]) -> PatternList {
+        let offset = u32::try_from(self.pattern_lists.len())
+            .expect("AST pattern_lists arena exceeded u32::MAX");
+        self.pattern_lists.extend_from_slice(items);
+        PatternList {
+            offset,
+            len: u32::try_from(items.len()).expect("AST pattern list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Copy an anonymous pattern's field list into the
+    /// `pattern_field_lists` side arena; see [`Self::push_expr_list`]
+    /// for the checked-conversion rationale.
+    fn push_pattern_field_list(&mut self, items: &[PatternField]) -> PatternFieldList {
+        let offset = u32::try_from(self.pattern_field_lists.len())
+            .expect("AST pattern_field_lists arena exceeded u32::MAX");
+        self.pattern_field_lists.extend_from_slice(items);
+        PatternFieldList {
+            offset,
+            len: u32::try_from(items.len())
+                .expect("AST pattern field list length exceeded u32::MAX"),
         }
     }
 
@@ -1073,6 +1260,38 @@ impl Ast {
             span,
             kind: TypeExprKind::Positional(elems),
         }
+    }
+
+    /// `_` wildcard pattern (M10): binds nothing.
+    pub fn pattern_wildcard(&mut self, span: SimpleSpan) -> PatternId {
+        self.push_pattern(PatternKind::Wildcard, span)
+    }
+
+    /// A fresh binding pattern `name` (M10).
+    pub fn pattern_bind(&mut self, name: Ident, span: SimpleSpan) -> PatternId {
+        self.push_pattern(PatternKind::Bind(name), span)
+    }
+
+    /// `{q, r}` / `{x = quot}` anonymous struct pattern (M10); the
+    /// field list is copied into the `pattern_field_lists` side arena
+    /// in written order.
+    pub fn pattern_anon(&mut self, fields: &[PatternField], span: SimpleSpan) -> PatternId {
+        let fields = self.push_pattern_field_list(fields);
+        self.push_pattern(PatternKind::Anon { fields }, span)
+    }
+
+    /// `(a, b)` positional pattern (M10) — also the shape the parser
+    /// builds for the paren-less `a, b = e` statement form; the
+    /// element list is copied into the `pattern_lists` side arena in
+    /// written order.
+    pub fn pattern_positional(&mut self, elems: &[PatternId], span: SimpleSpan) -> PatternId {
+        let elems = self.push_pattern_list(elems);
+        self.push_pattern(PatternKind::Positional(elems), span)
+    }
+
+    /// Destructuring assignment `pattern = value` (M10).
+    pub fn destructure(&mut self, target: PatternId, value: ExprId, span: SimpleSpan) -> StmtId {
+        self.push_stmt(StmtKind::Destructure { target, value }, span)
     }
 
     /// Field access `object.field` (M9).

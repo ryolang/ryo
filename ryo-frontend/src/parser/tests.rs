@@ -6,9 +6,9 @@ use chumsky::input::Input;
 use ryo_core::types::InternPool;
 
 /// Owned parser error as threaded through the test helpers.
-type TestErr = Rich<'static, Token, SimpleSpan, ParseDiag>;
+pub(super) type TestErr = Rich<'static, Token, SimpleSpan, ParseDiag>;
 
-fn lex_and_parse(input: &str) -> Result<(Ast, InternPool), Vec<TestErr>> {
+pub(super) fn lex_and_parse(input: &str) -> Result<(Ast, InternPool), Vec<TestErr>> {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lex(input, &mut pool, &mut sink);
@@ -35,7 +35,7 @@ fn lex_and_parse(input: &str) -> Result<(Ast, InternPool), Vec<TestErr>> {
 }
 
 /// The single top-level statement of a parsed snippet.
-fn only_stmt(ast: &Ast) -> StmtId {
+pub(super) fn only_stmt(ast: &Ast) -> StmtId {
     let stmts = ast.top_level_stmts();
     assert_eq!(stmts.len(), 1);
     stmts[0]
@@ -48,7 +48,7 @@ fn var_decl(ast: &Ast, stmt: StmtId) -> &VarDecl {
     }
 }
 
-fn fn_def(ast: &Ast, stmt: StmtId) -> &FunctionDef {
+pub(super) fn fn_def(ast: &Ast, stmt: StmtId) -> &FunctionDef {
     match &ast.stmt(stmt).kind {
         StmtKind::FunctionDef(def) => def,
         other => panic!("expected FunctionDef, got {other:?}"),
@@ -63,7 +63,7 @@ fn struct_def_stmt(ast: &Ast, id: StmtId) -> &StructDef {
 }
 
 /// Body statements of a parsed function definition.
-fn fn_body<'a>(ast: &'a Ast, def: &FunctionDef) -> &'a [StmtId] {
+pub(super) fn fn_body<'a>(ast: &'a Ast, def: &FunctionDef) -> &'a [StmtId] {
     ast.stmt_list(def.body)
 }
 
@@ -1266,7 +1266,7 @@ fn parse_view_param_annotation() {
 /// Recovery-aware variant of `lex_and_parse`: returns whether a
 /// (possibly partial) program could be produced, the arena it was
 /// built into, every parse error, and the pool.
-fn lex_and_parse_recovering(input: &str) -> (bool, Ast, Vec<TestErr>, InternPool) {
+pub(super) fn lex_and_parse_recovering(input: &str) -> (bool, Ast, Vec<TestErr>, InternPool) {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lex(input, &mut pool, &mut sink);
@@ -1286,7 +1286,7 @@ fn lex_and_parse_recovering(input: &str) -> (bool, Ast, Vec<TestErr>, InternPool
 }
 
 /// The statement is a parser-recovery placeholder.
-fn is_error_stmt(ast: &Ast, stmt: StmtId) -> bool {
+pub(super) fn is_error_stmt(ast: &Ast, stmt: StmtId) -> bool {
     matches!(ast.stmt(stmt).kind, StmtKind::Error)
 }
 
@@ -1501,6 +1501,11 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
                 }
             }
             StmtKind::AssignOrDecl { value, .. } | StmtKind::CompoundAssign { value, .. } => {
+                expr_work.push(*value);
+            }
+            StmtKind::Destructure { value, .. } => {
+                // The pattern lives in its own arenas and holds no
+                // expressions; only the value is reachable here.
                 expr_work.push(*value);
             }
             StmtKind::FieldAssign { target, value }

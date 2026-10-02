@@ -14,8 +14,8 @@
 //! last child of its parent.
 
 use crate::ast::{
-    Ast, ExprId, ExprKind, FunctionDef, IfStmt, Literal, StmtId, StmtKind, TypeExpr, TypeExprKind,
-    VarDecl,
+    Ast, ExprId, ExprKind, FunctionDef, IfStmt, Literal, PatternId, PatternKind, StmtId, StmtKind,
+    TypeExpr, TypeExprKind, VarDecl,
 };
 use crate::tir::ParamMode;
 use crate::types::InternPool;
@@ -113,6 +113,7 @@ fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
         StmtKind::CompoundAssign { .. } => "CompoundAssign",
         StmtKind::FieldAssign { .. } => "FieldAssign",
         StmtKind::CompoundFieldAssign { .. } => "CompoundFieldAssign",
+        StmtKind::Destructure { .. } => "Destructure",
         StmtKind::WhileLoop { .. } => "WhileLoop",
         StmtKind::ForRange { .. } => "ForRange",
         StmtKind::Break => "Break",
@@ -203,6 +204,12 @@ fn write_stmt_children(
             writeln!(out, "{}CompoundFieldAssign: {:?}", prefix, op)?;
             let inner = format!("{}  ", prefix);
             write_expr(out, ast, *target, &inner, false, "target: ", pool)?;
+            write_expr(out, ast, *value, &inner, true, "value: ", pool)
+        }
+        StmtKind::Destructure { target, value } => {
+            writeln!(out, "{}Destructure", prefix)?;
+            let inner = format!("{}  ", prefix);
+            write_pattern(out, ast, *target, &inner, false, "target: ", pool)?;
             write_expr(out, ast, *value, &inner, true, "value: ", pool)
         }
         StmtKind::WhileLoop { cond, body } => {
@@ -485,6 +492,65 @@ fn write_expr_args(
         write_expr(out, ast, arg, prefix, i == args.len() - 1, "", pool)?;
     }
     Ok(())
+}
+
+/// Render a destructuring pattern subtree (M10) in the same
+/// tree-drawing style as [`write_expr`].
+fn write_pattern(
+    out: &mut String,
+    ast: &Ast,
+    pat: PatternId,
+    prefix: &str,
+    is_last: bool,
+    label: &str,
+    pool: &InternPool,
+) -> fmt::Result {
+    let pattern = ast.pattern(pat);
+    let name: Cow<'static, str> = match &pattern.kind {
+        PatternKind::Wildcard => Cow::Borrowed("Wildcard"),
+        PatternKind::Bind(ident) => Cow::Owned(format!("Bind({})", pool.str(ident.name))),
+        PatternKind::Anon { .. } => Cow::Borrowed("Anon"),
+        PatternKind::Positional(_) => Cow::Borrowed("Positional"),
+    };
+    writeln!(
+        out,
+        "{}{}{}{} ({}..{})",
+        prefix,
+        connector(is_last),
+        label,
+        name,
+        pattern.span.start,
+        pattern.span.end
+    )?;
+    let new_prefix = format!("{}{}", prefix, continuation(is_last));
+    match &pattern.kind {
+        PatternKind::Wildcard | PatternKind::Bind(_) => Ok(()),
+        PatternKind::Anon { fields } => {
+            // Fields are scalar (name, binding) pairs, not nodes:
+            // render one line each, no recursion.
+            let fields = ast.pattern_field_list(*fields);
+            for (i, field) in fields.iter().enumerate() {
+                writeln!(
+                    out,
+                    "{}{}{}: {} ({}..{})",
+                    new_prefix,
+                    connector(i == fields.len() - 1),
+                    pool.str(field.name),
+                    pool.str(field.binding.name),
+                    field.binding.span.start,
+                    field.binding.span.end
+                )?;
+            }
+            Ok(())
+        }
+        PatternKind::Positional(elems) => {
+            let elems = ast.pattern_list(*elems);
+            for (i, &elem) in elems.iter().enumerate() {
+                write_pattern(out, ast, elem, &new_prefix, i == elems.len() - 1, "", pool)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn write_optional_bound(

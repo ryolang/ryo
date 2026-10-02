@@ -230,6 +230,11 @@ pub enum DiagCode {
     /// anonymous literal, exactly like `{}` (E0109), so the
     /// diagnostic stands alone.
     UnitParen,
+    /// `(a) = x` (M10): a one-element parenthesized destructuring
+    /// without the trailing comma. The message names the fix —
+    /// `(a,)` — and the plain spelling `a = x`; the parser recovers
+    /// the line to an Error statement so the diagnostic stands alone.
+    SingleElemDestructuring,
     /// An unrecognized `#[...]` attribute (M9.1): the attribute name is
     /// not one of the known forms (`derive(Eq)`, `repr(C)`), its
     /// argument list does not match, or it is attached to something
@@ -398,6 +403,10 @@ pub enum ParseDiag {
     /// `none` for the unit value, or a one-element tuple `(x,)`.
     /// Recovered as an empty anonymous struct literal, like `{}`.
     UnitParen,
+    /// `(a) = x` (M10): a one-element parenthesized destructuring
+    /// needs the trailing comma — `(a,)` — or the plain spelling
+    /// `a = x`. The line recovers to an Error statement.
+    SingleElemDestructuring,
     /// `#[name(args)]` that is not one of the recognized attribute
     /// forms (M9.1): `derive(Eq)` or `repr(C)`. Carries the attribute
     /// head and arguments as interned ids; render them through the
@@ -428,6 +437,7 @@ impl ParseDiag {
             ParseDiag::EmptyAnonStruct => DiagCode::EmptyAnonStruct,
             ParseDiag::ChainedPositionalAccess => DiagCode::ChainedPositionalAccess,
             ParseDiag::UnitParen => DiagCode::UnitParen,
+            ParseDiag::SingleElemDestructuring => DiagCode::SingleElemDestructuring,
             ParseDiag::UnknownAttribute { .. } | ParseDiag::MisplacedAttribute => {
                 DiagCode::UnknownAttribute
             }
@@ -491,6 +501,10 @@ impl std::fmt::Display for ParseDiag {
             ParseDiag::UnitParen => f.write_str(
                 "empty parentheses are the unit type `void`; write `none` \
                  for the unit value, or a one-element tuple `(x,)`",
+            ),
+            ParseDiag::SingleElemDestructuring => f.write_str(
+                "single-element destructuring needs a trailing comma — \
+                 `(a,)` — or write plain `a = x`",
             ),
             ParseDiag::UnknownAttribute { .. } => f.write_str(
                 "unknown attribute; known attributes: \
