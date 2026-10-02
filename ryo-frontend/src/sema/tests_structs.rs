@@ -346,3 +346,44 @@ fn derived_struct_with_mixed_eq_capable_fields_compares_clean() {
     let src = "#[derive(Eq)] struct Inner:\n\tv: int\n\n#[derive(Eq)] struct P:\n\ta: int\n\tb: float\n\tc: str\n\td: bool\n\te: bytes\n\tinner: Inner\n\nfn main():\n\tp = P{a=1, b=2.0, c=\"x\", d=true, e=b\"yz\", inner=Inner{v=3}}\n\tq = P{a=1, b=2.0, c=\"x\", d=true, e=b\"yz\", inner=Inner{v=3}}\n\tr = p == q\n\ts = p != q\n";
     assert!(run(src).is_ok());
 }
+
+#[test]
+fn anon_eq_structural() {
+    // M10: `==` / `!=` on anonymous structs lower to the shared
+    // StructEq/StructNe tags — Eq-capability is structural (every
+    // field Eq-capable, computed recursively), so no attribute gates
+    // the operator. A nested shape compares through the same
+    // memberwise path as a nested derived struct.
+    let src = "fn main():\n\tp = {x=1, y=2.0, s=\"a\", n={v=3}}\n\tq = {x=1, y=2.0, s=\"a\", n={v=3}}\n\tr = p == q\n\ts = p != q\n";
+    let (tirs, pool) = run(src).expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    let eq = main
+        .instructions
+        .iter()
+        .find(|i| i.tag == TirTag::StructEq)
+        .expect("p == q must lower to a StructEq inst");
+    assert_eq!(eq.ty, pool.bool_(), "StructEq result must be bool");
+    let ne = main
+        .instructions
+        .iter()
+        .find(|i| i.tag == TirTag::StructNe)
+        .expect("p != q must lower to a StructNe inst");
+    assert_eq!(ne.ty, pool.bool_(), "StructNe result must be bool");
+}
+
+#[test]
+fn anon_eq_field_not_eq_capable() {
+    // A shape with a non-Eq field — a struct without `#[derive(Eq)]`
+    // — is not Eq-capable: the operator is rejected with
+    // AnonFieldNotEq naming the offending field and its type.
+    let src = "struct Inner:\n\tx: int\n\nfn main():\n\tp = {v=Inner{x=1}, w=2}\n\tq = {v=Inner{x=1}, w=2}\n\tr = p == q\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::AnonFieldNotEq)
+        .expect("AnonFieldNotEq must fire");
+    assert_eq!(
+        diag.message,
+        "binary operator `==` requires field 'v' of type 'Inner' to be Eq-capable"
+    );
+}

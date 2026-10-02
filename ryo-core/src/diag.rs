@@ -181,6 +181,12 @@ pub enum DiagCode {
     /// structs destructure by field name — their fields aren't
     /// `"0"`/`"1"`. The message suggests the brace pattern spelling.
     DestructurePositionalOnNamed,
+    /// `==` / `!=` applied to an anonymous struct shape (M10) with a
+    /// field whose type is not Eq-capable (M9.1's predicate). Shape
+    /// equality is structural — Eq-capability is computed recursively
+    /// from the fields, there is no opt-in attribute — so the
+    /// diagnostic names the offending field and its type.
+    AnonFieldNotEq,
 
     // --- ownership (M8.1b) ---
     /// Use of a value after it has been moved.

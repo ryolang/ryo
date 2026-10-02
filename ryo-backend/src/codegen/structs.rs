@@ -699,7 +699,9 @@ impl<M: Module> Codegen<M> {
                     let call = builder.ins().call(eq_ref, &[lvp, lvl, rvp, rvl]);
                     builder.inst_results(call)[0]
                 }
-                TypeKind::Struct => {
+                // Nested nominal or anonymous (M10) shapes both recurse:
+                // `struct_view` reads either payload.
+                TypeKind::Struct | TypeKind::AnonStruct => {
                     Self::emit_struct_eq(builder, ctx, lhs_field, rhs_field, field.ty, false)?
                 }
                 TypeKind::View(_) => {
