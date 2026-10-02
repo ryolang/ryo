@@ -439,27 +439,43 @@ impl<M: Module> Codegen<M> {
     /// current triple at that program point. The free is
     /// family-appropriate (`ryo_str_free` / `ryo_bytes_free`, selected
     /// per target via `free_target_is_bytes`).
+    ///
+    /// Consults `dead_drop_by_if` (built once per function) rather than
+    /// re-scanning the whole per-function drop list at the start of
+    /// every arm — on if-heavy functions with dead drops the old scan
+    /// was O(ifs × arms × drops).
     pub(crate) fn emit_conditional_dead_drops(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         if_stmt: TirRef,
         arm: ryo_core::ownership::BranchId,
     ) -> Result<(), String> {
-        for drop in ctx.sidecar.conditional_dead_drops.iter() {
-            if drop.if_stmt != if_stmt || !drop.arms.contains(&arm) {
-                continue;
-            }
-            let Some(name) = Self::free_binding_name(ctx, drop.target) else {
+        if ctx.sidecar.conditional_dead_drops.is_empty() {
+            return Ok(());
+        }
+        let pending: Vec<TirRef> = ctx
+            .dead_drop_by_if
+            .get(if_stmt.index())
+            .map(|indices| {
+                indices
+                    .iter()
+                    .filter(|&&i| ctx.sidecar.conditional_dead_drops[i].arms.contains(&arm))
+                    .map(|&i| ctx.sidecar.conditional_dead_drops[i].target)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for target in pending {
+            let Some(name) = Self::free_binding_name(ctx, target) else {
                 continue;
             };
             // M9: struct bindings drop their needs-drop fields.
-            if Self::try_emit_struct_dead_drop(builder, ctx, name, drop.target)? {
+            if Self::try_emit_struct_dead_drop(builder, ctx, name, target)? {
                 continue;
             }
             let Some((ptr, cap)) = Self::emit_fat_load_ptr_cap(builder, ctx, name) else {
                 continue;
             };
-            let free_ref = if Self::free_target_is_bytes(ctx, drop.target) {
+            let free_ref = if Self::free_target_is_bytes(ctx, target) {
                 Self::declare_bytes_free(ctx, builder)?
             } else {
                 Self::declare_str_free(ctx, builder)?
